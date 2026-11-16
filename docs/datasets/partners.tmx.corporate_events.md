@@ -29,7 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"type": "earnings"}`. Keys: `isin`, `isin_any_of`, `isin_gt`, `isin_gte`, `isin_lt`, `isin_lte`, `status`, `status_any_of`, `status_gt`, `status_gte`, `status_lt`, `status_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`, `tmx_company_id`, `tmx_company_id_gt`, `tmx_company_id_gte`, `tmx_company_id_lt`, `tmx_company_id_lte`, `tmx_record_id`, `tmx_record_id_any_of`, `tmx_record_id_gt`, `tmx_record_id_gte`, `tmx_record_id_lt`, `tmx_record_id_lte`, `trading_venue`, `trading_venue_any_of`, `trading_venue_gt`, `trading_venue_gte`, `trading_venue_lt`, `trading_venue_lte`, `type`, `type_any_of`, `type_gt`, `type_gte`, `type_lt`, `type_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

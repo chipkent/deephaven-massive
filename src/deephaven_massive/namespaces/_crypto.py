@@ -281,7 +281,8 @@ class CryptoNamespace(Namespace):
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair. `history()` reads
                 `dm.ALL` only from the flat files.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -317,7 +318,8 @@ class CryptoNamespace(Namespace):
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair, use
                 `m.crypto.snapshots(dm.ALL)`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -354,7 +356,8 @@ class CryptoNamespace(Namespace):
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -396,7 +399,8 @@ class CryptoNamespace(Namespace):
                 `dm.ALL` for one-minute and one-day bars.
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
@@ -441,7 +445,8 @@ class CryptoNamespace(Namespace):
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair's bar of
                 one day, use `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -483,7 +488,8 @@ class CryptoNamespace(Namespace):
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -517,7 +523,8 @@ class CryptoNamespace(Namespace):
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every traded pair.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -551,7 +558,8 @@ class CryptoNamespace(Namespace):
 
         Args:
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -586,7 +594,8 @@ class CryptoNamespace(Namespace):
                 one day, use `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
             date: The UTC day, as a date such as `"2026-01-02"`. A `datetime` or an instant is
                 refused.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

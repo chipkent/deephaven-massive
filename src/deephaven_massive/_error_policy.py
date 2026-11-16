@@ -47,7 +47,8 @@ class ErrorPolicy:
 
     Set a session's policy with `dm.MassiveConfig(on_error=...)`. Set one call's policy with any
     dataset method's `on_error=` argument. Each cause takes the first setting it finds: the
-    call's, then the session's, then `ErrorPolicy.DEFAULTS`. By default every cause logs,
+    call's, then the session's, then `ErrorPolicy.DEFAULTS`. A call that leaves `on_error` out,
+    or passes None, sets no cause, so the session decides. By default every cause logs,
     except `refused_venues`, which raises. A live call whose policy changes any cause's
     setting gets its own stream in `m.streams()`.
 

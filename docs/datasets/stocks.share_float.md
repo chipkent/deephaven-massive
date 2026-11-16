@@ -27,7 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"free_float_percent_lt": 20}`. Keys: `free_float_percent`, `free_float_percent_gt`, `free_float_percent_gte`, `free_float_percent_lt`, `free_float_percent_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

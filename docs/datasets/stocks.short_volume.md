@@ -29,7 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`. Keys: `short_volume_ratio`, `short_volume_ratio_any_of`, `short_volume_ratio_gt`, `short_volume_ratio_gte`, `short_volume_ratio_lt`, `short_volume_ratio_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

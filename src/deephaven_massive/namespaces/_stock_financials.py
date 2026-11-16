@@ -229,7 +229,8 @@ class StocksFinancialsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -304,7 +305,8 @@ class StocksFinancialsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -371,7 +373,8 @@ class StocksFinancialsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"fiscal_year_gte": 2020}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -428,7 +431,8 @@ class StocksFinancialsNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"price_to_earnings_lt": 15}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

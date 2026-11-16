@@ -24,7 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair's bar of one day, use `m.crypto.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. |
 | [`date`](README.md#date) | The UTC day, as a date such as `"2026-01-02"`. A `datetime` or an instant is refused. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

@@ -286,7 +286,8 @@ class ForexNamespace(Namespace):
         Args:
             symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair.
                 `dm.canonical_symbol_forex` converts `EUR/USD`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -322,7 +323,8 @@ class ForexNamespace(Namespace):
         Args:
             symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair, use
                 `m.forex.snapshots(dm.ALL)`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -371,7 +373,8 @@ class ForexNamespace(Namespace):
                 takes `dm.ALL` for one-minute and one-day bars.
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
@@ -416,7 +419,8 @@ class ForexNamespace(Namespace):
         Args:
             symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair's bar
                 of one day, use `m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -457,7 +461,8 @@ class ForexNamespace(Namespace):
 
         Args:
             symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -489,7 +494,8 @@ class ForexNamespace(Namespace):
 
         Args:
             symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair Massive tracks.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -523,7 +529,8 @@ class ForexNamespace(Namespace):
 
         Args:
             direction: `dm.Direction.GAINERS` for the largest increases, or `dm.Direction.LOSERS`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -565,7 +572,8 @@ class ForexNamespace(Namespace):
             to_currency: The code of the currency to convert to, such as `"USD"`.
             amount: The amount to convert, any finite number; 1.0 by default.
             precision: The decimal places of the result; 2 by default.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

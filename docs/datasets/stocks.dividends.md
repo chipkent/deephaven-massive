@@ -29,7 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. With a watchlist, `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"distribution_type": "special"}`. Keys: `distribution_type`, `distribution_type_any_of`, `frequency`, `frequency_gt`, `frequency_gte`, `frequency_lt`, `frequency_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

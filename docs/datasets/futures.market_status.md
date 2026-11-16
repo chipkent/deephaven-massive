@@ -25,7 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | `product_code` | Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A table of them in a `ProductCode` column works too. Leave it out for every product. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A table of product codes caps every code's requests instead. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

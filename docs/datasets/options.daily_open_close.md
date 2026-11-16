@@ -25,7 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`symbols`](README.md#symbols) | Option contracts. `dm.ALL` is refused; for every contract's bar of one day, use `bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day)`, which reads the flat files. |
 | [`date`](README.md#date) | The trading day, as a date; a `datetime` raises. |
 | [`adjusted`](README.md#adjusted) | Adjusts for splits of the underlying. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

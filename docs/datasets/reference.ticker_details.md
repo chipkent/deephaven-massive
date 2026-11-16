@@ -24,7 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | Tickers of any asset class. `dm.ALL` is refused; `tickers()` lists every ticker. |
 | [`as_of`](README.md#as_of) | The day the details are as of. Leave it out for the latest. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

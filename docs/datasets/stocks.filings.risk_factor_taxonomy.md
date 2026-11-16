@@ -26,7 +26,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"primary_category": "Financial"}`. Keys: `primary_category`, `primary_category_any_of`, `primary_category_gt`, `primary_category_gte`, `primary_category_lt`, `primary_category_lte`, `secondary_category`, `secondary_category_any_of`, `secondary_category_gt`, `secondary_category_gte`, `secondary_category_lt`, `secondary_category_lte`, `taxonomy`, `taxonomy_gt`, `taxonomy_gte`, `taxonomy_lt`, `taxonomy_lte`, `tertiary_category`, `tertiary_category_any_of`, `tertiary_category_gt`, `tertiary_category_gte`, `tertiary_category_lt`, `tertiary_category_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

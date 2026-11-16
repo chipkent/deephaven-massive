@@ -27,7 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"last_updated_gte": "2026-06-01"}`. Keys: `benzinga_id`, `benzinga_id_any_of`, `benzinga_id_gt`, `benzinga_id_gte`, `benzinga_id_lt`, `benzinga_id_lte`, `last_updated`, `last_updated_gt`, `last_updated_gte`, `last_updated_lt`, `last_updated_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

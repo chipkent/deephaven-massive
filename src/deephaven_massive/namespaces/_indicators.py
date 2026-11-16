@@ -242,7 +242,8 @@ class IndicatorsNamespace(Namespace):
             order: The timestamp order, or None.
             limit: The cap on each symbol's rows, or None.
             filters: Further query parameters, or None.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             The dataset's `FetchQuery`.
@@ -319,7 +320,8 @@ class IndicatorsNamespace(Namespace):
             order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -396,7 +398,8 @@ class IndicatorsNamespace(Namespace):
             order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -472,7 +475,8 @@ class IndicatorsNamespace(Namespace):
             order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -553,7 +557,8 @@ class IndicatorsNamespace(Namespace):
             order: The direction of the bars' times. The endpoints have no `sort`.
             limit: The most rows for each symbol.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

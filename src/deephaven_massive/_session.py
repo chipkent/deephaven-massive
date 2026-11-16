@@ -427,7 +427,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
                 instead.
             filters: Further endpoint parameters, except `type`, which Massive refuses beside
                 tickers.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

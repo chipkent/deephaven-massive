@@ -325,7 +325,8 @@ class ReferenceNamespace(Namespace):
             order: The direction of `sort`.
             limit: Per ticker when tickers are named, else in total.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -390,7 +391,8 @@ class ReferenceNamespace(Namespace):
             symbols: Tickers of any asset class. `dm.ALL` is refused; `tickers()` lists every
                 ticker.
             as_of: The day the details are as of. Leave it out for the latest.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -438,7 +440,8 @@ class ReferenceNamespace(Namespace):
             asset_class: The asset class whose types to list. Leave it out for every class. Massive
                 lists no futures types.
             locale: The locale whose types to list. Leave it out for both.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -479,7 +482,8 @@ class ReferenceNamespace(Namespace):
             symbols: Tickers of any asset class, CUSIPs, or Composite FIGIs. `dm.ALL` is refused.
             types: The event types to include, such as `["ticker_change"]`. One `str` is one type.
                 Leave it out for every type.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -517,7 +521,8 @@ class ReferenceNamespace(Namespace):
 
         Args:
             symbols: The tickers to find related companies of. `dm.ALL` is refused.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -572,7 +577,8 @@ class ReferenceNamespace(Namespace):
             order: Each ticker's direction of `sort`, newest first by default.
             limit: Articles per ticker, or in total without `symbols`.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -623,7 +629,8 @@ class ReferenceNamespace(Namespace):
             asset_class: The asset class whose exchanges to list. Leave it out for every class.
                 Massive lists no index exchanges.
             locale: The locale whose exchanges to list. Leave it out for both.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -678,7 +685,8 @@ class ReferenceNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -727,7 +735,8 @@ class ReferenceNamespace(Namespace):
         `poll()` table keeps the latest status in that row.
 
         Args:
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -756,7 +765,8 @@ class ReferenceNamespace(Namespace):
         close times on an early close.
 
         Args:
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

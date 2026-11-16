@@ -25,7 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`timespan`](README.md#timespan) | The bar's unit. `DAY` bars are read from REST only; for `dm.ALL`, use `SESSION`. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
 | [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. Left out, it reads every exchange your plan allows. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

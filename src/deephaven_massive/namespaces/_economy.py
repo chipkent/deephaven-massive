@@ -138,7 +138,8 @@ class EconomyNamespace(Namespace):
             order: The sort direction, or None.
             limit: The total-row cap, or None.
             filters: Further query parameters, or None.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             The dataset's `FetchQuery`.
@@ -183,7 +184,8 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -236,7 +238,8 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -289,7 +292,8 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -342,7 +346,8 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -396,7 +401,8 @@ class EconomyNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total.
             filters: Further endpoint parameters.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
