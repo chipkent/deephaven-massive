@@ -29,7 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead, and a table of product codes caps every code's requests. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"active": True}`. Keys: `active`, `first_trade_date`, `first_trade_date_gt`, `first_trade_date_gte`, `first_trade_date_lt`, `first_trade_date_lte`, `last_trade_date`, `last_trade_date_gt`, `last_trade_date_gte`, `last_trade_date_lt`, `last_trade_date_lte`, `provider_id`, `provider_product_id`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`, `type`, `type_any_of`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

@@ -25,7 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`symbols`](README.md#symbols) | Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. |
 | [`date`](README.md#date) | The trading day, as a date. |
 | [`adjusted`](README.md#adjusted) | Adjusts volume as well as prices. Massive doesn't report the basis of these prices, so the library can't check it. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

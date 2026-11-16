@@ -1844,8 +1844,9 @@ class Flusher:
     ) -> list[StreamSink]:
         """Apply each stream's policy to a batch's withheld rows: fail it, or report and go on.
 
-        A stream counts the withheld rows of the symbols it holds, and every row whose symbol
-        could not be read, since that could have been any stream's (`Withheld.counts`). A
+        A stream counts the withheld rows of the symbols it holds, read once per batch, and
+        every row whose symbol could not be read, since that could have been any stream's
+        (`Withheld.counts`). A
         stream whose policy is `RAISE` for a cause it counts fails. Each other stream gets
         the events of the rows it counts (`Withheld.events`), handed to its session after the
         flush (`_report_events`), and each unreadable spelling is logged once at the loudest
@@ -1863,8 +1864,15 @@ class Flusher:
         named = plan.symbol_field is not None
         self._payloads += 1
         payload = self._payloads
+        symbols = {group.symbol for group in withheld.groups if group.symbol is not None}
         for sink in readers:
-            holds = sink.holds if named and not sink.receives_all else None
+            # One reading of the stream's symbols, so its counts, events, and failure agree
+            # even when its symbols change meanwhile.
+            holds = (
+                frozenset(filter(sink.holds, symbols)).__contains__
+                if named and not sink.receives_all
+                else None
+            )
             counts = withheld.counts(holds)
             if not counts:
                 kept.append(sink)

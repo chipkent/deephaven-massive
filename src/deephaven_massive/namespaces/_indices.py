@@ -205,7 +205,8 @@ class IndicesNamespace(Namespace):
             symbols: Indices with the `I:` prefix, such as `"I:SPX"`, or `dm.ALL` for every index.
                 `history()` downloads each day's whole flat file, with every index in it, however
                 few indices you pass. The file for 2026-11-09 was 2.9 GB.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -247,7 +248,8 @@ class IndicesNamespace(Namespace):
                 `dm.ALL` from the minute and day flat files.
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
@@ -291,7 +293,8 @@ class IndicesNamespace(Namespace):
         Args:
             symbols: Indices with the `I:` prefix. `dm.ALL` is refused; for every index's bar of one
                 day, use `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -348,7 +351,8 @@ class IndicesNamespace(Namespace):
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"ticker_gte": "I:N"}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -394,7 +398,8 @@ class IndicesNamespace(Namespace):
             symbols: Indices with the `I:` prefix. `dm.ALL` is refused; for every index's bar of one
                 day, use `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
             date: The day, as a date. A `datetime` raises.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

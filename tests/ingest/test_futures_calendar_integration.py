@@ -5,9 +5,11 @@ schedules, after finding each contract's product. These tests record what that d
 on and Massive's docs leave open: whether combos have a product and a schedule, and whether
 the contracts list holds them; how many products, contracts, and schedule events there are;
 what the contract and snapshot lookups cost, with a `date` and nested `fields` and without;
-whether a combo's snapshot product places its trades in Massive's own session; how often
+whether a combo's snapshot product places its trades in Massive's own session; whether the
+trades path reads a combo whose ticker holds `:` or a space, and spelled how; how often
 contracts are listed, and which tickers the snapshot or the contracts list lacks; how far
-ahead each product's schedule reaches; and whether any trade falls outside every session. Each
+ahead each product's schedule reaches; whether any trade falls outside every session; and
+Massive's whole answers where those checks found data missing, to quote to Massive. Each
 test sends REST requests only and records what Massive sent (`evidence`), except the
 streamed-tickers test, which streams every futures trade on the key's WebSocket for 10
 minutes: it is marked `integration_all_symbols`, so `-m integration` leaves it out and
@@ -29,6 +31,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -1207,8 +1210,76 @@ def _cost_sample(client: RestClient, evidence: Evidence) -> list[str]:
     return sample
 
 
+def _lookups(sample: Sequence[str], day: date) -> dict[str, dict[str, object]]:
+    """Build the cost check's contracts lookups, those with `date` first.
+
+    Each of `_LOOKUP_SIZES` is looked up with `date`; each but the largest also without one,
+    which an earlier run saw fail with HTTP 502 for 500 tickers.
+
+    Returns:
+        Each lookup's query by its label, in the order the runs send them.
+    """
+    queries = {
+        size: {"ticker.any_of": _spread(sample, size), "limit": _LIST_PAGE}
+        for size in _LOOKUP_SIZES
+    }
+    lookups = {f"{size} tickers, date {day}": {**q, "date": day} for size, q in queries.items()}
+    lookups.update(
+        (f"{size} tickers, no date", q) for size, q in queries.items() if size != _LOOKUP_SIZES[-1]
+    )
+    return lookups
+
+
+def _cost_run(
+    client: RestClient, label: str, query: Mapping[str, object], *, evidence: Evidence
+) -> _Timing | WireError:
+    """Time one run of a contracts lookup and record it at once, or record its failure.
+
+    Returns:
+        The run's timing, or the `WireError` it failed with after the client's retries.
+
+    Raises:
+        WireAuthError: When Massive refuses the key.
+        WireEntitlementError: When the key's plan lacks futures data.
+    """
+    try:
+        run = _timed_read(client, _CONTRACTS, query, most=_COST_PAGES)
+    except (WireAuthError, WireEntitlementError):
+        raise
+    except WireError as error:
+        evidence(f"contracts, {label}: failed: {error}")
+        return error
+    evidence(
+        f"contracts, {label}: {run.rows} rows, {len(run.seconds)} pages"
+        f"{'' if run.ended else ' (cut: a lower bound)'}, seconds per page "
+        f"{[round(s, 3) for s in run.seconds]}"
+    )
+    return run
+
+
+def _record_cost(label: str, runs: Sequence[_Timing | WireError], evidence: Evidence) -> None:
+    """Record a lookup's runs: the seconds of those answered, and the status of each failure."""
+    timed = [run for run in runs if isinstance(run, _Timing)]
+    failed = [run.status for run in runs if isinstance(run, WireError)]
+    totals = [sum(run.seconds) for run in timed]
+    capped = (
+        ""
+        if all(run.ended for run in timed)
+        else f" (a run stopped at {_COST_PAGES} pages: its rows and seconds are lower bounds)"
+    )
+    summary = (
+        f"median {statistics.median(totals):.3f}, slowest {max(totals):.3f}"
+        if totals
+        else "no run answered"
+    )
+    evidence(
+        f"contracts, {label}: {len(timed)} of {len(runs)} runs answered{capped}, seconds per "
+        f"run {[round(t, 3) for t in totals]}, {summary}; failures by HTTP status {failed}"
+    )
+
+
 @pytest.mark.settles("130")
-@pytest.mark.requests(120)
+@pytest.mark.requests(95)
 @pytest.mark.timeout(1200)
 def test_contracts_lookup_cost_with_and_without_date(
     live_rest: RestClient, *, evidence: Evidence
@@ -1220,47 +1291,42 @@ def test_contracts_lookup_cost_with_and_without_date(
     unexplained. The calendar now always sends a `date` range
     (`test_calendar_contracts_lookup_as_sent`). Reads the whole snapshot, takes 500 tickers
     spread evenly over it (singles and combos), and of them 100 and then 1, spread evenly
-    again; finds the latest day the contracts list holds (`_listed_day`). Then times six
-    lookups, each at the largest page and up to 5 pages: 1, 100, and 500 tickers, without
-    `date` and with that `date`. Each runs 5 times, the six taking turns, so a slow spell of
-    Massive's falls on all six alike (a cache of Massive's would still favor the later
-    runs). Records each lookup's rows, pages, seconds per run and per page, median, and
-    slowest. A run cut at 5 pages (as 100 and 500 tickers without `date` are likely to be)
-    says its rows and seconds are lower bounds, of its first pages only.
+    again; finds the latest day the contracts list holds (`_listed_day`). Then times five
+    lookups, each at the largest page and up to 5 pages: 1, 100, and 500 tickers with that
+    `date`, then 1 and 100 without one (500 without one failed with HTTP 502 in an earlier
+    run, and is not sent). Each runs 5 times, the five taking turns, those with `date` first
+    in each turn, so a slow spell of Massive's falls on all five alike (a cache of Massive's
+    would still favor the later runs). Records each run as it completes: its rows, pages,
+    and seconds per page; and a run that fails (`WireError`, after the client's retries), as
+    evidence, without stopping the others. Then records each lookup's runs answered, seconds
+    per run, median, and slowest. A run cut at 5 pages (as 1 and 100 tickers without `date`
+    may be) says its rows and seconds are lower bounds, of its first pages only.
 
     A lookup with `date` that returns fewer rows than tickers asked found some tickers not
     listed that day. Seconds per page tell the causes apart: pages of like time mean the cost
     is the rows `date` leaves out; one slow page among fast ones means Massive's variance.
-    Times include any wait for the key's rate limit. Passes when every request is answered;
-    the times are evidence. Sends at most 120 requests: up to 6 for the snapshot (`_read_snapshot`),
-    up to 4 days asked, then 5 runs of up to 22 pages.
+    Times include any wait for the key's rate limit. Passes when some run is answered; the
+    times and failures are evidence. Sends at most 95 requests: up to 6 for the snapshot
+    (`_read_snapshot`), up to 4 days asked, then 5 runs of up to 17 pages.
+
+    Raises:
+        WireAuthError: When Massive refuses the key.
+        WireEntitlementError: When the key's plan lacks futures data.
     """
     sample = _cost_sample(live_rest, evidence)
     day = _listed_day(live_rest, evidence)
-    lookups: dict[str, dict[str, object]] = {}
-    for size in _LOOKUP_SIZES:
-        tickers = _spread(sample, size)
-        query = {"ticker.any_of": tickers, "limit": _LIST_PAGE}
-        lookups[f"{len(tickers)} tickers, no date"] = query
-        lookups[f"{len(tickers)} tickers, date {day}"] = {**query, "date": day}
-    timings: dict[str, list[_Timing]] = {label: [] for label in lookups}
-    for _ in range(_COST_RUNS):
+    lookups = _lookups(sample, day)
+    runs: dict[str, list[_Timing | WireError]] = {label: [] for label in lookups}
+    for turn in range(1, _COST_RUNS + 1):
         for label, query in lookups.items():
-            timings[label].append(_timed_read(live_rest, _CONTRACTS, query, most=_COST_PAGES))
-    for label, runs in timings.items():
-        totals = [sum(run.seconds) for run in runs]
-        capped = (
-            ""
-            if all(run.ended for run in runs)
-            else f" (a run stopped at {_COST_PAGES} pages: its rows and seconds are lower bounds)"
-        )
-        evidence(
-            f"contracts, {label}: rows {[run.rows for run in runs]}, pages "
-            f"{[len(run.seconds) for run in runs]}{capped}, seconds per run "
-            f"{[round(s, 3) for s in totals]}, median {statistics.median(totals):.3f}, slowest "
-            f"{max(totals):.3f}; seconds per page "
-            f"{[[round(s, 3) for s in run.seconds] for run in runs]}"
-        )
+            runs[label].append(
+                _cost_run(live_rest, f"{label}, run {turn}", query, evidence=evidence)
+            )
+    for label, done in runs.items():
+        _record_cost(label, done, evidence)
+    assert any(isinstance(run, _Timing) for done in runs.values() for run in done), (
+        "no contracts lookup was answered"
+    )
 
 
 @pytest.mark.settles("139")
@@ -1439,6 +1505,16 @@ _PRODUCT_PAIR = re.compile(r"^([A-Z0-9]+):([A-Z0-9]+) ")
 `CL:BZ N7-Q7` (`BF` of `CL:BF F7-G7-H7` names a butterfly, not a product)."""
 
 
+def _dash_legs(ticker: str) -> list[str]:
+    """Split a combo ticker into its `-` legs, leaving out a trailing ratio.
+
+    Returns:
+        Such as `["CLG7", "BZG7"]` of `CLG7-BZG7`, `["NKDZ6", "NIYZ6"]` of `NKDZ6-NIYZ6 2:3`,
+        or `["CL:BZ"]` of `CL:BZ H7-M7`, whose legs are months, not tickers.
+    """
+    return ticker.split(" ", 1)[0].split("-")
+
+
 def _pool_combos(listed: Mapping[str, _Listed], since: int) -> list[str]:
     """Order the combos traded since an instant, those most likely to tell products apart first.
 
@@ -1461,7 +1537,7 @@ def _pool_combos(listed: Mapping[str, _Listed], since: int) -> list[str]:
     )
 
     def mixed(ticker: str) -> bool:
-        legs = {listed[leg].product_code for leg in ticker.split("-") if leg in listed}
+        legs = {listed[leg].product_code for leg in _dash_legs(ticker) if leg in listed}
         return ":" in ticker or len(legs) > 1
 
     unprefixed = [ticker for ticker, found in recent if not ticker.startswith(found.product_code)]
@@ -1475,7 +1551,7 @@ def _pool_combos(listed: Mapping[str, _Listed], since: int) -> list[str]:
 def _candidates(ticker: str, listed: Mapping[str, _Listed], singles: set[str]) -> list[str]:
     """Name the products whose schedule could date a combo's trades.
 
-    They are its snapshot product code, its first `-` leg's (`CLZ6` of `CLZ6-CLF7`), and
+    They are its snapshot product code, every `-` leg's (`CL` and `BZ` of `CLG7-BZG7`), and
     the two product codes an inter-commodity combo names (`_PRODUCT_PAIR`), each only when
     `singles` (the single products listed) holds it.
 
@@ -1483,9 +1559,7 @@ def _candidates(ticker: str, listed: Mapping[str, _Listed], singles: set[str]) -
         The codes, sorted.
     """
     codes = {listed[ticker].product_code}
-    leg = ticker.split("-", 1)[0]
-    if leg in listed:
-        codes.add(listed[leg].product_code)
+    codes |= {listed[leg].product_code for leg in _dash_legs(ticker) if leg in listed}
     pair = _PRODUCT_PAIR.match(ticker)
     if pair:
         codes |= set(pair.groups())
@@ -1623,27 +1697,26 @@ def test_combo_trade_sessions_by_snapshot_product(
 ) -> None:
     """Whether a combo's snapshot product code puts its trades in Massive's own session.
 
-    The calendar would date a combo's streamed rows by the schedule of the product its
-    snapshot row names. An earlier run checked three combos whose tickers start with their
-    product code, on a Sunday evening, when every product's trades fall in Monday's session:
-    that could not tell the product Massive names from any other. Reads the whole snapshot
-    and the single products listed on the latest day the contracts list holds
-    (`_listed_day`), and takes up to 100 combos
-    traded within 3 days: first those whose ticker does not start with their product code,
-    then inter-commodity spreads (`CL:BZ N7-Q7`, or legs of different products), then one per
-    product code. A combo's candidates are its snapshot product code, its first leg's
-    (`CLZ6` of `CLZ6-CLF7`), and the two codes an inter-commodity ticker names (`CL`, `BZ`),
-    when they are listed single products. Reads the candidates' schedules from 4 days back
-    to 1 ahead, to the end (up to 10 pages, else a lower bound). Picks 30 of the combos, first
-    those whose candidates' sessions differ (only their trades can tell one candidate from
-    another), and reads each one's latest 200 trades within 3 days. Places each trade in the
-    session of each candidate whose span (first event to last) holds it, beside the trade's
-    own `session_end_date`. Records per combo and in total: trades that agree, disagree
-    (each listed), and that no session holds, by candidate (the snapshot's product or
-    another), and the trades by Chicago weekday and part of the session (from 17:00, the
-    evening that belongs to the next day); and how many combos have a trade their candidates
-    place in different sessions, the only trades that discriminate. A trades read
-    Massive refuses (a ticker it cannot take in the path) is recorded, not failed.
+    The calendar would date a combo's streamed rows by the schedule of the product its snapshot
+    row names. An earlier run checked three combos whose tickers start with their product code,
+    on a Sunday evening, when every product's trades fall in Monday's session: that could not
+    tell the product Massive names from any other. Reads the whole snapshot and the single
+    products listed on the latest day the contracts list holds (`_listed_day`), and takes up to
+    100 combos traded within 3 days: first those whose ticker does not start with their product
+    code, then inter-commodity spreads (`CL:BZ N7-Q7`, or legs of different products), then one
+    per product code. A combo's candidates are its snapshot product code, every `-` leg's (`CL`
+    and `BZ` of `CLG7-BZG7`), and the two codes an inter-commodity ticker names (`CL`, `BZ` of
+    `CL:BZ N7-Q7`), when they are listed single products. Reads the candidates' schedules from 4
+    days back to 1 ahead, to the end (up to 10 pages, else a lower bound). Picks 30 of the
+    combos, first those whose candidates' sessions differ (only their trades can tell one
+    candidate from another), and reads each one's latest 200 trades within 3 days. Places each
+    trade in the session of each candidate whose span (first event to last) holds it, beside the
+    trade's own `session_end_date`. Records per combo and in total: trades that agree, disagree
+    (each listed), and that no session holds, by candidate (the snapshot's product or another),
+    and the trades by Chicago weekday and part of the session (from 17:00, the evening that
+    belongs to the next day); and how many combos have a trade their candidates place in
+    different sessions, the only trades that discriminate. A trades read Massive refuses (a
+    ticker it cannot take in the path) is recorded, not failed.
 
     The snapshot's product dates combos when its trades agree; that settles it against the
     other candidates only by the trades they place apart, so with none the evidence says the
@@ -1689,6 +1762,155 @@ def test_combo_trade_sessions_by_snapshot_product(
         f"{dict(totals)}"
     )
     assert totals, "no combo trade was read"
+
+
+_SPACED_WINDOW = timedelta(hours=1)
+"""How long before a combo's last snapshot trade the path spelling check reads its trades."""
+
+
+def _spelled_path(path: str, text: str) -> RestPath:
+    """Return a futures path's spec with its `{ticker}` placeholder replaced by text as written.
+
+    The REST client encodes a path value itself, percent-encoding every character but
+    letters, digits, and `-._~` (`CL%3ABZ%20H7-M7`); this spec sends another spelling, such
+    as `CL:BZ%20H7-M7`, to tell Massive's reading of the path from the client's encoding.
+
+    Returns:
+        The path with no path parameter, the text in its place.
+    """
+    rest_path = source(Transport.REST, path)
+    params = tuple(param for param in rest_path.params if not param.in_path)
+    return replace(rest_path, key=rest_path.key.replace("{ticker}", text), params=params)
+
+
+def _record_trades_read(
+    client: RestClient,
+    label: str,
+    rest_path: RestPath,
+    *,
+    path_params: Mapping[str, object],
+    query: Mapping[str, object],
+    evidence: Evidence,
+) -> None:
+    """Read one page of a combo's trades and record its count and latest trade, or the refusal.
+
+    Raises:
+        WireError: When the read fails other than by Massive refusing it (`_refused`).
+    """
+    try:
+        trades = client.get(rest_path, path_params, query, bucket="futures").rows
+    except WireError as error:
+        if not _refused(error):
+            raise
+        evidence(f"{label}: refused: {error}")
+        return
+    stamps = [stamp for trade in trades if isinstance(stamp := trade.get("timestamp"), int)]
+    latest = _chicago(max(stamps)) if stamps else None
+    evidence(f"{label}: {len(trades)} trades, latest {latest}")
+
+
+def _spaced_and_plain_combos(client: RestClient, evidence: Evidence) -> tuple[_Combo, _Combo]:
+    """Pick the CL combos the path spelling check reads, from the snapshot from `CL` up to `CM`.
+
+    Returns:
+        The combo traded most recently within 7 days whose ticker holds `:` and a space, and
+        the one whose ticker holds neither, the control.
+    """
+    since = epoch_ns(datetime.now(UTC) - _RECENT_TRADE)
+    query = {"ticker.gte": "CL", "ticker.lt": "CM", "limit": _PRODUCTS_PAGE}
+    _, recent = _snapshot_combos(_page(client, _SNAPSHOT, query=query), since)
+    spaced = [combo for combo in recent if ":" in combo.ticker and " " in combo.ticker]
+    plain = [combo for combo in recent if ":" not in combo.ticker and " " not in combo.ticker]
+    assert spaced, "no CL combo whose ticker holds ':' and a space traded within 7 days"
+    assert plain, "no CL combo whose ticker holds neither ':' nor a space traded within 7 days"
+    combo, control = spaced[0], plain[0]
+    evidence(
+        f"combo {combo.ticker!r}, last snapshot trade {_chicago(combo.traded)}; control "
+        f"{control.ticker!r}, last snapshot trade {_chicago(control.traded)}"
+    )
+    return combo, control
+
+
+@pytest.mark.settles("136")
+@pytest.mark.requests(9)
+@pytest.mark.timeout(300)
+def test_spaced_combo_trades_by_path_spelling(
+    live_session: dm.MassiveSession,
+    live_rest: RestClient,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Whether Massive's trades path reads a combo whose ticker holds `:` or a space.
+
+    An earlier run read no trade from `/futures/v1/trades/{ticker}` for any of 21 such combos
+    (`CL:BZ H7-M7`), though the snapshot showed each trading minutes before, while combos
+    without them (`CLG7-BZG7`) read 200 each. The library sends such a ticker percent-encoded,
+    `CL%3ABZ%20H7-M7`. Massive's docs say nothing of how a path ticker is encoded; a URL path
+    may hold `:` as it is and a space as `%20` (RFC 3986), and some servers read `+` as a space.
+    Reads the snapshot from `CL` up to `CM`, and takes the combo traded most recently within 7
+    days whose ticker holds `:` and a space (so that each spelling below differs) and, as the
+    control, the one traded most recently whose ticker holds neither. Reads up to 10 of the
+    combo's trades, latest first, from an hour before its last snapshot trade, its ticker
+    spelled four ways: as the library sends it, with `:` as it is (`CL:BZ%20H7-M7`), and with
+    `+` for the space, `:` as it is (`CL:BZ+H7-M7`) and encoded (`CL%3ABZ+H7-M7`). Reads the
+    control's trades the same way, from an hour before its own last trade, as the library sends
+    it and with its `-` escaped (`CLG7%2DBZG7`), which shows whether Massive decodes an escape
+    in the path at all; then the combo's trades in its hour as a user reads them,
+    `m.futures.trades(combo).history(start, end)`. Records each read's trades and latest trade
+    in Chicago time, or Massive's refusal.
+
+    When some spelling reads trades the library's does not, the library's encoding is the cause,
+    and that spelling is the one to send; so is it when the control reads trades as the library
+    sends it and none with its `-` escaped, since Massive then reads no escape. When no spelling
+    reads a trade and the control reads trades both ways, Massive's trades path lacks such
+    combos: a report for Massive, and `history()` of one gives no rows. When the control reads
+    none either, the run settles nothing. Passes when every request is answered or refused; the
+    counts are evidence. Sends at most 9 requests: the snapshot, six trades reads, and up to 2
+    pages of `history()`.
+
+    Raises:
+        WireError: When a trades read fails other than by a refusal.
+    """
+    combo, control = _spaced_and_plain_combos(live_rest, evidence)
+    start = _instant(combo.traded) - _SPACED_WINDOW
+    trades = {"timestamp.gte": start, "sort": "timestamp.desc", "limit": 10}
+    since_control = _instant(control.traded) - _SPACED_WINDOW
+    colon = quote(combo.ticker, safe=":")
+    for text in (
+        colon,
+        colon.replace("%20", "+"),
+        quote(combo.ticker, safe="").replace("%20", "+"),
+    ):
+        rest_path = _spelled_path(_TRADES, text)
+        _record_trades_read(
+            live_rest, rest_path.key, rest_path, path_params={}, query=trades, evidence=evidence
+        )
+    escaped = quote(control.ticker, safe="").replace("-", "%2D")
+    control_path = _spelled_path(_TRADES, escaped)
+    control_trades = {**trades, "timestamp.gte": since_control}
+    _record_trades_read(
+        live_rest,
+        f"control {control_path.key}",
+        control_path,
+        path_params={},
+        query=control_trades,
+        evidence=evidence,
+    )
+    for ticker, query in ((combo.ticker, trades), (control.ticker, control_trades)):
+        _record_trades_read(
+            live_rest,
+            f"{ticker!r} as the library sends it ({quote(ticker, safe='')})",
+            source(Transport.REST, _TRADES),
+            path_params={"ticker": ticker},
+            query=query,
+            evidence=evidence,
+        )
+    end = _instant(combo.traded) + timedelta(seconds=1)
+    rows = table_rows(live_session.futures.trades(combo.ticker).history(start, end, wait=True))
+    evidence(
+        f"history() of {combo.ticker!r}, {start:%H:%M:%S} to {end:%H:%M:%S} UTC: {len(rows)} rows"
+    )
 
 
 _LISTING_CONTRACT_PAGES = 40
@@ -1888,6 +2110,13 @@ _LOOKUP_CHUNK = 100
 _LOOKUP_CHUNKS = 30
 """The most contracts lookups the streamed-tickers check sends."""
 
+_LOOKUP_PAGES = 3
+"""The most pages of one streamed-tickers contracts lookup: 100 tickers listed on each of a
+week's trading days fill under one page of 1,000, so a third page means the cap cut it."""
+
+_LOOKUP_DAYS = timedelta(days=7)
+"""How far back the streamed-tickers check asks the contracts list for each contract's dates."""
+
 _STREAM_SNAPSHOT_LOOKUPS = 30
 """The most snapshot lookups, 100 tickers each, the streamed-tickers check sends."""
 
@@ -1924,9 +2153,44 @@ def _record_streamed_in_neither(
         evidence(f"in neither: {neither[start : start + _LOOKUP_CHUNK]}")
 
 
+def _record_unlisted_singles(
+    client: RestClient, singles: Sequence[str], evidence: Evidence
+) -> None:
+    """Record the single contracts streamed that the contracts list lacks within a week.
+
+    Looks them up 100 a lookup by `ticker.any_of`, the first `_LOOKUP_CHUNKS` lookups in
+    sorted order, with the dates from `_LOOKUP_DAYS` before the calendar's today to it, each
+    lookup to its end or `_LOOKUP_PAGES` pages.
+    """
+    chunks = [singles[i : i + _LOOKUP_CHUNK] for i in range(0, len(singles), _LOOKUP_CHUNK)]
+    today = futures_session(datetime.now(UTC))  # the calendar's today
+    dates = {"date.gte": today - _LOOKUP_DAYS, "date.lte": today, "limit": _LIST_PAGE}
+    found: set[str] = set()
+    cut = 0
+    for chunk in chunks[:_LOOKUP_CHUNKS]:
+        query = {**dates, "ticker.any_of": chunk}
+        rows, _, ended = _read_pages(client, _CONTRACTS, query, most=_LOOKUP_PAGES)
+        found |= {str(r.get("ticker")) for r in rows}
+        cut += not ended
+    looked_up = [t for chunk in chunks[:_LOOKUP_CHUNKS] for t in chunk]
+    missing = sorted(set(looked_up) - found)
+    capped = (
+        f" ({cut} lookups cut at {_LOOKUP_PAGES} pages: some it lacks may be on pages not read)"
+        if cut
+        else ""
+    )
+    evidence(
+        f"looked up {len(looked_up)} of {len(singles)} single contracts, dates "
+        f"{dates['date.gte']} to {today}; the contracts list holds "
+        f"{len(looked_up) - len(missing)}, lacks {len(missing)}{capped}"
+    )
+    for start in range(0, len(missing), _LOOKUP_CHUNK):
+        evidence(f"not in the contracts list: {missing[start : start + _LOOKUP_CHUNK]}")
+
+
 @pytest.mark.integration_all_symbols
 @pytest.mark.settles("127", "134")
-@pytest.mark.requests(75)
+@pytest.mark.requests(135)
 @pytest.mark.timeout(1500)
 def test_streamed_futures_tickers_are_listed(
     live_session: dm.MassiveSession,
@@ -1940,10 +2204,14 @@ def test_streamed_futures_tickers_are_listed(
 
     Streams every futures trade (`m.futures.trades(dm.ALL).last_by()`) on the key's WebSocket
     for 10 minutes, which takes over the key's own futures connection the whole time. Then
-    looks up the single contract tickers seen in the contracts list, 100 a request as the
-    calendar asks (`ticker.any_of`, the largest page), at most 30 requests: the first 3,000
-    in sorted order. Records the tickers seen, singles and combos, how many were looked up,
-    and every one looked up that the list does not hold. Then asks the snapshot for every
+    looks up the single contract tickers seen in the contracts list, 100 a lookup by
+    `ticker.any_of`, the largest page, and the dates from 7 days before the calendar's today to
+    it (`date.gte`, `date.lte`): the contracts list holds one row per contract and trading day,
+    and a lookup without a date reads every date of every contract, whose first page leaves
+    most contracts out. Each lookup reads every page, up to 3 (a lookup cut there says some
+    tickers it lacks may be on pages not read), at most 30 lookups: the first 3,000 in sorted
+    order. Records the tickers seen, singles and combos, how many were looked up, and every
+    one looked up that the list does not hold within the week. Then asks the snapshot for every
     ticker seen, singles and combos alike (`ticker.any_of`, 100 a request, up to 30), and the
     contracts list, by `ticker.any_of` and the latest day it holds, for those the snapshot
     lacks (up to 10, after up to 4 requests to find that day); where they cannot ask about
@@ -1953,7 +2221,7 @@ def test_streamed_futures_tickers_are_listed(
     status for ES is not `open`, and with Massive's refusal when the stream is refused.
 
     Passes when trades arrived, the stream never failed, and every lookup is answered; the
-    missing tickers are evidence. Sends at most 75 requests of its own: the market status
+    missing tickers are evidence. Sends at most 135 requests of its own: the market status
     and the lookups. The stream's own futures calendar also looks up the contracts it sees,
     100 a request, and loads their products' schedules, on the same futures rate limit;
     their number depends on how many contracts trade, and the timeout leaves 10 minutes for
@@ -1986,18 +2254,154 @@ def test_streamed_futures_tickers_are_listed(
     evidence(
         f"tickers seen in {_STREAM_SECONDS:.0f} s: {len(seen)}, {len(singles)} single contracts"
     )
-    chunks = [singles[i : i + _LOOKUP_CHUNK] for i in range(0, len(singles), _LOOKUP_CHUNK)]
-    found: set[str] = set()
-    for chunk in chunks[:_LOOKUP_CHUNKS]:
-        query = {"ticker.any_of": chunk, "limit": _LIST_PAGE}
-        found |= {str(r.get("ticker")) for r in _page(live_rest, _CONTRACTS, query=query)}
-    looked_up = [t for chunk in chunks[:_LOOKUP_CHUNKS] for t in chunk]
-    missing = sorted(set(looked_up) - found)
-    evidence(
-        f"looked up {len(looked_up)} of {len(singles)} single contracts; the contracts list "
-        f"holds {len(looked_up) - len(missing)}, lacks {len(missing)}"
-    )
-    for start in range(0, len(missing), _LOOKUP_CHUNK):
-        evidence(f"not in the contracts list: {missing[start : start + _LOOKUP_CHUNK]}")
+    _record_unlisted_singles(live_rest, singles, evidence)
     _record_streamed_in_neither(live_rest, seen, evidence)
     assert seen, f"no futures trade arrived in {_STREAM_SECONDS:.0f} s, though trades were due"
+
+
+_TAS_UNDERLYINGS = {
+    "BZT": "BZ",
+    "CLT": "CL",
+    "GFT": "GF",
+    "HET": "HE",
+    "HG0": "HG",
+    "HGT": "HG",
+    "HOT": "HO",
+    "KET": "KE",
+    "LET": "LE",
+    "NGT": "NG",
+    "PAT": "PA",
+    "PLT": "PL",
+    "RBT": "RB",
+    "SBT": "ZS",
+    "SIT": "SI",
+    "ZCT": "ZC",
+    "ZLT": "ZL",
+    "ZMT": "ZM",
+    "ZWT": "ZW",
+}
+"""The products two runs found traded within 7 days with no schedule, each with the product of
+the futures contract it settles to. CME's contract specifications name `CLT`, `HGT`, and `HG0`
+as Trade at Settlement (TAS) products; the others are taken to be TAS products from CME notices
+and filings."""
+
+_UNLISTED_STREAMED = ("6E:XF:EURUSD:Z6", "SR1H7-ZQH7", "0BTZ9", "0NANHZ601")
+"""Tickers a run streamed that neither the snapshot nor the contracts list held: a CME FX Link
+spread, a 1-Month SOFR against 30-Day Fed Funds spread, and two single contracts."""
+
+_SPACED_COMBO = "CL:BZ F7-G7"
+"""A combo whose ticker holds `:` and a space, for which a run read no trades."""
+
+_DASHED_COMBO = "CLZ7-CLM8"
+"""A combo whose ticker holds neither, traded the same second, for which that run read 10."""
+
+
+def _record_body(
+    client: RestClient,
+    label: str,
+    path: str,
+    *,
+    query: Mapping[str, object],
+    evidence: Evidence,
+) -> dict[str, Any] | None:
+    """Read one page of a futures path and record its whole body, or Massive's refusal.
+
+    The query's `ticker` fills a path's `{ticker}`, which the REST client percent-encodes.
+
+    Returns:
+        The body, or None when Massive refused the request (`_refused`).
+
+    Raises:
+        WireError: When the read fails other than by a refusal.
+    """
+    path_params = {"ticker": query["ticker"]} if "{ticker}" in path else {}
+    rest = {key: value for key, value in query.items() if key not in path_params}
+    try:
+        page = client.get(source(Transport.REST, path), path_params, rest, bucket="futures")
+    except WireError as error:
+        if not _refused(error):
+            raise
+        evidence(f"{label}: refused: {error}")
+        return None
+    body = page.body if isinstance(page.body, dict) else {"body": page.body}
+    evidence(f"{label}: {json.dumps(body, default=str)}")
+    return body
+
+
+def _record_first_singles(
+    client: RestClient, codes: Sequence[str], *, day: date, evidence: Evidence
+) -> None:
+    """Record the first single contract a day's contracts list holds for each product.
+
+    Asks for the products' single contracts on `day`, up to 2 pages, and records how many
+    rows each product had and its first row whole.
+    """
+    query = {"product_code.any_of": list(codes), "date": day, "type": "single", "limit": _LIST_PAGE}
+    rows, pages, ended = _read_pages(client, _CONTRACTS, query, most=2)
+    firsts: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        firsts.setdefault(str(row.get("product_code")), row)
+    evidence(
+        f"single contracts of {list(codes)} on {day}: {len(rows)} rows in {pages} pages "
+        f"({'the whole list' if ended else 'more follow: a lower bound'}), by product "
+        f"{dict(Counter(str(row.get('product_code')) for row in rows))}"
+    )
+    for code in codes:
+        evidence(f"first single contract of {code}: {json.dumps(firsts.get(code), default=str)}")
+
+
+@pytest.mark.settles("134", "135", "136", "137")
+@pytest.mark.requests(15)
+@pytest.mark.timeout(300)
+def test_response_bodies_of_futures_gaps(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """Record Massive's whole answers where earlier runs found futures data missing.
+
+    Earlier runs recorded counts only: products with no schedule, taken to be CME Trade at
+    Settlement (TAS) products; streamed tickers that neither the snapshot nor the contracts
+    list held; and a combo whose ticker holds `:` and a space, whose trades path read nothing.
+    This records the bodies themselves, to quote to Massive. Asks the schedules for the latest
+    session of `CLT` and of its underlying `CL` (`sort=session_end_date.desc`, `limit=1`); the
+    products records of the 19 TAS products and their 18 underlyings, in one request; the
+    contracts active on the latest day the contracts list holds for the TAS products, and the
+    first such single contract of each underlying (up to 2 pages); the snapshot and that day's
+    contracts for two of the streamed tickers in neither, an FX Link spread and a SOFR against
+    Fed Funds spread, with the two single contracts beside them; and the snapshot and the
+    latest 10 trades of `CL:BZ F7-G7` and of `CLZ7-CLM8`, each ticker as the library sends it.
+    Records each body whole, or Massive's refusal; for the underlyings' contracts, the first
+    row of each product and the count of rows.
+
+    Passes when every request is answered or refused; the bodies are evidence. Sends at most
+    15 requests: up to 4 to find the contracts list's latest day, and 11 more.
+
+    Raises:
+        WireError: When a read fails other than by a refusal.
+    """
+    for code in ("CLT", "CL"):
+        schedules = {"product_code": code, "sort": "session_end_date.desc", "limit": 1}
+        _record_body(
+            live_rest, f"schedules of {code}", _SCHEDULES, query=schedules, evidence=evidence
+        )
+    tas = sorted(_TAS_UNDERLYINGS)
+    underlyings = sorted(set(_TAS_UNDERLYINGS.values()))
+    products: dict[str, object] = {"product_code.any_of": tas + underlyings, "limit": 100}
+    _record_body(live_rest, "products", _PRODUCTS, query=products, evidence=evidence)
+    day = _listed_day(live_rest, evidence)
+    contracts: dict[str, object] = {"product_code.any_of": tas, "date": day, "limit": _LIST_PAGE}
+    _record_body(
+        live_rest, "contracts of the TAS products", _CONTRACTS, query=contracts, evidence=evidence
+    )
+    _record_first_singles(live_rest, underlyings, day=day, evidence=evidence)
+    unlisted: dict[str, object] = {"ticker.any_of": list(_UNLISTED_STREAMED), "limit": _LIST_PAGE}
+    label = f"of {list(_UNLISTED_STREAMED)}"
+    _record_body(live_rest, f"snapshot {label}", _SNAPSHOT, query=unlisted, evidence=evidence)
+    listed = {**unlisted, "date": day}
+    _record_body(
+        live_rest, f"contracts {label} on {day}", _CONTRACTS, query=listed, evidence=evidence
+    )
+    combos = [_SPACED_COMBO, _DASHED_COMBO]
+    snapshot: dict[str, object] = {"ticker.any_of": combos}
+    _record_body(live_rest, f"snapshot of {combos}", _SNAPSHOT, query=snapshot, evidence=evidence)
+    for ticker in combos:
+        trades = {"ticker": ticker, "sort": "timestamp.desc", "limit": 10}
+        label = f"trades of {ticker!r}, path {quote(ticker, safe='')}"
+        _record_body(live_rest, label, _TRADES, query=trades, evidence=evidence)

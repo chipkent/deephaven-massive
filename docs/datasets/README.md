@@ -317,7 +317,7 @@ Massive refuses the files of an exchange your plan doesn't include. `history()` 
 
 ### on_error
 
-A `dm.ErrorPolicy` that sets what each kind of problem does in this call, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`. A problem is one bad symbol, row, file line, or refused futures exchange, and each kind is a cause. Each cause the policy leaves unset follows the session's `MassiveConfig.on_error`, then `dm.ErrorPolicy.DEFAULTS`. `help(dm.ErrorPolicy)` lists the causes. [Bad symbols and rows](https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error) says what each value does.
+A `dm.ErrorPolicy` that sets what each kind of problem does in this call, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`. A problem is one bad symbol, row, file line, or refused futures exchange, and each kind is a cause. Each cause the policy leaves unset follows the session's `MassiveConfig.on_error`, then `dm.ErrorPolicy.DEFAULTS`. Leave `on_error` out, or pass None, to take every cause from the session. By default every cause logs, except `refused_venues`, which raises. `help(dm.ErrorPolicy)` lists the causes. [Bad symbols and rows](https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error) says what each value does.
 
 A live call whose policy changes any cause's setting gets its own stream in `m.streams()`.
 

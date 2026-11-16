@@ -353,6 +353,10 @@ class MassiveConfig:
             Set a cause to `dm.OnError.RAISE` when a table must not run past it.
             `help(dm.ErrorPolicy)` lists the causes. By default each logs, except
             `refused_venues`, which raises.
+
+            A dataset method's `on_error=` overrides this policy for one call. A call that
+            leaves it out, or passes None, uses this policy for every cause, and each cause
+            unset here falls back to `dm.ErrorPolicy.DEFAULTS`.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)

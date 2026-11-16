@@ -435,7 +435,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -472,7 +473,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         Args:
             symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)` for every
                 ticker.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -512,7 +514,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -548,7 +551,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         Args:
             symbols: Stock tickers. `dm.ALL` is refused; use `m.stocks.snapshots(dm.ALL)` for every
                 ticker.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -602,7 +606,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             timespan: The bar's unit. Massive refuses `dm.Timespan.SESSION`, a futures unit.
             multiplier: Units per bar.
             adjusted: Adjusts volume as well as prices.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A `StreamHistoryQuery` for 1-second and 1-minute bars at `multiplier=1`, which
@@ -651,7 +656,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             symbols: Stock tickers. `dm.ALL` is refused; for every ticker's bar of one day, use
                 `m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`.
             adjusted: Adjusts volume as well as prices.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -693,7 +699,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -727,7 +734,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -759,7 +767,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -798,7 +807,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.
             include_otc: True to include OTC securities.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -842,7 +852,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
         Args:
             direction: `dm.Direction.GAINERS` or `dm.Direction.LOSERS`.
             include_otc: True to include OTC securities.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -888,7 +899,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             date: The trading day, as a date.
             adjusted: Adjusts volume as well as prices. Massive doesn't report the basis of these
                 prices, so the library can't check it.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -949,7 +961,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. With a watchlist, `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"distribution_type": "special"}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1012,7 +1025,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"adjustment_type": "reverse_split"}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1073,7 +1087,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             order: The direction of the rows. Here it works without `sort` too.
             limit: The most rows: in total for `symbols=None`, per ticker when tickers are named.
             filters: Further endpoint parameters, such as `{"ipo_status": "pending"}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1133,7 +1148,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"days_to_cover_gte": 5}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1194,7 +1210,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"short_volume_ratio_gte": 50}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1252,7 +1269,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
             filters: Further endpoint parameters, such as `{"free_float_percent_lt": 20}`.
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`).
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:

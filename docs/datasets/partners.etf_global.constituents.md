@@ -27,7 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"effective_date": "2026-09-18"}`. Keys: `composite_ticker_gt`, `composite_ticker_gte`, `composite_ticker_lt`, `composite_ticker_lte`, `constituent_ticker`, `constituent_ticker_any_of`, `constituent_ticker_gt`, `constituent_ticker_gte`, `constituent_ticker_lt`, `constituent_ticker_lte`, `effective_date`, `effective_date_gt`, `effective_date_gte`, `effective_date_lt`, `effective_date_lte`, `figi`, `figi_any_of`, `figi_gt`, `figi_gte`, `figi_lt`, `figi_lte`, `isin`, `isin_any_of`, `isin_gt`, `isin_gte`, `isin_lt`, `isin_lte`, `processed_date`, `processed_date_gt`, `processed_date_gte`, `processed_date_lt`, `processed_date_lte`, `sedol`, `sedol_any_of`, `sedol_gt`, `sedol_gte`, `sedol_lt`, `sedol_lte`, `us_code`, `us_code_any_of`, `us_code_gt`, `us_code_gte`, `us_code_lt`, `us_code_lte`. |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 

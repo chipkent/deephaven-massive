@@ -2574,3 +2574,26 @@ def test_each_stream_records_only_its_own_withheld_rows_under_any_policy(
         flusher.flush()
     assert recorded == [(1, 1)]
     assert not [r for r in caplog.records if "withheld" in r.getMessage()]
+
+
+def test_a_stream_reads_its_symbols_once_for_a_batch_s_withheld_rows(
+    massive_session: dm.MassiveSession, flusher: Flusher, *, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The stream drops AAPL from its symbols while the batch is judged: its count, its events,
+    # and its drift all come from one reading, so a counted row always has its event.
+    core = massive_session._core
+    events = capture_problems(core, monkeypatch)
+    aapl, _ = make_sink(core, ("AAPL",), stream_id=1)
+    flusher.routes.add("T", aapl)
+    answers = iter([True])
+    monkeypatch.setattr(stream.StreamSink, "holds", lambda _sink, _symbol: next(answers, False))
+    recorded: list[int] = []
+    monkeypatch.setattr(
+        core,
+        "record_stream_drift",
+        lambda _id, _transport, drift: recorded.append(drift.dropped_rows),
+    )
+    flusher.rows("T", frame([trade("AAPL", SipTimestamp=5), trade("AAPL")]), {}, generation=1)
+    flusher.flush()
+    assert [(event.symbol, event.rows) for event in events] == [("AAPL", 1)]
+    assert recorded == [1]
