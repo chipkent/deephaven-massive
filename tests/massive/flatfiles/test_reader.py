@@ -1154,14 +1154,15 @@ def test_a_row_with_two_unreadable_keys_is_marked_once_for_the_first_header(
 def test_a_row_whose_key_cannot_be_read_never_changes_how_other_rows_convert(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    # Arrow reads "0x10" as 16; the marked row's odd price must not send the column to the
-    # slower reading, which would not.
+    # Arrow reads "0x10" as 16, in a list too; the marked row's odd text must not send a
+    # column to the slower reading, which would not.
     columns = (*TRADE_COLUMNS, ReadColumn("sequence_number", "SequenceNumber", pa.int64()))
-    good = ",,4,1,1,1.5,0x10,1741012200000000000,10,1,AAPL,,\n"
-    keyless = ",,4,2,1,x,y,,10,1,AAPL,,\n"
+    good = "0x10,,4,1,1,1.5,0x10,1741012200000000000,10,1,AAPL,,\n"
+    keyless = "x,,4,2,1,x,y,,10,1,AAPL,,\n"
     with opened(KEY, TRADE_HEADER + good + keyless) as file:
         [(batch, report, marks)] = list(file.batches(plan(columns=columns)))
     assert batch["SequenceNumber"].to_pylist() == [16, None]
+    assert batch["Conditions"].to_pylist() == [[16], None]
     assert batch["Price"].to_pylist() == [1.5, None]
     assert report.unconvertible == frozenset()
     assert marks[RowFault.UNREADABLE_KEYS].rows == (1,)
