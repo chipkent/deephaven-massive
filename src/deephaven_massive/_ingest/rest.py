@@ -130,9 +130,9 @@ import pyarrow.compute as pc
 from deephaven_massive._datasets.catalog import REFERENCE_PATH
 from deephaven_massive._datasets.dates import day_class, is_trading_day, reaches_now
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
-from deephaven_massive._datasets.row_times import time_rule
+from deephaven_massive._datasets.row_times import START, StampRule, time_rule
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_class
-from deephaven_massive._datasets.wire_symbols import contracts_underlying
+from deephaven_massive._datasets.wire_symbols import contracts_underlying, log_unreadable
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
@@ -142,6 +142,7 @@ from deephaven_massive._errors import (
     EntitlementError,
     ErrorSource,
     MassiveError,
+    RowDataError,
     SessionClosedError,
     UnavailableSymbolError,
     failure_text,
@@ -190,13 +191,21 @@ from deephaven_massive._ingest.symbol_reads import (
     read_rest_by_value,
 )
 from deephaven_massive._log_limits import bounded_list, log_once
-from deephaven_massive._massive import Cancel, DriftReport, Transport, WireError
+from deephaven_massive._massive import Cancel, DriftReport, RowFault, Transport, WireError
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.columns import dataset_table, rest_recency_note
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.poll import Pollers
+from deephaven_massive._tables.withheld import (
+    REASON,
+    Withheld,
+    failure_of,
+    mark,
+    marked_count,
+    withhold_rows,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -214,6 +223,7 @@ if TYPE_CHECKING:
     from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import Page, Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
+    from deephaven_massive._tables.problem_events import ProblemSink
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import HostDecision, SymbolOutcome, Unsplit
 
@@ -286,16 +296,19 @@ def _listed_rows(
 
     A request that named one ticker gives it to every row. A request that named several gives
     each row every one of them its list holds, the row repeated once per such ticker, in the
-    order of its list; a row that lists none of them keeps a null `Symbol`, never dropped. A
-    request that named none leaves `Symbol` null.
+    order of its list; a row that lists none of them is left out, as a row outside a
+    `history()` window is: it belongs to none of the request's symbols, so it is neither
+    published nor reported as a problem. A request that named none leaves `Symbol` null, the
+    column's documented meaning.
 
     Args:
-        batch: One page's rows in the dataset's schema, with a null `Symbol`.
+        batch: One page's rows in the dataset's schema, with a null `Symbol` and the mark
+            columns.
         named: The tickers the request named (`own_symbols`).
         column: The column of each row's tickers (`DatasetSpec.ticker_list`).
 
     Returns:
-        The rows with their `Symbol`, and how many rows listed none of several named tickers.
+        The rows with their `Symbol`, and how many listed none of several named tickers.
     """
     if not named:
         return batch, 0
@@ -307,15 +320,12 @@ def _listed_rows(
         wanted = set(named)
         rows: list[int] = []
         symbols = []
-        unmatched = 0
         for index, listed in enumerate(batch.column(column).to_pylist()):
             hits: list[str | None] = [t for t in dict.fromkeys(listed or ()) if t in wanted]
-            if not hits:
-                unmatched += 1
-                hits = [None]
             rows.extend([index] * len(hits))
             symbols.extend(hits)
         taken = batch.take(pa.array(rows, pa.int64()))
+        unmatched = batch.num_rows - len(set(rows))
     position = taken.schema.get_field_index(_SYMBOL)
     arrays = list(taken.columns)
     arrays[position] = pa.array(symbols, taken.schema.field(position).type)
@@ -334,42 +344,29 @@ def _cut(text: str) -> str:
     return text if len(text) <= _ANSWER_SHOWN else text[: _ANSWER_SHOWN - 1] + "…"
 
 
-def _page_rows(
-    batches: Sequence[pa.RecordBatch],
-    *,
-    window: HistoryWindow | None,
-    time_name: str,
-    fill: Callable[[pa.RecordBatch], pa.RecordBatch],
-    where: str,
-    read: int,
-) -> list[pa.RecordBatch]:
-    """Keep a page's rows of the `history()` window, fill their time columns, keep whole bars.
-
-    Logs one DEBUG line per page with the rows left after each step, so an empty table can be
-    traced to the step that emptied it.
+def _stamped(
+    stamps: StampRule, label: str, batch: pa.RecordBatch, *, source: str
+) -> pa.RecordBatch:
+    """Stamp a page's bars at 00:00 of their days, marking a bar at an odd stamp.
 
     Args:
-        batches: The page's converted rows, stamped.
-        window: The `history()` window, or None for `fetch()` and `poll()`.
-        time_name: The dataset's time column, for `keep_window`.
-        fill: Fills the library's time columns (`row_times.TimeRule.fill`).
-        where: The dataset, page, path, and symbol, for the line.
-        read: How many rows the page held, before conversion.
+        stamps: The bars' stamp rule.
+        label: The dataset, for the stamp's WARNING.
+        batch: The page's rows, with the mark columns.
+        source: The path template, for the WARNING.
 
     Returns:
-        The rows kept.
+        The rows, known stamps moved, and each bar at a stamp Massive is not known to use
+        marked `unconvertible_values` on `TimestampStart`, to be withheld.
     """
-    windowed = [keep_window(batch, window, time=time_name) for batch in batches]
-    whole = [whole_bars(fill(batch), window) for batch in windowed]
-    logger.debug(
-        "%s: %d rows read, %d converted, %d in the window, %d kept as whole bars",
-        where,
-        read,
-        sum(batch.num_rows for batch in batches),
-        sum(batch.num_rows for batch in windowed),
-        sum(batch.num_rows for batch in whole),
-    )
-    return whole
+    stamped, odd = stamps.stamp(label, batch, source=source)
+    sent = batch.column(START)
+
+    def reason(row: int) -> str:
+        stamp: int = sent[row].value
+        return stamps.reason(stamp)
+
+    return mark(stamped, RowFault.UNCONVERTIBLE_VALUES, odd, field=START, reason=reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,7 +566,7 @@ class RestReader:
             no call owns: what a symbol spelling the library cannot read
             (`unreadable_symbols`) and a symbol Massive has no data for
             (`unavailable_symbols`) do.
-        raw_symbol: Whether the session's schemas have `RawSymbol` (`SessionCore.raw_symbol`).
+        problems: The session's sink of the rows it withholds (`SessionCore.problems`).
         delayed_subscriptions: The subscriptions whose delayed data the session accepts
             (`MassiveConfig.delayed_subscriptions`); a current-data read of any other fails on
             a `DELAYED` label (`_check_recency`).
@@ -586,7 +583,7 @@ class RestReader:
     drift: DriftRegistry
     max_concurrency: int
     policy: ResolvedPolicy
-    raw_symbol: bool
+    problems: ProblemSink
     delayed_subscriptions: AbstractSet[Subscription]
     threads: str
     exec_ctx: ExecutionContext
@@ -708,13 +705,7 @@ class RestReader:
         `UnavailableSymbolError` of `_report_missing` for a symbol Massive has no data for. A
         closed session raises `SessionClosedError("... is closed; ...")`.
         """
-        converter = RowConverter.build(
-            self.catalog,
-            spec,
-            rest_path,
-            unreadable_symbols=self.policy.unreadable_symbols,
-            raw_symbol=self.raw_symbol,
-        )
+        converter = RowConverter.build(self.catalog, spec, rest_path)
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
                 self._call,
@@ -791,13 +782,7 @@ class RestReader:
         converters: dict[str, RowConverter] = {}
         for rest_path, _ in units:
             if rest_path.template not in converters:
-                converters[rest_path.template] = RowConverter.build(
-                    self.catalog,
-                    spec,
-                    rest_path,
-                    unreadable_symbols=self.policy.unreadable_symbols,
-                    raw_symbol=self.raw_symbol,
-                )
+                converters[rest_path.template] = RowConverter.build(self.catalog, spec, rest_path)
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
                 self._call_alone,
@@ -1096,16 +1081,19 @@ class RestReader:
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if stamps is not None:
-                    batches = [stamps.stamp(spec.name, batch, source=template) for batch in batches]
+                    batches = [_stamped(stamps, spec.name, b, source=template) for b in batches]
                 kept.extend(
-                    _page_rows(
+                    self._page_rows(
+                        spec,
                         batches,
                         window=window,
                         time_name=converter.time_name,
                         fill=functools.partial(times.fill, received=received),
-                        where=f"{spec.name}: page {requests} of {template} for "
+                        where=f"GET {template}",
+                        page=f"{spec.name}: page {requests} of {template} for "
                         f"{call.symbol or 'the request'}",
                         read=len(page.rows),
+                        record=record,
                     )
                 )
         except WireError as error:
@@ -1202,6 +1190,108 @@ class RestReader:
         missing = f"{call.symbol}{scope} (HTTP 404 from {template})"
         return _Outcome(tuple(kept), requests + 1, missing=missing)
 
+    def _page_rows(
+        self,
+        spec: DatasetSpec,
+        batches: Sequence[pa.RecordBatch],
+        *,
+        window: HistoryWindow | None,
+        time_name: str,
+        fill: Callable[[pa.RecordBatch], pa.RecordBatch],
+        where: str,
+        page: str,
+        read: int,
+        record: Callable[[DriftReport], None] | None,
+    ) -> list[pa.RecordBatch]:
+        """Keep a page's rows of the window, withhold its marked rows, fill and keep whole bars.
+
+        The rows the library could not read whole are withheld (`withheld.withhold_rows`) after
+        the window, which keeps a marked row it cannot place, and before the time columns are
+        filled. The withheld rows count in the page's drift, give the session their problem
+        events, and log each unreadable symbol spelling once at the level the read's
+        `unreadable_symbols` gives. Logs one DEBUG line per page with the rows left after each
+        step, so an empty table can be traced to the step that emptied it.
+
+        Args:
+            spec: The dataset.
+            batches: The page's converted rows, stamped and marked.
+            window: The `history()` window, or None for `fetch()` and `poll()`.
+            time_name: The dataset's time column, for `keep_window`.
+            fill: Fills the library's time columns (`row_times.TimeRule.fill`).
+            where: The request template, for the drift and the events.
+            page: The dataset, page, path, and symbol, for the DEBUG line.
+            read: How many rows the page held, before conversion.
+            record: Also given the withheld rows' drift, for a live table's `SchemaDrift`; or
+                None.
+
+        Returns:
+            The rows kept.
+
+        Raises:
+            RowDataError: If the page had rows inside the window and the library could read
+                none of them whole, the sign of a change in Massive's format, whatever the
+                read's policy (a row outside the window counts neither way); or if a cause of a
+                withheld row is `RAISE` in the read's policy (`withheld.failure_of`).
+        """
+        if not batches:
+            return []
+        considered = sum(batch.num_rows for batch in batches)
+        windowed = pa.Table.from_batches(
+            [keep_window(batch, window, time=time_name) for batch in batches]
+        )
+        asked = windowed.num_rows
+        if asked and marked_count(windowed) == asked:
+            first = windowed.column(REASON)[0].as_py()
+            raise RowDataError(
+                f"{spec.name}: the library could read none of the {asked} rows of the read's "
+                f"symbols and window on a page from {where} whole, so Massive's format may have "
+                f"changed; the first: {first}"
+            )
+        symbol = _SYMBOL if _SYMBOL in windowed.schema.names else None
+        withheld = withhold_rows(windowed, symbol=symbol)
+        if withheld.groups:
+            self._report_withheld(spec, withheld, where=where)
+            if record is not None:
+                record(withheld.drift)
+        whole = [whole_bars(fill(batch), window) for batch in withheld.rows.to_batches()]
+        logger.debug(
+            "%s: %d rows read, %d converted, %d in the window, %d withheld, %d kept as whole bars",
+            page,
+            read,
+            considered,
+            windowed.num_rows,
+            withheld.total,
+            sum(batch.num_rows for batch in whole),
+        )
+        return whole
+
+    def _report_withheld(self, spec: DatasetSpec, withheld: Withheld, *, where: str) -> None:
+        """Fail on a page's withheld rows under `RAISE`, or report them and go on.
+
+        Args:
+            spec: The dataset.
+            withheld: The page's withheld rows.
+            where: The request template.
+
+        Raises:
+            RowDataError: If a cause of a withheld row is `RAISE` in the read's policy.
+        """
+        failure = failure_of(
+            withheld.counts(), self.policy, dataset=spec.name, first_reason=withheld.first_reason
+        )
+        if failure is not None:
+            raise RowDataError(failure)
+        self.drift.report(spec.name, Transport.REST, withheld.drift, where=where)
+        spellings = sorted(
+            {g.sent for g in withheld.groups if g.fault is RowFault.UNREADABLE_SYMBOLS and g.sent}
+        )
+        log_unreadable(spec.name, spellings, self.policy.unreadable_symbols)
+        self.problems(
+            withheld.events(
+                dataset=spec.name, transport=Transport.REST, where=where, stream_id=None
+            )
+        )
+
     def _listed(
         self,
         spec: DatasetSpec,
@@ -1213,7 +1303,7 @@ class RestReader:
         """Fill the `Symbol` of a dataset whose rows list their tickers (`_listed_rows`).
 
         Logs one WARNING per dataset a session, then DEBUG, when a row lists none of the
-        request's several named tickers: it keeps a null `Symbol`.
+        request's several named tickers: the row is left out, since it is none of theirs.
 
         Args:
             spec: The dataset, with a `ticker_list`.
@@ -1237,7 +1327,7 @@ class RestReader:
             logger.log(
                 logging.WARNING if first else logging.DEBUG,
                 "%s: %d rows Massive returned from %s list none of the request's tickers "
-                "(%s) in %s, so their Symbol is null",
+                "(%s) in %s, so they are left out",
                 spec.name,
                 unmatched,
                 template,
@@ -1703,7 +1793,7 @@ class RestReader:
                 found = f"{value} (HTTP 404 from {template})"
                 self._report_missing(spec, [found])
                 absent.append(found)
-        schema = self.catalog.dataset_schema(spec, raw_symbol=self.raw_symbol)
+        schema = self.catalog.dataset_schema(spec)
         return poll.CycleRows(
             pa.concat_tables([one.rows for one in reads])
             if reads
@@ -2119,7 +2209,7 @@ class RestReader:
             tables.append(table)
             requests += made
         if not tables:
-            schema = self.catalog.dataset_schema(spec, raw_symbol=self.raw_symbol)
+            schema = self.catalog.dataset_schema(spec)
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
         per_symbol = any(call.symbol is not None for _, calls in planned for call in calls)
@@ -2187,7 +2277,7 @@ class RestEndpoints:
             core.drift,
             core.config.max_concurrency,
             policy,
-            core.raw_symbol,
+            core.problems,
             core.config.delayed_subscriptions,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,

@@ -53,15 +53,24 @@ from deephaven_massive._enums import (
     Timespan,
 )
 from deephaven_massive._error_policy import resolve_policy
-from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError
+from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError, RowDataError
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._log_limits import BoundedLog, LoggedKeys
-from deephaven_massive._massive import DriftReport, Field, Source, Transport, WireType, WireUnit
+from deephaven_massive._massive import (
+    DriftReport,
+    Field,
+    RowFault,
+    Source,
+    Transport,
+    WireType,
+    WireUnit,
+)
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.columns import col_defs
+from deephaven_massive._tables.problem_events import ProblemEvent
 from deephaven_massive._tables.transports import (
     SymbolFailure,
     SymbolOutcome,
@@ -276,6 +285,20 @@ def pick(table: Table, *columns: str) -> list[tuple[Any, ...]]:
     return [tuple(row[c] for c in columns) for row in rows(table)]
 
 
+def capture_problems(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> list[ProblemEvent]:
+    # The problem events the session receives, in order.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    return events
+
+
+def problems(events: list[ProblemEvent]) -> list[tuple[object, ...]]:
+    # What each event says of its rows: cause, symbol as sent, field, and count.
+    return [(e.cause, e.symbol, e.field, e.rows) for e in events]
+
+
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[datetime], None]:
     def set_now(moment: datetime) -> None:
@@ -488,7 +511,6 @@ def test_trades_are_renamed_typed_and_converted(
     assert first == {
         "Symbol": "AAPL",
         "Timestamp": 1741012200000000123,
-        "RawSymbol": None,  # the default session keeps the column; null on a readable row
         "Conditions": [12, 37],
         "Correction": None,
         "Exchange": 4,
@@ -571,7 +593,6 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
         prefix="us_stocks_sip/day_aggs_v1",
         request=request(timespan=Timespan.DAY, adjusted=False),
         window=window,
-        raw_symbol=False,
         warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
@@ -586,31 +607,37 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
             "Transactions": [1],
         }
     )
-    assert transform.apply(batch, received=7, key=STOCK_KEY)[0].num_rows == kept
+    assert transform.apply(batch, {}, received=7, key=STOCK_KEY)[0].num_rows == kept
 
 
-def test_an_unreadable_spelling_under_raise_is_a_library_defect() -> None:
+def test_an_unreadable_spelling_is_withheld_beside_a_readable_row() -> None:
+    # The transform withholds the row whatever the setting: the read applies the setting.
     transform = flatfiles._Transform.build(
         synthetic_catalog(),
         SYNTHETIC,
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL, on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)),
         window=whole_days(SYNTHETIC, "2025-03-03"),
-        raw_symbol=False,
         warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
         {
-            "Symbol": ["!!"],
-            "Timestamp": [1741012200000000123],
-            "ParticipantTimestamp": [1741012199999],
-            "Size": [100],
-            "Conditions": [12],
+            "Symbol": ["!!", "AAPL"],
+            "Timestamp": [1741012200000000123, 1741012200000000124],
+            "ParticipantTimestamp": [1741012199999, 1741012199999],
+            "Size": [100, 200],
+            "Conditions": [12, 12],
         }
     )
-    with pytest.raises(dm.MassiveError, match="'!!'") as info:
-        transform.apply(batch, received=7, key=STOCK_KEY)
-    assert info.value.source is dm.ErrorSource.LIBRARY
+    rows, _, withheld = transform.apply(batch, {}, received=7, key=STOCK_KEY)
+    assert rows.column("Symbol").to_pylist() == ["AAPL"]
+    [group] = withheld.groups
+    assert (group.fault, group.symbol, group.sent, group.rows) == (
+        RowFault.UNREADABLE_SYMBOLS,
+        None,
+        "!!",
+        1,
+    )
 
 
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
@@ -621,7 +648,6 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL),
         window=window,
-        raw_symbol=False,
         warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
@@ -633,8 +659,9 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
             "Conditions": [12, None],
         }
     )
-    converted, drift = transform.apply(batch, received=7, key=STOCK_KEY)
+    converted, drift, withheld = transform.apply(batch, {}, received=7, key=STOCK_KEY)
     assert drift == DriftReport()
+    assert withheld.total == 0
     out = converted.to_pydict()
     # Every row of the block arrived together.
     assert [int(v.value) for v in out["TimestampInsert"]] == [7, 7]
@@ -649,14 +676,13 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     assert transform.plan.required == frozenset({"ticker", "sip_timestamp"})
 
 
-def test_a_size_beyond_2_53_widened_to_a_double_is_served_rounded_and_reported() -> None:
+def test_a_size_beyond_2_53_widened_to_a_double_is_withheld_and_reported() -> None:
     transform = flatfiles._Transform.build(
         synthetic_catalog(),
         SYNTHETIC,
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL),
         window=whole_days(SYNTHETIC, "2025-03-03"),
-        raw_symbol=False,
         warnings=WARNINGS,
     )
     batch = pa.RecordBatch.from_pydict(
@@ -668,55 +694,89 @@ def test_a_size_beyond_2_53_widened_to_a_double_is_served_rounded_and_reported()
             "Conditions": [12, 12],
         }
     )
-    converted, drift = transform.apply(batch, received=7, key=STOCK_KEY)
-    assert converted.column("Size").to_pylist() == [float(2**53), 100.0]
+    converted, drift, withheld = transform.apply(batch, {}, received=7, key=STOCK_KEY)
+    assert converted.column("Symbol").to_pylist() == ["MSFT"]
+    assert converted.column("Size").to_pylist() == [100.0]
+    assert withheld.counts() == {RowFault.UNCONVERTIBLE_VALUES: 1}
+    assert [(g.symbol, g.field) for g in withheld.groups] == [("AAPL", "Size")]
     assert drift == DriftReport(rounded=frozenset({"size"}))
     assert drift.samples["size"].value == str(2**53 + 1)
 
 
-def test_milliseconds_in_a_nanosecond_column_read_as_null_with_a_warning(
+def test_milliseconds_in_a_nanosecond_column_withhold_their_row_with_a_warning(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     make_csv_gz: Callable[[str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Milliseconds in a column documented in nanoseconds land in January 1970: never served.
     row = trade(1, 1741012200000000000, participant=1741012200000)
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row + trade(2, 1741012200000000001)))
+    events = capture_problems(session, monkeypatch)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
         t = q.history("2025-03-03", "2025-03-03", wait=True)
-    assert pick(t, "Id", "ParticipantTimestamp") == [("1", None), ("2", 1741012200000000001)]
-    [warning] = [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER]
-    assert warning == (
-        "stocks.trades: FLAT_FILES field 'participant_timestamp' held a value that does not fit "
-        f"its type; it reads as null (schema drift) at {LOCATION.format(TRADES_0303)}; first "
-        "value 1741012200000"
-    )
+    assert pick(t, "Id", "ParticipantTimestamp") == [("2", 1741012200000000001)]
+    assert problems(events) == [(RowFault.UNCONVERTIBLE_VALUES, "AAPL", "ParticipantTimestamp", 1)]
+    warnings = [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER]
+    assert warnings == [
+        withheld_count(
+            1,
+            "timestamp unit mismatch for stocks.trades.ParticipantTimestamp: 1741012200000 ns is "
+            "outside 1990 to 2100",
+        ),
+        unconvertible_header("participant_timestamp", "1741012200000"),
+    ]
 
 
-def test_a_wrong_unit_in_the_time_column_drops_its_row_with_a_count(
+def test_a_wrong_unit_in_the_time_column_withholds_its_row_with_a_count(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     make_csv_gz: Callable[[str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rows = trade(1, 1741012200000) + trade(2, 1741012200000000001) + trade(3, 5)
+    # The participant times are good: only the time column fails, which is no field's drift.
+    good = 1741012200000000000
+    rows = (
+        trade(1, 1741012200000, participant=good)
+        + trade(2, 1741012200000000001)
+        + trade(3, 5, participant=good)
+    )
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    events = capture_problems(session, monkeypatch)
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
         t = query(session, STOCK_TRADES, symbols=dm.ALL).history(
             "2025-03-03", "2025-03-03", wait=True
         )
     assert pick(t, "Id") == [("2",)]
+    assert problems(events) == [(RowFault.UNREADABLE_KEYS, "AAPL", "Timestamp", 2)]
     [warning] = [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER]
     assert warning == (
-        f"stocks.trades: dropped 2 FLAT_FILES row(s) whose key cannot be read, the first at "
-        f"{LOCATION.format(TRADES_0303)}: timestamp unit mismatch for "
+        f"stocks.trades: withheld 2 FLAT_FILES row(s) the library cannot read whole, the first "
+        f"at {LOCATION.format(TRADES_0303)}: timestamp unit mismatch for "
         "stocks.trades.Timestamp: 1741012200000 ns is outside 1990 to 2100; such rows are "
-        "dropped and counted: the running count is logged at DEBUG and shown in the "
+        "withheld and counted: the running count is logged at DEBUG and shown in the "
         "SchemaDrift of each live table that lost them"
+    )
+
+
+def test_a_wrong_unit_in_the_time_column_fails_the_read_under_raise(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
+) -> None:
+    rows = trade(1, 1741012200000) + trade(2, 1741012200000000001)
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    strict = dm.ErrorPolicy(unreadable_keys=dm.OnError.RAISE)
+    with dm.MassiveSession(CONFIG) as m, pytest.raises(RowDataError) as info:
+        query(m, STOCK_TRADES, symbols=dm.ALL, on_error=strict).history(
+            "2025-03-03", "2025-03-03", wait=True
+        )
+    assert str(info.value).startswith(
+        "stocks.trades: Massive sent rows the library cannot read whole, which it withheld "
+        "(1 under unreadable_keys); the first: timestamp unit mismatch"
     )
 
 
@@ -864,17 +924,65 @@ def test_a_file_whose_every_line_is_malformed_fails_the_call(
 def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
     *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:
-    # Every row dropped is a change in the file's format, not one odd row.
+    # Every row withheld is a change in the file's format, not one odd row.
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000)))
     with pytest.raises(
-        dm.MassiveError,
-        match=rf"^cannot read {re.escape(LOCATION.format(TRADES_0303))}: every one of the 1 "
-        r"rows of the requested symbols was dropped, so the file's format may have changed; the "
-        r"first: timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
-        r"outside 1990 to 2100\. " + re.escape(LIBRARY_BUG) + "$",
+        RowDataError,
+        match=r"^stocks\.trades: the library could read none of the 1 rows of the read's "
+        rf"symbols and window in {re.escape(LOCATION.format(TRADES_0303))} whole, so Massive's "
+        r"format may have changed; the first: timestamp unit mismatch for "
+        r"stocks\.trades\.Timestamp: 1741012200000 ns is outside 1990 to 2100\. "
+        + re.escape(LIBRARY_BUG)
+        + "$",
     ) as info:
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     assert info.value.source is dm.ErrorSource.LIBRARY
+
+
+INSIDE = 1741012200000000000  # 2025-03-03T14:30Z, in the read's window
+OUTSIDE = 1741098600000000000  # 2025-03-04T14:30Z, outside it
+
+
+def unfit_price(n: int, nanos: int) -> str:
+    # A trades row whose price is no number: its row cannot be read whole.
+    return trade(n, nanos).replace(",1.5,", ",x,")
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param(unfit_price(1, INSIDE) + unfit_price(2, INSIDE), id="every-row-inside"),
+        # The good rows outside the window count neither way: nothing the read asked for
+        # could be read.
+        pytest.param(
+            unfit_price(1, INSIDE) + trade(2, OUTSIDE) + trade(3, OUTSIDE), id="good-outside"
+        ),
+    ],
+)
+def test_a_file_whose_rows_in_the_window_are_all_unreadable_fails_the_read(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], rows: str
+) -> None:
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    with pytest.raises(
+        RowDataError,
+        match=r"the library could read none of the \d rows of the read's symbols and window",
+    ):
+        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+
+
+def test_unreadable_rows_outside_the_window_are_neither_published_nor_reported(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = unfit_price(1, OUTSIDE) + trade(2, INSIDE) + unfit_price(3, OUTSIDE) + trade(4, INSIDE)
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    events = capture_problems(session, monkeypatch)
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert pick(t, "Id") == [("2",), ("4",)]
+    assert events == []
 
 
 def test_epoch_zero_is_null_except_in_timestamp(
@@ -935,21 +1043,30 @@ def test_a_ticker_the_library_cannot_read_fails_the_read_under_raise(
     ) as m:
         every = query(m, STOCK_TRADES, symbols=dm.ALL)
         with pytest.raises(
-            dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
+            RowDataError,
+            match=r"^stocks\.trades: Massive sent rows the library cannot read whole, which it "
+            r"withheld \(1 under unreadable_symbols\); the first: Massive sent the symbol 'BRK/B'",
         ):
             every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
 
 
-def test_a_ticker_the_library_cannot_read_is_kept_by_default(
-    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
+def test_a_ticker_the_library_cannot_read_is_withheld_by_default(
+    *,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    clock: Callable[[datetime], None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
     with dm.MassiveSession(CONFIG) as m:
+        events = capture_problems(m, monkeypatch)
         t = query(m, STOCK_TRADES, symbols=dm.ALL).history(
             "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True
         )
-        assert pick(t, "Symbol", "RawSymbol", "Id") == [(None, "BRK/B", "1"), ("AAPL", None, "2")]
+        assert pick(t, "Symbol", "Id") == [("AAPL", "2")]
+        assert "RawSymbol" not in t.column_names
+    assert problems(events) == [(RowFault.UNREADABLE_SYMBOLS, "BRK/B", "Symbol", 1)]
 
 
 @pytest.mark.parametrize("ticker", ["NA", "NULL"])
@@ -1003,7 +1120,8 @@ def test_each_file_logs_its_rows_after_each_step(
     (line,) = [r.getMessage() for r in caplog.records if "rows read" in r.getMessage()]
     assert line.startswith(f"stocks.trades: s3://flatfiles/{TRADES_0303} at ")
     assert line.endswith(
-        ": 4 rows read, 0 of the requested symbols, 0 in the window, 0 kept as whole bars"
+        ": 4 rows read, 0 of the requested symbols, 0 in the window, 0 withheld, 0 kept as "
+        "whole bars"
     )
 
 
@@ -2800,7 +2918,6 @@ def test_an_unreachable_endpoint_is_a_massive_error(
             gzip.compress(b"ticker,price\n")[:10] + b"\xff" * 40, id="corrupt-deflate-data"
         ),
         pytest.param("ticker,price\nAAPL,1.0\n", id="missing-documented-headers"),
-        pytest.param("ticker,sip_timestamp\nAAPL,12:30\n", id="no-row-readable"),
     ],
 )
 def test_a_malformed_file_is_a_massive_error(
@@ -3310,7 +3427,6 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         prefix="us_stocks_sip/trades_v1",
         request=request(dm.ALL),
         window=window,
-        raw_symbol=False,
         warnings=WARNINGS,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
@@ -3340,7 +3456,6 @@ def test_a_read_stopped_while_it_waits_for_a_connection_is_cancelled_not_missing
             prefix="us_stocks_sip/trades_v1",
             request=request(dm.ALL),
             window=whole_days(STOCK_TRADES, "2025-03-03"),
-            raw_symbol=False,
             warnings=WARNINGS,
         )
         key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
@@ -3836,8 +3951,13 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
     # Converting a file's rows can fail in Arrow (out of memory, say): it is a failed read of
     # that file, named like any other.
     def exhausted(
-        transform: flatfiles._Transform, batch: pa.RecordBatch, *, received: int, key: object
-    ) -> tuple[pa.RecordBatch, DriftReport]:
+        transform: flatfiles._Transform,
+        batch: pa.RecordBatch,
+        marks: object,
+        *,
+        received: int,
+        key: object,
+    ) -> tuple[pa.RecordBatch, DriftReport, object]:
         raise pa.ArrowMemoryError("malloc of size 1048576 failed")
 
     monkeypatch.setattr(flatfiles._Transform, "apply", exhausted)
@@ -3994,31 +4114,47 @@ def test_a_futures_file_without_its_session_header_is_a_massive_error(
 
 def unconvertible_header(name: str, value: str) -> str:
     return (
-        f"stocks.trades: FLAT_FILES field {name!r} held a value that does not fit its type; it "
-        f"reads as null (schema drift) at {LOCATION.format(TRADES_0303)}; first value {value}"
+        f"stocks.trades: FLAT_FILES field {name!r} held a value that does not fit its type; its "
+        f"row is withheld (schema drift) at {LOCATION.format(TRADES_0303)}; first value {value}"
     )
 
 
-def test_an_unconvertible_value_is_null_and_warned_once(
+def withheld_count(count: int, reason: str) -> str:
+    return (
+        f"stocks.trades: withheld {count} FLAT_FILES row(s) the library cannot read whole, the "
+        f"first at {LOCATION.format(TRADES_0303)}: {reason}; such rows are withheld and counted: "
+        "the running count is logged at DEBUG and shown in the SchemaDrift of each live table "
+        "that lost them"
+    )
+
+
+def test_an_unconvertible_value_withholds_its_row_and_warns_once(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     fake_s3.put_csv(TRADES_0303, names, [*data[:2], {**data[2], "size": "lots"}, data[3]])
+    events = capture_problems(session, monkeypatch)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
         t = q.history("2025-03-03", "2025-03-03", wait=True)
         q.history("2025-03-03", "2025-03-03", wait=True)
-    assert pick(t, "Id", "Size") == [("1", 100.0), ("2", 50.0), ("3", None), ("4", 10.0)]
+    assert pick(t, "Id", "Size") == [("1", 100.0), ("2", 50.0), ("4", 10.0)]
+    # The second read logs its count at DEBUG.
     assert [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER] == [
-        unconvertible_header("size", "lots")
+        withheld_count(1, "size holds 'lots', which is not double"),
+        unconvertible_header("size", "lots"),
     ]
+    assert [(e.cause, e.field, e.rows) for e in events] == [
+        (RowFault.UNCONVERTIBLE_VALUES, "Size", 1)
+    ] * 2
 
 
-def test_an_unconvertible_list_is_null_and_warned(
+def test_an_unconvertible_list_withholds_its_row_and_warns(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
@@ -4030,9 +4166,10 @@ def test_an_unconvertible_list_is_null_and_warned(
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
         t = q.history("2025-03-03", "2025-03-03", wait=True)
-    assert pick(t, "Id", "Conditions")[0] == ("1", None)
+    assert [row[0] for row in pick(t, "Id")] == ["2", "3", "4"]
     assert [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER] == [
-        unconvertible_header("conditions", "12,abc")
+        withheld_count(1, "conditions holds '12,abc', which is not string"),
+        unconvertible_header("conditions", "12,abc"),
     ]
 
 

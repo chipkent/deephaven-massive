@@ -1534,6 +1534,8 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
             noncanonical_symbols=OnError.RAISE,
             unreadable_symbols=OnError.LOG,
             unavailable_symbols=OnError.LOG,
+            unreadable_keys=OnError.LOG,
+            unconvertible_values=OnError.LOG,
             malformed_rows=OnError.LOG,
             refused_venues=OnError.RAISE,
         ),
@@ -1576,6 +1578,8 @@ _CAUSE_COMMENTS: Final[Mapping[str, str]] = {
     "noncanonical_symbols": "A watchlist value that isn't Massive's exact ticker.",
     "unreadable_symbols": "A symbol in Massive's data that the library can't read.",
     "unavailable_symbols": "A symbol Massive has no data for.",
+    "unreadable_keys": "A row of Massive's data whose key the library can't read.",
+    "unconvertible_values": "A row of Massive's data with a value the library can't read.",
     "malformed_rows": "A flat-file line that isn't a readable row.",
     "refused_venues": "A futures exchange you name that the plan lacks.",
 }

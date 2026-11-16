@@ -234,18 +234,20 @@ def test_a_row_whose_time_cannot_be_placed_is_kept_and_marked(
     assert ids((1741012200000000123, 1741012200000000124)) == ["1", "2"]
 
 
-def test_a_file_whose_every_time_cannot_be_placed_fails(trades: FlatFile) -> None:
+def test_a_file_whose_every_time_cannot_be_placed_hands_every_row_on_marked(
+    trades: FlatFile,
+) -> None:
+    # Whether a file of no readable row fails is its reader's call, after the window
+    # (`_ingest/flatfiles.py`): the reader hands every row on, each marked.
     def to_ns(values: pa.Array) -> pa.Array:
         return pa.nulls(len(values), pa.int64())
 
-    with pytest.raises(WireError) as info:
-        table(trades, plan(to_ns=to_ns))
-    assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of the 4 rows "
-        "of the requested symbols was dropped, so the file's format may have changed; the "
-        "first: 1741012200000000123 is no time"
-    )
-    assert info.value.kind is WireFailure.UNREADABLE
+    with trades:
+        [(rows, _, marks)] = list(trades.batches(plan(to_ns=to_ns)))
+    assert rows.num_rows == 4
+    unread = marks[RowFault.UNREADABLE_KEYS]
+    assert unread.rows == (0, 1, 2, 3)
+    assert unread.reasons[0] == "1741012200000000123 is no time"
 
 
 def test_one_odd_row_alone_in_its_block_never_fails_the_file(
@@ -444,7 +446,6 @@ def test_a_futures_row_without_a_session_is_marked(
             gzip.compress(b"ticker,price\n")[:10] + b"\xff" * 40, id="corrupt-deflate-data"
         ),
         pytest.param("ticker,price\nAAPL,1.0\n", id="missing-documented-headers"),
-        pytest.param(TRADE_HEADER + "12,,4,1,1,1.5,1,12:30,10,1,AAPL,,\n", id="no-row-readable"),
     ],
 )
 def test_a_malformed_file_is_a_wire_error(
@@ -518,7 +519,7 @@ def test_a_filtered_out_row_is_never_parsed(opened: Callable[[str, str | bytes],
 # Reading in parallel chunks reads exactly as the streaming reader did.
 
 
-def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str:
+def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport, int]:
     # The reading the chunked one replaced, as reference: Arrow's streaming reader over the
     # whole decompressed file, one block at a time, each block through the same `_apply`.
     file, _ = flat_file(KEY, data)
@@ -530,7 +531,7 @@ def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str
         missing=frozenset(read_types).difference(names),
     )
     if not text.peek(1):
-        return pa.Table.from_batches([reader._empty(read)]), headers
+        return pa.Table.from_batches([reader._empty(read)]), headers, 0
     blocks = pacsv.open_csv(
         pa.PythonFile(text, mode="r"),
         read_options=pacsv.ReadOptions(
@@ -544,29 +545,25 @@ def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str
             strings_can_be_null=True,
         ),
     )
-    batches, drift, held, unread = [], headers, 0, 0
+    batches, drift, marked = [], headers, 0
     for block in blocks:
         applied = file._apply(block, read)
         batches.append(applied.rows)
         drift = drift.merge(applied.drift)
-        held += applied.considered
-        unread += applied.unread
-    if held and unread == held:
-        return f"every one of the {held} rows of the requested symbols was dropped"
-    return pa.Table.from_batches(batches, schema=batches[0].schema), drift
+        marked += sum(len(found.rows) for found in applied.marks.values())
+    return pa.Table.from_batches(batches, schema=batches[0].schema), drift, marked
 
 
-def _chunked(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str:
+def _chunked(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport, int]:
+    # The chunked reader's rows, drift, and count of marked rows.
     file, _ = flat_file(KEY, data)
-    batches, drift = [], DriftReport()
-    try:
-        with file:
-            for rows, found, _ in file.batches(read):
-                batches.append(rows)
-                drift = drift.merge(found)
-    except WireError as error:
-        return error.message
-    return pa.Table.from_batches(batches, schema=batches[0].schema), drift
+    batches, drift, marked = [], DriftReport(), 0
+    with file:
+        for rows, found, marks in file.batches(read):
+            batches.append(rows)
+            drift = drift.merge(found)
+            marked += sum(len(mark.rows) for mark in marks.values())
+    return pa.Table.from_batches(batches, schema=batches[0].schema), drift, marked
 
 
 def _odd_trades(rows: int, *, line_end: str = "\n") -> str:
@@ -606,7 +603,6 @@ def test_chunks_read_exactly_as_one_stream(
     # gives the rows, in order, and the drift and dropped rows of the streaming reader.
     data = make_csv_gz(_odd_trades(3_000, line_end=line_end))
     expected = _streamed(data, plan(symbols=symbols, window_ns=window_ns, block_size=4096))
-    assert not isinstance(expected, str)
     assert expected[0].num_rows > 0
     for chunk_blocks in (1, 2, 5):
         for threads in (1, 3):
@@ -618,23 +614,24 @@ def test_chunks_read_exactly_as_one_stream(
                 parse_threads=threads,
             )
             got = _chunked(data, read)
-            assert not isinstance(got, str)
             assert got[0].equals(expected[0]), (chunk_blocks, threads)
             assert got[1] == expected[1]
+            assert got[2] == expected[2]
             assert dict(got[1].samples) == dict(expected[1].samples)
 
 
-def test_a_file_whose_every_row_is_dropped_fails_alike_in_chunks(
+def test_a_file_whose_every_row_is_unreadable_is_handed_on_alike_in_chunks(
     make_csv_gz: Callable[[str], bytes],
 ) -> None:
+    # The reader marks every row; its caller decides that such a file fails.
     rows = "".join(f"12,,4,{n},1,1.5,{n},x,100,3,AAPL,,\n" for n in range(2_000))
     data = make_csv_gz(TRADE_HEADER + rows)
     read = plan(block_size=4096, chunk_blocks=2)
     expected = _streamed(data, read)
-    assert expected == "every one of the 2000 rows of the requested symbols was dropped"
-    failure = _chunked(data, read)
-    assert isinstance(failure, str)
-    assert failure.startswith(f"cannot read s3://flatfiles/{KEY} at https://{HOST}: {expected}")
+    assert expected[2] == 2_000
+    got = _chunked(data, read)
+    assert got[0].equals(expected[0])
+    assert got[2] == 2_000
 
 
 def test_a_read_ended_early_drops_the_chunks_not_yet_parsed(
@@ -910,7 +907,6 @@ def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(
     first = 1 + sum(1 for line in spoiled[: spoiled.index("S9,499")] if line)
     data = make_csv_gz("\n".join([header, *spoiled]))
     expected = _streamed(make_csv_gz(clean), plan(block_size=4096))
-    assert not isinstance(expected, str)
     for chunk_blocks in (1, 5):
         for threads in (1, 3):
             read = plan(block_size=4096, chunk_blocks=chunk_blocks, parse_threads=threads)

@@ -876,14 +876,14 @@ def test_a_value_that_does_not_fit_warns_once_and_shows_with_a_question_mark(
         registry.report("forex.trades", Transport.WS, drift, where=WHERE)
     assert drift_warnings(caplog) == [
         (
-            "forex.trades: WS field 'x' held a value that does not fit its type; it reads as null "
-            f'(schema drift) at {WHERE}; symbol C:EURUSD; first value "4.8"'
+            "forex.trades: WS field 'x' held a value that does not fit its type; its row is "
+            f'withheld (schema drift) at {WHERE}; symbol C:EURUSD; first value "4.8"'
         )
     ]
     assert registry.record(3, "WebSocket", drift) == "WebSocket:x?"
 
 
-def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
+def test_withheld_rows_warn_once_per_dataset_then_count_at_debug(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = DriftRegistry()
@@ -902,8 +902,8 @@ def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
         (
             logging.WARNING,
             (
-                f"stocks.trades: dropped 2 REST row(s) whose key cannot be read, the first at "
-                f"{WHERE}: row 0: no Ticker; such rows are dropped and counted: the running "
+                f"stocks.trades: withheld 2 REST row(s) the library cannot read whole, the first "
+                f"at {WHERE}: row 0: no Ticker; such rows are withheld and counted: the running "
                 "count is logged at DEBUG and shown in the SchemaDrift of each live table that "
                 "lost them"
             ),
@@ -911,8 +911,8 @@ def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
         (
             logging.WARNING,
             (
-                f"stocks.quotes: dropped 2 REST row(s) whose key cannot be read, the first at "
-                f"{WHERE}: row 0: no Ticker; such rows are dropped and counted: the running "
+                f"stocks.quotes: withheld 2 REST row(s) the library cannot read whole, the first "
+                f"at {WHERE}: row 0: no Ticker; such rows are withheld and counted: the running "
                 "count is logged at DEBUG and shown in the SchemaDrift of each live table that "
                 "lost them"
             ),
@@ -922,31 +922,32 @@ def test_dropped_rows_warn_once_per_dataset_then_count_at_debug(
     assert counted.levelno == logging.DEBUG
     # Every drop since the WARNING: 3 counted silently, then 3 more.
     assert re.fullmatch(
-        r"stocks\.trades: dropped 6 more row\(s\) whose key cannot be read in the last \d+ s "
+        r"stocks\.trades: withheld 6 more row\(s\) the library cannot read whole in the last "
+        r"\d+ s "
         r"\(8 so far\); the latest WS at wss://h/stocks channel T: row 4: no Ticker",
         counted.getMessage(),
     )
 
 
-def test_dropped_rows_are_counted_in_the_owners_schema_drift() -> None:
-    # After its one WARNING, a dropped row stays visible: each owner's row counts its drops,
+def test_withheld_rows_are_counted_in_the_owners_schema_drift() -> None:
+    # After its one WARNING, a withheld row stays visible: each owner's row counts them,
     # per prefix, every count before every field. A count counts reads: a report of a row
     # read again adds to it again.
     registry = DriftRegistry()
     first = DriftReport(dropped_rows=2, dropped_reason="row 0: no Ticker")
-    assert registry.record(1, "REST", first) == "REST:2 rows dropped"
+    assert registry.record(1, "REST", first) == "REST:2 rows withheld"
     assert registry.record(1, "REST", DriftReport()) is None
     halted = DriftReport(extra=frozenset({"halted"}), dropped_rows=1)
-    assert registry.record(1, "REST", halted) == "REST:3 rows dropped, REST:halted+"
+    assert registry.record(1, "REST", halted) == "REST:3 rows withheld, REST:halted+"
     assert registry.record(1, "WebSocket", DriftReport(dropped_rows=1)) == (
-        "REST:3 rows dropped, WebSocket:1 row dropped, REST:halted+"
+        "REST:3 rows withheld, WebSocket:1 row withheld, REST:halted+"
     )
-    assert registry.record(2, "T", DriftReport(dropped_rows=1)) == "T:1 row dropped"
+    assert registry.record(2, "T", DriftReport(dropped_rows=1)) == "T:1 row withheld"
     registry.forget(1)
-    assert registry.record(1, "REST", DriftReport(dropped_rows=1)) == "REST:1 row dropped"
+    assert registry.record(1, "REST", DriftReport(dropped_rows=1)) == "REST:1 row withheld"
 
 
-def test_a_cut_schema_drift_keeps_every_prefix_s_dropped_count() -> None:
+def test_a_cut_schema_drift_keeps_every_prefix_s_withheld_count() -> None:
     # One prefix's fields fill the text past its limit; a later prefix's count, which sorts
     # after them by name, still shows.
     registry = DriftRegistry()
@@ -956,7 +957,7 @@ def test_a_cut_schema_drift_keeps_every_prefix_s_dropped_count() -> None:
     assert text is not None
     assert len(text) == SCHEMA_DRIFT_SHOWN
     assert text.endswith("…")
-    assert text.startswith("WebSocket:4 rows dropped, REST:field_00+, ")
+    assert text.startswith("WebSocket:4 rows withheld, REST:field_00+, ")
 
 
 def test_a_rounded_whole_number_warns_once_and_shows_with_a_tilde(
@@ -971,7 +972,7 @@ def test_a_rounded_whole_number_warns_once_and_shows_with_a_tilde(
     assert drift_warnings(caplog) == [
         (
             "stocks.last_quote: REST field 's' held a whole number beyond 2**53, which its "
-            "double column holds only rounded; it reads rounded (schema drift) at "
+            "double column holds only rounded; its row is withheld (schema drift) at "
             f"{WHERE}; first value {big}"
         )
     ]

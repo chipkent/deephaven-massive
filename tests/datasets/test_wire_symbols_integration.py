@@ -1,13 +1,13 @@
 """Live checks of how Massive spells share-class and preferred stock tickers in its rows.
 
 The library publishes every `Symbol` in Massive's canonical form (`BRK.B`, `KIMpL`), and reads a
-row's ticker back into it (`canonical_from_wire`); a spelling it cannot read leaves a null
-`Symbol`, keeps the text in `RawSymbol`, and logs one ERROR naming the text, so the owner can
-report it to Massive. These tests read rows of such stocks from each transport that serves
-stocks and record the raw spelling each one writes, so a transport that writes a share class or
-a preferred otherwise than its ticker list (`BRK/B`, `BRK-B`, `KIM-L`) shows up with its exact
-text. Each test records what Massive sent (`evidence`); one the key's plan does not cover skips
-on Massive's refusal, quoting it. How to run these tests is in `docs/live-tests.md`.
+row's ticker back into it (`canonical_from_wire`); a row whose spelling it cannot read is
+withheld, and one WARNING names the text, so the owner can report it. These tests read rows
+of such stocks from each transport that serves stocks and record the raw spelling each one
+writes, so a transport that writes a share class or a preferred otherwise than its ticker
+list (`BRK/B`, `BRK-B`, `KIM-L`) shows up with its exact text. Each test records what
+Massive sent (`evidence`); one the key's plan does not cover skips on Massive's refusal,
+quoting it. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations

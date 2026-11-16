@@ -43,7 +43,7 @@ from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_co
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.rest import RestReader
 from deephaven_massive._log_limits import BoundedLog
-from deephaven_massive._massive import Status, StatusKind, Transport, WsState
+from deephaven_massive._massive import RowFault, Status, StatusKind, Transport, WsState
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import ConnectionState, StreamUpdate
 from deephaven_massive._tables.execution_context import entered, update_cycle
@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
+    from deephaven_massive._tables.problem_events import ProblemEvent
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive.queries import StreamQuery
     from tests._fakes.ws import FakeMassiveServer, TradeFeed
@@ -346,11 +347,11 @@ def drop_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.name == DROP_LOGGER and r.levelno == logging.WARNING and "dropped" in r.getMessage()
+        if r.name == DROP_LOGGER and r.levelno == logging.WARNING and "withheld" in r.getMessage()
     ]
 
 
-def test_a_row_without_its_time_is_dropped_and_fails_no_stream(
+def test_a_row_without_its_time_is_withheld_and_fails_no_stream(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     caplog: pytest.LogCaptureFixture,
@@ -371,14 +372,12 @@ def test_a_row_without_its_time_is_dropped_and_fails_no_stream(
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING"] * 3
     [warning] = drop_warnings(caplog)
-    assert warning.startswith("test.trades: dropped 1 WS row(s) whose key cannot be read")
-    assert "/stocks channel T: dropped a T row for MSFT from 127.0.0.1/stocks: no SipTimestamp" in (
-        warning
-    )
+    assert warning.startswith("test.trades: withheld 1 WS row(s) the library cannot read whole")
+    assert "/stocks channel T: a T row for MSFT from 127.0.0.1/stocks: no SipTimestamp" in warning
     del msft
 
 
-def test_rows_without_a_symbol_are_dropped_and_the_all_stream_keeps_running(
+def test_rows_without_a_symbol_are_withheld_and_the_all_stream_keeps_running(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     caplog: pytest.LogCaptureFixture,
@@ -401,17 +400,16 @@ def test_rows_without_a_symbol_are_dropped_and_the_all_stream_keeps_running(
     assert [r["State"] for r in rows] == ["RUNNING", "RUNNING"]
     # One WARNING for the dataset, counting both rows and naming the first one's reason.
     [warning] = drop_warnings(caplog)
-    assert warning.startswith("test.trades: dropped 2 WS row(s) whose key cannot be read")
+    assert warning.startswith("test.trades: withheld 2 WS row(s) the library cannot read whole")
     assert warning.endswith(
-        "/stocks channel T: dropped a T row from 127.0.0.1/stocks: no Ticker (wire key 'sym'), "
-        "which "
-        "the dataset needs; such rows are dropped and counted: the running count is logged "
+        "/stocks channel T: a T row from 127.0.0.1/stocks: no Ticker (wire key 'sym'), which "
+        "the dataset needs; such rows are withheld and counted: the running count is logged "
         "at DEBUG and shown in the SchemaDrift of each live table that lost them"
     )
     del aapl
 
 
-def test_a_timestamp_out_of_bounds_drops_its_row_and_fails_no_stream(
+def test_a_timestamp_out_of_bounds_withholds_its_row_and_fails_no_stream(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
@@ -693,7 +691,10 @@ def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams_under_rais
     wait_for(lambda: failed_after_flush(ws_session, every))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("test.trades: Massive sent the symbol 'BRK/B', a spelling")
+    assert row["Error"].startswith(
+        "test.trades: Massive sent rows the library cannot read whole, which it withheld "
+        "(1 under unreadable_symbols); the first: Massive sent the symbol 'BRK/B', a spelling"
+    )
 
 
 def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too_under_raise(
@@ -707,7 +708,10 @@ def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too_under_raise(
     wait_for(lambda: failed_after_flush(ws_session, one))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("test.trades: Massive sent the symbol 'BRK/B', a spelling")
+    assert row["Error"].startswith(
+        "test.trades: Massive sent rows the library cannot read whole, which it withheld "
+        "(1 under unreadable_symbols); the first: Massive sent the symbol 'BRK/B', a spelling"
+    )
 
 
 def test_a_failing_upstream_watchlist_fails_the_stream(
@@ -851,16 +855,26 @@ def test_releasing_a_stream_another_stream_watches_keeps_the_watcher_following(
     cycle_ended(ws_session)
 
 
-def test_a_frame_symbol_the_library_cannot_read_is_kept_by_default(
-    make_ws_session: Callable[..., WsSession], *, rows_when: RowsWhen
+def test_a_frame_symbol_the_library_cannot_read_is_withheld_by_default(
+    make_ws_session: Callable[..., WsSession],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rows_when: RowsWhen,
 ) -> None:
     warned = make_ws_session()
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(warned.session._core, "problems", events.extend)
     every = warned.query(TRADES, dm.ALL).append_only()
     warned.subscribed("T.*")
     warned.send(trade("BRK/B"), trade("AAPL"))
     warned.flush()
-    shown = rows_when(every, lambda rows: len(rows) == 2)
-    assert [(r["Symbol"], r["RawSymbol"]) for r in shown] == [(None, "BRK/B"), ("AAPL", None)]
+    shown = rows_when(every, lambda rows: len(rows) == 1)
+    assert [r["Symbol"] for r in shown] == ["AAPL"]
+    assert "RawSymbol" not in every.column_names
+    wait_for(lambda: len(events) == 1)
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (RowFault.UNREADABLE_SYMBOLS, "BRK/B", 1)
+    ]
 
 
 def test_a_derived_table_keeps_following_the_watchlist(
@@ -3594,24 +3608,40 @@ def test_calls_that_differ_only_in_their_policy_are_separate_streams(
         ws_session.session.release(table)
 
 
-def test_a_stream_applies_its_own_call_s_unreadable_setting(
-    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+@pytest.mark.parametrize(
+    ("cause", "bad"),
+    [
+        (RowFault.UNREADABLE_SYMBOLS, trade("BRK/B")),
+        (RowFault.UNCONVERTIBLE_VALUES, trade("AAPL", p="bad")),
+    ],
+    ids=["unreadable-symbol", "unfit-value"],
+)
+def test_a_stream_applies_its_own_call_s_setting_to_a_withheld_row(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cause: RowFault,
+    bad: dict[str, object],
 ) -> None:
-    # Two streams of one channel share the conversion of a batch; the spelling the library
-    # cannot read fails only the stream whose call chose RAISE, and the other keeps the row.
-    strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
+    # Two streams of one channel share the conversion of a batch; the withheld row fails only
+    # the stream whose call chose RAISE, and the other publishes the good row and gets the
+    # withheld row's one event.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(ws_session.session._core, "problems", events.extend)
+    strict = dm.ErrorPolicy(**{cause.value: dm.OnError.RAISE})
     kept = ws_session.query(TRADES, dm.ALL).append_only()
     failing = ws_session.query(TRADES, dm.ALL, on_error=strict).append_only()
     ws_session.subscribed("T.*")
-    ws_session.send(trade("BRK/B"), trade("AAPL"))
+    ws_session.send(bad, trade("AAPL"))
     wait_for(lambda: failed_after_flush(ws_session, failing))
     rows = {row["StreamId"]: row for row in streams_of(ws_session, dh_to_pylist)}
-    assert [row["State"] for row in rows.values()].count("FAILED") == 1
-    wait_for(lambda: kept.size == 2)
-    assert sorted(dh_to_pylist(kept.view("RawSymbol")), key=str) == [
-        {"RawSymbol": "BRK/B"},
-        {"RawSymbol": None},
-    ]
+    states = {stream_id: row["State"] for stream_id, row in rows.items()}
+    assert sorted(states.values()) == ["FAILED", "RUNNING"]
+    wait_for(lambda: kept.size == 1)
+    assert [r["Symbol"] for r in dh_to_pylist(kept.view("Symbol"))] == ["AAPL"]
+    (running,) = [stream_id for stream_id, state in states.items() if state == "RUNNING"]
+    assert [(e.cause, e.stream_id, e.rows) for e in events] == [(cause, running, 1)]
 
 
 def test_a_crypto_stream_splits_its_pairs_under_its_call_s_policy(

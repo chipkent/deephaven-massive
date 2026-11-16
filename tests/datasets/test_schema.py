@@ -232,16 +232,10 @@ def test_derived_columns_follow_the_leading_keys() -> None:
     assert root.description.startswith("The OCC option root, read from `Symbol`")
     assert root.supplied_by == plain.columns[0].supplied_by
     assert root.wire_keys == plain.columns[0].wire_keys
-    # RawSymbol exists only where a symbol is read from rows, and only when asked for.
-    assert dataset_schema(by_request, (by_request,), lookup, raw_symbol=True) == plain
-    kept = dataset_schema(from_rows, (from_rows,), lookup, raw_symbol=True)
-    assert kept.column_names[:3] == ("Symbol", "OptionRoot", "RawSymbol")
-    assert kept.columns[2].description.endswith(
-        "When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is "
-        "`dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the "
-        "call's own `on_error` keeps it."
-    )
-    assert "RawSymbol" not in dataset_schema(from_rows, (from_rows,), lookup).column_names
+    # A symbol read from rows has an option root too, and no column beside it.
+    kept = dataset_schema(from_rows, (from_rows,), lookup)
+    assert kept.column_names[:2] == ("Symbol", "OptionRoot")
+    assert "RawSymbol" not in kept.column_names
 
 
 def test_only_options_datasets_have_an_option_root() -> None:
@@ -258,9 +252,7 @@ def test_only_options_datasets_have_an_option_root() -> None:
         asset_class=AssetClass.OPTIONS,
         fetch_path="/v3/reference/options/contracts",
     )
-    names = dataset_schema(unkeyed, (unkeyed,), lookup, raw_symbol=True).column_names
-    assert "OptionRoot" not in names
-    assert "RawSymbol" not in names
+    assert "OptionRoot" not in dataset_schema(unkeyed, (unkeyed,), lookup).column_names
 
 
 def test_the_merge_follows_the_membership_positions() -> None:
@@ -470,13 +462,8 @@ def test_a_dataset_keeps_only_the_columns_its_own_sources_fill() -> None:
 def test_every_dataset_column_is_supplied_by_some_transport(name: str) -> None:
     # A dataset has only the columns some transport of its own fills, library columns included.
     spec = CATALOG.by_name[name]
-    for raw_symbol in (False, True):
-        empty = [
-            c.name
-            for c in CATALOG.dataset_schema(spec, raw_symbol=raw_symbol).columns
-            if not c.supplied_by
-        ]
-        assert empty == [], name
+    empty = [c.name for c in CATALOG.dataset_schema(spec).columns if not c.supplied_by]
+    assert empty == [], name
 
 
 def test_tables_of_two_classes_merge_on_their_shared_columns(dh_exec_ctx: object) -> None:

@@ -931,11 +931,9 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_warns(
         ("2024-11-29", ny_midnight_ns(date(2024, 11, 29)))
     ]
     assert not stamp_warnings(caplog)
-    # 14:30 is served too, as sent: its stamp, a day later its end, no Date, one WARNING.
-    odd = rows(rest_session.options.previous_day_bar(TSLA).fetch(wait=True))
-    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in odd] == [
-        (None, afternoon * 10**6, (afternoon + 86_400_000) * 10**6)
-    ]
+    # 14:30 is withheld, so a page of no other bar fails the read, with one WARNING.
+    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
+        rest_session.options.previous_day_bar(TSLA).fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
         f"options.previous_day_bar: a 1-day bar of {TSLA} from "
@@ -1495,8 +1493,9 @@ def test_one_unreadable_admin_message_never_fails_the_table(
     unreadable = {**admin_message(302, 1, FLEX), "t": "soon"}  # its time cannot be read
     odd = {**admin_message(323, 2, "ALERT"), "x": "PHLX"}  # its exchange cannot be read
     ws_session.publish(unreadable, odd, admin_message(302, 3, "X"))
-    got = rows_when(kept, lambda arrived: len(arrived) == 2)
-    assert [(r["SequenceNumber"], r["Exchange"]) for r in got] == [(2, None), (3, 302)]
+    # Both odd rows are withheld; the good one lands.
+    got = rows_when(kept, lambda arrived: len(arrived) == 1)
+    assert [(r["SequenceNumber"], r["Exchange"]) for r in got] == [(3, 302)]
     (row,) = shown_streams(ws_session, dh_to_pylist)
     assert row["State"] == "RUNNING"
     ws_session.session.release(kept)

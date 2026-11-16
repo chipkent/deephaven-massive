@@ -817,7 +817,7 @@ def test_the_trades_pair_shares_its_columns_in_one_order_with_one_timestamp() ->
 
 
 def test_a_projected_member_renames_through_its_projection() -> None:
-    schema = Catalog((INDEX_VALUES,)).dataset_schema(INDEX_VALUES, raw_symbol=False)
+    schema = Catalog((INDEX_VALUES,)).dataset_schema(INDEX_VALUES)
     assert schema.column_names == ("Symbol", "Date", "Timestamp", "Value", "TimestampInsert")
     assert Catalog((INDEX_VALUES,)).problems() == ()
     # The forex last quote joins the quotes kind with `ask` and `bid` under the kind's names.
@@ -829,17 +829,17 @@ def test_a_projected_member_renames_through_its_projection() -> None:
 def test_keys_rename_to_symbol_timestamp_and_underlying() -> None:
     catalog = Catalog((CONTRACTS, RELATED, FUTURES_TRADES))
     assert catalog.problems() == ()
-    contracts = catalog.dataset_schema(CONTRACTS, raw_symbol=False).column_names
+    contracts = catalog.dataset_schema(CONTRACTS).column_names
     assert contracts[0] == "Symbol"
     assert "Underlying" in contracts
     assert {"Ticker", "UnderlyingTicker"}.isdisjoint(contracts)
     # The peer is the row's symbol, and the company asked about comes from the request.
-    assert catalog.dataset_schema(RELATED, raw_symbol=False).column_names == (
+    assert catalog.dataset_schema(RELATED).column_names == (
         "Symbol",
         "Underlying",
         "TimestampInsert",
     )
-    futures = catalog.dataset_schema(FUTURES_TRADES, raw_symbol=False).column_names
+    futures = catalog.dataset_schema(FUTURES_TRADES).column_names
     assert futures[:3] == ("Symbol", "Date", "Timestamp")
     assert "SessionEndDate" not in futures  # the session is the row's Date
 

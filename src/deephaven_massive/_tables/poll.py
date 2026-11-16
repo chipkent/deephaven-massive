@@ -55,14 +55,14 @@ reader raises `UnavailableSymbolError`, a `PermanentError`, which fails the tabl
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
 `PermanentError` fails the table through `publish_failure`, marks the row `FAILED`
 (`SessionCore.fail_stream`), and ends the poller. The permanent errors are `RowDataError` (a
-page whose every row was dropped because a key could not be read, or a row that, in any mode,
-has a null poll key, which would merge unrelated rows; one odd row is dropped and counted, or
-its odd value read as null, and the table goes on), `SymbolRowError` (a symbol table's row
-that is not Massive's ticker, under `noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the
-row is skipped and the cycle's `Error` lists it), and `UnavailableSymbolError` (a symbol
-Massive has no data for, under `unavailable_symbols=RAISE`). The failure is
-logged at the level its `is_bug` gives (`log_failure`): ERROR for a defect, naming whose it is,
-and WARNING otherwise.
+page of which the library could read no row whole, a withheld row of a cause the policy sets to
+`RAISE`, or a row that, in any mode, has a null poll key, which would merge unrelated rows; one
+row the library cannot read whole is withheld and reported, and the table goes on),
+`SymbolRowError` (a symbol table's row that is not Massive's ticker, under
+`noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the row is skipped and the cycle's
+`Error` lists it), and `UnavailableSymbolError` (a symbol Massive has no data for, under
+`unavailable_symbols=RAISE`). The failure is logged at the level its `is_bug` gives
+(`log_failure`): ERROR for a defect, naming whose it is, and WARNING otherwise.
 A refusal (`AuthenticationError` or `EntitlementError`) logs one WARNING per session, dataset,
 and kind of refusal, and each later `poll()` table refused the same way logs at DEBUG: every
 poll makes its own requests and gets its own error, so twenty polls of a dataset the plan
@@ -127,7 +127,6 @@ import pyarrow.compute as pc
 from deephaven import dtypes
 from deephaven.stream import blink_to_append_only
 
-from deephaven_massive._datasets.column_descriptions import RAW_SYMBOL
 from deephaven_massive._datasets.row_times import INSERT
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import PollMode, Recency
@@ -647,7 +646,7 @@ class Poller:
         self._max_outage = core.config.max_outage
         self._schema = core.dataset_schema(spec)
         self._spec = spec
-        self._key_names = key_columns(spec, self._schema)
+        self._key_names = spec.poll_keys
         self._list_keys = list_keys(self._schema, self._key_names)
         self._request = request
         self._rule = SymbolRowRule.of(spec, request.on_error.noncanonical_symbols)
@@ -1289,10 +1288,7 @@ class Poller:
         `APPEND` would append its row again every cycle. Like a missing required key, it is a
         data failure, so it fails the table. The dataset's nullable poll keys
         (`DatasetSpec.nullable_poll_keys`, such as an option's `PutCall`, empty for common
-        stock) and its revision keys are not checked: a null there is a value. Nor is `Symbol`
-        in a `WARN` session (`key_columns`): the reader refuses a row with no symbol, so a null
-        `Symbol` there is a row Massive spelled in a way the library cannot read, keyed by its
-        `RawSymbol`.
+        stock) and its revision keys are not checked: a null there is a value.
 
         Args:
             table: The cycle's rows.
@@ -1304,13 +1300,7 @@ class Poller:
                 published.
         """
         nullable = self._spec.nullable_poll_keys
-        # In a WARN session the key holds RawSymbol (`key_columns`): a row's Symbol is null
-        # exactly when its RawSymbol holds the unreadable text, so neither is checked.
-        warn = RAW_SYMBOL in self._key_names
-        checked = (
-            k for k in self._key_names if k not in nullable and not (warn and k in _SYMBOL_KEYS)
-        )
-        for name in checked:
+        for name in (k for k in self._key_names if k not in nullable):
             missing = pc.is_null(table.column(name), nan_is_null=True)
             row = pc.index(missing, True).as_py()
             if row >= 0:
@@ -1505,10 +1495,6 @@ def _left_out_text(left_out: Sequence[str]) -> str | None:
     return f"no rows this cycle for {len(left_out)} {noun}: {shown}{tail}"
 
 
-_SYMBOL_KEYS: Final = frozenset({"Symbol", RAW_SYMBOL})
-"""The key columns of a row's symbol in a `WARN` session: one of the two is always set."""
-
-
 def _hashable(column: pa.ChunkedArray) -> list[object]:
     """Return a column's values in a form a set can hold: a list value as a tuple.
 
@@ -1549,7 +1535,7 @@ def list_keys(schema: Schema, keys: Sequence[str]) -> tuple[str, ...]:
 
     Args:
         schema: The dataset's schema in the session.
-        keys: The table's key columns (`key_columns`).
+        keys: The table's key columns (`DatasetSpec.poll_keys`).
 
     Returns:
         The keys whose type is a list (`long[]`, `String[]`), in key order; empty for most
@@ -1557,29 +1543,6 @@ def list_keys(schema: Schema, keys: Sequence[str]) -> tuple[str, ...]:
     """
     lists = {c.name for c in schema.columns if pa.types.is_list(c.type.arrow_type)}
     return tuple(key for key in keys if key in lists)
-
-
-def key_columns(spec: DatasetSpec, schema: Schema) -> tuple[str, ...]:
-    """Return the columns that identify a row of a `poll()` table: its key in every mode.
-
-    They are the dataset's poll keys (`DatasetSpec.poll_keys`), plus `RawSymbol` when they hold
-    `Symbol` and the schema has a `RawSymbol` column (a session whose `unreadable_symbols` is
-    `LOG`, the default, or `IGNORE`). Such a session keeps a row whose symbol Massive spelled in
-    a way the library cannot read, with a null `Symbol` and the text in `RawSymbol`; keyed on
-    `Symbol` alone, every such row would merge into one, or fail the null-key check. With
-    `RawSymbol` in the key, a readable row is keyed by its `Symbol` (its `RawSymbol` is null)
-    and an unreadable one by its text.
-
-    Args:
-        spec: The dataset.
-        schema: The dataset's schema in the session.
-
-    Returns:
-        The key columns, in order.
-    """
-    if "Symbol" in spec.poll_keys and RAW_SYMBOL in schema.column_names:
-        return (*spec.poll_keys, RAW_SYMBOL)
-    return spec.poll_keys
 
 
 def build_table(
@@ -1615,7 +1578,7 @@ def build_table(
     """
     definitions = col_defs(schema)
     replace = mode is PollMode.REPLACE
-    keys = list(key_columns(spec, schema))
+    keys = list(spec.poll_keys)
     lists = list_keys(schema, keys) if mode is not PollMode.APPEND else ()
     hidden = []
     if replace:

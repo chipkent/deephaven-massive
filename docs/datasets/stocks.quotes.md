@@ -44,7 +44,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST: the request's `stockTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given stock." | REST, flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, flat files, WebSocket |
 | `Timestamp` | Instant | The row's event time. From REST and flat files `sip_timestamp`: "The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this quote from the exchange which produced it."; WebSocket `t`: "The SIP timestamp in Unix MS." | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. | REST, flat files, WebSocket |
 | `BidPrice` | double | The bid price. | REST, flat files, WebSocket |
 | `BidSize` | double | The bid size. This represents the number of shares buyers are bidding for at the given bid price. | REST, flat files, WebSocket |
 | `AskPrice` | double | The ask price. | REST, flat files, WebSocket |
@@ -70,7 +69,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Symbol` | request | `ticker` | `sym` |
 | `Date` |  |  |  |
 | `Timestamp` | `sip_timestamp` | `sip_timestamp` | `t` |
-| `RawSymbol` | request | `ticker` | `sym` |
 | `BidPrice` | `bid_price` | `bid_price` | `bp` |
 | `BidSize` | `bid_size` | `bid_size` | `bs` |
 | `AskPrice` | `ask_price` | `ask_price` | `ap` |

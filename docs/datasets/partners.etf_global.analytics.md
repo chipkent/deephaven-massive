@@ -40,7 +40,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When the session's `unreadable_symbols` (`MassiveConfig.on_error`) is `dm.OnError.RAISE`, the column is absent, and such a row fails the table unless the call's own `on_error` keeps it. |
 | `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. |
 | `ProcessedDate` | String | The date showing when ETF Global received and processed the data. |
 | `QuantCompositeBehavioral` | double | Behavioral analysis score measuring investor psychology and market behavior patterns. |
@@ -85,7 +84,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `composite_ticker` |
-| `RawSymbol` | `composite_ticker` |
 | `EffectiveDate` | `effective_date` |
 | `ProcessedDate` | `processed_date` |
 | `QuantCompositeBehavioral` | `quant_composite_behavioral` |

@@ -925,22 +925,20 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     ]
 
 
-def test_previous_day_bar_serves_an_unexpected_stamp_with_a_warning(
+def test_previous_day_bar_withholds_an_unexpected_stamp_with_a_warning(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING)
-    # 14:30 New York time is no stamp Massive is known to give a stock 1-day bar; the bar is
-    # still served, as sent: its stamp, a day later its end, and no Date.
+    # 14:30 New York time is no stamp Massive is known to give a stock 1-day bar: which day the
+    # bar covers would be a guess, so it is withheld, and a page of no other bar fails.
     day = new_york_midnight_ns(date(2020, 11, 10))
     stamp = day // 10**6 + 14 * 3_600_000 + 1_800_000
     bar = {"T": "AAPL", "t": stamp, "c": 115.97}
     fake_rest.reply(
         "/v2/aggs/ticker/AAPL/prev", Reply({"status": "OK", "adjusted": True, "results": [bar]})
     )
-    out = table_rows(rest_session.stocks.previous_day_bar("AAPL").fetch(wait=True))
-    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
-        (None, stamp * 10**6, (stamp + 86_400_000) * 10**6, 115.97)
-    ]
+    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
+        rest_session.stocks.previous_day_bar("AAPL").fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
         "stocks.previous_day_bar: a 1-day bar of AAPL from /v2/aggs/ticker/{stocksTicker}/prev is "
@@ -1262,9 +1260,10 @@ LIST_CALLS: list[tuple[str, dict[str, Any], str, dict[str, str], tuple[str, obje
     ),
     (
         "filings.initial_insider_ownership",
-        {"symbols": ["NVDA", "GOOGL"], "issuer_cik": "0000320193"},
+        # The fixture's row lists PPHC: a row that lists none of the tickers named is left out.
+        {"symbols": ["PPHC", "GOOGL"], "issuer_cik": "0000320193"},
         "/stocks/filings/vX/form-3",
-        {"tickers.any_of": "GOOGL,NVDA", "issuer_cik": "0000320193", "limit": "10000"},
+        {"tickers.any_of": "GOOGL,PPHC", "issuer_cik": "0000320193", "limit": "10000"},
         ("FilingDate", "2026-03-30"),
     ),
     (
@@ -1751,15 +1750,12 @@ def test_a_day_file_moves_an_early_close_and_warns_on_an_unexpected_stamp(
         ("BCC", "2024-11-29", day)
     ]
     assert not stamp_warnings(caplog)
-    # 14:30 is no stamp Massive is known to use: the bar may cover another day, so it keeps
-    # its stamp and ends a day later, past the range's one day, and the range does not hold
-    # it; one WARNING names it.
+    # 14:30 is no stamp Massive is known to use: the bar may cover another day, so it is
+    # withheld, and a file of no other bar fails the read; one WARNING names it.
     afternoon = day + 29 * HOUR_NS // 2
     fake_s3.put(key, make_csv_gz(f"{header}BCC,1,61.68,61.99,62.565,61.41,{afternoon},1\n"))
-    odd = table_rows(
+    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
         query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES, wait=True)
-    )
-    assert odd == []
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
         "stocks.bars: a 1-day bar of BCC from the flat files us_stocks_sip/day_aggs_v1 is stamped "

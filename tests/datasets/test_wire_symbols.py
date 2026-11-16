@@ -14,7 +14,7 @@ from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
     canonical_from_wire,
     log_unreadable,
-    unreadable_symbol_message,
+    unreadable_symbol_reason,
     wire_spellings,
     ws_symbol,
 )
@@ -143,21 +143,17 @@ def test_the_vendored_crypto_tickers_read_back_from_their_websocket_form(
         assert canonical_from_wire(CRY, websocket) == ticker
 
 
-def test_the_unreadable_symbol_message_names_the_spellings_the_setting_and_the_bug() -> None:
-    message = unreadable_symbol_message("forex.quotes", ["b", "a"])
-    assert message.startswith("forex.quotes: Massive sent the symbols 'a', 'b', spellings the")
-    one = unreadable_symbol_message("forex.quotes", ["a"])
-    assert one.startswith("forex.quotes: Massive sent the symbol 'a', a spelling the library")
-    assert "'on_error: {unreadable_symbols: log}' in the settings file" in message
-    assert "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG)" in message
-    assert message.endswith(LIBRARY_BUG)
+def test_the_unreadable_symbol_reason_names_the_spelling_and_the_bug() -> None:
+    assert unreadable_symbol_reason("a") == (
+        f"Massive sent the symbol 'a', a spelling the library cannot read. {LIBRARY_BUG}"
+    )
 
 
 @pytest.fixture
 def fresh_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     log = logging.getLogger(wire_symbols.__name__)
     monkeypatch.setattr(
-        wire_symbols, "_logged_spellings", BoundedLog(log, limit=2, level=logging.ERROR)
+        wire_symbols, "_logged_spellings", BoundedLog(log, limit=2, level=logging.WARNING)
     )
     monkeypatch.setattr(
         wire_symbols, "_ignored_spellings", BoundedLog(log, limit=2, level=logging.DEBUG)
@@ -172,8 +168,7 @@ def test_wire_symbols_read_a_column_and_log_nothing(caplog: pytest.LogCaptureFix
     with caplog.at_level(logging.DEBUG, logger=wire_symbols.__name__):
         read = reader.read(raw, cache)
     assert read.symbols.to_pylist() == ["C:EURUSD", None, None, "C:EURUSD", None, None, None]
-    assert read.raw.to_pylist() == [None, None, "??", None, "??", "!!", "##"]
-    assert read.unreadable == ("!!", "##", "??")
+    assert read.unreadable_rows.to_pylist() == [False, False, True, False, True, True, True]
     assert cache == {
         "EUR/USD": "C:EURUSD",
         "??": None,
@@ -185,19 +180,13 @@ def test_wire_symbols_read_a_column_and_log_nothing(caplog: pytest.LogCaptureFix
 
 
 @pytest.mark.usefixtures("fresh_warnings")
-@pytest.mark.parametrize(
-    ("raw_symbol", "kept"),
-    [
-        (True, "its rows have a null Symbol and keep the text in RawSymbol"),
-        (False, "its rows have a null Symbol"),
-    ],
-)
-def test_an_unreadable_spelling_is_logged_once_at_error_under_log(
-    caplog: pytest.LogCaptureFixture, *, raw_symbol: bool, kept: str
+def test_an_unreadable_spelling_is_logged_once_at_warning_under_log(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    kept = "its rows are withheld"
     with caplog.at_level(logging.DEBUG, logger=wire_symbols.__name__):
-        log_unreadable("forex.quotes", ["!!", "##", "??"], OnError.LOG, raw_symbol=raw_symbol)
-        log_unreadable("forex.quotes", ["!!"], OnError.LOG, raw_symbol=raw_symbol)  # once
+        log_unreadable("forex.quotes", ["!!", "##", "??"], OnError.LOG)
+        log_unreadable("forex.quotes", ["!!"], OnError.LOG)  # once
     # Two spellings are reported, then one record says the rest are not.
     messages = [r.getMessage() for r in caplog.records]
     assert messages == [
@@ -211,7 +200,7 @@ def test_an_unreadable_spelling_is_logged_once_at_error_under_log(
         ),
         "2 values were reported; further ones are not logged",
     ]
-    assert {r.levelno for r in caplog.records} == {logging.ERROR}  # a gap in the library
+    assert {r.levelno for r in caplog.records} == {logging.WARNING}
 
 
 @pytest.mark.usefixtures("fresh_warnings")
@@ -219,7 +208,7 @@ def test_an_unreadable_spelling_is_logged_at_debug_under_ignore(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.DEBUG, logger=wire_symbols.__name__):
-        log_unreadable("forex.quotes", ["??"], OnError.IGNORE, raw_symbol=True)
+        log_unreadable("forex.quotes", ["??"], OnError.IGNORE)
     assert [r.levelno for r in caplog.records] == [logging.DEBUG]
 
 

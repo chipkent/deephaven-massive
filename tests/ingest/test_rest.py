@@ -14,7 +14,7 @@ from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoo
 from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
 from types import MethodType
-from typing import Any, NoReturn, ParamSpec, TypedDict
+from typing import TYPE_CHECKING, Any, NoReturn, ParamSpec, TypedDict
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -67,7 +67,7 @@ from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, CryptoTickers
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog, LoggedKeys
-from deephaven_massive._massive import Cancel, RestPath, Transport
+from deephaven_massive._massive import Cancel, RestPath, RowFault, Transport
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.diagnostics import Diagnostics
@@ -82,6 +82,9 @@ from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import FetchQuery, HistoryQuery, Query
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
+
+if TYPE_CHECKING:
+    from deephaven_massive._tables.problem_events import ProblemEvent
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
@@ -1821,7 +1824,7 @@ def test_row_symbols_are_canonical(
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
     out = fetch(session, CONVERSION, params={"from": "AUD", "to": "USD", "amount": 100})
     assert [(r["Symbol"], r["Converted"]) for r in out] == [("C:AUDUSD", 65.5)]
-    assert out[0]["RawSymbol"] is None  # the default session keeps the column, null when read
+    assert "RawSymbol" not in out[0]
     assert fake_rest.get_queries()[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
     # Under RAISE, a spelling the library cannot read fails the request, naming it.
     config = dm.MassiveConfig(
@@ -1830,33 +1833,75 @@ def test_row_symbols_are_canonical(
         on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE),
     )
     with dm.MassiveSession(config) as strict:
-        assert "RawSymbol" not in fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]
+        assert (
+            fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]["Converted"] == 65.5
+        )
+        # A page of one such row fails whatever the setting: no row of it could be read.
         with pytest.raises(
-            dm.MassiveError,
-            match=r"^forex\.conversion: Massive sent the symbol 'not a pair', a spelling the "
-            r"library cannot read as Massive's ticker\. To keep such rows .* This is a bug in "
-            r"deephaven-massive\.",
+            RowDataError,
+            match=r"^forex\.conversion: the library could read none of the 1 rows .* the first: "
+            r"Massive sent the symbol 'not a pair', a spelling the library cannot read\.",
         ):
             fetch(strict, CONVERSION, params={"from": "AUD", "to": "XXX"})
 
 
-def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_by_default(
-    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def dividend(ticker: str, row_id: str) -> dict[str, object]:
+    # One dividend row of a ticker as Massive spells it.
+    return {**AAPL_DIVIDEND, "ticker": ticker, "id": row_id}
+
+
+def test_an_unreadable_row_symbol_is_withheld_by_default(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    fresh = BoundedLog(logging.getLogger(wire_symbols.__name__), limit=5, level=logging.ERROR)
+    fresh = BoundedLog(logging.getLogger(wire_symbols.__name__), limit=5, level=logging.WARNING)
     monkeypatch.setattr(wire_symbols, "_logged_spellings", fresh)
-    body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
-    fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
-    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
-    with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, wire_symbols.__name__):
-        (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
-        q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
-        assert "RawSymbol" in [name for (name,) in q.columns().iter_tuple(cols="Name")]
-    assert (row["Symbol"], row["RawSymbol"]) == (None, "?")
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    rows = [dividend("a b", "E9"), AAPL_DIVIDEND]
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(rows)))
+    with caplog.at_level(logging.WARNING, wire_symbols.__name__):
+        out = fetch(session, DIVIDENDS, symbols=["AAPL"])
+    assert [(r["Id"], r["Symbol"]) for r in out] == [("E1", "AAPL")]
+    assert "RawSymbol" not in out[0]
+    assert [(e.cause, e.symbol, e.field, e.rows, e.stream_id) for e in events] == [
+        (RowFault.UNREADABLE_SYMBOLS, "a b", "Symbol", 1, None)
+    ]
     (record,) = [r for r in caplog.records if r.name == wire_symbols.__name__]
-    assert record.levelno == logging.ERROR
-    assert record.getMessage().startswith("forex.conversion: Massive sent the symbol '?'")
+    assert record.levelno == logging.WARNING
+    assert record.getMessage().startswith("stocks.dividends: Massive sent the symbol 'a b'")
+
+
+@pytest.mark.parametrize(
+    ("cause", "page"),
+    [
+        ("unreadable_symbols", [dividend("a b", "E9"), AAPL_DIVIDEND]),
+        ("unconvertible_values", [{**AAPL_DIVIDEND, "frequency": 4.5}, AAPL_DIVIDEND]),
+        (
+            "unreadable_keys",
+            [{k: v for k, v in AAPL_DIVIDEND.items() if k != "ticker"}, AAPL_DIVIDEND],
+        ),
+    ],
+)
+def test_a_withheld_rows_cause_under_raise_fails_the_read(
+    *, fake_rest: FakeRestServer, cause: str, page: list[dict[str, object]]
+) -> None:
+    # The good row beside it does not save the read: the cause's setting fails it.
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(page)))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(**{cause: dm.OnError.RAISE}),
+    )
+    with dm.MassiveSession(config) as m, pytest.raises(RowDataError) as info:
+        fetch(m, DIVIDENDS, symbols=["AAPL"])
+    assert str(info.value).startswith(
+        "stocks.dividends: Massive sent rows the library cannot read whole, which it withheld "
+        f"(1 under {cause}); the first: "
+    )
 
 
 def test_a_reactive_symbol_table_is_read_once_for_fetch(
@@ -1986,24 +2031,25 @@ def test_a_row_without_its_symbol_is_a_data_failure(
 def test_one_odd_row_costs_the_call_only_itself(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A row without its symbol is dropped and counted; a value that does not fit is null.
+    # A row without its symbol and one with a value that does not fit are withheld and
+    # counted; the good row beside them lands.
     nameless = {key: value for key, value in AAPL_DIVIDEND.items() if key != "ticker"}
     odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([nameless, odd, AAPL_DIVIDEND])))
     with caplog.at_level(logging.WARNING, LOGGER):
         out = fetch(session, DIVIDENDS, symbols=["AAPL"])
-    assert [(r["Id"], r["Frequency"]) for r in out] == [("E2", None), ("E1", 4)]
+    assert [(r["Id"], r["Frequency"]) for r in out] == [("E1", 4)]
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings == [
         (
-            "stocks.dividends: REST field 'frequency' held a value that does not fit its type; it "
-            f"reads as null (schema drift) at GET {DIVIDENDS_PATH}; first value 4.5"
+            "stocks.dividends: REST field 'frequency' held a value that does not fit its type; "
+            f"its row is withheld (schema drift) at GET {DIVIDENDS_PATH}; first value 4.5"
         ),
         (
-            "stocks.dividends: dropped 1 REST row(s) whose key cannot be read, the first at GET "
-            f"{DIVIDENDS_PATH}: {DIVIDENDS_PATH}: row 0: no Ticker (wire key 'ticker'), which the "
-            "dataset needs; such rows are dropped and counted: the running count is logged at "
-            "DEBUG and shown in the SchemaDrift of each live table that lost them"
+            "stocks.dividends: withheld 2 REST row(s) the library cannot read whole, the first "
+            f"at GET {DIVIDENDS_PATH}: {DIVIDENDS_PATH}: row 0: no Ticker (wire key 'ticker'), "
+            "which the dataset needs; such rows are withheld and counted: the running count is "
+            "logged at DEBUG and shown in the SchemaDrift of each live table that lost them"
         ),
     ]
 
@@ -2224,6 +2270,57 @@ def test_history_bounds_a_timestamp_axis_exactly_and_pages(
         "stocks.trades history: source=REST requests=2, waiting out at most 600 s of pauses"
         in caplog.text
     )
+
+
+MIDNIGHT = epoch_ns(datetime(2025, 3, 3, 5, tzinfo=UTC))
+"""The start of the 2025-03-03 window: midnight in New York."""
+
+
+def window_trade(offset: int, price: object) -> dict[str, object]:
+    # A trade `offset` nanoseconds after the window's start; a negative offset lies outside it.
+    return {"sip_timestamp": MIDNIGHT + offset, "price": price, "size": 10}
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        pytest.param([window_trade(1, "x"), window_trade(2, "y")], id="every-row-inside"),
+        # The good rows outside the window count neither way.
+        pytest.param(
+            [window_trade(-2, 1.0), window_trade(1, "x"), window_trade(-1, 2.0)], id="good-outside"
+        ),
+    ],
+)
+def test_a_page_whose_rows_in_the_window_are_all_unreadable_fails_the_read(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, page: list[dict[str, object]]
+) -> None:
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope(page)))
+    with pytest.raises(
+        RowDataError,
+        match=r"^stocks\.trades: the library could read none of the \d rows of the read's symbols "
+        r"and window on a page from GET /v3/trades/\{stockTicker\} whole",
+    ):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+
+
+def test_unreadable_rows_outside_the_window_are_neither_published_nor_reported(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    page = [
+        window_trade(-2, "x"),
+        window_trade(1, 1.0),
+        window_trade(-1, "y"),
+        window_trade(2, 2.0),
+    ]
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope(page)))
+    out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+    assert [r["Price"] for r in out] == [1.0, 2.0]
+    assert events == []
 
 
 def test_bars_fill_the_range_segments_in_milliseconds(
@@ -3094,7 +3191,11 @@ def unexpected_stamps(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 def test_forex_day_bars_are_stamped_at_the_utc_days_start(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The range's 00:00 UTC stays and the day's last millisecond moves to 00:00 UTC.
     march_3, march_4 = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 4))
@@ -3120,7 +3221,14 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
     fake_rest.reply(
         grouped,
         Reply(envelope([{"T": "C:EURUSD", "t": last_ms, "c": 3.0}])),
-        Reply(envelope([{"T": "C:EURUSD", "t": new_york, "c": 3.0}])),
+        Reply(
+            envelope(
+                [
+                    {"T": "C:EURUSD", "t": new_york, "c": 3.0},
+                    {"T": "C:GBPUSD", "t": last_ms, "c": 4.0},
+                ]
+            )
+        ),
     )
     every = history(
         session,
@@ -3133,10 +3241,11 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
     )
     assert [(r["Symbol"], r["TimestampStart"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
     assert not unexpected_stamps(caplog)
-    # A stamp at midnight New York time may be another day cut: the bar keeps it, with no
-    # Date, and ends a day later, so a range of 03-03 alone does not hold its whole window;
-    # one WARNING names the symbol and the stamp, since bars are stamped before the window
-    # keeps them.
+    # A stamp at midnight New York time may be another day cut: which day the bar covers
+    # would be a guess, so it is withheld and reported, beside the pair stamped as Massive
+    # does; one WARNING names the symbol and the stamp.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
     with caplog.at_level(logging.WARNING):
         odd = history(
             session,
@@ -3147,13 +3256,19 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
             timespan=Timespan.DAY,
             adjusted=True,
         )
-    assert odd == []
+    assert [(r["Symbol"], r["Close"]) for r in odd] == [("C:GBPUSD", 4.0)]
+    assert [(e.cause, e.symbol, e.field) for e in events] == [
+        (RowFault.UNCONVERTIBLE_VALUES, "C:EURUSD", "TimestampStart")
+    ]
+    assert events[0].reason == (
+        "stamped at 2025-03-03T05:00:00+00:00, which Massive is not known to use for a 1-day bar"
+    )
     [warning] = unexpected_stamps(caplog)
     assert warning.startswith(
         "forex.bars: a 1-day bar of C:EURUSD from /v2/aggs/grouped/locale/global/market/fx/{date} "
         "is stamped 2025-03-03T05:00:00+00:00, which is not a stamp Massive is known to use for "
         "such a bar (00:00:00.000, 23:59:59.999 in UTC). The library cannot tell which day it "
-        "covers, so the row is served as sent"
+        "covers, so the row is withheld"
     )
 
 
@@ -3189,22 +3304,20 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
 ) -> None:
     caplog.set_level(logging.WARNING)
     # A two-day bar stamped at midnight New York time may hold hours of the next day: it is
-    # served at its stamp, ends two days later, and logs one WARNING.
+    # withheld and logs one WARNING; a page of no other bar fails the read.
     start, end = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 7)) - 1
     two_days = f"/v2/aggs/ticker/X:BTCUSD/range/2/day/{start}/{end}".replace(":", "%3A")
     new_york = ny_ms(date(2025, 3, 3))
     fake_rest.reply(two_days, Reply(envelope([{"t": new_york, "c": 1.0}])))
-    out = crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
-    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
-        (None, new_york * 10**6, (new_york + 2 * 86_400_000) * 10**6, 1.0)
-    ]
+    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+        crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
     [warning] = unexpected_stamps(caplog)
     assert warning.startswith(
         "crypto.bars: a bar of X:BTCUSD from /v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/"
         "{timespan}/{from}/{to} is stamped 2025-03-03T05:00:00+00:00, which is not a stamp "
         "Massive is known to use for such a bar (00:00:00.000 in UTC). The library cannot tell "
-        "which day it covers, so the row is served as sent: TimestampStart is Massive's stamp, "
-        "TimestampEnd that stamp plus 2 days"
+        "which day it covers, so the row is withheld rather than published at a guessed day "
+        "(bars of 2 days)"
     )
     caplog.clear()
     # Massive stamps a crypto week at 00:00 UTC on its Sunday (2026-10-11 in the live check),
@@ -3222,10 +3335,10 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
         (sunday * 10**6, after * 10**6, 2.0)
     ]
     assert not unexpected_stamps(caplog)
-    # A week bar stamped on another day may cover another week: it keeps its stamp and ends
-    # a week later, after the range, so this range does not hold it; its form warns.
-    out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
-    assert out == []
+    # A week bar stamped on another day may cover another week: it is withheld, and its form
+    # warns.
+    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+        crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
     [warning] = unexpected_stamps(caplog)
     assert (
         "is stamped 2026-10-12T00:00:00+00:00, which is not a stamp Massive is known to use for "
@@ -3248,9 +3361,9 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
         (first * 10**6, april * 10**6, 3.0)
     ]
     assert not unexpected_stamps(caplog)
-    # A month bar stamped on the 2nd ends on April 2, after the range.
-    out = crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
-    assert out == []
+    # A month bar stamped on the 2nd is withheld.
+    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+        crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
     [warning] = unexpected_stamps(caplog)
     assert "is stamped 2025-03-02T00:00:00+00:00" in warning
     assert "on the 1st of a month)" in warning
@@ -4609,7 +4722,8 @@ def test_each_page_logs_its_rows_after_each_step(
     assert pages == [
         (
             "stocks.bars: page 1 of /v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/"
-            "{from}/{to} for AAPL: 4 rows read, 4 converted, 2 in the window, 2 kept as whole bars"
+            "{from}/{to} for AAPL: 4 rows read, 4 converted, 2 in the window, 0 withheld, 2 kept "
+            "as whole bars"
         )
     ]
 
@@ -4644,12 +4758,19 @@ def _listed(*rows: tuple[int, list[str]]) -> Reply:
 
 
 def test_a_row_is_listed_under_each_named_ticker_it_lists(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # One request names both tickers; a row listing both is each one's, in its list's order,
-    # and a row listing neither keeps a null Symbol, with one WARNING a session.
+    # and a row listing neither is left out, as a row outside the window is: no event, and one
+    # WARNING a session.
     page = _listed((1, ["MSFT", "AAPL"]), (2, ["AAPL"]), (3, ["TSLA"]))
     fake_rest.reply(LISTED_PATH, page, page)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
             out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
@@ -4657,15 +4778,15 @@ def test_a_row_is_listed_under_each_named_ticker_it_lists(
                 (1, "MSFT"),
                 (1, "AAPL"),
                 (2, "AAPL"),
-                (3, None),
             ]
     assert [q["tickers.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]] * 2
     assert [m for m in caplog.messages if "list none" in m] == [
         (
             "partners.benzinga.news: 1 rows Massive returned from /benzinga/v2/news list none "
-            "of the request's tickers (2 [AAPL, MSFT]) in Tickers, so their Symbol is null"
+            "of the request's tickers (2 [AAPL, MSFT]) in Tickers, so they are left out"
         )
     ]
+    assert events == []
 
 
 def test_one_named_ticker_is_every_row_s_and_none_leaves_symbol_null(
