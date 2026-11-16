@@ -533,6 +533,7 @@ class _Bucket:
         "probing",
         "refusals",
         "refused_minute",
+        "run_episode",
         "run_refusals",
         "slots",
         "turns",
@@ -575,6 +576,9 @@ class _Bucket:
         self.pause_until = float("-inf")
         self.episode = 0
         self.run_refusals = 0  # counted refusals of the current run; 0 when none is going
+        # The episode the current run started in: a request granted before it (a lower episode)
+        # belongs to an earlier run, so its refusal never chooses this run's minute.
+        self.run_episode = 0
         self.last_refusal: str | None = None
         # Set by a pause: the next request to start is its probe, alone (`probe`) until
         # Massive answers it with anything but a 429.
@@ -1230,6 +1234,8 @@ class RequestGovernor:
             state.refusals += 1
             state.last_refusal = message
             if permit.episode == state.episode:
+                if state.run_refusals == 0:
+                    state.run_episode = permit.episode  # this refusal starts a run
                 state.episode += 1
                 state.run_refusals += 1
                 if asked is not None:
@@ -1242,9 +1248,10 @@ class RequestGovernor:
                 if asked is not None:
                     reason = f"{reason}; {honoured}"
                     state.pause(now + asked)
-            # Learning reads the earliest refused minute of a run still going; a late refusal
-            # after its run ended teaches nothing, even when its Retry-After pauses the bucket.
-            if per_minute and state.run_refusals > 0:
+            # Learning reads the earliest refused minute of the run still going, among the
+            # requests granted since it started; a late refusal of an earlier run teaches
+            # nothing, even when its Retry-After pauses the bucket.
+            if per_minute and state.run_refusals > 0 and permit.episode >= state.run_episode:
                 minute = int(sent // _MINUTE)
                 if state.refused_minute is None or minute < state.refused_minute:
                     state.refused_minute = minute

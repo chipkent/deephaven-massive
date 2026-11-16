@@ -1906,3 +1906,22 @@ def test_a_request_counts_in_the_minute_it_is_sent_not_granted() -> None:
     _requests(governor, "stocks", 2)  # minute 1
     _learn_run(governor, retry_after=70.0)
     assert _state(governor).learned == 3
+
+
+def test_a_late_refusal_of_an_earlier_run_never_chooses_the_current_runs_minute() -> None:
+    # A generic 429 starts a run in minute 0 and its probe ends it, while an older request is
+    # still in flight. In minute 1, five answers and a per-minute refusal start a new run; the
+    # older request's per-minute 429 then lands. The new run still learns minute 1's five.
+    clock = FakeClock()
+    governor = _governor(clock)
+    old = governor.admission("stocks", lane=object()).acquire(Cancel())  # minute 0, episode 0
+    _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()))
+    _requests(governor, "stocks", 1)  # the probe, at 15 s: the run ends, learning nothing
+    clock.advance(60.0)
+    _requests(governor, "stocks", 5)  # minute 1
+    _refuse(
+        governor, governor.admission("stocks", lane=object()).acquire(Cancel()), message=PER_MINUTE
+    )
+    _refuse(governor, old, message=PER_MINUTE)
+    _requests(governor, "stocks", 1)
+    assert _state(governor).learned == 5
