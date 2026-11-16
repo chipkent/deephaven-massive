@@ -123,7 +123,7 @@ def test_the_conversion_s_last_is_the_pair_s_last_quote(
     assert all(outcome.rows)
 
 
-@pytest.mark.settles("137")
+@pytest.mark.settles("138")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(60)
 def test_session_change_is_the_chain_s_day_change(

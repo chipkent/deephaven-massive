@@ -316,7 +316,7 @@ def test_session_change_reads_the_traded_contracts_again(
     read_again = ",".join(_CONTRACTS[: same_field.SESSION_CONTRACTS])
     assert fake_rest.get_queries(one_value=True) == [
         ("/v3/snapshot/options/SPY", {"limit": "250"}),
-        ("/v3/snapshot", {"ticker.any_of": read_again}),
+        ("/v3/snapshot", {"ticker.any_of": read_again, "limit": "20"}),
     ]
     assert (
         lines[-1]

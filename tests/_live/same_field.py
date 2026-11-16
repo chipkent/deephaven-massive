@@ -239,11 +239,9 @@ def session_change(client: RestClient, evidence: Callable[[str], None]) -> Outco
         if ticker and day.get("change") is not None and len(days) < SESSION_CONTRACTS:
             days[ticker] = day
     evidence(f"{len(days)} chain contracts with a day.change read again, of {len(chain)}")
-    unified = (
-        _rows(client, _UNIFIED, names={}, query={"ticker.any_of": tuple(days)}, bucket="options")
-        if days
-        else []
-    )
+    # The unified snapshot sends 10 rows unless asked for more, and `_rows` reads one page.
+    query = {"ticker.any_of": tuple(days), "limit": len(days)}
+    unified = _rows(client, _UNIFIED, names={}, query=query, bucket="options") if days else []
     sessions = {row.get("ticker"): row.get("session") or {} for row in unified}
     compared = differing = 0
     for ticker, day in days.items():
