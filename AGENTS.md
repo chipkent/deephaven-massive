@@ -207,13 +207,10 @@ These protect the owner's repository, money, and secrets.
     exchange the plan lacks) defaults to `RAISE`, because asking for data the plan lacks is a
     bug in the caller. A new cause gets a new setting, never a hard-coded failure or a silent
     skip.
-  - **Only a problem that affects every row fails the table whatever the setting:**
-    authentication, a closed session, a plan without the dataset, a refusal of everything a call
-    asked for, a read for which Massive sent rows inside the requested symbols and window and
-    the library could read none of them whole (on REST judged per page, on flat files per file;
-    rows outside the window count neither way), a stream that receives the whole channel whose
-    dataset's run on it is withheld, a stream of named symbols whose symbol's run, or the run of
-    rows with no readable symbol, is withheld, and a library defect.
+  - **Only a problem that affects every row a table would receive fails it, whatever the
+    setting:** authentication, a closed session, a plan without the dataset, a refusal of
+    everything a call asked for, a read or stream whose rows it would receive are all withheld,
+    and a library defect. `docs/configuration.md` says how each read and stream judges that.
 - **Dates are ISO strings**: every calendar-date column, vendor dates included, stores
   `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read; instants stay
   `Instant`s. Every dataset table is built by `_tables/columns.py` `dataset_table`, and the
