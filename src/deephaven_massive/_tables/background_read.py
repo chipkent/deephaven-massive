@@ -62,11 +62,12 @@ the row is marked `DONE` at once (`BackgroundRead.fail`), while the session stil
 **Threads and locks.** `open_read` runs on the caller thread, which may hold the update graph's
 lock (a console command): it creates tables, registers the row, and submits the read to the
 pool, and waits for nothing. The read enters the session's execution context; it holds no lock
-while the transport call runs, so its rate-limit patience is the full `READ_PATIENCE`, not the
-console's. Its publish lock serializes the one `add` with a failure, so the table either gets
-its rows or fails, never both; only `registry_lock` is taken below it. Every other method is
-safe from any thread: `release` and `fail` only set the token, update registries, and publish a
-failure.
+while the transport call runs, and no caller waits for it, so it waits out
+`MassiveConfig.max_outage` of rate-limit pauses, not the console's 90 s: the time any live
+table may stay cut off from Massive (`rate_limits.read_patience`). Its publish lock serializes
+the one `add` with a failure, so the table either gets its rows or fails, never both; only
+`registry_lock` is taken below it. Every other method is safe from any thread: `release` and
+`fail` only set the token, update registries, and publish a failure.
 """
 
 from __future__ import annotations

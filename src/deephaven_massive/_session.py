@@ -594,8 +594,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
         delete. This table shows each symbol's read, so you can find the ones that failed and why.
 
         A read that fails for a reason that can clear, such as a rate limit or a network error, is
-        `RETRYING`. It's tried again 1, 5, and 15 minutes later, then marked `FAILED`. Any other
-        failure is `FAILED` at once. To read a failed symbol again, delete its row from the
+        `RETRYING`. It's tried again 2, 8, and 30 seconds later, then every minute, and marked
+        `FAILED` once it has kept failing for `max_outage` seconds, set in `MassiveConfig`. Any
+        other failure is `FAILED` at once. To read a failed symbol again, delete its row from the
         watchlist and add it back.
 
         The rows stay for the session's life. Each call returns a new table, which keeps its final

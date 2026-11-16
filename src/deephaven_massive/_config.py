@@ -297,14 +297,22 @@ class MassiveConfig:
             Sessions with the same key and streaming settings share one connection whatever
             this setting. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
-        max_outage: Sets how many seconds a stream or `poll()` table may stay cut off from Massive
-            before it fails. Defaults to 300 seconds.
+        max_outage: Sets how many seconds a live table may stay cut off from Massive before it
+            fails. Defaults to 300 seconds.
 
-            Raise it to ride out longer outages, or set `0` to fail at the first one. A stream
-            counts the time its connection is down, and a `poll()` table counts the time its
-            polls keep failing or stop arriving. Until the limit passes, the table's
-            `m.streams()` row shows the problem in `Error`. A failed table stays failed, so call
-            the method again for a new one. See
+            Raise it to ride out longer outages, or set `0` to fail at the first one. Each kind
+            of table counts its own time:
+
+            - A stream counts the time its connection is down.
+            - A `poll()` table counts the time its polls keep failing or stop arriving.
+            - A `fetch()` or `history()` without `wait=True` counts the time it waits out
+              Massive's rate limits.
+            - A `fetch()` or `history()` of a watchlist counts, for each symbol, the time its
+              reads keep failing. Only that symbol fails, and `m.symbol_reads()` shows it
+              `FAILED`.
+
+            Until the limit passes, the table's `m.streams()` row shows the problem in `Error`.
+            A failed table stays failed, so call the method again for a new one. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
         flat_file_symbol_threshold: Sets how many symbols in a list make a `history()` call read
             Massive's flat files instead of a request per symbol, when both can serve it. Defaults
@@ -1521,7 +1529,7 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     ),
     "max_outage": _Example(
         600.0,
-        "Seconds a stream or poll() table rides out an outage before it fails; 0 fails at once.",
+        "Seconds a live table rides out an outage before it fails; 0 fails at once.",
     ),
     "flush_interval": _Example(
         0.05, "Seconds between the batches of streamed rows added to live tables."

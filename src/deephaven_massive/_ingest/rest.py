@@ -81,13 +81,14 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   table's drift also reaches its `SchemaDrift` through `SessionCore.record_stream_drift`.
 - **Errors.** Every `WireError` becomes its public exception through `_errors.from_wire`
   (401 `AuthenticationError`, 403 `EntitlementError`), except a pause longer than the read's
-  patience still covers (`rate_limits.read_patience`: 10 minutes of pauses, or 90 s while the
-  thread holds the update graph's lock), which becomes `MassiveError("rate limited: ...")`
-  with status 429 (the first 429 of each subscription has already logged its INFO notice). One
-  odd row never fails a read: a row the library cannot read whole is withheld and reported as
-  drift; a read whose every row of its symbols and window was withheld, across all its pages,
-  raises `RowDataError` (`ReadTally.check`). Static verbs raise each error, and log it at DEBUG,
-  or at ERROR for a defect.
+  patience still covers (`rate_limits.read_patience`: 10 minutes of pauses for a read its
+  caller waits for, 90 s while the thread holds the update graph's lock, and
+  `MassiveConfig.max_outage` for a read no caller waits for), which becomes
+  `MassiveError("rate limited: ...")` with status 429 (the first 429 of each subscription has
+  already logged its INFO notice). One odd row never fails a read: a row the library cannot
+  read whole is withheld and reported as drift; a read whose every row of its symbols and
+  window was withheld, across all its pages, raises `RowDataError` (`ReadTally.check`). Static
+  verbs raise each error, and log it at DEBUG, or at ERROR for a defect.
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
   (`_ingest/host_decision.py`), single-flight: the first caller of a (class, family) makes the one
   REST request and every concurrent caller waits for its answer.
@@ -587,6 +588,9 @@ class RestReader:
             `"massive #1 call-7 rest"`: the session, the call, and the transport.
         exec_ctx: The session's execution context, which tells whether a read's thread holds
             the update graph's lock, and so how long the read waits out a pause.
+        max_outage: The session's `MassiveConfig.max_outage`, in seconds: how long a
+            background read waits out pauses.
+        background: True for a reader whose reads no caller waits for (`read_patience`).
         warnings: The session's once-per-session warnings (`SessionCore.warnings`), such as
             that of a bar stamped where Massive is not known to stamp one.
     """
@@ -601,6 +605,8 @@ class RestReader:
     threads: str
     exec_ctx: ExecutionContext
     warnings: BoundedLog
+    max_outage: float
+    background: bool
 
     def patience(self) -> Patience:
         """Return the patience of a read starting now (`rate_limits.read_patience`).
@@ -611,7 +617,7 @@ class RestReader:
         Returns:
             A new `Patience`, for every request of the read.
         """
-        return read_patience(self.exec_ctx)
+        return read_patience(self.exec_ctx, max_outage=self.max_outage, background=self.background)
 
     def rest_path(self, template: str) -> RestPath:
         """Return a generated REST path.
@@ -2307,7 +2313,7 @@ class RestEndpoints:
         self._core = core
         self._state = state
 
-    def _reader(self, role: str, policy: ResolvedPolicy) -> RestReader:
+    def _reader(self, role: str, policy: ResolvedPolicy, *, background: bool) -> RestReader:
         """Return a reader of the session's paths.
 
         Args:
@@ -2315,6 +2321,10 @@ class RestEndpoints:
                 threads are named `"<session prefix> <role> rest_<n>"`.
             policy: The policy its reads follow: the call's (`Request.on_error`), or the
                 session's (`SessionCore.policy`) for a read no call owns.
+            background: True when no caller waits for its reads, which then wait out
+                `MassiveConfig.max_outage` of pauses (`rate_limits.read_patience`): a
+                background read's, or one a stream's lookup makes. A read given a stop token
+                (`stop`) is a background read, and only one is given one.
 
         Returns:
             The reader.
@@ -2331,6 +2341,8 @@ class RestEndpoints:
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,
             core.warnings,
+            core.config.max_outage,
+            background,
         )
 
     def _static(self, spec: DatasetSpec, table: pa.Table) -> Table:
@@ -2378,7 +2390,7 @@ class RestEndpoints:
         known = self._state.hosts.known(key)
         if known is not None:
             return known  # a decision already made needs no patience (a Java call)
-        reader = self._reader("hosts", self._core.policy)
+        reader = self._reader("hosts", self._core.policy, background=False)
         # Taken before claiming the decision: a claim is ended only by the block that decides.
         patience = reader.patience()
         claim = self._state.hosts.claim_or_wait(
@@ -2443,7 +2455,7 @@ class RestEndpoints:
 
         A failed request raises the public error of `RestReader.rows`.
         """
-        return self._reader("schedules", self._core.policy).rows(
+        return self._reader("schedules", self._core.policy, background=True).rows(
             template, query, bucket=bucket, cancel=cancel
         )
 
@@ -2463,7 +2475,7 @@ class RestEndpoints:
 
         A failed lookup raises the `MassiveError` of `RestReader.crypto_pair`.
         """
-        return self._reader("crypto pairs", policy).crypto_pair(symbol)
+        return self._reader("crypto pairs", policy, background=True).crypto_pair(symbol)
 
     def _write_decision(
         self, asset_class: AssetClass, family: ChannelFamily, decision: HostDecision
@@ -2512,8 +2524,9 @@ class RestEndpoints:
             call: The call's id (`SessionCore.next_stream_id`), which names its fan-out
                 threads (`"massive #1 call-7 rest_0"`).
             stop: A background read's stop token (`SessionClients.read_stop`, a `Cancel`),
-                which ends the read's waits when set; None when only the session's close
-                should.
+                which ends the read's waits when set, for a read no caller waits for, which
+                then waits out `MassiveConfig.max_outage` of rate-limit pauses; None for a
+                read its caller waits for, which only the session's close stops.
 
         Returns:
             A static table in the dataset's schema.
@@ -2528,7 +2541,7 @@ class RestEndpoints:
         A parameter a path does not take raises the `ValueError` of `shared_params` before any
         request: every path is planned before the first one is read.
         """
-        reader = self._reader(f"call-{call}", request.on_error)
+        reader = self._reader(f"call-{call}", request.on_error, background=stop is not None)
         table, _ = reader.read_fetch(
             spec,
             request,
@@ -2550,7 +2563,7 @@ class RestEndpoints:
 
         A parameter a path does not take raises the `ValueError` of `shared_params`.
         """
-        self._reader("check", request.on_error).plan_fetch(
+        self._reader("check", request.on_error, background=False).plan_fetch(
             spec, request, request.static_symbols, split=_unsplit
         )
 
@@ -2577,14 +2590,14 @@ class RestEndpoints:
             request: The normalized arguments; its symbols are ignored.
             symbols: The canonical symbols to read.
             call: The call's id, which names the read's fan-out threads.
-            stop: A read's stop token, or None.
+            stop: A background read's stop token, or None, as `fetch` takes it.
 
         Returns:
             Each symbol, in the order given, with its outcome.
 
         Errors are those of `symbol_reads.read_rest_by_symbol`.
         """
-        reader = self._reader(f"call-{call}", request.on_error)
+        reader = self._reader(f"call-{call}", request.on_error, background=stop is not None)
         cancel = as_cancel(stop)
         units, failed = fetch_units(
             reader,
@@ -2635,7 +2648,7 @@ class RestEndpoints:
             request: The normalized arguments, with a value table and static symbols.
             values: The values to read, already checked.
             call: The call's id, which names the read's fan-out threads.
-            stop: A read's stop token, or None.
+            stop: A background read's stop token, or None, as `fetch` takes it.
 
         Returns:
             Each value, in the order given, with its outcome.
@@ -2643,7 +2656,7 @@ class RestEndpoints:
         Errors are those of `symbol_reads.read_rest_by_value`.
         """
         return read_rest_by_value(
-            self._reader(f"call-{call}", request.on_error),
+            self._reader(f"call-{call}", request.on_error, background=stop is not None),
             self._core,
             spec,
             request=request,
@@ -2699,7 +2712,7 @@ class RestEndpoints:
         differs from the request and for a symbol whose later page answers HTTP 404, its data
         cut short.
         """
-        reader = self._reader(f"call-{call}", request.on_error)
+        reader = self._reader(f"call-{call}", request.on_error, background=stop is not None)
         rest_path, calls, shape = _history_plan(
             reader,
             spec,
@@ -2750,7 +2763,11 @@ class RestEndpoints:
         A parameter the path does not take raises the `ValueError` of `shared_params`.
         """
         _history_plan(
-            self._reader("check", request.on_error), spec, request, window=window, split=_unsplit
+            self._reader("check", request.on_error, background=False),
+            spec,
+            request,
+            window=window,
+            split=_unsplit,
         )
 
     def history_by_symbol(
@@ -2777,14 +2794,14 @@ class RestEndpoints:
             window: The call's window.
             symbols: The canonical symbols to read.
             call: The call's id, which names the read's fan-out threads.
-            stop: A read's stop token, or None.
+            stop: A background read's stop token, or None, as `fetch` takes it.
 
         Returns:
             Each symbol, in the order given, with its outcome.
 
         Errors are those of `symbol_reads.read_rest_by_symbol`.
         """
-        reader = self._reader(f"call-{call}", request.on_error)
+        reader = self._reader(f"call-{call}", request.on_error, background=stop is not None)
         cancel = as_cancel(stop)
         units, failed = history_units(
             reader, spec, request, window=window, symbols=symbols, cancel=cancel
@@ -2842,7 +2859,13 @@ class RestEndpoints:
         takes fails here (`RestReader.check_parameters`), and the symbols of a path that lacks
         one are left out of each cycle and listed in the table's `Error` (`read_cycle`).
         """
-        reader = self._reader("poll", request.on_error)
+        reader = self._reader(
+            # Each cycle keeps the patience of a waited read: the poll's own watch fails a
+            # cycle that has received nothing for max_outage (`Poller.check_running`).
+            "poll",
+            request.on_error,
+            background=False,
+        )
         if isinstance(request.symbols, SymbolTable) or request.value_table is not None:
             reader.check_parameters(spec, request)
             # The table's symbols choose among every fetch path at each cycle.

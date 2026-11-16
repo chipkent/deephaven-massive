@@ -309,9 +309,10 @@ class MassiveError(Exception):
         an `EntitlementError`, a `SessionClosedError`, or a bug.
 
         Before it raises, the library has retried a server failure or a failed connection a few
-        times. It raises a rate limit as soon as the read would spend more than 10 minutes in
-        all waiting out rate limits, or 90 seconds for a console command with `wait=True`. Wait
-        before you call again.
+        times. It raises a rate limit as soon as a read with `wait=True` would spend more than
+        10 minutes in all waiting out rate limits, or 90 seconds inside a console command. A
+        read in the background, and each read of a watchlist, waits out `max_outage` in
+        `MassiveConfig` instead. Wait before you call again.
         """
         return self._is_retryable
 

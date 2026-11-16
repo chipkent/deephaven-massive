@@ -16,7 +16,6 @@ from deephaven_massive._enums import Subscription
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.rate_limits import (
     BUCKETS,
-    CONSOLE_ADVICE,
     CONSOLE_PATIENCE,
     LEARN_ONLY,
     OTHER,
@@ -27,6 +26,7 @@ from deephaven_massive._ingest.rate_limits import (
     ReadShape,
     announce,
     bucket_of,
+    console_advice,
     rate_limit_rows,
     read_patience,
 )
@@ -480,27 +480,43 @@ def test_the_default_registry_names_the_other_buckets_requests() -> None:
     lease.release()
 
 
-def test_a_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_the_lock(
+def test_a_waited_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_the_lock(
     dh_exec_ctx: ExecutionContext,
 ) -> None:
-    patience = read_patience(dh_exec_ctx)
+    patience = read_patience(dh_exec_ctx, max_outage=300.0, background=False)
     assert (patience.seconds, patience.advice) == (READ_PATIENCE, "")
     assert READ_PATIENCE == 600.0
     # A console command holds the update graph's exclusive lock: the read gives up sooner, and
     # its give-up error says how to read without the lock.
     with exclusive_lock(dh_exec_ctx.update_graph):
-        console = read_patience(dh_exec_ctx)
+        console = read_patience(dh_exec_ctx, max_outage=300.0, background=False)
     assert console.seconds == CONSOLE_PATIENCE == 90.0
-    assert (
-        console.advice
-        == CONSOLE_ADVICE
-        == (
-            "this read ran inside a Deephaven console command, which waits out only 90 s of "
-            "pauses; leave out wait=True to let fetch() or history() read in the background, "
-            "which waits out 10 min"
-        )
+    assert console.advice == (
+        "this read ran inside a Deephaven console command, which waits out only 90 s of "
+        "pauses; leave out wait=True to let fetch() or history() read in the background, "
+        "which waits out MassiveConfig.max_outage (300 s)"
     )
-    assert read_patience(dh_exec_ctx) is not read_patience(dh_exec_ctx)  # one per read
+
+
+def test_a_read_no_caller_waits_for_waits_out_max_outage(dh_exec_ctx: ExecutionContext) -> None:
+    patience = read_patience(dh_exec_ctx, max_outage=300.0, background=True)
+    assert (patience.seconds, patience.advice) == (300.0, "")
+    assert read_patience(dh_exec_ctx, max_outage=0.0, background=True).seconds == 0.0
+
+
+@pytest.mark.parametrize("max_outage", [0.0, 90.0])
+def test_the_console_advises_no_background_read_that_would_wait_no_longer(
+    dh_exec_ctx: ExecutionContext, max_outage: float
+) -> None:
+    assert console_advice(max_outage) == ""
+    with exclusive_lock(dh_exec_ctx.update_graph):
+        console = read_patience(dh_exec_ctx, max_outage=max_outage, background=False)
+    assert (console.seconds, console.advice) == (CONSOLE_PATIENCE, "")
+
+
+def test_each_read_gets_a_patience_of_its_own(dh_exec_ctx: ExecutionContext) -> None:
+    first = read_patience(dh_exec_ctx, max_outage=300.0, background=False)
+    assert first is not read_patience(dh_exec_ctx, max_outage=300.0, background=False)
 
 
 def test_the_pace_warning_counts_each_slot_for_61_seconds(
