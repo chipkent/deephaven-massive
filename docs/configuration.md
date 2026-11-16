@@ -18,9 +18,9 @@ of three forms:
   [Values and defaults](#settings-table) shows it.
 - A list, in brackets: `[stocks, options]`, or `[]` for none. `delayed_subscriptions` is the
   only list.
-- A mapping, one `key: value` line per entry, indented under the setting's name.
-  `websocket_hosts` maps asset classes to hostnames, and `rest_requests_per_minute` maps
-  subscriptions to whole numbers.
+- A mapping, one `key: value` line per entry, indented under the setting's name, or in
+  braces on one line: `{stocks: 5}`, or `{}` for none. `websocket_hosts` maps asset classes to
+  hostnames, and `rest_requests_per_minute` maps subscriptions to whole numbers.
 
 This file uses all three forms:
 
@@ -79,7 +79,7 @@ too, `HTTPS_PROXY`, and so are your company's certificate authorities and the lo
 
 Most files start with your plans: `delayed_subscriptions` and `rest_requests_per_minute`
 match the session to what you've bought. A file that leaves both out treats every
-subscription as real-time, with no request limit until Massive refuses a request.
+subscription as real-time. Its requests go at full speed until Massive refuses one.
 
 Each setting is a name in the settings file and an argument of `dm.MassiveConfig`. In a file,
 write the values shown here. In code, pass the matching Python value: `{dm.Subscription.STOCKS}`
@@ -192,7 +192,7 @@ A key inside the `websocket_hosts` mapping is named by its full path: `websocket
 | Setting | What it's for | Values | Default |
 |---|---|---|---|
 | `delayed_subscriptions` | Lists the subscriptions whose plan gets Massive's delayed data, as Stocks Starter and Developer do, so their streams and snapshots work. | A list of any of `stocks`, `options`, `indices`, or `futures`, such as `[stocks]`, or `[]` for none | `[]` |
-| `rest_requests_per_minute` | Sets how many REST requests a minute Massive allows each subscription, so its requests keep to that pace from the first one. | A mapping of any of `stocks`, `options`, `indices`, `currencies`, or `futures` to a positive whole number, such as `{options: 5}`, or `{}` for none | `{}` |
+| `rest_requests_per_minute` | Gives each subscription's REST request limit on your plan, so its requests keep to it from the first one. | A mapping of any of `stocks`, `options`, `indices`, `currencies`, or `futures` to a positive whole number, such as `{options: 5}`, or `{}` for none | `{}` |
 | `max_outage` | Sets how many seconds a stream or `poll()` table may stay cut off from Massive before it fails. | A number of seconds, `0` or more, such as `600` | `300` |
 | `flush_interval` | Sets how many seconds pass between the batches of streamed rows added to live tables. | A positive number of seconds, such as `0.1` | `0.05` |
 | `flat_file_symbol_threshold` | Sets how many symbols in a list make a `history()` call read Massive's flat files instead of a request per symbol, when both can serve it. | A positive whole number, such as `100` | `50` |
@@ -237,15 +237,15 @@ Leave a delayed subscription out, and a stream of its current data raises
 
 #### rest_requests_per_minute
 
-List each subscription Massive limits, with its limit on your plan, such as 5 for
-`stocks`. Leave out a subscription Massive doesn't limit.
+List each subscription Massive limits, with its limit in requests a minute, such as
+5 for `stocks`. Leave out a subscription Massive doesn't limit.
 
-A limited subscription you leave out runs at full speed until Massive refuses one
-of its requests for the rate limit (HTTP 429, "exceeded the maximum requests per
-minute"). From then on, it keeps to the number of its requests Massive answered in
-the minute of that refusal, which the log gives; a number you list wins over it.
-The limit is shared by every session in this server that uses your key.
-`m.rate_limits()` shows each subscription's pace.
+Leave a limited subscription out, and the session learns its limit from Massive's
+first refusal, after a pause. `m.rate_limits()` shows the limit a session learned:
+copy it here to skip the pause next time. A limit you list wins over a learned one.
+
+Every session in this server that uses your key shares one limit per subscription.
+When sessions list different limits, the lowest applies.
 
 #### max_outage
 

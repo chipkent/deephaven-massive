@@ -553,7 +553,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
     def rate_limits(self) -> Table:
         """Return a live table of Massive's REST request limits, one row per subscription.
 
-        Massive limits each subscription's REST requests per minute, at a number your plan sets.
+        Massive may limit each subscription's REST requests per minute, at a number your plan
+        sets.
         The limit counts every request your account makes, from every key and session. Each row
         is one subscription, or `other` for the datasets Massive assigns to none. Sessions in this
         server that use the same key share these rows. Each call returns a new table, which keeps
@@ -567,8 +568,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `State`: `READY`; `PACED`, to fit a known limit; or `PAUSED` until `PausedUntil`,
               after Massive refused a request for coming too fast.
             - `RequestsPerMinute`: the limit the library keeps to; null until one is known.
-            - `LimitSource`: `DECLARED` in `MassiveConfig.rest_requests_per_minute`, or
-              `LEARNED`: the requests Massive answered in the minute before it refused one.
+            - `LimitSource`: `DECLARED`, from `MassiveConfig.rest_requests_per_minute`, or
+              `LEARNED`, from the requests Massive answered in the minute it refused one.
             - `InFlight`, `Waiting`, `RecentRequests` (in the last 61 seconds), `Attempts`, and
               `Refusals`.
             - `PausedUntil`, `LastRefusal`, and `UpdatedAt`.

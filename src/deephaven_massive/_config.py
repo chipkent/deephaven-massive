@@ -228,19 +228,18 @@ class MassiveConfig:
             `EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
             `poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
             `history()` and other past data don't depend on this setting.
-        rest_requests_per_minute: Sets how many REST requests a minute Massive allows each
-            subscription, so its requests keep to that pace from the first one. Defaults to an
-            empty mapping.
+        rest_requests_per_minute: Gives each subscription's REST request limit on your plan,
+            so its requests keep to it from the first one. Defaults to an empty mapping.
 
-            List each subscription Massive limits, with its limit on your plan, such as 5 for
-            `dm.Subscription.STOCKS`. Leave out a subscription Massive doesn't limit.
+            List each subscription Massive limits, with its limit in requests a minute, such as
+            5 for `dm.Subscription.STOCKS`. Leave out a subscription Massive doesn't limit.
 
-            A limited subscription you leave out runs at full speed until Massive refuses one
-            of its requests for the rate limit (HTTP 429, "exceeded the maximum requests per
-            minute"). From then on, it keeps to the number of its requests Massive answered in
-            the minute of that refusal, which the log gives; a number you list wins over it.
-            The limit is shared by every session in this server that uses your key.
-            `m.rate_limits()` shows each subscription's pace.
+            Leave a limited subscription out, and the session learns its limit from Massive's
+            first refusal, after a pause. `m.rate_limits()` shows the limit a session learned:
+            copy it here to skip the pause next time. A limit you list wins over a learned one.
+
+            Every session in this server that uses your key shares one limit per subscription.
+            When sessions list different limits, the lowest applies.
         websocket_hosts: Streams an asset class from a WebSocket host you name instead of the one
             the library picks, such as `business.massive.com` for index values. Defaults to an empty
             mapping.

@@ -291,12 +291,12 @@ class RateLimitState(StrEnum):
 
 
 class LimitSource(StrEnum):
-    """Why a bucket of `m.rate_limits()` is paced: the `LimitSource` column.
+    """Why a row of `m.rate_limits()` is paced: the `LimitSource` column.
 
-    `DECLARED`: a session that shares the bucket gives the subscription's limit in
+    `DECLARED`: a session that shares the row gives the subscription's limit in
     `MassiveConfig.rest_requests_per_minute`. `LEARNED`: Massive refused one of its requests for
     exceeding the maximum requests per minute, and the limit is the number of its requests
-    Massive answered in the minute before.
+    Massive answered in the minute of that refusal.
     """
 
     DECLARED = "DECLARED"
