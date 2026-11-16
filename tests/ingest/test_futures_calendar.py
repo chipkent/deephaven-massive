@@ -1038,3 +1038,30 @@ def test_a_failed_reload_for_a_row_no_session_holds_retries_on_time(
     correct(calendar, [row])
     idle(calendar)
     assert fetch.paths().count(SCHEDULES_PATH) == asked + 1
+
+
+@pytest.mark.parametrize("later", ["unlisted", "outage"])
+def test_a_later_answer_replaces_an_old_refusal(
+    calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock, *, later: str
+) -> None:
+    refusal = EntitlementError("HTTP 403", status=403)
+    fetch.answers[SNAPSHOT_PATH] = []
+    fetch.answers[CONTRACTS_PATH] = refusal
+    state(calendar, "GONEZ6")
+    clock.now += RETRY_DELAYS[0]
+    assert state(calendar, "GONEZ6").readiness is Readiness.REFUSED
+    fetch.answers[CONTRACTS_PATH] = (
+        [] if later == "unlisted" else MassiveError("HTTP 503", status=503)
+    )
+    clock.now += SPACING
+    assert state(calendar, "GONEZ6").readiness is Readiness.WAITING
+
+
+def test_a_new_ticker_of_a_product_whose_schedule_failed_waits_for_its_retry(
+    calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock
+) -> None:
+    fetch.answers[SCHEDULES_PATH] = MassiveError("HTTP 500", status=500)
+    watched(calendar, "ESM4")
+    asked = fetch.paths().count(SCHEDULES_PATH)
+    watched(calendar, "CLZ6-CLF7")  # also ES: its schedule's retry is not due yet
+    assert fetch.paths().count(SCHEDULES_PATH) == asked

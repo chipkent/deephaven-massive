@@ -1642,6 +1642,7 @@ class Flusher:
             return
         self._counted_symbols(plan, converted, readers=readers)
         if self._held is not None and plan.symbol_field is not None:
+            self._held.prune(plan, functools.partial(_received, readers))
             settled = self._held.settle(
                 plan, converted.batch, generation=batch.generation, times=plan.times
             )
@@ -1741,6 +1742,7 @@ class Flusher:
             if plan in settled:
                 continue
             try:
+                held.prune(plan, functools.partial(_received, readers))
                 result = held.settle(plan, None, generation=0, times=plan.times)
                 readers = self._apply_settled(plan, result, readers, held=held)
                 if readers:
@@ -2265,6 +2267,19 @@ class Flusher:
             core.drift.report(dataset, Transport.WS, drift, where=where)
         for core, sink in live:
             core.record_stream_drift(sink.stream_id, Transport.WS, drift)
+
+
+def _received(readers: list[StreamSink], ticker: str) -> bool:
+    """Tell whether some stream of a dataset still receives a ticker.
+
+    Args:
+        readers: The dataset's streams on the channel.
+        ticker: The ticker.
+
+    Returns:
+        True when a `dm.ALL` stream reads the dataset, or a symbol stream holds the ticker.
+    """
+    return any(sink.receives_all or sink.holds(ticker) for sink in readers)
 
 
 def _defect(plan: ChannelPlan, what: str) -> MassiveError:

@@ -275,6 +275,25 @@ class HeldRows(Generic[_K]):
         for key in [key for key in self._held if key not in live]:
             self.drop(key, why="no stream reads them any more")
 
+    def prune(self, key: _K, wanted: Callable[[str], bool]) -> None:
+        """Drop the held rows of a dataset's tickers that no stream receives any more.
+
+        A watchlist that removes a ticker while its rows wait leaves them to no one: they are
+        dropped, and logged at INFO, rather than looked up and counted against the limit.
+
+        Args:
+            key: The dataset's plan.
+            wanted: Whether some stream of the dataset still receives a ticker.
+        """
+        held = self._held.get(key, {})
+        gone = [ticker for ticker in held if not wanted(ticker)]
+        for ticker in gone:
+            logger.info(
+                "%d held futures rows of %s are dropped: no stream receives it any more",
+                held.pop(ticker).rows,
+                ticker,
+            )
+
     def drop(self, key: _K, *, why: str) -> None:
         """Drop every held row of one dataset, and log how many at INFO.
 

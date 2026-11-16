@@ -819,18 +819,14 @@ class FuturesCalendar:
             found: The products of the tickers a round found.
 
         Returns:
-            Those neither loaded nor queued: this round loads them.
+            Those not loaded, not queued, and due: this round loads them. A product whose
+            load failed waits for its retry, as any lookup does.
         """
+        now = self._clock()
+        wanted: set[str] = set()
         with self._lock:
-            wanted = {
-                p
-                for p in found
-                if p not in self._sessions
-                and (p not in self._schedules or not self._schedules[p].queued)
-            }
-            for product in wanted:
-                lookup = self._schedules.setdefault(product, _Lookup())
-                lookup.queued = True
+            for product in found - self._sessions.keys():
+                self._due(self._schedules, product, now=now, asks=wanted)
         return wanted
 
     def _load_tickers(self, tickers: set[str], answers: _Answers) -> None:
@@ -1133,6 +1129,7 @@ def _unlisted(lookup: _Lookup, refusal: str, now: float) -> None:
     lookup.failing_since = None
     lookup.error = refusal
     lookup.refusals = 0
+    lookup.refused = None  # Massive answered: an older refusal no longer holds
     lookup.attempts += 1
     discarded = now - lookup.unlisted_since >= UNLISTED_AFTER.total_seconds()
     lookup.due = now + (
@@ -1157,6 +1154,7 @@ def _failed(lookup: _Lookup, error: MassiveError, now: float) -> bool:
         if first:
             lookup.failing_since = now
         lookup.refusals = 0
+        lookup.refused = None  # the latest answer is an outage, not a refusal
         lookup.attempts += 1
         lookup.due = now + _retry_delay(lookup.attempts)
         return first

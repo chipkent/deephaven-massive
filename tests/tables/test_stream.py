@@ -1113,6 +1113,14 @@ def test_held_rows_of_two_sockets_publish_each_with_its_own(futures_flush: Futur
     assert flush.sinks[0].rows_generation == 2
 
 
+def test_a_ticker_a_watchlist_removes_drops_its_held_rows(futures_flush: FuturesFlush) -> None:
+    flush = futures_flush
+    flush.send("NQM5")
+    flush.sinks[0].set_symbols(frozenset({"GCM5"}))  # its watchlist removed NQM5
+    flush.send("ESM5")
+    assert flush.held.rows_of(flush.plan) == 1  # only ESM5's, which stream 2 receives
+
+
 def test_held_rows_never_count_as_dropped(futures_flush: FuturesFlush) -> None:
     # Rows that only wait are read whole: a long wait never looks like a format change.
     flush = futures_flush

@@ -579,3 +579,15 @@ def test_the_held_bytes_count_each_rows_held_time(held: HeldRows[str]) -> None:
     assert held.total_bytes == (
         part.rows.get_total_buffer_size() + part.held_at.get_total_buffer_size()
     )
+
+
+def test_a_ticker_no_stream_receives_drops_its_held_rows(
+    held: HeldRows[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    settle(held, batch(("ESZ6", None, 1.0), ("NQZ6", None, 2.0)))
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.held_rows"):
+        held.prune("trades", lambda ticker: ticker == "NQZ6")
+    assert held.rows_of("trades") == 1
+    assert caplog.messages == [
+        "1 held futures rows of ESZ6 are dropped: no stream receives it any more"
+    ]
