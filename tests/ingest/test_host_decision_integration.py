@@ -111,6 +111,7 @@ def test_index_values_stream_on_the_resolved_host(
 def test_minute_bars_of_an_unlabelled_key_stream_from_the_real_time_host(
     live_session: dm.MassiveSession,
     *,
+    live_config: dm.MassiveConfig,
     recency_label: RecencyLabel,
     wait_acked: WaitAcked,
     table_rows: TableRows,
@@ -127,8 +128,18 @@ def test_minute_bars_of_an_unlabelled_key_stream_from_the_real_time_host(
     acknowledgement. Passes when the stocks connection is on `socket.massive.com` and Massive
     acknowledged the topic there, which it does whether or not the market is open; a refusal
     there means such a key's TICK host is another one, which the user pins with
-    `MassiveConfig.websocket_hosts`.
+    `MassiveConfig.websocket_hosts`. Skips first when the owner's settings choose the stocks
+    host themselves (stocks listed as delayed, or a stocks host pinned), since the question is
+    the library's choice without them.
     """
+    if (
+        dm.Subscription.STOCKS in live_config.delayed_subscriptions
+        or dm.AssetClass.STOCKS in live_config.websocket_hosts
+    ):
+        pytest.skip(
+            "the settings choose the stocks host (delayed_subscriptions or websocket_hosts); "
+            "the question is the host the library picks without them"
+        )
     answer = recency_label(dm.Subscription.STOCKS)
     if not answer.unlabelled:
         pytest.skip(
