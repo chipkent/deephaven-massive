@@ -310,7 +310,7 @@ class MassiveError(Exception):
 
         Before it raises, the library has retried a server failure or a failed connection a few
         times. Wait before you call again. A read that Massive keeps refusing raises a rate-limit
-        error before its waits would pass:
+        error when waiting out the refusals would take longer than:
 
         - 90 seconds for a `wait=True` call inside a console command;
         - 10 minutes for any other `wait=True` call;

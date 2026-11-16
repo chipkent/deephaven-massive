@@ -283,8 +283,7 @@ limit is shared by every session in this server that uses your key.
 
 #### max_outage
 
-Set `0` to fail at the first outage. Set a larger value to keep tables through
-longer ones. Each kind of table counts its own time:
+Set `0` to fail at the first outage. Each kind of table counts its own time:
 
 - A stream counts the time its connection is down.
 - A `poll()` table counts the time its polls keep failing or stop arriving.
