@@ -472,7 +472,11 @@ def _filters(
     reserved = {
         filter_key(form): arguments.get(name, name) for name in typed for form in param_family(name)
     }
-    library = {filter_key(form) for name in spec.fixed_params for form in param_family(name)}
+    library = {
+        filter_key(form)
+        for name in (*spec.fixed_params, *spec.library_params)
+        for form in param_family(name)
+    }
     symbol_keys = (
         set()
         if spec.symbol_param is None

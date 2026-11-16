@@ -29,6 +29,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+from deephaven_massive._datasets.filters import filter_keys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
@@ -553,9 +554,11 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
     }
     assert snapshots(dm.ALL)._request.symbols is dm.ALL
     assert dict(snapshots(dm.ALL)._request.params) == {"type": "options"}
-    with pytest.raises(ValueError, match=r"^type is set through its own argument"):
+    # The library sets `type`, for dm.ALL only, so the page lists no `type` filter key.
+    assert "type" not in filter_keys(CATALOG, options.SNAPSHOTS)
+    with pytest.raises(ValueError, match=r"^the library sets type itself; it is not a filter$"):
         snapshots(dm.ALL, filters={"type": "stocks"})
-    with pytest.raises(ValueError, match=r"^type is set through its own argument"):
+    with pytest.raises(ValueError, match=r"^the library sets type itself; it is not a filter$"):
         snapshots([CONTRACT], filters={"type": "options"})
     with pytest.raises(ValueError, match=r"^ticker_any_of is set through symbols=, not"):
         snapshots(dm.ALL, filters={"ticker_any_of": [CONTRACT]})

@@ -233,6 +233,20 @@ def test_a_refused_wildcard_keeps_the_explicit_topics() -> None:
     assert loop.subs.counts() == (1, 1, 0, 0)
 
 
+@pytest.mark.parametrize("end", ["", ".", ", try later"])
+def test_a_refusal_names_a_futures_combo_topic_with_spaces(end: str) -> None:
+    # The protocol reads words, so it names only the combo's first word, `T.CL:BF`; the topic
+    # held whole in the message is the one refused, and a shorter combo it contains is not.
+    combo, shorter = "T.CL:BF Q6-U6-V6", "T.CL:BF Q6-U6"
+    loop = make_loop()
+    loop.subs.add([combo, shorter, "T.ESZ5"])
+    loop.subs.opened(1)
+    loop.sender.take()
+    message = f"not authorized: {combo}{end}"
+    loop.subs.status(refusal("T.CL:BF", message=message))
+    assert loop.refused == [((combo,), message)]
+
+
 def test_removing_a_wildcard_waits_for_the_explicit_topics() -> None:
     loop = make_loop()
     loop.subs.add(["T.*", "T.AAPL", "T.MSFT", "T.IBM"])

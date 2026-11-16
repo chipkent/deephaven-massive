@@ -16,6 +16,7 @@ timer queue.
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
@@ -107,6 +108,21 @@ def stream_topics(
     A crypto symbol not in `pairs` raises the `KeyError` of `ws_symbol`.
     """
     return frozenset(f"{channel}.{ws_symbol(asset_class, s, pairs)}" for s in symbols)
+
+
+def _names(message: str, topic: str) -> bool:
+    """Return whether a server message names a topic whole, not as part of a longer one.
+
+    Args:
+        message: The server's message.
+        topic: The topic, such as `T.CL:BF Q6-U6`, which `T.CL:BF Q6-U6-V6` does not name.
+
+    Returns:
+        True when the topic appears with no ticker character (a letter, a digit, `.`, `:`,
+        or `-`) on either side; a sentence's closing `.` after it still counts.
+    """
+    before, after = r"[A-Za-z0-9:.\-]", r"[A-Za-z0-9:\-]|\.\w"
+    return re.search(rf"(?<!{before}){re.escape(topic)}(?!{after})", message) is not None
 
 
 class Sender(Protocol):
@@ -492,11 +508,16 @@ class Subscriptions:
         and a stream with rows still fails at `max_outage` after a reconnect, so nothing stale
         goes unmarked.
 
+        A wanted topic with a space, such as a futures combo's `T.CL:BF Q6-U6-V6`, is never one
+        word of the message, so it counts as named when the message holds it whole.
+
         Args:
             status: A `REFUSED` status.
         """
-        if status.topics:
-            self._refuse(tuple(t for t in status.topics if t in self._refs), status.message)
+        spaced = [t for t in sorted(self._refs) if " " in t and _names(status.message, t)]
+        if status.topics or spaced:
+            named = [t for t in status.topics if t in self._refs]
+            self._refuse(tuple(dict.fromkeys([*named, *spaced])), status.message)
             return
         awaiting = len(self._pending) + len(self._noack) + len(self._resend)
         if len(self._pending) != 1 or awaiting != 1:
