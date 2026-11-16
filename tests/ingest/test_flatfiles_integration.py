@@ -217,10 +217,11 @@ def test_auto_minute_bars_through_today_match_rest(
     fill warning. Today's bars keep arriving between the two reads, and Massive may serve the
     key's recent bars late, so only the minutes that start before the latest minute both reads
     hold are compared.
-    Passes when both hold the same minutes (`TimestampStart`) per day, and no minute twice:
-    no day missing or doubled where the sources meet. Skips on a day that is not a trading
-    day, when there is nothing to fill, and when the previous day's file is not published
-    yet, when `AUTO` reads REST for both days and the test would compare REST with REST.
+    Passes when both reads hold the same days, the same minutes (`TimestampStart`) per day
+    before that minute, and no minute twice: no day missing or doubled where the sources meet.
+    Skips on a day that is not a trading day, when there is nothing to fill, and when the
+    previous day's file is not published yet, when `AUTO` reads REST for both days and the test
+    would compare REST with REST.
     """
     today = calendar.today()
     if not calendar.is_trading_day(today):
@@ -244,6 +245,9 @@ def test_auto_minute_bars_through_today_match_rest(
     if any(previous_trading_day.isoformat() in fill for fill in fills):
         pytest.skip(f"not exercised: the {previous_trading_day} file is not published yet")
     auto, rest = read["auto"], read["rest"]
+    auto_days = sorted({day for day, _ in whole["auto"]})
+    rest_days = sorted({day for day, _ in whole["rest"]})
+    assert auto_days == rest_days, f"AUTO read days {auto_days}, REST read {rest_days}"
     assert len(set(auto)) == len(auto), "AUTO holds a minute twice"
     assert auto == rest, (
         f"AUTO and REST differ: {len(set(auto) - set(rest))} minutes only in AUTO, "
