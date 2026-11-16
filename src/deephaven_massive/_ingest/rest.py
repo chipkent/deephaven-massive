@@ -1011,8 +1011,9 @@ class RestReader:
 
         Returns:
             The call's rows and request count; no rows for a symbol with no data, logged at
-            DEBUG and named in `missing`: a call planned with `Call.no_data`, which sends no
-            request, or a per-symbol call whose first request Massive answered with HTTP 404.
+            DEBUG and named in `missing`: a call planned with `Call.unsplit` for a pair Massive
+            has no data for, or a per-symbol call whose first request Massive answered with
+            HTTP 404. Any `Call.unsplit` sends no request.
             `read` warns once per read for the symbols new to the session. Each page logs one
             DEBUG line with its rows after each step (`_page_rows`).
 
@@ -1028,11 +1029,14 @@ class RestReader:
         another adjustment basis the `MassiveError` of `_check_adjusted`, and delayed data the
         `EntitlementError` of `_check_recency`.
         """
-        if call.no_data is not None:
+        if call.unsplit is not None:
+            why = call.unsplit.why
             logger.debug(
-                "%s: %s has no data (%s); no request is sent", spec.name, call.symbol, call.no_data
+                "%s: %s has no split (%s); no request is sent", spec.name, call.symbol, why
             )
-            return _Outcome((), 0, missing=f"{call.symbol} ({call.no_data})")
+            # A pair whose currencies cannot be read was reported by the lookup, not as no data.
+            missing = f"{call.symbol} ({why})" if call.unsplit.no_data else None
+            return _Outcome((), 0, missing=missing)
         kept: list[pa.RecordBatch] = []
         requests = 0
         template = converter.rest_path.template
@@ -1823,8 +1827,10 @@ class RestReader:
         `ValueError`) is left out with its symbols, and the cycle reads every other path, as
         `MassiveConfig.unavailable_symbols` says (`_unavailable`): under `LOG` each symbol logs
         one WARNING per session, naming the path and the parameter, and DEBUG on later cycles.
-        A crypto pair Massive's crypto ticker list gives no split for is planned as a call with
-        no data (`Call.no_data`), which the read reports as it reports HTTP 404.
+        A crypto pair Massive's crypto ticker list gives no split for is planned as a call that
+        is never sent (`Call.unsplit`): the read reports a pair Massive has no data for as it
+        reports HTTP 404, and the cycle leaves out one whose currencies cannot be read, named
+        with why.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -1853,6 +1859,11 @@ class RestReader:
                 reason = str(error).removeprefix(f"{spec.name}: ")
             else:
                 planned.append(path)
+                left_out.extend(
+                    f"{call.symbol} ({call.unsplit.why})"
+                    for call in path[1]
+                    if call.unsplit is not None and not call.unsplit.no_data
+                )
                 continue
             # Only a reactive table's symbols can meet a refusing path here: static symbols
             # were planned when the table was made, so `own` is a tuple.
@@ -2848,7 +2859,7 @@ def _buckets(spec: DatasetSpec, planned: Sequence[tuple[RestPath, list[Call]]]) 
         call_bucket(spec, path.template, call)
         for path, calls in planned
         for call in calls
-        if call.no_data is None  # never sent
+        if call.unsplit is None  # never sent
     ]
 
 

@@ -19,8 +19,8 @@ arguments (`Request`), and the generated REST paths into `Call`s, one per reques
 Everything here is pure: it reads the catalog's generated paths and the call's arguments, makes
 no request, starts no thread, and keeps no state, so it is tested without a fake server. A
 crypto pair is split by the caller's `CryptoSplit` (the REST transport reads Massive's crypto
-ticker list), never by a guess; a pair it gives no split for is planned as a call with no data
-(`Call.no_data`), which is never sent. The REST transport (`rest.py`) runs the calls this module
+ticker list), never by a guess; a pair it gives no split for is planned as a call that is
+never sent (`Call.unsplit`). The REST transport (`rest.py`) runs the calls this module
 plans.
 """
 
@@ -104,16 +104,16 @@ class Call:
         symbol: The one symbol of a per-symbol request: it fills the keys the dataset takes
             from the request (`KeySpec.from_request`), and HTTP 404 for it drops the symbol.
             None for a request that is not per symbol.
-        no_data: Why the call's symbol is known to have no data before any request, such as
-            a crypto pair Massive's crypto ticker list does not hold; the call is then never
-            sent, and its symbol is reported as Massive's HTTP 404 would be. None for a call
-            to send.
+        unsplit: Why the call's crypto pair has no split, known before any request; the call
+            is then never sent. A pair Massive has no data for is reported as Massive's HTTP
+            404 would be; one whose currencies cannot be read is only left out, as the lookup
+            reported it. None for a call to send.
     """
 
     path_params: Mapping[str, object]
     query: Mapping[str, object]
     symbol: str | None = None
-    no_data: str | None = None
+    unsplit: Unsplit | None = None
 
 
 def _date_bound(name: str, value: date, *, upper: bool) -> date:
@@ -331,7 +331,7 @@ def _symbol_parts(
     slot: str | None,
     pair: bool = False,
     split: CryptoSplit,
-) -> list[tuple[str | None, dict[str, object], dict[str, object], str | None]]:
+) -> list[tuple[str | None, dict[str, object], dict[str, object], Unsplit | None]]:
     """Return how a request's symbols spread over requests of one path.
 
     A path that takes the symbol itself (a key the dataset fills from the request, such as
@@ -354,11 +354,10 @@ def _symbol_parts(
         split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
-        `(symbol, path parameters, query parameters, no data)` per request: `symbol` is set for
-        a per-symbol request, and `no data` says why Massive has no data for a pair `split`
-        gives no currencies for (`Call.no_data`). A pair whose currencies `split` cannot read
-        gets no request at all: the lookup has reported it. Empty for an empty symbol tuple (a
-        reactive table with no valid row).
+        `(symbol, path parameters, query parameters, unsplit)` per request: `symbol` is set
+        for a per-symbol request, and `unsplit` says why a pair `split` gives no currencies for
+        has none (`Call.unsplit`). Empty for an empty symbol tuple (a reactive table with no
+        valid row).
 
     Raises:
         ValueError: If the path needs a symbol per request and the symbols are `dm.ALL` or
@@ -393,11 +392,10 @@ def _symbol_parts(
             for i in range(0, len(explicit), size)
         ]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
-    requests = [
+    return [
         _symbol_request(spec, symbol, rest_path, targets=targets, param=param, split=split)
         for symbol in explicit
     ]
-    return [request for request in requests if request is not None]
 
 
 def _symbol_request(
@@ -408,14 +406,14 @@ def _symbol_request(
     targets: Sequence[str],
     param: str | None,
     split: CryptoSplit,
-) -> tuple[str, dict[str, object], dict[str, object], str | None] | None:
+) -> tuple[str, dict[str, object], dict[str, object], Unsplit | None]:
     """Return the parameters of one symbol's request.
 
     The symbol fills each target: a `{from}/{to}` pair takes its two currencies (`_pair`), a
     path placeholder or a query parameter the symbol itself. The symbol parameter, when the
     path has one, takes the symbol too: as a one-symbol tuple when it takes a list. A crypto
-    pair Massive has no data for leaves `{from}/{to}` unfilled and gets why, so the call is
-    never sent; a pair whose currencies `split` cannot read gets no request.
+    pair `split` gives no currencies for leaves `{from}/{to}` unfilled and gets why, so the
+    call is never sent.
 
     Args:
         spec: The dataset, for messages.
@@ -427,29 +425,27 @@ def _symbol_request(
         split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
-        `(symbol, path parameters, query parameters, no data)`, with why Massive has no data
-        for the symbol or None; None for a pair whose currencies cannot be read.
+        `(symbol, path parameters, query parameters, unsplit)`, with why the pair has no
+        split, or None.
     """
     params = {p.name: p for p in rest_path.params}
     path: dict[str, object] = {}
     query: dict[str, object] = {}
-    no_data = None
+    unsplit = None
     for name in targets:
         if name == "from" and "to" in params:
             currencies = _pair(spec, symbol, split)
             if isinstance(currencies, tuple):
                 path["from"], path["to"] = currencies
-            elif currencies.no_data:
-                no_data = currencies.why
             else:
-                return None
+                unsplit = currencies
         elif params[name].in_path:
             path[name] = symbol
         else:
             query[name] = symbol
     if param is not None:
         query[param] = (symbol,) if params[param].kind is ParamKind.LIST else symbol
-    return symbol, path, query, no_data
+    return symbol, path, query, unsplit
 
 
 def _caller_params(
@@ -705,12 +701,12 @@ def plan_calls(
     slot = empty[0] if len(empty) == 1 else None
     calls = []
     parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair, split=split)
-    for symbol, own_path, own_query, no_data in parts:
+    for symbol, own_path, own_query, unsplit in parts:
         zone_class = day_class(spec, map(symbol_class, own_symbols(spec, symbol, own_query)))
         axis = axis_query(spec, rest_path, dates=dates, asset_class=zone_class)
         sent = _filter_days(rest_path, {**query, **axis}, zone_class)
         sent_query = {**sent, **(extra or {}), **own_query}
-        calls.append(Call({**path, **own_path}, sent_query, symbol, no_data))
+        calls.append(Call({**path, **own_path}, sent_query, symbol, unsplit))
     return calls
 
 

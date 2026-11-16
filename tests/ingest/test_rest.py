@@ -1512,9 +1512,9 @@ def test_a_poll_plans_a_pair_massive_does_not_list_as_a_call_with_no_data(
         CRYPTO_OPEN_CLOSE, request, ("X:BTCUSD", "X:DOTUSD"), cancel=Cancel()
     )
     calls = [call for _, calls in planned for call in calls]
-    assert [(call.symbol, call.no_data) for call in calls] == [
+    assert [(call.symbol, call.unsplit) for call in calls] == [
         ("X:BTCUSD", None),
-        ("X:DOTUSD", NOT_LISTED.why),
+        ("X:DOTUSD", NOT_LISTED),
     ]
     assert left_out == []
     config = dm.MassiveConfig(
@@ -4773,7 +4773,7 @@ def test_a_call_with_no_data_is_never_counted_as_a_request(session: dm.MassiveSe
     # A pair Massive's list does not hold is never sent, so pacing and announcements skip it.
     path = _endpoints(session)._reader("call-1").rest_path(CRYPTO_LAST_PATH)
     sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD")
-    unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED.why)
+    unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED)
     assert len(rest._buckets(CRYPTO_LAST, [(path, [sent, unsent])])) == 1
 
 
@@ -4786,3 +4786,25 @@ def test_a_stream_splits_a_pair_through_the_sessions_rest_transport(
     assert isinstance(ports, SessionClients)
     assert ports._crypto_pair("X:BTCUSD") == ("BTC", "USD")
     assert ports._crypto_pair("X:NOPEUSD") == NOT_LISTED
+
+
+def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The lookup reported it under unreadable_symbols: a poll names it in the cycle's Error,
+    # and no read reports it again as a symbol with no data.
+    unjoined = _ticker("X:DOTUSD", "DOT", "USDT")
+    fake_rest.reply(TICKERS_PATH, Reply(envelope([unjoined])), Reply(envelope([])))
+    reader = _endpoints(session)._reader("poll")
+    request = Request(symbols=("X:DOTUSD",), params=(("date", date(2025, 3, 3)),))
+    _, left_out = reader._plan_cycle(CRYPTO_OPEN_CLOSE, request, ("X:DOTUSD",), cancel=Cancel())
+    assert left_out == [
+        (
+            "X:DOTUSD (Massive's reference data gives the currencies 'DOT' and 'USDT', which do "
+            "not join to it)"
+        )
+    ]
+    with caplog.at_level(logging.WARNING, LOGGER):
+        assert fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"]) == []
+    assert [r for r in caplog.records if r.name == LOGGER] == []  # not as no data
+    assert sent_data(fake_rest) == []

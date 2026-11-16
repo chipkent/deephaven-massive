@@ -525,21 +525,13 @@ def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
     ) == ("AAPL", {}, {"ticker": "AAPL"}, None)
 
 
-def test_a_pair_with_no_split_is_a_call_with_no_data_or_no_call() -> None:
-    # Massive has no data for a pair its list does not hold: a call that is never sent. A
-    # pair whose currencies cannot be read, which the lookup reported, gets no call.
+def test_a_pair_with_no_split_is_a_call_that_is_never_sent() -> None:
+    # The call carries why, so the read reports the pair without sending anything.
     path = _rest_path(CRYPTO_LAST_PATH)
-
-    def missing(_symbol: str) -> Unsplit:
-        return Unsplit("not listed", no_data=True)
-
-    def unreadable(_symbol: str) -> Unsplit:
-        return Unsplit("do not join", no_data=False)
-
-    assert rest_requests._symbol_request(
-        CRYPTO_LAST, "X:DOTUSD", path, targets=["from"], param=None, split=missing
-    ) == ("X:DOTUSD", {}, {}, "not listed")
+    missing = Unsplit("not listed", no_data=True)
     calls = rest_requests.plan_calls(
-        CRYPTO_LAST, path, Request(), symbols=("X:DOTUSD",), split=unreadable
+        CRYPTO_LAST, path, Request(), symbols=("X:DOTUSD",), split=lambda _: missing
     )
-    assert calls == []
+    assert [(call.symbol, call.path_params, call.unsplit) for call in calls] == [
+        ("X:DOTUSD", {}, missing)
+    ]
