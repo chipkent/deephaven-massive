@@ -59,7 +59,7 @@ library's message.
 Stop every other program that uses the key, then run these in order. Each command adds its
 output to `live-checks.log`, the file to attach to an issue.
 
-1. During the regular session, 09:30 to 16:00 New York time on a weekday, run the main tests:
+1. During the regular session, 09:30 to 16:00 New York time on a trading day, run the main tests:
 
    ```bash
    uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
@@ -256,7 +256,7 @@ show what Massive sends on a quiet stocks connection. The check works only until
 when Massive starts its overnight stock session. The library logs each of Massive's status messages as
 `wss://<host>/stocks status <KIND>: <message>`. In the debug log of the day's
 `stream-day/<date>-<n>/` folder, note each stocks status line from the subscriptions'
-acknowledgements to 04:00, and the longest stretch with no line. Put them, or "none", in a
+acknowledgements to 04:00, and the longest stretch with no stocks status line. Put them, or "none", in a
 comment on the tester's results issue.
 
 <a id="live-run-reruns"></a>
