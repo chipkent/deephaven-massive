@@ -63,7 +63,7 @@ the Summary, or one decision that needs a sentence of reasoning. No walls of tex
 
 | Section | Content |
 |---|---|
-| Summary | What the PR does and why, in two to four sentences, for a reader with no context; then, if needed, **Check before merging**: at most seven one-line items. An approval is its decision number or, before a decision file records it, the question and the owner's dated answer: the quoted question, then the quoted answer, with the date. No file or internal names, no history of the branch, no table of differences from `main`. |
+| Summary | What changes for a user and why, in two to four sentences, for a reader with no context. It leads with what a user sees, with a concrete call or a before and after. Then, if needed, **Check before merging**: at most seven one-line items. An approval is its decision number or, before a decision file records it, the question in plain words and the owner's dated answer: the quoted question, then the quoted answer, with the date. Never a coordinator, a brief, or a question code ("Q3"). No file or internal names, no history of the branch, no table of differences from `main`. |
 | Why | The problem, with a concrete example a user would hit. |
 | What changes | One bullet per user-visible change, with before and after wherever the API or a result changes. |
 | Decisions | Each choice the PR makes or applies, and each departure from the plan, with its reason. A table works well. "None" when there are none. |
@@ -73,7 +73,7 @@ the Summary, or one decision that needs a sentence of reasoning. No walls of tex
 
 In the Summary and Why, assume the reviewer knows nothing about why this PR exists. Give the
 context and terms they need to follow the change, and no more; don't explain code the change
-doesn't depend on.
+doesn't depend on. No word coined in the code appears unless the text defines it at first use.
 
 Then `Closes #<issue>` on its own line, then the required footer.
 
@@ -110,6 +110,22 @@ fine. A bold label heading a paragraph is a wall in disguise.
 > **Check before merging:**
 >
 > - The note headings: Features, Fixes, Docs, Tests, Refactors, Chores, and Other.
+
+A Summary in the code's words fails the owner, who then needs someone to explain it. This one,
+from a fix to crypto streams, uses words coined in the code ("split", "another pair of the
+same change") and gives the mechanism before what a user sees:
+
+> A crypto stream now subscribes every pair whose split the session already holds, even when
+> Massive's crypto ticker list can't be read for another pair of the same change. Only the
+> pairs the list must still split wait for it and retry.
+
+The same Summary, rewritten:
+
+> When Massive's crypto ticker list fails to load, a crypto stream no longer holds back the
+> pairs it already knows. To subscribe a pair such as `X:ETHUSD`, the library needs the pair's
+> two currencies, which come from that list, and it remembers each answer for the session.
+> Before this PR, if the lookup failed for one new pair, every pair after it alphabetically
+> waited too, even pairs the library already knew. Now only the unknown pairs wait and retry.
 
 A decision only the owner can make goes to the owner, in full, before the pull request opens
 (`writing-to-the-owner`; a subagent asks through its coordinator); the description is not a
@@ -159,7 +175,9 @@ Run it on every draft, and before every push that changes the PR:
 7. **Check the frame**: the sections in order, "None" in an empty Decisions or Follow-ups, a
    title that meets the rules, text that describes the branch after this push, and the issue in
    `closingIssuesReferences`.
-8. **Run the description check**: `uv run python scripts/check_pr_body.py` on the draft at
+8. **Have a fresh editor grade it** (`writing-a-pr-description`, section 4), and rewrite until
+   it passes.
+9. **Run the description check**: `uv run python scripts/check_pr_body.py` on the draft at
    `.git-pr-body.md`. It fails on an item under Check before merging that asks the owner
    anything, on an approval claimed without its decision or the question and the owner's
    dated answer, and on a rule change

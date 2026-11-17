@@ -1,6 +1,6 @@
 ---
 name: writing-a-pr-description
-description: "Use this skill whenever you write or rewrite a pull request description, an issue body, a bug report to Massive or Deephaven (wrong data, a defect), or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, and runs that page's self-edit checklist. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write or rewrite a pull request description, an issue body, a bug report to Massive or Deephaven (wrong data, a defect), or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, runs that page's self-edit checklist, and has a fresh editor grade it until it passes. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing a PR description
@@ -49,7 +49,8 @@ Copy the sections from `.github/pull_request_template.md` (`gh pr create --body-
 shows it). End with the issue link that the "Close the issue" section of
 `docs/dev/pull-requests.md` gives (`Closes #<issue>` on its own line for a full delivery) and the
 attribution footer your session requires. Write the Summary last, as two to four plain sentences
-that say what the PR does and why for a reader with no context. A **Check before merging** list
+that say what changes for a user and why, for a reader with no context, in words a library
+user knows. A **Check before merging** list
 holds the notices and quoted approvals from section 1, for the owner to see, and nothing the
 owner has not settled (`AGENTS.md`, Ask, and keep working). `uv run python
 scripts/check_pr_body.py` checks it before you publish.
@@ -75,7 +76,22 @@ would. Two passes help:
   `docs/dev/user-docs.md#ai-tells` list the usual offenders; the grep in the checklist finds
   the narration.
 
-## 4. Publish
+## 4. Grade
+
+The author reads its own text in the code's vocabulary, so a fresh editor grades it. Before
+the push that opens the PR or changes its description, spawn a grader with no other context:
+
+```text
+Read <repo>/.claude/skills/writing-user-docs/agents/editor.md and follow it exactly, with its
+section "Grading a PR description". Grade <worktree>/.git-pr-body.md against the diff from
+`git diff origin/main...HEAD` in <worktree>. Return the score sheet.
+```
+
+Rewrite from its sheet and grade again with a fresh grader until the description passes. If a
+few rounds can't pass it, ask the owner for help with the specific obstacle
+(`writing-to-the-owner`), with the sheets; never ask for sign-off on failing text.
+
+## 5. Publish
 
 Write the body to `.git-pr-body.md` at the root of your own worktree: `.gitignore` holds that
 name, so `git add` never stages it, and two agents never overwrite each other's draft.

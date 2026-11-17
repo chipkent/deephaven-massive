@@ -49,6 +49,32 @@ thing it documents. When the page to grade is a docstring other than the package
 
 Count units by the docstrings' total length.
 
+## Grading a PR description
+
+A pull request description, issue body, or report (`writing-a-pr-description`) has one reader
+who decides: the owner, choosing whether to merge from this text alone. A reviewer with no
+context and a user reading the merged PR months later must follow it too. Its standard is
+`docs/dev/pull-requests.md`, read whole, on top of the method in `docs/dev/user-docs.md`. You
+get the description and its diff (`git diff origin/main...HEAD`) and nothing else about how it
+was written. Change the passes this way:
+
+- Pass 1 reads the Summary as the opening and answers these four questions, each with quotes,
+  instead of its usual ones. A no to any of the first three, or a yes to the fourth, fails the
+  twenty-second test:
+  1. Could the owner decide to merge from this text alone?
+  2. Does the Summary say what a user sees, in words a library user knows?
+  3. Is every term defined at first use?
+  4. Does any process talk appear: a coordinator, a brief, an agent, a question code ("Q3"),
+     a review round?
+- Pass 2: the panel is two readers, the owner and that later user. A word coined in the code
+  ("the pair's split", "the reference lane") is a fault unless the text defines it at first use.
+- Pass 3: source each claim in the diff or the repository.
+- Pass 4: the sections are the standard's, in its order, and each of its banned patterns is a
+  fault on criterion 3 or 7. Skip the checks for badges, steps, and file formats.
+- Pass 5: mark Teaching N/A.
+
+Mark Hook N/A and count the Summary's faults under criterion 3.
+
 ## How to judge a finding
 
 Every finding quotes the exact text, gives its line, names the rule it breaks, and gives a
