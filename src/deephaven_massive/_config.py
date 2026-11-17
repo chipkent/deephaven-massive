@@ -472,7 +472,8 @@ class MassiveConfig:
         if self.reconnect_backoff < MIN_RECONNECT_BACKOFF:
             raise ValueError(
                 f"reconnect_backoff={self.reconnect_backoff:g} is below the minimum of "
-                f"{MIN_RECONNECT_BACKOFF:g} s. Pass {MIN_RECONNECT_BACKOFF:g} or more."
+                f"{MIN_RECONNECT_BACKOFF:g} s. Pass reconnect_backoff={MIN_RECONNECT_BACKOFF:g} "
+                "or more."
             )
         if self.subscription_confirmation_timeout >= NO_ACK_RESEND:
             raise ValueError(

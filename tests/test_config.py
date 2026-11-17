@@ -207,7 +207,8 @@ def test_reconnect_backoff_bounds(base: MassiveConfig) -> None:
         dataclasses.replace(base, reconnect_backoff=0)
     with pytest.raises(
         ValueError,
-        match=r"^reconnect_backoff=14\.99 is below the minimum of 15 s\. Pass 15 or more\.$",
+        match=r"^reconnect_backoff=14\.99 is below the minimum of 15 s\. Pass "
+        r"reconnect_backoff=15 or more\.$",
     ):
         dataclasses.replace(base, reconnect_backoff=14.99)
     refusal = (

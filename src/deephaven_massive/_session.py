@@ -203,8 +203,8 @@ def _register(core: SessionCore) -> None:
                 "A new MassiveSession uses the same API key as an open session but a different "
                 "%s, so the two cannot share WebSocket connections. Massive keeps one connection "
                 "per asset class for an account, so when the new session connects, the live "
-                "tables of the older one follow its connection_taken. Give both sessions the "
-                "same %s, or close the older session.",
+                "tables of the older one fail or reconnect as its connection_taken says. Give both "
+                "sessions the same %s, or close the older session.",
                 shown,
                 shown,
             )

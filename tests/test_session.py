@@ -322,9 +322,9 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
             "A new MassiveSession uses the same API key as an open session but a different "
             "subscription_confirmation_timeout and flush_interval, so the two cannot share "
             "WebSocket connections. Massive keeps one connection per asset class for an account, "
-            "so when the new session connects, the live tables of the older one follow its "
-            "connection_taken. Give both sessions the same subscription_confirmation_timeout and "
-            "flush_interval, or close the older session."
+            "so when the new session connects, the live tables of the older one fail or reconnect "
+            "as its connection_taken says. Give both sessions the same "
+            "subscription_confirmation_timeout and flush_interval, or close the older session."
         )
     ]
     caplog.clear()
