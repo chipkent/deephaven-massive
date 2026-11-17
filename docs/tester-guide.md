@@ -213,9 +213,10 @@ uv run python scripts/tester.py examples
 ```
 
 The runner gives examples 17, 18, and 22 a copy of your settings file's
-`delayed_subscriptions`, and prints it as `settings:`. It prints a line per example as it runs,
-and another for an example whose stream failed afterward. Then it prints where it saved the
-output, and `no example failed`, or `failed:` and the examples' names. Each example's output is in
+`delayed_subscriptions`, and prints it as `settings:`. It prints each example's name as it
+starts and its verdict when it ends. An example whose stream failed afterward gets a new
+verdict. Then the runner prints where it saved the output, and `no example failed`, or
+`failed:` and the examples' names. Each example's output is in
 `~/massive-test/examples-output/`, and `summary.txt` there gives each one's verdict:
 
 | Verdict | What you do |
