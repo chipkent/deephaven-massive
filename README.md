@@ -388,7 +388,9 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 
 `snapshot` has one row per stock, with columns such as `DayClose`, `PrevDayClose`, and
 `TodaysChangePerc`. On Starter or Developer without the setting, the `snapshot` table fails with
-an error that names the setting to change.
+an error that names the setting to change. A snapshot opens no stream. Once you stream, as the
+next example does, `Recency` in `m.connections()` says whether each feed is live or delayed.
+[The problems example](#see-problems) shows the check.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file. [Configuration](#configuration)
@@ -588,16 +590,18 @@ Four more live tables show what the session is doing:
 
 ```python continues
 streams = m.streams()  # each live table and background read: its State, and Error if it failed
-connections = m.connections()  # each feed: Host, Recency, and State, such as CONNECTED or WAITING
+# each streaming connection, and in Recency whether its data is live or delayed
+feeds = m.connections().view(["Transport", "AssetClass", "Host", "State", "Recency"])
 rate_limits = m.rate_limits()  # each subscription's rate-limit State: READY, PACED, or PAUSED
 symbol_reads = m.symbol_reads()  # each watchlist symbol read: its State, and Error if it failed
 ```
 
-Here `streams` has one row, for the ticker-details read, whose `State` ends `DONE`.
-`symbol_reads` stays empty, because this example reads no watchlist.
+Here `streams` has one row, for the ticker-details read, whose `State` ends `DONE`. `feeds`
+and `symbol_reads` stay empty, because this example opens no stream and reads no watchlist.
 
-`Recency` says whether a feed's data is `REALTIME` or `DELAYED`. `UNKNOWN` means the library
-can't tell, and it never treats that data as real-time.
+Once a stream opens, `feeds` has a row for its connection, and its `Recency` tells you whether
+the data is live or delayed. `Recency` is `REALTIME` or `DELAYED`, as Massive labels the feed, or
+`UNKNOWN` when Massive gives no label.
 
 Troubleshooting's [diagnostics section](docs/troubleshooting.md#diagnostics) says when to check
 each table. For a table's columns, run `help()` on its method, such as

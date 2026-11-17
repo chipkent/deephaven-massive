@@ -930,7 +930,7 @@ def test_the_problems_example_lists_the_ticker_massive_does_not_know(
     )
     readme_server.reply("/v3/reference/tickers/ZZZZ", Reply(status=404))
     console = Console(tmp_path, console_command)
-    diagnostics = ("streams", "connections", "rate_limits", "symbol_reads")
+    diagnostics = ("streams", "feeds", "rate_limits", "symbol_reads")
     ran = console.run(section_blocks(README, "see-problems"), "problems", "details", *diagnostics)
     _wait_for_rows(ran["details"], lambda rows: len(rows) == 1, dh_to_pylist)
     rows = _wait_for_rows(ran["problems"], lambda rows: len(rows) == 1, dh_to_pylist)
@@ -947,6 +947,7 @@ def test_the_problems_example_lists_the_ticker_massive_does_not_know(
     )
     assert streams[0]["Query"].startswith("m.reference.ticker_details(")
     assert dh_to_pylist(ran["symbol_reads"]) == []
+    assert dh_to_pylist(ran["feeds"]) == []  # the example opens no stream
     ran.clear()
     console.close()
 
