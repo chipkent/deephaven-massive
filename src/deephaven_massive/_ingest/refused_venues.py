@@ -116,10 +116,10 @@ class RefusedVenues:
     def report(self, dataset: str, *, problems: ProblemSink, stream_id: int) -> None:
         """Report the venues the read skips, each venue once per call.
 
-        One `refused_venues` problem names the venues new to the call, with Massive's status
-        and text, for `m.problems()`, whose first per table the session's reporter logs; the
-        record here is at DEBUG. Called after each look at the call's files, before a call whose
-        every venue is refused raises; reports nothing when S3 refused no
+        Each venue new to the call is one `refused_venues` problem, with the venue in `Field`
+        and Massive's status and text, for `m.problems()`, whose first per table the session's
+        reporter logs; the record here is at DEBUG. Called after each look at the call's files,
+        before a call whose every venue is refused raises; reports nothing when S3 refused no
         venue, or only venues an earlier read of the call reported.
 
         Args:
@@ -132,30 +132,30 @@ class RefusedVenues:
         new = tuple((keys[key], refused[keys[key]]) for key in self._logged.first_seen(keys))
         if not new:
             return
-        detail = (
-            f"skipping the flat files of {_names(new)} for the whole range, since Massive "
-            "refused them; name only the exchanges the plan includes in venues= to request "
-            "none of them. S3 refused: "
-            + "; ".join(f"{venue.name}: {error.message}" for venue, error in new)
-        )
-        logger.debug("%s history (%s): %s", dataset, self.call, detail)
-        problems(
-            [
-                ProblemEvent(
-                    cause=ProblemCause.REFUSED_VENUES,
-                    action=ProblemAction.SKIPPED,
-                    dataset=dataset,
-                    stream_id=stream_id,
-                    where=self.call,
-                    symbol=None,
-                    field=None,
-                    rows=0,
-                    detail=detail,
-                    at=time.time_ns(),
-                    policy=self.policy,
-                )
-            ]
-        )
+        at = time.time_ns()
+        events = [
+            ProblemEvent(
+                cause=ProblemCause.REFUSED_VENUES,
+                action=ProblemAction.SKIPPED,
+                dataset=dataset,
+                stream_id=stream_id,
+                where=self.call,
+                symbol=None,
+                field=venue.name,
+                rows=0,
+                detail=(
+                    f"skipping the flat files of {venue.name} for the whole range, since Massive "
+                    "refused them; name only the exchanges the plan includes in venues= to "
+                    f"request none of them. S3 refused: {venue.name}: {error.message}"
+                ),
+                at=at,
+                policy=self.policy,
+            )
+            for venue, error in new
+        ]
+        for event in events:
+            logger.debug("%s history (%s): %s", dataset, self.call, event.detail)
+        problems(events)
 
     def every_venue_refused(self) -> EntitlementError:
         """Return the error of a call whose every requested venue S3 refused.
