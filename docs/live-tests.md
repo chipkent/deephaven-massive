@@ -27,7 +27,7 @@ settings from it and leaves every other setting at its default:
 |---|---|---|
 | `delayed_subscriptions` | Each subscription Massive serves your key delayed | Every stream and snapshot test of those subscriptions skips, `not listed as delayed` |
 | `rest_requests_per_minute` | Each subscription Massive limits by the minute, and its limit | The rate-limit tests skip, and other tests run slower |
-| `websocket_hosts` | `indices: business.massive.com`, when Massive serves your key real-time index values | The library picks the host, which may not serve your index values |
+| `websocket_hosts` | `indices: business.massive.com`, when your Massive dashboard shows your indices data as real-time | The library picks the host, which may not serve your index values |
 
 Leave `websocket_hosts` out when you list `indices` in `delayed_subscriptions`. The library
 refuses that pair, and the run stops ([`websocket_hosts`](configuration.md#setting-details)).
