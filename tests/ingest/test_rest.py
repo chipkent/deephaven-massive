@@ -3129,7 +3129,7 @@ def test_a_poll_checks_only_the_paths_its_symbols_can_reach(*, session: dm.Massi
     underlyings = ValueTable(
         "underlying", "underlying_ticker", "Underlying", underlying=True, table=table
     )
-    reader.check_parameters(CONTRACTS, Request(value_table=underlyings))
+    reader.check_parameters(CONTRACTS, dataclasses.replace(listed, value_table=underlyings))
     named = Request(symbols=("O:SPY250117C00600000",), value_table=underlyings)
     with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
         reader.check_parameters(CONTRACTS, named)
