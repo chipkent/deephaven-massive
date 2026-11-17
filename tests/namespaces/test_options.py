@@ -1556,7 +1556,9 @@ def test_a_list_dataset_withholds_a_row_it_cannot_read_whole(
         out = rows(list_query(m, spec).fetch(wait=True))
     # No trace of the bad row; the whole one beside it lands, and the call has its problem.
     assert [(r["Symbol"], r["OptionRoot"]) for r in out] == [("O:SPY260123C00687000", "SPY")]
-    assert [(e.cause, e.rows, e.stream_id is not None) for e in events] == [
+    # The rows carry both datasets' keys, so each dataset also lists the other's as drift.
+    withheld = [e for e in events if e.cause is not ProblemCause.SCHEMA_DRIFT]
+    assert [(e.cause, e.rows, e.stream_id is not None) for e in withheld] == [
         (ProblemCause(cause.value), 1, True)
     ]
 
