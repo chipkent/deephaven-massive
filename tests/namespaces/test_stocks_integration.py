@@ -88,8 +88,9 @@ _DAY_FILE = "us_stocks_sip/day_aggs_v1"
 _MINUTE_FILE = "us_stocks_sip/minute_aggs_v1"
 _DAY_NS = 86_400 * 1_000_000_000
 _DAY_STAMPS = frozenset({(0, 0, 0), (13, 0, 0), (16, 0, 0)})
-"""The New York times of day (hour, minute, second) at which the library expects a stock 1-day
-bar's stamp: midnight, a half day's 13:00 close, and the 16:00 close."""
+"""The New York times of day (hour, minute, second) at which grouped daily and the day files are
+expected to stamp a stock 1-day bar: midnight, a half day's 13:00 close, and the 16:00 close.
+The library also accepts the 04:00 pre-market open, where `/prev` stamps it."""
 _STREAM_WAIT = 60.0
 """Seconds a stream test waits for its first frame; stocks trade on weekdays only."""
 
@@ -407,12 +408,13 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     half day's week and the week before, and the month bars of the two whole months before
     the current one; and the library's `TimestampStart`, `TimestampEnd`, and `Date` for the
     same requests: about 14 requests in all. Passes when every source
-    answered and each grouped-daily row is stamped where the library expects a 1-day bar: at
-    00:00, 13:00, or 16:00 New York time of its own day. Reading the rest: range stamps there,
-    longer bars at 00:00 New York time on their period's first day (or the weekend before a
-    week's Monday), and matching values confirm the library's day label; minute bars ending at
-    12:59 on the half day confirm a whole day cut short; a raw stamp of any other form is
-    served by the library, labelled by the New York day it falls on, with a WARNING in the log.
+    answered and each grouped-daily row is stamped where grouped daily is expected to stamp a
+    1-day bar: at 00:00, 13:00, or 16:00 New York time of its own day. Reading the rest: range
+    stamps there, a `/prev` stamp there or at 04:00, longer bars at 00:00 New York time on
+    their period's first day (or the weekend before a week's Monday), and matching values
+    confirm the library's day label; minute bars ending at 12:59 on the half day confirm a
+    whole day cut short; a raw stamp of any other form is withheld by the library, with a
+    WARNING in the log.
     Grouped-daily volume runs a little below the range bar's, so only the stamps are asserted.
     """
     days = stamp_days["day"]
