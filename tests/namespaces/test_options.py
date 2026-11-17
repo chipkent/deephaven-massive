@@ -80,6 +80,8 @@ NAMES = (
     "snapshots",
     "contracts",
     "daily_open_close",
+    "open_interest",
+    "unusual_trades",
 )
 
 
@@ -152,6 +154,8 @@ def test_each_dataset_reads_its_sources() -> None:
         "options.snapshots": None,
         "options.contracts": None,
         "options.daily_open_close": None,
+        "options.open_interest": None,
+        "options.unusual_trades": None,
     }
     # Every dataset but the chain, which takes its underlying instead, and the admin messages,
     # whose rows name no contract, takes contracts.
@@ -187,6 +191,8 @@ def test_each_dataset_reads_its_sources() -> None:
         (R, "/v3/reference/options/contracts/{options_ticker}"),
     )
     assert options.DAILY_OPEN_CLOSE.sources == ((R, "/v1/open-close/{optionsTicker}/{date}"),)
+    assert options.OPEN_INTEREST.sources == ((R, "/options/v1/open-interest"),)
+    assert options.UNUSUAL_TRADES.sources == ((R, "/options/v1/unusual-trades"),)
 
 
 @pytest.mark.parametrize(
@@ -203,6 +209,8 @@ def test_each_dataset_reads_its_sources() -> None:
         (options.SNAPSHOTS, FetchQuery),
         (options.CONTRACTS, FetchQuery),
         (options.DAILY_OPEN_CLOSE, FetchQuery),
+        (options.OPEN_INTEREST, FetchQuery),
+        (options.UNUSUAL_TRADES, FetchQuery),
     ],
 )
 def test_query_class_of_each_dataset(spec: DatasetSpec, expected: type) -> None:
@@ -229,6 +237,8 @@ def test_page_sizes_are_the_largest_each_endpoint_returns() -> None:
         "options.snapshots": 250,
         "options.contracts": 1_000,
         "options.daily_open_close": None,
+        "options.open_interest": 50_000,
+        "options.unusual_trades": 50_000,
     }
 
 
@@ -355,6 +365,8 @@ def test_required_keys_are_the_row_keys_of_each_path() -> None:
         ("contracts.json", "/v3/reference/options/contracts"),
         ("contract.json", "/v3/reference/options/contracts/{options_ticker}"),
         ("open_close.json", "/v1/open-close/{optionsTicker}/{date}"),
+        ("open_interest.json", "/options/v1/open-interest"),
+        ("unusual_trades.json", "/options/v1/unusual-trades"),
     ],
 )
 def test_fixtures_are_shaped_like_the_generated_fields(
@@ -1256,6 +1268,156 @@ def test_daily_open_close_reads_one_day_per_contract(
     assert [(r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         (ny_midnight_ns(date(2023, 1, 9)), ny_midnight_ns(date(2023, 1, 10)))
     ]
+
+
+def test_open_interest_sends_its_filters_and_reads_each_contract_s_day(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    path = "/options/v1/open-interest"
+    fake_rest.reply(path, Reply(body(load_fixture, "open_interest.json")))
+    out = rows(
+        rest_session.options.open_interest(
+            ["O:SPY260123P00687000", "O:SPY260123C00687000"],
+            root=["SPY", "SPXW"],
+            contract_type=dm.ContractType.PUT,
+            start=date(2026, 1, 20),
+            end="2026-01-22",
+            sort="open_interest",
+            order=dm.Order.DESC,
+            filters={"expiration_date_lte": "2026-01-23"},
+        ).fetch(wait=True)
+    )
+    assert fake_rest.get_queries(one_value=True) == [
+        (
+            path,
+            {
+                "ticker.any_of": "O:SPY260123C00687000,O:SPY260123P00687000",
+                "root.any_of": "SPY,SPXW",
+                "contract_type": "put",
+                "date.gte": "2026-01-20",
+                "date.lte": "2026-01-22",
+                "expiration_date.lte": "2026-01-23",
+                "sort": "open_interest.desc",
+                "limit": "50000",
+            },
+        )
+    ]
+    picked = ("Symbol", "OptionRoot", "Date", "ContractType", "OpenInterest")
+    assert [tuple(r[c] for c in picked) for r in out] == [
+        ("O:SPY260123P00687000", "SPY", "2026-01-22", "put", 9871),
+        ("O:SPY260123C00687000", "SPY", "2026-01-22", "call", 15234),
+    ]
+    assert (out[0]["ExpirationDate"], out[0]["StrikePrice"], out[0]["UnderlyingTicker"]) == (
+        "2026-01-23",
+        687.0,
+        "SPY",
+    )
+
+
+def test_open_interest_sends_one_root_as_root(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/options/v1/open-interest", Reply({"status": "OK", "results": []}))
+    rest_session.options.open_interest(root="SPXW").fetch(wait=True)
+    assert fake_rest.get_queries(one_value=True) == [
+        ("/options/v1/open-interest", {"root": "SPXW", "limit": "50000"})
+    ]
+
+
+@pytest.mark.parametrize("spec", [options.OPEN_INTEREST, options.UNUSUAL_TRADES])
+def test_option_root_is_massive_s_root_where_the_rows_carry_one(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, spec: DatasetSpec
+) -> None:
+    # A root unlike the symbol's shows the value is Massive's, not read from `Symbol`.
+    row = {
+        "ticker": "O:SPY260123C00687000",
+        "root": "XYZ",
+        "date": "2026-01-22",
+        "sip_timestamp": 1761751432123456800,
+        "sequence_number": 1,
+    }
+    path = spec.rest_paths[0]
+    fake_rest.reply(path, Reply({"status": "OK", "results": [row]}))
+    query = (
+        rest_session.options.open_interest()
+        if spec is options.OPEN_INTEREST
+        else rest_session.options.unusual_trades()
+    )
+    [out] = rows(query.fetch(wait=True))
+    assert (out["Symbol"], out["OptionRoot"]) == ("O:SPY260123C00687000", "XYZ")
+    assert "Root" not in out
+    [column] = [c for c in CATALOG.dataset_schema(spec).columns if c.name == "OptionRoot"]
+    assert column.description.startswith("The OCC root symbol of the contract (e.g., SPXW).")
+
+
+def test_unusual_trades_read_each_trade_at_its_sip_time(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    path = "/options/v1/unusual-trades"
+    fake_rest.reply(path, Reply(body(load_fixture, "unusual_trades.json")))
+    start = datetime(2025, 10, 29, 15, tzinfo=UTC)
+    out = rows(
+        rest_session.options.unusual_trades(
+            "O:SPY260123C00687000", start=start, end=datetime(2025, 10, 29, 16, tzinfo=UTC)
+        ).fetch(wait=True)
+    )
+    [(sent_path, sent)] = fake_rest.get_queries(one_value=True)
+    assert sent_path == path
+    assert sent["ticker.any_of"] == "O:SPY260123C00687000"
+    assert {"sip_timestamp.gte", "sip_timestamp.lt", "limit"} <= sent.keys()
+    picked = ("Symbol", "Date", "Timestamp", "OptionRoot", "Price", "Size", "Flags")
+    assert [tuple(r[c] for c in picked) for r in out] == [
+        (
+            "O:SPY260123C00687000",
+            "2025-10-29",
+            1761751432123456800,
+            "SPY",
+            15.25,
+            120,
+            ["block_premium"],
+        ),
+        (
+            "O:SPXW261218C06000000",
+            "2025-10-29",
+            1761751431987654400,
+            "SPXW",
+            42.1,
+            25,
+            ["block_premium", "iso"],
+        ),
+    ]
+    assert [(r["UnderlyingTicker"], r["Conditions"], r["Exchange"]) for r in out] == [
+        ("SPY", [227], 316),
+        ("SPX", [219], 304),
+    ]
+
+
+def test_the_list_datasets_take_only_option_contracts_and_refuse_all(
+    massive_session: dm.MassiveSession,
+) -> None:
+    m = massive_session
+    for factory in (m.options.open_interest, m.options.unusual_trades):
+        assert factory()._request.symbols is None
+        with pytest.raises(ValueError, match="leave symbols out, which returns every contract"):
+            factory(dm.ALL)
+        with pytest.raises(ValueError, match="is an underlying, not an OCC option symbol"):
+            factory("AAPL")
+    with pytest.raises(ValueError, match="root is empty; pass None for every root"):
+        m.options.open_interest(root=[])
+    with pytest.raises(TypeError, match="root must be a str, a sequence of str, or None"):
+        m.options.open_interest(root=5)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(TypeError, match="contract_type"):
+        m.options.open_interest(contract_type="call")  # type: ignore[arg-type]  # the point
+    with pytest.raises(ValueError, match="calendar date; pass dates"):
+        m.options.open_interest(start=datetime(2026, 1, 20, tzinfo=UTC))
+    with pytest.raises(ValueError, match="root_any_of is set through its own argument, root="):
+        m.options.open_interest(filters={"root_any_of": "SPY"})
 
 
 # --- End to end: WebSocket -------------------------------------------------------------------

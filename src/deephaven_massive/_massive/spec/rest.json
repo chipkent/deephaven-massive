@@ -1518,7 +1518,7 @@
     {"column": "Date", "conversion": null, "required": true, "type": "date", "unit": null, "wire_key": "date"},
     {"column": "ExpirationDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "expiration_date"},
     {"column": "OpenInterest", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "open_interest"},
-    {"column": "Root", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "root"},
+    {"column": "OptionRoot", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "root"},
     {"column": "StrikePrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "strike_price"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
     {"column": "UnderlyingTicker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "underlying_ticker"}
@@ -1549,7 +1549,7 @@
     {"column": "Conditions", "conversion": null, "required": false, "type": "long-array", "unit": null, "wire_key": "conditions"},
     {"column": "Exchange", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "Flags", "conversion": null, "required": false, "type": "string-array", "unit": null, "wire_key": "flags"},
-    {"column": "Root", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "root"},
+    {"column": "OptionRoot", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "root"},
     {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "sequence_number"},
     {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "sip_timestamp"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},

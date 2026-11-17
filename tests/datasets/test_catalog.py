@@ -1328,11 +1328,7 @@ DEFERRED: Mapping[tuple[Transport, str], Deferral] = {
         "arguments, and its columns.",
         729,
     )
-    for path in (
-        "/options/v1/open-interest",
-        "/options/v1/unusual-trades",
-        "/options/v1/admin-messages",
-    )
+    for path in ("/options/v1/admin-messages",)
 }
 """Generated sources no dataset reads yet, by `(transport, source key)`.
 
@@ -1640,9 +1636,16 @@ def test_a_dataset_serves_current_data_or_computes_from_it_not_both() -> None:
         )
 
 
-def test_the_indicators_latest_values_are_checked_as_current_data() -> None:
+def test_the_latest_indicator_values_and_unusual_trades_are_checked_as_current_data() -> None:
+    # Each one's latest rows Massive computes from the market's current data.
     latest = {spec.name for spec in CATALOG.by_name.values() if spec.latest_is_current}
-    assert latest == {"indicators.ema", "indicators.macd", "indicators.rsi", "indicators.sma"}
+    assert latest == {
+        "indicators.ema",
+        "indicators.macd",
+        "indicators.rsi",
+        "indicators.sma",
+        "options.unusual_trades",
+    }
 
 
 def test_only_datasets_of_current_data_are_checked_for_delayed_labels() -> None:

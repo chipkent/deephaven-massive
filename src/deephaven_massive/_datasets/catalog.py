@@ -687,7 +687,9 @@ class DatasetSpec:
 
     @property
     def is_feed(self) -> bool:
-        """True for a feed: a dataset whose default `poll()` mode is `APPEND` (news, filings).
+        """True for a feed: a dataset whose default `poll()` mode is `APPEND`.
+
+        The feeds are the news, the filings, and the options' unusual trades.
 
         Massive keeps a feed's whole archive, and its `start` and `end` are the only bound on
         what a cycle reads, so `poll()` on a feed refuses to start without `start`. Every feed

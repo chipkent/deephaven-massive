@@ -1118,7 +1118,7 @@
     "underlying_ticker": "The ticker of the contract's underlying (e.g., SPX). Weekly and adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see root to tell them apart."
    },
    "/options/v1/unusual-trades": {
-    "price": "The price of the trade. This is the actual dollar value per whole contract of this trade.",
+    "price": "The price of the trade. This is the price per share of the underlying, so the total dollar value of a trade is the price multiplied by the size and by the contract multiplier, which is typically 100 shares per contract.",
     "size": "The size of a trade (also known as volume), in contracts.",
     "conditions": "A list of condition codes. See Options Condition Codes (https://massive.com/docs/rest/options/market-operations/condition-codes) for what each code means.",
     "exchange": "The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs.",
