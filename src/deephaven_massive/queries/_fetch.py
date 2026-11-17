@@ -340,7 +340,9 @@ class FetchQuery(Query):
         )
         request = replace(self._request, symbols=call_time)
         rest = core.rest_transport()
-        if call_time:  # a parameter error raises now; with none, the first read checks them
+        # A parameter any path of a symbol the table may hold lacks raises now, as for a list.
+        rest.check_fetch(spec, self._request)
+        if call_time:
             rest.check_fetch(spec, request)
         plan = FollowPlan(
             Transport.REST,

@@ -392,18 +392,13 @@ def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_ra
     ]
 
 
-def test_a_parameter_the_path_does_not_take_fails_its_symbols_before_any_request(
+def test_a_parameter_the_path_does_not_take_raises_before_any_request(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"], adjusted=False)
-    aapl, msft = _failure(out["AAPL"]), _failure(out["MSFT"])
-    assert aapl.error is msft.error
-    assert isinstance(aapl.error, UnsupportedParameterError)
-    assert str(aapl.error) == (
-        "stocks.dividends: /stocks/v1/dividends does not take ['adjusted']; leave that "
-        "parameter out, or read these symbols in a call without it"
-    )
-    assert not aapl.error.is_retryable
+    # The call refuses such a parameter for every path its symbol table could reach, so a
+    # fetch read by symbol never fails one symbol for it.
+    with pytest.raises(ValueError, match=r"dividends does not take \['adjusted'\]"):
+        _fetch(session, DIVIDENDS, ["AAPL", "MSFT"], adjusted=False)
     assert fake_rest.get_queries() == []
 
 

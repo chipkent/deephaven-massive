@@ -2602,17 +2602,21 @@ class RestEndpoints:
         """Plan `fetch`'s requests with no request, so a parameter error raises now.
 
         A background `fetch()` calls it on the caller thread before its table exists. Crypto
-        pairs are not split here (`_unsplit`): the read splits them.
+        pairs are not split here (`_unsplit`): the read splits them. A request that follows a
+        symbol table is checked against every path the table's symbols could reach
+        (`RestReader.check_parameters`), since the table may come to hold a symbol of any.
 
         Args:
             spec: The dataset, with a fetch path.
-            request: The normalized arguments, with static symbols.
+            request: The normalized arguments, with static symbols or a symbol table.
 
         A parameter a path does not take raises the `ValueError` of `shared_params`.
         """
-        self._reader("check", request.on_error, background=False).plan_fetch(
-            spec, request, request.static_symbols, split=_unsplit
-        )
+        reader = self._reader("check", request.on_error, background=False)
+        if isinstance(request.symbols, SymbolTable):
+            reader.check_parameters(spec, request)
+        else:
+            reader.plan_fetch(spec, request, request.static_symbols, split=_unsplit)
 
     def fetch_by_symbol(
         self,
@@ -2628,8 +2632,9 @@ class RestEndpoints:
         See `RestTransport.fetch_by_symbol` for what is read and returned, and
         `_ingest/symbol_reads.py` for how a failure is classed. The requests are planned with
         the crypto pairs split by Massive's ticker list, so a pair the list does not hold
-        fails alone; a parameter a symbol's path does not take fails that path's symbols.
-        Before the first request, one INFO line announces a read whose paced requests cannot
+        fails alone. A parameter a symbol's path does not take never reaches here: the call
+        checked every path its symbol table could reach (`check_fetch`). Before the first
+        request, one INFO line announces a read whose paced requests cannot
         all start within a minute (`rate_limits.announce`).
 
         Args:

@@ -19,9 +19,10 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 from deephaven.update_graph import shared_lock
 from typing_extensions import Unpack, override
 
@@ -3178,6 +3179,27 @@ def test_a_parameter_a_named_contract_lacks_fails_a_watchlist_poll_at_the_call(
         assert isinstance(q, FetchQuery)
         with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
             q.poll(60)
+    assert fake_rest.requests == []
+
+
+@pytest.mark.parametrize("held", [[], ["O:SPY250117C00600000"]], ids=["empty", "a contract"])
+def test_a_parameter_a_named_contract_lacks_fails_a_watchlist_fetch_at_the_call(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_input_table: Callable[..., InputTable],
+    held: list[str],
+) -> None:
+    # As a poll does: a contract the watchlist names, now or later, reads the per-contract
+    # path, which takes no filter of the list path, so the fetch fails at the call.
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    if held:
+        watch.add(new_table([string_col("Symbol", held)]))
+    q = query(session, CONTRACTS, symbols=watch, filters={"strike_price_gte": 1})
+    assert isinstance(q, FetchQuery)
+    for wait in (False, True):
+        with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
+            q.fetch(wait=wait)
     assert fake_rest.requests == []
 
 

@@ -291,14 +291,16 @@ class RestTransport(Protocol):
         """Check that `fetch` can plan its requests for the request, before any data request.
 
         A background `fetch()` calls it on the caller thread, so a parameter a path does not
-        take raises there, at the call, as `fetch` raises it before its first request.
+        take raises there, at the call, as `fetch` raises it before its first request. A
+        `fetch()` that follows a symbol table calls it with the table, and every path a symbol
+        of the table could reach is checked.
 
         Args:
             spec: The dataset.
-            request: The normalized arguments, with static symbols.
+            request: The normalized arguments, with static symbols or a symbol table.
 
         Raises:
-            ValueError: The request sets a parameter a path of the call does not take.
+            ValueError: The request sets a parameter a path the call could read does not take.
         """
         ...
 
