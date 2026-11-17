@@ -226,7 +226,7 @@ class SharedStreams:
         `RuntimeError` from the described copy; that error is wrapped in the same
         `MassiveError`. Either way `m.streams()` shows `FAILED`. When the session has closed
         by the time such a Deephaven error reaches this call, the error is wrapped in the
-        closed session's `MassiveError` (`"MassiveSession #1 is closed; ..."`) instead, whether or
+        closed session's `MassiveError` (`session_closed`) instead, whether or
         not the stream's row records the close yet. A session that closes while the result is
         built is checked once more after the result is tracked: the result is released and the
         closed session's `MassiveError` raised, so a close that started before that check never
@@ -255,7 +255,7 @@ class SharedStreams:
         Raises:
             MassiveError: If the stream has failed (`"stocks.trades stream 7 failed: ..."`).
             SessionClosedError: If the session closed while the result was built
-                (`"MassiveSession #1 is closed; ..."`).
+                (`session_closed`).
         """
         core = required(self._core(), "the session")  # held until the call returns: live_set.py
         key: StreamKey = (spec.name, channel, request.symbol_key(), request.on_error)
@@ -666,7 +666,7 @@ class SharedStreams:
         if closed:
             logger.debug("%s: releasing a stream opened during close()", self._label)
             raise SessionClosedError(
-                f"{self._label} was closed while a stream was opening. {NEW_SESSION}"
+                f"This session was closed while a stream was opening. {NEW_SESSION}"
             )
         return opened
 

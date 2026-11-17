@@ -171,7 +171,7 @@ class _Generation:
 
 
 # The message of a loop-thread method called from another thread.
-_OFF_LOOP = "WsClient.{method} must be called on the client's loop thread"
+_OFF_LOOP = "WsClient.{method} runs only on the client's loop thread, and another thread called it."
 
 # The server answered the key with `max_connections`.
 _NO_SLOT: Final = "max_connections"
@@ -299,7 +299,7 @@ class WsClient:
         """
         parts = urlsplit(url)
         if parts.scheme not in {"ws", "wss"} or not parts.hostname:
-            raise ValueError(f"not a WebSocket URL: {url!r}")
+            raise ValueError(f"url={url!r} is not a ws:// or wss:// URL with a host.")
         self._url = url
         self._host = parts.hostname
         self._path = parts.path or "/"
@@ -497,13 +497,13 @@ class WsClient:
             failure = None  # only `close()` cancels the task
         except Exception as error:
             logger.exception(
-                "the WebSocket client for %s stopped on an internal error. %s",
+                "The WebSocket client for %s stopped on an internal error. %s",
                 self._url,
                 LIBRARY_BUG_REPORT,
             )
             failure = WireError(
-                f"the WebSocket client for {self._host}{self._path} stopped on an internal "
-                f"error: {error!r}",
+                f"The WebSocket client for {self._host}{self._path} stopped on an internal "
+                f"error: {error!r}.",
                 host=self._host,
                 path=self._path,
                 kind=WireFailure.CLIENT_DEFECT,
@@ -638,7 +638,7 @@ class WsClient:
             # The server spoke a protocol this client does not know: vendor drift, not a
             # network hiccup, so it is logged at ERROR, though the attempt is still retried.
             logger.exception(
-                "the handshake with %s broke protocol. %s", self._url, LIBRARY_BUG_REPORT
+                "The handshake with %s broke protocol. %s", self._url, LIBRARY_BUG_REPORT
             )
             return _Ended()
         if isinstance(reply, WireError):
@@ -670,20 +670,23 @@ class WsClient:
         """
         greeting, _ = handshake_status(self._clean(await websocket.recv()))
         if greeting != "connected":
-            raise ValueError(f"expected the 'connected' status, got {greeting!r}")
+            raise ValueError(f"Massive greeted with the status {greeting!r}, not 'connected'.")
         await websocket.send(auth_frame(self._api_key))
         reply, message = handshake_status(self._clean(await websocket.recv()))
         if reply == "auth_success":
             return None
         if reply == "auth_failed":
             return WireAuthError(
-                f"Massive rejected the API key at {self._host}{self._path}: {message}",
+                f"Massive answered the authentication at {self._host}{self._path} with status "
+                f'auth_failed: "{message}".',
                 host=self._host,
                 path=self._path,
             )
         if reply == _NO_SLOT:
             return _NO_SLOT
-        raise ValueError(f"unexpected reply to the key: {reply!r} ({message!r})")
+        raise ValueError(
+            f"Massive answered the key with the status {reply!r} and the message {message!r}."
+        )
 
     async def _run_generation(self, websocket: ClientConnection) -> _Ended:
         """Open a generation and decode its frames until the socket closes.

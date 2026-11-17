@@ -106,8 +106,8 @@ class ProblemReporter:
         for problem, text in first:
             table = "" if problem.stream_id is None else f" table {problem.stream_id}"
             logger.warning(
-                "%s%s: %s: %s; m.problems() lists it and every later %s problem of this "
-                "table, which the log shows at DEBUG only",
+                "%s%s: %s: %s. m.problems() lists it and every later %s problem of this "
+                "table, which the log shows at DEBUG only.",
                 problem.dataset,
                 table,
                 problem.cause.value,
@@ -141,10 +141,10 @@ def _alarm(problem: Problem) -> str | None:
             head = f"{problem.rows} rows{symbol}, "
         else:
             head = "" if problem.symbol is None else f"{problem.symbol}: "
-        return f"{head}{problem.detail} (at {problem.where})"
+        return f"{head}{problem.detail.removesuffix('.')} (at {problem.where})"
     for span in problem.spans.values():
         policy = problem.policy if span.policy is None else span.policy
         if policy not in _QUIET:
             head = "" if span.symbol is None else f"{span.symbol}: "
-            return f"{head}{span.detail} (at {problem.where})"
+            return f"{head}{span.detail.removesuffix('.')} (at {problem.where})"
     return None

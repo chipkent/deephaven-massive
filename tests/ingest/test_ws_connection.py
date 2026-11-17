@@ -48,6 +48,12 @@ W = Transport.WS
 
 STOCK_KEYS = SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("SipTimestamp"))
 
+_GROUP_CLOSED = re.escape(
+    "Every session that shares these WebSocket connections has closed. Open a new "
+    "dm.MassiveSession() to read again."
+)
+"""The whole message of a futures lookup once every session sharing the connections closed."""
+
 TRADES = DatasetSpec(
     name="test.trades",
     summary="A test dataset.",
@@ -232,7 +238,7 @@ def test_a_rejected_key_fails_every_stream(
         assert failed.flusher.join(TIMEOUT)
     # An expected failure, not a defect: one WARNING for the cause, however many streams it
     # fails, and no ERROR.
-    rejected = [r for r in caplog.records if "rejected the API key" in r.getMessage()]
+    rejected = [r for r in caplog.records if "status auth_failed" in r.getMessage()]
     assert [r.levelno for r in rejected] == [logging.WARNING]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     with ws_session.connections.group.lock:
@@ -240,11 +246,11 @@ def test_a_rejected_key_fails_every_stream(
     assert failed.flusher.join(TIMEOUT)  # its last flush applied the failures, unasked
     [row] = connections_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert "rejected the API key" in row["LastError"]
     # Massive may answer `auth_failed` to a key whose plan has no streams of the class, too.
-    assert row["LastError"].endswith(
-        "; this can also mean the stocks plan includes no WebSocket streams for stocks, not "
-        "only a bad key"
+    assert row["LastError"] == (
+        "Massive answered the authentication at 127.0.0.1/stocks with status auth_failed: "
+        '"authentication failed". Massive gives this answer for a wrong key and for a key with '
+        "no WebSocket streams of stocks, and its text tells which."
     )
     assert [s["State"] for s in streams_of(ws_session, dh_to_pylist)] == ["FAILED", "FAILED"]
     again = q.blink()  # a fresh stream, on a fresh connection
@@ -263,8 +269,9 @@ def test_a_fatal_handshake_names_the_status_and_host(
     fake_ws_server.close(1011)
     ws_session.wait(lambda s: WsState.FAILED in s.states)
     [row] = connections_of(ws_session, dh_to_pylist)
-    assert row["LastError"].startswith("the WebSocket connection to socket.test/stocks failed:")
-    assert "404" in row["LastError"]
+    assert row["LastError"] == (
+        "Massive answered the WebSocket connection to 127.0.0.1/stocks with HTTP 404."
+    )
     del result
 
 
@@ -352,8 +359,8 @@ def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
     assert errors == [("RUNNING", None), ("RUNNING", None)]
     assert spans_of(custom_session, dh_to_pylist) == {
         (1, NO_ACK): (
-            "no acknowledgement from Massive for T.AAPL; its rows may be missing; the "
-            "subscription is re-sent until Massive acknowledges it"
+            "Massive has not confirmed the subscription T.AAPL, so its rows may be missing. The "
+            "library re-sends it until Massive confirms."
         )
     }
     # A late acknowledgement ends it.
@@ -378,8 +385,8 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
         (
             on_host(REALTIME_HOST),
             (
-                "the key's plan may not include this data in real time; if Massive serves your "
-                "futures data delayed, pass delayed_subscriptions={dm.Subscription.FUTURES} to "
+                "The usual cause is a key without real-time futures data. To use Massive's "
+                "delayed futures feed, pass delayed_subscriptions={dm.Subscription.FUTURES} to "
                 "dm.MassiveConfig."
             ),
         ),
@@ -388,10 +395,11 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
             # data on another host, which websocket_hosts pins.
             on_host(REALTIME_HOST, "no timeframe in the futures snapshot"),
             (
-                "the futures snapshot carried no recency label, so the library used the "
-                "real-time host; if Massive serves this data on another host, pin it with "
-                'MassiveConfig(websocket_hosts={dm.AssetClass.FUTURES: "<host>"}); if Massive '
-                "serves your futures data delayed, pass "
+                "Massive's futures snapshot did not say whether this key's data is real-time or "
+                "delayed, so the library chose the real-time host. To stream from another host, "
+                "pass "
+                'websocket_hosts={dm.AssetClass.FUTURES: "<host>"} to dm.MassiveConfig. To use '
+                "Massive's delayed futures feed, pass "
                 "delayed_subscriptions={dm.Subscription.FUTURES} to dm.MassiveConfig."
             ),
         ),
@@ -403,41 +411,40 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
                 "the host check's snapshot (/futures/v1/snapshot) was refused: not entitled",
             ),
             (
-                "Massive also refused the futures snapshot (the host check's snapshot "
-                "(/futures/v1/snapshot) was refused: not entitled), so the key's plan may "
-                "include no live (WebSocket) futures data; read it with fetch(), poll(), or "
-                "history() instead"
+                "Massive also refused the futures snapshot: the host check's snapshot "
+                "(/futures/v1/snapshot) was refused: not entitled. The usual cause is a key "
+                "without live futures data. Read it with fetch(), poll(), or history() instead."
             ),
         ),
         (
             # A key whose snapshot proved real-time data gains nothing from the delayed feed.
             on_host(REALTIME_HOST, "last_trade.timeframe=REAL-TIME"),
             (
-                "the futures snapshot is real-time (last_trade.timeframe=REAL-TIME), but the "
-                "key's plan may not include this data"
+                "The futures snapshot answered real-time data, last_trade.timeframe=REAL-TIME, "
+                "so Massive's delayed feed is no alternative."
             ),
         ),
         (
             on_host(DELAYED_HOST, "MassiveConfig.delayed_subscriptions"),
             (
-                "MassiveConfig.delayed_subscriptions lists dm.Subscription.FUTURES, so its streams "
-                "use Massive's delayed feed; to use the real-time feed, remove "
-                "dm.Subscription.FUTURES from delayed_subscriptions"
+                "delayed_subscriptions lists dm.Subscription.FUTURES, so this table streams from "
+                "Massive's delayed feed. To stream from the real-time feed, remove "
+                "dm.Subscription.FUTURES from delayed_subscriptions."
             ),
         ),
         (
             on_host("futures.example.com", "websocket_hosts"),
             (
-                "MassiveConfig.websocket_hosts[AssetClass.FUTURES] pins this host; the key's "
-                "plan may not include this data there"
+                "websocket_hosts pins this host for dm.AssetClass.FUTURES. Pass another host "
+                "there, or remove the pin."
             ),
         ),
         pytest.param(
             # A pinned real-time host keeps the pin's hint, whatever its snapshot said.
             on_host(REALTIME_HOST, "websocket_hosts, last_trade.timeframe=REAL-TIME"),
             (
-                "MassiveConfig.websocket_hosts[AssetClass.FUTURES] pins this host; the key's "
-                "plan may not include this data there"
+                "websocket_hosts pins this host for dm.AssetClass.FUTURES. Pass another host "
+                "there, or remove the pin."
             ),
             id="pinned real-time host",
         ),
@@ -468,7 +475,10 @@ def test_a_refused_step_fails_its_streams_and_names_the_feeds_fix(
     )
     assert len(custom_session.urls) == 1
     [_, failed] = streams_of(custom_session, dh_to_pylist)
-    assert "Massive said: Real-time data requires an upgrade; " + hint in failed["Error"]
+    assert failed["Error"] == (
+        f'Massive answered the subscription to T.NQZ5 on {custom_session.urls[0]}: "Real-time '
+        f'data requires an upgrade". {hint}'
+    )
     del first, second
 
 
@@ -596,15 +606,20 @@ def test_one_acknowledgement_frame_rewrites_the_row_once(
 
 
 @pytest.mark.parametrize(
-    ("asset_class", "topics", "channel"),
+    ("asset_class", "topics", "channel", "listed"),
     [
-        (AssetClass.INDICES, ("V.I:SPX", "A.I:SPX"), "V"),
-        (AssetClass.OPTIONS, ("AD.*",), "AD"),
+        (AssetClass.INDICES, ("V.I:SPX", "A.I:SPX"), "V", "A.I:SPX and V.I:SPX"),
+        (AssetClass.OPTIONS, ("AD.*",), "AD", "AD.*"),
     ],
     ids=["index values", "admin messages"],
 )
 def test_a_refusal_names_the_one_host_a_channel_s_page_documents(
-    ws_session: WsSession, *, asset_class: AssetClass, topics: tuple[str, ...], channel: str
+    ws_session: WsSession,
+    *,
+    asset_class: AssetClass,
+    topics: tuple[str, ...],
+    channel: str,
+    listed: str,
 ) -> None:
     # Index values are documented only on the Business feed and the admin messages only on the
     # real-time feed: a connection on another host names that host for the channel alone.
@@ -621,8 +636,14 @@ def test_a_refusal_names_the_one_host_a_channel_s_page_documents(
     assert connection._last_error is not None
     # The generated host, which test_generate ties to the channel's vendored page.
     only = channel_only_host(asset_class, channel)
-    assert connection._last_error.endswith(
-        f" (Massive documents the {asset_class.value} {channel} channel only on {only})"
+    subscription = asset_class.name
+    assert connection._last_error == (
+        f"Massive answered the subscription to {listed} on wss://delayed.test/"
+        f'{asset_class.value}: "not authorized". Massive documents the {asset_class.value} '
+        f"{channel} channel only on {only}. delayed_subscriptions lists "
+        f"dm.Subscription.{subscription}, so this table streams from Massive's delayed feed. To "
+        f"stream from the real-time feed, remove dm.Subscription.{subscription} from "
+        "delayed_subscriptions."
     )
     assert connection._last_error.count("Massive documents") == 1  # not for the A channel
     connection.close()
@@ -687,7 +708,9 @@ def test_a_connection_that_does_not_end_is_reported(
     monkeypatch.setattr(ws, "JOIN_TIMEOUT", 0.01)
     monkeypatch.setattr(connection, "join", lambda _: False)
     ws_session.connections.close()
-    assert "has not ended 0 s after close()" in caplog.text
+    assert (
+        f"{_URL}: the connection had not closed 0 s after close(), so it closes in the background."
+    ) in caplog.text
     del result
 
 
@@ -1054,7 +1077,10 @@ def test_no_calendar_outlives_a_closed_transport(
         return calendar
 
     monkeypatch.setattr("deephaven_massive._ingest.ws_connection.FuturesCalendar", closing)
-    with pytest.raises(dm.MassiveError, match="connection group has closed"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=rf"^{_GROUP_CLOSED}$",
+    ):
         ws_session.connections.futures_calendar()
     assert not created[0]._thread.is_alive()  # closed at once, never installed
     # Once closed, no calendar is even created.
@@ -1087,7 +1113,10 @@ def test_the_calendar_never_reads_through_a_freed_session(ws_session: WsSession)
     real = group.sessions
     group.sessions = {_Freed()}
     try:
-        with pytest.raises(dm.MassiveError, match="connection group has closed"):
+        with pytest.raises(
+            dm.MassiveError,
+            match=rf"^{_GROUP_CLOSED}$",
+        ):
             group._fetch_rows("/futures/v1/contracts", {}, bucket="futures", cancel=Cancel())
     finally:
         group.sessions = real  # before the session's close leaves the group
@@ -1111,7 +1140,10 @@ def test_the_calendar_outlives_the_session_that_made_it(ws_session: WsSession) -
     looked_up(ws_session, "NQZ5")  # read through the open session
     other.close()
     assert not calendar._thread.is_alive()  # the group's last session closed it
-    with pytest.raises(dm.MassiveError, match="connection group has closed"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=rf"^{_GROUP_CLOSED}$",
+    ):
         group._fetch_rows("/futures/v1/contracts", {}, bucket="futures", cancel=Cancel())
     del theirs
 
@@ -1220,7 +1252,14 @@ def test_the_connection_reports_drift_and_logs_dropped_rows_and_a_summary(
     assert ws_session.on_loop(connection, lambda: connection._summary) is not first
     drifts = problem_rows(ws_session, dh_to_pylist, DRIFT)  # a problem of each stream
     assert [(r["StreamId"], r["Field"]) for r in drifts] == [(1, "zz"), (2, "zz")]
-    assert all(r["Detail"].endswith("; first sent for AAPL; first value 1") for r in drifts)
+    assert all(
+        r["Detail"]
+        == (
+            "Massive sent the field 'zz', which its documentation lacks, so the rows are "
+            "published without it. It was first sent for AAPL. Its first value: 1."
+        )
+        for r in drifts
+    )
     [dropped] = [m for m in caplog.messages if m.startswith("cannot place a T row for AAPL")]
     assert dropped.endswith('"q":1,"s":100,"z":3,"ds":"100"}')
     [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
@@ -1281,8 +1320,8 @@ def test_a_lost_connection_warns_once_per_outage_and_its_reconnect_is_info(
     down = [entry for entry in ours if "the connection is down" in entry[1]]
     assert [level for level, _ in down] == [logging.WARNING]
     assert re.fullmatch(
-        rf"{re.escape(_URL)}: the connection is down \(reconnecting\); its 1 live tables get no "
-        r"data until it reconnects, next attempt in \d+ s; m\.connections\(\) shows its state",
+        rf"{re.escape(_URL)}: the connection is down, so its 1 live table gets no data until it "
+        r"reconnects\. The library tries again in \d+ s\. m\.connections\(\) shows its state\.",
         down[0][1],
     )
     back = [entry for entry in ours if "reconnected after" in entry[1]]
@@ -1309,7 +1348,12 @@ def test_an_outage_names_a_full_account_and_logs_once(
             )
     down = [r for r in caplog.records if "the connection is down" in r.getMessage()]
     assert [r.levelno for r in down] == [logging.WARNING]
-    assert "is down (the account has no free connection, max_connections)" in down[0].getMessage()
+    assert down[0].getMessage() == (
+        f"{_URL}: the connection is down, so its 1 live table gets no data until it reconnects. "
+        'Massive answered the login with "max_connections", so another connection with this '
+        "API key holds its place. The library tries again in 30 s. Stop the other "
+        "program or session that uses the key."
+    )
     ws_session.session.release(result)
 
 
@@ -1326,9 +1370,12 @@ def test_an_outage_that_comes_to_wait_for_a_slot_warns_of_the_full_account_once(
                 connection, functools.partial(connection._on_state, state, time.time() + 30.0)
             )
     down = [r.getMessage() for r in caplog.records if "the connection is down" in r.getMessage()]
-    assert [m.split(";")[0] for m in down] == [
-        f"{_URL}: the connection is down (reconnecting)",
-        f"{_URL}: the connection is down (the account has no free connection, max_connections)",
+    assert [m.split(". ")[1] for m in down] == [
+        "The library tries again in 30 s",
+        (
+            'Massive answered the login with "max_connections", so another connection with this '
+            "API key holds its place"
+        ),
     ]
     ws_session.session.release(result)
 
@@ -1360,20 +1407,25 @@ def test_the_options_cap_warns_once_per_episode_with_its_changes_at_debug(
         (
             logging.DEBUG,
             (
-                "test.trades stream 1: 3 contracts deferred, 2 before; over capacity: 1/1000; "
-                "0 deferred"
+                "test.trades stream 1: 3 contracts deferred, 2 before; The connection wants 1 "
+                "options subscription, over Massive's cap of 1,000, so 0 wait."
             ),
         )
     ]
     ws_session.session.release(result)
 
 
-_DOWN = r"connection down since (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ); no data"
+_DOWN = (
+    r"The connection has been down since (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ), so no data arrives\."
+)
 """The pattern of the `outage` span's detail of a stream whose connection is down; its group
 is the start."""
 
 
-_NO_ACK = r"no acknowledgement from Massive for T\.\w+; its rows may be missing; .*"
+_NO_ACK = (
+    r"Massive has not confirmed the subscription T\.\w+, so its rows may be missing\. The "
+    r"library re-sends it until Massive confirms\."
+)
 """The pattern of the `unacknowledged_topics` span's detail of a stream with a topic Massive
 never acknowledged."""
 
@@ -1381,9 +1433,9 @@ never acknowledged."""
 def _outage_failure(since: str, limit: str) -> str:
     # The message a stream fails with once the outage held it down for `max_outage`.
     return (
-        f"the WebSocket connection to socket.test/stocks has been down since {since}, longer "
-        f"than MassiveConfig.max_outage ({limit} s); the rows from {since} on are missing, so "
-        "this table stopped; call the verb again for a new live table"
+        f"The WebSocket connection to socket.test/stocks has been down since {since}, longer "
+        f"than max_outage={limit} s, so this table stopped and the rows from then on are "
+        "missing. Call the method again for a new live table."
     )
 
 
@@ -1510,7 +1562,7 @@ def test_an_outage_past_max_outage_fails_every_stream_and_its_derived_tables(
     assert failure is not None
     assert (failure.source, failure.is_retryable) == (dm.ErrorSource.NETWORK, True)
     # An expected failure: one WARNING for both streams, never an ERROR.
-    failures = [r for r in caplog.records if "longer than MassiveConfig.max_outage" in r.message]
+    failures = [r for r in caplog.records if "longer than max_outage=" in r.message]
     assert [r.levelno for r in failures] == [logging.WARNING]
 
 
@@ -1987,8 +2039,7 @@ def test_any_frame_ends_the_quiet_feed_span_and_the_stream_keeps_running(
     for frame in (_ack("T.AAPL"), json.dumps([trade("AAPL")])):  # a status, then data
         ws_session.on_loop(connection, lambda: connection._check_frames(time.time_ns() + later))
         assert re.fullmatch(
-            r"no data since \S+Z during stocks trading hours; quiet symbols or a market holiday "
-            r"may explain it",
+            r"Massive has sent nothing since \S+Z during stocks trading hours\.",
             quiet() or "",
         )
         fake_ws_server.send(frame)
@@ -2097,10 +2148,10 @@ def test_a_refused_fmv_topic_names_its_one_host(ws_session: WsSession) -> None:
     )
     connection._refused(("FMV.C:EURUSD",), "not authorized")
     assert connection._last_error is not None
-    assert connection._last_error.endswith(
-        "Massive said: not authorized; fair-market-value (FMV) data streams only from "
-        "business.massive.com, the one host Massive documents for it; "
-        "MassiveConfig.websocket_hosts never applies to FMV"
+    assert connection._last_error == (
+        "Massive answered the subscription to FMV.C:EURUSD on wss://business.massive.com/forex: "
+        '"not authorized". Massive documents one host for FMV data, business.massive.com, and '
+        "websocket_hosts does not apply to it."
     )
     connection.close()
     assert connection.join(TIMEOUT)
@@ -2120,7 +2171,12 @@ def test_a_refusal_adds_a_real_time_note_only_to_the_streams_that_carry_one(
     errors = {r["Dataset"]: r["Error"] for r in streams_of(ws_session, dh_to_pylist)}
     note = "options.admin_messages streams only in real time, on the plans listed at "
     assert note in errors["options.admin_messages"]
-    assert "refused the subscription to AD.*, T.*" in errors["options.trades"]
+    assert errors["options.trades"] == (
+        'Massive answered the subscription to AD.* and T.* on wss://socket.test/options: "no". '
+        "Massive documents the options AD channel only on socket.massive.com. To stream from "
+        'another host, pass websocket_hosts={dm.AssetClass.OPTIONS: "<host>"} to '
+        "dm.MassiveConfig."
+    )
     assert "streams only in real time" not in errors["options.trades"]
     m.release(notices)
     m.release(trades)
@@ -2129,12 +2185,10 @@ def test_a_refusal_adds_a_real_time_note_only_to_the_streams_that_carry_one(
 _TIME = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"
 
 _TAKEN_ERROR = (
-    r"another connection with this API key took the WebSocket connection to socket\.test/stocks "
-    rf"at ({_TIME}), so this table stopped; stop the other program or session that uses the key "
-    r"and call the method again, or set "
-    r"MassiveConfig\(connection_taken=dm\.ConnectionTaken\.RECONNECT\) to take the connection "
-    r"back; see https://github\.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting\.md"
-    r"#live-table-messages"
+    r"Another connection with this API key took the WebSocket connection to socket\.test/stocks "
+    rf"at ({_TIME}), so this table stopped\. Stop the other program or session that uses the key "
+    r"and call the method again, or pass connection_taken=dm\.ConnectionTaken\.RECONNECT to "
+    r"dm\.MassiveConfig to take the connection back\."
 )
 
 
@@ -2164,15 +2218,15 @@ def test_a_taken_connection_fails_its_tables_and_closes_by_default(
     match = re.fullmatch(_TAKEN_ERROR, stream["Error"])
     assert match is not None
     assert result.j_table.isFailed()
-    warnings = [r for r in caplog.records if "took the connection at" in r.getMessage()]
+    warnings = [r for r in caplog.records if "took this one at" in r.getMessage()]
     assert [(r.levelno, r.getMessage()) for r in warnings] == [
         (
             logging.WARNING,
             (
-                f"{_URL}: another connection with this API key took the connection at "
-                f"{match.group(1)} (max_connections); no live table of a session with "
-                "connection_taken=RECONNECT remains, so its 1 live tables fail and the connection "
-                "closes"
+                f"{_URL}: another connection with this API key took this one at "
+                f"{match.group(1)}. Massive closed it with the reason max_connections. No live "
+                "table's session set connection_taken=RECONNECT, so its 1 live table failed and "
+                "the connection closed."
             ),
         )
     ]
@@ -2200,13 +2254,15 @@ def test_a_reconnect_session_says_when_it_takes_the_connection_back(
     assert row["State"] == "RECONNECTING"
     assert row["NextReconnectAt"] is not None
     assert re.fullmatch(
-        rf"another connection with this API key took the connection at {_TIME}", row["LastError"]
+        rf"Another connection with this API key took this connection at {_TIME}\. The library "
+        rf"takes it back at {_TIME}\.",
+        row["LastError"],
     )
     [stream] = streams_of(session, dh_to_pylist)
     assert (stream["State"], stream["Error"]) == ("RUNNING", None)
     assert re.fullmatch(
-        rf"connection down since {_TIME}; no data; another connection with this API key took "
-        rf"it at {_TIME}; reconnecting at {_TIME} takes it back \(connection_taken=RECONNECT\)",
+        rf"The connection has been down since {_TIME}, so no data arrives\. Another connection "
+        rf"with this API key took it at {_TIME}, and the library takes it back at {_TIME}\.",
         spans_of(session, dh_to_pylist)[(1, OUTAGE)],
     )
     assert not result.j_table.isFailed()
@@ -2263,12 +2319,12 @@ def test_a_shared_connection_taken_fails_only_the_tables_of_fail_sessions(
     ws_session.flush()
     rows_when(theirs, lambda rows: len(rows) == 1)
     assert not theirs.j_table.isFailed()
-    [warning] = [r.getMessage() for r in caplog.records if "took the connection" in r.getMessage()]
+    [warning] = [r.getMessage() for r in caplog.records if "took this one" in r.getMessage()]
     assert re.fullmatch(
-        rf"{re.escape(_URL)}: another connection with this API key took the connection at "
-        rf"{_TIME} \(max_connections\); 1 live tables of sessions with "
-        rf"connection_taken=RECONNECT remain, so it reconnects at {_TIME} and takes the "
-        "connection back; 1 live tables of sessions with connection_taken=FAIL fail",
+        rf"{re.escape(_URL)}: another connection with this API key took this one at {_TIME}\. "
+        r"Massive closed it with the reason max_connections\. The 1 live table whose session set "
+        rf"connection_taken=RECONNECT reconnects at {_TIME} and takes it back\. The 1 live table "
+        r"whose session set connection_taken=FAIL has failed\.",
         warning,
     )
     other.release(theirs)
@@ -2327,7 +2383,7 @@ def test_a_fail_sessions_stream_opening_when_the_connection_is_taken_fails_as_it
         ws_session.wait(lambda s: WsState.TAKEN in s.states)
         go.set()
         try:  # the verb names the failure its stream met while it opened
-            with pytest.raises(dm.MassiveError, match=r"stream \d+ failed: another connection"):
+            with pytest.raises(dm.MassiveError, match=r"stream \d+ failed: Another connection"):
                 opening.result(TIMEOUT)
             [stream] = streams_of(ws_session, dh_to_pylist)
             assert re.fullmatch(_TAKEN_ERROR, stream["Error"])
@@ -2399,7 +2455,7 @@ def test_a_reconnected_connection_forgets_it_was_taken(
         session.session.release(result)
         session.wait(lambda s: WsState.CLOSED in s.states)
     messages = [r.getMessage() for r in caplog.records]
-    assert len([m for m in messages if "took the connection at" in m]) == 1  # the eviction's
+    assert len([m for m in messages if "took this one at" in m]) == 1  # the eviction's
     assert f"closing {_URL}: no stream for 0 s" in messages
     assert not result.j_table.isFailed()
 
@@ -2433,7 +2489,7 @@ def test_a_taken_connection_decides_to_close_once(
 
         session.on_loop(connection, twice)
         session.wait(lambda s: WsState.CLOSED in s.states)
-    closes = [r for r in caplog.records if "the connection closes" in r.getMessage()]
+    closes = [r for r in caplog.records if "the connection closed." in r.getMessage()]
     assert len(closes) == 1
     del first, second
 
@@ -2609,3 +2665,16 @@ def test_an_outage_starts_at_the_first_failed_attempt_not_while_waiting(
     assert down_since >= added_at
     ws_session.subscribed("T.AAPL")  # the next attempt connects
     ws_session.session.release(result)
+
+
+def test_the_no_acknowledgement_detail_names_two_subscriptions_or_counts_many() -> None:
+    text = ws_connection.Connection._no_ack_text
+    assert text(frozenset({"T.AAPL", "Q.AAPL"})) == (
+        "Massive has not confirmed the subscriptions Q.AAPL and T.AAPL, so their rows may be "
+        "missing. The library re-sends them until Massive confirms."
+    )
+    many = frozenset(f"T.S{n}" for n in range(7))
+    assert text(many) == (
+        "Massive has not confirmed 7 subscriptions, the first 5: T.S0, T.S1, T.S2, T.S3, and "
+        "T.S4, so their rows may be missing. The library re-sends them until Massive confirms."
+    )

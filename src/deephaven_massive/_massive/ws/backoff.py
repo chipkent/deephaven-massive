@@ -76,9 +76,9 @@ class Backoff:
             ValueError: If `initial` is not positive or `maximum` is below `initial`.
         """
         if not initial > 0:
-            raise ValueError(f"the initial backoff must be positive, not {initial}")
+            raise ValueError(f"initial={initial!r} is not a positive number of seconds.")
         if maximum < initial:
-            raise ValueError(f"the maximum backoff {maximum} is below the initial {initial}")
+            raise ValueError(f"maximum={maximum!r} is below initial={initial!r}.")
         self._initial = initial
         self._maximum = maximum
         self._uniform = uniform

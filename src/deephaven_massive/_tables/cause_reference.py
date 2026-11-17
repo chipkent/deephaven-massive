@@ -66,8 +66,8 @@ def with_causes_reference(page: str) -> str:
     end = page.find(CAUSES_REFERENCE_END, max(start, 0))
     if start < 0 or end < 0:
         raise ValueError(
-            "the troubleshooting page needs the lines CAUSES_REFERENCE_START and "
-            "CAUSES_REFERENCE_END around its generated table"
+            "The troubleshooting page needs the lines CAUSES_REFERENCE_START and "
+            "CAUSES_REFERENCE_END, in that order, around its generated table."
         )
     head = page[: start + len(CAUSES_REFERENCE_START)]
     return f"{head}\n\n{causes_reference()}\n{page[end:]}"

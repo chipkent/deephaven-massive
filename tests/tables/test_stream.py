@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 import statistics
 import sys
 import threading
@@ -88,6 +89,8 @@ RowsWhen: TypeAlias = (
 )
 W = Transport.WS
 TIMEOUT = 15.0
+FLUSH_URL = "wss://socket.test/stocks"
+"""The connection URL of the tests' flushers, which starts their messages."""
 
 TRADES = DatasetSpec(
     name="test.trades",
@@ -835,7 +838,7 @@ def test_a_failure_after_the_close_fails_the_table_with_the_close(
     core = massive_session._core
     sink, _ = make_sink(core, ALL)
     failures = _record_failures(sink, monkeypatch)
-    closed = f"{core.label} was closed; this table no longer updates. " + NEW_SESSION
+    closed = "This session was closed, so this table no longer updates. " + NEW_SESSION
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.stream"):
         assert sink.fail(MassiveError("a failure that raced the close"))
@@ -1047,6 +1050,7 @@ class FuturesFlush:
         self.flusher = Flusher(
             core.exec_ctx,
             "test-flush",
+            url=FLUSH_URL,
             interval=3600.0,
             sessions=self.calendar,
             held=self.held,
@@ -1460,7 +1464,7 @@ def test_a_failure_settling_held_rows_fails_their_streams_as_a_defect(
 
 @pytest.fixture
 def flusher(massive_session: dm.MassiveSession) -> Iterator[Flusher]:
-    f = Flusher(massive_session._core.exec_ctx, "test-flush", interval=3600.0)
+    f = Flusher(massive_session._core.exec_ctx, "test-flush", url=FLUSH_URL, interval=3600.0)
     yield f
     f.stop()
 
@@ -1497,6 +1501,7 @@ def test_each_stream_records_the_socket_its_newest_rows_came_from(
     flusher = Flusher(
         massive_session._core.exec_ctx,
         "test-flush",
+        url=FLUSH_URL,
         interval=3600.0,
         on_new_generation=lambda: calls.append(None),
     )
@@ -1645,11 +1650,11 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
         flusher.flush()
     assert every.failed
     assert not aapl.failed
-    [record] = [r for r in caplog.records if "could read none" in r.getMessage()]
+    [record] = [r for r in caplog.records if "could not read the last" in r.getMessage()]
     assert record.levelno == logging.WARNING  # Massive's data, no bug of the library
     assert record.getMessage() == (
-        f"test.trades stream 1 failed: test.trades: the library could read none of the last "
-        f"{2 * half} rows Massive sent on channel T whole, so it withheld them all and published "
+        f"test.trades stream 1 failed: test.trades: the library could not read the last "
+        f"{2 * half} rows Massive sent on channel T whole, so it withheld them and published "
         "none. Timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100. "
         "m.problems() counts the withheld rows by cause and symbol."
     )
@@ -1698,8 +1703,8 @@ def test_a_symbol_whose_every_row_is_withheld_is_stale_in_its_streams_and_fails_
     flusher.flush()
     assert (every.failed, illq.failed, aapl.failed) == (False, False, False)
     why = (
-        f"the last {2 * half} rows were withheld; the first: timestamp unit mismatch for "
-        "test.trades.Timestamp: 5 ms is outside 1990 to 2100"
+        f"The library withheld the last {2 * half} rows of this symbol. Timestamp unit mismatch "
+        "for test.trades.Timestamp: 5 ms is outside 1990 to 2100."
     )
     assert stale_spans(problems, 7) == [{"ILLQ": why}]
     assert stale_spans(problems, 8) == [{"ILLQ": why}]
@@ -1797,9 +1802,11 @@ def test_a_stale_symbol_whose_run_reaches_the_limit_again_updates_its_detail_in_
         for p in problems
         if isinstance(p, ProblemSpans) and p.cause is ProblemCause.STALE_SYMBOL_DATA
     )
-    assert first.detail.startswith(f"the last {limit} rows were withheld; the first: timestamp")
+    assert first.detail.startswith(
+        f"The library withheld the last {limit} rows of this symbol. Timestamp"
+    )
     assert later.detail == (
-        f"the last {limit} rows were withheld; the first: a T row for ILLQ: no Price"
+        f"The library withheld the last {limit} rows of this symbol. A T row for ILLQ: no Price."
     )
     assert later.since == first.since
 
@@ -1878,7 +1885,7 @@ def test_one_flush_of_dropped_rows_at_the_limit_fails_the_streams_by_the_run_rul
     assert every.failed
     assert "could not publish" not in caplog.text
     assert (
-        f"the library could read none of the last {stream.DROPPED_RUN_LIMIT} rows Massive sent "
+        f"the library could not read the last {stream.DROPPED_RUN_LIMIT} rows Massive sent "
         "on channel T whole"
     ) in caplog.text
 
@@ -1940,7 +1947,10 @@ def test_a_row_failure_that_is_refused_spares_the_other_streams(
     assert aapl.failed
     assert msft.failed
     assert msft.rows_published == 0
-    assert "test-flush: could not fail stream 1" in caplog.text
+    assert (
+        f"{FLUSH_URL}: the library could not stop stream 1 with this error: test.trades: "
+        "Massive sent 1 row the library cannot read whole"
+    ) in caplog.text
 
 
 def test_a_failure_is_recorded_before_the_table_fails(
@@ -1977,7 +1987,9 @@ def test_a_batch_that_cannot_be_converted_fails_only_its_readers(
     assert broken.failed
     assert not healthy.failed
     rows_when(shown, lambda rows: len(rows) == 1)
-    assert "test.trades: could not publish a T batch" in caplog.text
+    assert (
+        "test.trades: the library could not publish the rows Massive sent on channel T: "
+    ) in caplog.text
 
 
 def test_drift_is_a_problem_of_each_stream_of_the_channel(
@@ -2199,7 +2211,7 @@ class _DyingFlusher(Flusher):
     __slots__ = ()
 
     def __init__(self, exec_ctx: ExecutionContext) -> None:
-        super().__init__(exec_ctx, "dying-flush", interval=0.001)
+        super().__init__(exec_ctx, "dying-flush", url=FLUSH_URL, interval=0.001)
 
     @override
     def flush(self) -> None:
@@ -2259,16 +2271,18 @@ def test_a_dying_flush_thread_fails_its_streams(
     assert healthy.failed  # a stream that cannot be failed does not spare the others
     # A defect of the library: one ERROR with how to report it, not CRITICAL, and not one per
     # stream it fails.
-    died = [r for r in caplog.records if r.getMessage().startswith("the flush thread")]
+    died = [
+        r for r in caplog.records if r.getMessage().startswith(f"{FLUSH_URL}: the library thread")
+    ]
     assert [(r.levelno, r.getMessage()) for r in died] == [
         (
             logging.ERROR,
-            "the flush thread dying-flush died (_Fatal()); this table no longer updates. "
-            + LIBRARY_BUG,
+            f"{FLUSH_URL}: the library thread that publishes this connection's rows died: "
+            "_Fatal(). This table no longer updates. " + LIBRARY_BUG,
         )
     ]
     assert died[0].exc_info is not None
-    assert "dying-flush: could not fail stream 2" in caplog.text
+    assert f"{FLUSH_URL}: the library could not stop stream 2 with this error: " in caplog.text
     assert [args.exc_type for args in escaped] == [_Fatal]
 
 
@@ -2295,7 +2309,9 @@ def test_a_stream_that_cannot_be_failed_costs_the_flush_nothing(
     assert [str(error) for error in recording.errors] == ["also refused"]
     rows_when(shown, lambda rows: len(rows) == 1)
     assert healthy.rows_published == 1
-    assert "test-flush: could not fail stream 2 (refused)" in caplog.text
+    assert (
+        f"{FLUSH_URL}: the library could not stop stream 2 with this error: refused " + LIBRARY_BUG
+    ) in caplog.text
 
 
 def test_a_drift_report_that_raises_costs_the_flush_nothing(
@@ -2320,14 +2336,17 @@ def test_a_drift_report_that_raises_costs_the_flush_nothing(
     flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)
     flusher.flush()
     assert [update[1].rows_published for update in reported] == [1]
-    assert "test-flush: could not report the drift of wss://h/stocks channel T" in (caplog.text)
+    assert (
+        "wss://h/stocks channel T: the library could not report the fields Massive sent "
+        f"beyond its documentation. {LIBRARY_BUG}"
+    ) in caplog.text
 
 
 class _BrokenFlusher(Flusher):
     __slots__ = ("flushes",)
 
     def __init__(self, core: SessionCore) -> None:
-        super().__init__(core.exec_ctx, "test-flush", interval=0.001)
+        super().__init__(core.exec_ctx, "test-flush", url=FLUSH_URL, interval=0.001)
         self.flushes = threading.Semaphore(0)
 
     @override
@@ -2345,11 +2364,14 @@ def test_the_flush_thread_logs_a_failing_flush_and_carries_on(
     assert f.flushes.acquire(timeout=TIMEOUT)  # it kept going
     f.stop()
     assert f.join(TIMEOUT)
-    assert "test-flush: a flush failed; continuing" in caplog.text
+    assert (
+        f"{FLUSH_URL}: publishing one batch of rows failed, and the next batch goes on. "
+        + LIBRARY_BUG
+    ) in caplog.text
 
 
 def test_an_unstarted_flusher_joins_at_once(massive_session: dm.MassiveSession) -> None:
-    assert Flusher(massive_session._core.exec_ctx, "never", interval=1.0).join(0.0)
+    assert Flusher(massive_session._core.exec_ctx, "never", url=FLUSH_URL, interval=1.0).join(0.0)
 
 
 # --- Benchmark (records, never gates) ----------------------------------------------------------
@@ -2534,7 +2556,7 @@ def test_streamed_rows_of_one_day_share_one_stored_date(
     core = massive_session._core
     spec = core.catalog.by_name["stocks.trades"]
     plan = ChannelPlan.build(core.catalog, spec, "T")
-    flusher = Flusher(core.exec_ctx, "test-flush", interval=3600.0)
+    flusher = Flusher(core.exec_ctx, "test-flush", url=FLUSH_URL, interval=3600.0)
     opened = open_stream_tables(
         plan,
         core.catalog.dataset_schema(spec),
@@ -2572,7 +2594,7 @@ def test_the_backlog_counts_buffered_rows_and_warns_when_it_grows(
     flusher.routes.add("T", sink)
 
     def warnings() -> int:
-        return sum("rows are waiting to be published" in r.getMessage() for r in caplog.records)
+        return sum("rows wait to be published" in r.getMessage() for r in caplog.records)
 
     flusher.rows(
         "Q", frame([trade("AAPL")]), {}, generation=1
@@ -2583,6 +2605,13 @@ def test_the_backlog_counts_buffered_rows_and_warns_when_it_grows(
     # Each buffered frame holds its arrival time with its rows: the backlog counts the rows.
     flusher.rows("T", frame([trade("AAPL")] * 3), {}, generation=1)
     assert (flusher.backlog, warnings()) == (8, 1)  # logged once while it stays above
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            f"{FLUSH_URL}: 5 rows wait to be published, more than 4. Deephaven's update graph is "
+            "falling behind the stream, as it does while a console command runs, so memory grows "
+            "until it catches up. Past 1024 MB, the live tables of this connection stop."
+        )
+    ]
     flusher.flush()
     assert flusher.backlog == 0  # nothing was dropped: the flush took every row
     flusher.rows("T", frame([trade("AAPL")] * 5), {}, generation=1)
@@ -2629,8 +2658,15 @@ def test_rows_past_the_memory_limit_fail_every_stream_routed_while_they_were_dro
     flusher.routes.add("T", during)
     flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # dropped: still over
     assert flusher.backlog == 4
-    dropping = [r.getMessage() for r in caplog.records if "rows are dropped" in r.getMessage()]
-    assert len(dropping) == 1  # logged once, at the frame that passed the limit
+    dropping = [r.getMessage() for r in caplog.records if "drops the rows" in r.getMessage()]
+    assert dropping == [  # logged once, at the frame that passed the limit
+        (
+            f"{FLUSH_URL}: 4 rows, about 0 MB, wait to be published, and 1 more on channel T would "
+            "pass the 0 MB the library keeps for one connection. Deephaven's update graph fell "
+            "behind the stream, or stopped, as it does while a console command runs. The library "
+            "drops the rows from now on and stops every live table of this connection."
+        )
+    ]
     flusher.flush()
     assert first.failed
     assert during.failed
@@ -2639,9 +2675,19 @@ def test_rows_past_the_memory_limit_fail_every_stream_routed_while_they_were_dro
     failures = [r.getMessage() for r in caplog.records if "stream 1 failed" in r.getMessage()]
     (failure,) = failures
     # The two dropped frames held a row each.
-    assert "4 rows (about 0 MB) waited to be published, and 2 more would pass" in failure
-    assert "MB the library keeps for one connection" in failure
-    assert "call the method again for a new live table" in failure
+    assert re.fullmatch(
+        re.escape(
+            "test.trades stream 1 failed: test.trades: 4 rows, about 0 MB, waited to be "
+            "published, and 2 more would pass the 0 MB the library keeps for one connection. "
+            "Deephaven's update graph fell behind the stream, or stopped, as it does while a "
+            "console command runs. The rows from "
+        )
+        + r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"
+        + re.escape(
+            " on are missing, so this table stopped. Call the method again for a new live table."
+        ),
+        failure,
+    )
     after, shown = make_sink(core, ("AAPL",), plan, stream_id=3)
     kept = blink_to_append_only(shown)  # before the flush, so no cycle's rows pass it by
     flusher.routes.add("T", after)
@@ -2792,7 +2838,7 @@ def test_a_flush_hands_events_to_live_sessions_only_and_survives_one_that_raises
         flusher._report_events([(sink, (event(sink.stream_id),)) for sink in (gone, failing, live)])
     assert [e.stream_id for e in seen] == [3]
     assert [r.getMessage().split(". ")[0] for r in caplog.records] == [
-        f"{flusher._thread.name}: could not report the problems of stream 2"
+        f"{FLUSH_URL}: the library could not report the problems of stream 2"
     ]
 
 
@@ -2835,12 +2881,12 @@ def test_a_run_of_rows_with_no_readable_symbol_fails_the_named_streams(
             flusher.flush()
     states.append(aapl.failed)
     assert states == [False, True]
-    [record] = [r for r in caplog.records if "could read the symbol" in r.getMessage()]
+    [record] = [r for r in caplog.records if "could not read the symbol" in r.getMessage()]
     assert record.levelno == logging.WARNING  # Massive's data, no bug of the library
     assert record.getMessage() == (
-        "test.trades stream 1 failed: test.trades: the library could read the symbol of none of "
-        "the last 100 rows Massive sent on channel T, so it withheld them all and published "
-        "none. A T row: no Ticker. m.problems() counts the withheld rows by cause and symbol."
+        "test.trades stream 1 failed: test.trades: the library could not read the symbol of "
+        "the last 100 rows Massive sent on channel T, so it withheld them and published none. "
+        "A T row: no Ticker. m.problems() counts the withheld rows by cause and symbol."
     )
     assert flusher._unrouted == {}
 

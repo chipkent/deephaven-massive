@@ -179,7 +179,9 @@ class _Watched:
         Raises:
             io.UnsupportedOperation: Always, naming the position.
         """
-        raise io.UnsupportedOperation(f"a response body cannot seek (to {offset})")
+        raise io.UnsupportedOperation(
+            f"A response body cannot seek, and the reader asked for position {offset}."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,9 +447,11 @@ class FlatFile:
                 self.rows_kept += block.rows.num_rows
                 yield block.rows, headers.merge(block.drift), block.marks
             if self.malformed_lines and not self.rows_read:
-                raise self._error(
-                    f"every one of its {self.malformed_lines} lines is malformed; the first: "
-                    f"{self.malformed_reason}",
+                raise WireError(
+                    f"None of the {self.malformed_lines} lines after the header of Massive's "
+                    f"file {self._location} can be read. In the first, {self.malformed_reason}.",
+                    host=self._host,
+                    path=self._key,
                     kind=WireFailure.UNREADABLE_ROWS,
                 )
         except (
@@ -458,13 +462,16 @@ class FlatFile:
             UnicodeDecodeError,
             csv.Error,
         ) as error:
-            raise WireError(
-                f"cannot read {self._location}: {error}",
-                host=self._host,
-                path=self._key,
-                # A body that broke off is a transport failure; any other is the file's content.
-                kind=(WireFailure.NO_ANSWER if self._dropped.is_set() else WireFailure.UNREADABLE),
-            ) from error
+            # A body that broke off is a transport failure; any other is the file's content.
+            if self._dropped.is_set():
+                raise WireError(
+                    f"The connection broke off while the library read Massive's file "
+                    f"{self._location}: {error}.",
+                    host=self._host,
+                    path=self._key,
+                    kind=WireFailure.NO_ANSWER,
+                ) from error
+            raise self._error(str(error)) from error
 
     def _blocks(
         self,
@@ -583,38 +590,38 @@ class FlatFile:
         line = text.readline(plan.block_size)
         if not line:
             # Massive publishes no empty partitions: an empty object is a broken upload.
-            raise self._error("the file is empty: no header line")
+            raise self._error("the file is empty and has no header line")
         if len(line) == plan.block_size and not line.endswith(b"\n"):
-            raise self._error(f"the header line is longer than {plan.block_size} bytes")
+            raise self._error(f"its header line is longer than {plan.block_size} bytes")
         # The csv module parses quoted names and drops the line end, `\r\n` included;
         # `utf-8-sig` drops a byte-order mark, as Arrow's own header parsing does.
         names = next(csv.reader([line.decode("utf-8-sig")]), [])
         repeated = sorted({name for name in names if names.count(name) > 1})
         if repeated:
             # Matching by name cannot tell which of two equal names holds the column.
-            raise self._error(f"the header names {', '.join(repeated)} more than once")
+            raise self._error(f"its header names {', '.join(repeated)} more than once")
         lacking = sorted(plan.required - set(names))
         if lacking:
-            raise self._error(f"the header lacks the key column {', '.join(lacking)}")
+            raise self._error(f"its header lacks the key column {', '.join(lacking)}")
         return names
 
-    def _error(self, reason: str, *, kind: WireFailure = WireFailure.UNREADABLE) -> WireError:
-        """Return the error of a file that cannot be read, naming the file.
+    def _error(self, reason: str) -> WireError:
+        """Return the error of a file the reader cannot read as a whole, naming the file.
 
         Args:
-            reason: What is wrong with the file.
-            kind: `WireFailure.UNREADABLE` for a file the reader cannot read as a whole, or
-                `WireFailure.UNREADABLE_ROWS` for one whose every line is malformed.
+            reason: What is wrong with the file, as a clause with no final period.
 
         Returns:
-            `WireError("cannot read <location>: <reason>")` of that kind, for the caller to
-            raise.
+            `WireError("The library could not read Massive's file <location>: <reason>.")`,
+            `WireFailure.UNREADABLE`, for the caller to raise.
         """
+        # A reason the CSV parser ended with a question needs no period after it.
+        end = "" if reason.endswith("?") else "."
         return WireError(
-            f"cannot read {self._location}: {reason}",
+            f"The library could not read Massive's file {self._location}: {reason}{end}",
             host=self._host,
             path=self._key,
-            kind=kind,
+            kind=WireFailure.UNREADABLE,
         )
 
     def _apply(self, block: pa.RecordBatch, plan: ReadPlan) -> _Block:
