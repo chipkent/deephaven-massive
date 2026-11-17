@@ -887,6 +887,25 @@ def test_ends_found_together_are_told_in_the_order_the_pauses_ended() -> None:
     ]
 
 
+def test_a_pause_keeps_the_refusal_that_began_or_lengthened_it() -> None:
+    # A later refusal that leaves the pause as it was changes `last_refusal`, not the pause's:
+    # its end, and a listener that subscribes mid-pause, still name the refusal behind it.
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    heard: list[PauseNotice] = []
+    governor.subscribe_pauses(heard.append)
+    burst = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(2)]
+    _refuse(governor, burst[0], retry_after=20.0, message="HTTP 429 (req 1)")
+    _refuse(governor, burst[1], retry_after=5.0, message="HTTP 429 (req 2)")  # no change
+    late: list[PauseNotice] = []
+    governor.subscribe_pauses(late.append)
+    clock.advance(30.0)
+    governor.snapshot()
+    assert [n.refusal for n in heard] == ["HTTP 429 (req 1)", "HTTP 429 (req 1)"]
+    assert late[0].refusal == "HTTP 429 (req 1)"
+    assert _state(governor).last_refusal == "HTTP 429 (req 2)"
+
+
 def test_a_listener_subscribed_mid_pause_hears_of_it_at_once() -> None:
     clock = FakeClock(manual=True)
     governor = _governor(clock)

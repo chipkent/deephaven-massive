@@ -570,6 +570,7 @@ class _Bucket:
         "last_refusal",
         "learned",
         "open",
+        "pause_refusal",
         "pause_started",
         "pause_until",
         "probe",
@@ -620,6 +621,9 @@ class _Bucket:
         # When the pause its pause listeners last heard of began (seconds since the Unix
         # epoch), until they hear it ended; None when they know of no open pause.
         self.pause_started: float | None = None
+        # The message of the 429 that began or last lengthened that pause; a later refusal
+        # that leaves the pause as it was doesn't replace it, as it does `last_refusal`.
+        self.pause_refusal = ""
         self.episode = 0
         self.run_refusals = 0  # counted refusals of the current run; 0 when none is going
         # The episode the current run started in: a request granted before it (a lower episode)
@@ -1497,8 +1501,7 @@ class RequestGovernor:
                         ends=wall + bucket.pause_until - now,
                         ended=False,
                         at=wall,
-                        # A pause begins at a refusal, which set `last_refusal`: "" never shows.
-                        refusal=bucket.last_refusal or "",
+                        refusal=bucket.pause_refusal,
                     )
                     self._tell_pauses((notice,), only=listener)
 
@@ -1536,6 +1539,7 @@ class RequestGovernor:
             return ()
         if bucket.pause_started is None:
             bucket.pause_started = wall
+        bucket.pause_refusal = refusal
         notice = PauseNotice(
             bucket=name,
             started=bucket.pause_started,
@@ -1567,8 +1571,7 @@ class RequestGovernor:
                         ends=ends,
                         ended=True,
                         at=ends,
-                        # A pause begins at a refusal, which set `last_refusal`: "" never shows.
-                        refusal=bucket.last_refusal or "",
+                        refusal=bucket.pause_refusal,
                     )
                 )
                 bucket.pause_started = None

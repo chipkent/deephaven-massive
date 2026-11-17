@@ -1113,7 +1113,7 @@ def test_a_pause_is_a_rate_limited_span_from_its_start_to_its_end(
     diagnostics.release()
 
 
-def test_a_pause_that_starts_and_ends_within_one_batch_still_has_its_row(
+def test_a_pause_over_before_anything_is_shown_still_has_its_row(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
     # The pause is over before the writer adds anything: it still shows, with its own times.
