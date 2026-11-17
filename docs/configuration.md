@@ -247,10 +247,10 @@ minutes late, or 10 for futures. Fair market value (FMV) streams always use
 no delayed feed for it.
 
 Leave a delayed subscription out, and a stream of its current data raises
-`EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
-`poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
-A stream from a host set in `websocket_hosts` is the exception: it opens, and
-`m.connections()` shows its recency.
+`EntitlementError`. Its message gives the line of Python to add. A stream from a host
+you set in `websocket_hosts` still opens, and its `Recency` shows Massive's label. A
+`fetch()` or `poll()` table fails with the same message, and `fetch(wait=True)`
+raises it.
 `history()` and other past data don't depend on this setting.
 
 #### rest_requests_per_minute
@@ -457,16 +457,16 @@ An entry must agree with `delayed_subscriptions`. Give a class a host whose name
 starts with `delayed.` exactly when its subscription is listed there, and never give
 one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
 
-The library opens a stream from a host set here whatever the class's snapshot says,
-and `m.connections()` shows its `Recency`:
+A stream from a host set here opens whatever Massive's label on its data says. Its
+`Recency` in `m.connections()` shows that label:
 
-- `DELAYED`: `delayed_subscriptions` lists the class, or its snapshot says delayed.
-- `REALTIME`: the class's snapshot says real-time.
-- `UNKNOWN`: forex or crypto, or a snapshot with no label, refused, or not read.
+- `DELAYED`: its subscription is in `delayed_subscriptions`, or Massive labels the
+  data `DELAYED`.
+- `REALTIME`: Massive labels the data `REAL-TIME`.
+- `UNKNOWN`: anything else, such as forex and crypto, whose data carries no label.
 
-For stocks, options, indices, and futures not in `delayed_subscriptions`, the
-library reads the class's snapshot from Massive once a session, on the class's first
-stream. A new session reads it again.
+When the library needs Massive's label, it reads it with one request, on the class's
+first stream of each session.
 
 #### subscription_confirmation_timeout
 

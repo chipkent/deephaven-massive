@@ -475,7 +475,7 @@ def recency_note(recency: Recency, *, host: str) -> str:
         return f"Live real-time data from {host}."
     if recency is Recency.DELAYED:
         return f"Live delayed data from {host}, 15 minutes behind (10 for futures)."
-    return f"Live data from {host}. Massive hasn't said whether it is real-time or delayed."
+    return f"Live data from {host}. Massive hasn't said whether this data is real-time or delayed."
 
 
 def rest_recency_note(
