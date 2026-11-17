@@ -1,4 +1,4 @@
-"""The raw requests of the options live tests: Massive's open interest, unusual trades, indices.
+"""The raw requests of the options live tests: open interest, unusual trades, tickers, contracts.
 
 Some options live tests read Massive's raw rows through the wire REST client, which encodes each
 query value by the kind the spec gives its parameter and refuses a value of another type before
@@ -17,18 +17,22 @@ if TYPE_CHECKING:
     from datetime import date
 
 __all__ = [
+    "CONTRACTS",
     "OPEN_INTEREST",
     "TICKERS",
     "UNUSUAL_TRADES",
     "Request",
+    "contracts",
     "index_list",
     "open_interest",
+    "stock_list",
     "unusual_trades",
 ]
 
 OPEN_INTEREST = "/options/v1/open-interest"
 UNUSUAL_TRADES = "/options/v1/unusual-trades"
 TICKERS = "/v3/reference/tickers"
+CONTRACTS = "/v3/reference/options/contracts"
 
 Request: TypeAlias = "tuple[str, dict[str, object]]"
 """A REST path that takes no path parameters, and its query values by wire name."""
@@ -70,3 +74,25 @@ def index_list(*, active: bool) -> Request:
         The path and query, 1,000 indices a page.
     """
     return TICKERS, {"market": "indices", "active": active, "limit": 1000}
+
+
+def stock_list() -> Request:
+    """Return a request of Massive's active stock list, which holds funds too.
+
+    Returns:
+        The path and query, 1,000 tickers a page.
+    """
+    return TICKERS, {"market": "stocks", "active": True, "limit": 1000}
+
+
+def contracts(*, underlying: str, limit: int) -> Request:
+    """Return a request of one page of today's contracts of one underlying.
+
+    Args:
+        underlying: The underlying as the contracts list takes it, bare for an index (`SPX`).
+        limit: The most rows on the page.
+
+    Returns:
+        The path and query.
+    """
+    return CONTRACTS, {"underlying_ticker": underlying, "limit": limit}
