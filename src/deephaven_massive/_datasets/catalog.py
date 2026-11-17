@@ -407,12 +407,13 @@ class DatasetSpec:
         library_params: Query parameters the library sets itself on some requests only, by wire
             name, such as the options snapshot's `type`, which only `dm.ALL` sends; they have no
             argument of their own. Each is reserved, with its whole family, from `filters`.
-        symbol_params_elsewhere: Query parameters of the fetch path that name a symbol which
-            another dataset method takes, each mapped to the instruction a refused filter
-            gives, such as the options contracts list's `ticker`, which
-            `m.options.contract_details` reads instead. The equality forms of each are reserved
-            from `filters` (`symbol_family`), so a symbol never goes out without the canonical
-            check `symbols=` gives it.
+        symbol_params_elsewhere: Query parameters of the primary path (the history path, else
+            the fetch path) that name a symbol which another dataset method takes, each mapped
+            to the instruction a refused filter gives, such as the options contracts list's
+            `ticker`, which `m.options.contract_details` reads instead. The equality forms of
+            each are reserved from `filters` (`symbol_family`), so a symbol is named only
+            through the other method's `symbols=`, with its canonical check; range forms such
+            as `ticker_gte` stay filters.
         row_times: Which of the library's time columns the rows carry (`RowTimes`);
             `RowTimes.BY_KIND`, the default, derives it (`times`): `BAR` for a `bars` dataset,
             `TICK` for any other dataset in a kind, `NONE` otherwise. The indicators declare

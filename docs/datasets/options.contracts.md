@@ -22,13 +22,13 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 | Argument | Description |
 | --- | --- |
-| `underlying` | Only contracts of this underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`; leave it out for every underlying. A table of them in a `Symbol` column is read value by value. A live table is followed. In a static table, one failed value fails the call. |
+| `underlying` | The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or a table of them in a `Symbol` column. Leave it out for every underlying. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`as_of`](README.md#as_of) | The day whose contracts to list; leave it out for today. |
 | `expired` | True lists only expired contracts; False, the default, those still trading. |
 | [`sort`](README.md#sort) | `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`. |
 | [`order`](README.md#order) | The direction of `sort`. |
-| [`limit`](README.md#limit) | The most rows in total. |
+| [`limit`](README.md#limit) | The most rows in total. A table of underlyings caps each underlying's rows instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"strike_price_gte": 100}`. Keys: `expiration_date`, `expiration_date_gt`, `expiration_date_gte`, `expiration_date_lt`, `expiration_date_lte`, `strike_price`, `strike_price_gt`, `strike_price_gte`, `strike_price_lt`, `strike_price_lte`. |
 | [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 

@@ -672,6 +672,10 @@ def test_contract_details_reject_bad_arguments(massive_session: dm.MassiveSessio
         details(dm.ALL)
     with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
         details("aapl")  # not canonical: the symbol check explains it
+    with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
+        details([])
+    with pytest.raises(ValueError, match=r"^options\.contract_details needs symbols, got None"):
+        details(None)  # type: ignore[arg-type]  # the point: refused at run time
     # In a list, an underlying meets the symbol check, which names it an underlying too.
     with pytest.raises(ValueError, match=r"^'AAPL' is an underlying, not an OCC option symbol"):
         details(["AAPL"])

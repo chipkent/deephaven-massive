@@ -419,8 +419,7 @@ def _expired(value: object) -> bool | None:
     """Check the `expired` argument of the contracts and return what is sent.
 
     `False` is Massive's default, so it is not sent: the request is then the same as one that
-    never mentions `expired`, and the per-contract path, which has no such parameter, accepts
-    it.
+    never mentions `expired`.
 
     Args:
         value: The argument as passed.
@@ -926,24 +925,29 @@ class OptionsNamespace(Namespace):
     ) -> FetchQuery:
         """Reference data on options contracts: type, exercise style, expiration, and strike.
 
-        Lists contracts, such as every contract of one underlying, to find their tickers; each row
-        holds one contract's underlying, shares per contract, primary exchange, and CFI code.
-        `contract_details()` reads contracts you can already name.
+        Lists the contracts of one underlying, or of every underlying, so you can find their
+        tickers. Each row also holds the contract's underlying, shares per contract, primary
+        exchange, and CFI code. To read contracts you can already name, use `contract_details()`.
 
-        A standard contract has `SharesPerContract` of 100. An adjusted contract keeps its own root,
-        such as `AAPL1`, and lists its further deliverables in `AdditionalUnderlyings`.
+        A list by underlying includes its adjusted contracts, such as those with root `AAPL1`. A
+        standard contract has `SharesPerContract` of 100; an adjusted one lists its further
+        deliverables in `AdditionalUnderlyings`.
+
+        A table of underlyings lists each one's contracts. A row that isn't a stock or index
+        ticker is skipped and logged, as `on_error`'s `noncanonical_symbols` sets. With a live
+        table, the result updates as its rows change. In a static table, an error from Massive
+        on one underlying fails the call.
 
         Args:
-            underlying: Only contracts of this underlying's exact Massive ticker, such as `"AAPL"`
-                or `"I:SPX"`; leave it out for every underlying. A table of them in a `Symbol`
-                column is read value by value. A live table is followed. In a static table, one
-                failed value fails the call.
+            underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or a
+                table of them in a `Symbol` column. Leave it out for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
             expired: True lists only expired contracts; False, the default, those still trading.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
-            limit: The most rows in total.
+            limit: The most rows in total. A table of underlyings caps each underlying's rows
+                instead.
             filters: Further endpoint parameters, such as `{"strike_price_gte": 100}`.
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
                 the default, takes each cause from the session's `MassiveConfig.on_error`.
@@ -1003,13 +1007,14 @@ class OptionsNamespace(Namespace):
     ) -> FetchQuery:
         """Reference data on named options contracts: type, exercise style, expiration, and strike.
 
-        Reads the contracts you name, one request each; each row holds one contract's underlying,
-        shares per contract, primary exchange, and CFI code, the columns `contracts()` lists. A
-        contract Massive doesn't know gets no row, and the library logs a WARNING.
+        Reads each contract you name, one request per contract, into the same columns as
+        `contracts()`. To find a contract's ticker first, list its underlying's contracts with
+        `contracts()`. A contract Massive doesn't know gets no row, and the library logs a
+        `WARNING`. To fail the call instead, pass
+        `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`.
 
         Args:
-            symbols: Option contracts to describe. `dm.ALL` is refused; `contracts()` lists
-                contracts.
+            symbols: Option contracts to describe.
             as_of: The day the details are as of; leave it out for today.
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
                 the default, takes each cause from the session's `MassiveConfig.on_error`.
@@ -1022,16 +1027,17 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None, empty, or `dm.ALL`;
-                - a ticker isn't Massive's exact ticker of an option contract; a stock or index
-                  ticker passed alone gets a message that says to list its contracts with
-                  `contracts()`;
+                - a ticker isn't Massive's exact ticker of an option contract, such as a stock
+                  ticker;
                 - a table has no `Symbol` column;
                 - `as_of` is a `datetime` or isn't a date.
 
         Example:
             ::
 
-                details = m.options.contract_details("O:AAPL250117C00150000").fetch()
+                details = m.options.contract_details(
+                    "O:AAPL250117C00150000", as_of="2025-01-02"
+                ).fetch()
         """
         if (
             isinstance(symbols, str)
