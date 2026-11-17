@@ -512,8 +512,8 @@ class FetchQuery(Query):
         polling while anything uses it
         (https://github.com/chipkent/deephaven-massive/blob/main/README.md#stop-live-tables).
 
-        A news or filings feed needs a `start` or a `limit`. Without either, each poll would read
-        Massive's whole archive.
+        A feed, a dataset whose `poll()` appends new rows (news, filings, unusual trades), needs
+        a `start` or a `limit`. Without either, each poll would read Massive's whole archive.
 
         A failed poll logs a WARNING and shows in `m.problems()`, and the next poll runs as
         usual. The table fails and stops polling if its polls keep failing for
@@ -542,7 +542,7 @@ class FetchQuery(Query):
             ValueError: At the call, before the table exists, if:
                 - it runs on a Deephaven update-graph thread;
                 - `interval` is shorter than 1 second or isn't finite;
-                - a news or filings feed has neither `start` nor `limit`;
+                - a feed has neither `start` nor `limit`;
                 - no row of a table of symbols is Massive's exact ticker;
                 - an endpoint doesn't take one of the query's parameters or filters.
             SessionClosedError: If the session is closed.

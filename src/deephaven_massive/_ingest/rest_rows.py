@@ -209,7 +209,8 @@ class RowConverter:
 
         Returns:
             The batch in the dataset's schema, with the mark columns and the derived column
-            (`OptionRoot`) computed from the symbols, and an index `Underlying` given its `I:`
+            (`OptionRoot`) computed from the symbols unless the path carries it as Massive's
+            `root`, and an index `Underlying` given its `I:`
             prefix by the row's CFI code (`_canonical_underlyings`); and the drift of its
             timestamps and widening: the wire keys of the epoch fields other than the time
             column that held a value out of bounds, and those of the `long` fields whose cast
@@ -222,7 +223,7 @@ class RowConverter:
         rounded = RoundedFields()
         failures: list[Failure] = []
         for column_type, name, source in self.columns:
-            if name == OPTION_ROOT:
+            if name == OPTION_ROOT and source is None:
                 values = option_roots(arrays["Symbol"])
             elif source is None:
                 values = pa.nulls(rows, column_type.arrow_type)

@@ -417,8 +417,9 @@ def test_a_cited_decision_is_resolved_against_the_pull_request_s_base(
 def test_the_branch_is_measured_against_its_pull_request_s_base(
     check: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
+    # The pull request's base wins over a stale declaration in the draft.
     monkeypatch.chdir(tmp_path)
-    (tmp_path / ".git-pr-body.md").write_text(CLEAN)
+    (tmp_path / ".git-pr-body.md").write_text("<!-- base: fix/stale -->\n" + CLEAN)
     outputs = {
         "gh pr view --json baseRefName": json.dumps({"baseRefName": "fix/below"}),
         "git diff origin/fix/below...HEAD": "",
@@ -428,12 +429,147 @@ def test_the_branch_is_measured_against_its_pull_request_s_base(
     assert check.main([]) == 0
 
 
-def test_a_branch_without_a_pull_request_is_measured_against_main(
+#: Open pull requests: the one this branch was cut from, a farther one, one never fetched, one
+#: stacked on this branch, and one whose branch already holds HEAD.
+_OPEN = [
+    {"headRefName": "feat/problems-table", "baseRefName": "main"},
+    {"headRefName": "feat/older", "baseRefName": "main"},
+    {"headRefName": "fork-branch", "baseRefName": "main"},
+    {"headRefName": "fix/above", "baseRefName": "fix/mine"},
+    {"headRefName": "fix/contains-mine", "baseRefName": "main"},
+]
+_STACKED = {
+    "git branch --show-current": "fix/mine\n",
+    "gh pr list --state open --limit 200 --json headRefName,baseRefName": json.dumps(_OPEN),
+    "git rev-list --count origin/main..HEAD": "9\n",
+    "git rev-list --count origin/feat/problems-table..HEAD": "2\n",
+    "git rev-list --count origin/feat/older..HEAD": "5\n",
+    "git rev-list --count origin/fix/above..HEAD": "1\n",
+    "git rev-list --count origin/fix/contains-mine..HEAD": "0\n",
+}
+
+
+def test_a_stacked_branch_before_its_pull_request_is_measured_against_the_branch_below(
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Against main, the base pull request's AGENTS.md edit would count as this branch's.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git-pr-body.md").write_text("## Summary\n\nAdds a column.\n")
+    outputs = {
+        **_STACKED,
+        "git diff origin/feat/problems-table...HEAD": "",
+        "git diff --name-only origin/feat/problems-table...HEAD": "src/x.py\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main([]) == 0
+    assert "origin/feat/problems-table (the open pull request's branch" in capsys.readouterr().out
+
+
+def test_a_declared_base_is_used_before_the_open_pull_requests_are_searched(
+    check: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git-pr-body.md").write_text(
+        "<!-- base: feat/problems-table -->\n## Summary\n\nAdds a column.\n"
+    )
+    outputs = {
+        "git rev-list --count origin/feat/problems-table..HEAD": "2\n",
+        "git diff origin/feat/problems-table...HEAD": "",
+        "git diff --name-only origin/feat/problems-table...HEAD": "src/x.py\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main([]) == 0
+
+
+def test_a_declared_base_that_already_holds_the_branch_is_ignored(
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Declaring the branch itself would diff it against itself and hide its rule edit.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git-pr-body.md").write_text(
+        "<!-- base: fix/mine -->\n## Summary\n\nRewords a skill.\n"
+    )
+    outputs = {
+        **_STACKED,
+        "git rev-list --count origin/fix/mine..HEAD": "0\n",
+        "git diff origin/feat/problems-table...HEAD": "",
+        "git diff --name-only origin/feat/problems-table...HEAD": ".claude/skills/x/SKILL.md\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main([]) == 1
+    assert "Ignoring the declared base origin/fix/mine" in capsys.readouterr().out
+
+
+def test_a_declared_base_git_cannot_find_is_ignored(
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A branch never pushed or fetched falls back to the search instead of a traceback.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git-pr-body.md").write_text(
+        "<!-- base: feat/unpushed -->\n## Summary\n\nAdds a column.\n"
+    )
+    outputs = {
+        **_STACKED,
+        "git diff origin/feat/problems-table...HEAD": "",
+        "git diff --name-only origin/feat/problems-table...HEAD": "src/x.py\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main([]) == 0
+    assert "Ignoring the declared base origin/feat/unpushed: git cannot find it" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_declaration_after_the_first_line_declares_nothing(check: ModuleType) -> None:
+    assert check.DECLARED_BASE.match("## Summary\n<!-- base: feat/x -->\n") is None
+    declared = check.DECLARED_BASE.match("<!-- base: feat/x -->\n## Summary\n")
+    assert declared is not None
+    assert declared.group("branch") == "feat/x"
+
+
+def test_a_branch_cut_from_main_is_measured_against_main_and_told_how_to_declare(
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Every open pull request's branch is as far as main or farther, so main stays the base.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git-pr-body.md").write_text("## Summary\n\nRewords a skill.\n")
+    outputs = {
+        **_STACKED,
+        "git rev-list --count origin/main..HEAD": "2\n",
+        "git diff origin/main...HEAD": "",
+        "git diff --name-only origin/main...HEAD": ".claude/skills/x/SKILL.md\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main([]) == 1
+    out = capsys.readouterr().out
+    assert "origin/main (no open pull request's branch is closer)" in out
+    assert "'<!-- base: <that branch> -->'" in out
+
+
+def test_a_branch_whose_open_pull_requests_cannot_be_listed_is_measured_against_main(
     check: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git-pr-body.md").write_text("## Summary\n\nRewords a skill.\n")
     outputs = {
+        "git branch --show-current": "fix/mine\n",
+        "git rev-list --count origin/main..HEAD": "2\n",
         "git diff origin/main...HEAD": "",
         "git diff --name-only origin/main...HEAD": ".claude/skills/x/SKILL.md\n",
     }

@@ -9,10 +9,13 @@ what Massive serves for its dataset, and the query's class says so:
 
 - `FetchQuery`: a REST dataset, with `fetch()` and `poll()`.
 - `StreamQuery`: a live stream, with `blink()`, `append_only()`, `ring()`, and `last_by()`.
-- `NoSymbolStreamQuery`: a live stream whose rows name no symbol, such as
-  `m.options.admin_messages()`, with `blink()`, `append_only()`, and `ring()` but no `last_by()`.
+- `NoSymbolStreamQuery`: any live stream whose rows name no symbol, with `blink()`,
+  `append_only()`, and `ring()` but no `last_by()`. Annotate with it to take any such stream.
 - `HistoryQuery`: any query with `history()`, and the query of bars Massive doesn't stream.
 - `StreamHistoryQuery`: a stream that also has history, with all five of those methods.
+- `NoSymbolStreamHistoryQuery`: a stream whose rows name no symbol, with history, such as
+  `m.options.admin_messages()`. It has `blink()`, `append_only()`, `ring()`, and `history()`,
+  but no `last_by()`.
 - `Query`: the base class of all of them, with `columns()`, for code that takes any query.
 
 You never construct a query: you get one from a dataset method. Import a class from here to
@@ -49,13 +52,18 @@ method.
 """
 
 from deephaven_massive.queries._fetch import FetchQuery
-from deephaven_massive.queries._history import HistoryQuery, StreamHistoryQuery
+from deephaven_massive.queries._history import (
+    HistoryQuery,
+    NoSymbolStreamHistoryQuery,
+    StreamHistoryQuery,
+)
 from deephaven_massive.queries._query import Query
 from deephaven_massive.queries._stream import NoSymbolStreamQuery, StreamQuery
 
 __all__ = [
     "FetchQuery",
     "HistoryQuery",
+    "NoSymbolStreamHistoryQuery",
     "NoSymbolStreamQuery",
     "Query",
     "StreamHistoryQuery",

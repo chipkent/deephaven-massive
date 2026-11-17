@@ -21,16 +21,16 @@ This module holds both directions of that mapping, which every transport applies
   without its `I:` (`SPX`) and finds no contract for `I:SPX`, while the option chain takes
   and writes `I:SPX`. `contracts_underlying` writes the spelling the contracts list takes, and
   `index_underlyings` reads its rows' underlyings back into the canonical form, by the CFI
-  code each row carries.
+  code each row carries; `is_index_option` reads one CFI code.
 
 The grammar these read and write, and its checks and converters, are `symbols.py`'s. Every
-function here is pure and thread-safe and makes no Deephaven call; the one shared state is the
-process-wide bound on the records of unreadable spellings.
+function here is pure and thread-safe and makes no Deephaven call.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, assert_never
 
@@ -58,6 +58,7 @@ __all__ = [
     "canonical_from_wire",
     "contracts_underlying",
     "index_underlyings",
+    "is_index_option",
     "unreadable_symbol_reason",
     "wire_spellings",
     "ws_symbol",
@@ -196,6 +197,19 @@ _OPTION_ON_AN_INDEX: Final = r"^O..I"
 """The CFI codes (ISO 10962) of an option whose underlying is an index: an `O` (an option),
 then its type and exercise style, then `I`, the underlying's kind (`OCEICS` for an SPX call;
 `OCASPS`, with `S` for a stock, for an AAPL call)."""
+
+
+def is_index_option(cfi: str) -> bool:
+    """Tell whether a contract's CFI code (ISO 10962) marks an option on an index.
+
+    Args:
+        cfi: The contract's CFI code, such as `"OCEICS"` for an SPX call.
+
+    Returns:
+        True for an option on an index (`_OPTION_ON_AN_INDEX`); False for any other code,
+        such as `"OCASPS"` for a stock's call.
+    """
+    return re.match(_OPTION_ON_AN_INDEX, cfi) is not None
 
 
 def contracts_underlying(symbol: str) -> str:

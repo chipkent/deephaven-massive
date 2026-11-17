@@ -13,6 +13,7 @@ from deephaven_massive._datasets.symbols import is_canonical
 from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
     canonical_from_wire,
+    is_index_option,
     unreadable_symbol_reason,
     wire_spellings,
     ws_symbol,
@@ -214,3 +215,12 @@ def test_a_class_with_no_spellings_is_a_defect() -> None:
     # Every class names its file spellings; a new one fails until it does, never reads as stocks.
     with pytest.raises(AssertionError):
         wire_spellings("bonds", "X:Y")  # type: ignore[arg-type]  # the point: refused at run time
+
+
+@pytest.mark.parametrize(
+    ("cfi", "expected"), [("OCEICS", True), ("OPEICS", True), ("OCASPS", False), ("ESVUFR", False)]
+)
+def test_a_cfi_code_marks_an_option_on_an_index_by_its_fourth_letter(
+    cfi: str, *, expected: bool
+) -> None:
+    assert is_index_option(cfi) is expected

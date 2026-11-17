@@ -247,9 +247,9 @@ class Query:
     A query describes one read of a dataset (its symbols, its range, its parameters) and reads
     nothing until you call one of its methods, each of which returns a Deephaven table. Which
     methods it has depends on its subclass: `FetchQuery`, `StreamQuery`, `NoSymbolStreamQuery`,
-    `HistoryQuery`, or `StreamHistoryQuery`. Annotate with `Query` when your code takes any
-    query and uses only what every query has: `columns()` and its `repr`, which is the call that
-    built it, such as `m.stocks.trades(['AAPL', 'MSFT'])`.
+    `HistoryQuery`, `StreamHistoryQuery`, or `NoSymbolStreamHistoryQuery`. Annotate with
+    `Query` when your code takes any query and uses only what every query has: `columns()` and
+    its `repr`, which is the call that built it, such as `m.stocks.trades(['AAPL', 'MSFT'])`.
 
     Import it as `from deephaven_massive.queries import Query`. You get a query from a dataset
     method, such as `m.stocks.trades("AAPL")`; calling a query class raises `TypeError`. A query

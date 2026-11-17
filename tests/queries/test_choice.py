@@ -15,6 +15,8 @@ from deephaven_massive._session import CATALOG, MassiveSession
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
+    NoSymbolStreamHistoryQuery,
+    NoSymbolStreamQuery,
     Query,
     StreamHistoryQuery,
     StreamQuery,
@@ -139,6 +141,11 @@ _CHANNELS = {"channels": {NotBars.ANY: "T"}}
         ({**_HISTORY}, HistoryQuery),
         ({"grouped_daily_path": "/v2/aggs/grouped/locale/us/market/stocks/{date}"}, HistoryQuery),
         ({**_CHANNELS, **_HISTORY}, StreamHistoryQuery),
+        ({**_CHANNELS, "names_symbols": False}, NoSymbolStreamQuery),
+        (
+            {**_CHANNELS, "history_path": "/options/v1/admin-messages", "names_symbols": False},
+            NoSymbolStreamHistoryQuery,
+        ),
     ],
 )
 def test_the_query_class_follows_the_transports(
@@ -170,8 +177,13 @@ def test_verbs_are_the_methods_every_query_of_a_dataset_has() -> None:
     by_name = CATALOG.by_name
     assert verbs(by_name["stocks.trades"]) == ("blink", "append_only", "ring", "last_by", "history")
     assert verbs(by_name["stocks.last_trade"]) == ("fetch", "poll")
-    # A stream whose rows name no symbol has no `last_by()`.
-    assert verbs(by_name["options.admin_messages"]) == ("blink", "append_only", "ring")
+    # A stream whose rows name no symbol has no `last_by()`; its archive gives `history()`.
+    assert verbs(by_name["options.admin_messages"]) == (
+        "blink",
+        "append_only",
+        "ring",
+        "history",
+    )
     # Only some bars stream, so no stream method is one every bars query has.
     assert verbs(STOCK_BARS) == ("history",)
 
