@@ -2644,6 +2644,125 @@ def test_the_live_harness_files_leave_out_the_spec_refresh(tmp_path: Path) -> No
     ]
 
 
+# The dataset docstrings say no plan by hand. Each dataset's generated page lists the plans
+# Massive's spec gives it, and its docstring links that page, so a plan named in the docstring
+# only goes stale when Massive changes its plans. The tests of what Massive serves a key name no
+# plan either: they learn it from Massive's answer. These files are checked for a plan named by
+# its tier: with its asset class (`Currencies Basic`), as a plan, tier, or key (`a Business
+# plan`, `a Basic key`, `Business-only`), two tiers together (`Starter and Developer`), a class's
+# plans (`every Futures plan`), or a free or paid plan, tier, or key. Names count, read as the
+# words their `_` separates (`test_a_business_key`).
+
+_TIER = r"(?:basic|starter|developer|advanced|business)"
+_CLASS = r"(?:stocks|options|indices|currencies|futures)"
+_PLAN_REFERENCE = re.compile(
+    rf"\b{_CLASS}\s+{_TIER}\b"
+    rf"|\b{_TIER}(?:-only|\s+(?:plans?|tiers?|keys?))\b"
+    rf"|\b{_TIER}\s+(?:and|or)\s+{_TIER}\b"
+    rf"|\b{_CLASS}\s+plans?\b"
+    rf"|\b(?:free|paid)\s+(?:{_TIER}\s+)?(?:plans?|tiers?|keys?)\b",
+    re.IGNORECASE,
+)
+"""Words that name a Massive plan by its tier, or a plan's contents by its asset class."""
+
+_TIER_CHECKED_TESTS = (
+    "tests/ingest/test_host_decision.py",
+    "tests/live/test_doc_examples_integration.py",
+    "tests/live/tester/test_examples.py",
+    "tests/test_docs.py",
+)
+"""The test files that say what Massive serves a key."""
+
+
+def _tier_checked_files(root: Path) -> list[Path]:
+    """Return the files checked for a plan named by its tier.
+
+    Args:
+        root: The repository root.
+
+    Returns:
+        Every module of `src/deephaven_massive/namespaces/`, which hold the dataset docstrings,
+        and the tests of `_TIER_CHECKED_TESTS`; sorted.
+    """
+    namespaces = (root / "src" / "deephaven_massive" / "namespaces").rglob("*.py")
+    return sorted([*namespaces, *(root / path for path in _TIER_CHECKED_TESTS)])
+
+
+def _plan_references(root: Path, files: Iterable[Path]) -> list[str]:
+    """Return each line of the Python files that names a plan by its tier, as `path:line: text`.
+
+    Args:
+        root: The repository root, which the paths are shown from.
+        files: The Python files to read.
+
+    Returns:
+        The lines, in file order.
+    """
+    found = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for number, words in sorted(_python_prose(text).items()):
+            if _PLAN_REFERENCE.search(words):
+                found.append(f"{path.relative_to(root)}:{number}: {lines[number - 1].strip()}")
+    return found
+
+
+def test_the_dataset_docstrings_and_their_tests_name_no_plan() -> None:
+    found = _plan_references(_ROOT, _tier_checked_files(_ROOT))
+    assert not found, (
+        "these lines name a Massive plan; link the dataset's generated page, which lists its "
+        "plans, or say what Massive serves or refuses, instead:\n" + "\n".join(found)
+    )
+
+
+@pytest.mark.parametrize(
+    ("line", "names_a_plan"),
+    [
+        ('"""Currencies Basic doesn\'t include this dataset."""', True),
+        ("# It streams only on a Business plan.", True),
+        ("# Massive can refuse a Basic key's snapshot.", True),
+        ('"""The `Business-only` stream."""', True),
+        ("# the setting Starter and Developer need", True),
+        ("# which every Futures plan includes", True),
+        ("# a free Basic plan's requests", True),
+        ("# the examples that need a paid plan's streams", True),
+        ("def test_a_business_key_streams():", True),
+        ('filters = {"section": "business"}  # the business description', False),
+        ("# ISO-8601's basic form", False),
+        ("# your plan lacks this dataset", False),
+        ("# Massive's spec lists the plans", False),
+    ],
+)
+def test_a_plan_reference_is_found_by_its_tier(
+    tmp_path: Path, line: str, *, names_a_plan: bool
+) -> None:
+    path = tmp_path / "src" / "x.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"{line}\n", encoding="utf-8")
+    expected = [f"src/x.py:1: {line}"] if names_a_plan else []
+    assert _plan_references(tmp_path, [path]) == expected
+
+
+def test_the_tier_checked_files_are_the_namespaces_and_the_listed_tests(tmp_path: Path) -> None:
+    for relative in [
+        "src/deephaven_massive/namespaces/_stocks.py",
+        "src/deephaven_massive/_config.py",
+        "tests/ingest/test_rest.py",
+        *_TIER_CHECKED_TESTS,
+    ]:
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text("")
+    found = [str(path.relative_to(tmp_path)) for path in _tier_checked_files(tmp_path)]
+    assert found == [
+        "src/deephaven_massive/namespaces/_stocks.py",
+        "tests/ingest/test_host_decision.py",
+        "tests/live/test_doc_examples_integration.py",
+        "tests/live/tester/test_examples.py",
+        "tests/test_docs.py",
+    ]
+
+
 # The logging rules.
 
 # The logging methods whose arguments end up in a record.

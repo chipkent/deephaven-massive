@@ -13,10 +13,10 @@ Example:
 
         m = dm.MassiveSession()
 
-        # Apple's daily bars for one week, on any Stocks plan.
+        # Apple's daily bars for one week.
         apple = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")
 
-        # Each stock's latest minute bar, live and real-time on Stocks Advanced.
+        # Each stock's latest minute bar, kept live.
         latest = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).last_by()
 
 Datasets:

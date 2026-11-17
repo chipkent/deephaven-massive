@@ -688,8 +688,8 @@ class OptionsNamespace(Namespace):
     def fmv(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Massive's fair market value of US-listed options contracts, streamed in real time.
 
-        Each row holds a contract's fair market value and when Massive computed it. It streams only
-        on Options Business, and it has no history. One connection carries at most 1,000 contracts.
+        Each row holds a contract's fair market value and when Massive computed it. It streams
+        only, with no history. One connection carries at most 1,000 contracts.
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.

@@ -426,7 +426,7 @@ def _check_news(
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
 @pytest.mark.timeout(600)
-def test_the_paid_examples_fill_in_the_current_stock_session(
+def test_the_live_examples_fill_in_the_current_stock_session(
     live_config: dm.MassiveConfig,
     live_session: dm.MassiveSession,
     *,

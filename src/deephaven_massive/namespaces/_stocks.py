@@ -762,8 +762,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
     def fmv(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Massive's fair market value estimate of US-listed stocks, as it updates.
 
-        Each row holds one fair market value and the time Massive computed it. It streams only on a
-        Business plan, and there's no history.
+        Each row holds one fair market value and the time Massive computed it. It streams only,
+        with no history.
 
         Args:
             symbols: Stock tickers, or `dm.ALL` for every ticker.

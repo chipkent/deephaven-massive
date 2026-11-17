@@ -1,8 +1,8 @@
 """Tests of the tester examples' runner (`tests/_live/tester/examples.py`), and the examples.
 
 Every example of `docs/tester-examples/` runs here, in order, against a fake Massive REST
-server that answers like a free key (`MarketServer`), and the examples that need a paid plan's
-streams run on a session whose WebSocket connections reach the fake WebSocket server. The
+server (`MarketServer`) that refuses the snapshot and the last trade, and the examples that
+stream run on a session whose WebSocket connections reach the fake WebSocket server. The
 guide's code blocks are checked against the files, so the tester pastes exactly the code
 these tests run.
 """
@@ -56,7 +56,7 @@ LIVE = (
     "21_crypto_watchlist.py",
     "22_gainers_trades.py",
 )
-"""The examples that need a paid plan's streams."""
+"""The examples that stream, which run on the fake WebSocket server."""
 
 AGGS = re.compile(r"^/v2/aggs/ticker/([^/]+)/range/(\d+)/(\w+)/([\d-]+)/([\d-]+)$")
 DETAILS = re.compile(r"^/v3/reference/tickers/([A-Z.]+)$")
@@ -228,7 +228,7 @@ def test_every_example_runs_against_the_fake_market(
     monkeypatch: pytest.MonkeyPatch,
     fake_ws_server: FakeMassiveServer,
 ) -> None:
-    # The free plan's snapshot is refused, so the live minute bars open on the real-time host
+    # The fake refuses the snapshot, so the live minute bars open on the real-time host
     # and Massive's live connection refuses their topic. The fake answers only once every
     # example has returned: a refusal that came while example 10 still built its table would
     # fail the open instead, so an immediate answer would race the example.
@@ -295,7 +295,7 @@ def _on_the_given_session(path: Path, folder: Path) -> Path:
 
 
 @pytest.mark.jvm_held
-def test_the_paid_examples_run_on_streams_from_the_fake_server(
+def test_the_live_examples_run_on_streams_from_the_fake_server(
     market: MarketServer,
     make_ws_session: Callable[..., WsSession],
     tmp_path: Path,
