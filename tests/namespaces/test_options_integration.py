@@ -1651,8 +1651,12 @@ def test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_referenc
     listed = _index_list(live_rest, evidence)
     market = _market_collisions(live_rest, listed, evidence)
     stock_roots = _stock_side_roots(live_rest, listed, evidence)
-    samples = [market[root] for root in sorted(market)[:_PER_SEARCH]]
-    for root in sorted(stock_roots.keys() - market.keys())[:_PER_SEARCH]:
+    sampled = sorted(market)[:_PER_SEARCH]
+    samples = [market[root] for root in sampled]
+    for root in sorted(stock_roots.keys() - set(sampled))[:_PER_SEARCH]:
+        if root in market:
+            samples.append(market[root])
+            continue
         rows = _page(live_rest, option_requests.open_interest(root=root, limit=5))
         evidence(f"open interest of root {root} ({stock_roots[root]}): {len(rows)} rows")
         samples += [("open interest", row) for row in rows[:1]]
