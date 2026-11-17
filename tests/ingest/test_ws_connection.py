@@ -15,7 +15,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeAlias
 
 import pytest
+from deephaven import dtypes, new_table
+from deephaven.column import string_col
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
@@ -530,7 +533,8 @@ def test_one_acknowledgement_frame_rewrites_the_row_once(
     connection = ws_session.connection()
     counts = ws_session.on_loop(connection, connection.subscriptions.counts)  # after the publish
     assert counts == (1000, 1000, 0, 0)
-    assert len(written) <= 4  # the connecting, connected, and subscribing rows, then the frame
+    # The waiting, connecting, connected, and subscribing rows, then the frame.
+    assert len(written) <= 5
     ws_session.session.release(result)
 
 
@@ -2290,4 +2294,154 @@ def test_a_client_state_with_no_rule_is_a_defect(ws_session: WsSession) -> None:
     connection = ws_session.connection()
     with pytest.raises(AssertionError):
         ws_session.on_loop(connection, lambda: connection._on_state("BOGUS", None))  # type: ignore[arg-type]  # the point: refused at run time
+    ws_session.session.release(result)
+
+
+# --- a connection with no topic: WAITING, no socket ------------------------------------------
+#
+# Each state and event, and the test that covers it:
+#
+# | state     | first topic | last topic goes | last stream released | session close | socket drop |
+# |-----------|-------------|-----------------|----------------------|---------------|-------------|
+# | WAITING   | connects    | (none to go)    | closes, no socket    | no socket     | (no socket) |
+# | CONNECTED | (open)      | stays connected | idle close (above)   | (above)       | reconnects  |
+
+
+def empty_watchlist(dh_input_table: Callable[..., InputTable]) -> InputTable:
+    # A watchlist with no row: its stream wants no topic.
+    return dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+
+
+def add_row(watchlist: InputTable, symbol: str) -> None:
+    watchlist.add(new_table([string_col("Symbol", [symbol])]))
+
+
+def state_of(ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]) -> str:
+    [row] = connections_of(ws_session, dh_to_pylist)
+    return str(row["State"])
+
+
+def test_a_stream_with_no_topic_waits_without_a_socket(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    *,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    result = ws_session.query(TRADES, empty_watchlist(dh_input_table)).blink()
+    wait_for(lambda: state_of(ws_session, dh_to_pylist) == "WAITING")
+    connection = ws_session.connection()
+    # A change with nothing to subscribe leaves it waiting.
+    ws_session.on_loop(connection, connection.check_idle)
+    assert state_of(ws_session, dh_to_pylist) == "WAITING"
+    assert (len(ws_session.urls), ws_session.opens, ws_session.states) == (1, 0, [])
+    assert fake_ws_server.connections == []
+    ws_session.session.release(result)
+
+
+def test_the_first_topic_opens_the_socket(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    watchlist = empty_watchlist(dh_input_table)
+    result = ws_session.query(TRADES, watchlist).blink()
+    wait_for(lambda: state_of(ws_session, dh_to_pylist) == "WAITING")
+    add_row(watchlist, "AAPL")
+    ws_session.subscribed("T.AAPL")
+    assert state_of(ws_session, dh_to_pylist) == "CONNECTED"
+    assert (ws_session.opens, ws_session.states) == (1, [WsState.CONNECTING])
+    ws_session.session.release(result)
+
+
+def test_a_connection_stays_open_when_its_last_topic_goes(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    watchlist = empty_watchlist(dh_input_table)
+    add_row(watchlist, "AAPL")
+    result = ws_session.query(TRADES, watchlist).blink()
+    ws_session.subscribed("T.AAPL")
+    watchlist.delete(new_table([string_col("Symbol", ["AAPL"])]))
+    ws_session.unsubscribed("T.AAPL")
+    # Its stream remains: the socket stays open, and no second socket opens.
+    assert state_of(ws_session, dh_to_pylist) == "CONNECTED"
+    assert ws_session.opens == 1
+    assert WsState.CLOSED not in ws_session.states
+    ws_session.session.release(result)
+
+
+def test_a_waiting_connection_released_closes_and_leaves_the_registry(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    monkeypatch.setattr(ws_connection, "IDLE_GRACE", 0.05)
+    result = ws_session.query(TRADES, empty_watchlist(dh_input_table)).blink()
+    wait_for(lambda: state_of(ws_session, dh_to_pylist) == "WAITING")
+    connection = ws_session.connection()
+    ws_session.session.release(result)
+    ws_session.wait(lambda s: WsState.CLOSED in s.states)
+    assert connection.join(TIMEOUT)
+    assert ws_session.connections.group.connections == {}
+    assert state_of(ws_session, dh_to_pylist) == "CLOSED"
+    assert (ws_session.opens, ws_session.states) == (0, [WsState.CLOSED])
+    assert fake_ws_server.connections == []
+
+
+def test_a_session_closed_while_waiting_opens_no_socket(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    *,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    result = ws_session.query(TRADES, empty_watchlist(dh_input_table)).blink()
+    wait_for(lambda: state_of(ws_session, dh_to_pylist) == "WAITING")
+    connection = ws_session.connection()
+    ws_session.session.close()
+    assert connection.join(TIMEOUT)
+    assert result.j_table.isFailed()
+    assert (ws_session.opens, ws_session.states) == (0, [WsState.CLOSED])
+    assert fake_ws_server.connections == []
+
+
+def test_a_socket_dropped_after_the_first_topic_reconnects(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    *,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    watchlist = empty_watchlist(dh_input_table)
+    result = ws_session.query(TRADES, watchlist).blink()
+    wait_for(lambda: state_of(ws_session, dh_to_pylist) == "WAITING")
+    add_row(watchlist, "AAPL")
+    ws_session.subscribed("T.AAPL")
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+    ws_session.subscribed("T.AAPL")  # on the new socket
+    assert WsState.RECONNECTING in ws_session.states
+    ws_session.session.release(result)
+
+
+def test_the_time_spent_waiting_is_no_outage(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # With no outage allowed at all, a stream that waited for its first topic still runs.
+    ws_session = make_ws_session(max_outage=0)
+    watchlist = empty_watchlist(dh_input_table)
+    result = ws_session.query(TRADES, watchlist).blink()
+    wait_for(lambda: state_of(ws_session, dh_to_pylist) == "WAITING")
+    add_row(watchlist, "AAPL")
+    ws_session.subscribed("T.AAPL")
+    [row] = streams_of(ws_session, dh_to_pylist)
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    assert not result.j_table.isFailed()
     ws_session.session.release(result)

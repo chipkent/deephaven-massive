@@ -1052,10 +1052,12 @@ def test_a_start_after_a_start_or_a_close_does_nothing(ws_session: WsSession) ->
     assert ws_session.opens == 0
     started = spare_connection(ws_session, "once.test")
     started.start()
-    started.start()  # a second start does nothing
-    ws_session.wait(lambda s: s.opens == 1)
+    started.start()  # a second start does nothing: a second thread start would raise
+    # Its loop runs, but with no stream wanting a topic it opens no socket.
+    assert ws_session.on_loop(started, lambda: started._state) is ConnectionState.WAITING
     started.close()
     assert started.join(TIMEOUT)
+    assert ws_session.opens == 0
 
 
 def test_stress_concurrent_verbs_and_releases(ws_session: WsSession) -> None:
@@ -2124,8 +2126,8 @@ def test_a_pair_massive_has_no_data_for_fails_the_stream_under_raise_from_every_
         "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset method or to "
         "MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the settings file"
     )
-    sent = {json.loads(f)["params"] for f in ws_session.server.frames()}
-    assert not any("ETHT" in topic for topic in sent)
+    # The stream failed before it subscribed any pair, so its connection never opened a socket.
+    assert ws_session.opens == 0
 
 
 @pytest.mark.usefixtures("fresh_pair_logs")
@@ -2259,6 +2261,32 @@ def test_a_max_outage_of_zero_fails_at_the_first_unread_list(
     result = ws_session.query(CRYPTO, ["X:DOTUSD"]).append_only()
     wait_for(lambda: failed_after_flush(ws_session, result))
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
+    # Its connection never had a topic, so it opened no socket.
+    assert ws_session.opens == 0
+
+
+@pytest.mark.parametrize("source", SOURCES)
+@pytest.mark.usefixtures("fresh_pair_logs")
+def test_a_crypto_stream_with_no_pair_massive_lists_opens_no_socket(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    source: str,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # Every pair has no data: the table opens, its Error names the pair, and its connection
+    # waits for a topic without opening a socket.
+    pairs = crypto_watchlist(["X:ETHTUSD"], source=source, dh_input_table=dh_input_table)
+    result = ws_session.query(CRYPTO, pairs).append_only()
+    wait_for(lambda: stream_error(ws_session, dh_to_pylist) == NO_DATA_ERROR)
+    [row] = [
+        r for r in dh_to_pylist(ws_session.session.connections()) if r["Transport"] == "WebSocket"
+    ]
+    assert row["State"] == "WAITING"
+    assert fake_ws_server.connections == []  # the server saw no URL opened
+    assert ws_session.opens == 0
+    ws_session.session.release(result)
 
 
 @pytest.mark.parametrize(

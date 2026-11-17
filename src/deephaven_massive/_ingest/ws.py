@@ -420,7 +420,9 @@ class WsConnections:
         resolution raises the `AuthenticationError`, `EntitlementError`, or `MassiveError` of
         `resolve_host`. A crypto stream of a symbol list opens with no topic, and its
         pairs go to the `symbol changes` worker once it is attached (`_change_pairs`), as a
-        symbol table's rows do, so nothing about a pair is decided at the call.
+        symbol table's rows do, so nothing about a pair is decided at the call. A connection
+        opens its socket only at the first topic of any of its streams
+        (`Connection._after_change`), so a stream with no topic opens none.
         """
         # The calling verb runs on the core, which is alive while the verb runs.
         core = required(self._core(), "the session")

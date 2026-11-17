@@ -8,11 +8,13 @@ through four callbacks and a handful of loop-thread methods.
 
 **Threading.** Each client runs an asyncio loop on its own daemon thread. All its state is
 confined to that thread, so it needs no lock and is correct on free-threaded Python. Only
-`start()` (once, by the creator), `close()`, and `join()` may be called from another thread;
-every other method, and every callback, runs on the loop thread. Another thread reaches the
-loop thread with `client.loop.call_soon_threadsafe(...)`, passing plain data.
+`start()` (once, by the creator), `connect()`, `close()`, and `join()` may be called from another
+thread; every other method, and every callback, runs on the loop thread. Another thread reaches
+the loop thread with `client.loop.call_soon_threadsafe(...)`, passing plain data.
 
-**Lifecycle.** `start()` connects at once. An attempt opens the socket, reads Massive's
+**Lifecycle.** `start()` starts the client's thread and loop, and `connect()` lets it connect: the
+library calls it once the connection has a topic to subscribe, so a connection with nothing to
+stream opens no socket. An attempt opens the socket, reads Massive's
 `connected` greeting, sends the key, and reads the reply, all within `HANDSHAKE_TIMEOUT`. On
 `auth_success` a new generation opens (`on_open`), and frames are decoded until the socket
 closes. After any close or failure that `close()` did not request and that is not fatal (a
@@ -179,8 +181,9 @@ class WsClient:
     """The client of one Massive WebSocket endpoint, on its own thread.
 
     The library creates one per connection, passes the callbacks that receive everything the
-    client learns, and calls `start()`. All state is confined to the client's loop thread;
-    see the module documentation for which methods other threads may call.
+    client learns, calls `start()`, and calls `connect()` when it wants the socket. All state is
+    confined to the client's loop thread; see the module documentation for which methods other
+    threads may call.
 
     The callbacks run on the loop thread, in the order the events happen, and must neither
     block nor raise. An exception from a callback, or any other unexpected exception, ends the
@@ -221,6 +224,7 @@ class WsClient:
                 max_reconnect_backoff=120.0,
             )
             client.start()
+            client.connect()
             ...
             client.close()
             client.join(5.0)
@@ -243,7 +247,7 @@ class WsClient:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         thread_prefix: str = "massive",
     ) -> None:
-        """Create the client and its loop; nothing connects until `start()`.
+        """Create the client and its loop; nothing connects until `start()` and `connect()`.
 
         Args:
             url: The endpoint, `wss://<host>/<path>` (or `ws://` against a local test server),
@@ -321,6 +325,8 @@ class WsClient:
         self._cancelled = False
         self._generations = 0
         self._current: _Generation | None = None
+        # Set by `connect()`; until then the client opens no socket.
+        self._connect_asked = asyncio.Event()
         self._thread = threading.Thread(
             target=self._run, name=f"{thread_prefix} ws {self._host}{self._path}", daemon=True
         )
@@ -332,11 +338,23 @@ class WsClient:
         return self._loop
 
     def start(self) -> None:
-        """Start the client's thread, which connects at once.
+        """Start the client's thread, which connects once `connect()` is called.
 
         Call it exactly once; a second call raises `RuntimeError` (from `threading.Thread`).
         """
         self._thread.start()
+
+    def connect(self) -> None:
+        """Let the client connect, from any thread, without waiting.
+
+        Until the first call, the client's thread runs its loop, so posted callbacks and timers
+        run, but it opens no socket. A call before `start()` takes effect once the thread runs.
+        Later calls do nothing, and so does a call after `close()` or once the client has
+        ended.
+        """
+        # A closed loop raises RuntimeError: the client has ended and there is nothing to open.
+        with contextlib.suppress(RuntimeError):
+            self._loop.call_soon_threadsafe(self._connect_asked.set)
 
     def close(self) -> None:
         """Ask the client to stop, from any thread, without waiting.
@@ -474,7 +492,7 @@ class WsClient:
         self._task = asyncio.current_task()
         failure: WireError | None
         try:
-            failure = None if self._closing.is_set() else await self._connect_until_fatal()
+            failure = None if self._closing.is_set() else await self._connect_when_asked()
         except asyncio.CancelledError:
             failure = None  # only `close()` cancels the task
         except Exception as error:
@@ -505,6 +523,15 @@ class WsClient:
             logger.exception(
                 "on_state raised while the client for %s ended. %s", self._url, LIBRARY_BUG_REPORT
             )
+
+    async def _connect_when_asked(self) -> WireError:
+        """Wait for `connect()`, then connect until a fatal failure; `close()` ends the wait.
+
+        Returns:
+            The fatal error.
+        """
+        await self._connect_asked.wait()
+        return await self._connect_until_fatal()
 
     async def _connect_until_fatal(self) -> WireError:
         """Attempt, run, and back off, forever, until a fatal failure.

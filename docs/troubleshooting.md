@@ -150,6 +150,7 @@ Act on these states:
 | Table | `State` | Why | What to do |
 |---|---|---|---|
 | `m.streams()` | `FAILED` | The table stopped, and `Error` says why. | Fix what `Error` names, then run the line that made the table again. |
+| `m.connections()` | `WAITING` | No live table on this connection has a symbol to stream yet, such as an empty watchlist or crypto pairs Massive doesn't list, so the library hasn't connected. | Nothing, if the table should be empty: it connects when its first symbol arrives. Otherwise read the table's `Error` in `m.streams()`. |
 | `m.connections()` | `WAITING_SLOT` | Massive refused this connection at login: your account has no free connection for this asset class. | Stop any other program that uses your key. The library keeps trying, and its live tables fail after `max_outage`. |
 | `m.symbol_reads()` | `FAILED` | The symbol's read failed, and `Error` says why. | Fix what `Error` names, then delete the symbol's row from the watchlist and add it back. |
 
