@@ -1644,7 +1644,8 @@ class Flusher:
         since each belongs to a stream it fails, so the backlog falls before frames are let in
         again; then it takes the overflow under the backlog lock, which lets frames be buffered
         again, and only then reads the routes. So every stream routed while frames were
-        dropped fails, and a stream routed after the routes are read missed nothing.
+        dropped fails, and a stream routed after the routes are read missed nothing. The error
+        dates the missing rows from the oldest frame discarded or dropped.
         """
         with self._backlog_lock:
             overflow = self._overflow  # only this thread clears it
@@ -1654,6 +1655,8 @@ class Flusher:
         self._drained(sum(len(f[2]) for f in frames), sum(f[4] for f in frames))
         with self._backlog_lock:
             self._overflow = None
+        # The rows are missing from the oldest discarded frame on, not only the dropped ones.
+        missing = utc_text(min([overflow.since, *(f[0] for f in frames)]) / 1e9)
         sinks = self.routes.sinks()
         logger.debug(
             "%s: %d rows dropped from %s, past the memory limit; %d buffered rows discarded, "
@@ -1669,7 +1672,7 @@ class Flusher:
             f"waited to be published, and {overflow.dropped} more would pass the "
             f"{HELD_BYTES_LIMIT // 2**20} MB the library keeps for one connection: Deephaven's "
             "update graph fell behind the stream, or stopped, as it does while a console "
-            f"command runs. The rows from {utc_text(overflow.since / 1e9)} on are missing, so "
+            f"command runs. The rows from {missing} on are missing, so "
             "this table stopped; call the method again for a new live table",
             source=ErrorSource.USER,
             is_retryable=True,

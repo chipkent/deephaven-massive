@@ -2486,11 +2486,38 @@ def test_rows_past_the_memory_limit_fail_every_stream_routed_while_they_were_dro
     assert "MB the library keeps for one connection" in failure
     assert "call the method again for a new live table" in failure
     after, shown = make_sink(core, ("AAPL",), plan, stream_id=3)
+    kept = blink_to_append_only(shown)  # before the flush, so no cycle's rows pass it by
     flusher.routes.add("T", after)
     flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)
     flusher.flush()
     assert not after.failed
-    rows_when(blink_to_append_only(shown), lambda rows: len(rows) == 1)
+    rows_when(kept, lambda rows: len(rows) == 1)
+
+
+def test_the_missing_rows_date_from_the_oldest_frame_the_flush_discards(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The frame buffered before the drops is discarded too, so the rows are missing from its
+    # arrival, not from the first dropped frame's.
+    caplog.set_level(logging.WARNING, logger=stream.__name__)
+    one = frame([trade("AAPL")])
+    monkeypatch.setattr(stream, "HELD_BYTES_LIMIT", frame_bytes(one))
+    sink, _ = make_sink(massive_session._core, ("AAPL",), stream_id=1)
+    flusher.routes.add("T", sink)
+    flusher.rows("T", one, {}, generation=1)
+    buffer = flusher.routes.buffer("T")
+    assert buffer is not None
+    (_, generation, rows, marks, nbytes) = buffer.get_nowait()
+    buffer.put((1_000_000_000, generation, rows, marks, nbytes))  # arrived at 1970-01-01T00:00:01Z
+    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # past the limit
+    flusher.flush()
+    assert sink.failed
+    (failure,) = [r.getMessage() for r in caplog.records if "stream 1 failed" in r.getMessage()]
+    assert "The rows from 1970-01-01T00:00:01Z on are missing" in failure
 
 
 def test_a_stream_routed_as_a_flush_takes_the_overflow_misses_no_row(
@@ -2508,6 +2535,7 @@ def test_a_stream_routed_as_a_flush_takes_the_overflow_misses_no_row(
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
     early, _ = make_sink(core, ("AAPL",), plan, stream_id=1)
     late, shown = make_sink(core, ("AAPL",), plan, stream_id=2)
+    kept = blink_to_append_only(shown)  # before the flush, so no cycle's rows pass it by
     flusher.routes.add("T", early)
     flusher.rows("T", one, {}, generation=1)
     flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # past the limit
@@ -2526,7 +2554,7 @@ def test_a_stream_routed_as_a_flush_takes_the_overflow_misses_no_row(
     assert early.failed
     assert not late.failed
     # The frame that came after the routing; the frames buffered before were discarded.
-    rows_when(blink_to_append_only(shown), lambda rows: len(rows) == 1)
+    rows_when(kept, lambda rows: len(rows) == 1)
 
 
 @pytest.mark.benchmark
