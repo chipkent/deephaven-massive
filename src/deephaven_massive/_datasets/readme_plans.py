@@ -145,7 +145,7 @@ PLANS_TABLE_END: Final = "<!-- End of the generated plans table. -->"
 
 _GUIDE: Final = (
     "How recent the data is on each of Massive's plans, and how far back its history goes, as "
-    "Massive's pages state them. An empty cell is a plan the page doesn't list."
+    "Massive's pages state them."
 )
 """The paragraph above the table."""
 
