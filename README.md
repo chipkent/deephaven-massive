@@ -148,7 +148,8 @@ each example's plan, and Examples 8 to 12 read the settings file that Example 7 
 | 10 | [Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started](#table-shapes) | Stocks Starter or higher |
 | 11 | [Backfill: start with today's minute bars, then continue live](#backfill-then-live) | Stocks Starter or higher |
 | 12 | [Dashboards: show a live chart and table together with deephaven.ui](#dashboard) | Stocks Starter or higher |
-| 13 | [Stopping live tables: release one table or close the session](#stop-live-tables) | Stocks Basic |
+| 13 | [Problems: see what went wrong in your tables](#see-problems) | Stocks Basic |
+| 14 | [Stopping live tables: release one table or close the session](#stop-live-tables) | Stocks Basic |
 
 <a id="read-daily-bars"></a>
 
@@ -389,6 +390,10 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 `TodaysChangePerc`. On Starter or Developer without the setting, the `snapshot` table fails with
 an error that names the setting to change.
 
+To check whether your data is real-time or delayed, run `m.connections()` in the next example's
+session. Its `Recency` is `DELAYED` with the Starter file and `REALTIME` with the Advanced one.
+[The problems example](#see-problems) shows the call.
+
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file. [Configuration](#configuration)
 covers the environment variables and the settings a new user needs, and the
@@ -557,6 +562,51 @@ Deephaven's guide to
 [creating dashboards](https://deephaven.io/core/ui/docs/creating-layouts/creating-dashboards/)
 shows more layouts.
 
+Next, where to see what went wrong in your tables.
+
+<a id="see-problems"></a>
+
+### Problems: see what went wrong in your tables
+
+Find out why a table has fewer rows than you asked for, on Stocks Basic. This asks for the
+details of Apple and of `ZZZZ`, a ticker Massive doesn't list:
+
+```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+problems = m.problems()  # each problem in your tables: Cause says why, Detail what happened
+details = m.reference.ticker_details(["AAPL", "ZZZZ"]).fetch()
+```
+
+`details` holds Apple's row. Massive answers the ticker-details request for `ZZZZ` with HTTP 404,
+so `problems` gets a row whose `Cause` is `unavailable_symbols` and `Symbol` is `ZZZZ`. Its
+`Detail` names the HTTP 404 and the endpoint the library called. Most other datasets answer an
+unlisted ticker with no rows and no error, so `problems` gets no row for it.
+
+Other problems, such as rows the library left out or a connection outage, add rows the same way.
+Troubleshooting's [problems section](docs/troubleshooting.md#problems) says what each one means
+and what to do about it.
+
+Four more live tables show what the session is doing:
+
+```python continues
+streams = m.streams()  # each live table and background read: its State, and Error if it failed
+# each streaming connection: its Host, State, and Recency, REALTIME or DELAYED
+connections = m.connections().view(["Transport", "AssetClass", "Host", "State", "Recency"])
+rate_limits = m.rate_limits()  # each subscription's rate-limit State: READY, PACED, or PAUSED
+symbol_reads = m.symbol_reads()  # each watchlist symbol read: its State, and Error if it failed
+```
+
+Here `streams` has one row, for the ticker-details read, whose `State` ends `DONE`.
+`symbol_reads` stays empty, because this example reads no watchlist. `connections` stays empty
+too, because a `fetch()` doesn't stream. Once a table streams, `connections` gets a row for each
+connection.
+
+Troubleshooting's [diagnostics section](docs/troubleshooting.md#diagnostics) says when to check
+each table. For a table's columns, run `help()` on its method, such as
+`help(m.connections)`.
+
 Next, how to stop live tables when you're done with them.
 
 <a id="stop-live-tables"></a>
@@ -667,8 +717,7 @@ setting, its values, and its default, with an example settings file.
 ### Bad symbols and rows
 
 By default, one bad symbol or row never stops a table. The library skips it, reads the rest, and
-logs a warning. A stream or `poll()` table also names each symbol it skips in its `Error` in
-`m.streams()`.
+logs a warning. `m.problems()` lists each one, as [Example 13](#see-problems) shows.
 
 Each kind of problem is a cause. For example, `noncanonical_symbols` is a watchlist row that
 isn't Massive's exact ticker. A `dm.ErrorPolicy` gives each cause one of three settings:

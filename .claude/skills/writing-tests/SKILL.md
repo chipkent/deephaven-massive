@@ -33,8 +33,8 @@ holds the harness details that keep a test deterministic and the JVM alive.
   `tests/data/<test owner path>/`.
 - Every behavior change gets a test that fails without the change.
 - A bad-row test (a row of Massive's data the library cannot read whole) checks four things:
-  the data table holds no trace of the row; the problem is recorded with its cause and count
-  (the `ProblemEvent`s the session's `problems` sink receives, until `m.problems()` exists);
+  the data table holds no trace of the row; `m.problems()` holds it with its cause and counts
+  (or the problems the session's `problems` sink receives, captured with `monkeypatch`);
   `RAISE` fails the table; and a good row beside it still lands.
 - A choice over a closed set (`AGENTS.md`, **Every choice over a closed set handles each case
   by name**) gets a test for each member, parametrized over the enum so a new member joins it,

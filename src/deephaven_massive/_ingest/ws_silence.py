@@ -2,11 +2,11 @@
 
 A connection that holds acknowledged subscriptions and has received no frame of any kind for
 `NO_FRAMES_WARNING` seconds, during its asset class's regular trading hours
-(`in_trading_hours`), logs one WARNING that its live tables may be stale and shows a note in
-every stream's `Error`; the streams keep running, since quiet symbols and market holidays are
-silent too. The first frame after it clears the note and logs the recovery at INFO. A
-connection that is not connected is the outage's, not this check's: an outage ends the silence
-episode without a log line, and its own note replaces the silence's.
+(`in_trading_hours`), logs one WARNING that its live tables may be stale and gives every
+stream a `quiet_feed` span in `m.problems()`; the streams keep running, since quiet symbols and
+market holidays are silent too. The first frame after it ends the spans and logs the recovery
+at INFO. A connection that is not connected is the outage's, not this check's: an outage ends
+the silence episode without a log line, and its own spans replace the silence's.
 
 `Connection` (`_ingest/ws_connection.py`) owns one `SilenceCheck`, runs `check` with each
 traffic summary, `heard` on every frame, and `end` when an outage begins, all on its client's
@@ -42,11 +42,13 @@ class SilenceCheck:
     """One connection's silence episodes, each logged once as a WARNING. Loop-confined.
 
     Attributes:
-        note: The `Error` of every stream that is not down during the episode under way, or
+        note: The detail of every stream's `quiet_feed` span during the episode under way, or
             None outside one.
+        quiet_at: When the episode under way began (its WARNING), in nanoseconds since the
+            epoch: its spans' start. None outside one.
     """
 
-    __slots__ = ("_asset_class", "_on_note", "_quiet_at", "_url", "note")
+    __slots__ = ("_asset_class", "_on_note", "_url", "note", "quiet_at")
 
     def __init__(self, url: str, asset_class: AssetClass, *, on_note: Callable[[], None]) -> None:
         """Start with no episode.
@@ -54,12 +56,12 @@ class SilenceCheck:
         Args:
             url: The connection's URL, which each log line names.
             asset_class: The class whose trading hours the check keeps.
-            on_note: Shows `note` on every stream, called each time it changes.
+            on_note: Reports `note` as every stream's span, called each time it changes.
         """
         self._url = url
         self._asset_class = asset_class
         self._on_note = on_note
-        self._quiet_at: int | None = None
+        self.quiet_at: int | None = None
         self.note: str | None = None
 
     def check(self, now: int, *, connected: bool, acknowledged: int, last_frame: int) -> None:
@@ -72,7 +74,7 @@ class SilenceCheck:
             last_frame: When its last frame of any kind arrived or its socket opened, in
                 nanoseconds since the epoch.
         """
-        if self._quiet_at is not None:
+        if self.quiet_at is not None:
             return
         silent = (now - last_frame) / 1e9
         if (
@@ -82,7 +84,7 @@ class SilenceCheck:
             or not in_trading_hours(self._asset_class, datetime.fromtimestamp(now / 1e9, UTC))
         ):
             return
-        self._quiet_at = now
+        self.quiet_at = now
         logger.warning(
             "%s: no frame for %.0f s during %s trading hours, though %d topics are "
             "acknowledged, so its live tables may be stale; a market holiday or symbols that "
@@ -99,18 +101,18 @@ class SilenceCheck:
         self._on_note()
 
     def heard(self) -> None:
-        """End a silence episode on a frame's arrival: log the recovery and clear the note."""
-        if self._quiet_at is None:
+        """End a silence episode on a frame's arrival: log the recovery and end the spans."""
+        if self.quiet_at is None:
             return
-        self._quiet_at = None
+        self.quiet_at = None
         logger.info("%s: frames arrive again", self._url)
         self.note = None
         self._on_note()
 
     def end(self) -> None:
-        """End a silence episode because an outage began, whose own note replaces it.
+        """End a silence episode because an outage began, whose own spans replace it.
 
-        Logs nothing and leaves showing the notes to the outage.
+        Logs nothing and leaves reporting the spans to the outage.
         """
-        self._quiet_at = None
+        self.quiet_at = None
         self.note = None

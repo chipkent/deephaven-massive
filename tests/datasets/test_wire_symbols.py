@@ -14,14 +14,12 @@ from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
     canonical_from_wire,
     is_index_option,
-    log_unreadable,
     unreadable_symbol_reason,
     wire_spellings,
     ws_symbol,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
+from deephaven_massive._enums import AssetClass, ClassFromPrefix
 from deephaven_massive._errors import LIBRARY_BUG
-from deephaven_massive._log_limits import BoundedLog
 
 STK, OPT, FUT, IDX, FX, CRY = (
     AssetClass.STOCKS,
@@ -150,17 +148,6 @@ def test_the_unreadable_symbol_reason_names_the_spelling_and_the_bug() -> None:
     )
 
 
-@pytest.fixture
-def fresh_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
-    log = logging.getLogger(wire_symbols.__name__)
-    monkeypatch.setattr(
-        wire_symbols, "_logged_spellings", BoundedLog(log, limit=2, level=logging.WARNING)
-    )
-    monkeypatch.setattr(
-        wire_symbols, "_ignored_spellings", BoundedLog(log, limit=2, level=logging.DEBUG)
-    )
-
-
 def test_wire_symbols_read_a_column_and_log_nothing(caplog: pytest.LogCaptureFixture) -> None:
     # What a spelling it cannot read does is the reader's setting, applied by the caller.
     reader = WireSymbols("forex.quotes", FX)
@@ -178,39 +165,6 @@ def test_wire_symbols_read_a_column_and_log_nothing(caplog: pytest.LogCaptureFix
         "##": None,
     }
     assert caplog.records == []
-
-
-@pytest.mark.usefixtures("fresh_warnings")
-def test_an_unreadable_spelling_is_logged_once_at_warning_under_log(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    kept = "its rows are withheld"
-    with caplog.at_level(logging.DEBUG, logger=wire_symbols.__name__):
-        log_unreadable("forex.quotes", ["!!", "##", "??"], OnError.LOG)
-        log_unreadable("forex.quotes", ["!!"], OnError.LOG)  # once
-    # Two spellings are reported, then one record says the rest are not.
-    messages = [r.getMessage() for r in caplog.records]
-    assert messages == [
-        (
-            "forex.quotes: Massive sent the symbol '!!', a spelling the library cannot read; "
-            f"{kept}. {LIBRARY_BUG}"
-        ),
-        (
-            "forex.quotes: Massive sent the symbol '##', a spelling the library cannot read; "
-            f"{kept}. {LIBRARY_BUG}"
-        ),
-        "2 values were reported; further ones are not logged",
-    ]
-    assert {r.levelno for r in caplog.records} == {logging.WARNING}
-
-
-@pytest.mark.usefixtures("fresh_warnings")
-def test_an_unreadable_spelling_is_logged_at_debug_under_ignore(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with caplog.at_level(logging.DEBUG, logger=wire_symbols.__name__):
-        log_unreadable("forex.quotes", ["??"], OnError.IGNORE)
-    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
 
 
 def test_a_crypto_topic_takes_its_split_only_from_the_pairs_given() -> None:

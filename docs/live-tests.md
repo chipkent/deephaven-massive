@@ -148,7 +148,7 @@ prints up to four sections:
 
 | Section | What it holds |
 |---|---|
-| `smoke coverage` | The smoke tests that passed, passed with drift, were refused, were skipped, and failed. Refusals are grouped by subscription and call, with Massive's text once. Drift is a library WARNING or a `SchemaDrift`, each listed. |
+| `smoke coverage` | The smoke tests that passed, passed with drift, were refused, were skipped, and failed. Refusals are grouped by subscription and call, with Massive's text once. Drift is a library WARNING or a row of `m.problems()`, each listed. |
 | `open questions` | The questions the run touched, in groups: `verified`, `ran, evidence to read`, `refused by Massive`, `not listed as delayed`, and `not verified`. Under each refused or unlisted question, each distinct reason follows, Massive's refusal or the library's message quoted. |
 | `live debug log` | The path of the run's debug log |
 | `live evidence` | The evidence file's lines again |
@@ -185,6 +185,8 @@ York day or with REST, and the others pass whatever Massive answers:
 | `test_index_day_windows_and_files_across_many_indices` | Index day and minute bars, over REST and in the flat files | Its verdict lines (a), (b), and (c) | Always: index day bars end at 01:00 New York time until this answer is read |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | Futures bars | Its `VERDICT` lines | A line differs from the library's model: each bar holds the whole sessions that open in its UTC days |
 | `test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent` | Option chain snapshots | Each call's ratio of `GreeksGamma` to Black-Scholes gamma, and the unit it matches | A unit isn't per $0.01, as Massive's description says |
+| `test_what_massive_calls_the_overnight_stock_session`, run from 21:00 to 04:00 New York time on a night before a trading day | `/v1/marketstatus/now` and SPY's unified snapshot | The `market` value, and the snapshot's `market_status` beside it | The test fails on a status the tests don't know, or `market` reads `closed` while the snapshot says `overnight_trading` |
+| `test_which_day_massive_counts_overnight_stock_trades_in`, run after 20:00 on the trading day that follows an overnight session | SPY's minute and day bars, and its last trade of the evening before | The day bar's open beside the opens of the first minute from 21:00, from midnight, and from 04:00; then, as supporting evidence, which span's volume it matches and the time of the evening's last trade | Always, once it no longer skips: the library dates a 21:00 trade by its calendar day until this answer is read |
 | A quiet connection, in the [`stream-day` group](#live-run-groups) of a tester's results | Stock streams | In that group's debug log, the stocks connection's `status` lines from 03:45 to 04:00 New York time, and every `no frame for ... during ... trading hours` WARNING | Always, with the longest gap between `status` lines |
 
 The options check skips when Massive refuses the topics, quoting the refusal. It also skips as

@@ -143,16 +143,17 @@ from deephaven_massive._tables.execution_context import entered, update_cycle
 from deephaven_massive._tables.follow_coordinator import CoordinatedRead
 from deephaven_massive._tables.liveness import make_result
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.refused_values import refused_values_of
 from deephaven_massive._tables.transports import SymbolRows
 from deephaven_massive._tables.watchlist import (
     CURRENT_STEP,
+    SkippedValues,
     SymbolWatch,
-    skipped_rows_text,
     watched_rows,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
@@ -161,6 +162,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._massive import Transport
     from deephaven_massive._tables.follow_coordinator import FirstRead
+    from deephaven_massive._tables.problem_events import Problem
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import SymbolOutcome
     from deephaven_massive._tables.watchlist import SymbolRowRule
@@ -477,15 +479,6 @@ class _WatchReports(Protocol):
         """
         ...
 
-    def skipped(self, read: CoordinatedRead, text: str | None, /) -> None:
-        """Queue the text of the values skipped now (`FollowCoordinator.skipped`).
-
-        Args:
-            read: The result.
-            text: The text, or None once no value is skipped.
-        """
-        ...
-
     def invalid(self, read: CoordinatedRead, message: str, /) -> None:
         """Queue the result's failure (`FollowCoordinator.invalid`).
 
@@ -582,15 +575,6 @@ class _WatchRouter:
                 self._replay_step = step
                 return
         self._route(lambda read: self._coordinator.changed(read, added, removed, step=step))
-
-    def on_skipped(self, values: tuple[str, ...]) -> None:
-        """The watch's `on_skipped`: queue the text of the values skipped now.
-
-        Args:
-            values: The skipped values, sorted; empty once none is.
-        """
-        text = skipped_rows_text(values) if values else None
-        self._route(lambda read: self._coordinator.skipped(read, text))
 
     def on_invalid(self, message: str) -> None:
         """The watch's `on_invalid`: queue the result's failure.
@@ -941,14 +925,22 @@ def _build(
         )
         groups = _shown_row_groups(blink, seed, keyed, reread=read.reread)
         result = describe(groups.ungroup(list(schema.column_names)), spec, schema, note=note)
+        skipped = SkippedValues(
+            rule,
+            stream_id=read.call,
+            report=functools.partial(_report_problems, weakref.ref(core)),
+        )
         watch = SymbolWatch(
             rule,
             followed,
             router.on_change,
             stream_id=read.call,
             on_invalid=router.on_invalid,
-            on_skipped=router.on_skipped,
+            on_skipped=skipped.update,
         )
+        refused = refused_values_of(symbol_table)
+        if refused is not None:  # a table `canonicalize_symbols` returned
+            refused.follow(skipped)
         # A table derived from the result keeps the blink table, and so the watch, alive.
         watch.keep_alive_with(blink)
         built.append((publisher, watch, built_step, empty))
@@ -1085,3 +1077,21 @@ def open_followed_read(
         len(seeded),
     )
     return result
+
+
+def _report_problems(
+    core_ref: Callable[[], SessionCore | None], problems: Sequence[Problem]
+) -> None:
+    """Hand problems of a followed read's symbol table to its session, if it still exists.
+
+    Its `SkippedValues` calls it from the watch's listener, on the caller thread for the
+    start's replay, and from a converted watchlist's listener: the session's problem sink logs
+    and queues, and never blocks. The session is held weakly: Java holds the listener.
+
+    Args:
+        core_ref: Returns the session's core, or None once it is freed.
+        problems: The problems.
+    """
+    core = core_ref()
+    if core is not None:
+        core.problems(problems)

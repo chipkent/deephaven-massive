@@ -10,8 +10,9 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Any, TypeAlias
 
 import pytest
@@ -29,7 +30,10 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, ws, ws_connection, ws_silence
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
-from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics
+from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, utc_text
+from deephaven_massive._tables.problem_events import Problem, ProblemCause, ProblemSpans
+from deephaven_massive._tables.session_core import SessionCore
+from deephaven_massive._tables.stream import StreamSink
 from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.ws import FakeMassiveServer, status_frame
 from tests._fakes.ws_session import REALTIME, TIMEOUT, WsSession
@@ -148,6 +152,50 @@ def connections_of(
     assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
     rows = dh_to_pylist(ws_session.session.connections())
     return [r for r in rows if r["Transport"] == "WebSocket"]
+
+
+OUTAGE = ProblemCause.OUTAGE.value
+NO_ACK = ProblemCause.UNACKNOWLEDGED_TOPICS.value
+QUIET = ProblemCause.QUIET_FEED.value
+DRIFT = ProblemCause.SCHEMA_DRIFT.value
+
+
+def problem_rows(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]], cause: str
+) -> list[dict[str, Any]]:
+    # The session's m.problems() rows of one cause, by stream and then oldest first.
+    settle(ws_session)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
+    rows = [r for r in dh_to_pylist(ws_session.session.problems()) if r["Cause"] == cause]
+    return sorted(rows, key=lambda r: (r["StreamId"], r["FirstSeen"]))
+
+
+def spans_of(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> dict[tuple[int, str], str]:
+    # The session's spans that hold now, by stream and cause, with their detail.
+    settle(ws_session)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
+    return {
+        (r["StreamId"], r["Cause"]): r["Detail"]
+        for r in dh_to_pylist(ws_session.session.problems())
+        if ProblemCause(r["Cause"]).traits.span and r["EndedAt"] is None
+    }
+
+
+def ended(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]], cause: str
+) -> list[tuple[int, bool]]:
+    # Each span of one cause as (stream, ended), by stream and then oldest first.
+    return [
+        (r["StreamId"], r["EndedAt"] is not None)
+        for r in problem_rows(ws_session, dh_to_pylist, cause)
+    ]
+
+
+def utc(stamp: datetime) -> str:
+    # A timestamp of m.problems() as the library's UTC text, such as "2027-01-15T08:01:00Z".
+    return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_close_returns_promptly_during_a_backoff_wait(
@@ -298,22 +346,22 @@ def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
     [row] = connections_of(custom_session, dh_to_pylist)
     assert (row["State"], row["NoAckTopics"], row["AckedTopics"]) == ("CONNECTED", 1, 1)
     assert custom_session.opens == 1
-    # The quiet stream says why its rows may be missing, without failing; the other is clean.
+    # The quiet stream has a span that says why its rows may be missing, without failing it;
+    # the other is clean.
     errors = [(r["State"], r["Error"]) for r in streams_of(custom_session, dh_to_pylist)]
-    assert errors == [
-        (
-            "RUNNING",
-            (
-                "no acknowledgement from Massive for T.AAPL; its rows may be missing; the "
-                "subscription is re-sent until Massive acknowledges it"
-            ),
-        ),
-        ("RUNNING", None),
-    ]
-    # A late acknowledgement clears it.
+    assert errors == [("RUNNING", None), ("RUNNING", None)]
+    assert spans_of(custom_session, dh_to_pylist) == {
+        (1, NO_ACK): (
+            "no acknowledgement from Massive for T.AAPL; its rows may be missing; the "
+            "subscription is re-sent until Massive acknowledges it"
+        )
+    }
+    # A late acknowledgement ends it.
     fake_ws_server.send(status_frame("success", "subscribed to: T.AAPL"))
     custom_session.wait(lambda s: len(s.statuses) == 2)
-    wait_for(lambda: streams_of(custom_session, dh_to_pylist)[0]["Error"] is None)
+    wait_for(lambda: ended(custom_session, dh_to_pylist, NO_ACK) == [(1, True)])
+    (span,) = problem_rows(custom_session, dh_to_pylist, NO_ACK)
+    assert (span["Action"], span["Rows"]) == ("DELAYED", 1)
     [row] = connections_of(custom_session, dh_to_pylist)
     assert (row["NoAckTopics"], row["AckedTopics"]) == (0, 2)
     del quiet, healthy
@@ -610,8 +658,6 @@ def test_a_connection_skips_a_session_that_is_gone(
     written: list[object] = []
     monkeypatch.setattr(Diagnostics, "write", lambda _, row: written.append(row))
     ws_session.on_loop(connection, connection._write_row)
-    drift = _massive.DriftReport(extra=frozenset({"zz"}))
-    ws_session.on_loop(connection, lambda: connection._record_drift("T", drift))
     assert written == []
     monkeypatch.undo()
     assert ws_session.on_loop(
@@ -1085,21 +1131,6 @@ def test_the_next_reconnect_time_is_shown_only_while_waiting(ws_session: WsSessi
     ws_session.session.release(result)
 
 
-def test_a_connections_drift_key_is_fixed_when_it_is_created(ws_session: WsSession) -> None:
-    forex = ws_session.query(FOREX, ["C:EURUSD"]).blink()
-    ws_session.subscribed("C.EUR-USD")
-    connection = ws_session.connection("wss://socket.test/forex")
-    key = ("WS", "forex", ChannelFamily.TICK.value)
-    assert connection.key == key
-    fmv = ws_session.query(FOREX_FMV, ["C:EURUSD"]).blink()  # joins the same connection
-    ws_session.subscribed("FMV.EUR-USD")
-    with ws_session.session._core.registry_lock:
-        assert connection.families == {ChannelFamily.TICK, ChannelFamily.FMV}
-    assert connection.key == key
-    ws_session.session.release(forex)
-    ws_session.session.release(fmv)
-
-
 def test_the_backlog_rewrite_repeats_until_the_rows_are_published(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
@@ -1167,8 +1198,10 @@ def test_buffered_rows_are_shown_until_they_are_published(
 _URL = "wss://socket.test/stocks"
 
 
-def test_the_connection_logs_drift_dropped_rows_and_a_summary(
-    ws_session: WsSession, caplog: pytest.LogCaptureFixture
+def test_the_connection_reports_drift_and_logs_dropped_rows_and_a_summary(
+    ws_session: WsSession,
+    caplog: pytest.LogCaptureFixture,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
@@ -1185,7 +1218,9 @@ def test_the_connection_logs_drift_dropped_rows_and_a_summary(
         ws_session.on_loop(connection, connection._summarize)
     # Each summary starts the next window's timer.
     assert ws_session.on_loop(connection, lambda: connection._summary) is not first
-    assert f"(schema drift) at {_URL} channel T; symbol AAPL; first value 1" in caplog.text
+    drifts = problem_rows(ws_session, dh_to_pylist, DRIFT)  # a problem of each stream
+    assert [(r["StreamId"], r["Field"]) for r in drifts] == [(1, "zz"), (2, "zz")]
+    assert all(r["Detail"].endswith("; first sent for AAPL; first value 1") for r in drifts)
     [dropped] = [m for m in caplog.messages if m.startswith("cannot place a T row for AAPL")]
     assert dropped.endswith('"q":1,"s":100,"z":3,"ds":"100"}')
     [summary] = [m for m in caplog.messages if m.startswith(f"{_URL}: last 60 s: ")]
@@ -1334,11 +1369,13 @@ def test_the_options_cap_warns_once_per_episode_with_its_changes_at_debug(
 
 
 _DOWN = r"connection down since (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ); no data"
-"""The pattern of the `Error` of a stream whose connection is down; its group is the start."""
+"""The pattern of the `outage` span's detail of a stream whose connection is down; its group
+is the start."""
 
 
 _NO_ACK = r"no acknowledgement from Massive for T\.\w+; its rows may be missing; .*"
-"""The pattern of the `Error` part of a stream with a topic Massive never acknowledged."""
+"""The pattern of the `unacknowledged_topics` span's detail of a stream with a topic Massive
+never acknowledged."""
 
 
 def _outage_failure(since: str, limit: str) -> str:
@@ -1418,20 +1455,21 @@ def test_an_outage_shows_until_the_reconnected_topics_are_acknowledged(
     ws_session.wait(lambda s: s.opens == 2)
     fake_ws_server.wait_for(lambda s: "T.AAPL" in s.connections[-1].topics)
     [row] = streams_of(ws_session, dh_to_pylist)
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
     # Reconnected, but no data flows until the topic is acknowledged: still an outage.
-    down = re.fullmatch(_DOWN, row["Error"])
+    down = re.fullmatch(_DOWN, spans_of(ws_session, dh_to_pylist)[(1, OUTAGE)])
     assert down is not None
-    assert (row["State"], row["Gaps"]) == ("RUNNING", None)
     assert 280.0 < _left(ws_session, connection, 1) <= 300.0  # the default: five minutes
     with caplog.at_level(logging.INFO, logger=ws_connection.__name__):
         fake_ws_server.send(_ack("T.AAPL"))
-        wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] is None)
+        wait_for(lambda: ended(ws_session, dh_to_pylist, OUTAGE) == [(1, True)])
         assert _down(ws_session, connection) == set()
         assert _down_since(ws_session, connection) is None  # the outage is over
-    # The note is gone, but the gap it announced stays on the row: from the last frame
-    # before the drop to the data's return.
-    gaps = streams_of(ws_session, dh_to_pylist)[0]["Gaps"]
-    assert re.fullmatch(rf"{down.group(1)} to \d{{4}}-\d\d-\d\dT\d\d:\d\d:\d\dZ", gaps)
+    # The span ends, and its row stays: from the last frame before the drop to the data's
+    # return.
+    (gap,) = problem_rows(ws_session, dh_to_pylist, OUTAGE)
+    assert (gap["Action"], utc(gap["SpanStart"])) == ("GAP", down.group(1))
+    assert gap["EndedAt"] >= gap["SpanStart"]
     # Its real end, once data flows again, is logged at INFO.
     (over,) = [r for r in caplog.records if "is over" in r.getMessage()]
     assert over.levelno == logging.INFO
@@ -1530,9 +1568,12 @@ def test_a_server_that_never_acknowledges_stays_down_until_each_stream_gets_data
 
     wait_for(silent_but_connected)  # NO_ACK: nothing waits for a reply, yet nothing arrived
     assert _down(custom_session, connection) == {1, 2}
-    errors = [r["Error"] for r in streams_of(custom_session, dh_to_pylist)]
-    # Two warnings, each its own part: the outage, and the connection's no-ack note.
-    assert all(re.fullmatch(f"{_DOWN}; {_NO_ACK}", e) for e in errors)
+    spans = spans_of(custom_session, dh_to_pylist)
+    # Two spans of each stream, each its own: the outage, and the connection's no-ack span.
+    assert spans.keys() == {(1, OUTAGE), (1, NO_ACK), (2, OUTAGE), (2, NO_ACK)}
+    for stream_id in (1, 2):
+        assert re.fullmatch(_DOWN, spans[(stream_id, OUTAGE)])
+        assert re.fullmatch(_NO_ACK, spans[(stream_id, NO_ACK)])
 
     def data_for(symbol: str) -> None:
         # The flush that gives the stream its first rows of the new socket checks recovery
@@ -1541,13 +1582,11 @@ def test_a_server_that_never_acknowledges_stays_down_until_each_stream_gets_data
 
     data_for("AAPL")  # AAPL's data flows again; MSFT's does not
     assert _down(custom_session, connection) == {2}
-    errors = [r["Error"] for r in streams_of(custom_session, dh_to_pylist)]
-    # Clearing the outage's part keeps the no-ack part, which only its source clears.
-    assert re.fullmatch(_NO_ACK, errors[0])
-    assert re.fullmatch(f"{_DOWN}; {_NO_ACK}", errors[1])
+    # Ending the outage's span keeps the no-ack span, which only its source ends.
+    assert spans_of(custom_session, dh_to_pylist).keys() == {(1, NO_ACK), (2, OUTAGE), (2, NO_ACK)}
     data_for("MSFT")
-    errors = [r["Error"] for r in streams_of(custom_session, dh_to_pylist)]
-    assert all(re.fullmatch(_NO_ACK, e) for e in errors)
+    assert spans_of(custom_session, dh_to_pylist).keys() == {(1, NO_ACK), (2, NO_ACK)}
+    assert [r["Error"] for r in streams_of(custom_session, dh_to_pylist)] == [None, None]
     assert _down_since(custom_session, connection) is None
     custom_session.session.release(result)
     custom_session.session.release(other)
@@ -1621,9 +1660,10 @@ def test_a_topic_never_acknowledged_holds_down_only_its_stream(
     # AAPL is acknowledged again: it recovers. MSFT never is: its last_by would show the rows
     # from before the drop as current, so it stays down and fails at its limit.
     assert _down(custom_session, connection) == {2}
-    errors = [r["Error"] for r in streams_of(custom_session, dh_to_pylist)]
-    assert errors[0] is None
-    assert re.fullmatch(f"{_DOWN}; {_NO_ACK}", errors[1])
+    spans = spans_of(custom_session, dh_to_pylist)
+    assert spans.keys() == {(2, OUTAGE), (2, NO_ACK)}
+    assert re.fullmatch(_DOWN, spans[(2, OUTAGE)])
+    assert re.fullmatch(_NO_ACK, spans[(2, NO_ACK)])
     _expire(custom_session, connection, 2)
     wait_for(lambda: bool(other.j_table.isFailed()))
     rows = streams_of(custom_session, dh_to_pylist)
@@ -1664,8 +1704,10 @@ def test_a_stream_that_never_received_a_row_runs_on_with_its_topic_unacknowledge
     custom_session.on_loop(connection, connection._check_recovered)
     assert _down(custom_session, connection) == set()
     [row] = streams_of(custom_session, dh_to_pylist)
-    assert row["State"] == "RUNNING"
-    assert re.fullmatch(_NO_ACK, row["Error"])
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    spans = spans_of(custom_session, dh_to_pylist)
+    assert spans.keys() == {(1, NO_ACK)}
+    assert re.fullmatch(_NO_ACK, spans[(1, NO_ACK)])
     custom_session.session.release(result)
 
 
@@ -1722,7 +1764,8 @@ def test_a_stream_covered_by_its_channels_wildcard_recovers_with_it(
     fake_ws_server.silent = {"T.AAPL"}
     fake_ws_server.close(1011)
     ws_session.wait(lambda s: s.opens == 2)
-    wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [None, None])
+    wait_for(lambda: ended(ws_session, dh_to_pylist, OUTAGE) == [(1, True), (2, True)])
+    assert [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [None, None]
     assert _down(ws_session, connection) == set()
     ws_session.session.release(every)
     ws_session.session.release(result)
@@ -1755,7 +1798,9 @@ def test_a_quiet_spell_before_a_drop_leaves_a_full_limit(
     window = ws_connection.KEEPALIVE_WINDOW
     assert 290.0 - window < _left(ws_session, connection, 1) <= 300.0 - window
     fake_ws_server.send(_ack("T.AAPL"))  # the acknowledgement arrives
-    wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] is None)
+    wait_for(lambda: ended(ws_session, dh_to_pylist, OUTAGE) == [(1, True)])
+    (gap,) = problem_rows(ws_session, dh_to_pylist, OUTAGE)
+    assert utc(gap["SpanStart"]) == utc_text(stopped / 1e9)  # when data stopped
     ws_session.flush()
     [row] = streams_of(ws_session, dh_to_pylist)
     assert (row["State"], row["Error"]) == ("RUNNING", None)
@@ -1822,7 +1867,7 @@ def test_a_stream_opened_during_an_outage_gets_its_own_limit(
     late = ws_session.query(TRADES, ["MSFT"]).blink()  # stream 2, on the still-down connection
     wait_for(lambda: 2 in _down(ws_session, connection))
     assert 290.0 < _left(ws_session, connection, 2) <= 300.0  # a full max_outage of its own
-    assert re.fullmatch(_DOWN, streams_of(ws_session, dh_to_pylist)[1]["Error"])
+    assert re.fullmatch(_DOWN, spans_of(ws_session, dh_to_pylist)[(2, OUTAGE)])
     released = ws_session.query(TRADES, ["IBM"]).blink()  # stream 3: released before its limit
     wait_for(lambda: 3 in _down(ws_session, connection))
     ws_session.session.release(released)
@@ -1854,11 +1899,51 @@ def test_a_stream_opened_during_an_outage_recovers_with_the_feed(
     late = ws_session.query(TRADES, ["MSFT"]).blink()
     fake_ws_server.wait_for(lambda s: "T.MSFT" in s.connections[-1].topics)
     fake_ws_server.send(_ack("T.MSFT"))  # the feed is back before the late stream's limit
-    wait_for(lambda: streams_of(ws_session, dh_to_pylist)[1]["Error"] is None)
+    wait_for(lambda: (2, True) in ended(ws_session, dh_to_pylist, OUTAGE))
+    assert (2, OUTAGE) not in spans_of(ws_session, dh_to_pylist)
     assert _down(ws_session, connection) == set()
     assert _down_since(ws_session, connection) is None
     assert streams_of(ws_session, dh_to_pylist)[1]["State"] == "RUNNING"
     ws_session.session.release(late)
+
+
+def test_a_stream_released_during_an_outage_ends_only_its_own_outage_span(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = ws_session.query(TRADES, ["AAPL"]).blink()
+    second = ws_session.query(TRADES, ["MSFT"]).blink()
+    ws_session.subscribed("T.AAPL", "T.MSFT")
+    connection = ws_session.connection()
+    fake_ws_server.silent = {"T.AAPL", "T.MSFT"}  # the outage outlasts the reconnect
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+    wait_for(lambda: _down(ws_session, connection) == {1, 2})
+    wait_for(lambda: ended(ws_session, dh_to_pylist, OUTAGE) == [(1, False), (2, False)])
+    core = ws_session.session._core
+    reported: list[Problem] = []
+    report = core.problems
+
+    def recording(problems: Sequence[Problem]) -> None:
+        reported.extend(problems)
+        report(problems)
+
+    monkeypatch.setattr(core, "problems", recording)
+    ws_session.session.release(first)
+    del first
+    wait_for(lambda: not ws_session.on_loop(connection, lambda: 1 in connection._streams))
+    # The connection ends the released stream's span itself, as it leaves.
+    assert [
+        (p.cause, p.spans) for p in reported if isinstance(p, ProblemSpans) and p.stream_id == 1
+    ] == [(ProblemCause.OUTAGE, {})]
+    # The other stream is still down, its span open.
+    assert ended(ws_session, dh_to_pylist, OUTAGE) == [(1, True), (2, False)]
+    assert re.fullmatch(_DOWN, spans_of(ws_session, dh_to_pylist)[(2, OUTAGE)])
+    assert _down(ws_session, connection) == {2}
+    ws_session.session.release(second)
 
 
 def test_an_outage_without_live_tables_logs_nothing(
@@ -1880,7 +1965,7 @@ def test_an_outage_without_live_tables_logs_nothing(
     assert not [m for m in messages if "is down" in m or "reconnected after" in m]
 
 
-def test_any_frame_clears_the_silence_note_and_the_stream_keeps_running(
+def test_any_frame_ends_the_quiet_feed_span_and_the_stream_keeps_running(
     *,
     ws_session: WsSession,
     fake_ws_server: FakeMassiveServer,
@@ -1894,22 +1979,79 @@ def test_any_frame_clears_the_silence_note_and_the_stream_keeps_running(
     connection = ws_session.connection()
     later = int(2 * ws_silence.NO_FRAMES_WARNING * 1e9)
 
-    def error() -> str | None:
+    def quiet() -> str | None:
         [row] = streams_of(ws_session, dh_to_pylist)
-        assert row["State"] == "RUNNING"  # silence never fails a stream
-        text = row["Error"]
-        assert text is None or isinstance(text, str)
-        return text
+        assert (row["State"], row["Error"]) == ("RUNNING", None)  # silence never fails a stream
+        return spans_of(ws_session, dh_to_pylist).get((1, QUIET))
 
     for frame in (_ack("T.AAPL"), json.dumps([trade("AAPL")])):  # a status, then data
         ws_session.on_loop(connection, lambda: connection._check_frames(time.time_ns() + later))
         assert re.fullmatch(
             r"no data since \S+Z during stocks trading hours; quiet symbols or a market holiday "
             r"may explain it",
-            error() or "",
+            quiet() or "",
         )
         fake_ws_server.send(frame)
-        wait_for(lambda: error() is None)
+        wait_for(lambda: quiet() is None)
+    assert ended(ws_session, dh_to_pylist, QUIET) == [(1, True), (1, True)]  # one per episode
+    ws_session.session.release(result)
+
+
+def _go_quiet(connection: ws_connection.Connection, note: str) -> None:
+    # Each stream's quiet_feed span as the silence check would show it. Straight to the spans:
+    # a status frame the fake server sends would end a real episode meanwhile.
+    connection._report_spans(
+        {
+            stream_id: {ProblemCause.QUIET_FEED: ({"quiet": (None, None, note, 0)}, None)}
+            for stream_id in connection._streams
+        }
+    )
+
+
+def test_a_span_reaches_only_the_streams_whose_session_lives(
+    *, ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, dh_to_pylist: ToPylist
+) -> None:
+    # A session freed without close() keeps its streams on the connection until its closer
+    # runs on the reaper; a span shown meanwhile reaches only the streams of live sessions.
+    first = ws_session.query(TRADES, ["AAPL"]).blink()
+    second = ws_session.query(TRADES, ["MSFT"]).blink()
+    ws_session.subscribed("T.AAPL", "T.MSFT")
+    connection = ws_session.connection()
+    core_of = StreamSink.core
+
+    def freed(sink: StreamSink) -> SessionCore | None:
+        return None if sink.stream_id == 2 else core_of(sink)
+
+    monkeypatch.setattr(StreamSink, "core", freed)
+    ws_session.on_loop(connection, lambda: _go_quiet(connection, "quiet"))
+    assert spans_of(ws_session, dh_to_pylist) == {(1, QUIET): "quiet"}
+    assert ws_session.on_loop(connection, lambda: sorted(connection._spans)) == [1]
+    monkeypatch.undo()
+    ws_session.session.release(first)
+    ws_session.session.release(second)
+
+
+def test_a_span_that_did_not_change_is_not_reported_again(
+    *, ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, dh_to_pylist: ToPylist
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    core = ws_session.session._core
+    reported: list[Problem] = []
+    report = core.problems
+
+    def recording(problems: Sequence[Problem]) -> None:
+        reported.extend(problems)
+        report(problems)
+
+    monkeypatch.setattr(core, "problems", recording)
+    for _ in range(2):  # the same note twice: its span holds on, unchanged
+        ws_session.on_loop(connection, lambda: _go_quiet(connection, "quiet"))
+    assert [(p.cause, p.stream_id) for p in reported if p.cause is ProblemCause.QUIET_FEED] == [
+        (ProblemCause.QUIET_FEED, 1)
+    ]
+    assert spans_of(ws_session, dh_to_pylist) == {(1, QUIET): "quiet"}
     ws_session.session.release(result)
 
 
@@ -2061,11 +2203,11 @@ def test_a_reconnect_session_says_when_it_takes_the_connection_back(
         rf"another connection with this API key took the connection at {_TIME}", row["LastError"]
     )
     [stream] = streams_of(session, dh_to_pylist)
-    assert stream["State"] == "RUNNING"
+    assert (stream["State"], stream["Error"]) == ("RUNNING", None)
     assert re.fullmatch(
         rf"connection down since {_TIME}; no data; another connection with this API key took "
         rf"it at {_TIME}; reconnecting at {_TIME} takes it back \(connection_taken=RECONNECT\)",
-        stream["Error"],
+        spans_of(session, dh_to_pylist)[(1, OUTAGE)],
     )
     assert not result.j_table.isFailed()
     session.close()

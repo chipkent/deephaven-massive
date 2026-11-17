@@ -13,9 +13,14 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import option_roots, rest, shared_lookup
-from deephaven_massive._ingest.option_roots import REREAD_AFTER, RootKind, canonical_underlyings
+from deephaven_massive._ingest.option_roots import (
+    REREAD_AFTER,
+    RootKind,
+    canonical_underlyings,
+)
 from deephaven_massive._ingest.rate_limits import Waiter
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._massive import RowFault
+from deephaven_massive._tables.withheld import WithheldGroup
 from tests._fakes.rest import FakeRestServer, Reply
 
 if TYPE_CHECKING:
@@ -299,7 +304,7 @@ def test_rows_of_an_index_root_get_the_prefix_and_each_root_is_asked_once() -> N
         ["SPXW", "SPXW", "DJT", None, "SPX"],
         ["SPX", "SPX", "DJT", "SPX", None],
     )
-    [out] = canonical_underlyings([batch], kind, dataset="options.open_interest")
+    out = canonical_underlyings([batch], kind, dataset="options.open_interest").rows
     assert out.column("Underlying").to_pylist() == ["I:SPX", "I:SPX", "DJT", "I:SPX", None]
     # A row without Massive's root is keyed by its symbol's; a null underlying asks nothing.
     assert asked == [
@@ -311,34 +316,50 @@ def test_rows_of_an_index_root_get_the_prefix_and_each_root_is_asked_once() -> N
 
 def test_a_page_already_canonical_or_of_stocks_alone_is_unchanged() -> None:
     prefixed = page([SPXW], ["SPXW"], ["I:SPX"])
-    assert canonical_underlyings([prefixed], fixed(RootKind.OTHER), dataset="d") == [prefixed]
-    stocks = page([AAPL], ["AAPL"], ["AAPL"])
-    assert canonical_underlyings([stocks], fixed(RootKind.OTHER), dataset="d") == [stocks]
+    for batch in (prefixed, page([AAPL], ["AAPL"], ["AAPL"])):
+        found = canonical_underlyings([batch], fixed(RootKind.OTHER), dataset="d")
+        assert found.rows.equals(pa.Table.from_batches([batch]))
+        assert found.groups == ()
 
 
 def test_a_row_already_prefixed_beside_a_bare_one_is_not_prefixed_twice() -> None:
     batch = page([SPXW, "O:SPXW261218P06000000"], ["SPXW", "SPXW"], ["I:SPX", "SPX"])
-    [out] = canonical_underlyings([batch], fixed(RootKind.INDEX), dataset="d")
+    out = canonical_underlyings([batch], fixed(RootKind.INDEX), dataset="d").rows
     assert out.column("Underlying").to_pylist() == ["I:SPX", "I:SPX"]
 
 
-def test_an_unclassified_root_keeps_the_bare_ticker_with_one_warning(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_the_rows_of_an_unclassified_root_are_withheld_as_unreadable_symbols(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    fresh = BoundedLog(logging.getLogger(LOGGER), limit=5, level=logging.WARNING)
-    monkeypatch.setattr(option_roots, "_unknown_roots", fresh)
-    batch = page([SPXW], ["SPXW"], ["SPX"])
-    with caplog.at_level(logging.WARNING, LOGGER):
-        for _ in range(2):
-            [out] = canonical_underlyings(
-                [batch], fixed(RootKind.UNKNOWN), dataset="options.open_interest"
-            )
-            assert out.column("Underlying").to_pylist() == ["SPX"]
-    [record] = caplog.records
-    assert record.getMessage().startswith(
-        "options.open_interest: Massive's Contract Overview gives no CFI code for option root "
-        f"SPXW (asked about {SPXW} as of 2026-11-13)"
+    batch = page(
+        [SPXW, "O:SPXW261218P06000000", AAPL],
+        ["SPXW", "SPXW", "AAPL"],
+        ["SPX", "SPX", "AAPL"],
     )
+    kinds = {"SPXW": RootKind.UNKNOWN, "AAPL": RootKind.OTHER}
+
+    def kind(root: str, *, underlying: str, contract: str, day: str) -> RootKind:
+        del underlying, contract, day
+        return kinds[root]
+
+    with caplog.at_level(logging.WARNING, LOGGER):
+        found = canonical_underlyings([batch], kind, dataset="options.open_interest")
+    # SPX may be an index's ticker without its I:, so SPXW's rows are left out; AAPL's stay.
+    assert found.rows.column("Symbol").to_pylist() == [AAPL]
+    # One group per underlying as Massive sent it, which its reader reports, so no WARNING.
+    assert found.groups == (
+        WithheldGroup(
+            RowFault.UNREADABLE_SYMBOLS,
+            None,
+            "SPX",
+            "Underlying",
+            2,
+            f"Massive's Contract Overview gives no CFI code for option root SPXW (asked about "
+            f"{SPXW} as of 2026-11-13), so the library can't tell whether the underlying SPX is "
+            "an index (I:SPX) or not",
+        ),
+    )
+    assert caplog.records == []
 
 
 def test_a_kind_no_case_handles_is_refused() -> None:

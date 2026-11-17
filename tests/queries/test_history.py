@@ -316,18 +316,32 @@ def test_history_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
 
 
 def test_history_skips_a_symbol_table_row_that_is_not_canonical(
-    *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    flat: Recorder,
+    problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
     q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert rest.calls[0][2].symbols == ("AAPL",)
     assert flat.calls == []
+    [skipped] = problem_rows()  # a problem of the call, which read the table once
+    assert (skipped["Cause"], skipped["Action"], skipped["Symbol"]) == (
+        "noncanonical_symbols",
+        "SKIPPED",
+        "msft",
+    )
+    assert skipped["Detail"].startswith("stocks.trades: a symbol table holds 'msft'")
     only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
     with pytest.raises(
         ValueError,
         match=r"^m\.stocks\.trades\(\): no row of the symbol table is a ticker this dataset",
     ):
         only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
+    # The call that raised still names its query on its problem.
+    failed = [r for r in problem_rows() if r["StreamId"] != skipped["StreamId"]]
+    assert [(r["Symbol"], r["Query"]) for r in failed] == [("msft", repr(only_bad))]
 
 
 def test_history_rejects_a_symbol_table_without_symbols(

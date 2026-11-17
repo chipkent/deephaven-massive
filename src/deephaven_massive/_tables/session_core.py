@@ -17,8 +17,8 @@ one `SessionCore`, which queries and namespaces share. The core owns:
   every verb that asks for it; and the worker-table registry (`WorkerTables`,
   `worker_tables.py`), every table a library thread fills (a `poll()` table, a
   background read, a followed read) from its creation until its result is released and its
-  blink table has shut down. Transports report row changes, failures, and drift by stream id
-  to the core (`update_streams`, `fail_stream`, `record_stream_drift`), which applies each to
+  blink table has shut down. Transports report row changes and failures by stream id
+  to the core (`update_streams`, `fail_stream`), which applies each to
   whichever registry holds the id, in one `registry_lock` section;
 - the latest `m.symbol_reads()` row of every symbol of every followed read, kept for the
   session's life so `close()` can mark the unfinished ones `CLOSED`, and the session's follow
@@ -27,7 +27,10 @@ one `SessionCore`, which queries and namespaces share. The core owns:
   and followed read, so the session's downloads share one limit;
 - the result registry and the reaper thread (`liveness.py`);
 - the diagnostics tables and their writer thread, the count of diagnostics views users hold, and
-  the drift registry that every transport reports schema drift to (`diagnostics.py`);
+  the registry of undocumented REST statuses (`diagnostics.py`);
+- the problem reporter (`problem_reporter.py`), which every transport and table hands its
+  problems to (`problems`): it logs each table's first problem of each cause and queues every
+  problem for `m.problems()`;
 - the closers that run when the session closes, or when it is freed without `close()`;
 - one factory hook per transport (`rest_transport`, `stream_transport`, `flat_file_transport`),
   each returning one of the ports of `transports.py`: `RestTransport` (`fetch`, `poll`, REST
@@ -77,7 +80,6 @@ from typing import TYPE_CHECKING, Final, TypeVar
 
 from deephaven.dherror import DHError
 
-from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._error_policy import resolve_policy
 from deephaven_massive._errors import (
     LIBRARY_BUG,
@@ -89,6 +91,7 @@ from deephaven_massive._errors import (
     source_of,
 )
 from deephaven_massive._log_limits import BoundedLog, bounded_list
+from deephaven_massive._massive import Redactor
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import (
     Diagnostics,
@@ -113,7 +116,8 @@ from deephaven_massive._tables.liveness import (
     release_scope,
     weak_owner_callback,
 )
-from deephaven_massive._tables.problem_events import LoggedProblems
+from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
+from deephaven_massive._tables.problem_reporter import ProblemReporter
 from deephaven_massive._tables.read_pool import ReadPool
 from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.stream_ids import next_stream_id
@@ -131,7 +135,6 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._error_policy import ResolvedPolicy
-    from deephaven_massive._massive import DriftReport, Transport
     from deephaven_massive._tables.problem_events import ProblemSink
     from deephaven_massive._tables.transports import (
         FlatFileTransport,
@@ -291,7 +294,7 @@ class SessionCore:
         catalog: Catalog,
         thread_prefix: str,
     ) -> None:
-        """Create the core, its reaper, the diagnostics tables and writer, and the drift registry.
+        """Create the core, its reaper, the diagnostics tables and writer, and the problem sink.
 
         Args:
             config: The validated configuration.
@@ -331,11 +334,13 @@ class SessionCore:
         self.release_later: Final[Callable[[LivenessScope], None]] = functools.partial(
             _release_on, self._reaper, exec_ctx
         )
+        redactor = Redactor(config.api_key, config.s3_secret_access_key)
         try:
             self.diagnostics: Final = Diagnostics(
                 exec_ctx,
                 f"{thread_prefix} diagnostics",
                 label=label,
+                redactor=redactor,
                 release_later=self.release_later,
                 on_death=functools.partial(SessionCore._thread_died, me, "diagnostics writer"),
             )
@@ -368,8 +373,11 @@ class SessionCore:
         self._paused_cycle_warned: int | None = None
         # The session's once-per-session warnings, such as history()'s unfilled columns.
         self.warnings: Final = BoundedLog(logger, limit=SESSION_WARNINGS, level=logging.WARNING)
-        # Receives the events of the rows the session's transports withhold.
-        self.problems: Final[ProblemSink] = LoggedProblems()
+        # Receives every problem the session's transports and tables meet: logs its alarm and
+        # queues it for `m.problems()`.
+        self.problems: Final[ProblemSink] = ProblemReporter(
+            self.diagnostics.report_problems, redactor
+        )
         # Not at interpreter exit: stopping the threads then would call into a JVM that may
         # already be shutting down.
         finalizer = weakref.finalize(
@@ -673,6 +681,9 @@ class SessionCore:
             logger.debug(
                 "%s: stream %d failed after it left the registry: %s", self.label, stream_id, error
             )
+        else:  # an opening stream's registered row has its dataset, though not yet written
+            assert current is not None  # a recorded failure is of a registered row
+            self.problems([_failed(current, error, where=self.label)])
         return None
 
     def next_stream_id(self) -> int:
@@ -711,34 +722,6 @@ class SessionCore:
             for stream_id, update in changes.items():
                 if not self.streams.change_row(stream_id, update.apply):
                     self.workers.change_row(stream_id, update.apply)
-
-    def record_stream_drift(self, stream_id: int, transport: Transport, drift: DriftReport) -> None:
-        """Add a payload's drift to a stream's `SchemaDrift` and write its row if it changed.
-
-        The REST poller and the WebSocket flush thread call this for each payload a stream receives,
-        after reporting the drift's WARNINGs with `DriftRegistry.report` outside every lock; a
-        registered worker table is recorded the same way. Recording the drift and writing the row
-        happen in one `registry_lock` section, so the row always shows the latest text however many
-        threads report for the stream. An opening stream's row is first written when its open
-        returns; an id that has left the registry is ignored, so no drift is kept for a stream that
-        is gone. No Deephaven call, no wait.
-
-        Args:
-            stream_id: The stream whose payload drifted.
-            transport: The transport that carried the payload; its user-facing name
-                (`TRANSPORT_LABELS`, `"WebSocket"` or `"REST"`) prefixes the entries.
-            drift: The payload's drift.
-        """
-        prefix = TRANSPORT_LABELS[transport]
-        with self.registry_lock:
-            if stream_id not in self.streams and stream_id not in self.workers:
-                return
-            text = self.drift.record(stream_id, prefix, drift)
-            if text is None:
-                return
-            change = functools.partial(replace, schema_drift=text)
-            if not self.streams.change_row(stream_id, change):
-                self.workers.change_row(stream_id, change)
 
     def write_symbol_reads(self, rows: Sequence[SymbolReadRow]) -> None:
         """Record and queue `m.symbol_reads()` rows, unless the session closed.
@@ -1006,3 +989,28 @@ def _closed_row(row: StreamRow, error: str) -> StreamRow:
     if row.state in (StreamState.FAILED, StreamState.DONE):
         return row
     return replace(row, state=StreamState.CLOSED, error=error)
+
+
+def _failed(row: StreamRow, error: MassiveError, *, where: str) -> ProblemEvent:
+    """Return the `stream_failed` problem of a table that failed.
+
+    Args:
+        row: The table's `m.streams()` row before it failed.
+        error: Its failure.
+        where: The session's label, for the log.
+
+    Returns:
+        The event, whose detail is the failure's text.
+    """
+    return ProblemEvent(
+        cause=ProblemCause.STREAM_FAILED,
+        action=ProblemAction.FAILED,
+        dataset=row.dataset,
+        stream_id=row.stream_id,
+        where=where,
+        symbol=None,
+        field=None,
+        rows=0,
+        detail=str(error),
+        at=time.time_ns(),
+    )

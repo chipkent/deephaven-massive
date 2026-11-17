@@ -55,8 +55,8 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   labels `DELAYED` on such plans though their rows are final, reference data, a listed
   subscription's pages, and `history()` are not checked.
 - **Fan-out.** A path that takes one symbol a request is called once per symbol, at most
-  `MassiveConfig.max_concurrency` at a time. A symbol with no data returns no rows: HTTP 404
-  on its first request drops that symbol with one WARNING. HTTP 404 on a later page of a
+  `MassiveConfig.max_concurrency` at a time. A symbol with no data returns no rows: HTTP 404 on its
+  first request drops that symbol, an `unavailable_symbols` problem. HTTP 404 on a later page of a
   symbol's pages means its data was cut short and raises `CutShortError`. Any other error
   fails the call, and every request of the read still waiting for the rate governor stops at
   once (each read has a `Cancel` token of its own, set when a fan-out ends, and a `poll()`
@@ -78,9 +78,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   Arrow batch of the dataset's merged schema. Only one page of decoded rows is held at a time.
   A row that carries an `error` (a ticker the plan does not include) keeps its `Error` and
   `Message` columns and is logged once.
-- **Drift.** Each page's `DriftReport` goes to the session's `DriftRegistry` (one WARNING per
-  dataset, transport, and field; undocumented envelope statuses once per path); a `poll()`
-  table's drift also reaches its `SchemaDrift` through `SessionCore.record_stream_drift`.
+- **Problems.** Each page's field Massive's documentation lacks is a `schema_drift` problem,
+  each withheld row an event of its cause, and each symbol Massive has no data for an
+  `unavailable_symbols` problem, all handed to the session's problem sink with the read's
+  `StreamId` (`RestReader.stream_id`); undocumented envelope statuses go to the session's
+  `DriftRegistry`, once per path.
 - **Errors.** Every `WireError` becomes its public exception through `_errors.from_wire`
   (401 `AuthenticationError`, 403 `EntitlementError`), except a pause longer than the read's
   patience still covers (`rate_limits.read_patience`: 10 minutes of pauses for a read its
@@ -124,7 +126,7 @@ import threading
 import time
 from collections import Counter
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar
@@ -132,13 +134,14 @@ from urllib.parse import urlsplit
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from typing_extensions import override
 
 from deephaven_massive._datasets.catalog import REFERENCE_PATH
 from deephaven_massive._datasets.dates import day_class, is_trading_day, reaches_now
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
 from deephaven_massive._datasets.row_times import START, StampRule, time_rule, whole
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_class
-from deephaven_massive._datasets.wire_symbols import contracts_underlying, log_unreadable
+from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
@@ -210,6 +213,12 @@ from deephaven_massive._tables.columns import dataset_table, rest_recency_note
 from deephaven_massive._tables.diagnostics import ConnectionRow, ConnectionState
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.poll import Pollers
+from deephaven_massive._tables.problem_events import (
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+    drift_events,
+)
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.withheld import (
     FAULT,
@@ -272,7 +281,30 @@ _ANSWER_SHOWN: Final = 200
 line shows it whole."""
 
 
-def _missing_error(spec: DatasetSpec, missing: Sequence[str]) -> UnavailableSymbolError:
+@dataclass(frozen=True, slots=True)
+class _Missing:
+    """A symbol a read left out because Massive has no data for it.
+
+    Attributes:
+        symbol: The symbol, as the call named it.
+        why: Why, such as `"for the session 2026-10-30 (HTTP 404 from /futures/vX/trades/{ticker})"`
+            or `"(Massive's crypto ticker list does not hold it)"`.
+    """
+
+    symbol: str
+    why: str
+
+    @override
+    def __str__(self) -> str:
+        """Return the symbol and why, for a message.
+
+        Returns:
+            Such as `"ESZ6 for the session 2026-10-30 (HTTP 404 from ...)"`.
+        """
+        return f"{self.symbol} {self.why}"
+
+
+def _missing_error(spec: DatasetSpec, missing: Sequence[_Missing]) -> UnavailableSymbolError:
     """Return the failure of symbols with no data, under `unavailable_symbols=RAISE`.
 
     Args:
@@ -282,7 +314,7 @@ def _missing_error(spec: DatasetSpec, missing: Sequence[str]) -> UnavailableSymb
     Returns:
         The error, naming the symbols, why, and the setting that would leave them out.
     """
-    names = bounded_list(missing)
+    names = bounded_list(str(one) for one in missing)
     logger.debug("%s: Massive has no data for %s; raising", spec.name, names)
     return UnavailableSymbolError(
         f"{spec.name}: Massive has no data for {names}. Remove the symbol; to leave it out and "
@@ -483,16 +515,14 @@ class _Outcome:
         batches: Its rows, in the dataset's schema.
         requests: How many requests it made (pages, and a dropped symbol's 404).
         missing: The symbol Massive has no data for, so left out, with the futures session it
-            was asked for and why, such as `"ESZ6 for the session 2026-10-30 (HTTP 404 from
-            /futures/vX/trades/{ticker})"` or `"X:FOOUSD (Massive's crypto ticker list does not
-            hold it)"`; None when the call was answered.
+            was asked for and why; None when the call was answered.
         received: How many rows Massive sent, before any was withheld, listed under its
             tickers, or left out of a window: what `limit` counts.
     """
 
     batches: tuple[pa.RecordBatch, ...]
     requests: int
-    missing: str | None = None
+    missing: _Missing | None = None
     received: int = 0
 
 
@@ -695,7 +725,7 @@ class RestReader:
     Attributes:
         state: The session's REST resources.
         catalog: The dataset catalog.
-        drift: The session's drift registry.
+        drift: The session's registry of undocumented REST statuses.
         max_concurrency: The most requests of one fan-out at a time.
         policy: The call's resolved policy (`Request.on_error`), or the session's for a read
             no call owns: what a symbol spelling the library cannot read
@@ -714,6 +744,9 @@ class RestReader:
         waiter: Who waits for the reader's reads, which sets their patience (`read_patience`).
         warnings: The session's once-per-session warnings (`SessionCore.warnings`), such as
             that of a bar stamped where Massive is not known to stamp one.
+        stream_id: The `StreamId` its problems carry: the call id of a `fetch()` or
+            `history()`, or a `poll()` table's id; None for a read no table owns (a host
+            decision, a schedule).
     """
 
     state: RestState
@@ -728,6 +761,7 @@ class RestReader:
     warnings: BoundedLog
     max_outage: float
     waiter: Waiter
+    stream_id: int | None = None
 
     def patience(self) -> Patience:
         """Return the patience of a read starting now (`rate_limits.read_patience`).
@@ -778,13 +812,23 @@ class RestReader:
         )
 
     def _underlyings(
-        self, spec: DatasetSpec, rows: list[pa.RecordBatch], *, stop: Cancel, patience: Patience
+        self,
+        spec: DatasetSpec,
+        rows: list[pa.RecordBatch],
+        *,
+        stop: Cancel,
+        patience: Patience,
+        where: str,
+        tally: ReadTally,
     ) -> list[pa.RecordBatch]:
         """Give a page's index underlyings their `I:` by option root, where the dataset asks.
 
         Only a dataset with `DatasetSpec.underlying_by_root` is changed
         (`option_roots.canonical_underlyings`); its rows' `Date` is filled by now, which dates
-        each root's lookup.
+        each root's lookup. The rows of a root Massive's contracts reference can't classify
+        are withheld as `unreadable_symbols` and reported as `_page_rows` reports its own
+        (`_report_withheld`), and counted in `tally` as withheld, since `_page_rows` counted
+        them among the page's rows already: a read whose every row is withheld fails.
 
         Args:
             spec: The dataset.
@@ -793,19 +837,29 @@ class RestReader:
             patience: The read's patience, taken on its own thread, which a lookup's pauses
                 are charged to: `_call` may run on a fan-out worker, whose own patience would
                 not know a console caller holds the update graph's lock.
+            where: The request template, for the events.
+            tally: The read's count of its rows and of those withheld.
 
         Returns:
-            The rows.
+            The rows to publish.
+
+        Raises:
+            RowDataError: If rows are withheld and `unreadable_symbols` is `RAISE` in the
+                read's policy.
 
         A failed lookup raises the `MassiveError` of `root_kind`.
         """
-        if not spec.underlying_by_root:
+        if not spec.underlying_by_root or not rows:
             return rows
-        return canonical_underlyings(
+        withheld = canonical_underlyings(
             rows,
             functools.partial(self.root_kind, patience=patience, cancel=stop),
             dataset=spec.name,
         )
+        if withheld.groups:
+            tally.add(0, withheld, source=where)
+            self._report_withheld(spec, withheld, where=where)
+        return list(withheld.rows.to_batches())
 
     def root_kind(
         self,
@@ -864,7 +918,7 @@ class RestReader:
         cancel: Cancel | None = None,
         patience: Patience,
         tally: ReadTally,
-        on_missing: Callable[[Sequence[str]], None] | None = None,
+        on_missing: Callable[[Sequence[_Missing]], None] | None = None,
     ) -> _PathRows:
         """Make the calls and return their rows as one Arrow table of the dataset's schema.
 
@@ -894,7 +948,7 @@ class RestReader:
                 for past data, such as `history()` or a previous day's bar.
             on_recency: Given what each page of current data shows about its recency
                 (`_check_recency`), for a `poll()` table's `Recency`; None to ignore it.
-            record: Also given each page's drift, for a `poll()` table's `SchemaDrift`.
+            record: Also given each page's drift, as a `poll()` cycle's progress.
             executor: A pool to run several calls on, which the caller keeps; None for a pool
                 of this read's own.
             cancel: Ends the read's waits when set, such as a poller's stop token; None when
@@ -1108,13 +1162,13 @@ class RestReader:
             )
             return error
 
-    def _report_missing(self, spec: DatasetSpec, missing: Sequence[str]) -> None:
+    def _report_missing(self, spec: DatasetSpec, missing: Sequence[_Missing]) -> None:
         """Apply `ErrorPolicy.unavailable_symbols` to the symbols a read found no data for.
 
         Massive has no data for a symbol it answered HTTP 404 for, and for a crypto pair its
-        crypto ticker list gives no split for. Under `LOG` one WARNING per read names each such
-        symbol once per session, under `IGNORE` only DEBUG, and the read leaves them out; under
-        `RAISE` the read fails.
+        crypto ticker list gives no split for. Each is an `unavailable_symbols` problem of the
+        read's table (`_unavailable_events`), whose first the session's problem reporter logs;
+        under `LOG` and `IGNORE` the read leaves them out, and under `RAISE` it fails.
 
         Args:
             spec: The dataset.
@@ -1123,35 +1177,106 @@ class RestReader:
         Raises:
             UnavailableSymbolError: Under `RAISE` (`_missing_error`).
         """
-        effect = effect_of(self.policy.unavailable_symbols)
-        if effect.fails:
+        self.problems(
+            self._unavailable_events(
+                spec, [(one.symbol, f"Massive has no data for it {one.why}") for one in missing]
+            )
+        )
+        if effect_of(self.policy.unavailable_symbols).fails:
             error = _missing_error(spec, missing)
             raise error
-        self._warn_missing(spec, missing, level=effect.level)
+        logger.debug(
+            "%s: Massive has no data for %s, so they are left out",
+            spec.name,
+            bounded_list(str(one) for one in missing),
+        )
 
-    def _warn_missing(self, spec: DatasetSpec, missing: Sequence[str], *, level: int) -> None:
-        """Log the symbols Massive has no data for: at `level` for those new this session.
-
-        One line per read names each symbol once per session at `level`, however many there
-        are; the others, and every symbol under a `level` of DEBUG, log at DEBUG. A DEBUG line
-        marks no symbol as named.
+    def _unavailable_events(
+        self, spec: DatasetSpec, found: Sequence[tuple[str, str]]
+    ) -> list[ProblemEvent]:
+        """Return the `unavailable_symbols` problems of the symbols a read leaves out.
 
         Args:
             spec: The dataset.
-            missing: The symbols, each with why (`_Outcome.missing`), in call order.
-            level: The level of the symbols not yet named this session.
+            found: Each symbol with why, in call order.
+
+        Returns:
+            One event per symbol, for the read's table.
         """
-        new = (
-            [symbol for symbol in missing if self.state.first("missing", spec.name, symbol)]
-            if level > logging.DEBUG
-            else []
+        at = time.time_ns()
+        return [
+            ProblemEvent(
+                cause=ProblemCause.UNAVAILABLE_SYMBOLS,
+                action=ProblemAction.SKIPPED,
+                dataset=spec.name,
+                stream_id=self.stream_id,
+                where=spec.name,
+                symbol=symbol,
+                field=None,
+                rows=0,
+                detail=why,
+                at=at,
+                policy=self.policy.unavailable_symbols,
+            )
+            for symbol, why in found
+        ]
+
+    def _unsplit_outcome(self, spec: DatasetSpec, call: Call, unsplit: Unsplit) -> _Outcome:
+        """Return the outcome of a call for a crypto pair with no split, which sends no request.
+
+        A pair Massive has no data for is named in `missing`, as HTTP 404 is. One whose
+        currencies the library cannot read, which the lookup logged, is an
+        `unreadable_symbols` problem of the read's table, never a symbol with no data.
+
+        Args:
+            spec: The dataset.
+            call: The call, planned for one pair.
+            unsplit: Why the pair has no split (`call.unsplit`).
+
+        Returns:
+            No rows and no request.
+        """
+        logger.debug(
+            "%s: %s has no split (%s); no request is sent", spec.name, call.symbol, unsplit.why
         )
-        logger.log(
-            level if new else logging.DEBUG,
-            "%s: Massive has no data for %s, so they are left out",
-            spec.name,
-            bounded_list(new or missing),
-        )
+        symbol = required(call.symbol, "a split call's symbol")
+        if unsplit.no_data:
+            return _Outcome((), 0, missing=_Missing(symbol, f"({unsplit.why})"))
+        self.problems(self._unreadable_events(spec, [(symbol, unsplit.why)]))
+        return _Outcome((), 0, missing=None)
+
+    def _unreadable_events(
+        self, spec: DatasetSpec, found: Sequence[tuple[str, str]]
+    ) -> list[ProblemEvent]:
+        """Return the `unreadable_symbols` problems of crypto pairs a read leaves out.
+
+        Massive's crypto ticker list gives such a pair's currencies, but they don't join to
+        its ticker, so no request is sent for it: a library bug, which the lookup logged.
+
+        Args:
+            spec: The dataset.
+            found: Each pair with why, in call order.
+
+        Returns:
+            One event per pair, for the read's table.
+        """
+        at = time.time_ns()
+        return [
+            ProblemEvent(
+                cause=ProblemCause.UNREADABLE_SYMBOLS,
+                action=ProblemAction.WITHHELD,
+                dataset=spec.name,
+                stream_id=self.stream_id,
+                where=spec.name,
+                symbol=symbol,
+                field="Symbol",
+                rows=0,
+                detail=f"{why}; the pair is never requested",
+                at=at,
+                policy=self.policy.unreadable_symbols,
+            )
+            for symbol, why in found
+        ]
 
     def _fan_out(
         self,
@@ -1257,13 +1382,7 @@ class RestReader:
         `EntitlementError` of `_check_recency`.
         """
         if call.unsplit is not None:
-            why = call.unsplit.why
-            logger.debug(
-                "%s: %s has no split (%s); no request is sent", spec.name, call.symbol, why
-            )
-            # A pair whose currencies cannot be read was reported by the lookup, not as no data.
-            missing = f"{call.symbol} ({why})" if call.unsplit.no_data else None
-            return _Outcome((), 0, missing=missing)
+            return self._unsplit_outcome(spec, call, call.unsplit)
         kept: list[pa.RecordBatch] = []
         requests = 0
         received_rows = 0
@@ -1300,9 +1419,16 @@ class RestReader:
                     )
                 self._check_adjusted(spec, request, template=template, echoed=page.adjusted)
                 batches, drift, flagged = converter.convert(page.rows, call.symbol)
-                self.drift.report(
-                    spec.name, Transport.REST, drift, where=f"GET {template}", symbol=call.symbol
-                )
+                if drift.extra:
+                    self.problems(
+                        drift_events(
+                            drift,
+                            dataset=spec.name,
+                            stream_id=self.stream_id,
+                            where=f"GET {template}",
+                            symbol=call.symbol,
+                        )
+                    )
                 if record is not None:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
@@ -1330,11 +1456,12 @@ class RestReader:
                             page=f"{spec.name}: page {requests} of {template} for "
                             f"{call.symbol or 'the request'}",
                             read=len(page.rows),
-                            record=record,
                             tally=tally,
                         ),
                         stop=stop,
                         patience=patience,
+                        where=f"GET {template}",
+                        tally=tally,
                     )
                 )
         except WireError as error:
@@ -1428,7 +1555,7 @@ class RestReader:
             error.request_id,
             error.message,
         )
-        missing = f"{call.symbol}{scope} (HTTP 404 from {template})"
+        missing = _Missing(call.symbol, f"{scope} (HTTP 404 from {template})".lstrip())
         return _Outcome(tuple(kept), requests + 1, missing=missing)
 
     def _page_rows(
@@ -1442,7 +1569,6 @@ class RestReader:
         where: str,
         page: str,
         read: int,
-        record: Callable[[DriftReport], None] | None,
         tally: ReadTally,
     ) -> list[pa.RecordBatch]:
         """Keep a page's rows of the window and its whole bars, withhold its marked rows, and fill.
@@ -1469,8 +1595,6 @@ class RestReader:
             where: The request template, for the drift and the events.
             page: The dataset, page, path, and symbol, for the DEBUG line.
             read: How many rows the page held, before conversion.
-            record: Also given the withheld rows' drift, for a live table's `SchemaDrift`; or
-                None.
             tally: The read's count of its rows inside the window and of those withheld.
 
         Returns:
@@ -1494,8 +1618,6 @@ class RestReader:
         symbol = _SYMBOL if _SYMBOL in windowed.schema.names else None
         withheld = withhold_rows(windowed, symbol=symbol)
         if withheld.groups:
-            if record is not None:  # first, so a table that fails still shows its count
-                record(withheld.drift)
             self._report_withheld(spec, withheld, where=where)
         asked = windowed.num_rows
         tally.add(asked, withheld, source=where)
@@ -1524,21 +1646,18 @@ class RestReader:
         """
         self.problems(
             withheld.events(
-                dataset=spec.name, transport=Transport.REST, where=where, stream_id=None
+                dataset=spec.name,
+                transport=Transport.REST,
+                where=where,
+                stream_id=self.stream_id,
+                policy=self.policy,
             )
         )
-        counts = withheld.counts()
         failure = failure_of(
-            counts, self.policy, dataset=spec.name, first_reason=withheld.first_reason
+            withheld.counts(), self.policy, dataset=spec.name, first_reason=withheld.first_reason
         )
         if failure is not None:
             raise RowDataError(failure)
-        if logs_withheld(counts, self.policy):
-            self.drift.report(spec.name, Transport.REST, withheld.drift, where=where)
-        spellings = sorted(
-            {g.sent for g in withheld.groups if g.fault is RowFault.UNREADABLE_SYMBOLS and g.sent}
-        )
-        log_unreadable(spec.name, spellings, self.policy.unreadable_symbols)
 
     def _listed(
         self,
@@ -2003,7 +2122,7 @@ class RestReader:
             symbols: The cycle's static symbols (a reactive table already read).
             values: The values the value table holds now (already checked), or None when the
                 request has no value table.
-            record: Records each page's drift in the table's `SchemaDrift`.
+            record: Given each page's drift, as the cycle's progress.
             on_recency: Records each page's recency evidence, for the table's `Recency`.
             executor: The poller's fan-out pool.
             cancel: The poller's stop token, which ends the cycle's waits.
@@ -2046,9 +2165,9 @@ class RestReader:
                 if error.status != HTTPStatus.NOT_FOUND or self.state.closed:
                     raise
                 template = required(spec.fetch_path, f"{spec.name}'s fetch path")
-                found = f"{value} (HTTP 404 from {template})"
+                found = _Missing(value, f"(HTTP 404 from {template})")
                 self._report_missing(spec, [found])
-                absent.append(found)
+                absent.append(str(found))
         tally.check(spec.name)
         schema = self.catalog.dataset_schema(spec)
         return poll.CycleRows(
@@ -2078,9 +2197,10 @@ class RestReader:
 
         By default one symbol never fails the table. Massive can answer HTTP 404 for a symbol
         (no data), and `ErrorPolicy.unavailable_symbols` decides (`_report_missing`): under
-        `LOG` and `IGNORE` such symbols are left out of the cycle and named in its `left_out`,
-        which the table's `Error` lists; under `RAISE` the table fails. A parameter a path does
-        not take never reaches a cycle: `check_parameters` refused it when the table was made.
+        `LOG` and `IGNORE` such symbols are left out of the cycle, each an
+        `unavailable_symbols` problem of the table, and named in its `left_out`; under `RAISE`
+        the table fails. A parameter a path does not take never reaches a cycle:
+        `check_parameters` refused it when the table was made.
         Before reading, the cycle's requests per bucket go to `pace`, which warns once when
         the paced ones outlast the interval.
 
@@ -2088,7 +2208,7 @@ class RestReader:
             spec: The dataset.
             request: The normalized arguments.
             symbols: The cycle's static symbols (a reactive table already read).
-            record: Records each page's drift in the table's `SchemaDrift`.
+            record: Given each page's drift, as the cycle's progress.
             on_recency: Records each page's recency evidence, for the table's `Recency`.
             executor: The poller's fan-out pool.
             cancel: The poller's stop token, which ends the cycle's waits.
@@ -2110,7 +2230,7 @@ class RestReader:
         """
         planned, left_out = self._plan_cycle(spec, request, symbols, cancel=cancel)
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
-        missing: list[str] = []
+        missing: list[_Missing] = []
         table, requests = self._read_planned(
             spec,
             request,
@@ -2126,7 +2246,7 @@ class RestReader:
         )
         if missing:
             self._report_missing(spec, missing)
-            left_out.extend(missing)
+            left_out.extend(str(one) for one in missing)
         return poll.CycleRows(table, requests, patience.seconds, tuple(left_out))
 
     def _plan_cycle(
@@ -2144,7 +2264,8 @@ class RestReader:
         table, `check_parameters` checked each path. A crypto pair Massive's crypto ticker
         list gives no split for is planned as a call that is never sent (`Call.unsplit`): the
         read reports a pair Massive has no data for as it reports HTTP 404, and the cycle
-        leaves out one whose currencies cannot be read, named with why.
+        leaves out one whose currencies cannot be read, named with why, an
+        `unreadable_symbols` problem of the table each cycle (`_call`).
 
         Args:
             spec: The dataset, with a fetch path.
@@ -2359,7 +2480,7 @@ class RestReader:
         patience: Patience,
         tally: ReadTally,
         on_recency: Callable[[Recency], None] | None = None,
-        on_missing: Callable[[Sequence[str]], None] | None = None,
+        on_missing: Callable[[Sequence[_Missing]], None] | None = None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the rows at `Request.limit`.
 
@@ -2450,13 +2571,15 @@ class RestEndpoints:
         """Bind the transport to the session's core and REST state.
 
         Args:
-            core: The session's core: configuration, catalog, drift registry, diagnostics.
+            core: The session's core: configuration, catalog, status registry, diagnostics.
             state: The session's REST resources.
         """
         self._core = core
         self._state = state
 
-    def _reader(self, role: str, policy: ResolvedPolicy, *, waiter: Waiter) -> RestReader:
+    def _reader(
+        self, role: str, policy: ResolvedPolicy, *, waiter: Waiter, stream_id: int | None = None
+    ) -> RestReader:
         """Return a reader of the session's paths.
 
         Args:
@@ -2468,6 +2591,7 @@ class RestEndpoints:
                 a background read, the only static read given a stop token (`stop`), and for
                 a `poll()` cycle and a stream's lookups; `STREAM_OPEN` for a host decision;
                 `CALL` for the rest.
+            stream_id: The `StreamId` its problems carry (`RestReader.stream_id`).
 
         Returns:
             The reader.
@@ -2486,6 +2610,7 @@ class RestEndpoints:
             core.warnings,
             core.config.max_outage,
             waiter,
+            stream_id,
         )
 
     def _static(self, spec: DatasetSpec, table: pa.Table) -> Table:
@@ -2684,7 +2809,9 @@ class RestEndpoints:
         A parameter a path does not take raises the `ValueError` of `shared_params` before any
         request: every path is planned before the first one is read.
         """
-        reader = self._reader(f"call-{call}", request.on_error, waiter=_waiter_of(stop))
+        reader = self._reader(
+            f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
+        )
         tally = ReadTally()
         table, _ = reader.read_fetch(
             spec,
@@ -2748,7 +2875,9 @@ class RestEndpoints:
 
         Errors are those of `symbol_reads.read_rest_by_symbol`.
         """
-        reader = self._reader(f"call-{call}", request.on_error, waiter=_waiter_of(stop))
+        reader = self._reader(
+            f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
+        )
         cancel = as_cancel(stop)
         units, failed = fetch_units(
             reader,
@@ -2810,7 +2939,7 @@ class RestEndpoints:
         Errors are those of `symbol_reads.read_rest_by_value`.
         """
         return read_rest_by_value(
-            self._reader(f"call-{call}", request.on_error, waiter=_waiter_of(stop)),
+            self._reader(f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call),
             self._core,
             spec,
             request=request,
@@ -2870,7 +2999,9 @@ class RestEndpoints:
         differs from the request and for a symbol whose later page answers HTTP 404, its data
         cut short.
         """
-        reader = self._reader(f"call-{call}", request.on_error, waiter=_waiter_of(stop))
+        reader = self._reader(
+            f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
+        )
         rest_path, calls, shape = _history_plan(
             reader,
             spec,
@@ -2960,7 +3091,9 @@ class RestEndpoints:
 
         Errors are those of `symbol_reads.read_rest_by_symbol`.
         """
-        reader = self._reader(f"call-{call}", request.on_error, waiter=_waiter_of(stop))
+        reader = self._reader(
+            f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
+        )
         cancel = as_cancel(stop)
         units, failed = history_units(
             reader, spec, request, window=window, symbols=symbols, cancel=cancel
@@ -3309,6 +3442,7 @@ def _cycle_reader(
 
     def read(
         *,
+        stream_id: int,
         symbols: tuple[str, ...] | AllSymbols | None,
         values: tuple[str, ...] | None,
         record: Callable[[DriftReport], None],
@@ -3316,7 +3450,7 @@ def _cycle_reader(
         executor: ThreadPoolExecutor,
         cancel: threading.Event,
     ) -> poll.CycleRows:
-        return reader.read_cycle(
+        return replace(reader, stream_id=stream_id).read_cycle(
             spec,
             request,
             symbols=symbols,

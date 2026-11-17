@@ -7,6 +7,7 @@ rows per second of the shared-batch fan-out against per-stream Python grouping.
 
 from __future__ import annotations
 
+import functools
 import logging
 import statistics
 import sys
@@ -25,7 +26,6 @@ from deephaven.stream import blink_to_append_only
 from typing_extensions import override
 
 import deephaven_massive as dm
-from deephaven_massive._datasets import wire_symbols
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import ALL, SymbolTable
@@ -38,23 +38,26 @@ from deephaven_massive._errors import (
     MassiveError,
     SessionClosedError,
 )
-from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import (
     DriftReport,
-    DriftSample,
     RowFault,
     RowMark,
     Transport,
     sources,
 )
-from deephaven_massive._tables import held_rows, stream
+from deephaven_massive._tables import held_rows, problem_reporter, stream
 from deephaven_massive._tables.columns import dataset_table
-from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.futures_dates import LookupState, Readiness
-from deephaven_massive._tables.held_rows import DELAYED_AFTER, HeldRows
+from deephaven_massive._tables.held_rows import DELAYED_AFTER, Delayed, HeldRows, Settled
 from deephaven_massive._tables.liveness import release_scope
-from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
+from deephaven_massive._tables.problem_events import (
+    Problem,
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+    ProblemSpans,
+)
 from deephaven_massive._tables.row_memory import frame_bytes
 from deephaven_massive._tables.stream import (
     ChannelPlan,
@@ -62,7 +65,7 @@ from deephaven_massive._tables.stream import (
     StreamSink,
     open_stream_tables,
 )
-from deephaven_massive._tables.watchlist import skipped_rows_text
+from deephaven_massive._tables.watchlist import SkippedValues, SymbolRowRule
 from deephaven_massive.namespaces._options import ADMIN_MESSAGES
 
 if TYPE_CHECKING:
@@ -75,6 +78,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import RowMarks
+    from deephaven_massive._tables.diagnostics import StreamUpdate
     from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
@@ -228,7 +232,6 @@ def test_rows_without_symbols_convert_whole_and_withhold_only_a_bad_time(
     assert withheld.counts() == {RowFault.UNREADABLE_KEYS: 1}
     assert [(g.symbol, g.sent, g.field) for g in withheld.groups] == [(None, None, "Timestamp")]
     assert withheld.by_symbol() == {}
-    assert converted.drift == DriftReport()
 
 
 FOREX_ROWS = [
@@ -260,7 +263,6 @@ def test_conversion_withholds_unreadable_symbols_and_reports_their_spellings(
         converted = plan.convert(
             frame(FOREX_ROWS, "forex/C"), (), cache, arrived=arrivals(FOREX_ROWS)
         )
-    assert converted.drift == DriftReport()
     [group] = converted.withheld.groups
     assert (group.fault, group.symbol, group.sent, group.rows) == (
         RowFault.UNREADABLE_SYMBOLS,
@@ -299,12 +301,10 @@ def test_conversion_withholds_rows_with_a_bad_time_or_another_bad_timestamp(
     assert withheld.first_reason == (
         "timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100"
     )
-    assert converted.drift == DriftReport(unconvertible=frozenset({"trft"}))
-    assert converted.drift.samples["trft"] == DriftSample(None, str(2**62))
     assert batch.column("ParticipantTimestamp").to_pylist() == [None]  # 0 is absent
 
 
-def test_a_size_beyond_2_53_is_withheld_and_reported_as_drift(
+def test_a_size_beyond_2_53_is_withheld(
     massive_session: dm.MassiveSession,
 ) -> None:
     # The trade's size is a `long` on the channel but a `double` in the dataset.
@@ -318,8 +318,6 @@ def test_a_size_beyond_2_53_is_withheld_and_reported_as_drift(
     assert [(g.fault, g.symbol, g.field) for g in converted.withheld.groups] == [
         (RowFault.UNCONVERTIBLE_VALUES, "AAPL", "Size")
     ]
-    assert converted.drift == DriftReport(rounded=frozenset({"s"}))
-    assert converted.drift.samples["s"] == DriftSample(None, str(2**53 + 1))
 
 
 def test_rows_convert_as_the_same_rows_keyed_by_column(massive_session: dm.MassiveSession) -> None:
@@ -1022,7 +1020,10 @@ WAITING = LookupState(Readiness.WAITING, "its product is being looked up")
 
 
 class FuturesFlush:
-    """A futures flusher with a fake calendar and two streams: NQM5's (1) and ESM5's (2)."""
+    """A futures flusher with a fake calendar and two streams: NQM5's (1) and ESM5's (2).
+
+    `first` replaces stream 1's symbols, such as `ALL` for a stream of every ticker.
+    """
 
     def __init__(
         self,
@@ -1030,11 +1031,12 @@ class FuturesFlush:
         monkeypatch: pytest.MonkeyPatch,
         *,
         policy: ResolvedPolicy = DEFAULT_POLICY,
+        first: NormalizedSymbols = ("NQM5",),
     ) -> None:
         spec = core.catalog.by_name["futures.trades"]
         self.plan = ChannelPlan.build(core.catalog, spec, "T")
         self.updates: list[dict[int, StreamUpdate]] = []
-        self.events: list[ProblemEvent] = []
+        self.events: list[Problem] = []
         monkeypatch.setattr(core, "update_streams", self.updates.append)
         monkeypatch.setattr(core, "problems", self.events.extend)
         self.calendar = FakeFuturesCalendar()
@@ -1050,7 +1052,8 @@ class FuturesFlush:
             held=self.held,
         )
         self.sinks: list[StreamSink] = []
-        for stream_id, wanted in ((1, ("NQM5",)), (2, ("ESM5",))):
+        streams: tuple[tuple[int, NormalizedSymbols], ...] = ((1, first), (2, ("ESM5",)))
+        for stream_id, wanted in streams:
             opened = open_stream_tables(
                 self.plan,
                 core.catalog.dataset_schema(spec),
@@ -1152,24 +1155,24 @@ def test_a_refused_lookup_fails_only_the_streams_that_receive_the_ticker(
         (Readiness.UNSCHEDULED, ProblemCause.UNSCHEDULED_PRODUCTS),
     ],
 )
-def test_discarded_rows_are_withheld_reported_and_logged_once_per_stream(
+def test_discarded_rows_are_withheld_and_listed_with_the_streams_setting(
     *,
     futures_flush: FuturesFlush,
-    caplog: pytest.LogCaptureFixture,
     readiness: Readiness,
     cause: ProblemCause,
 ) -> None:
+    # Each flush's discards are events of the stream that would have received them, with its
+    # setting; the session's reporter logs the first of each cause.
     flush = futures_flush
     flush.calendar.set("NQM5", LookupState(readiness, "gone"))
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.stream"):
-        flush.send("NQM5")
-        flush.send("NQM5")
+    flush.send("NQM5")
+    flush.send("NQM5")
     assert flush.published() == {1: 0, 2: 0}
-    assert [(e.cause, e.action, e.symbol, e.rows, e.stream_id) for e in flush.events] == [
-        (cause, ProblemAction.WITHHELD, "NQM5", 1, 1)
-    ] * 2
-    assert len(caplog.records) == 1  # once per stream and cause
-    assert caplog.records[0].getMessage().startswith("stream 1: futures.trades: ")
+    assert [
+        (e.cause, e.action, e.symbol, e.rows, e.stream_id, e.policy)
+        for e in flush.events
+        if isinstance(e, ProblemEvent)
+    ] == [(cause, ProblemAction.WITHHELD, "NQM5", 1, 1, OnError.LOG)] * 2
     assert not flush.sinks[0].failed
 
 
@@ -1195,41 +1198,179 @@ def test_discarded_rows_fail_a_stream_whose_setting_raises(
     assert [sink.failed for sink in flush.sinks] == [True, False]
 
 
-def test_a_long_wait_is_reported_once_as_delayed(
-    futures_flush: FuturesFlush, caplog: pytest.LogCaptureFixture
+def undated(flush: FuturesFlush) -> list[dict[str, str]]:
+    # Each `undated_rows` snapshot the streams reported: its waiting tickers, with why.
+    return [
+        {name: span.detail for name, span in p.spans.items()}
+        for p in flush.events
+        if isinstance(p, ProblemSpans) and p.cause is ProblemCause.UNDATED_ROWS
+    ]
+
+
+def test_a_long_wait_is_an_undated_rows_span_until_the_rows_publish(
+    futures_flush: FuturesFlush,
 ) -> None:
     flush = futures_flush
     flush.send("NQM5")
     flush.now += DELAYED_AFTER
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.stream"):
-        flush.flusher.flush()
-        flush.now += 1
-        flush.flusher.flush()
-    assert [(e.cause, e.action, e.symbol, e.rows) for e in flush.events] == [
-        (ProblemCause.UNDATED_ROWS, ProblemAction.DELAYED, "NQM5", 1)
-    ]
-    assert caplog.messages == [
-        (
-            "stream 1: futures.trades: the rows of 1 [NQM5] have waited over 15 s for their "
-            "trading session; they publish once it loads"
-        )
-    ]
+    flush.flusher.flush()
+    flush.now += 1
+    flush.flusher.flush()  # still waiting: no change, no new snapshot
+    [waiting] = undated(flush)
+    assert list(waiting) == ["NQM5"]
+    flush.calendar.set("NQM5", LookupState(Readiness.READY, loaded_at=0.0))
+    flush.flusher.flush()
+    assert undated(flush)[1:] == [{}]  # ended once its rows published
+    assert flush.published()[1] == 1
 
 
-def test_a_stream_warns_again_about_a_later_wait(
-    futures_flush: FuturesFlush, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_a_later_wait_opens_a_new_span(futures_flush: FuturesFlush) -> None:
     flush = futures_flush
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.stream"):
-        for _ in range(2):
-            flush.calendar.set("NQM5", WAITING)
-            flush.send("NQM5")
-            flush.now += DELAYED_AFTER
-            flush.flusher.flush()
-            flush.calendar.set("NQM5", LookupState(Readiness.READY, loaded_at=0.0))
-            flush.flusher.flush()
-    assert len(caplog.records) == 2
+    for _ in range(2):
+        flush.calendar.set("NQM5", WAITING)
+        flush.send("NQM5")
+        flush.now += DELAYED_AFTER
+        flush.flusher.flush()
+        flush.calendar.set("NQM5", LookupState(Readiness.READY, loaded_at=0.0))
+        flush.flusher.flush()
+    assert [list(found) for found in undated(flush)] == [["NQM5"], [], ["NQM5"], []]
     assert flush.published()[1] == 2
+
+
+def test_a_discarded_ticker_ends_its_wait(futures_flush: FuturesFlush) -> None:
+    flush = futures_flush
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    flush.flusher.flush()
+    flush.calendar.set("NQM5", LookupState(Readiness.UNSCHEDULED, "gone"))
+    flush.flusher.flush()
+    assert [list(found) for found in undated(flush)] == [["NQM5"], []]
+
+
+def undated_snapshots(flush: FuturesFlush, stream_id: int) -> list[ProblemSpans]:
+    # Each `undated_rows` snapshot one stream reported, whole.
+    return [
+        p
+        for p in flush.events
+        if isinstance(p, ProblemSpans)
+        and p.cause is ProblemCause.UNDATED_ROWS
+        and p.stream_id == stream_id
+    ]
+
+
+def test_a_ticker_dropped_from_the_watchlist_ends_its_wait(futures_flush: FuturesFlush) -> None:
+    # The stream no longer receives the ticker, so its rows can never publish to it: the span
+    # ends at the next flush, though another stream keeps the ticker's rows waiting.
+    flush = futures_flush
+    nqm5, esm5 = flush.sinks
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    flush.flusher.flush()
+    esm5.set_symbols(frozenset({"ESM5", "NQM5"}))  # keeps NQM5's rows waiting
+    nqm5.set_symbols(frozenset({"GCM5"}))
+    flush.flusher.flush()
+    assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"], []]
+
+
+def test_a_ticker_no_stream_receives_any_more_ends_its_wait(
+    futures_flush: FuturesFlush,
+) -> None:
+    # Its held rows are dropped, so nothing settles them again: the flush still ends the span.
+    flush = futures_flush
+    nqm5, _ = flush.sinks
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    flush.flusher.flush()
+    nqm5.set_symbols(frozenset({"GCM5"}))
+    flush.flusher.flush()
+    assert flush.held.rows_of(flush.plan) == 0
+    assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"], []]
+
+
+def test_a_stream_of_every_ticker_keeps_its_wait_across_flushes(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A `dm.ALL` stream names no ticker, yet receives every one: a flush never ends its wait as
+    # if the ticker had left its watchlist.
+    flush = FuturesFlush(massive_session._core, monkeypatch, first=ALL)
+    try:
+        flush.send("NQM5")
+        flush.now += DELAYED_AFTER
+        flush.flusher.flush()
+        flush.flusher.flush()
+        assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"]]
+    finally:
+        flush.flusher.stop()
+
+
+def test_a_stream_that_receives_a_waiting_ticker_later_shows_its_wait(
+    futures_flush: FuturesFlush,
+) -> None:
+    # Settling reports NQM5's wait once, to stream 1; stream 2's watchlist adds NQM5 later and
+    # shows the same wait from its next flush.
+    flush = futures_flush
+    _, esm5 = flush.sinks
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    flush.flusher.flush()
+    assert undated_snapshots(flush, 2) == []
+    esm5.set_symbols(frozenset({"ESM5", "NQM5"}))
+    flush.flusher.flush()
+    assert [list(found.spans) for found in undated_snapshots(flush, 2)] == [["NQM5"]]
+    assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"]]
+
+
+def test_a_waiting_ticker_s_rows_grow_on_its_span(futures_flush: FuturesFlush) -> None:
+    # More rows of a ticker whose wait was reported join the hold: its span counts them and
+    # keeps its start.
+    flush = futures_flush
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    flush.flusher.flush()
+    flush.send("NQM5", "NQM5")
+    first, later = undated_snapshots(flush, 1)
+    assert (first.spans["NQM5"].rows, later.spans["NQM5"].rows) == (1, 3)
+    assert later.spans["NQM5"].since == first.spans["NQM5"].since
+
+
+def test_a_wait_whose_older_rows_were_discarded_holds_on_while_newer_rows_wait(
+    futures_flush: FuturesFlush,
+) -> None:
+    # Settling discards one of NQM5's rows, but the hold still has a reported wait of it: the
+    # dataset's open wait keeps its reason and counts the rows left.
+    flush = futures_flush
+    reported = Settled(None, delayed={"NQM5": Delayed(3, "its product is being looked up")})
+    assert flush.flusher._open_waits(flush.plan, reported, {"NQM5": 3}) == {
+        "NQM5": (3, "its product is being looked up")
+    }
+    discarded = Settled(None, discarded={Readiness.UNSCHEDULED: {"NQM5": (1, "no session")}})
+    assert flush.flusher._open_waits(flush.plan, discarded, {"NQM5": 2}) == {
+        "NQM5": (2, "its product is being looked up")
+    }
+    assert flush.flusher._open_waits(flush.plan, Settled(None), {}) == {}
+
+
+def test_a_later_report_of_a_waiting_ticker_updates_its_rows_and_keeps_its_start(
+    futures_flush: FuturesFlush,
+) -> None:
+    # Driven through the stream's span bookkeeping directly: settling reports a wait once, so
+    # the rows of an open span change only when the stream's waits are handed in again.
+    flush = futures_flush
+    sink = flush.sinks[0]
+
+    def report(rows: int) -> ProblemSpans | None:
+        waits = {"NQM5": (rows, "its product is being looked up")}
+        return flush.flusher._undated_spans(
+            flush.plan, waits, sink, where="test", receives=sink.holds
+        )
+
+    first = report(1)
+    assert first is not None
+    assert report(1) is None  # nothing changed
+    later = report(3)
+    assert later is not None
+    assert (first.spans["NQM5"].rows, later.spans["NQM5"].rows) == (1, 3)
+    assert later.spans["NQM5"].since == first.spans["NQM5"].since
 
 
 def test_past_the_byte_limit_the_streams_of_the_dataset_fail(
@@ -1413,7 +1554,6 @@ def test_a_batch_whose_every_row_was_dropped_publishes_nothing_and_fails_nothing
 def test_an_all_stream_survives_rows_whose_time_or_value_is_odd(
     massive_session: dm.MassiveSession,
     flusher: Flusher,
-    caplog: pytest.LogCaptureFixture,
     *,
     monkeypatch: pytest.MonkeyPatch,
     rows_when: RowsWhen,
@@ -1429,38 +1569,24 @@ def test_an_all_stream_survives_rows_whose_time_or_value_is_odd(
         trade("ZZZ", Ticker=None),
     ]
     events = capture_problems(core, monkeypatch)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.diagnostics"):
-        # The client marked a row it could not route; the plan marks the other two odd rows.
-        flusher.rows(
-            "T",
-            frame(rows),
-            unread_keys(3, reason="a T row from h/stocks: no Ticker"),
-            generation=1,
-        )
-        flusher.flush()
-        flusher.rows("T", frame([trade("NVDA")]), {}, generation=1)
-        flusher.flush()
+    # The client marked a row it could not route; the plan marks the other two odd rows.
+    flusher.rows(
+        "T",
+        frame(rows),
+        unread_keys(3, reason="a T row from h/stocks: no Ticker"),
+        generation=1,
+    )
+    flusher.flush()
+    flusher.rows("T", frame([trade("NVDA")]), {}, generation=1)
+    flusher.flush()
     assert not every.failed
     assert every.rows_published == 2
     published = rows_when(shown, lambda found: len(found) == 2)
     assert [r["Symbol"] for r in published] == ["AAPL", "NVDA"]
     assert [(e.cause, e.symbol, e.field, e.rows, e.stream_id) for e in events] == [
-        (RowFault.UNREADABLE_KEYS, "MSFT", "Timestamp", 1, every.stream_id),
-        (RowFault.UNCONVERTIBLE_VALUES, "IBM", "TrfTimestamp", 1, every.stream_id),
-        (RowFault.UNREADABLE_KEYS, None, "Ticker", 1, every.stream_id),
-    ]
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings == [
-        (
-            "test.trades: WS field 'trft' held a value that does not fit its type; its row is "
-            f"withheld (schema drift) at test-flush channel T; first value {2**62}"
-        ),
-        (
-            "test.trades: withheld 3 WS row(s) the library cannot read whole, the first at "
-            "test-flush channel T: timestamp unit mismatch for test.trades.Timestamp: 5 ms is "
-            "outside 1990 to 2100; such rows are withheld and counted: the running count is "
-            "logged at DEBUG and shown in the SchemaDrift of each live table that lost them"
-        ),
+        (ProblemCause.UNREADABLE_KEYS, "MSFT", "Timestamp", 1, every.stream_id),
+        (ProblemCause.UNCONVERTIBLE_VALUES, "IBM", "TrfTimestamp", 1, every.stream_id),
+        (ProblemCause.UNREADABLE_KEYS, None, "Ticker", 1, every.stream_id),
     ]
 
 
@@ -1507,16 +1633,30 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
     assert flusher._runs == {}
 
 
-def test_a_symbol_whose_every_row_is_dropped_fails_its_streams_while_others_publish(
-    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+def stale_spans(problems: list[Problem], stream_id: int) -> list[dict[str, str]]:
+    # Each `stale_symbol_data` snapshot of one stream, as its symbols and their details.
+    return [
+        {name: span.detail for name, span in p.spans.items()}
+        for p in problems
+        if isinstance(p, ProblemSpans)
+        and p.cause is ProblemCause.STALE_SYMBOL_DATA
+        and p.stream_id == stream_id
+    ]
+
+
+def test_a_symbol_whose_every_row_is_withheld_is_stale_in_its_streams_and_fails_none(
+    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # AAPL publishes in every flush, so the dataset's run never grows; ILLQ's rows are all
-    # dropped, and the streams that name ILLQ must not freeze without an error.
+    # withheld, and the streams that hold ILLQ must not freeze without a word: each marks it
+    # stale, and none fails, so AAPL's rows keep flowing to the stream that names both.
     core = massive_session._core
+    problems: list[Problem] = []
+    monkeypatch.setattr(core, "problems", problems.extend)
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
-    every, _ = make_sink(core, ALL, plan)
-    illq, _ = make_sink(core, ("ILLQ",), plan)
-    aapl, _ = make_sink(core, ("AAPL",), plan)
+    every, _ = make_sink(core, ALL, plan, stream_id=7)
+    illq, _ = make_sink(core, ("ILLQ", "AAPL"), plan, stream_id=8)
+    aapl, _ = make_sink(core, ("AAPL",), plan, stream_id=9)
     for sink in (every, illq, aapl):
         flusher.routes.add("T", sink)
     half = stream.DROPPED_RUN_LIMIT // 2
@@ -1530,147 +1670,133 @@ def test_a_symbol_whose_every_row_is_dropped_fails_its_streams_while_others_publ
     marks = unread_keys(*range(half - 1), reason="a T row for ILLQ: no Price", sent="ILLQ")
     flusher.rows("T", lost, marks, generation=1)
     flusher.flush()
+    assert stale_spans(problems, 8) == []
+    flusher.rows("T", frame([trade("AAPL"), trade("ILLQ", SipTimestamp=5)]), {}, generation=1)
+    flusher.flush()
     assert (every.failed, illq.failed, aapl.failed) == (False, False, False)
-    with caplog.at_level(logging.ERROR):
-        flusher.rows("T", frame([trade("AAPL"), trade("ILLQ", SipTimestamp=5)]), {}, generation=1)
-        flusher.flush()
-    assert (every.failed, illq.failed, aapl.failed) == (False, True, False)
-    error = next(r.getMessage() for r in caplog.records if "rows of ILLQ" in r.getMessage())
-    assert f"the last {2 * half} rows of ILLQ on channel T were withheld" in error
-    assert "the first: timestamp unit mismatch for test.trades.Timestamp" in error
+    why = (
+        f"the last {2 * half} rows were withheld; the first: timestamp unit mismatch for "
+        "test.trades.Timestamp: 5 ms is outside 1990 to 2100"
+    )
+    assert stale_spans(problems, 7) == [{"ILLQ": why}]
+    assert stale_spans(problems, 8) == [{"ILLQ": why}]
+    assert stale_spans(problems, 9) == []  # a stream that never held ILLQ
+    problems.clear()
+    flusher.rows("T", frame([trade("ILLQ")]), {}, generation=1)
+    flusher.flush()
+    assert (stale_spans(problems, 7), stale_spans(problems, 8)) == ([{}], [{}])  # published
 
 
-def test_an_all_stream_marks_a_starved_symbol_stale_until_it_publishes_again(
+def test_an_all_stream_marks_each_starved_symbol_stale_until_it_publishes_again(
     massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A dm.ALL stream is never failed for one symbol, but its last values for the symbol
-    # freeze: its Error says so, without failing it, and clears once the symbol is back.
     core = massive_session._core
+    problems: list[Problem] = []
+    monkeypatch.setattr(core, "problems", problems.extend)
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
     every, _ = make_sink(core, ALL, plan, stream_id=7)
     flusher.routes.add("T", every)
-    written: list[StreamUpdate] = []
-    monkeypatch.setattr(core, "update_streams", lambda changes: written.extend(changes.values()))
-    reason = "timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100"
     limit = stream.DROPPED_RUN_LIMIT
-    for symbol in ("ILLQ", "AAA", "BBB", "CCC"):
+    for symbol in ("ILLQ", "AAA"):
         flusher.rows(
             "T", frame([trade("AAPL"), *[trade(symbol, SipTimestamp=5)] * limit]), {}, generation=1
         )
         flusher.flush()
     assert not every.failed
-
-    def stale(update: StreamUpdate) -> str | None:
-        # The stale-symbol part an update sets; None when it sets or clears no such part.
-        return (update.notes or {}).get(NotePart.STALE_SYMBOLS)
-
-    errors = [stale(u) for u in written if stale(u) is not None]
-    assert errors == [
-        f"rows for ILLQ are being dropped ({reason}); its last values may be stale",
-        f"rows for ILLQ, AAA are being dropped ({reason}); their last values may be stale",
-        f"rows for ILLQ, AAA, BBB are being dropped ({reason}); their last values may be stale",
-        (
-            f"rows for ILLQ, AAA, BBB and 1 more are being dropped ({reason}); their last values "
-            "may be stale"
-        ),
-    ]
-    written.clear()
-    flusher.rows("T", frame([trade(symbol) for symbol in ("ILLQ", "AAA", "BBB")]), {}, generation=1)
+    assert [list(found) for found in stale_spans(problems, 7)] == [["ILLQ"], ["ILLQ", "AAA"]]
+    first = next(p for p in problems if isinstance(p, ProblemSpans))
+    problems.clear()
+    flusher.rows("T", frame([trade("ILLQ")]), {}, generation=1)
     flusher.flush()
-    assert [stale(u) for u in written] == [
-        f"rows for CCC are being dropped ({reason}); its last values may be stale"
-    ]
-    written.clear()
-    flusher.rows("T", frame([trade("CCC")]), {}, generation=1)
+    [left] = [p for p in problems if isinstance(p, ProblemSpans)]
+    assert list(left.spans) == ["AAA"]
+    assert left.spans["AAA"].since > first.spans["ILLQ"].since
+    problems.clear()
+    flusher.rows("T", frame([trade("ILLQ")]), {}, generation=1)
     flusher.flush()
-    assert [u.notes for u in written] == [{NotePart.STALE_SYMBOLS: None}]
-    written.clear()
-    flusher.rows("T", frame([trade("CCC")]), {}, generation=1)
-    flusher.flush()
-    assert [u.notes for u in written] == [None]  # nothing left to clear
+    assert stale_spans(problems, 7) == []  # nothing changed
     flusher.routes.remove(7)
     flusher.flush()
-    assert (flusher._stale, flusher._noted) == ({}, {})
+    assert flusher._stale == {}
 
 
-def test_a_stale_symbol_warns_once_when_it_starves_and_logs_its_return_at_info(
-    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+def test_a_stale_symbol_the_stream_no_longer_holds_ends_its_span(
+    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A watchlist row deleted while its symbol is stale: no row of it can reach the stream
+    # again, so its span ends at the next flush, rows or none, instead of holding until the
+    # stream closes.
     core = massive_session._core
+    problems: list[Problem] = []
+    monkeypatch.setattr(core, "problems", problems.extend)
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
-    for stream_id in (7, 8):
-        flusher.routes.add("T", make_sink(core, ALL, plan, stream_id=stream_id)[0])
-    reason = "timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100"
+    named, _ = make_sink(core, ("ILLQ", "AAPL"), plan, stream_id=8)
+    flusher.routes.add("T", named)
     limit = stream.DROPPED_RUN_LIMIT
-    with caplog.at_level(logging.INFO, logger=stream.__name__):
-        # Two runs of ILLQ: the second finds it stale already, so it warns once.
-        for _ in range(2):
-            flusher.rows(
-                "T",
-                frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]),
-                {},
-                generation=1,
-            )
-            flusher.flush()
-        flusher.rows("T", frame([trade("ILLQ")]), {}, generation=1)
-        flusher.flush()
-    mine = [r for r in caplog.records if r.name == stream.__name__]
-    assert [(r.levelno, r.getMessage()) for r in mine] == [
-        (
-            logging.WARNING,
-            (
-                f"test.trades: every recent row of 1 [ILLQ] on channel T was withheld because the "
-                f"library could not read it whole (the first: {reason}), so the dm.ALL streams 2 "
-                "[7, 8] may be stale for them; they keep running and name the symbols in their "
-                "Error until a row is published"
-            ),
-        ),
-        (
-            logging.INFO,
-            (
-                "test.trades: rows of 1 [ILLQ] on channel T are published again; the dm.ALL "
-                "streams no longer name them as stale"
-            ),
-        ),
-    ]
+    flusher.rows(
+        "T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]), {}, generation=1
+    )
+    flusher.flush()
+    assert [list(found) for found in stale_spans(problems, 8)] == [["ILLQ"]]
+    problems.clear()
+    named.set_symbols(frozenset({"AAPL"}))
+    flusher.flush()  # no rows: the watchlist may have emptied
+    assert stale_spans(problems, 8) == [{}]
+    problems.clear()
+    flusher.flush()
+    assert stale_spans(problems, 8) == []  # ended once
 
 
-def test_a_stale_symbol_is_not_called_published_when_its_stream_failed_instead(
-    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+def test_a_stale_symbol_whose_run_reaches_the_limit_again_updates_its_detail_in_place(
+    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The run starts over at the limit; a second full run with another first reason restates
+    # why, and the span keeps the start it had.
     core = massive_session._core
+    problems: list[Problem] = []
+    monkeypatch.setattr(core, "problems", problems.extend)
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
-    every, _ = make_sink(core, ALL, plan)
+    every, _ = make_sink(core, ALL, plan, stream_id=7)
     flusher.routes.add("T", every)
     limit = stream.DROPPED_RUN_LIMIT
     flusher.rows(
         "T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]), {}, generation=1
     )
     flusher.flush()
-    with caplog.at_level(logging.INFO, logger=stream.__name__):
-        # A spelling the library cannot read fails the stream before ILLQ's row could publish.
-        flusher.rows("T", frame([trade("ILLQ"), trade("BRK/B")]), {}, generation=1)
-        flusher.flush()
-    assert every.failed
-    assert "published again" not in caplog.text
+    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)
+    lost = frame([trade("ILLQ", Price=None)] * limit)
+    marks = unread_keys(*range(limit), reason="a T row for ILLQ: no Price", sent="ILLQ")
+    flusher.rows("T", lost, marks, generation=1)
+    flusher.flush()
+    assert not every.failed
+    first, later = (
+        p.spans["ILLQ"]
+        for p in problems
+        if isinstance(p, ProblemSpans) and p.cause is ProblemCause.STALE_SYMBOL_DATA
+    )
+    assert first.detail.startswith(f"the last {limit} rows were withheld; the first: timestamp")
+    assert later.detail == (
+        f"the last {limit} rows were withheld; the first: a T row for ILLQ: no Price"
+    )
+    assert later.since == first.since
 
 
-def test_a_dataset_whose_every_row_is_dropped_fails_its_streams_without_a_stale_warning(
-    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+def test_a_dataset_whose_every_row_is_withheld_fails_its_streams_and_marks_nothing_stale(
+    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     core = massive_session._core
+    problems: list[Problem] = []
+    monkeypatch.setattr(core, "problems", problems.extend)
     plan = ChannelPlan.build(core.catalog, TRADES, "T")
     every, _ = make_sink(core, ALL, plan)
     flusher.routes.add("T", every)
-    with caplog.at_level(logging.WARNING, logger=stream.__name__):
-        # The symbol's run and the dataset's reach the limit in one flush: the stream fails,
-        # so no WARNING says it keeps running.
-        flusher.rows(
-            "T", frame([trade("ILLQ", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT), {}, generation=1
-        )
-        flusher.flush()
+    # The symbol's run and the dataset's reach the limit in one flush: the stream fails.
+    flusher.rows(
+        "T", frame([trade("ILLQ", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT), {}, generation=1
+    )
+    flusher.flush()
     assert every.failed
-    assert "may be stale" not in caplog.text
+    assert stale_spans(problems, every.stream_id) == []
 
 
 def test_a_flush_merges_its_frames_drift_and_reports_it_outside_the_flush_lock(
@@ -1828,15 +1954,22 @@ def test_a_batch_that_cannot_be_converted_fails_only_its_readers(
     assert "test.trades: could not publish a T batch" in caplog.text
 
 
-def test_drift_is_reported_for_the_streams_of_the_channel(
-    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
+def test_drift_is_a_problem_of_each_stream_of_the_channel(
+    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    sink, _ = make_sink(massive_session._core, ALL)
+    core = massive_session._core
+    events = capture_problems(core, monkeypatch)
+    sink, _ = make_sink(core, ALL)
+    gone, _ = make_sink(core, ALL, stream_id=2)
     flusher.routes.add("T", sink)
-    with caplog.at_level(logging.WARNING):
-        flusher.drift("T", DriftReport(extra=frozenset({"zz"})), where="wss://h/stocks channel T")
-        flusher.flush()
-    assert "test.trades: WS field 'zz' is not in the schema" in caplog.text
+    flusher.routes.add("T", gone)
+    # Stream 2's session was collected.
+    monkeypatch.setattr(StreamSink, "core", lambda self: None if self.stream_id == 2 else core)
+    flusher.drift("T", DriftReport(extra=frozenset({"zz"})), where="wss://h/stocks channel T")
+    flusher.flush()
+    assert [(e.cause, e.field, e.stream_id) for e in events] == [
+        (ProblemCause.SCHEMA_DRIFT, "zz", sink.stream_id)
+    ]
 
 
 def test_routes_forget_a_stream_once(flusher: Flusher, massive_session: dm.MassiveSession) -> None:
@@ -1891,18 +2024,13 @@ def test_a_full_symbol_cache_starts_over_and_the_rows_still_publish(
     assert [row["Symbol"] for row in rows] == ["AAPL", "MSFT", "IBM", "AAPL"]
 
 
-def test_an_unreadable_spelling_is_logged_once_across_a_symbol_cache_reset(
+def test_an_unreadable_spelling_warns_once_across_a_symbol_cache_reset(
     massive_session: dm.MassiveSession,
     flusher: Flusher,
     monkeypatch: pytest.MonkeyPatch,
     *,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr(
-        wire_symbols,
-        "_logged_spellings",
-        BoundedLog(logging.getLogger("t"), limit=5, level=logging.ERROR),
-    )
     monkeypatch.setattr(stream, "SYMBOL_CACHE_LIMIT", 1)
     core = massive_session._core
     plan = ChannelPlan.build(core.catalog, FOREX, "C")
@@ -1929,8 +2057,12 @@ def test_an_unreadable_spelling_is_logged_once_across_a_symbol_cache_reset(
             assert flusher._symbols[plan] == {}  # two spellings pass the limit of one
     assert not opened.sink.failed
     assert opened.sink.rows_published == 2  # the unreadable row of each flush is withheld
-    spelled = [r for r in caplog.records if r.name == "t" and "'nonsense pair'" in r.getMessage()]
-    assert len(spelled) == 1  # the drift WARNING quotes it too, as the first row's reason
+    spelled = [
+        r
+        for r in caplog.records
+        if r.name == problem_reporter.__name__ and "nonsense pair" in r.getMessage()
+    ]
+    assert len(spelled) == 1  # the stream's first unreadable_symbols problem
 
 
 def _forex_sink(
@@ -1956,27 +2088,18 @@ def _forex_sink(
 
 
 @pytest.mark.parametrize(
-    ("settings", "level"),
-    [
-        ((OnError.RAISE, OnError.LOG, OnError.IGNORE), logging.ERROR),
-        ((OnError.IGNORE, OnError.IGNORE), logging.DEBUG),
-    ],
+    "settings",
+    [(OnError.RAISE, OnError.LOG, OnError.IGNORE), (OnError.IGNORE, OnError.IGNORE)],
 )
 def test_each_stream_of_a_plan_applies_its_own_unreadable_setting(
     massive_session: dm.MassiveSession,
     flusher: Flusher,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    caplog: pytest.LogCaptureFixture,
     settings: tuple[OnError, ...],
-    level: int,
 ) -> None:
     # One plan converts the batch once for every stream: a stream under RAISE fails, the others
-    # publish the readable row only and get the withheld row's event, and the spelling is
-    # logged once, at the loudest of their settings.
-    log = logging.getLogger("t")
-    monkeypatch.setattr(wire_symbols, "_logged_spellings", BoundedLog(log, limit=5, level=40))
-    monkeypatch.setattr(wire_symbols, "_ignored_spellings", BoundedLog(log, limit=5, level=10))
+    # publish the readable row only, and each gets the withheld row's event with its setting.
     core = massive_session._core
     plan = ChannelPlan.build(core.catalog, FOREX, "C")
     sinks = [
@@ -1986,18 +2109,16 @@ def test_each_stream_of_a_plan_applies_its_own_unreadable_setting(
     for sink in sinks:
         flusher.routes.add("C", sink)
     events = capture_problems(core, monkeypatch)
-    with caplog.at_level(logging.DEBUG, logger="t"):
-        flusher.rows("C", frame(FOREX_ROWS, "forex/C"), {}, generation=1)
-        flusher.flush()
+    flusher.rows("C", frame(FOREX_ROWS, "forex/C"), {}, generation=1)
+    flusher.flush()
     for sink, setting in zip(sinks, settings, strict=True):
         assert sink.failed is (setting is OnError.RAISE)
         assert sink.rows_published == (0 if sink.failed else 1)
-    # Every stream's session records the row, a failed stream's too.
-    assert [(e.stream_id, e.cause, e.symbol, e.rows) for e in events] == [
-        (sink.stream_id, RowFault.UNREADABLE_SYMBOLS, "nonsense pair", 1) for sink in sinks
+    # Every stream's session records the row, a failed stream's too, with its own setting.
+    assert [(e.stream_id, e.cause, e.symbol, e.rows, e.policy) for e in events] == [
+        (sink.stream_id, ProblemCause.UNREADABLE_SYMBOLS, "nonsense pair", 1, setting)
+        for sink, setting in zip(sinks, settings, strict=True)
     ]
-    records = [r for r in caplog.records if r.name == "t" and "'nonsense pair'" in r.getMessage()]
-    assert [r.levelno for r in records] == [level]
 
 
 def test_a_sink_whose_session_is_gone_reports_nothing(
@@ -2348,28 +2469,37 @@ def test_a_failed_watchlist_of_a_finished_stream_does_nothing() -> None:
     stream._fail_later(gone, "late")
 
 
-def test_skipped_watchlist_rows_reach_the_streams_error(
+def test_skipped_watchlist_rows_are_spans_of_the_streams_problems(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # What the watch's `on_skipped` does, called here from a Python thread, which line coverage
-    # before 3.14 can see: the skipped values become the row's Error, and none clears it.
+    # before 3.14 can see: each skipped value is a span, which ends once none skips it.
     core = massive_session._core
     sink, _ = make_sink(core, ALL)
-    reported: list[dict[int, StreamUpdate]] = []
-    monkeypatch.setattr(core, "update_streams", lambda changes: reported.append(dict(changes)))
-    stream._show_skipped(weakref.ref(sink), ("msft",))
-    stream._show_skipped(weakref.ref(sink), ())
-    assert reported == [
-        {sink.stream_id: StreamUpdate(skipped=skipped_rows_text(["msft"]))},
-        {sink.stream_id: StreamUpdate(clear_skipped=True)},
+    problems: list[Problem] = []
+    monkeypatch.setattr(core, "problems", problems.extend)
+    rule = SymbolRowRule(
+        "test.trades", AssetClass.STOCKS, as_written=False, noncanonical=dm.OnError.LOG
+    )
+    report = functools.partial(stream._report_problems, weakref.ref(sink))
+    skipped = SkippedValues(rule, stream_id=sink.stream_id, report=report)
+    skipped.update(("msft",))
+    skipped.update(("msft",))  # unchanged: nothing reported
+    skipped.update(())
+    spans = [p for p in problems if isinstance(p, ProblemSpans)]
+    assert [(p.cause, p.stream_id, list(p.spans)) for p in spans] == [
+        (ProblemCause.NONCANONICAL_SYMBOLS, sink.stream_id, ["msft"]),
+        (ProblemCause.NONCANONICAL_SYMBOLS, sink.stream_id, []),
     ]
+    assert spans[0].spans["msft"].detail == rule.refusal("msft")
+    assert spans[0].policy is dm.OnError.LOG
 
 
-def test_skipped_watchlist_rows_of_a_finished_stream_do_nothing() -> None:
+def test_problems_of_a_finished_stream_go_nowhere() -> None:
     def gone() -> None:
         return None  # the sink was collected
 
-    stream._show_skipped(gone, ("msft",))
+    stream._report_problems(gone, [])
 
 
 def test_streamed_rows_of_one_day_share_one_stored_date(
@@ -2609,9 +2739,9 @@ def test_a_flush_hands_events_to_live_sessions_only_and_survives_one_that_raises
     monkeypatch.setattr(
         StreamSink, "core", lambda self: None if self.stream_id == 1 else alive(self)
     )
-    seen: list[ProblemEvent] = []
+    seen: list[Problem] = []
 
-    def problems(found: Sequence[ProblemEvent]) -> None:
+    def problems(found: Sequence[Problem]) -> None:
         if found[0].stream_id == 2:
             raise RuntimeError("broken sink")
         seen.extend(found)
@@ -2620,31 +2750,23 @@ def test_a_flush_hands_events_to_live_sessions_only_and_survives_one_that_raises
 
     def event(stream_id: int) -> ProblemEvent:
         return ProblemEvent(
-            cause=RowFault.UNCONVERTIBLE_VALUES,
+            cause=ProblemCause.UNCONVERTIBLE_VALUES,
             action=ProblemAction.WITHHELD,
             dataset="test.trades",
-            transport=Transport.WS,
             stream_id=stream_id,
             where="flush channel T",
             symbol="AAPL",
             field="Price",
             rows=1,
-            reason="Price holds 'x'",
+            detail="Price holds 'x'",
             at=0,
         )
 
     with caplog.at_level(logging.ERROR, stream.__name__):
-        flusher._report_events(
-            [
-                stream._StreamProblems(
-                    sink, (event(sink.stream_id),), DriftReport(dropped_rows=1), None, "here", 1
-                )
-                for sink in (gone, failing, live)
-            ]
-        )
+        flusher._report_events([(sink, (event(sink.stream_id),)) for sink in (gone, failing, live)])
     assert [e.stream_id for e in seen] == [3]
     assert [r.getMessage().split(". ")[0] for r in caplog.records] == [
-        f"{flusher._thread.name}: could not report the withheld rows of stream 2"
+        f"{flusher._thread.name}: could not report the problems of stream 2"
     ]
 
 
@@ -2652,8 +2774,8 @@ def test_a_named_stream_never_fails_for_another_symbol_s_withheld_rows(
     massive_session: dm.MassiveSession, flusher: Flusher
 ) -> None:
     # AAPL and MSFT share channel T. A run of MSFT rows the library cannot read, with no AAPL
-    # row at all (after hours, say), fails the MSFT stream by its symbol's run; the AAPL stream
-    # received none of those rows, so it goes on.
+    # row at all (after hours, say), marks MSFT stale in its stream, which fails no stream; the
+    # AAPL stream received none of those rows.
     core = massive_session._core
     aapl, _ = make_sink(core, ("AAPL",), stream_id=1)
     msft, _ = make_sink(core, ("MSFT",), stream_id=2)
@@ -2662,7 +2784,8 @@ def test_a_named_stream_never_fails_for_another_symbol_s_withheld_rows(
     odd = [trade("MSFT", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT
     flusher.rows("T", frame(odd), {}, generation=1)
     flusher.flush()
-    assert (aapl.failed, msft.failed) == (False, True)
+    assert (aapl.failed, msft.failed) == (False, False)
+    assert list(flusher._stale) == [2]
 
 
 def test_a_run_of_rows_with_no_readable_symbol_fails_the_named_streams(
@@ -2693,73 +2816,53 @@ def test_each_stream_records_only_its_own_withheld_rows_under_any_policy(
     flusher: Flusher,
     *,
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # An AAPL row is withheld: the AAPL stream's SchemaDrift counts it, the MSFT stream's does
-    # not, and under IGNORE no WARNING is logged.
+    # An AAPL row is withheld: the AAPL stream gets its event, the MSFT stream does not.
     core = massive_session._core
     quiet = resolve_policy(dm.ErrorPolicy(unreadable_keys=OnError.IGNORE), dm.ErrorPolicy())
     aapl, _ = make_sink(core, ("AAPL",), stream_id=1, policy=quiet)
     msft, _ = make_sink(core, ("MSFT",), stream_id=2, policy=quiet)
     flusher.routes.add("T", aapl)
     flusher.routes.add("T", msft)
-    recorded: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        core,
-        "record_stream_drift",
-        lambda stream_id, _transport, drift: recorded.append((stream_id, drift.dropped_rows)),
-    )
+    events = capture_problems(core, monkeypatch)
     rows = [trade("AAPL", SipTimestamp=5), trade("AAPL"), trade("MSFT")]
-    with caplog.at_level(logging.WARNING):
-        flusher.rows("T", frame(rows), {}, generation=1)
-        flusher.flush()
-    assert recorded == [(1, 1)]
-    assert not [r for r in caplog.records if "withheld" in r.getMessage()]
+    flusher.rows("T", frame(rows), {}, generation=1)
+    flusher.flush()
+    assert [(e.stream_id, e.rows, e.policy) for e in events] == [(1, 1, OnError.IGNORE)]
 
 
 def test_a_stream_reads_its_symbols_once_for_a_batch_s_withheld_rows(
     massive_session: dm.MassiveSession, flusher: Flusher, *, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The stream drops AAPL from its symbols while the batch is judged: its count, its events,
-    # and its drift all come from one reading, so a counted row always has its event.
+    # The stream drops AAPL from its symbols while the batch is judged: its count and its
+    # events come from one reading, so a counted row always has its event.
     core = massive_session._core
     events = capture_problems(core, monkeypatch)
     aapl, _ = make_sink(core, ("AAPL",), stream_id=1)
     flusher.routes.add("T", aapl)
     answers = iter([True])
     monkeypatch.setattr(stream.StreamSink, "holds", lambda _sink, _symbol: next(answers, False))
-    recorded: list[int] = []
-    monkeypatch.setattr(
-        core,
-        "record_stream_drift",
-        lambda _id, _transport, drift: recorded.append(drift.dropped_rows),
-    )
     flusher.rows("T", frame([trade("AAPL", SipTimestamp=5), trade("AAPL")]), {}, generation=1)
     flusher.flush()
     assert [(event.symbol, event.rows) for event in events] == [("AAPL", 1)]
-    assert recorded == [1]
 
 
 def test_rows_with_no_readable_symbol_beside_another_symbol_s_rows_never_fail_a_quiet_stream(
     massive_session: dm.MassiveSession, flusher: Flusher, *, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # AAPL and MSFT share channel T, and MSFT keeps publishing. Rows with no readable symbol
-    # could be MSFT's, so they never fail the quiet AAPL stream; each one still counts in
-    # AAPL's SchemaDrift, since it could have been AAPL's.
+    # could be MSFT's, so they never fail the quiet AAPL stream; each one is still a problem
+    # of AAPL's, since it could have been AAPL's.
     core = massive_session._core
+    events = capture_problems(core, monkeypatch)
     aapl, _ = make_sink(core, ("AAPL",), stream_id=1)
     msft, _ = make_sink(core, ("MSFT",), stream_id=2)
     flusher.routes.add("T", aapl)
     flusher.routes.add("T", msft)
-    recorded: dict[int, int] = {}
-
-    def record(stream_id: int, _transport: object, drift: DriftReport) -> None:
-        recorded[stream_id] = recorded.get(stream_id, 0) + drift.dropped_rows
-
-    monkeypatch.setattr(core, "record_stream_drift", record)
     nameless = [trade("AAPL", Ticker=None)] * 10
     for _ in range(stream.DROPPED_RUN_LIMIT // 10 + 1):
         flusher.rows("T", frame([*nameless, trade("MSFT")]), unread_keys(*range(10)), generation=1)
         flusher.flush()
     assert (aapl.failed, msft.failed) == (False, False)
-    assert recorded[1] == 10 * (stream.DROPPED_RUN_LIMIT // 10 + 1)
+    counted = sum(e.rows for e in events if e.stream_id == 1)
+    assert counted == 10 * (stream.DROPPED_RUN_LIMIT // 10 + 1)

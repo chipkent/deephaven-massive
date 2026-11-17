@@ -39,17 +39,17 @@ the time of the latest poll that returned the row; it is never part of a row's i
 A cycle reads a reactive symbol table once, with `Table.snapshot()` on the poller thread (never
 in a listener), and requests the dataset's fetch path for the symbols it holds; a fan-out path
 makes its requests on the poller's pool of `max_concurrency` threads. Each cycle updates the
-table's row of `m.streams()`: `RowsPublished`, `RequestsPerCycle`, `SymbolCount` for a reactive
-table, and `SchemaDrift` from each page's drift.
+table's row of `m.streams()`: `RowsPublished`, `RequestsPerCycle`, and `SymbolCount` for a
+reactive table. Its problems are rows of `m.problems()`: a run of failed cycles is a
+`poll_cycle_failed` span, cycles that end after their interval a `poll_cycle_late` span, and a
+symbol-table value it skips a `noncanonical_symbols` span.
 
 **Symbols left out.** By default one symbol never fails a whole table. Symbols Massive answers
 with HTTP 404 follow `ErrorPolicy.unavailable_symbols`: under `LOG`, the default, and `IGNORE`
-they have no rows in the cycle (a `REPLACE` table drops their rows), and every good cycle lists
-them, with the reason, in the row's `Error` (`NotePart.LEFT_OUT`, `CycleRows.left_out`),
-clearing the list once none is left out, so the table never loses rows without saying why; the
-REST reader logs each one WARNING per session under `LOG`, and only DEBUG under `IGNORE`. Under
-`RAISE` the REST reader raises `UnavailableSymbolError`, a `PermanentError`, which fails the
-table.
+they have no rows in the cycle (a `REPLACE` table drops their rows), and the REST reader
+reports each, with the reason, as an `unavailable_symbols` problem of the table every cycle
+that leaves it out, so the table never loses rows without saying why. Under `RAISE` the REST
+reader raises `UnavailableSymbolError`, a `PermanentError`, which fails the table.
 
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
 `PermanentError` fails the table through `publish_failure`, marks the row `FAILED`
@@ -58,20 +58,20 @@ read of which the library could read no row whole, or a withheld row of a cause 
 to `RAISE`; one row the library cannot read whole is withheld and reported, and the table goes
 on, a row with a null poll key, which would merge unrelated rows, included),
 `SymbolRowError` (a symbol table's row that is not Massive's ticker, under
-`noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the row is skipped and the cycle's
-`Error` lists it), and `UnavailableSymbolError` (a symbol Massive has no data for, under
+`noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the row is skipped and listed in
+`m.problems()`), and `UnavailableSymbolError` (a symbol Massive has no data for, under
 `unavailable_symbols=RAISE`). The failure is logged at the level its `is_bug` gives
 (`log_failure`): ERROR for a defect, naming whose it is, and WARNING otherwise.
 A refusal (`AuthenticationError` or `EntitlementError`) logs one WARNING per session, dataset,
 and kind of refusal, and each later `poll()` table refused the same way logs at DEBUG: every
 poll makes its own requests and gets its own error, so twenty polls of a dataset the plan
 does not include would otherwise log twenty WARNINGs for one cause. Any
-other error, also one while publishing, is shown in the row's `Error` with the time of the last
-good cycle (or, before one, of the poll's start); the table keeps its rows and the next cycle
-runs as scheduled, and clears the `Error` once it succeeds, recording the run in the row's
-`Gaps`: from its first failed cycle's start (that cycle published nothing, whatever pages it
-received) to the good cycle's start, the time over which rows may be missing, a record that
-outlasts the note. A run of failing cycles fails the
+other error, also one while publishing, opens the table's `poll_cycle_failed` span of
+`m.problems()`, with the error and the time of the last good cycle (or, before one, of the
+poll's start); the table keeps its rows and the next cycle runs as scheduled, and ends the span
+once it succeeds. The span runs from the first failed cycle's start (that cycle published
+nothing, whatever pages it received) to the good cycle, the time over which rows may be
+missing. A run of failing cycles fails the
 table, in every mode and naming the last good cycle, once one of its failures comes
 `MassiveConfig.max_outage` seconds or more after its first failed cycle last made progress:
 the rows since then may be missing, and a table that kept running would show stale data as if
@@ -87,8 +87,9 @@ INFO.
 rate-limit pause) leaves the table late: the first one of a run logs one WARNING that names
 `m.rate_limits()`, and the first cycle that ends in time again logs at INFO. A cycle blocks its
 poller's thread, so the session's poll watch thread (`Pollers`) checks the running cycles every
-`WATCH_INTERVAL` seconds: once one runs past its interval, its row's `Error` reads "cycle running
-since <start>; last good cycle at <time>" until the cycle ends. A late cycle that has received
+`WATCH_INTERVAL` seconds: once one runs past its interval, the table's `poll_cycle_late` span
+says "cycle running since <start>; last good cycle at <time>" until a cycle ends in time. A
+late cycle that has received
 no page for more than `max_outage` seconds (from its start, or from the start of the run of
 failing cycles it continues, and never less than `WATCH_INTERVAL`) fails the table the same
 way; one that keeps receiving pages, however slowly, never does, and with a `max_outage` of
@@ -153,7 +154,6 @@ from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import RowFault, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import (
-    NotePart,
     StreamKind,
     StreamRow,
     StreamUpdate,
@@ -163,11 +163,12 @@ from deephaven_massive._tables.diagnostics import (
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result
+from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
-from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols, skipped_rows_text
+from deephaven_massive._tables.refused_values import refused_values_of
+from deephaven_massive._tables.watchlist import SkippedValues, SymbolRowRule, read_symbols
 from deephaven_massive._tables.withheld import (
     failure_of,
-    logs_withheld,
     mark,
     with_marks,
     withhold_rows,
@@ -185,12 +186,12 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.schema import Schema
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import DriftReport
+    from deephaven_massive._tables.problem_events import Problem
     from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
     "CLOCK",
-    "LEFT_OUT_SHOWN",
     "LIST_KEY_COLUMN",
     "LIVE_COLUMN",
     "CycleReader",
@@ -209,9 +210,6 @@ _ROW_TEXT: Final = 300
 """The longest rendering of a row in the reason of a null poll key."""
 _SYMBOL: Final = "Symbol"
 """The canonical symbol column, by which withheld rows are grouped when a dataset has one."""
-
-LEFT_OUT_SHOWN: Final = 10
-"""How many symbols left out of a cycle the row's `Error` names before it counts the rest."""
 
 LIVE_COLUMN: Final = "__MassiveLive"
 """The hidden column of a `REPLACE` table's publisher: False marks a tombstone. Dataset columns
@@ -333,7 +331,7 @@ class CycleRows:
         left_out: The symbols the cycle has no rows for, each with why, such as
             `"X:FOOUSD (its currencies cannot be read)"` or
             `"AAPL1 (HTTP 404 from /v3/trades/{stockTicker})"`, in the order found; empty for
-            none. The row's `Error` lists them (`NotePart.LEFT_OUT`).
+            none, for the cycle's log line. The REST reader reports each in `m.problems()`.
     """
 
     rows: pa.Table
@@ -351,6 +349,7 @@ class CycleReader(Protocol):
     def __call__(
         self,
         *,
+        stream_id: int,
         symbols: tuple[str, ...] | AllSymbols | None,
         values: tuple[str, ...] | None,
         record: Callable[[DriftReport], None],
@@ -361,10 +360,11 @@ class CycleReader(Protocol):
         """Request the dataset for the symbols; return the rows, the cost, and what was left out.
 
         Args:
+            stream_id: The table's `StreamId`, which the cycle's problems carry.
             symbols: The cycle's static symbols: a sorted tuple, `ALL`, or None.
             values: The values a value table holds now (`Request.value_table`: underlyings
                 or product codes), each read as if passed alone; None without one.
-            record: Receives each page's drift, for the table's `SchemaDrift`.
+            record: Receives each page's drift, as the cycle's progress.
             on_recency: Receives what a page's recency labels show (`REALTIME` or `DELAYED`),
                 from any of the cycle's threads, for the table's `Recency`.
             executor: The poller's pool for fan-out requests.
@@ -574,12 +574,14 @@ class Poller:
         "_failing",
         "_failing_at",
         "_failing_since",
+        "_failures",
         "_gap_from",
         "_good_at",
         "_interval",
         "_key_names",
         "_keys",
         "_late",
+        "_late_spans",
         "_list_keys",
         "_marked_late",
         "_max_concurrency",
@@ -596,6 +598,7 @@ class Poller:
         "_running",
         "_schema",
         "_seen",
+        "_skipped",
         "_spec",
         "_stop",
         "_stream_id",
@@ -670,6 +673,22 @@ class Poller:
         self._interval = interval.total_seconds()
         self._mode = mode
         self._stream_id = stream_id
+        # The table's span problems: the values it skips and its run of failed cycles (only
+        # the poller thread touches them), and its late cycles (guarded by the watch lock).
+        self._skipped = SkippedValues(
+            self._rule,
+            stream_id=stream_id,
+            values=self._value_rule,
+            report=functools.partial(_report_problems, self._core),
+        )
+        _follow_refused(request.symbols, self._skipped)
+        where = f"{spec.name} poll() stream {stream_id}"
+        self._failures = SpanTracker(
+            ProblemCause.POLL_CYCLE_FAILED, dataset=spec.name, stream_id=stream_id, where=where
+        )
+        self._late_spans = SpanTracker(
+            ProblemCause.POLL_CYCLE_LATE, dataset=spec.name, stream_id=stream_id, where=where
+        )
         self._read = read
         self._pollers = pollers
         self._clock = clock
@@ -821,11 +840,14 @@ class Poller:
         return "it was stopped: its table shut down"
 
     def _note_pace(self, took: float) -> None:
-        """Log the start and the end of a run of cycles that end after their interval.
+        """Report the start and the end of a run of cycles that end after their interval.
 
         A late cycle leaves the table behind the interval the user asked for: its requests are
-        paced at a subscription's limit, or held by a rate-limit pause. The first late
-        cycle of a run logs one WARNING, and the first cycle in time again logs at INFO.
+        paced to Massive's rate limit, or held by a rate-limit pause. A run of them is
+        one `poll_cycle_late` span of `m.problems()`, from the first late cycle's start (or
+        from the watch's mark of a cycle running past its interval) to the first cycle in time
+        again. The first late cycle of a run logs one WARNING, and the first cycle in time
+        again logs at INFO.
 
         Args:
             took: The cycle's duration, in seconds.
@@ -835,7 +857,7 @@ class Poller:
             logger.warning(
                 "%s poll() stream %d: a cycle took %.0f s, longer than the %g s interval, so the "
                 "table updates late; m.rate_limits() shows whether its requests are paced or "
-                "paused by Massive's rate limit",
+                "paused by Massive's rate limit, and m.problems() lists the run",
                 self._spec.name,
                 self._stream_id,
                 took,
@@ -849,6 +871,30 @@ class Poller:
                 self._interval,
             )
         self._late = late
+        detail = f"a cycle took {took:.0f} s, longer than the {self._interval:g} s interval"
+        self._show_late(detail if late else None, since=self._began_at)
+
+    def _show_late(self, detail: str | None, *, since: float) -> None:
+        """Open, update, or end the table's `poll_cycle_late` span, under the watch lock.
+
+        The poller thread and the watch thread both call it; the lock keeps their snapshots in
+        the order they were taken.
+
+        Args:
+            detail: Why the table is late, or None once a cycle ends in time.
+            since: When the late run began, wall-clock seconds, for a span that opens now.
+        """
+        core = self._core()
+        if core is None:
+            return
+        with self._watch_lock:
+            spans = self._late_spans.update(
+                {} if detail is None else {"late": (None, None, detail, 0)},
+                at=int(self._clock.time() * 1e9),
+                since=int(since * 1e9),
+            )
+            if spans is not None:
+                core.problems([spans])
 
     def _watch_begin(self) -> None:
         """Show the watch thread that a cycle starts, with what its late mark names.
@@ -877,27 +923,27 @@ class Poller:
             self._running = False
             return self._progress_at
 
-    def _page_received(self, core: SessionCore, drift: DriftReport) -> None:
-        """A page of the cycle arrived: count it as progress and record its drift.
+    def _page_received(self, drift: DriftReport) -> None:
+        """A page of the cycle arrived: count it as progress.
 
-        The REST reader calls it for every page, on the poller's thread or a fan-out thread.
+        The REST reader calls it for every page, on the poller's thread or a fan-out thread;
+        the reader reports the page's drift itself.
 
         Args:
-            core: The session's core.
-            drift: The page's drift, recorded in the row's `SchemaDrift`.
+            drift: The page's drift, unused here.
         """
+        del drift
         now = self._clock.monotonic()
         with self._watch_lock:
             self._progress_at = max(self._progress_at, now)
-        core.record_stream_drift(self._stream_id, Transport.REST, drift)
 
     def check_running(self) -> None:
         """Mark a cycle that runs past its interval, and fail one that stopped making progress.
 
         Called by the session's poll watch thread (`Pollers`), never by the poller's own
-        thread, which the cycle blocks. A running cycle that has passed its interval shows in
-        the row's `Error`: "cycle running since <start>; last good cycle at <time>", until the
-        cycle ends and updates the row. A cycle that has passed its interval and received no
+        thread, which the cycle blocks. A running cycle that has passed its interval opens the
+        table's `poll_cycle_late` span: "cycle running since <start>; last good cycle at
+        <time>", until a cycle ends in time. A cycle that has passed its interval and received no
         page for more than `MassiveConfig.max_outage` seconds, and more than `WATCH_INTERVAL`
         (counted from its start, or from the start of the run of failing cycles it continues,
         until its first page), fails the table; with a `max_outage` of zero, no running cycle
@@ -923,10 +969,16 @@ class Poller:
             if marking:
                 self._marked_late = True
                 note = f"cycle running since {utc_text(began_at)}; {good}"
-                # Under the watch lock, so the cycle's own update of the row follows it.
-                core.update_streams(
-                    {self._stream_id: StreamUpdate(notes={NotePart.POLL_CYCLE: note})}
+                # Under the watch lock, so the cycle's own report follows it.
+                spans = self._late_spans.update(
+                    {"late": (None, None, note, 0)},
+                    at=int(self._clock.time() * 1e9),
+                    since=int(began_at * 1e9),
                 )
+                # A cycle is marked once, and every cycle that ended rewrote the span
+                # (`_note_pace`), so this note is new.
+                assert spans is not None
+                core.problems([spans])
             if failing:
                 self._running = False  # fails once
                 # Stopped under the watch lock: the cycle's `_watch_end` comes after, so it
@@ -1058,10 +1110,12 @@ class Poller:
         """
         symbols, skipped_symbols = self._symbols()
         values, skipped_values = self._values()
-        skipped = (*skipped_symbols, *skipped_values)
-        record = functools.partial(self._page_received, core)
+        # The rows hold these values whether or not the read succeeds, so they are listed now.
+        self._skipped.update(skipped_symbols, values=skipped_values)
+        record = self._page_received
         seen = _RecencySeen()
         read = self._read(
+            stream_id=self._stream_id,
             symbols=symbols,
             values=values,
             record=record,
@@ -1086,46 +1140,29 @@ class Poller:
             read.patience,
             bounded_list(read.left_out) if read.left_out else "none",
         )
-        gap = self._recovered_gap()
-        # A successful cycle clears an earlier cycle's error; the skipped rows are kept apart.
         update = StreamUpdate(
             rows_published=self._published,
             requests_per_cycle=read.requests,
             symbol_count=_symbol_count(symbols),
-            notes={
-                NotePart.POLL_CYCLE: None,
-                NotePart.LEFT_OUT: _left_out_text(read.left_out),
-            },
-            skipped=skipped_rows_text(skipped) if skipped else None,
-            clear_skipped=not skipped,
             recency=seen.shown(),
-            gap=gap,
         )
         core.update_streams({self._stream_id: update})
+        # A successful cycle ends an earlier run of failed cycles.
+        ended = self._failures.update({}, at=int(self._began_at * 1e9))  # where rows flow again
+        if ended is not None:
+            core.problems([ended])
         self._good_at, self._succeeded, self._failing_since = self._began_at, True, None
         if self._failing is not None:
             self._failing = None
             logger.info(
                 "%s poll() stream %d: a cycle succeeded again; rows from %s to %s may be "
-                "missing, recorded in its Gaps",
+                "missing, recorded in m.problems()",
                 self._spec.name,
                 self._stream_id,
                 utc_text(self._gap_from),
                 utc_text(self._began_at),
             )
         return True
-
-    def _recovered_gap(self) -> tuple[int, int] | None:
-        """Return the gap a good cycle ends: the run of failing cycles before it, if any.
-
-        Returns:
-            `(start, end)` in epoch nanoseconds, from the run's first failed cycle's start
-            (`_gap_from`: that cycle published nothing, even when it received pages before it
-            failed) to this cycle's start; None when no cycle failed since the last good one.
-        """
-        if self._failing_since is None:
-            return None
-        return int(self._gap_from * 1e9), int(self._began_at * 1e9)
 
     def _fail_fatal(self, core: SessionCore, error: MassiveError) -> None:
         """Fail the table with a cycle's fatal error; a failure that raises is logged at ERROR.
@@ -1151,10 +1188,11 @@ class Poller:
             )
 
     def _carry_on(self, core: SessionCore, error: Exception) -> bool:
-        """Show a cycle's error in the table's row, or fail the table once it is too late.
+        """Report a cycle's error as the table's problem, or fail the table once it is too late.
 
-        The table keeps its rows, and its `Error` names the cycle's error and the last good
-        cycle's time. A failure that comes `MassiveConfig.max_outage` seconds or more after the
+        The table keeps its rows, and its `poll_cycle_failed` span names the cycle's error and
+        the last good cycle's time. A failure that comes `MassiveConfig.max_outage` seconds or
+        more after the
         run's start fails the table instead (`_outage_failure`), in every mode, and the poller
         ends. The run starts at its first failed cycle's last progress: the cycle's start, or
         its latest page. Counting from there, not from the last good cycle, keeps one transient
@@ -1201,8 +1239,13 @@ class Poller:
                 exc_info=error if error.is_bug else None,  # a bug, with its traceback
             )
         self._failing = run
-        note = f"{error}; {self._good_text()}"
-        core.update_streams({self._stream_id: StreamUpdate(notes={NotePart.POLL_CYCLE: note})})
+        spans = self._failures.update(
+            {"failed": (None, None, f"{error}; {self._good_text()}", 0)},
+            at=int(self._clock.time() * 1e9),
+            since=int(self._gap_from * 1e9),
+        )
+        if spans is not None:
+            core.problems([spans])
         return True
 
     def _good_text(self) -> str:
@@ -1296,8 +1339,8 @@ class Poller:
         every later row with the same null skipped by `APPEND`; a NaN never equals itself, so
         `APPEND` would append its row again every cycle. So such a row is a row the library
         cannot place, withheld in every mode as any unreadable key is (`withheld.py`): its
-        events go to the session, its count to the table's `SchemaDrift`, and the log reports
-        it at the level `ErrorPolicy.unreadable_keys` gives; under `RAISE` it fails the table.
+        events go to the session's `m.problems()`, whose reporter logs the first of the table;
+        under `RAISE` it then fails the table.
         The dataset's nullable poll keys (`DatasetSpec.nullable_poll_keys`, such as an option's
         `PutCall`, empty for common stock) and its revision keys are not checked: a null there
         is a value.
@@ -1340,16 +1383,14 @@ class Poller:
                 transport=Transport.REST,
                 where=where,
                 stream_id=self._stream_id,
+                policy=policy,
             )
         )
-        core.record_stream_drift(self._stream_id, Transport.REST, withheld.drift)
         counts = withheld.counts()
         dataset = f"{spec.name} poll()"
         failure = failure_of(counts, policy, dataset=dataset, first_reason=withheld.first_reason)
         if failure is not None:
             raise RowDataError(failure)
-        if logs_withheld(counts, policy):
-            core.drift.report(spec.name, Transport.REST, withheld.drift, where=where)
         if not withheld.rows.num_rows:
             raise RowDataError(
                 f"{dataset}: every one of the cycle's {table.num_rows} rows has a null poll "
@@ -1520,23 +1561,35 @@ def _logged_symbols(symbols: NormalizedSymbols | None) -> str:
             raise BrokenGuaranteeError(unmatched_form("a poll stream's logged symbols", symbols))
 
 
-def _left_out_text(left_out: Sequence[str]) -> str | None:
-    """Return the `Error` part that lists a cycle's symbols left out, or None for none.
+def _report_problems(
+    core_ref: Callable[[], SessionCore | None], problems: Sequence[Problem]
+) -> None:
+    """Hand problems of a poll's symbol table to its session, if the session lives.
+
+    Its `SkippedValues` calls it; the session is held weakly, so the poller and its skipped
+    values never keep it alive.
 
     Args:
-        left_out: Each symbol with why (`CycleRows.left_out`).
-
-    Returns:
-        `"no rows this cycle for <n> symbol(s): <first LEFT_OUT_SHOWN, each with why>"`, with
-        `" and <k> more"` when there are more; None when the list is empty.
+        core_ref: Returns the session's core, or None once it is freed.
+        problems: The problems.
     """
-    if not left_out:
-        return None
-    shown = "; ".join(left_out[:LEFT_OUT_SHOWN])
-    more = len(left_out) - LEFT_OUT_SHOWN
-    noun = "symbol" if len(left_out) == 1 else "symbols"
-    tail = f" and {more} more" if more > 0 else ""
-    return f"no rows this cycle for {len(left_out)} {noun}: {shown}{tail}"
+    core = core_ref()
+    if core is not None:
+        core.problems(problems)
+
+
+def _follow_refused(symbols: NormalizedSymbols | None, skipped: SkippedValues) -> None:
+    """Join the values `canonicalize_symbols` refuses to a poll's own skipped values.
+
+    Args:
+        symbols: The poll's symbols; only a live table `canonicalize_symbols` returned has
+            refused values (`refused_values_of`).
+        skipped: The poll's skipped values.
+    """
+    table = symbols.table if isinstance(symbols, SymbolTable) else None
+    refused = None if table is None else refused_values_of(table)
+    if refused is not None:
+        refused.follow(skipped)
 
 
 def _hashable(column: pa.ChunkedArray) -> list[object]:
