@@ -599,8 +599,9 @@ symbol_reads = m.symbol_reads()  # each watchlist symbol read: its State, and Er
 ```
 
 Here `streams` has one row, for the ticker-details read, whose `State` ends `DONE`.
-`connections` and `symbol_reads` stay empty, because this example opens no stream and reads no
-watchlist. In a session that streams, `connections` gets a row for each stream's connection.
+`symbol_reads` stays empty, because this example reads no watchlist. `connections` stays empty
+too, because a `fetch()` doesn't stream. Once a table streams, `connections` gets a row for each
+connection.
 
 Troubleshooting's [diagnostics section](docs/troubleshooting.md#diagnostics) says when to check
 each table. For a table's columns, run `help()` on its method, such as
