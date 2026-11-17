@@ -85,8 +85,8 @@ for Massive's answer and `RequestTarget.unreadable` for one the library could no
 test pins each builder's whole output.
 
 **Exempt** from the whole rubric, the advice test of item 7 included: a developer or contract
-check that fails at import or in `scripts/refresh.py`. Its reader is a contributor holding the
-source.
+check that fails at import or in `scripts/refresh.py` or `scripts/render_reference.py`. Its
+reader is a contributor holding the source.
 
 ## Procedure
 
