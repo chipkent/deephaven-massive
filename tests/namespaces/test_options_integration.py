@@ -1112,8 +1112,33 @@ def _page(client: RestClient, path: str, query: Mapping[str, object]) -> list[di
     return client.get(source(Transport.REST, path), {}, query, bucket="options").rows
 
 
+_STANDING_ROOTS = ("SPY", "SPXW")
+"""The sample roots whose contracts always have open interest; an adjusted root's may have
+none on the day read."""
+
+
+def _root_samples(client: RestClient, evidence: Evidence) -> dict[str, list[dict[str, Any]]]:
+    """Read one page of the latest open interest of each sample root, each root on its own.
+
+    A shared page could hold one root's rows alone, so each root gets its own request. Records
+    each root's row count; an adjusted root with no rows is recorded, not failed.
+
+    Returns:
+        Each sample root's rows.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key access to the open interest; the
+            live-test hook skips, quoting it.
+    """
+    samples = {
+        root: _page(client, _OPEN_INTEREST, {"root": root, "limit": 100}) for root in _SAMPLE_ROOTS
+    }
+    evidence(f"open interest rows per root: { {k: len(v) for k, v in samples.items()} }")
+    return samples
+
+
 @pytest.mark.verifies("140")
-@pytest.mark.requests(3)
+@pytest.mark.requests(5)
 def test_root_is_the_ticker_s_occ_root(
     live_session: dm.MassiveSession,
     *,
@@ -1123,42 +1148,45 @@ def test_root_is_the_ticker_s_occ_root(
 ) -> None:
     """Massive's `root` of the open interest and unusual trades is each ticker's OCC root.
 
-    Reads one page of open interest of the roots `SPY`, `SPXW`, and `AMCR1`, one page of the
-    latest unusual trades of any root, and the library's open interest of `SPXW`, and records
-    the roots and counts.
-    Fails on any row whose `root` is not its ticker's root: the two datasets then can't give
-    Massive's `root` the name `OptionRoot`. A refusal skips the test, quoting Massive.
+    Reads one page of open interest of each of the roots `SPY`, `SPXW`, and `AMCR1`, one page of
+    the latest unusual trades of any root, and the library's open interest of `SPXW`, and
+    records the roots and counts. Fails when `SPY`, `SPXW`, or the library's read has no row,
+    since the check would then rest on nothing, and on any row whose `root` is not its ticker's
+    root: the two datasets then can't give Massive's `root` the name `OptionRoot`. A refusal
+    skips the test, quoting Massive.
     """
-    rows = _page(live_rest, _OPEN_INTEREST, {"root.any_of": ",".join(_SAMPLE_ROOTS), "limit": 300})
-    rows += _page(live_rest, _UNUSUAL_TRADES, {"limit": 300})
+    samples = _root_samples(live_rest, evidence)
+    trades = _page(live_rest, _UNUSUAL_TRADES, {"limit": 300})
+    rows = [row for found in samples.values() for row in found] + trades
     differ = [(r.get("ticker"), r.get("root")) for r in rows if r.get("root") != _root(r["ticker"])]
-    roots = sorted({str(r.get("root")) for r in rows})
-    evidence(f"{len(rows)} rows; roots {roots[:30]}; root unlike its ticker's: {differ[:10]}")
+    roots = sorted({str(r.get("root")) for r in trades})
+    evidence(f"{len(trades)} unusual trades of roots {roots[:30]}")
+    evidence(f"rows whose root is unlike the ticker's: {differ[:10]}")
     library = table_rows(live_session.options.open_interest(root="SPXW", limit=5).fetch(wait=True))
     evidence(f"library SPXW: {[(r['Symbol'], r['OptionRoot']) for r in library]}")
-    assert rows
+    assert all(samples[root] for root in _STANDING_ROOTS)
+    assert library
     assert not differ
     assert all(r["OptionRoot"] == _root(r["Symbol"]) for r in library)
 
 
 @pytest.mark.settles("141")
-@pytest.mark.requests(7)
+@pytest.mark.requests(9)
 def test_underlying_ticker_against_the_contracts_reference(
     live_rest: RestClient, *, evidence: Evidence
 ) -> None:
     """The open interest's `underlying_ticker` beside the contracts reference's, per contract.
 
-    Reads one page of open interest of the roots `SPY`, `SPXW`, and `AMCR1`, then the contracts
-    reference of up to two contracts of each, and records both `underlying_ticker` values and
-    the reference's CFI code. Reading it: equal values for every contract, the index included,
-    mean one field; the owner then decides whether the columns take one name. A contract the
-    reference doesn't know, or a refusal of it, is recorded and passed over; a refusal of the
-    open interest skips the test, quoting Massive.
+    Reads one page of open interest of each of the roots `SPY`, `SPXW`, and `AMCR1`, then the
+    contracts reference of up to two contracts of each, and records both `underlying_ticker`
+    values and the reference's CFI code. Reading it: equal values for every contract, the index
+    included, mean one field; the owner then decides whether the columns take one name. A
+    contract the reference doesn't know, or a refusal of it, is recorded and passed over; a
+    refusal of the open interest skips the test, quoting Massive. Fails when `SPY` or `SPXW`
+    has no row, since nothing would be compared.
     """
-    rows = _page(live_rest, _OPEN_INTEREST, {"root.any_of": ",".join(_SAMPLE_ROOTS), "limit": 300})
-    picked = [
-        row for root in _SAMPLE_ROOTS for row in [r for r in rows if r.get("root") == root][:2]
-    ]
+    samples = _root_samples(live_rest, evidence)
+    picked = [row for found in samples.values() for row in found[:2]]
     compared = 0
     for row in picked:
         ticker = str(row["ticker"])
@@ -1176,8 +1204,8 @@ def test_underlying_ticker_against_the_contracts_reference(
             f"contracts underlying_ticker {described.get('underlying_ticker')!r}, "
             f"cfi {described.get('cfi')!r}"
         )
-    evidence(f"roots read: {sorted({str(r.get('root')) for r in rows})}; compared {compared}")
-    assert rows
+    evidence(f"compared {compared} contracts")
+    assert all(samples[root] for root in _STANDING_ROOTS)
 
 
 @pytest.mark.verifies("142")
