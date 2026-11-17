@@ -1116,6 +1116,36 @@ class FlatFileHistory:
             forced=forced,
         )
 
+    def _outcomes(
+        self,
+        spec: DatasetSpec,
+        transform: _Transform,
+        futures: list[Future[list[Table] | None]],
+        *,
+        refusals: RefusedVenues | None,
+    ) -> list[list[Table] | None]:
+        """List the read's refused venues, then return each file's outcome, in key order.
+
+        The refusals come first: a file that failed raises in its outcome, and a call whose
+        every venue is refused raises in the lookup, and either way the venues S3 refused on
+        the way are listed in `m.problems()`.
+
+        Args:
+            spec: The dataset.
+            transform: The request's block transform, whose call the problems carry.
+            futures: Each file's read, in key order.
+            refusals: The call's record of refused venues; None when a refusal fails the call.
+
+        Returns:
+            Each file's tables, or None for a missing or refused file.
+
+        Raises:
+            Exception: A file's failure (`_outcome`).
+        """
+        if refusals is not None:
+            refusals.report(spec.name, problems=self._core.problems, stream_id=transform.call)
+        return [_outcome(future) for future in futures]
+
     def _read(
         self,
         spec: DatasetSpec,
@@ -1196,10 +1226,8 @@ class FlatFileHistory:
         self._check_open()
         if stop is not None and stop.is_set():  # the reads stopped early: report no result
             raise MassiveError(f"{spec.name} history: {READ_STOPPED}", source=ErrorSource.USER)
-        parts = [_outcome(future) for future in futures]
+        parts = self._outcomes(spec, transform, futures, refusals=refusals)
         if refusals is not None:
-            # Listed first: a call whose every venue is refused raises in the lookup.
-            refusals.report(spec.name, problems=self._core.problems, stream_id=transform.call)
             keys, parts = _without_refused(keys, parts, refusals=refusals)
         missing = [key for key, part in zip(keys, parts, strict=True) if part is None]
         _warn_if_none_exist(spec, keys, missing)

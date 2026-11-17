@@ -4599,3 +4599,28 @@ def test_an_ignored_unconvertible_value_withholds_its_row_with_no_warning(
         (ProblemCause.UNCONVERTIBLE_VALUES, "Size", 1, dm.OnError.IGNORE)
     ]
     assert caplog.records == []
+
+
+def test_a_refused_venue_is_listed_when_another_file_fails_the_call(
+    *,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One venue is refused and the other's file fails: the call raises the failure, and the
+    # refused venue it met on the way is listed all the same.
+    m = dm.MassiveSession(
+        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG))
+    )
+    try:
+        events = capture_problems(m, monkeypatch)
+        two_days_of_venues()
+        fake_s3.refuse("us_futures_cme/", status=403, code="AccessDenied", message="No")
+        fake_s3.refuse("us_futures_nymex/", status=400, code="InvalidRequest", message="Bad")
+        q = m.futures.trades(dm.ALL, venues={FuturesVenue.NYMEX, FuturesVenue.CME})
+        with pytest.raises(dm.MassiveError, match="InvalidRequest"):
+            q.history("2025-03-04", "2025-03-04", wait=True)
+        assert [e.cause for e in events] == [ProblemCause.REFUSED_VENUES]
+        assert "CME" in events[0].detail
+    finally:
+        m.close()
