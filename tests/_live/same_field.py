@@ -88,7 +88,7 @@ SESSION_WANTED: Final = 5
 """How many contracts the session-change check must compare for a settled answer."""
 
 FX: Final = "currencies"
-"""The rate bucket and plan class of forex and crypto, both under the Currencies plans."""
+"""The rate bucket of forex and crypto, which share the Currencies subscription."""
 
 QUOTE_TRIES: Final = 4
 """How many times the forex check reads both endpoints, looking for one quote in both."""

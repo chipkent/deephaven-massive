@@ -457,16 +457,16 @@ def test_the_testers_own_settings_file_names_the_delayed_subscriptions(
 
 
 def test_fitted_runs_a_copy_only_when_the_example_names_a_path_of_the_run(tmp_path: Path) -> None:
-    free = _write(tmp_path, "01_a.py", "m = dm.MassiveSession()\n")
+    plain = _write(tmp_path, "01_a.py", "m = dm.MassiveSession()\n")
     reads = f'm = dm.MassiveSession(dm.MassiveConfig.from_file("{examples.SETTINGS_PATH}"))\n'
-    paid = _write(tmp_path, "02_b.py", f"# paid\n{reads}")
+    settled = _write(tmp_path, "02_b.py", f"# live\n{reads}")
     logs = _write(tmp_path, "03_c.py", f'log = "{examples.TEST_FOLDER}/massive-debug.log"\n')
     settings, folder, copies = tmp_path / "settings.yaml", tmp_path / "t", tmp_path / "fitted"
-    assert examples.fitted(free, settings=settings, test_folder=folder, folder=copies) == free
-    copy = examples.fitted(paid, settings=settings, test_folder=folder, folder=copies)
+    assert examples.fitted(plain, settings=settings, test_folder=folder, folder=copies) == plain
+    copy = examples.fitted(settled, settings=settings, test_folder=folder, folder=copies)
     assert copy == copies / "02_b.py"
     assert copy.read_text(encoding="utf-8") == (
-        f'# paid\nm = dm.MassiveSession(dm.MassiveConfig.from_file("{settings}"))\n'
+        f'# live\nm = dm.MassiveSession(dm.MassiveConfig.from_file("{settings}"))\n'
     )
     copy = examples.fitted(logs, settings=settings, test_folder=folder, folder=copies)
     assert copy.read_text(encoding="utf-8") == f'log = "{folder}/massive-debug.log"\n'
