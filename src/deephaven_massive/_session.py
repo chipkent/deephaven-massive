@@ -53,8 +53,9 @@ from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._config import MassiveConfig, shown_setting
 from deephaven_massive._datasets.catalog import Catalog
 from deephaven_massive._debug_log import configure_from_environment
-from deephaven_massive._errors import ErrorSource, MassiveError, raises_through
+from deephaven_massive._errors import ErrorSource, MassiveError, raises_through, user_defect
 from deephaven_massive._ingest.clients import CONNECTION_SETTINGS, SessionClients
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._tables.diagnostics import CONNECTIONS, RATE_LIMITS, STREAMS
 from deephaven_massive._tables.execution_context import (
     has_execution_context,
@@ -177,11 +178,10 @@ def _register(core: SessionCore) -> None:
     of each. A new session whose settings differ from those of an open session with the same
     key gets connections of its own, which compete with the other session's for the slot:
     Massive keeps the newer connection and closes the older, whose live tables then follow
-    their session's `connection_taken`. So a WARNING names the first such session and the
-    settings that differ. Sessions on
-    different Deephaven update graphs never share either; that is not warned about, since a
-    server normally has one graph. Sessions are held weakly; closed and collected ones do not
-    count.
+    their session's `connection_taken`. So a WARNING names the settings that differ from those
+    of the oldest such session, and the fix. Sessions on different Deephaven update graphs
+    never share either; that is not warned about, since a server normally has one graph.
+    Sessions are held weakly; closed and collected ones do not count.
 
     Args:
         core: The new session's core.
@@ -191,21 +191,22 @@ def _register(core: SessionCore) -> None:
         _open_sessions[:] = [weakref.ref(other) for other in alive]
         _open_sessions.append(weakref.ref(core))
         others = [
-            (other.label, other.config)
-            for other in alive  # in order of creation, so the oldest such session is named
+            other.config
+            for other in alive  # in order of creation, so the oldest such session is compared
             if other.config.api_key == core.config.api_key and not other.closed
         ]
-    for label, config in others:
+    for config in others:
         differ = [n for n in CONNECTION_SETTINGS if getattr(config, n) != getattr(core.config, n)]
         if differ:
+            shown = prose_list(differ, "settings", shown=len(CONNECTION_SETTINGS))
             logger.warning(
-                "%s uses the same API key as %s with different connection settings (%s), so "
-                "the two cannot share WebSocket connections; Massive allows an account one "
-                "connection per asset class and keeps the newer, so the live tables on the "
-                "older follow their session's connection_taken",
-                core.label,
-                label,
-                ", ".join(differ),
+                "A new MassiveSession uses the same API key as an open session but a different "
+                "%s, so the two cannot share WebSocket connections. Massive keeps one connection "
+                "per asset class for an account, so when the new session connects, the live "
+                "tables of the older one fail or reconnect as its connection_taken says. Give both "
+                "sessions the same %s, or close the older session.",
+                shown,
+                shown,
             )
             return
 
@@ -295,21 +296,27 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
         exec_ctx = get_exec_ctx()
         if not has_execution_context(exec_ctx):
             raise MassiveError(
-                "MassiveSession must be created inside a Deephaven server: no Deephaven "
-                "ExecutionContext is active on this thread. Create it from the Deephaven "
-                "console or an application script, or enter a context first "
-                "(with deephaven.execution_context.get_exec_ctx(): ...).",
+                user_defect(
+                    "No Deephaven ExecutionContext is active on this thread, and a "
+                    "MassiveSession needs one",
+                    "Create the session from the Deephaven console or an application script, "
+                    "or create it on this thread inside with ctx: after saving "
+                    "ctx = deephaven.execution_context.get_exec_ctx() in the console",
+                ),
                 source=ErrorSource.USER,
                 is_bug=True,
             )
         refuse_update_graph_thread(exec_ctx)
         if not has_script_query_scope(exec_ctx):
             raise MassiveError(
-                "MassiveSession needs an ExecutionContext whose query scope is the Python script "
-                "session's own: the library's formulas call Python functions through it. A "
-                "context from make_user_exec_ctx(freeze_vars=[...]) has a frozen copy instead; "
-                "create the session from the console or an application script, or use "
-                "make_user_exec_ctx() without freeze_vars.",
+                user_defect(
+                    "This thread's ExecutionContext comes from "
+                    "make_user_exec_ctx(freeze_vars=[...]), whose query scope is a frozen copy, "
+                    "and a MassiveSession needs the Python script session's own, since the "
+                    "library's formulas call Python functions through it",
+                    "Create the session from the console or an application script, or use "
+                    "make_user_exec_ctx() without freeze_vars",
+                ),
                 source=ErrorSource.USER,
                 is_bug=True,
             )
@@ -452,8 +459,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
         if isinstance(filters, Mapping) and "type" in filters:
             logger.debug("snapshots: refused the type filter %r, sent beside tickers", filters)
             raise ValueError(
-                "snapshots takes no type filter: Massive refuses type beside tickers, and each "
-                "ticker's prefix selects its class"
+                "m.snapshots takes no 'type' filter, since Massive refuses it beside tickers and "
+                "each ticker's prefix already selects its asset class. Remove 'type' from "
+                "filters."
             )
         return build_query(
             self._core,
@@ -723,10 +731,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
         if not self._core.results.release(table):
             raise ValueError(
-                f"{self._core.label}: release() takes a live table that this session returned, "
-                "and this table is not one. For a table you made from a live table, release "
-                "the live table instead. A table of another session needs that session's "
-                "release(). A static table needs no release"
+                "release() takes only a live table this session returned, and this table is "
+                "not one. Release the live table a derived table came from, call release() on "
+                "the session that returned the table, or leave a static table as it is."
             )
 
     @raises_through(SessionCore.close, refuse_update_graph_thread)

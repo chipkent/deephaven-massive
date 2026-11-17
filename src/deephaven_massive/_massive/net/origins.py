@@ -40,6 +40,8 @@ def origin_of(url: str) -> Origin:
     """
     parts = urlsplit(url)
     if parts.scheme not in _DEFAULT_PORTS or not parts.hostname:
-        raise ValueError(f"{without_userinfo_or_query(url)!r} is not an absolute http or https URL")
+        raise ValueError(
+            f"{without_userinfo_or_query(url)!r} is not an absolute http or https URL."
+        )
     port = _DEFAULT_PORTS[parts.scheme] if parts.port is None else parts.port
     return parts.scheme, parts.hostname, port

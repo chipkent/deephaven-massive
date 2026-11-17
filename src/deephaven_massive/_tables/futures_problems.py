@@ -15,14 +15,15 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._log_limits import bounded_list
+from deephaven_massive._enums import OnError
+from deephaven_massive._error_policy import policy_hint
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._tables.futures_dates import UNLISTED_AFTER_TEXT, Readiness
 from deephaven_massive._tables.problem_events import ProblemCause, ProblemEvent
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
-    from deephaven_massive._enums import OnError
     from deephaven_massive._error_policy import ResolvedPolicy
 
 __all__ = ["DISCARDS", "Discard", "futures_events"]
@@ -43,16 +44,23 @@ class Discard:
     text: str
 
     def message(self, dataset: str, tickers: Iterable[str]) -> str:
-        """Word the discard of some tickers' rows for one dataset.
+        """Word the failure of a stream that discarded some tickers' rows under `RAISE`.
 
         Args:
             dataset: The dataset.
             tickers: The tickers.
 
         Returns:
-            The message.
+            What happened, that the cause's `RAISE` stopped the table, and the setting that
+            streams the rest.
         """
-        return f"{dataset}: {self.text.format(names=bounded_list(sorted(tickers)))}"
+        cause = self.cause.value
+        names = prose_list(sorted(tickers), "tickers")
+        return (
+            f"{dataset}: {self.text.format(names=names)}. This table stopped because its "
+            f"on_error holds dm.ErrorPolicy({cause}=dm.OnError.RAISE). "
+            + policy_hint(OnError.LOG, cause, purpose="To stream the rest")
+        )
 
 
 DISCARDS: Final[Mapping[Readiness, Discard]] = MappingProxyType(
@@ -61,13 +69,13 @@ DISCARDS: Final[Mapping[Readiness, Discard]] = MappingProxyType(
             ProblemCause.UNLISTED_CONTRACTS,
             lambda policy: policy.unlisted_contracts,
             "neither Massive's futures snapshot nor its contracts list has held {names} for "
-            f"{UNLISTED_AFTER_TEXT}, so their rows are left out",
+            f"{UNLISTED_AFTER_TEXT}, so the library withheld their rows",
         ),
         Readiness.UNSCHEDULED: Discard(
             ProblemCause.UNSCHEDULED_PRODUCTS,
             lambda policy: policy.unscheduled_products,
-            "Massive's futures schedules give no session for rows of {names}, so those rows "
-            "are left out",
+            "Massive's futures schedules give no trading session for rows of {names}, so the "
+            "library withheld those rows",
         ),
     }
 )

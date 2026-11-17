@@ -114,7 +114,7 @@ from deephaven_massive._ingest.ws_connection import (
     ConnectionGroup,
     ConnectionStream,
 )
-from deephaven_massive._log_limits import bounded_list, mark_failure_logged
+from deephaven_massive._log_limits import bounded_list, mark_failure_logged, prose_list
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
@@ -192,11 +192,12 @@ class _PairState:
                 ProblemCause.SYMBOL_READ_RETRYING,
                 dataset=self.dataset,
                 stream_id=stream_id,
-                where=f"crypto stream {stream_id}",
+                where=f"{self.dataset} stream {stream_id}",
             )
+        failure = str(self.failure).removesuffix(".")
         why = (
-            f"waits for Massive's crypto ticker list, which could not be read ({self.failure}); "
-            "retrying"
+            "It waits for Massive's crypto ticker list, which the library reads again. The "
+            f"last read failed: {failure}."
         )
         return self.waits.update({pair: (pair, None, why, 0) for pair in self.waiting})
 
@@ -642,10 +643,11 @@ class WsConnections:
         new = {t for t in topics if not is_wildcard(t)} - in_use
         if len(new) + len(in_use) > OPTIONS_CAP:
             raise ValueError(
-                f"{spec.name}: {len(new)} new option topics and {len(in_use)} in use exceed "
-                f"the {OPTIONS_CAP} topics one /options connection carries; a topic is one "
-                "contract on one channel, so each channel of a contract counts once, and the "
-                "connection's topics include those of every session sharing it"
+                f"{spec.name}: this table would add {len(new):,} options "
+                f"{'subscription' if len(new) == 1 else 'subscriptions'} to the "
+                f"{len(in_use):,} its connection carries, over Massive's cap of {OPTIONS_CAP:,}. "
+                "Each channel of each contract counts, from every session on the connection. "
+                "Pass fewer contracts."
             )
 
     def _attach(self, stream: ConnectionStream) -> None:
@@ -737,9 +739,7 @@ class WsConnections:
                 # A loop that has ended holds no stream any more (`Connection._on_state`).
                 connection.post(connection.release_stream, stream_id)
         except Exception:
-            logger.exception(
-                "%s: the shutdown of stream %d failed. %s", self._label, stream_id, LIBRARY_BUG
-            )
+            logger.exception("Releasing stream %d failed. %s", stream_id, LIBRARY_BUG)
 
     def _symbols_changed(
         self, stream_id: int, added: frozenset[str], removed: frozenset[str]
@@ -858,15 +858,15 @@ class WsConnections:
             else:
                 failure = MassiveError(
                     library_bug(
-                        f"the watchlist change of stream {stream_id} (added "
-                        f"{bounded_list(sorted(added))}, removed "
-                        f"{bounded_list(sorted(removed))}) failed: {error!r}"
+                        f"Stream {stream_id} could not follow a change of its symbol table, "
+                        f"which added {prose_list(sorted(added), 'symbols')} and removed "
+                        f"{prose_list(sorted(removed), 'symbols')}: {error!r}"
                     ),
                     source=ErrorSource.LIBRARY,
                 )
             # Logged here, with the trace; the stream's failure then logs it at DEBUG only.
             mark_failure_logged(failure)
-            logger.exception("%s: %s", self._label, failure)
+            logger.exception("%s", failure)
             with self._lock:
                 connection = self.group.streams.get(stream_id)
             if connection is not None:
@@ -918,7 +918,7 @@ class WsConnections:
             for symbol in removed:
                 state.waiting.discard(symbol)
             asked = sorted(added | state.waiting)
-        reader = f"crypto stream {stream_id}"
+        reader = f"{state.dataset} stream {stream_id}"
         split, unsplit, waiting, failure = self._split(asked, state.policy)
         no_data = {pair: why.why for pair, why in unsplit.items() if why.no_data}
         if no_data and not self._no_data(stream_id, no_data, reader=reader, state=state):
@@ -1023,7 +1023,7 @@ class WsConnections:
                     symbol=pair,
                     field="Symbol",
                     rows=0,
-                    detail=f"{why}; the pair is never subscribed",
+                    detail=f"{why.removesuffix('.')}. The library never subscribes this pair.",
                     at=at,
                     policy=state.policy.unreadable_symbols,
                 )
@@ -1063,30 +1063,37 @@ class WsConnections:
                         symbol=pair,
                         field=None,
                         rows=0,
-                        detail=f"Massive has no data for it ({why}); it is skipped",
+                        detail=f"Massive has no data for this pair: {why.removesuffix('.')}.",
                         at=at,
                         policy=setting,
                     )
                     for pair, why in sorted(no_data.items())
                 ]
             )
-        described = bounded_list([f"{pair} ({why})" for pair, why in sorted(no_data.items())])
+        pairs = sorted(no_data)
+        one = len(pairs) == 1
         effect = effect_of(setting)
         if effect.fails:
+            # Only a pair missing from Massive's crypto ticker list is one it has no data for.
             self._fail(
                 stream_id,
                 UnavailableSymbolError(
-                    f"{reader}: Massive has no data for {described}. Remove the pair; "
+                    f"{reader}: Massive has no data for {prose_list(pairs, 'pairs')}, which "
+                    f"{'is' if one else 'are'} not on its crypto ticker list, "
+                    f"m.reference.tickers(market=dm.Market.CRYPTO). Remove "
+                    f"{'it' if one else 'them'} from the symbols, or "
                     + policy_hint(
-                        OnError.LOG,
-                        "unavailable_symbols",
-                        purpose="to skip it and stream the others",
+                        OnError.LOG, "unavailable_symbols", purpose="to stream the others"
                     ),
                     source=ErrorSource.MASSIVE,
                 ),
             )
             return False
-        logger.debug("%s: Massive has no data for %s; skipped", reader, described)
+        logger.debug(
+            "%s: Massive has no data for %s; skipped",
+            reader,
+            bounded_list([f"{pair} ({why})" for pair, why in sorted(no_data.items())]),
+        )
         return True
 
     def _wait(
@@ -1162,12 +1169,13 @@ class WsConnections:
         """
         failure = required(state.failure, f"stream {stream_id}'s failed read of the list")
         since = required(state.since, f"when stream {stream_id}'s pairs began to wait")
+        waiting = prose_list(sorted(state.waiting), "pairs")
         return copy_error(
             failure,
-            f"crypto stream {stream_id}: Massive's crypto ticker list could not be read for "
-            f"{now - since:.0f} s, longer than MassiveConfig.max_outage "
-            f"({self._max_outage:g} s), so {bounded_list(sorted(state.waiting))} cannot be "
-            f"streamed: {failure}",
+            f"{state.dataset} stream {stream_id}: Massive's crypto ticker list could not be read "
+            f"for {now - since:.0f} s, longer than max_outage={self._max_outage:g} s, so this "
+            f"table stopped, since it cannot stream {waiting}. The last read failed: "
+            f"{str(failure).removesuffix('.')}. Call the method again for a new live table.",
         )
 
     def _schedule(self, stream_id: int, delay: float, method: str, *args: object) -> None:
@@ -1345,8 +1353,8 @@ class WsConnections:
                 connection.show_closed(self)
             elif not connection.join(JOIN_TIMEOUT):
                 logger.warning(
-                    "%s: the connection to %s has not ended %.0f s after close()",
-                    self._label,
+                    "%s: the connection had not closed %.0f s after close(), so it closes in "
+                    "the background.",
                     connection.url,
                     JOIN_TIMEOUT,
                 )

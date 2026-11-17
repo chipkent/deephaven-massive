@@ -283,7 +283,9 @@ def _environment_value(name: str) -> str:
     if not value.strip():
         return ""
     if value != value.strip():
-        raise ValueError(f"{name}={value!r} has leading or trailing whitespace; set it without any")
+        raise ValueError(
+            f"{name}={value!r} has leading or trailing whitespace. Set {name} to {value.strip()!r}."
+        )
     return value
 
 
@@ -313,15 +315,18 @@ def configure_from_environment() -> None:
         return
     level = _LEVELS.get(value.upper()) if value else logging.DEBUG
     if level is None:
+        *others, last = _LEVELS
         raise ValueError(
-            f"{LEVEL_VARIABLE}={value!r} is not a logging level; use one of {', '.join(_LEVELS)}"
+            f"{LEVEL_VARIABLE}={value!r} is not a logging level. Set it to "
+            f"{', '.join(others)}, or {last}."
         )
-    source = "the environment" if value else f"the environment; {LEVEL_VARIABLE} unset, so DEBUG"
+    source = "the environment" if value else f"the environment, with {LEVEL_VARIABLE} unset"
     try:
         _install(level, path or LogOutput.STDERR, environment=True, source=source)
     except OSError as error:
         raise OSError(
-            f"{FILE_VARIABLE}={path!r} cannot be opened for appending: {error.strerror or error}"
+            f"{FILE_VARIABLE}={path!r} cannot be opened for appending: "
+            f"{error.strerror or error}. Set it to a file this process can write."
         ) from error
 
 

@@ -149,25 +149,43 @@ def test_require_enum_returns_members() -> None:
 def test_require_enum_names_the_matching_member() -> None:
     with pytest.raises(TypeError) as info:
         _require_enum("minute", dm.Timespan, "timespan")
-    assert str(info.value) == "timespan must be dm.Timespan, e.g. dm.Timespan.MINUTE"
+    assert (
+        str(info.value) == "timespan must be dm.Timespan, such as dm.Timespan.MINUTE, not 'minute'"
+    )
+    # The member it names is taken.
+    assert _require_enum(dm.Timespan.MINUTE, dm.Timespan, "timespan") is dm.Timespan.MINUTE
 
 
 def test_require_enum_matches_names_and_ignores_case() -> None:
-    with pytest.raises(TypeError, match=r"e\.g\. dm\.Sip\.OPRA$"):
+    with pytest.raises(
+        TypeError, match=r"^sip must be dm\.Sip, such as dm\.Sip\.OPRA, not 'opra'$"
+    ):
         _require_enum("opra", dm.Sip, "sip")
-    with pytest.raises(TypeError, match=r"e\.g\. dm\.HistorySource\.FLAT_FILES$"):
+    with pytest.raises(
+        TypeError,
+        match=r"^source must be dm\.HistorySource, such as dm\.HistorySource\.FLAT_FILES, "
+        r"not 'FLAT_FILES'$",
+    ):
         _require_enum("FLAT_FILES", dm.HistorySource, "source")
 
 
 def test_require_enum_falls_back_to_the_first_member() -> None:
-    with pytest.raises(TypeError, match=r"^mode must be dm\.PollMode, e\.g\. dm\.PollMode\.AUTO$"):
+    with pytest.raises(
+        TypeError, match=r"^mode must be dm\.PollMode, such as dm\.PollMode\.AUTO, not 'sometimes'$"
+    ):
         _require_enum("sometimes", dm.PollMode, "mode")
-    with pytest.raises(TypeError, match=r"dm\.Order\.ASC$"):
+    with pytest.raises(
+        TypeError, match=r"^order must be dm\.Order, such as dm\.Order\.ASC, not int$"
+    ):
         _require_enum(3, dm.Order, "order")
 
 
 def test_require_enum_rejects_other_enums() -> None:
-    with pytest.raises(TypeError, match=r"dm\.Market"):
+    with pytest.raises(
+        TypeError,
+        match=r"^market must be dm\.Market, such as dm\.Market\.STOCKS, not "
+        r"dm\.AssetClass\.STOCKS$",
+    ):
         _require_enum(dm.AssetClass.STOCKS, dm.Market, "market")
 
 

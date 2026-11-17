@@ -1,6 +1,7 @@
 """Tests for `check_api_key`, the rule of an API key the REST client can send in a header."""
 
 import logging
+import re
 
 import pytest
 
@@ -29,13 +30,14 @@ def test_a_key_no_header_can_carry_is_refused_and_never_shown(
     api_key: str, refused: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="deephaven_massive")
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"^api_key must be non-empty visible ASCII, with no whitespace or line break "
-            r"\(check for a trailing newline\); the key is not shown$"
-        ),
-    ):
+    kind, _, index = refused.partition(" at index ")
+    refusal = (
+        "api_key is empty. Pass your Massive API key."
+        if not index
+        else f"api_key holds a {kind} character at index {index}, and an API key may hold only "
+        "visible ASCII. Pass the key without that character."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         check_api_key(api_key, setting="api_key")
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (
@@ -50,5 +52,10 @@ def test_a_key_no_header_can_carry_is_refused_and_never_shown(
 
 
 def test_the_message_names_the_setting() -> None:
-    with pytest.raises(ValueError, match=r"^MASSIVE_API_KEY must be"):
+    with pytest.raises(
+        ValueError,
+        match=r"^MASSIVE_API_KEY holds a whitespace character at index 0, and an API key may "
+        r"hold only visible ASCII\. Pass the key without that character\.$",
+    ):
         check_api_key(" ", setting="MASSIVE_API_KEY")
+    check_api_key("s3cr3t", setting="MASSIVE_API_KEY")  # the key without it is accepted

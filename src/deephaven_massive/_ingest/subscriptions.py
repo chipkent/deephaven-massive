@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from deephaven_massive._config import NO_ACK_RESEND
 from deephaven_massive._datasets.wire_symbols import ws_symbol
-from deephaven_massive._log_limits import bounded_list
+from deephaven_massive._log_limits import bounded_list, prose_list
 from deephaven_massive._massive import StatusKind
 
 if TYPE_CHECKING:
@@ -220,6 +220,7 @@ class Subscriptions:
                 cap=None,
                 on_refused=lambda topics, message: None,
                 on_change=lambda: None,
+                url="wss://socket.massive.com/stocks",
             )
             subscriptions.add(["T.AAPL"])
             subscriptions.opened(1)  # subscribes T.AAPL
@@ -234,6 +235,7 @@ class Subscriptions:
         cap: int | None,
         on_refused: Callable[[tuple[str, ...], str], None],
         on_change: Callable[[], None],
+        url: str,
     ) -> None:
         """Start with no topic wanted and no generation open.
 
@@ -246,7 +248,9 @@ class Subscriptions:
             cap: The most explicit topics on the wire (1,000 for `/options`), or None.
             on_refused: Called with refused topics and the server's message.
             on_change: Called after every change of the counts or the deferred topics.
+            url: The connection's URL, which starts each WARNING.
         """
+        self._url = url
         self._sender = sender
         self._call_later = call_later
         self._subscription_confirmation_timeout = subscription_confirmation_timeout
@@ -489,8 +493,9 @@ class Subscriptions:
             if not self._warned_unparsed:
                 self._warned_unparsed = True
                 logger.warning(
-                    "an acknowledgement named no topic; treating it as acknowledging the "
-                    "whole subscription in flight"
+                    "%s: Massive confirmed a subscription without naming it, so the library "
+                    "takes it as confirming every subscription it sent last.",
+                    self._url,
                 )
             topics = self._unanswered()
         late = []  # topics in `NO_ACK` that Massive acknowledges after all
@@ -759,13 +764,12 @@ class Subscriptions:
     def _report_no_ack(self) -> None:
         """Log the `NO_ACK` topics of the step that just resolved, in one WARNING."""
         logger.warning(
-            "generation %d: no acknowledgement from Massive after %.1f s and one re-send for "
-            "the topics %s; they stay subscribed and are re-sent every %.0f s, they count in "
-            "NoAckTopics of m.connections() and in their streams' Error, and the connection is "
-            "not reconnected for them",
-            self.generation,
+            "%s: Massive has not confirmed the subscriptions %s after %.0f s and one re-send, "
+            "so their live tables may miss their rows. The library re-sends them every %.0f s. "
+            "m.problems() lists them until Massive confirms.",
+            self._url,
+            prose_list(sorted(self._unreported), "subscriptions"),
             2 * self._subscription_confirmation_timeout,
-            bounded_list(sorted(self._unreported)),
             NO_ACK_RESEND,
         )
         self._unreported.clear()

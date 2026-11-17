@@ -170,9 +170,9 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             summary="Massive sent a row whose symbol the library can't read as Massive's ticker. "
             "The row is left out.",
             fix="The library withheld the row because Massive sent it in a form the library "
-            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. To "
-            "quiet it, set `unreadable_symbols` to `dm.OnError.IGNORE`; to fail the table, "
-            "`dm.OnError.RAISE`.",
+            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. "
+            "Set `unreadable_symbols` to `dm.OnError.IGNORE` to quiet it, or to "
+            "`dm.OnError.RAISE` to fail the table.",
         ),
         _C.UNAVAILABLE_SYMBOLS: CauseTraits(
             policy="unavailable_symbols",
@@ -191,9 +191,9 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             summary="Massive sent a row whose symbol, time, or other key the library can't read. "
             "The row is left out.",
             fix="The library withheld the row because Massive sent it in a form the library "
-            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. To "
-            "quiet it, set `unreadable_keys` to `dm.OnError.IGNORE`; to fail the table, "
-            "`dm.OnError.RAISE`.",
+            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. "
+            "Set `unreadable_keys` to `dm.OnError.IGNORE` to quiet it, or to "
+            "`dm.OnError.RAISE` to fail the table.",
         ),
         _C.UNCONVERTIBLE_VALUES: CauseTraits(
             policy="unconvertible_values",
@@ -203,9 +203,9 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             summary="Massive sent a row with a value the library can't read as its column's type. "
             "The row is left out.",
             fix="The library withheld the row because Massive sent it in a form the library "
-            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. To "
-            "quiet it, set `unconvertible_values` to `dm.OnError.IGNORE`; to fail the table, "
-            "`dm.OnError.RAISE`.",
+            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. "
+            "Set `unconvertible_values` to `dm.OnError.IGNORE` to quiet it, or to "
+            "`dm.OnError.RAISE` to fail the table.",
         ),
         _C.MALFORMED_ROWS: CauseTraits(
             policy="malformed_rows",
@@ -215,8 +215,8 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             summary="A line of a flat file isn't a row the library can read. The line is left out.",
             fix="The library skipped the line because Massive sent it in a form the library "
             "can't read. `Detail` names the file and its first such line, for a report to "
-            "Massive. To quiet it, set `malformed_rows` to `dm.OnError.IGNORE`; to fail the "
-            "read, `dm.OnError.RAISE`.",
+            "Massive. Set `malformed_rows` to `dm.OnError.IGNORE` to quiet it, or to "
+            "`dm.OnError.RAISE` to fail the read.",
         ),
         _C.REFUSED_VENUES: CauseTraits(
             policy="refused_venues",
@@ -304,7 +304,7 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             summary="The table has more contracts than Massive's cap of 1,000 per connection, "
             "counting a contract's trades and quotes as two. The contracts past the cap wait, "
             "and `Rows` counts them.",
-            fix="Watch fewer contracts. The waiting ones subscribe as others leave.",
+            fix="Pass fewer contracts. The waiting ones subscribe as others leave.",
         ),
         _C.UNACKNOWLEDGED_TOPICS: CauseTraits(
             policy=None,
@@ -600,9 +600,9 @@ def drift_events(
         seen = ""
         sent = symbol if sample is None or sample.symbol is None else sample.symbol
         if sent is not None:
-            seen += f"; first sent for {sent}"
+            seen += f" It was first sent for {sent}."
         if sample is not None and sample.value is not None:
-            seen += f"; first value {sample.value}"
+            seen += f" Its first value: {sample.value}."
         events.append(
             ProblemEvent(
                 cause=ProblemCause.SCHEMA_DRIFT,
@@ -613,8 +613,8 @@ def drift_events(
                 symbol=None,
                 field=key,
                 rows=0,
-                detail=f"Massive sent the field {key!r}, which its documentation lacks; the "
-                f"rows are published without it{seen}",
+                detail=f"Massive sent the field {key!r}, which its documentation lacks, so the "
+                f"rows are published without it.{seen}",
                 at=at,
             )
         )

@@ -207,7 +207,7 @@ def test_the_file_variable_alone_logs_at_debug(
     text = path.read_text(encoding="utf-8")
     assert (
         f"logging deephaven_massive at DEBUG to {path.resolve()} "
-        "(from the environment; DEEPHAVEN_MASSIVE_LOG unset, so DEBUG)"
+        "(from the environment, with DEEPHAVEN_MASSIVE_LOG unset)"
     ) in text
     assert _lines(text)[-1][3] == "a DEBUG line"
 
@@ -217,16 +217,22 @@ def test_a_variable_with_surrounding_whitespace_is_refused(
     monkeypatch: pytest.MonkeyPatch, variable: str
 ) -> None:
     monkeypatch.setenv(variable, " INFO ")
-    message = f"{variable}=' INFO ' has leading or trailing whitespace; set it without any"
+    message = f"{variable}=' INFO ' has leading or trailing whitespace. Set {variable} to 'INFO'."
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         _debug_log.configure_from_environment()
+
+
+def test_the_level_a_whitespace_refusal_names_is_taken(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "INFO")  # the fix the refusal above names
+    _debug_log.configure_from_environment()
+    assert LIBRARY.level == logging.INFO
 
 
 def test_an_unknown_level_names_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "verbose")
     message = (
-        "DEEPHAVEN_MASSIVE_LOG='verbose' is not a logging level; use one of DEBUG, INFO, "
-        "WARN, WARNING, ERROR, CRITICAL"
+        "DEEPHAVEN_MASSIVE_LOG='verbose' is not a logging level. Set it to DEBUG, INFO, WARN, "
+        "WARNING, ERROR, or CRITICAL."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         _debug_log.configure_from_environment()
@@ -273,8 +279,11 @@ def test_a_log_file_that_cannot_be_opened_names_the_variable(
     path = tmp_path / "missing" / "massive.log"
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "DEBUG")
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG_FILE", str(path))
-    message = f"DEEPHAVEN_MASSIVE_LOG_FILE={str(path)!r} cannot be opened for appending: "
-    with pytest.raises(OSError, match=f"^{re.escape(message)}") as info:
+    message = (
+        f"DEEPHAVEN_MASSIVE_LOG_FILE={str(path)!r} cannot be opened for appending: No such file "
+        "or directory. Set it to a file this process can write."
+    )
+    with pytest.raises(OSError, match=f"^{re.escape(message)}$") as info:
         _debug_log.configure_from_environment()
     assert isinstance(info.value.__cause__, FileNotFoundError)
     assert not [h for h in LIBRARY.handlers if isinstance(h, logging.FileHandler)]
