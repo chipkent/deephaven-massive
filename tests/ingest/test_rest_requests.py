@@ -165,7 +165,11 @@ def test_a_dataset_without_pairs_refuses_a_pair_path() -> None:
         keys={(R, CRYPTO_LAST_PATH): SourceKeys(symbol=KeySpec("from", from_request=True))},
     )
     path = _rest_path(CRYPTO_LAST_PATH)
-    with pytest.raises(ValueError, match="only forex and crypto symbols are currency pairs"):
+    with pytest.raises(
+        ValueError,
+        match=r"^stocks\.pair asked for a currency pair, which only forex and crypto have\. This "
+        r"is a bug in deephaven-massive\. ",
+    ):
         rest_requests.plan_calls(
             spec, path, Request(symbols=("AAPL",)), symbols=("AAPL",), split=split_pair
         )
@@ -173,7 +177,10 @@ def test_a_dataset_without_pairs_refuses_a_pair_path() -> None:
 
 def test_a_per_symbol_path_needs_explicit_symbols() -> None:
     path = _rest_path(CRYPTO_LAST_PATH)
-    with pytest.raises(ValueError, match="needs explicit symbols"):
+    with pytest.raises(
+        ValueError,
+        match=r"^crypto\.last needs the symbols named\. Pass them in place of dm\.ALL\.$",
+    ):
         rest_requests.plan_calls(
             CRYPTO_LAST, path, Request(symbols=dm.ALL), symbols=dm.ALL, split=split_pair
         )

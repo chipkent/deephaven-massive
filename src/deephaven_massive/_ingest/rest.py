@@ -33,9 +33,9 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   and quotes named by session dates are requested one session at a time
   (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time
   (weekdays only for the classes that do not trade at weekends). Bars of a day or longer
-  are stamped at 00:00 of their day in the class day zone, and every bar is served: a stamp
-  Massive is not known to use is kept as sent and logs one WARNING per form of stamp per
-  session (`row_times.stamp_rule`, `StampRule.stamp`).
+  are stamped at 00:00 of their day in the class day zone: a stamp Massive is not known to
+  use withholds its row, as an `unconvertible_values` problem, and logs one WARNING per form of
+  stamp per session (`row_times.stamp_rule`, `StampRule.stamp`).
 - **Time columns.** Every page's rows get the library's time columns (`row_times.TimeRule`):
   `Date`, a bar's `TimestampStart` and `TimestampEnd`, and `TimestampInsert`, the instant the
   page arrived. The day zone of each call follows its own symbols' class (`dates.day_class`),
@@ -88,12 +88,13 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   patience still covers (`rate_limits.read_patience`: 10 minutes of pauses for a read its
   caller waits for, `MassiveConfig.max_outage` for a read that feeds a live table, and 90 s
   while the thread holds the update graph's lock), which becomes
-  `MassiveError("rate limited: ...")` with status 429 (the first 429 of each subscription has
-  already logged its INFO notice). One odd row never fails a read: a row the library cannot
-  read whole is withheld and reported as drift; a read whose every row of its symbols and
-  window was withheld, across all its pages and parts (an `AUTO` `history()`'s files too, and
-  every value of a table of values), fails with `RowDataError`: the read's entry point makes its
-  one `ReadTally`, every part adds to it, and the entry point checks it once
+  a `MassiveError` with status 429 that quotes Massive's answer (the first 429 of each
+  subscription has already logged its INFO notice). One odd row never fails a read: a row
+  the library cannot read whole is withheld and reported as drift; a read whose every row of
+  its symbols and window was withheld, across all its pages and parts (an `AUTO`
+  `history()`'s files too, and every value of a table of values), fails with `RowDataError`:
+  the read's entry point makes its one `ReadTally`, every part adds to it, and the entry point
+  checks it once
   (`ReadTally.check`, or `ReadTally.judge` by symbol). Static verbs raise each error, and log
   it at DEBUG, or at ERROR for a defect.
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
@@ -205,7 +206,7 @@ from deephaven_massive._ingest.symbol_reads import (
     read_rest_by_symbol,
     read_rest_by_value,
 )
-from deephaven_massive._log_limits import bounded_list, log_once
+from deephaven_massive._log_limits import bounded_list, log_once, prose_list
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -319,16 +320,23 @@ def _missing_error(spec: DatasetSpec, missing: Sequence[_Missing]) -> Unavailabl
         missing: The symbols, each with why it has no data (`_Outcome.missing`), in call order.
 
     Returns:
-        The error, naming the symbols, why, and the setting that would leave them out.
+        The error, naming the symbols and the setting that would leave them out, such as
+        `"stocks.trades: Massive has no data for FOO and BARX. Remove them, or, to read the
+        others, pass on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call
+        or to dm.MassiveConfig."`. Why each has no data is in its `m.problems()` row.
     """
-    names = bounded_list(str(one) for one in missing)
-    logger.debug("%s: Massive has no data for %s; raising", spec.name, names)
+    logger.debug(
+        "%s: Massive has no data for %s, so the read fails",
+        spec.name,
+        prose_list((str(one) for one in missing), "symbols"),
+    )
+    them = "it" if len(missing) == 1 else "them"
+    hint = policy_hint(
+        OnError.LOG, "unavailable_symbols", purpose=f"Remove {them}, or, to read the others"
+    )
+    names = prose_list((one.symbol for one in missing), "symbols")
     return UnavailableSymbolError(
-        f"{spec.name}: Massive has no data for {names}. Remove the symbol; "
-        + policy_hint(
-            OnError.LOG, "unavailable_symbols", purpose="to leave it out and read the others"
-        ),
-        source=ErrorSource.MASSIVE,
+        f"{spec.name}: Massive has no data for {names}. {hint}", source=ErrorSource.MASSIVE
     )
 
 
@@ -413,8 +421,10 @@ def _per_symbol(name: str, planned: Sequence[tuple[RestPath, list[Call]]]) -> bo
     kinds = {call.symbol is not None for _, calls in planned for call in calls}
     if len(kinds) > 1:
         raise BrokenGuaranteeError(
-            f"{name}: a read mixes per-symbol requests with requests of several symbols, so "
-            "`limit` can cap neither each symbol nor the whole call"
+            library_bug(
+                f"{name} planned requests of one symbol beside requests of several, so limit "
+                "can cap neither each symbol nor the whole call"
+            )
         )
     return True in kinds
 
@@ -952,8 +962,8 @@ class RestReader:
             limit: The cap on each call's rows, or None; `_read_planned` caps the total.
             window: The `history()` window whose rows to keep, or None. Bars of a day or longer
                 move to 00:00 of their day in the class day zone, and a stamp Massive is not
-                known to use is kept as sent and logs one WARNING per form of stamp per session
-                (`row_times.stamp_rule`).
+                known to use withholds its row and logs one WARNING per form of stamp per
+                session (`row_times.stamp_rule`).
             current: True for a `fetch()` or `poll()` of current data (`_read_planned`), whose
                 pages are checked for a `DELAYED` label (`_check_recency`); False, the default,
                 for past data, such as `history()` or a previous day's bar.
@@ -983,7 +993,7 @@ class RestReader:
         page on another adjustment basis, its `CutShortError` for a symbol whose data was cut
         short, the `EntitlementError` of `_check_recency` for delayed data, and, with no
         `on_missing`, the `UnavailableSymbolError` of `_report_missing` for a symbol Massive has
-        no data for. A closed session raises `SessionClosedError("... is closed; ...")`.
+        no data for. A closed session raises `SessionClosedError("This session is closed. ...")`.
         """
         converter = RowConverter.build(self.catalog, spec, rest_path)
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
@@ -1397,8 +1407,8 @@ class RestReader:
 
         Each page of current data is checked for a `DELAYED` label (`_check_recency`), each
         page against the requested adjustment basis (`_check_adjusted`), its bars of a day or
-        longer are stamped (`StampRule.stamp`; a stamp Massive is not known to use is kept as
-        sent and logs one WARNING per form of stamp per session), its rows outside the
+        longer are stamped (`StampRule.stamp`; a stamp Massive is not known to use withholds its
+        row and logs one WARNING per form of stamp per session), its rows outside the
         `history()` window dropped (`keep_window`), and its rows given the library's time columns
         (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
         call's day zone follows its own symbols' class (`dates.day_class`).
@@ -1432,10 +1442,10 @@ class RestReader:
 
         A failed request otherwise raises the public error of its `WireError` (`public_error`), and
         once the session is closed every failed request does, a 404 included: the call raises
-        `SessionClosedError("... is closed; ...")` rather than dropping its symbol. A row that
-        breaks the schema raises the `RowDataError` of `rest_rows.RowConverter.convert`, a page on
-        another adjustment basis the `MassiveError` of `_check_adjusted`, and delayed data the
-        `EntitlementError` of `_check_recency`.
+        `SessionClosedError("This session is closed. ...")` rather than dropping its symbol. A
+        row that breaks the schema raises the `RowDataError` of
+        `rest_rows.RowConverter.convert`, a page on another adjustment basis the `MassiveError`
+        of `_check_adjusted`, and delayed data the `EntitlementError` of `_check_recency`.
         """
         if call.unsplit is not None:
             return self._unsplit_outcome(spec, call, call.unsplit)
@@ -1468,7 +1478,6 @@ class RestReader:
                     self._check_recency(
                         spec,
                         page,
-                        template=template,
                         bucket=bucket,
                         own=own,
                         call=call,
@@ -1493,7 +1502,7 @@ class RestReader:
                 if spec.ticker_list is not None:
                     batches = self._listed(spec, batches, own, template=template)
                 if bare_index is not None:
-                    self._check_index_rows(spec, batches, bare_index, template=template)
+                    self._check_index_rows(spec, batches, bare_index)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if times.stamps is not None:
@@ -1574,8 +1583,8 @@ class RestReader:
                 how many pages had arrived.
 
         A 404 that arrives after the session closed raises the
-        `SessionClosedError("... is closed; ...")` of `public_error`, and any other failure the
-        error of `_dataset_error`.
+        `SessionClosedError("This session is closed. ...")` of `public_error`, and any other
+        failure the error of `_dataset_error`.
         """
         if error.status != HTTPStatus.NOT_FOUND or call.symbol is None:
             raise self._dataset_error(spec, bucket, error) from error
@@ -1591,10 +1600,10 @@ class RestReader:
             )
             raise self.public_error(error) from error
         if requests:
+            pages = "1 page" if requests == 1 else f"{requests} pages"
             raise CutShortError(
-                f"{spec.name}: {call.symbol}'s data was cut short: Massive answered "
-                f"HTTP 404 for page {requests + 1} of {template} after {requests} "
-                f"page{'s' if requests > 1 else ''} had arrived; retry the call",
+                f"{spec.name}: the rows of {call.symbol} were cut short after {pages} arrived. "
+                f"{error.message} Call the method again.",
                 status=error.status,
                 request_id=error.request_id,
             ) from error
@@ -1755,18 +1764,18 @@ class RestReader:
             first = self.state.first("unlisted rows", spec.name)
             logger.log(
                 logging.WARNING if first else logging.DEBUG,
-                "%s: %d rows Massive returned from %s list none of the request's tickers "
-                "(%s) in %s, so they are left out",
+                "%s: Massive sent %d rows from %s whose %s lists none of the requested tickers "
+                "%s, so they are left out.",
                 spec.name,
                 unmatched,
                 template,
-                bounded_list(named),
                 spec.ticker_list,
+                prose_list(named, "tickers"),
             )
         return listed
 
     def _check_index_rows(
-        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str, *, template: str
+        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str
     ) -> None:
         """Warn about rows of an index's contracts that do not read as that index's.
 
@@ -1783,7 +1792,6 @@ class RestReader:
             spec: The dataset.
             batches: One page's rows in the dataset's schema.
             index: The canonical index the call asked for, such as `I:SPX`.
-            template: The path, for the messages.
         """
         if not batches:
             return
@@ -1796,35 +1804,28 @@ class RestReader:
         no_code = pc.and_(other, pc.is_null(cfi))
         other_kind = pc.and_(other, pc.is_valid(cfi))
         if pc.any(other_kind).as_py() and self.state.first("index-other-kind", spec.name, index):
-            shown = list(
-                zip(
-                    pc.filter(symbols, other_kind).to_pylist()[:5],
-                    pc.filter(underlyings, other_kind).to_pylist()[:5],
-                    pc.filter(cfi, other_kind).to_pylist()[:5],
-                    strict=True,
-                )
-            )
+            first = pc.indices_nonzero(other_kind)[0].as_py()
             logger.warning(
-                "%s: asked %s for the contracts of %s by its bare ticker, %s=%s, and %d rows "
-                "are not options on an index by their CFI code, so Massive answered about "
-                "another instrument; they keep the underlying Massive wrote. The first "
-                "(Symbol, Underlying, Cfi): %s",
+                "%s: the contracts of %s were asked for by the bare ticker %s=%s, and the CFI "
+                "codes of %d rows mark options on something other than an index, so Massive "
+                "answered about another instrument too. Those rows keep the underlying Massive "
+                "wrote. The first is %s, with Underlying %s and Cfi %s.",
                 spec.name,
-                template,
                 index,
                 BARE_INDEX_PARAM,
                 contracts_underlying(index),
                 pc.sum(other_kind).as_py(),
-                shown,
+                symbols[first].as_py(),
+                underlyings[first].as_py(),
+                cfi[first].as_py(),
             )
         if pc.any(no_code).as_py() and self.state.first("index-no-cfi", spec.name):
             logger.warning(
-                "%s: %d rows of the contracts of %s from %s have no CFI code, so nothing says "
-                "their underlying is an index and they keep Massive's bare %r; the first: %s",
+                "%s: %d rows of the contracts of %s have no CFI code, so nothing marks their "
+                "underlying as the index, and they keep Massive's bare %r. The first is %s.",
                 spec.name,
                 pc.sum(no_code).as_py(),
                 index,
-                template,
                 contracts_underlying(index),
                 pc.filter(symbols, no_code)[0].as_py(),
             )
@@ -1834,7 +1835,6 @@ class RestReader:
         spec: DatasetSpec,
         page: Page,
         *,
-        template: str,
         bucket: str,
         own: Sequence[str],
         call: Call,
@@ -1863,7 +1863,6 @@ class RestReader:
         Args:
             spec: The dataset, for the message.
             page: The page.
-            template: The page's path template, for the WARNING of an unknown label.
             bucket: The page's rate-limit bucket.
             own: The symbols the request names (`own_symbols`).
             call: The request, whose one symbol stands for its rows when they carry none.
@@ -1896,9 +1895,7 @@ class RestReader:
             page.rows, fixed=fixed, listed=listed, symbol_key=symbol_key, symbol=call.symbol
         )
         for subscription, unknown in recency.unknown:
-            self._warn_unknown_label(
-                spec, template=template, subscription=subscription, unknown=unknown
-            )
+            self._warn_unknown_label(spec, subscription=subscription, unknown=unknown)
         if recency.refused:
             subscription = min(recency.refused)
             tickers, evidence = recency.refused[subscription]
@@ -1914,7 +1911,6 @@ class RestReader:
         self,
         spec: DatasetSpec,
         *,
-        template: str,
         subscription: Subscription | None,
         unknown: tuple[str, object],
     ) -> None:
@@ -1926,21 +1922,20 @@ class RestReader:
 
         Args:
             spec: The dataset.
-            template: The page's path template.
             subscription: The subscription of the row's data, or None when it has none.
             unknown: The field and its value (`RecencyLabels.unknown`).
         """
         field, value = unknown
         owner = "no subscription" if subscription is None else str(subscription)
         if self.state.first("recency-label", owner, field, repr(value)):
+            data = "data of no subscription" if subscription is None else f"{subscription} data"
             logger.warning(
-                "%s: %s answered %s=%r, which is neither DELAYED nor REAL-TIME, for %s data; "
-                "the library cannot tell whether the row is delayed and serves it",
+                "%s: Massive labels %s %s=%r, which is neither DELAYED nor REAL-TIME. The "
+                "library cannot tell whether those rows are delayed, and serves them.",
                 spec.name,
-                template,
+                data,
                 field,
                 value,
-                owner,
             )
 
     def _check_adjusted(
@@ -1972,18 +1967,17 @@ class RestReader:
         if echoed is None:
             if self.state.first("adjusted-echo", spec.name, template):
                 logger.warning(
-                    "%s: %s answered without its adjusted echo, so this page's split basis "
-                    "(adjusted=%s requested) cannot be checked",
+                    "%s: Massive answered without saying whether its bars are adjusted, so the "
+                    "library cannot check that they match adjusted=%s.",
                     spec.name,
-                    template,
                     sent,
                 )
             return
         if echoed is not sent:
             raise MassiveError(
-                f"{spec.name}: Massive answered {template} with adjusted={echoed} although "
-                f"adjusted={sent} was requested, so the call would mix split-adjusted and "
-                "as-traded prices; retry it",
+                f"{spec.name}: Massive answered with bars of adjusted={echoed}, and the call "
+                f"asked for adjusted={sent}. The table would mix split-adjusted and as-traded "
+                "prices, so the read stopped. Call the method again.",
                 is_retryable=True,
             )
 
@@ -2012,7 +2006,7 @@ class RestReader:
         new = []
         for row in flagged:
             ticker = str(symbol if key is None else row.get(key))
-            answer = f"{ticker} ({row.get('error')}: {row.get('message')})"
+            answer = f'{ticker} with "{row.get("error")}: {row.get("message")}"'
             logger.debug(
                 "%s: Massive answered an error row from %s for %s", dataset, template, answer
             )
@@ -2021,22 +2015,20 @@ class RestReader:
                 new.append(_cut(answer))
         if new:
             logger.warning(
-                "%s: Massive answered error rows from %s for %s; the rows are kept with their "
-                "Error and Message columns",
+                "%s: Massive answered error rows for %s. The rows are kept, with Massive's "
+                "answer in their Error and Message columns.",
                 dataset,
-                template,
-                bounded_list(new),
+                prose_list(new, "tickers"),
             )
 
     def public_error(self, error: WireError) -> MassiveError:
         """Return the public error of a wire error.
 
-        A closed session's error is `SessionClosedError("MassiveSession #1 is closed; ...")`,
-        whatever the request returned. A pause that outlasts the read's patience is
-        `MassiveError("rate limited: ...")` with status 429: the governor's message (which
-        requests, the latest refusal, when its next request (a probe) goes, the read's
-        patience, the usual cause, and the remedies), then where to watch the subscriptions'
-        state. Every other error is `_errors.from_wire`'s.
+        A closed session's error is `SessionClosedError("This session is closed. ...")`,
+        whatever the request returned. A pause that outlasts the read's patience is a
+        `MassiveError` with status 429: the governor's message (Massive's answer, when the
+        next request goes, the usual cause, and the remedies), then where to watch the
+        subscriptions' pace. Every other error is `_errors.from_wire`'s.
 
         Args:
             error: The wire error.
@@ -2048,7 +2040,7 @@ class RestReader:
             return SessionClosedError(session_closed())
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
             return MassiveError(
-                f"rate limited: {error.message}. m.rate_limits() shows each subscription's state",
+                f"{error.message} See each subscription's pace in m.rate_limits().",
                 status=429,
                 request_id=error.request_id,
             )
@@ -2071,19 +2063,20 @@ class RestReader:
 
         Returns:
             The public error, with the wire error's status and request id, such as
-            `EntitlementError("stocks.last_trade: the Stocks subscription of your plan does not
-            include this data; Massive answered HTTP 403 from GET ...; try
-            m.stocks.snapshots(...), which carries the same values")`.
+            `EntitlementError("stocks.last_trade: Massive refused this read for the Stocks
+            subscription. Massive answered GET ... with HTTP 403: "...". Call
+            m.stocks.snapshots with the same symbols, which carries the same values.")`.
         """
         public = self.public_error(error)
         if type(public) is not EntitlementError:
             return public
-        holder = (
-            "your account" if bucket == OTHER else f"the {bucket.title()} subscription of your plan"
-        )
-        message = f"{spec.name}: {holder} does not include this data; {public}"
+        holder = "your account" if bucket == OTHER else f"the {bucket.title()} subscription"
+        message = f"{spec.name}: Massive refused this read for {holder}. {public}"
         if spec.refused_alternative is not None:
-            message += f"; try m.{spec.refused_alternative}(...), which carries the same values"
+            message += (
+                f" Call m.{spec.refused_alternative} with the same symbols, which carries the "
+                "same values."
+            )
         return EntitlementError(
             message, status=public.status, request_id=public.request_id, source=public.source
         )
@@ -2739,7 +2732,7 @@ class RestEndpoints:
         )
         if not isinstance(claim, Claim):
             return claim
-        context = f"deciding the {asset_class.value} WebSocket host failed"
+        context = f"Deciding the {asset_class.value} WebSocket host failed"
         try:
             decision = host_decision.decide(
                 asset_class,
@@ -2873,7 +2866,8 @@ class RestEndpoints:
         `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`, or a `DELAYED` label on a subscription
         not in `MassiveConfig.delayed_subscriptions`, `RestReader._check_recency`),
         `RowDataError` for a row that breaks the schema, and `MassiveError` itself for any other
-        failure (a rate limit as `"rate limited: ..."`, a closed session as `"... is closed; ..."`).
+        failure (a rate limit with status 429, a closed session as
+        `"This session is closed. ..."`).
 
         A parameter a path does not take raises the `ValueError` of `shared_params` before any
         request: every path is planned before the first one is read.
@@ -3042,7 +3036,7 @@ class RestEndpoints:
         request series per symbol where the path takes one. Rows outside the window are
         dropped (`keep_window`), bars of a day or longer are stamped at 00:00 of their day in the
         class day zone (`StampRule.stamp`, `row_times.day_starts`; a stamp Massive is not known
-        to use is kept as sent and logs one WARNING per form of stamp per session), and every
+        to use withholds its row and logs one WARNING per form of stamp per session), and every
         row gets the library's time columns. A symbol with no data adds no rows. Before the
         first request, one INFO line announces a long download (`rate_limits.announce`): a
         read whose paced requests cannot all start within a minute, with the least time it
@@ -3353,8 +3347,8 @@ def _request_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
     log_once(
         logger,
         f"bucket\0{spec.name}\0{template}\0{bucket}",
-        "%s %s (symbols: %s) is charged to the %s bucket: %s; later requests of this path "
-        "charged to it are not logged",
+        "%s %s, symbols %s, is charged to the %s bucket as %s. Later requests of this path "
+        "charged to it are not logged.",
         spec.name,
         template,
         ", ".join(own_symbols(spec, call.symbol, call.query)) or "none",

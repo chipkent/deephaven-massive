@@ -898,8 +898,9 @@ MALFORMED_ROWS = (
 """Two rows between a line with too few fields, one with too many, and one not UTF-8 text."""
 
 MALFORMED = (
-    f"3 malformed line(s) of {LOCATION.format(TRADES_0303)}, the first: row 2 after the header "
-    "has 2 fields where the header has 13; skipped, and the file's other rows are kept"
+    f"Massive's flat file {LOCATION.format(TRADES_0303)} has 3 lines the library cannot read. "
+    "The first: Row 2 after the header has 2 fields where the header has 13. They are skipped, "
+    "and the file's other rows are kept."
 )
 """The detail of the one `malformed_rows` problem of the file that holds `MALFORMED_ROWS`."""
 
@@ -949,10 +950,11 @@ def test_a_malformed_line_fails_the_read_under_raise(
             q.history("2025-03-03", "2025-03-03", wait=True)
     [listed] = events
     assert (listed.cause, listed.policy) == (ProblemCause.MALFORMED_ROWS, dm.OnError.RAISE)
-    assert listed.detail.endswith("; malformed_rows=raise fails the read")
+    assert listed.detail.endswith(" The read fails.")
     assert str(info.value) == (
-        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
-        f"line. Row 2 after the header has 2 fields where the header has 13. {MALFORMED_FIX}"
+        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+        "library cannot read. Row 2 after the header has 2 fields where the header has 13. "
+        f"{MALFORMED_FIX}"
     )
     assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
     assert "SECRET" not in str(info.value)
@@ -970,8 +972,9 @@ def test_a_call_s_malformed_rows_overrides_the_session_s(
         with pytest.raises(dm.MassiveError) as info:
             q.history("2025-03-03", "2025-03-03", wait=True)
         assert str(info.value) == (
-            f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
-            f"line. Row 2 after the header has 2 fields where the header has 13. {MALFORMED_FIX}"
+            f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+            "library cannot read. Row 2 after the header has 2 fields where the header has 13. "
+            f"{MALFORMED_FIX}"
         )
         kept = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
         assert kept.size > 0
@@ -995,8 +998,9 @@ def test_malformed_lines_at_the_end_of_a_file_fail_the_read_under_raise(
     ):
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     assert str(info.value) == (
-        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
-        f"line. Row 21 after the header is not UTF-8 text. {MALFORMED_FIX}"
+        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+        "library cannot read. Row 21 after the header is not UTF-8 text. "
+        f"{MALFORMED_FIX}"
     )
 
 
@@ -1026,8 +1030,9 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
         failed = out[symbol]
         assert isinstance(failed, SymbolFailure)
         assert str(failed.error) == (
-            f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
-            f"line. Row 2 after the header has 2 fields where the header has 13. {MALFORMED_FIX}"
+            f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+            "library cannot read. Row 2 after the header has 2 fields where the header has 13. "
+            f"{MALFORMED_FIX}"
         )
         assert not failed.error.is_retryable
 
@@ -1077,8 +1082,9 @@ def test_rows_withheld_before_a_malformed_line_under_raise_are_listed_too(
         with pytest.raises(dm.MassiveError) as info:
             q.history("2025-03-03", "2025-03-03", wait=True)
     assert str(info.value) == (
-        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
-        f"line. Row 21 after the header has 14 fields where the header has 13. {MALFORMED_FIX}"
+        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+        "library cannot read. Row 21 after the header has 14 fields where the header has 13. "
+        f"{MALFORMED_FIX}"
     )
     assert [e.cause for e in events] == [
         ProblemCause.UNCONVERTIBLE_VALUES,
@@ -1530,8 +1536,8 @@ def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
 
 def holiday_warning(spec: str, key: str, day: str) -> str:
     return (
-        f"{spec}: {key} does not exist, though a later day's file does; skipping {day}, a day "
-        "without trading (a holiday?)"
+        f"{spec}: Massive has no flat file {key}, though it has a later day's, so the read skips "
+        f"{day}. The usual cause is a market holiday."
     )
 
 
@@ -1541,15 +1547,18 @@ def s3_line(spec: str, files: int, skipped: str) -> str:
 
 def not_published(spec: str, day: str, remedy: str) -> str:
     return (
-        f"{spec}: the flat file for {day} is not published yet. Massive usually publishes a "
-        f"day's flat files by about 11:00 ET the next day, but the time varies. {remedy}"
+        f"{spec}: Massive has not published the flat file for {day} yet. Massive usually "
+        f"publishes a day's flat files by about 11:00 ET the next day, but the time varies. "
+        f"{remedy}"
     )
 
 
-READ_REST = "Retry later, or read REST with source=dm.HistorySource.REST"
+READ_REST = (
+    "Call the method again later, or pass source=dm.HistorySource.REST to read the day from REST."
+)
 NO_REST = (
-    "Retry later; REST cannot serve this read: futures.trades history over REST needs explicit "
-    "symbols"
+    "REST cannot serve this read, since futures.trades history over REST needs explicit "
+    "symbols. Call the method again later."
 )
 MANY = [f"S{n:02d}" for n in range(49)] + ["AAPL"]
 """Fifty symbols: enough for `AUTO` to read flat files, and explicit, so REST can serve them."""
@@ -1664,6 +1673,7 @@ def test_a_missing_last_day_with_no_later_file_raises_under_flat_files(
     session: dm.MassiveSession,
     put: Callable[[str, str], None],
     fake_s3: FakeS3,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # On Monday 03-10 no file after 03-04 exists, so 03-04 may simply not be out yet. The
     # look stops before today, whose file cannot exist.
@@ -1676,6 +1686,12 @@ def test_a_missing_last_day_with_no_later_file_raises_under_flat_files(
         q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert unpublished.value.is_retryable  # the file appears once Massive publishes it
     assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in (3, 4, 5, 6, 7)]
+    # The advice works: with source=dm.HistorySource.REST, REST reads the range.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    q.history("2025-03-03", "2025-03-04", source=HistorySource.REST, wait=True)
+    ((_, request, _),) = rest.calls
+    assert (request.start, request.end) == (date(2025, 3, 3), date(2025, 3, 4))
 
 
 def test_a_long_run_of_missing_files_well_before_today_has_no_file_at_all(
@@ -1692,14 +1708,15 @@ def test_a_long_run_of_missing_files_well_before_today_has_no_file_at_all(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=["AAPL"])
     missing = [d for d in range(4, 15) if date(2025, 3, d).weekday() < 5]
-    days = ", ".join(f"2025-03-{d:02d}" for d in missing)
+    days = "9 days, the first 3: 2025-03-04, 2025-03-05, and 2025-03-06"
+    assert len(missing) == 9
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(
-            f"stocks.trades: no flat file exists for {days}, nor for any later day up to a "
-            "week after the range; Massive publishes a day's file the next day, so these files "
-            "will not appear. To read them, read REST with source=dm.HistorySource.REST, or end "
-            "the range before them"
+            f"stocks.trades: Massive has no flat file for {days}, nor for any later day up to "
+            "a week after the range. Massive publishes a day's file the next day, so these "
+            "files will not appear. Pass source=dm.HistorySource.REST to read them from REST, "
+            "or end the range before them."
         )
         + "$",
     ):
@@ -1725,8 +1742,8 @@ def test_a_missing_day_rest_cannot_serve_raises_under_auto(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     remedy = (
-        "Retry later; REST cannot serve this read: stocks.trades history over REST needs "
-        "explicit symbols"
+        "REST cannot serve this read, since stocks.trades history over REST needs explicit "
+        "symbols. Call the method again later."
     )
     with pytest.raises(
         dm.MassiveError,
@@ -1757,8 +1774,8 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     assert req.symbols == tuple(sorted(MANY))
     assert window.span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
     assert caplog.messages[-1].startswith(
-        "stocks.trades history: AUTO read REST because the flat files are missing for these "
-        "days: 1 [2025-03-04]"
+        "stocks.trades history: Massive has no flat files for 2025-03-04. The read took those "
+        "rows from REST instead."
     )
     assert t.attributes()["TableDescription"].endswith(
         "Read from flat files, and from REST for 2025-03-04, whose files are missing."
@@ -1905,7 +1922,10 @@ def test_crypto_trades_every_day(
     # A missing Sunday file is no weekend for crypto: with no later file yet, it may not be
     # out yet ...
     clock(datetime(2025, 3, 3, 12, tzinfo=NEW_YORK))
-    with pytest.raises(dm.MassiveError, match=r"the flat file for 2025-03-02 is not published"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=re.escape(not_published("crypto.trades", "2025-03-02", READ_REST)) + "$",
+    ):
         q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES, wait=True)
     clock(NOW)
     caplog.clear()
@@ -2356,11 +2376,12 @@ def test_a_futures_range_with_no_later_session_within_a_week_raises(
         # The run's only missing trading day, Monday 01-20, lies three weeks before today and
         # no session file followed it within a week: it has no file at all.
         match=re.escape(
-            "futures.trades: no flat file exists for 2025-01-20, nor for any later day up to a "
-            "week after the range; Massive publishes a day's file the next day, so these files "
-            "will not appear. To read them, end the range before them; REST cannot serve this "
-            "read: futures.trades history over REST needs explicit symbols"
-        ),
+            "futures.trades: Massive has no flat file for 2025-01-20, nor for any later day up "
+            "to a week after the range. Massive publishes a day's file the next day, so these "
+            "files will not appear. REST cannot serve this read, since futures.trades history "
+            "over REST needs explicit symbols. End the range before them."
+        )
+        + "$",
     ):
         q.history(
             datetime(2025, 1, 17, 18, tzinfo=CHICAGO),  # the weekend sessions are missing too
@@ -2583,10 +2604,11 @@ def test_mixed_futures_bounds_are_refused_before_any_read(
 
 
 OTHER_SESSIONS = (
-    "futures.trades: the flat file us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz holds rows "
-    "of session 2025-03-03, not only of its own 2025-03-04; each row keeps its own session in "
-    "Date and is kept when that session was requested, but rows of a requested session may "
-    "sit in a neighbouring day's file, which a call by dates does not read, and be missing"
+    "futures.trades: Massive's flat file us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz "
+    "holds rows of session 2025-03-03 as well as of its own 2025-03-04. Each row keeps its own "
+    "session in Date. Rows of a requested session may sit in a neighbouring day's file, which a "
+    "call by dates does not read, and be missing. To include them, read a wider range of "
+    "dates, or by datetimes."
 )
 
 
@@ -2624,9 +2646,9 @@ def test_a_futures_row_keeps_its_own_session_and_the_call_keeps_the_requested(
         doubts
         == [
             (
-                "futures.trades history: the flat files hold rows of sessions other than their "
-                "own day's, so rows of session(s) 2025-03-04 may sit in a file outside the range "
-                "and be missing; read a wider range of dates, or by datetimes, to include them"
+                "futures.trades history: Massive's flat files hold rows of sessions other than "
+                "their own day's, so rows of 2025-03-04 may sit in a file outside the range and "
+                "be missing. To include them, read a wider range of dates, or by datetimes."
             )
         ]
         * 2
@@ -2714,13 +2736,12 @@ def test_a_refused_futures_venue_names_the_venue(
         with pytest.raises(
             dm.EntitlementError,
             match=(
-                r"the plan does not include NYMEX futures flat files: HTTP 403 for "
+                r"^futures\.trades: Massive refused the flat files of NYMEX\. HTTP 403 for "
                 r"s3://flatfiles/us_futures_nymex/trades_v1/2025/03/2025-03-04\.csv\.gz at "
-                r"https://files\.massive\.com \(AccessDenied: Access Denied\); pass "
-                r"venues={dm\.FuturesVenue\.<VENUE>, \.\.\.} with only the venues the plan "
-                r"includes, or leave venues out; to skip the venues S3 refuses, pass "
-                r"on_error=dm\.ErrorPolicy\(refused_venues=dm\.OnError\.LOG\) to the call or "
-                r"to dm\.MassiveConfig\.$"
+                r"https://files\.massive\.com \(AccessDenied: Access Denied\) Leave "
+                r"dm\.FuturesVenue\.NYMEX out of venues, or, to skip every venue Massive "
+                r"refuses, pass on_error=dm\.ErrorPolicy\(refused_venues=dm\.OnError\.LOG\) to "
+                r"the call or to dm\.MassiveConfig\.$"
             ),
         ):
             q.history("2025-03-04", "2025-03-04", wait=True)
@@ -2749,18 +2770,16 @@ def two_days_of_venues(
 
 
 SKIPPED_NYMEX = (
-    r"futures\.trades history \(MassiveSession #\d+ call-\d+\): skipping the flat files of "
-    "NYMEX for the whole range, since Massive refused them; name only the exchanges the plan "
-    "includes in venues= to request none of them. S3 refused: NYMEX: HTTP 403 for "
+    r"futures\.trades history \(MassiveSession #\d+ call-\d+\): Massive refused the flat "
+    "files of NYMEX for the whole range: HTTP 403 for "
     rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com "
     r"\(AccessDenied: Access Denied\)"
 )
 """The DEBUG record of a read that skipped NYMEX after S3 refused `REFUSED_0305`."""
 
 NYMEX_ALARM = (
-    r"futures\.trades table \d+: refused_venues: skipping the flat files of NYMEX for the whole "
-    "range, since Massive refused them; name only the exchanges the plan includes in venues= to "
-    r"request none of them\. S3 refused: NYMEX: HTTP 403 for "
+    r"futures\.trades table \d+: refused_venues: Massive refused the flat files of NYMEX for "
+    "the whole range: HTTP 403 for "
     rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com "
     r"\(AccessDenied: Access Denied\) \(at [^)]*call-\d+\); "
     r"m\.problems\(\) lists it and every later refused_venues problem of this table, which the "
@@ -2800,17 +2819,27 @@ def test_a_read_that_leaves_venues_out_skips_a_refused_venue_whatever_the_settin
 
 
 def test_a_read_that_leaves_venues_out_fails_when_every_venue_is_refused(
-    *, session: dm.MassiveSession, fake_s3: FakeS3, two_days_of_venues: Callable[[], None]
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     two_days_of_venues()
     fake_s3.refuse("us_futures_", status=403, code="AccessDenied", message="No")
     q = session.futures.trades(dm.ALL)
     with pytest.raises(
         dm.EntitlementError,
-        match=r"^the plan does not include the flat files of any venue requested \(CME, CBOT, "
-        r"NYMEX, COMEX\): ",
+        match=r"^futures\.trades: Massive refused the flat files of every venue the read asked "
+        r"for, CME, CBOT, NYMEX, and COMEX\. ",
     ):
         q.history("2025-03-04", "2025-03-04", wait=True)
+    # The advice works: contract tickers with source=dm.HistorySource.REST read from REST.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    contracts = session.futures.trades(["ESZ6"])
+    t = contracts.history("2025-03-04", "2025-03-04", source=HistorySource.REST, wait=True)
+    assert pick(t, "Symbol") == [("from REST",)]
 
 
 @pytest.mark.parametrize("policy", [OnError.LOG, OnError.IGNORE])
@@ -2909,7 +2938,7 @@ def test_a_venue_refused_past_the_range_end_is_skipped_for_the_whole_range(
             "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange."
         )
         assert [r.getMessage() for r in caplog.records if "holiday" in r.getMessage()] == []
-        assert f"S3 refused: NYMEX: HTTP 403 for s3://flatfiles/{later}" in caplog.text
+        assert f"of NYMEX for the whole range: HTTP 403 for s3://flatfiles/{later}" in caplog.text
     finally:
         m.close()
 
@@ -2928,7 +2957,8 @@ def test_a_call_whose_only_venue_is_refused_past_the_range_end_raises(
     )
     with pytest.raises(
         dm.EntitlementError,
-        match=r"^the plan does not include the flat files of any venue requested \(NYMEX\): ",
+        match=r"^futures\.trades: Massive refused the flat files of every venue the read asked "
+        r"for, NYMEX\. ",
     ):
         q.history("2025-03-04", "2025-03-05", wait=True)
 
@@ -3069,11 +3099,11 @@ def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
         with pytest.raises(
             dm.EntitlementError,
             match=(
-                r"^the plan does not include the flat files of any venue requested \(CME, "
-                r"NYMEX\): HTTP 403 for s3://flatfiles/us_futures_cme/trades_v1/2025/03/"
-                r"2025-03-04\.csv\.gz at https://files\.massive\.com \(AccessDenied: No\); pass "
-                r"venues={dm\.FuturesVenue\.<VENUE>, \.\.\.} with only the venues the plan "
-                "includes$"
+                r"^futures\.trades: Massive refused the flat files of every venue the read "
+                r"asked for, CME and NYMEX\. HTTP 403 for s3://flatfiles/us_futures_cme/"
+                r"trades_v1/2025/03/2025-03-04\.csv\.gz at https://files\.massive\.com "
+                r"\(AccessDenied: No\) To read from REST instead, pass contract tickers such as "
+                r"'ESZ6' in place of dm\.ALL, with source=dm\.HistorySource\.REST\.$"
             ),
         ) as info:
             q.history("2025-03-04", "2025-03-04", wait=True)
@@ -3083,7 +3113,7 @@ def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
             (ProblemCause.REFUSED_VENUES, OnError.IGNORE, "CME"),
             (ProblemCause.REFUSED_VENUES, OnError.IGNORE, "NYMEX"),
         ]
-        assert ["S3 refused: CME" in events[0].detail, "S3 refused: NYMEX" in events[1].detail] == [
+        assert ["of CME for" in events[0].detail, "of NYMEX for" in events[1].detail] == [
             True,
             True,
         ]
@@ -3120,7 +3150,7 @@ def test_the_call_overrides_the_sessions_refused_venues(
             t = q.history("2025-03-04", "2025-03-04", wait=True)
             assert pick(t, "ReportSequence") == kept
         else:
-            with pytest.raises(dm.EntitlementError, match="COMEX futures flat files"):
+            with pytest.raises(dm.EntitlementError, match=r"the flat files of COMEX\. "):
                 q.history("2025-03-04", "2025-03-04", wait=True)
     finally:
         m.close()
@@ -3156,7 +3186,9 @@ def test_a_refused_file_is_an_entitlement_error(
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
         dm.EntitlementError,
-        match=r"the plan does not include these flat files: .*\(AccessDenied: Access Denied\)",
+        match=r"^stocks\.trades: Massive refused its flat files\. HTTP 403 for "
+        rf"s3://flatfiles/{re.escape(TRADES_0303)} at https://files\.massive\.com "
+        r"\(AccessDenied: Access Denied\)$",
     ) as info:
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
@@ -3184,10 +3216,12 @@ def test_rejected_credentials_are_an_authentication_error(
     with pytest.raises(
         dm.AuthenticationError,
         match=re.escape(
-            f"S3 rejected the flat-file credentials: HTTP 403 for s3://flatfiles/{key} at "
-            f"https://files.massive.com ({code}: Rejected); check MassiveConfig "
-            "s3_access_key_id and s3_secret_access_key"
-        ),
+            f"{spec.name}: Massive rejected the flat-file credentials. HTTP 403 for "
+            f"s3://flatfiles/{key} at https://files.massive.com ({code}: Rejected) Pass the S3 "
+            "access key Massive's dashboard shows as s3_access_key_id and s3_secret_access_key "
+            "to dm.MassiveConfig."
+        )
+        + "$",
     ) as info:
         q.history("2025-03-04", "2025-03-04", wait=True)
     assert not isinstance(info.value, dm.EntitlementError)
@@ -3385,8 +3419,9 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
         q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
     assert type(info.value) is dm.MassiveError
     assert str(info.value) == (
-        f"cannot read {LOCATION.format(TRADES_0303)}: HTTP 404 ({code}: {message}); check "
-        "MassiveConfig s3_bucket and s3_endpoint_url"
+        f"stocks.trades: cannot read {LOCATION.format(TRADES_0303)}: HTTP 404 ({code}: "
+        f"{message}) The usual cause is an s3_bucket or s3_endpoint_url in dm.MassiveConfig "
+        "that is not Massive's. Leave both out to read Massive's."
     )
     assert (info.value.status, info.value.request_id) == (404, fake_s3.request_id)
     # Not skipped as holidays: the call fails, and its failure is logged with its id, at DEBUG
@@ -3406,13 +3441,14 @@ def test_a_range_without_any_file_raises(
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with (
         caplog.at_level(logging.WARNING, logger=LOGGER),
-        pytest.raises(dm.MassiveError, match=r"the flat file for 2025-03-03 is not published"),
+        pytest.raises(dm.MassiveError, match=r"the flat file for 2025-03-03 yet\. "),
     ):
         q.history("2025-03-01", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert caplog.messages == [
         (
-            "stocks.trades: 0 of 2 trading days' files exist (2025-03-03..2025-03-04, first "
-            f"looked for at {TRADES_0303}); the bucket, prefix, or venue may be wrong"
+            "stocks.trades: Massive has none of the flat files of the 2 trading days from "
+            f"2025-03-03 to 2025-03-04, the first looked for at {TRADES_0303}. The usual cause is "
+            "an s3_bucket or s3_endpoint_url in dm.MassiveConfig that is not Massive's."
         )
     ]
 
@@ -3447,8 +3483,9 @@ def test_a_crypto_weekend_without_files_warns_about_the_address(
         q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES, wait=True)
     assert caplog.messages == [
         (
-            "crypto.trades: 0 of 2 trading days' files exist (2025-03-01..2025-03-02, first "
-            f"looked for at {saturday}); the bucket, prefix, or venue may be wrong"
+            "crypto.trades: Massive has none of the flat files of the 2 trading days from "
+            f"2025-03-01 to 2025-03-02, the first looked for at {saturday}. The usual cause is an "
+            "s3_bucket or s3_endpoint_url in dm.MassiveConfig that is not Massive's."
         )
     ]
 
@@ -3784,7 +3821,7 @@ def test_a_read_stopped_while_it_waits_for_a_connection_is_cancelled_not_missing
         client._slots._ready.wait = noted  # type: ignore[method-assign]  # see the wait
         for read in (
             lambda cancel: transport._read_key(transform, key, cancel=cancel),
-            lambda cancel: transport._opened(key, cancel=cancel),
+            lambda cancel: transport._opened(key, "stocks.trades", cancel=cancel),
         ):
             waiting.clear()
             cancel = _massive.Cancel()
@@ -4278,8 +4315,10 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(
-            f"cannot read s3://flatfiles/{TRADES_0303} at https://files.massive.com: malloc of "
-            "size 1048576 failed"
+            "stocks.trades: the library could not convert Massive's flat file "
+            f"s3://flatfiles/{TRADES_0303} at https://files.massive.com: "
+            "ArrowMemoryError('malloc of size 1048576 failed'). This is a bug in "
+            "deephaven-massive. "
         ),
     ) as info:
         q.history("2025-03-03", "2025-03-03", wait=True)

@@ -48,7 +48,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, assert_never
 
-from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
+from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST, delayed_fix
 from deephaven_massive._datasets.column_reference import page_url
 from deephaven_massive._datasets.feeds import dataset_hosts, fmv_host
 from deephaven_massive._enums import (
@@ -210,18 +210,6 @@ def pinned(evidence: str) -> bool:
     return evidence == _PINNED or evidence.startswith(f"{_PINNED}, ")
 
 
-def _websocket_hosts_hint(asset_class: AssetClass) -> str:
-    """Return the configuration that pins the class's host, for log messages.
-
-    Args:
-        asset_class: The class.
-
-    Returns:
-        For example `MassiveConfig(websocket_hosts={dm.AssetClass.STOCKS: "<host>"})`.
-    """
-    return f'MassiveConfig(websocket_hosts={{dm.AssetClass.{asset_class.name}: "<host>"}})'
-
-
 def _real_time(asset_class: AssetClass, evidence: str) -> HostDecision:
     """Return the real-time host's decision.
 
@@ -246,13 +234,16 @@ def _unconfirmed_real_time(asset_class: AssetClass, evidence: str) -> HostDecisi
     Returns:
         `socket.massive.com`, `REALTIME`, with the evidence.
     """
+    subscription = subscription_of(asset_class)
     logger.warning(
-        "%s WebSocket host: %s; streaming from the real-time feed %s, and a refusal from "
-        "Massive fails the refused streams with its text (pin another host with %s)",
+        "%s streams: the library cannot tell from Massive's snapshot whether this key's %s "
+        "data is delayed, so it connects to the real-time feed %s. The snapshot showed: %s "
+        "If Massive refuses a stream there, its table fails with Massive's text. %s",
         asset_class.value,
-        evidence,
+        subscription,
         REALTIME_HOST,
-        _websocket_hosts_hint(asset_class),
+        evidence if evidence.endswith(".") else f"{evidence}.",
+        delayed_fix(subscription, purpose="To connect to Massive's delayed feed instead"),
     )
     return HostDecision(REALTIME_HOST, Recency.REALTIME, evidence)
 
@@ -465,12 +456,13 @@ def _pinned(
     evidence = f"{_PINNED}, {found.why}"
     if found.warn:
         logger.warning(
-            "%s WebSocket host: %s (%s); streaming from the pinned host with its recency %s "
-            "(a new session reads Massive's label again)",
+            "%s streams: the library cannot tell from Massive's snapshot whether the data on "
+            "the pinned host %s is delayed, so m.connections() shows its Recency as %s. The "
+            "snapshot showed: %s A new session reads Massive's snapshot again.",
             asset_class.value,
             host,
-            evidence,
             found.recency,
+            found.why if found.why.endswith(".") else f"{found.why}.",
         )
     else:
         logger.info(

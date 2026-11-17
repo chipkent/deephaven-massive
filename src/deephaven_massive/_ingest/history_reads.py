@@ -62,7 +62,7 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._ingest.refused_venues import refused_note, refused_source
 from deephaven_massive._ingest.symbol_reads import split_by_symbol, symbol_outcomes
-from deephaven_massive._log_limits import LoggedKeys, bounded_list
+from deephaven_massive._log_limits import LoggedKeys, prose_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
@@ -210,8 +210,8 @@ def read_history(
         merged = merge([read.empty, *(part for _, part in read.parts), *filled])
         table = merged.sort(time_column(spec.times))
     days = ", ".join(day.isoformat() for day in read.unread)
-    missing = bounded_list(day.isoformat() for day in read.unread)
-    _warn_rest_served(core, spec, f"the flat files are missing for these days: {missing}")
+    missing = prose_list((day.isoformat() for day in read.unread), "days")
+    _warn_rest_served(core, spec, f"Massive has no flat files for {missing}")
     flat = TRANSPORT_LABELS[Transport.FLAT_FILES]
     served = f"Read from {flat}, and from REST for {days}, whose files are missing."
     return table, served, lacks
@@ -282,7 +282,7 @@ def _scan(
                 refusal = _refused_flat_files(spec, error, request)
                 raise refusal from error
             raise
-        _warn_rest_served(core, spec, f"S3 refused the flat files ({error})")
+        _warn_rest_served(core, spec, f"Massive refused the flat files. {error}")
         return None
 
 
@@ -302,26 +302,28 @@ def _check_published(
     """
     infer = forced or problem is not None
     if read.absent:
-        days = ", ".join(day.isoformat() for day in read.absent)
+        days = prose_list((day.isoformat() for day in read.absent), "days")
         remedy = (
-            "read REST with source=dm.HistorySource.REST, or end the range before them"
+            "Pass source=dm.HistorySource.REST to read them from REST, or end the range "
+            "before them."
             if problem is None
-            else f"end the range before them; REST cannot serve this read: {problem}"
+            else f"REST cannot serve this read, since {problem}. End the range before them."
         )
         raise MassiveError(
-            f"{spec.name}: no flat file exists for {days}, nor for any later day up to "
-            f"a week after the range; Massive publishes a day's file the next day, so "
-            f"these files will not appear. To read them, {remedy}"
+            f"{spec.name}: Massive has no flat file for {days}, nor for any later day up to "
+            "a week after the range. Massive publishes a day's file the next day, so these "
+            f"files will not appear. {remedy}"
         )
     if read.unread and infer:
         first = read.unread[0].isoformat()
         remedy = (
-            "Retry later, or read REST with source=dm.HistorySource.REST"
+            "Call the method again later, or pass source=dm.HistorySource.REST to read the "
+            "day from REST."
             if problem is None
-            else f"Retry later; REST cannot serve this read: {problem}"
+            else f"REST cannot serve this read, since {problem}. Call the method again later."
         )
         raise MassiveError(
-            f"{spec.name}: the flat file for {first} is not published yet. "
+            f"{spec.name}: Massive has not published the flat file for {first} yet. "
             f"{PUBLICATION_NOTE}. {remedy}",
             is_retryable=True,
         )
@@ -392,11 +394,11 @@ def _uncertain_sessions(spec: DatasetSpec, sessions: Sequence[date]) -> str | No
         return None
     named = ", ".join(day.isoformat() for day in sessions)
     logger.warning(
-        "%s history: the flat files hold rows of sessions other than their own day's, so "
-        "rows of session(s) %s may sit in a file outside the range and be missing; read a "
-        "wider range of dates, or by datetimes, to include them",
+        "%s history: Massive's flat files hold rows of sessions other than their own day's, "
+        "so rows of %s may sit in a file outside the range and be missing. To "
+        "include them, read a wider range of dates, or by datetimes.",
         spec.name,
-        named,
+        prose_list(sessions, "sessions"),
     )
     return (
         f"Session(s) {named} may be incomplete: Massive's flat files held rows of other "
@@ -682,8 +684,8 @@ def _rest_days_by_symbol(
         symbol that failed with its error; and the symbols Massive had no data for: no row in
         the files, and HTTP 404 from every REST read (`SymbolRows.no_data`).
     """
-    missing = bounded_list(day.isoformat() for day in days)
-    _warn_rest_served(core, spec, f"the flat files are missing for these days: {missing}")
+    missing = prose_list((day.isoformat() for day in days), "days")
+    _warn_rest_served(core, spec, f"Massive has no flat files for {missing}")
     rest = core.rest_transport()
     pieces = {symbol: [table] for symbol, table in tables.items()}
     failures: dict[str, MassiveError] = {}
@@ -748,19 +750,24 @@ def _warn_rest_served(core: SessionCore, spec: DatasetSpec, why: str) -> None:
     Args:
         core: The session's core, whose catalog names the columns.
         spec: The dataset.
-        why: Why REST served the read, such as `"the flat files are missing for these days:
-            1 [2025-03-04]"`.
+        why: Why REST served the read, as one or more sentences, such as `"Massive has no
+            flat files for 2025-03-04"`; a final period is added when it has none.
     """
     catalog = core.catalog
     lost = catalog.history_columns(spec, Transport.FLAT_FILES) - catalog.history_columns(
         spec, Transport.REST
     )
     columns = (
-        f"; those rows leave {', '.join(sorted(lost))} null, which the flat files fill"
+        f" Those rows leave {prose_list(sorted(lost), 'columns')} null, which the flat files fill."
         if lost
         else ""
     )
-    logger.warning("%s history: AUTO read REST because %s%s", spec.name, why, columns)
+    logger.warning(
+        "%s history: %s The read took those rows from REST instead.%s",
+        spec.name,
+        why if why.endswith(".") else f"{why}.",
+        columns,
+    )
 
 
 def _refused_flat_files(
@@ -784,8 +791,7 @@ def _refused_flat_files(
     if rest_history_problem(spec, request) is not None:
         return error
     return EntitlementError(
-        f"{error}; REST serves this read too: pass source=dm.HistorySource.REST to "
-        "history() (it can fill other columns; columns() shows which)",
+        f"{error} To read from REST instead, pass source=dm.HistorySource.REST to history().",
         status=error.status,
         request_id=error.request_id,
     )

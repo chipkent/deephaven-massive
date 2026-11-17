@@ -121,7 +121,7 @@ READ_PATIENCE: Final = 600.0
 """Seconds a read its caller waits for waits out its bucket's pauses before it fails with status
 429."""
 
-LIVE_TABLE_ADVICE: Final = "raise MassiveConfig.max_outage to wait longer"
+LIVE_TABLE_ADVICE: Final = "Pass a larger max_outage to dm.MassiveConfig to wait longer."
 """The remedy the give-up error of a read that feeds a live table ends with (`Patience.advice`)."""
 
 CONSOLE_PATIENCE: Final = 90.0
@@ -201,15 +201,12 @@ def console_advice(max_outage: float) -> str:
         max_outage: The session's `MassiveConfig.max_outage`, in seconds.
 
     Returns:
-        The remedy, or empty when there is none to give.
+        The remedy, `"Leave out wait=True to read in the background."`, or empty when there
+        is none to give.
     """
     if max_outage <= CONSOLE_PATIENCE:
         return ""
-    return (
-        f"this read ran inside a Deephaven console command, which waits out only "
-        f"{CONSOLE_PATIENCE:.0f} s of pauses; leave out wait=True to let fetch() or history() "
-        f"read in the background, which waits out MassiveConfig.max_outage ({max_outage:g} s)"
-    )
+    return "Leave out wait=True to read in the background."
 
 
 def read_patience(exec_ctx: ExecutionContext, *, max_outage: float, waiter: Waiter) -> Patience:
@@ -464,12 +461,10 @@ class GovernorRegistry:
             paced = _lowest(entry.holders)
         if conflict is not None:
             logger.warning(
-                "%s declares rest_requests_per_minute %s, but %s, which uses the same API key, "
-                "declares %s; Massive counts their requests together, so both pace %s, the "
-                "lowest limit declared for each subscription",
-                label,
+                "This session declares rest_requests_per_minute %s, and another session that "
+                "uses the same API key declares %s. Massive counts their requests together, so "
+                "both pace %s, the lowest limit declared for each subscription.",
                 _names(mine),
-                conflict.label,
                 _names(conflict.limits),
                 _names(paced),
             )
@@ -584,37 +579,35 @@ class RateLimitNotices:
         if bucket == OTHER:
             what = "a request outside Massive's subscriptions"
         learns = (
-            "once the pause ends, they are paced at the number of them Massive answered of "
-            "those sent in the refusal's clock minute, if it answered any (the next log line "
-            "and m.rate_limits() give it)"
+            "Once the pause ends, they are paced at the number of them Massive answered of "
+            "those sent in the refusal's clock minute, if it answered any. The next log line "
+            "and m.rate_limits() give it."
         )
         if bucket in self._declared:
             declared = self._declared[bucket]
             advice = (
-                f"its requests are already paced at the {declared} per minute declared, so "
+                f"Its requests are already paced at the {declared} per minute declared, so "
                 "either other sessions, processes, or API keys of the account share the limit, "
-                f"or {declared} is above Massive's limit; requests pause and resume"
+                f"or {declared} is above Massive's limit. Requests pause and resume."
             )
         elif per_minute and bucket == OTHER:
             advice = (
-                "that is Massive's limit on reference and other data outside the "
-                f"subscriptions, which it counts on their own; {learns}"
+                "That is Massive's limit on reference and other data outside the "
+                f"subscriptions, which it counts on their own. {learns}"
             )
         elif per_minute:
             advice = (
-                f"Massive limits these requests per minute; {learns}; declare "
-                f"MassiveConfig(rest_requests_per_minute={{dm.Subscription.{bucket.upper()}: "
-                "<limit>}) to pace them from the first request, with the limit Massive gives "
-                "you"
+                f"Massive limits these requests per minute. {learns} To pace them from the "
+                "first request, pass rest_requests_per_minute="
+                f"{{dm.Subscription.{bucket.upper()}: n}} to dm.MassiveConfig, with the limit n "
+                "Massive gives you."
             )
         else:
             advice = (
-                "requests pause and resume; if this persists, send the request id to Massive's "
-                "support"
+                "Requests pause and resume. If this persists, send the request_id to Massive's "
+                "support."
             )
-        logger.info(
-            "%s: Massive refused %s with HTTP 429 (%s); %s", self._label, what, error, advice
-        )
+        logger.info("Massive refused %s with HTTP 429. %s %s", what, error, advice)
 
 
 def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
@@ -724,9 +717,9 @@ def announce(
         what = f"{count} requests" if words is None else f"{count} requests, {words}"
         if pauses_live_tables:
             logger.warning(
-                "%s: %s; paced at %d requests a minute (%s); this command will pause every "
-                "live table on the server for at least %d min: leave out wait=True to read "
-                "in the background",
+                "%s: %s, paced at %d requests a minute for %s. This command will pause every "
+                "live table on the server for at least %d min. Leave out wait=True to read "
+                "in the background.",
                 read,
                 what,
                 limit,
@@ -735,8 +728,8 @@ def announce(
             )
         else:
             logger.info(
-                "%s: %s; paced at %d requests a minute (%s); at that pace they take at "
-                "least %d min",
+                "%s: %s, paced at %d requests a minute for %s. At that pace they take at "
+                "least %d min.",
                 read,
                 what,
                 limit,
@@ -786,12 +779,14 @@ class PaceCheck:
             self._warned = True
             logger.warning(
                 "%s: each cycle makes %d %s requests, but they are paced at %d per minute, so a "
-                "cycle takes at least %.0f s, longer than the %g s interval; cycles run late",
+                "cycle takes at least %.0f s, longer than the %g s interval, and cycles run "
+                "late. To keep them on time, pass poll() an interval of %.0f s or more.",
                 self._read,
                 count,
                 bucket,
                 limit,
                 needs,
                 self._interval,
+                math.ceil(needs),
             )
             return

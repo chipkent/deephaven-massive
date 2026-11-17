@@ -84,7 +84,11 @@ def test_the_flat_file_transport_needs_s3_credentials(fake_s3: FakeS3) -> None:
         dataclasses.replace(CONFIG, s3_access_key_id=None, s3_secret_access_key=None)
     )
     try:
-        with pytest.raises(ValueError, match="flat files need MassiveConfig s3_access_key_id"):
+        with pytest.raises(
+            ValueError,
+            match=r"^Reading flat files needs S3 credentials\. Pass s3_access_key_id and "
+            r"s3_secret_access_key to dm\.MassiveConfig\.$",
+        ):
             m._core.flat_file_transport()
     finally:
         m.close()

@@ -315,8 +315,16 @@ def test_a_pinned_host_s_recency_is_massive_s_label(
     assert pinned(decision.evidence)
     (record,) = caplog.records
     assert record.levelno == (logging.WARNING if warned else logging.INFO)
-    assert host in record.getMessage()
-    assert evidence in record.getMessage()
+    if not warned:
+        assert host in record.getMessage()
+        assert evidence in record.getMessage()
+        return
+    shown = why.format(path=probe.path, name=asset_class.value).rstrip(".")
+    assert record.getMessage() == (
+        f"{asset_class.value} streams: the library cannot tell from Massive's snapshot whether "
+        f"the data on the pinned host {host} is delayed, so m.connections() shows its Recency "
+        f"as UNKNOWN. The snapshot showed: {shown}. A new session reads Massive's snapshot again."
+    )
 
 
 def test_a_pinned_business_host_without_a_label_is_never_real_time() -> None:
@@ -470,8 +478,21 @@ def test_an_undocumented_timeframe_streams_real_time_data(
     )
     (record,) = caplog.records
     assert record.levelno == logging.WARNING
-    assert "'END-OF-DAY'" in record.getMessage()
-    assert "websocket_hosts={dm.AssetClass.STOCKS" in record.getMessage()
+    assert record.getMessage() == (
+        "stocks streams: the library cannot tell from Massive's snapshot whether this key's "
+        "stocks data is delayed, so it connects to the real-time feed socket.massive.com. The "
+        "snapshot showed: last_trade.timeframe='END-OF-DAY', neither DELAYED nor REAL-TIME, in "
+        "the snapshot. If Massive refuses a stream there, its table fails with Massive's text. "
+        "To connect to Massive's delayed feed instead, pass "
+        "delayed_subscriptions={dm.Subscription.STOCKS} to dm.MassiveConfig."
+    )
+    # The advice works: with the setting, the stocks streams connect to the delayed feed.
+    advised = run(
+        AssetClass.STOCKS,
+        snapshot("stocks_unknown_timeframe.json"),
+        delayed=frozenset({Subscription.STOCKS}),
+    )
+    assert (advised.host, advised.recency) == (DELAYED_HOST, Recency.DELAYED)
 
 
 def test_delayed_beside_an_undocumented_timeframe_is_refused() -> None:

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from deephaven_massive._enums import FuturesVenue, OnError
 from deephaven_massive._errors import EntitlementError
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
 
 if TYPE_CHECKING:
@@ -77,10 +78,10 @@ class RefusedVenues:
         with self._lock:
             first = self._refusals.setdefault(venue, error)
         logger.debug(
-            "S3 refused %s; skipping venue %s%s",
-            error.message,
+            "skipping venue %s%s: %s",
             venue.name,
             "" if first is error else " (already refused)",
+            error.message,
         )
 
     def __contains__(self, venue: FuturesVenue | None) -> bool:
@@ -144,9 +145,8 @@ class RefusedVenues:
                 field=venue.name,
                 rows=0,
                 detail=(
-                    f"skipping the flat files of {venue.name} for the whole range, since Massive "
-                    "refused them; name only the exchanges the plan includes in venues= to "
-                    f"request none of them. S3 refused: {venue.name}: {error.message}"
+                    f"Massive refused the flat files of {venue.name} for the whole range: "
+                    f"{error.message.rstrip('.')}"
                 ),
                 at=at,
                 policy=self.policy,
@@ -157,19 +157,26 @@ class RefusedVenues:
             logger.debug("%s history (%s): %s", dataset, self.call, event.detail)
         problems(events)
 
-    def every_venue_refused(self) -> EntitlementError:
+    def every_venue_refused(self, dataset: str) -> EntitlementError:
         """Return the error of a call whose every requested venue S3 refused.
+
+        Args:
+            dataset: The dataset read, such as `"futures.trades"`, which starts the message.
 
         Returns:
             An `EntitlementError` naming the venues and the first one's refusal, with its status
-            and request id.
+            and request id, such as `"futures.trades: Massive refused the flat files of every
+            venue the read asked for, CME and NYMEX. Massive answered ... To read from REST
+            instead, pass contract tickers such as 'ESZ6' in place of dm.ALL, with
+            source=dm.HistorySource.REST."`.
         """
         refused = self._refused()
         first = refused[0][1]
+        names = prose_list((venue.name for venue, _ in refused), "venues", shown=len(refused))
         return EntitlementError(
-            f"the plan does not include the flat files of any venue requested ({_names(refused)}): "
-            f"{first.message}; pass venues={{dm.FuturesVenue.<VENUE>, ...}} with only the venues "
-            "the plan includes",
+            f"{dataset}: Massive refused the flat files of every venue the read asked for, "
+            f"{names}. {first.message} To read from REST instead, pass contract tickers such "
+            "as 'ESZ6' in place of dm.ALL, with source=dm.HistorySource.REST.",
             status=first.status,
             request_id=first.request_id,
         )
@@ -212,15 +219,3 @@ def refused_source(source: str, venues: tuple[FuturesVenue, ...]) -> str:
     if not venues:
         return source
     return f"{source} without {', '.join(venue.name for venue in venues)} (refused)"
-
-
-def _names(refused: tuple[tuple[FuturesVenue, WireEntitlementError], ...]) -> str:
-    """Name refused venues for a message, such as `"NYMEX, COMEX"`.
-
-    Args:
-        refused: The refused venues with their refusals.
-
-    Returns:
-        The venues' names, comma-separated.
-    """
-    return ", ".join(venue.name for venue, _ in refused)
