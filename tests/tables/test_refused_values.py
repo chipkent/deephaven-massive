@@ -67,17 +67,89 @@ def test_a_follower_gets_the_values_now_and_each_change_beside_its_own() -> None
     skipped.update(("btc",))  # the table's own skipped value joins them
     refused.change(())  # fixed or deleted
     assert spans_of(problems) == [
-        {"refused ^GSPC": ("^GSPC", OnError.IGNORE)},
-        {"refused ^GSPC": ("^GSPC", OnError.IGNORE), "btc": ("btc", None)},
+        {"refused None '^GSPC'": ("^GSPC", OnError.IGNORE)},
+        {"refused None '^GSPC'": ("^GSPC", OnError.IGNORE), "btc": ("btc", None)},
         {"btc": ("btc", None)},
     ]
     first = problems[0]
     assert isinstance(first, ProblemSpans)
     assert first.cause is ProblemCause.NONCANONICAL_SYMBOLS
-    assert first.spans["refused ^GSPC"].detail == "canonicalize_symbols refused it: not a pair"
+    assert (
+        first.spans["refused None '^GSPC'"].detail == "canonicalize_symbols refused it: not a pair"
+    )
     del skipped  # a follower that is gone gets nothing more
     refused.change(("^GSPC",))
     assert len(problems) == 3
+
+
+def test_a_table_of_values_is_a_source_of_its_own_named_by_its_column() -> None:
+    # A poll that reads a converted symbol table and a converted table of values: each table's
+    # refused values come and go alone, and the values table's spans name its column.
+    problems: list[Problem] = []
+    skipped = SkippedValues(RULE, stream_id=7, report=problems.extend)
+    symbols = RefusedValues(OnError.LOG, why={"^X": "not a pair"}.get)
+    values = RefusedValues(OnError.IGNORE, why={"no pe!": "not a ticker"}.get)
+    symbols.change(("^X",))
+    symbols.follow(skipped)
+    values.follow(skipped, field="Symbol")  # nothing refused there yet: no new snapshot
+    values.change(("no pe!",))  # refused
+    values.change(())  # fixed, or its row deleted: the symbol table's span holds on
+    symbols.change(())
+    assert spans_of(problems) == [
+        {"refused None '^X'": ("^X", OnError.LOG)},
+        {
+            "refused None '^X'": ("^X", OnError.LOG),
+            "refused 'Symbol' 'no pe!'": ("no pe!", OnError.IGNORE),
+        },
+        {"refused None '^X'": ("^X", OnError.LOG)},
+        {},
+    ]
+    spans = problems[1]
+    assert isinstance(spans, ProblemSpans)
+    assert (
+        spans.spans["refused None '^X'"].field,
+        spans.spans["refused 'Symbol' 'no pe!'"].field,
+    ) == (
+        None,
+        "Symbol",
+    )
+
+
+def test_one_converted_table_followed_as_both_symbols_and_values_is_two_sources() -> None:
+    problems: list[Problem] = []
+    skipped = SkippedValues(RULE, stream_id=7, report=problems.extend)
+    both = RefusedValues(OnError.LOG, why={"^X": "not a pair"}.get)
+    both.follow(skipped)
+    both.follow(skipped, field="Symbol")
+    both.change(("^X",))
+    both.change(())
+    # Each source takes the change in turn, so neither hides the other's span.
+    assert [sorted(found) for found in spans_of(problems)] == [
+        ["refused None '^X'"],
+        ["refused 'Symbol' '^X'", "refused None '^X'"],
+        ["refused 'Symbol' '^X'"],
+        [],
+    ]
+
+
+def test_two_sources_whose_values_read_alike_keep_a_span_each() -> None:
+    # The symbol table refuses "Symbol x" and the table of values in column Symbol refuses
+    # "x": each is its own span, whatever text the values hold.
+    problems: list[Problem] = []
+    skipped = SkippedValues(RULE, stream_id=7, report=problems.extend)
+    RefusedValues(OnError.LOG, why={"Symbol x": "no"}.get).follow(skipped)
+    values = RefusedValues(OnError.LOG, why={"x": "no"}.get)
+    values.follow(skipped, field="Symbol")
+    values.change(("x",))
+    symbols = RefusedValues(OnError.LOG, why={"Symbol x": "no"}.get)
+    symbols.change(("Symbol x",))
+    symbols.follow(skipped)
+    last = problems[-1]
+    assert isinstance(last, ProblemSpans)
+    assert sorted((span.symbol, span.field) for span in last.spans.values()) == [
+        ("Symbol x", None),
+        ("x", "Symbol"),
+    ]
 
 
 def test_a_live_converted_table_keeps_its_refused_values_current(
@@ -94,7 +166,7 @@ def test_a_live_converted_table_keeps_its_refused_values_current(
     problems: list[Problem] = []
     skipped = SkippedValues(RULE, stream_id=7, report=problems.extend)
     refused.follow(skipped)
-    assert [list(found) for found in spans_of(problems)] == [["refused ^X"]]
+    assert [list(found) for found in spans_of(problems)] == [["refused None '^X'"]]
     source.add(new_table([string_col("Id", ["3"]), string_col("Symbol", ["^Y"])]))
     wait_for(lambda: len(problems) == 2)
     source.add(new_table([string_col("Id", ["2"]), string_col("Symbol", ["ETH-USD"])]))  # fixed
@@ -102,9 +174,9 @@ def test_a_live_converted_table_keeps_its_refused_values_current(
     source.delete(new_table([string_col("Id", ["3"])]))  # deleted
     wait_for(lambda: len(problems) == 4)
     assert [list(found) for found in spans_of(problems)] == [
-        ["refused ^X"],
-        ["refused ^X", "refused ^Y"],
-        ["refused ^Y"],
+        ["refused None '^X'"],
+        ["refused None '^X'", "refused None '^Y'"],
+        ["refused None '^Y'"],
         [],
     ]
     release_scope(dh_exec_ctx, scope)

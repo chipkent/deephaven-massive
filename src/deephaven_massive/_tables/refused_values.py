@@ -7,7 +7,8 @@ kept current by a watch on the input table (`watchlist.SymbolWatch`, with a `Con
 that accepts what the converter converts). A live table that follows the returned table looks
 it up (`refused_values_of`) and joins it to its own skipped values (`watchlist.SkippedValues`),
 so each refused value is a `noncanonical_symbols` span of that table while some row holds it,
-and the span ends once every such row is fixed or deleted.
+and the span ends once every such row is fixed or deleted. A table follows each converted table
+it reads: its symbol table, and a `poll()`'s table of values too, whose spans name its column.
 
 Only the table `canonicalize_symbols` returns is known here, held weakly: a table derived from
 it is not, and a static input has no watch, since its rows never change.
@@ -119,7 +120,9 @@ class RefusedValues:
         self._why = why
         self._lock = threading.Lock()
         self._values: dict[str, str] = {}
-        self._followers: weakref.WeakSet[SkippedValues] = weakref.WeakSet()
+        # Each follower, held weakly, with the `field` it follows the table as; a follower may
+        # follow the same table twice, as its symbol table and as its table of values.
+        self._followers: list[tuple[weakref.ref[SkippedValues], str | None]] = []
         self._watch: SymbolWatch | None = None
 
     def keep(self, watch: SymbolWatch) -> None:
@@ -138,18 +141,25 @@ class RefusedValues:
         """
         with self._lock:
             self._values = {value: self._why(value) or "" for value in values}
-            for follower in list(self._followers):
-                follower.refused_changed(self._values, self.policy)
+            alive = []
+            for ref, field in self._followers:
+                follower = ref()
+                if follower is not None:  # a follower that is gone is dropped
+                    alive.append((ref, field))
+                    follower.refused_changed(self._values, self.policy, field=field)
+            self._followers = alive
 
-    def follow(self, follower: SkippedValues) -> None:
+    def follow(self, follower: SkippedValues, *, field: str | None = None) -> None:
         """Hand a follower the values refused now, then every change, while it lives.
 
         Args:
             follower: A table's skipped values, held weakly.
+            field: The column of a `poll()`'s table of values this table is, which the spans
+                name in `Field`; None when it is the follower's symbol table.
         """
         with self._lock:
-            self._followers.add(follower)
-            follower.refused_changed(self._values, self.policy)
+            self._followers.append((weakref.ref(follower), field))
+            follower.refused_changed(self._values, self.policy, field=field)
 
 
 def track_refused(table: Table, refused: RefusedValues) -> None:

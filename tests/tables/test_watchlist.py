@@ -972,4 +972,4 @@ def test_skipped_values_report_both_sources_in_order_across_threads() -> None:
         thread.join(30)
     last = reported[-1]
     assert isinstance(last, ProblemSpans)
-    assert sorted(last.spans) == ["refused r1", "v1"]  # each source's last value, 199 % 3
+    assert sorted(last.spans) == ["refused None 'r1'", "v1"]  # each source's last value, 199 % 3

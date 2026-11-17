@@ -1522,6 +1522,53 @@ def test_a_value_canonicalize_symbols_refuses_is_shown_until_its_row_is_deleted(
     assert not failed
 
 
+def test_a_value_canonicalize_symbols_refuses_in_a_table_of_values_is_shown(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
+) -> None:
+    # A table of underlyings passed through canonicalize_symbols, as in
+    # m.options.contracts(underlying=table).poll(60): the converter nulls the refused value,
+    # which the poll skips like any null, yet the poll lists it while the input holds it. Each
+    # spell of it is a span: refused, fixed, refused again, then deleted.
+    source = dh_input_table({"Id": dtypes.string, "Symbol": dtypes.string}, key_cols="Id")
+    source.add(new_table([string_col("Id", ["1", "2"]), string_col("Symbol", ["AAPL", "no pe!"])]))
+    converted = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    values = ValueTable(
+        "underlying", "underlying_ticker", "Symbol", underlying=True, table=converted
+    )
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
+    )
+    clock.wait_for_sleepers(1)
+    assert script.values == [("AAPL",)]
+
+    def refused() -> list[tuple[object, ...]]:
+        return sorted(
+            (r["StreamId"], r["Symbol"], r["Field"], r["Action"], r["EndedAt"] is not None)
+            for r in problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+        )
+
+    assert refused() == [(1, "no pe!", "Symbol", "SKIPPED", False)]
+    source.add(new_table([string_col("Id", ["2"]), string_col("Symbol", ["MSFT"])]))  # fixed
+    until(lambda: refused() == [(1, "no pe!", "Symbol", "SKIPPED", True)])
+    source.add(new_table([string_col("Id", ["3"]), string_col("Symbol", ["no pe!"])]))
+    until(lambda: len(refused()) == 2)  # refused again: a span of its own
+    assert refused() == [
+        (1, "no pe!", "Symbol", "SKIPPED", False),
+        (1, "no pe!", "Symbol", "SKIPPED", True),
+    ]
+    source.delete(new_table([string_col("Id", ["3"])]))  # deleted
+    until(lambda: refused() == [(1, "no pe!", "Symbol", "SKIPPED", True)] * 2)
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
+
+
 def test_a_freed_session_gets_no_problem_of_the_symbol_table(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
