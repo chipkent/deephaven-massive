@@ -388,9 +388,10 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 
 `snapshot` has one row per stock, with columns such as `DayClose`, `PrevDayClose`, and
 `TodaysChangePerc`. On Starter or Developer without the setting, the `snapshot` table fails with
-an error that names the setting to change. A snapshot opens no stream. Once you stream, as the
-next example does, `Recency` in `m.connections()` says whether each feed is live or delayed.
-[The problems example](#see-problems) shows the check.
+an error that names the setting to change.
+
+Once a table streams, as in the next example, `Recency` in `m.connections()` says whether its
+data is real-time or delayed. [The problems example](#see-problems) shows the check.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file. [Configuration](#configuration)
@@ -590,7 +591,7 @@ Four more live tables show what the session is doing:
 
 ```python continues
 streams = m.streams()  # each live table and background read: its State, and Error if it failed
-# each streaming connection, and in Recency whether its data is live or delayed
+# each streaming connection: its Host, State, and Recency, REALTIME or DELAYED
 feeds = m.connections().view(["Transport", "AssetClass", "Host", "State", "Recency"])
 rate_limits = m.rate_limits()  # each subscription's rate-limit State: READY, PACED, or PAUSED
 symbol_reads = m.symbol_reads()  # each watchlist symbol read: its State, and Error if it failed
@@ -599,9 +600,9 @@ symbol_reads = m.symbol_reads()  # each watchlist symbol read: its State, and Er
 Here `streams` has one row, for the ticker-details read, whose `State` ends `DONE`. `feeds`
 and `symbol_reads` stay empty, because this example opens no stream and reads no watchlist.
 
-Once a stream opens, `feeds` has a row for its connection, and its `Recency` tells you whether
-the data is live or delayed. `Recency` is `REALTIME` or `DELAYED`, as Massive labels the feed, or
-`UNKNOWN` when Massive gives no label.
+Once a stream opens, `feeds` shows its connection, and `Recency` says whether its data is
+real-time or delayed. `UNKNOWN` means the library can't tell, and it never treats that data as
+real-time.
 
 Troubleshooting's [diagnostics section](docs/troubleshooting.md#diagnostics) says when to check
 each table. For a table's columns, run `help()` on its method, such as
