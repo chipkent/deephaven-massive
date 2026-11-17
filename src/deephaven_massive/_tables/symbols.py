@@ -199,7 +199,7 @@ def _track_refused(
         table,
         _no_change,
         stream_id=0,
-        on_invalid=_no_failure,
+        on_invalid=lambda _message: None,  # the converted table fails with its input on its own
         on_skipped=refused.change,
     )
     watch.keep_alive_with(converted)
@@ -216,15 +216,6 @@ def _no_change(added: frozenset[str], removed: frozenset[str]) -> None:
         removed: Unused.
     """
     del added, removed
-
-
-def _no_failure(message: str) -> None:
-    """Ignore a failure of the input: the converted table fails with it on its own.
-
-    Args:
-        message: Unused.
-    """
-    del message
 
 
 def _arguments(

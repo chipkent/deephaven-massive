@@ -10,7 +10,7 @@ from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive._enums import AssetClass, OnError
-from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.problem_events import Problem, ProblemCause, ProblemSpans
 from deephaven_massive._tables.refused_values import (
     ConversionRule,
@@ -23,6 +23,7 @@ from deephaven_massive._tables.watchlist import SkippedValues, SymbolRowRule
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table_factory import InputTable
 
 RULE = SymbolRowRule("crypto.trades", AssetClass.CRYPTO, as_written=False, noncanonical=OnError.LOG)
@@ -80,7 +81,7 @@ def test_a_follower_gets_the_values_now_and_each_change_beside_its_own() -> None
 
 
 def test_a_live_converted_table_keeps_its_refused_values_current(
-    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+    dh_exec_ctx: ExecutionContext, dh_input_table: Callable[..., InputTable]
 ) -> None:
     source = dh_input_table({"Id": dtypes.string, "Symbol": dtypes.string}, key_cols="Id")
     source.add(new_table([string_col("Id", ["1", "2"]), string_col("Symbol", ["BTC-USD", "^X"])]))
@@ -106,11 +107,11 @@ def test_a_live_converted_table_keeps_its_refused_values_current(
         ["refused ^Y"],
         [],
     ]
-    scope.release()
+    release_scope(dh_exec_ctx, scope)
 
 
 def test_a_static_or_failing_conversion_tracks_nothing(
-    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+    dh_exec_ctx: ExecutionContext, dh_input_table: Callable[..., InputTable]
 ) -> None:
     static = dm.canonicalize_symbols(new_table([string_col("Symbol", ["^X"])]), AssetClass.CRYPTO)
     assert refused_values_of(static) is None
@@ -119,10 +120,10 @@ def test_a_static_or_failing_conversion_tracks_nothing(
     with scope.open():
         strict = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
     assert refused_values_of(strict) is None  # a refused value fails it instead
-    scope.release()
+    release_scope(dh_exec_ctx, scope)
 
 
-def test_a_tracked_table_is_forgotten_with_its_values(dh_exec_ctx: object) -> None:
+def test_a_tracked_table_is_forgotten_with_its_values(dh_exec_ctx: ExecutionContext) -> None:
     table = new_table([string_col("Symbol", ["a"])])
     refused = RefusedValues(OnError.LOG, why=RULE.refusal)
     track_refused(table, refused)
