@@ -41,14 +41,17 @@ decides which requests share one, how long each read waits, and what the user is
   it makes give up raises, and a `poll()` it makes late warns (`Poller`).
 - **Diagnostics.** `rate_limit_rows` turns the governor's snapshot into the rows of
   `m.rate_limits()`; the session's diagnostics writer pulls them whenever the governor
-  changes.
+  changes. Each pause also reaches the session's `m.problems()` as it starts, lengthens, and
+  ends: the lease hands the governor's pause notices to the session (`GovernorLease`).
 - **Notices.** `announce` logs, at INFO, how many requests a long static read makes and the
   least time pacing makes them take, and `PaceCheck` warns once when a `poll()` cycle needs
   more requests than its interval allows.
 
-Locks: the registry has one leaf lock. It calls into a governor (`declare`, `idle`) while
-holding it, so the order is the registry's lock, then the governor's, then whatever a governor
-listener takes (the diagnostics queue's leaf lock). Neither the registry's lock nor the
+Locks: the registry has one leaf lock. It calls into a governor (`declare`, `idle`,
+`subscribe_pauses`) while holding it, so the order is the registry's lock, then the governor's,
+then whatever a governor listener takes (the diagnostics queue's leaf lock), which a pause
+listener takes under the governor's lock; the diagnostics never call the governor while
+holding it. Neither the registry's lock nor the
 governor's is ever taken under `SessionCore.registry_lock`; the diagnostics queue's lock is, by
 every diagnostics write, which is safe because that lock is a leaf on both paths. None of them
 is held across a Deephaven call, a request, or a wait.
@@ -76,7 +79,7 @@ if TYPE_CHECKING:
 
     from deephaven.execution_context import ExecutionContext
 
-    from deephaven_massive._massive import Patience, RequestGovernor, WireError
+    from deephaven_massive._massive import Patience, PauseNotice, RequestGovernor, WireError
 
 __all__ = [
     "BUCKETS",
@@ -300,7 +303,7 @@ class GovernorLease:
     is collected unclosed. The lease refers to the registry, never to the session. Thread-safe.
     """
 
-    __slots__ = ("_holder", "_key", "_listener", "_registry", "governor")
+    __slots__ = ("_holder", "_key", "_listener", "_on_pause", "_registry", "governor")
 
     def __init__(
         self,
@@ -310,6 +313,7 @@ class GovernorLease:
         holder: int,
         governor: RequestGovernor,
         listener: Callable[[], None],
+        on_pause: Callable[[PauseNotice], None],
     ) -> None:
         """Bind the lease; the registry has already recorded the hold.
 
@@ -319,20 +323,23 @@ class GovernorLease:
             holder: The hold's number in the entry.
             governor: The shared governor.
             listener: The session's governor listener, removed by `release`.
+            on_pause: The session's pause listener, removed by `release`.
         """
         self._registry = registry
         self._key = key
         self._holder = holder
         self._listener = listener
+        self._on_pause = on_pause
         self.governor: Final = governor
 
     def release(self) -> None:
-        """End the hold: stop the session's listener and drop its declarations. Idempotent.
+        """End the hold: stop the session's listeners and drop its declarations. Idempotent.
 
         The subscriptions only this session declared become unpaced again, unless they learned
         a limit. The entry stays while its governor still holds slots or a pause.
         """
         self.governor.unsubscribe(self._listener)
+        self.governor.unsubscribe_pauses(self._on_pause)
         self._registry.release(self._key, self._holder)
 
 
@@ -355,6 +362,7 @@ class GovernorRegistry:
                 limits={Subscription.STOCKS: 5},
                 label="MassiveSession #1",
                 listener=lambda: None,
+                on_pause=lambda notice: None,
             )
             two = registry.lease(
                 api_key="k",
@@ -362,6 +370,7 @@ class GovernorRegistry:
                 limits={},
                 label="MassiveSession #2",
                 listener=lambda: None,
+                on_pause=lambda notice: None,
             )
             assert one.governor is two.governor
             one.release()
@@ -411,6 +420,7 @@ class GovernorRegistry:
         limits: Mapping[Subscription, int],
         label: str,
         listener: Callable[[], None],
+        on_pause: Callable[[PauseNotice], None],
     ) -> GovernorLease:
         """Take a hold on the governor of an API key and REST origin, creating it if needed.
 
@@ -428,6 +438,8 @@ class GovernorRegistry:
             label: The session's label, for the WARNING.
             listener: Called after every change of the governor (`RequestGovernor.subscribe`);
                 it must only enqueue.
+            on_pause: Told of every pause of the governor, from those open now
+                (`RequestGovernor.subscribe_pauses`); it must only enqueue.
 
         Returns:
             The lease, whose `governor` the session's REST client uses.
@@ -448,6 +460,7 @@ class GovernorRegistry:
             entry.holders[number] = _Holder(label, mine)
             entry.declare()
             entry.governor.subscribe(listener)
+            entry.governor.subscribe_pauses(on_pause)
             paced = _lowest(entry.holders)
         if conflict is not None:
             logger.warning(
@@ -461,7 +474,12 @@ class GovernorRegistry:
                 _names(paced),
             )
         return GovernorLease(
-            self, key=key, holder=number, governor=entry.governor, listener=listener
+            self,
+            key=key,
+            holder=number,
+            governor=entry.governor,
+            listener=listener,
+            on_pause=on_pause,
         )
 
     def release(self, key: tuple[str, tuple[str, str, int]], holder: int) -> None:

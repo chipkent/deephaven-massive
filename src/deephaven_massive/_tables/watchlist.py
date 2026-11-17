@@ -75,6 +75,7 @@ from deephaven_massive._tables.problem_events import (
     ProblemEvent,
     SpanTracker,
 )
+from deephaven_massive._tables.refused_values import refused_detail
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -513,12 +514,14 @@ class SkippedValues:
     """A table's skipped symbol-table values, as its `noncanonical_symbols` spans.
 
     Each value a table skips is one span of `m.problems()` while some row holds it, which ends
-    once every row of it is fixed or deleted. Two sources feed it: the table's own reader (a
-    watch's listener, a poller), with the values its rule skips (`update`), and, for a table
-    that follows one `canonicalize_symbols` returned, the values the converter refuses there
-    (`refused_changed`, from `refused_values.RefusedValues`). Each change of either reports the
-    joined spans through `report`. One leaf lock orders the changes of both sources, and the
-    report is made under it, so the snapshots reach the session in order.
+    once every row of it is fixed or deleted. Its sources are the table's own reader (a
+    watch's listener, a poller), with the values its rule skips (`update`), and, for each table
+    it reads that `canonicalize_symbols` returned (its symbol table, a `poll()`'s value table),
+    the values the converter refuses there (`refused_changed`, from
+    `refused_values.RefusedValues`). A value table's spans name its column in `Field`, as its
+    own skipped values do. Each change of a source reports the joined spans through `report`.
+    One leaf lock orders the changes of every source, and the report is made under it, so the
+    snapshots reach the session in order.
     """
 
     __slots__ = (
@@ -526,7 +529,6 @@ class SkippedValues:
         "_lock",
         "_own",
         "_refused",
-        "_refused_policy",
         "_report",
         "_rule",
         "_tracker",
@@ -556,8 +558,11 @@ class SkippedValues:
         self._report = report
         self._lock = threading.Lock()
         self._own: dict[str, tuple[str | None, str | None, str, int]] = {}
-        self._refused: dict[str, tuple[str | None, str | None, str, int]] = {}
-        self._refused_policy = OnError.LOG
+        # Each converted table's refused values, by its `field` (`refused_changed`): their
+        # spans, and the converter's `on_error`.
+        self._refused: dict[
+            str | None, tuple[dict[str, tuple[str | None, str | None, str, int]], OnError]
+        ] = {}
         self._tracker = SpanTracker(
             ProblemCause.NONCANONICAL_SYMBOLS,
             dataset=rule.dataset,
@@ -573,35 +578,73 @@ class SkippedValues:
             symbols: The symbol table's distinct values skipped now; empty once none is.
             values: The value table's, skipped by the `values` rule.
         """
+        # Named by the source and the value, quoted, as `refused_changed` names its spans, so
+        # one text skipped in both tables is two spans.
         own: dict[str, tuple[str | None, str | None, str, int]] = {
-            value: (value, None, self._rule.refusal(value), 0) for value in symbols
+            f"skipped {None!r} {value!r}": (value, None, self._rule.refusal(value), 0)
+            for value in symbols
         }
         if self._values is not None:
             rule = self._values
-            own.update({value: (value, rule.column, rule.refusal(value), 0) for value in values})
+            own.update(
+                {
+                    f"skipped {rule.column!r} {value!r}": (
+                        value,
+                        rule.column,
+                        rule.refusal(value),
+                        0,
+                    )
+                    for value in values
+                }
+            )
         with self._lock:
             self._own = dict(own)
             self._show()
 
-    def refused_changed(self, refused: Mapping[str, str], policy: OnError) -> None:
-        """Take the values `canonicalize_symbols` refuses now; report the spans if they changed.
+    def update_values(self, values: Iterable[str]) -> None:
+        """Take the values a table of values skips now, for a table that reads only that table.
+
+        Args:
+            values: Its distinct values skipped now, by the `values` rule; empty once none is.
+        """
+        self.update((), values=values)
+
+    def refused_changed(
+        self, refused: Mapping[str, str], policy: OnError, *, field: str | None = None
+    ) -> None:
+        """Take the values `canonicalize_symbols` refuses now in one table the table reads.
+
+        Reports the spans if they changed. Each converted table is a source of its own, so a
+        change of one leaves the other's spans as they were.
 
         Args:
             refused: Each value the converter refuses now, with its reason.
             policy: The converter's `on_error`.
+            field: The column of a value table, which its spans name in `Field`; None for the
+                symbol table.
         """
+        # Named by the source and the value, quoted, so no two sources' names can meet.
+        spans: dict[str, tuple[str | None, str | None, str, int]] = {
+            f"refused {field!r} {value!r}": (
+                value,
+                field,
+                refused_detail(why),
+                0,
+            )
+            for value, why in refused.items()
+        }
         with self._lock:
-            self._refused = {
-                f"refused {value}": (value, None, f"canonicalize_symbols refused it: {why}", 0)
-                for value, why in refused.items()
-            }
-            self._refused_policy = policy
+            self._refused[field] = (spans, policy)
             self._show()
 
     def _show(self) -> None:
         """Report the joined spans when they changed; the lock is held."""
-        current = {**self._refused, **self._own}
-        policies = dict.fromkeys(self._refused, self._refused_policy)
+        current: dict[str, tuple[str | None, str | None, str, int]] = {}
+        policies: dict[str, OnError] = {}
+        for refused, policy in self._refused.values():
+            current.update(refused)
+            policies.update(dict.fromkeys(refused, policy))
+        current.update(self._own)
         spans = self._tracker.update(current, policies=policies)
         if spans is not None:
             self._report([spans])

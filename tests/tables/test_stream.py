@@ -2510,10 +2510,10 @@ def test_skipped_watchlist_rows_are_spans_of_the_streams_problems(
     skipped.update(())
     spans = [p for p in problems if isinstance(p, ProblemSpans)]
     assert [(p.cause, p.stream_id, list(p.spans)) for p in spans] == [
-        (ProblemCause.NONCANONICAL_SYMBOLS, sink.stream_id, ["msft"]),
+        (ProblemCause.NONCANONICAL_SYMBOLS, sink.stream_id, ["skipped None 'msft'"]),
         (ProblemCause.NONCANONICAL_SYMBOLS, sink.stream_id, []),
     ]
-    assert spans[0].spans["msft"].detail == rule.refusal("msft")
+    assert spans[0].spans["skipped None 'msft'"].detail == rule.refusal("msft")
     assert spans[0].policy is dm.OnError.LOG
 
 
