@@ -930,7 +930,8 @@ def test_the_problems_example_lists_the_ticker_massive_does_not_know(
     )
     readme_server.reply("/v3/reference/tickers/ZZZZ", Reply(status=404))
     console = Console(tmp_path, console_command)
-    ran = console.run(section_blocks(README, "see-problems"), "problems", "details")
+    diagnostics = ("streams", "connections", "rate_limits", "symbol_reads")
+    ran = console.run(section_blocks(README, "see-problems"), "problems", "details", *diagnostics)
     _wait_for_rows(ran["details"], lambda rows: len(rows) == 1, dh_to_pylist)
     rows = _wait_for_rows(ran["problems"], lambda rows: len(rows) == 1, dh_to_pylist)
     # The row the README describes: its cause, its symbol, and Massive's answer.
@@ -938,6 +939,14 @@ def test_the_problems_example_lists_the_ticker_massive_does_not_know(
         ("unavailable_symbols", "ZZZZ", "SKIPPED")
     ]
     assert "HTTP 404" in rows[0]["Detail"]
+    # Each diagnostics table the example opens is a live table of the session. As the README
+    # says, streams holds the details read, which ends DONE, and symbol_reads stays empty.
+    assert all(ran[name].is_refreshing for name in diagnostics)
+    streams = _wait_for_rows(
+        ran["streams"], lambda rows: [r["State"] for r in rows] == ["DONE"], dh_to_pylist
+    )
+    assert streams[0]["Query"].startswith("m.reference.ticker_details(")
+    assert dh_to_pylist(ran["symbol_reads"]) == []
     ran.clear()
     console.close()
 

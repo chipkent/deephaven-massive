@@ -571,19 +571,37 @@ details of Apple and of `ZZZZ`, a ticker Massive doesn't list:
 import deephaven_massive as dm
 
 m = dm.MassiveSession()
-problems = m.problems()
+problems = m.problems()  # each problem in your tables: Cause says why, Detail what happened
 details = m.reference.ticker_details(["AAPL", "ZZZZ"]).fetch()
 ```
 
 `details` holds Apple's row. Massive answers the ticker-details request for `ZZZZ` with HTTP 404,
 so `problems` gets a row whose `Cause` is `unavailable_symbols` and `Symbol` is `ZZZZ`. Its
-`Detail` gives Massive's answer, HTTP 404, and the endpoint the library called. Most other datasets answer an
-unlisted ticker with no rows, which is Massive's answer and not a problem.
+`Detail` names the HTTP 404 and the endpoint the library called. Most other datasets answer an
+unlisted ticker with no rows and no error, so `problems` gets no row for it.
 
-Every problem the library meets in your tables is a row of `m.problems()`: a skipped symbol, a
-row it left out, an outage. `Cause` says why, and `Detail` gives Massive's answer or the reason.
-[Read the problems table](docs/troubleshooting.md#problems) says what each problem means and
-what to do about it.
+Other problems, such as rows the library left out or a connection outage, add rows the same way.
+Troubleshooting's [problems section](docs/troubleshooting.md#problems) says what each one means
+and what to do about it.
+
+Four more live tables show what the session is doing:
+
+```python continues
+streams = m.streams()  # each live table and background read: its State, and Error if it failed
+connections = m.connections()  # each feed: Host, Recency, and State, such as CONNECTED or WAITING
+rate_limits = m.rate_limits()  # each subscription's rate-limit State: READY, PACED, or PAUSED
+symbol_reads = m.symbol_reads()  # each watchlist symbol read: its State, and Error if it failed
+```
+
+Here `streams` has one row, for the ticker-details read, whose `State` ends `DONE`.
+`symbol_reads` stays empty, because this example reads no watchlist.
+
+`Recency` says whether a feed's data is `REALTIME` or `DELAYED`. `UNKNOWN` means the library
+can't tell, and it never treats that data as real-time.
+
+Troubleshooting's [diagnostics section](docs/troubleshooting.md#diagnostics) says when to check
+each table. For a table's columns, run `help()` on its method, such as
+`help(m.connections)`.
 
 Next, how to stop live tables when you're done with them.
 
