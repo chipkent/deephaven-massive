@@ -46,6 +46,7 @@ from deephaven_massive._tables.transports import (
     SymbolFailure,
 )
 from deephaven_massive._tables.watchlist import (
+    CurrentSymbols,
     SymbolRowRule,
     read_symbols,
     skipped_rows_text,
@@ -53,7 +54,7 @@ from deephaven_massive._tables.watchlist import (
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from deephaven.table import Table
 
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     from deephaven_massive._enums import OnError
     from deephaven_massive._massive import Transport
     from deephaven_massive._tables.followed_read import FollowPlan
+    from deephaven_massive._tables.problem_events import ProblemEvent
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive.queries._call import QueryCall
 
@@ -127,6 +129,36 @@ def _read_symbol_table(
     live: bool = False,
     call: int | None = None,
 ) -> tuple[str, ...]:
+    """Read a symbol table once and return its symbols (`_read_symbol_rows`).
+
+    Args:
+        core: The session core.
+        spec: The dataset.
+        symbols: The boxed table, static or refreshing.
+        query: The `repr` of the query whose verb reads it.
+        noncanonical: The call's `noncanonical_symbols`.
+        live: True for a live verb.
+        call: The id of the static verb's call whose symbols these are, or None.
+
+    Returns:
+        The table's canonical symbols, sorted and de-duplicated.
+    """
+    return _read_symbol_rows(
+        core, spec, symbols, query=query, noncanonical=noncanonical, live=live, call=call
+    ).symbols
+
+
+def _read_symbol_rows(
+    core: SessionCore,
+    spec: DatasetSpec,
+    symbols: SymbolTable,
+    *,
+    query: str,
+    noncanonical: OnError,
+    live: bool = False,
+    call: int | None = None,
+    listed: bool = False,
+) -> CurrentSymbols:
     """Read a symbol table once, under the call's rule for a row that is not a ticker.
 
     The table is read as one consistent snapshot (`read_symbols` in `_tables/watchlist.py`),
@@ -151,10 +183,12 @@ def _read_symbol_table(
             before any error below.
             None for a read the call
             makes only to check the table, or a live verb's, whose table lists them.
+        listed: True when the caller lists the skipped values itself once its table has an
+            id (`table_problems`), as a stream of a static table does.
 
     Returns:
-        The table's canonical symbols, sorted and de-duplicated; null and skipped rows are
-        left out.
+        The table's canonical symbols, sorted and de-duplicated, and its skipped values; null
+        rows are left out.
 
     Raises:
         ValueError: If the table has rows and none of them is Massive's ticker, so the result
@@ -168,16 +202,13 @@ def _read_symbol_table(
     """
     rule = SymbolRowRule.of(spec, noncanonical)
     with entered(core.exec_ctx):
-        rows = read_symbols(rule, symbols.table, stream_id=None, reported=live or call is not None)
+        reported = live or listed or call is not None
+        rows = read_symbols(rule, symbols.table, stream_id=None, reported=reported)
         has_rows = symbols.table.size > 0
     if call is not None:
-        where = f"the symbol table of {query}"
-        events = rule.skipped_events(rows.skipped, stream_id=call, where=where, field=None)
-        refused = refused_values_of(
-            symbols.table, rule.column
-        )  # a table `canonicalize_symbols` returned
-        if refused is not None:
-            events += refused.events(dataset=spec.name, stream_id=call, where=where, field=None)
+        events = table_problems(
+            spec, symbols, rule, skipped=rows.skipped, stream_id=call, query=query
+        )
         if events:
             # Named first: a call that raises below never reaches the read that names it.
             core.diagnostics.name_read(call, query)
@@ -195,7 +226,41 @@ def _read_symbol_table(
                 "each value"
             )
         raise ValueError(f"{query}: the symbol table holds no symbols")
-    return rows.symbols
+    return rows
+
+
+def table_problems(
+    spec: DatasetSpec,
+    symbols: SymbolTable,
+    rule: SymbolRowRule,
+    *,
+    skipped: Sequence[str],
+    stream_id: int,
+    query: str,
+) -> list[ProblemEvent]:
+    """Return the `noncanonical_symbols` problems of one read of a static symbol table.
+
+    Each value the read skipped, and each value `dm.canonicalize_symbols` refused in the table
+    it returned (`RefusedValues.events`), is one problem: the table never changes, so it is
+    listed once.
+
+    Args:
+        spec: The dataset.
+        symbols: The boxed table.
+        rule: The rule the read followed.
+        skipped: The values it skipped.
+        stream_id: The call's id, or the stream's that read the table.
+        query: The `repr` of the query whose verb read it.
+
+    Returns:
+        The problems; none when the read skipped nothing and nothing was refused.
+    """
+    where = f"the symbol table of {query}"
+    events = rule.skipped_events(skipped, stream_id=stream_id, where=where, field=None)
+    refused = refused_values_of(symbols.table, rule.column)  # a `canonicalize_symbols` table
+    if refused is not None:
+        events += refused.events(dataset=spec.name, stream_id=stream_id, where=where, field=None)
+    return events
 
 
 def _log_failure(call: int, elapsed: float, error: BaseException) -> None:

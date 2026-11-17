@@ -200,6 +200,38 @@ def test_a_static_symbol_table_row_that_is_not_canonical_is_skipped(
     assert len(fake_streams.opened) == 1
 
 
+@pytest.mark.parametrize("verb", ["blink", "append_only", "ring", "last_by"])
+def test_a_static_symbol_tables_skipped_and_refused_values_are_problems_of_the_stream(
+    massive_session: dm.MassiveSession,
+    *,
+    fake_streams: FakeStreams,
+    verb: str,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # As every other read of a static table lists them: each value once, with the stream's id.
+    raw = new_table([string_col("Symbol", ["AAPL", "msft"])])
+    converted = dm.canonicalize_symbols(
+        new_table([string_col("Symbol", ["MSFT", "no pe!"])]), dm.AssetClass.STOCKS
+    )
+    results = []
+    for table in (raw, converted):
+        call = getattr(trades(massive_session, table), verb)
+        results.append(call(3) if verb == "ring" else call())
+    rows = [
+        (r["Cause"], r["Symbol"], r["Field"], r["EndedAt"], r["Detail"][:21])
+        for r in problem_rows()
+    ]
+    assert rows == [
+        ("noncanonical_symbols", "msft", None, None, "stocks.trades: a symb"),
+        ("noncanonical_symbols", "no pe!", None, None, "canonicalize_symbols "),
+    ]
+    stream_ids = {r["StreamId"] for r in problem_rows()}
+    assert len(stream_ids) == 2
+    assert None not in stream_ids
+    for result in results:
+        massive_session.release(result)
+
+
 def test_bar_channels_follow_the_timespan(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
