@@ -208,6 +208,7 @@ def make_client(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[..., Har
         made.append(client)
         if start:
             client.start()
+            client.connect()
         return Harness(client, recorder, sleeper, clock)
 
     yield make
@@ -361,6 +362,7 @@ def test_a_silent_server_is_cut_off_by_the_handshake_timeout(
 
     monkeypatch.setattr(loop, "time", skewed)
     h.client.start()
+    h.client.connect()
     fake_ws_server.wait_for(lambda s: bool(s.connections) and s.connections[0].auth is not None)
     late.set()
     loop.call_soon_threadsafe(lambda: None)  # wake the loop to see its clock's jump
@@ -664,6 +666,7 @@ def test_subscribe_sends_at_once_and_the_ack_is_decoded(
     h = make_client(start=False, recorder=recorder)
     recorder.open_hook = lambda g: h.client.subscribe(g, ["T.AAPL", "Q.AAPL"])
     h.client.start()
+    h.client.connect()
     recorder.wait_for(lambda e: recorder.count("status")(e) == 2)
     assert recorder.of("status") == [
         (1, Status(kind=StatusKind.ACK, topics=("T.AAPL",), message="subscribed to: T.AAPL")),
@@ -875,6 +878,7 @@ def test_close_during_a_long_backoff_returns_within_a_second(
         max_reconnect_backoff=120.0,
     )
     client.start()
+    client.connect()
     recorder.wait_state(WsState.RECONNECTING)
     began = time.monotonic()
     client.close()
@@ -902,6 +906,7 @@ def test_close_from_a_callback_stops_the_client(
     h = make_client(start=False, recorder=recorder)
     recorder.open_hook = lambda _: h.client.close()
     h.client.start()
+    h.client.connect()
     assert h.client.join(10.0)
     assert recorder.states() == [WsState.CONNECTING, WsState.CLOSED]
 
@@ -913,7 +918,46 @@ def test_close_before_start_ends_at_once(
     assert h.client.join(0.0)  # never started: nothing to wait for
     h.client.close()
     h.client.start()
+    h.client.connect()
     assert h.client.join(10.0)
+    assert h.recorder.states() == [WsState.CLOSED]
+    assert fake_ws_server.connections == []
+
+
+def test_a_started_client_opens_no_socket_until_connect(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    # The loop runs from start(): a posted call runs, yet no socket opens until connect().
+    h = make_client(start=False)
+    h.client.start()
+    assert h.on_loop(lambda: "ran") == "ran"
+    assert h.recorder.states() == []
+    assert fake_ws_server.connections == []
+    h.client.connect()
+    h.client.connect()  # a second call opens no second socket
+    h.recorder.wait_open(1)
+    assert h.recorder.states() == [WsState.CONNECTING]
+    assert len(fake_ws_server.connections) == 1
+
+
+def test_connect_before_start_connects_once_the_thread_runs(
+    make_client: Callable[..., Harness],
+) -> None:
+    h = make_client(start=False)
+    h.client.connect()
+    h.client.start()
+    h.recorder.wait_open(1)
+
+
+def test_close_before_connect_reports_closed_and_opens_no_socket(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client(start=False)
+    h.client.start()
+    assert h.on_loop(lambda: "ran") == "ran"  # the client waits for connect()
+    h.client.close()
+    assert h.client.join(10.0)
+    h.client.connect()  # after the client ended: does nothing
     assert h.recorder.states() == [WsState.CLOSED]
     assert fake_ws_server.connections == []
 
@@ -941,6 +985,7 @@ def test_a_raising_callback_stops_the_client_and_is_logged(
 
     recorder.open_hook = boom
     h.client.start()
+    h.client.connect()
     assert h.client.join(10.0)
     fake_ws_server.wait_for(lambda s: s.connections[0].close_code is not None)
     assert "stopped on an internal error" in caplog.text
@@ -1036,6 +1081,7 @@ def test_16_clients_at_once(
         harnesses.append(h)
     for h in harnesses:
         h.client.start()
+        h.client.connect()
     for h in harnesses:
         h.recorder.wait_for(lambda e: any(x[0] == "status" for x in e))
     acked = sorted(h.recorder.of("status")[0][1].topics[0] for h in harnesses)

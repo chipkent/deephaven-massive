@@ -149,7 +149,7 @@ class WsSession:
         on_error: dm.ErrorPolicy = _DEFAULTS.on_error,
         delayed_subscriptions: AbstractSet[dm.Subscription] = _DEFAULTS.delayed_subscriptions,
     ) -> None:
-        """Open the session; nothing connects until a stream verb runs.
+        """Open the session; nothing connects until a stream has a topic to subscribe.
 
         Args:
             server: The fake server every connection reaches.

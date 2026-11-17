@@ -276,6 +276,7 @@ class _Probe:
     def open(self) -> None:
         """Start the client and wait until Massive accepts the key; fail the test otherwise."""
         self.client.start()
+        self.client.connect()
         assert self._opened.wait(_AUTH_WAIT), f"not authenticated; states {self.records().states}"
 
     def send(self, action: str, topics: Sequence[str]) -> None:

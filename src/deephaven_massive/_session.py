@@ -487,8 +487,10 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `Recency`: `REALTIME`, `DELAYED`, or `UNKNOWN`. `UNKNOWN` means the library can't
               tell, and it never treats such data as real-time.
             - `Evidence`: what showed the library that recency.
-            - `State`: `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`, `RECONNECTING`,
-              `FAILED`, or `CLOSED`.
+            - `State`: `RESOLVING`, `WAITING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`,
+              `RECONNECTING`, `FAILED`, or `CLOSED`. `WAITING` means the library hasn't connected,
+              because no live table on the connection has a symbol to stream yet. It connects at
+              the first symbol.
             - `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics`: the subscriptions sent,
               confirmed by Massive, waiting for confirmation, and never confirmed.
             - `BufferedRows`: rows waiting to reach their tables. Past 1,000,000, a WARNING is

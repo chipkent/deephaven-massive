@@ -176,9 +176,16 @@ for a key (`DriftRegistry.report`): the same as a connection's traffic summary."
 
 
 class ConnectionState(StrEnum):
-    """The `State` of a row of `m.connections()`."""
+    """The `State` of a row of `m.connections()`.
+
+    `WAITING` and `WAITING_SLOT` differ: a `WAITING` connection has opened no socket, since none
+    of its live tables has a symbol to subscribe yet, while a `WAITING_SLOT` connection tried,
+    and Massive refused it for want of a free connection on the account.
+    """
 
     RESOLVING = "RESOLVING"
+    WAITING = "WAITING"
+    """No socket is open: no live table on the connection has a symbol to subscribe yet."""
     CONNECTING = "CONNECTING"
     CONNECTED = "CONNECTED"
     WAITING_SLOT = "WAITING_SLOT"
