@@ -17,7 +17,7 @@ checkout's root. Each pytest marker selects one set of tests:
 |---|---|
 | `integration` | The question tests, most of which record or check Massive's answer to an open question, a behavior the library depends on that Massive's docs leave open ([the list](dev/verification-items/README.md)) |
 | `integration_smoke` | Every dataset and method once, checked automatically |
-| `integration_rate_limits` | The three rate-limit tests, which send a subscription more requests a minute than Massive allows, on purpose |
+| `integration_rate_limits` | The three rate-limit tests, which send a subscription your settings file lists in `rest_requests_per_minute` more requests a minute than Massive allows, on purpose |
 | `integration_limits` | The four connection-limit tests, which go over Massive's subscription and connection limits on purpose |
 | `integration_all_symbols` | The test that streams every futures trade for 10 minutes, taking over your key's futures connection the whole time |
 
@@ -25,10 +25,10 @@ checkout's root. Each pytest marker selects one set of tests:
 
 <a id="variables"></a>
 
-### Set your keys
+### Set your keys and settings file
 
-Set `MASSIVE_API_KEY`, and the two S3 keys if your key reaches the flat files, as the README's
-[Set your API keys](../README.md#set-your-api-keys) step shows.
+Set your keys as the README's [Set your API keys](../README.md#set-your-api-keys) step shows.
+Leave out the two S3 keys if your plan doesn't include flat files.
 
 Then point the run at your [settings file](configuration.md). Add this line to your shell's
 startup file, beside your keys, and open a new terminal:
@@ -52,8 +52,7 @@ library's message.
 
 ### Run the commands in order
 
-Run the connection-limit tests after the others, and alone, because they disturb the key's
-connections:
+Run the tests in this order:
 
 1. Stop every other program that uses the key.
 2. On a weekday from 09:30 to 16:00 New York time, while stocks trade, run the question,
@@ -63,19 +62,13 @@ connections:
    uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
    ```
 
-   The command also runs every README example as written and checks it against its text. A
-   test of a subscription Massive limits waits its turn, and a line counts down the requests
+   The command also runs every README example as written.
+
+   A test of a subscription Massive limits waits its turn. A line counts down the requests
    left.
 
-   Each rate-limit test uses up one minute's requests of the first subscription your file lists
-   in `rest_requests_per_minute`, in this order:
-
-   | Test | Order |
-   |---|---|
-   | `test_whether_a_ticker_lookup_for_one_market_is_charged_to_its_class` | indices, currencies, stocks |
-   | The other two | indices, futures, options, stocks, currencies |
-
-3. Run the connection-limit tests, one command after the other:
+3. Run the connection-limit tests alone, one command after the other, because they disturb the
+   key's connections:
 
    ```bash
    uv run pytest -m integration_limits tests/massive/ws/test_client_integration.py 2>&1 | tee -a live-checks.log
@@ -172,10 +165,10 @@ says:
 
 | Check | Data it reads | What to read | Open an issue when |
 |---|---|---|---|
-| `test_the_options_cap_counts_contracts_or_topics` | Option quote and trade streams | Whether Massive acknowledges all 2,000 topics of 1,000 contracts | Massive acknowledges them all, since the library assumes the cap counts topics |
+| `test_the_options_cap_counts_contracts_or_topics` | Option quote and trade streams | Whether Massive acknowledges 2,000 subscriptions, a trade and a quote one for each of 1,000 contracts | Massive acknowledges them all, since the library assumes Massive's cap of 1,000 counts these subscriptions, not contracts |
 | `test_an_index_minute_file_holds_its_own_new_york_day` | Index minute bars, over REST and in the flat files | The minutes REST has that the file lacks | Any minute is missing |
 | `test_index_day_windows_and_files_across_many_indices` | Index day and minute bars, over REST and in the flat files | Its verdict lines (a), (b), and (c) | Always. The library ends index day bars at 01:00 New York time, and its verdict lines say whether that's right. |
-| `test_futures_bar_buckets_against_the_bars_inside_them` | Futures bars | Its `VERDICT` lines | Always, with its `VERDICT` lines |
+| `test_futures_bar_buckets_against_the_bars_inside_them` | Futures bars | Its `VERDICT` lines: whether each bar of a session or longer holds whole sessions of its UTC days, on a fixed grid | Always, with its `VERDICT` lines |
 | `test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent` | Option chain snapshots | Each call's ratio of `GreeksGamma` to Black-Scholes gamma, and the unit it matches | A call matches a unit other than per $0.01, the unit Massive's description gives |
 | A quiet connection, in the [`stream-day` group](#live-run-groups) of a tester's results | Stock streams | In that group's debug log, the stocks connection's `status` lines from 03:45 to 04:00 New York time, and every `no frame for ... during ... trading hours` WARNING | Always, with the longest gap between `status` lines |
 
@@ -189,9 +182,9 @@ uv run pytest -m integration tests/namespaces/test_options_integration.py -k gam
 uv run pytest -m integration_limits tests/massive/ws/test_client_integration.py -k options_cap 2>&1 | tee -a live-checks.log
 ```
 
-The options check skips when Massive refuses the topics, quoting the refusal. It also skips as
-inconclusive when the socket reconnects without saying why. Then run it again with its command
-above.
+The options check skips when Massive refuses the subscriptions, quoting the refusal. It skips
+as inconclusive when the socket reconnects without saying why. After that skip, run it again
+with its command above.
 
 <a id="index-hosts"></a>
 
