@@ -1838,22 +1838,23 @@ class Flusher:
     ) -> dict[str, tuple[int, str]]:
         """Update a dataset's reported waits that still hold; return them.
 
-        A wait joins when settling reports it (`Settled.delayed`), and leaves when its rows
-        publish (`Settled.resumed`) or are discarded, or once the hold no longer has the
-        ticker's rows (a watchlist dropped it, or its lookup failed). Each wait counts the
-        rows the hold has of its ticker now.
+        A wait joins when settling reports it (`Settled.delayed`), and leaves once the hold
+        no longer has a reported wait of the ticker: its rows published or were discarded, a
+        watchlist dropped it, or its lookup failed. A wait whose older rows were discarded
+        while newer ones still wait holds on. Each wait counts the rows the hold has of its
+        ticker now.
 
         Args:
             plan: The dataset's plan for the channel.
             settled: What settling decided.
-            held: The tickers whose rows the dataset still holds, with how many each holds.
+            held: The tickers whose reported wait the hold still has, with their rows
+                (`HeldRows.waiting`).
 
         Returns:
             Each ticker whose reported wait holds, with its rows and reason.
         """
-        ended = settled.resumed.union(*settled.discarded.values())
         found = self._waits.get(plan, {})
-        waits = {t: (held[t], why) for t, (_, why) in found.items() if t in held and t not in ended}
+        waits = {t: (held[t], why) for t, (_, why) in found.items() if t in held}
         waits.update({t: (delay.rows, delay.reason) for t, delay in settled.delayed.items()})
         if waits:
             self._waits[plan] = waits

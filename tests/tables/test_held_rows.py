@@ -298,16 +298,19 @@ def test_a_long_wait_is_reported_once_and_its_release_logged(
     settle(held, batch(("ESZ6", None, 1.0)))
     clock.now += DELAYED_AFTER - 1
     assert settle(held, batch(("ESZ6", None, 2.0))).delayed == {}
+    assert held.waiting("trades") == {}  # held, but no wait reported yet
     clock.now += 1
     assert settle(held, None).delayed == {"ESZ6": Delayed(2, WAITING.reason)}
     clock.now += RECHECK_EVERY
     assert settle(held, None).delayed == {}  # once per wait
+    assert held.waiting("trades") == {"ESZ6": 2}  # the reported wait holds on
     calendar.found["ESZ6"] = READY
     calendar.dates["ESZ6"] = "2026-11-17"
     calendar.version += 1
     with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.held_rows"):
         settle(held, None)
     assert caplog.messages == ["the held futures rows of ESZ6 are settled after 16 s"]
+    assert held.waiting("trades") == {}
 
 
 def test_past_the_byte_limit_the_dataset_holding_the_most_fails(

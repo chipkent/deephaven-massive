@@ -49,7 +49,7 @@ from deephaven_massive._tables import held_rows, problem_reporter, stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.futures_dates import LookupState, Readiness
-from deephaven_massive._tables.held_rows import DELAYED_AFTER, HeldRows
+from deephaven_massive._tables.held_rows import DELAYED_AFTER, Delayed, HeldRows, Settled
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.problem_events import (
     Problem,
@@ -1331,6 +1331,23 @@ def test_a_waiting_ticker_s_rows_grow_on_its_span(futures_flush: FuturesFlush) -
     first, later = undated_snapshots(flush, 1)
     assert (first.spans["NQM5"].rows, later.spans["NQM5"].rows) == (1, 3)
     assert later.spans["NQM5"].since == first.spans["NQM5"].since
+
+
+def test_a_wait_whose_older_rows_were_discarded_holds_on_while_newer_rows_wait(
+    futures_flush: FuturesFlush,
+) -> None:
+    # Settling discards one of NQM5's rows, but the hold still has a reported wait of it: the
+    # dataset's open wait keeps its reason and counts the rows left.
+    flush = futures_flush
+    reported = Settled(None, delayed={"NQM5": Delayed(3, "its product is being looked up")})
+    assert flush.flusher._open_waits(flush.plan, reported, {"NQM5": 3}) == {
+        "NQM5": (3, "its product is being looked up")
+    }
+    discarded = Settled(None, discarded={Readiness.UNSCHEDULED: {"NQM5": (1, "no session")}})
+    assert flush.flusher._open_waits(flush.plan, discarded, {"NQM5": 2}) == {
+        "NQM5": (2, "its product is being looked up")
+    }
+    assert flush.flusher._open_waits(flush.plan, Settled(None), {}) == {}
 
 
 def test_a_later_report_of_a_waiting_ticker_updates_its_rows_and_keeps_its_start(
