@@ -56,8 +56,8 @@ Settings:
 
     - `delayed_subscriptions` lets live tables and snapshots read a plan's delayed data, as on
       Stocks Starter.
-    - `rest_basic_subscriptions` keeps a free Basic plan's requests within its limit from the
-      first request.
+    - `rest_requests_per_minute` keeps a subscription's requests within the limit Massive
+      gives your plan from the first request.
 
     `help(dm.MassiveConfig)` lists every setting. `dm.ErrorPolicy` decides what a bad symbol or
     row does, for the session or for one call.

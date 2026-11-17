@@ -39,11 +39,11 @@ Interface:
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
     - `RequestGovernor`, `BucketState`: when each REST request of a Massive subscription may
-      start (a Basic subscription's pace, the pause after a 429), shared by the clients of one
-      API key, and a snapshot of one subscription's state for diagnostics.
+      start (a subscription's declared or learned pace, the pause after a 429), shared by the
+      clients of one API key, and a snapshot of one subscription's state for diagnostics.
     - `Patience`: how long one read waits out its buckets' pauses, shared by its requests.
-    - `BASIC_REQUESTS_PER_MINUTE`, `RATE_WINDOW`: a Basic subscription's limit (5 requests
-      per minute) and the seconds a finished request holds its slot (61).
+    - `RATE_WINDOW`: the seconds a finished request holds its slot of a paced subscription
+      (61: Massive's minute and one second of margin).
     - `RETRYABLE_STATUSES`: the HTTP statuses whose request may succeed when sent again later
       (429, 500, 502, 503, 504), which the library reports as retryable.
     - `Cancel`: the cancellation token that ends a request's waits.
@@ -108,7 +108,6 @@ from deephaven_massive._massive.net.retry import RETRYABLE_STATUSES
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
 from deephaven_massive._massive.rest.governor import (
-    BASIC_REQUESTS_PER_MINUTE,
     RATE_WINDOW,
     BucketState,
     Patience,
@@ -135,7 +134,6 @@ from deephaven_massive._massive.spec.values import encode_value
 from deephaven_massive._massive.ws import Status, StatusKind, WsClient, WsState
 
 __all__ = [
-    "BASIC_REQUESTS_PER_MINUTE",
     "RATE_WINDOW",
     "RETRYABLE_STATUSES",
     "BucketState",

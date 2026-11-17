@@ -109,13 +109,13 @@ def test_an_upgrade_that_lifts_the_limit_passes(
 ) -> None:
     # Session A learns the limit; the first minute's six calls draw a 429; the next minute's
     # are all answered, so the upgrade took effect.
-    fake_rest.reply(PREV, LIMITED, BAR, LIMITED, BAR)
+    fake_rest.reply(PREV, BAR, LIMITED, BAR, LIMITED, BAR)
     clock = _Time(rest_clock)
     record = upgrade_check.run_upgrade_check(
         "stocks", open_session=open_session, folder=tmp_path, waits=clock.waits()
     )
     assert record.verdict == "passed"
-    assert record.learned_calls == 1
+    assert record.learned_calls == 2
     assert record.row_before["LimitSource"] == "LEARNED"
     assert clock.entered == 1
     assert clock.sleeps == [60.0, upgrade_check.FRESH_MINUTE]
@@ -137,7 +137,7 @@ def test_a_slow_round_without_refusals_blames_the_library(
     rest_clock: FakeClock,
 ) -> None:
     # The six calls are answered at once; session B's calls, after the fresh minute, are slow.
-    fake_rest.reply(PREV, LIMITED, BAR)
+    fake_rest.reply(PREV, BAR, LIMITED, BAR)
     clock = _Time(rest_clock, slept_call_seconds=31.0)
     record = upgrade_check.run_upgrade_check(
         "stocks", open_session=open_session, folder=tmp_path, waits=clock.waits()
@@ -157,7 +157,7 @@ def test_six_calls_answered_over_more_than_a_minute_are_no_upgrade(
     Calls that a limit the library still holds paces draw no 429, though Massive may still
     limit the subscription.
     """
-    fake_rest.reply(PREV, LIMITED, BAR)
+    fake_rest.reply(PREV, BAR, LIMITED, BAR)
     clock = _Time(rest_clock, call_seconds=11.0)  # six calls take 132 s
     record = upgrade_check.run_upgrade_check(
         "stocks", open_session=open_session, folder=tmp_path, waits=clock.waits()
@@ -177,7 +177,7 @@ def test_refusals_until_the_wait_ends_blame_massive(
     rest_clock: FakeClock,
 ) -> None:
     # Six calls answered, then every session B is refused again.
-    fake_rest.reply(PREV, LIMITED, *[BAR] * 7, *[LIMITED, BAR] * 400)
+    fake_rest.reply(PREV, BAR, LIMITED, *[BAR] * 7, *[LIMITED, BAR] * 400)
     record = upgrade_check.run_upgrade_check(
         "stocks", open_session=open_session, folder=tmp_path, waits=_Time(rest_clock).waits()
     )
@@ -193,7 +193,7 @@ def test_no_upgrade_is_a_rehearsal(
     tmp_path: Path,
     rest_clock: FakeClock,
 ) -> None:
-    fake_rest.reply(PREV, *[LIMITED, BAR] * 200)  # every minute's six calls draw a 429
+    fake_rest.reply(PREV, BAR, *[LIMITED, BAR] * 200)  # every minute's six calls draw a 429
     record = upgrade_check.run_upgrade_check(
         "stocks", open_session=open_session, folder=tmp_path, waits=_Time(rest_clock).waits()
     )
@@ -232,7 +232,7 @@ def test_six_failed_calls_are_no_upgrade(
     rest_clock: FakeClock,
 ) -> None:
     """Calls that fail fast draw no 429, but Massive answered none of them."""
-    fake_rest.reply(PREV, LIMITED, BAR, FORBIDDEN)  # session A learns the limit, then 403s
+    fake_rest.reply(PREV, BAR, LIMITED, BAR, FORBIDDEN)  # session A learns the limit, then 403s
     record = upgrade_check.run_upgrade_check(
         "stocks", open_session=open_session, folder=tmp_path, waits=_Time(rest_clock).waits()
     )
@@ -250,7 +250,7 @@ def test_a_failed_call_in_a_round_of_ten_fails_the_check(
     rest_clock: FakeClock,
 ) -> None:
     # Six calls answered, then session B's second call is refused the data.
-    fake_rest.reply(PREV, LIMITED, *[BAR] * 7, FORBIDDEN)
+    fake_rest.reply(PREV, BAR, LIMITED, *[BAR] * 7, FORBIDDEN)
     record = upgrade_check.run_upgrade_check(
         "stocks", open_session=open_session, folder=tmp_path, waits=_Time(rest_clock).waits()
     )

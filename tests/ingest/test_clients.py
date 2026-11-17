@@ -352,7 +352,7 @@ def test_the_client_is_created_under_the_registry_lock(
 
 def test_sessions_of_one_key_share_a_governor_and_its_declarations(fake_s3: FakeS3) -> None:
     first = dm.MassiveSession(
-        dataclasses.replace(CONFIG, rest_basic_subscriptions={dm.Subscription.OPTIONS})
+        dataclasses.replace(CONFIG, rest_requests_per_minute={dm.Subscription.OPTIONS: 5})
     )
     second = dm.MassiveSession(CONFIG)
     other_key = dm.MassiveSession(dataclasses.replace(CONFIG, api_key="other-key"))
@@ -364,9 +364,9 @@ def test_sessions_of_one_key_share_a_governor_and_its_declarations(fake_s3: Fake
         rest_state = clients_of(second)._rest
         assert rest_state is not None
         assert rest_state.client.governor is shared  # the session's client uses it
-        assert {s.bucket for s in shared.snapshot() if s.declared} == {"options"}
+        assert {s.bucket: s.declared for s in shared.snapshot() if s.declared} == {"options": 5}
         first.close()  # the declaration leaves with its session
-        assert {s.bucket for s in shared.snapshot() if s.declared} == set()
+        assert {s.bucket for s in shared.snapshot() if s.declared is not None} == set()
     finally:
         for m in (first, second, other_key):
             m.close()
@@ -377,7 +377,7 @@ def test_sessions_of_one_key_share_a_governor_and_its_declarations(fake_s3: Fake
 
 def test_a_collected_session_releases_its_lease(fake_s3: FakeS3) -> None:
     m = dm.MassiveSession(
-        dataclasses.replace(CONFIG, rest_basic_subscriptions={dm.Subscription.STOCKS})
+        dataclasses.replace(CONFIG, rest_requests_per_minute={dm.Subscription.STOCKS: 5})
     )
     governor = clients_of(m)._lease.governor
     gc.disable()
@@ -386,4 +386,4 @@ def test_a_collected_session_releases_its_lease(fake_s3: FakeS3) -> None:
     finally:
         gc.enable()
     # The collected session's closers run on its reaper; its declaration goes with it.
-    assert _wait_for(lambda: not any(s.declared for s in governor.snapshot()))
+    assert _wait_for(lambda: all(s.declared is None for s in governor.snapshot()))

@@ -37,7 +37,7 @@ other setting at its default:
 | Setting | List in it | Without it |
 |---|---|---|
 | `delayed_subscriptions` | Each subscription Massive serves your key delayed | Every stream and snapshot test of those subscriptions skips, `not listed as delayed` |
-| `rest_basic_subscriptions` | Each subscription whose REST requests Massive limits by the minute | Each one's first refused request pauses its requests while the library learns the limit, and the rate-limit tests skip |
+| `rest_requests_per_minute` | Each subscription whose REST requests Massive limits by the minute, with its limit | Each one's first refused request pauses its requests while the library learns the limit, and the rate-limit tests skip |
 | `websocket_hosts` | A WebSocket host you pin for an asset class | The library picks the host |
 
 Add the variable to your shell's startup file, beside your keys, and open a new terminal:
@@ -63,7 +63,7 @@ The connection-limit tests run last and alone, because they disturb the key's co
 
    A weekday run in market hours covers more, because a stream test checks rows only while its
    market is open. The rate-limit tests spend a subscription your settings file lists in
-   `rest_basic_subscriptions`, whatever order the file lists them in: the first listed of
+   `rest_requests_per_minute`, whatever order the file lists them in: the first listed of
    indices, futures, options, stocks, and currencies, or, for the ticker-lookup test, of
    indices, currencies, and stocks. They skip when the file lists none of these.
 
@@ -135,8 +135,8 @@ requests it declares, and a line counts down the requests left while one waits.
 
 A limited subscription your settings file doesn't list costs a pause more. Its first request
 past Massive's minute is refused, and its requests wait for the refusal's `Retry-After`, or up
-to a minute, while the library learns the limit. List it in `rest_basic_subscriptions`, and its
-requests are paced from the first.
+to a minute, while the library learns the limit. List it in `rest_requests_per_minute` with
+its limit, and its requests are paced from the first.
 
 <a id="read-the-end-of-a-run"></a>
 

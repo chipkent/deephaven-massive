@@ -1,8 +1,8 @@
 """Massive's REST rate limits on the library side: shared governors, warnings, and diagnostics.
 
 Massive limits REST requests per subscription (stocks, options, indices, currencies, futures),
-5 per minute on the free Basic tier and none on a paid one, and every API key of an account
-shares the counters. Reference and cross-asset requests are counted in a bucket of their own.
+at a limit its plans set, and every API key of an account shares the counters. Reference and
+cross-asset requests are counted in a bucket of their own.
 Massive's knowledge base states these rules in the article "What is the request limit for
 Massive's RESTful APIs?", which the refresh vendors, and whose changes its drift check reports:
 `vendor/massive/knowledge-base/what-is-the-request-limit-for-massives-restful-apis.md`.
@@ -12,17 +12,18 @@ decides which requests share one, how long each read waits, and what the user is
 - **Sharing.** `GOVERNORS`, the process's `GovernorRegistry`, keeps one governor per (API key,
   REST origin). Each session takes a `GovernorLease` at construction and releases it when it
   closes or is collected, so the sessions of a process that use one key share its counters.
-  The registry keys entries by the key's SHA-256 digest, never the key itself. What a governor
-  learned is Basic lives and dies with it: a governor created again for the same key and origin
-  starts unpaced, and relearns a Basic subscription from its first refusal. The governor
-  paces every subscription that any live session declares Basic
-  (`MassiveConfig.rest_basic_subscriptions`: the stricter wins), and logs one WARNING when two
-  sessions declare different non-empty sets. An entry outlives its last lease until its
+  The registry keys entries by the key's SHA-256 digest, never the key itself. The limits a
+  governor learned live and die with it: a governor created again for the same key and origin
+  starts unpaced, and learns again from Massive's refusals. The governor paces every
+  subscription that any live session declares a limit for
+  (`MassiveConfig.rest_requests_per_minute`: the lowest limit declared wins), and logs one
+  WARNING when two sessions declare different non-empty mappings. An entry outlives its last
+  lease until its
   governor is idle (no slot held, no pause active), so a notebook cell that makes a new session
   does not start with an empty window.
 - **Buckets.** A request is charged to its dataset's subscription (`bucket_of`); reference
-  data and the other datasets Massive assigns to no subscription go to `OTHER`, which is paced
-  once a refusal names the per-minute limit, like a subscription, but cannot be declared.
+  data and the other datasets Massive assigns to no subscription go to `OTHER`, which learns
+  its limit from Massive's refusals, like a subscription, but cannot be declared.
 - **Patience.** Each read decides how long it waits out pauses (`read_patience`): `READ_PATIENCE`
   (10 minutes of pauses), or `CONSOLE_PATIENCE` (90 s) for a read made while its thread holds the
   Deephaven update graph's lock, as a console command does, since every table of the process
@@ -68,7 +69,6 @@ from deephaven_massive._tables.execution_context import holds_update_graph_lock
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
-    from collections.abc import Set as AbstractSet
 
     from deephaven.execution_context import ExecutionContext
 
@@ -99,14 +99,14 @@ logger = logging.getLogger(__name__)
 OTHER: Final = "other"
 """The bucket of reference data and the other datasets Massive assigns to no subscription
 (cross-market reference data, economy, partner data, the unified snapshot), which Massive
-counts in a bucket of its own; it is paced once a refusal names the per-minute limit."""
+counts in a bucket of its own; it is paced once it learns a limit from Massive's refusals."""
 
 BUCKETS: Final = (*(subscription.value for subscription in Subscription), OTHER)
 """Every bucket of a governor: one per subscription, then `OTHER`."""
 
 LEARN_ONLY: Final = frozenset({OTHER})
-"""The buckets that cannot be declared Basic, since no setting names them; a refusal naming
-the per-minute limit paces them as it does a subscription."""
+"""The buckets whose limit cannot be declared, since no setting names them; they learn a limit
+from Massive's refusals as a subscription does."""
 
 READ_PATIENCE: Final = 600.0
 """Seconds a read waits out its bucket's pauses before it fails with status 429."""
@@ -207,11 +207,11 @@ class _Holder:
 
     Attributes:
         label: The session's label, such as `"MassiveSession #1"`.
-        basic: The subscriptions it declares Basic.
+        limits: The requests per minute it declares for each subscription.
     """
 
     label: str
-    basic: frozenset[Subscription]
+    limits: Mapping[Subscription, int]
 
 
 class _Entry:
@@ -229,9 +229,10 @@ class _Entry:
         self.holders: dict[int, _Holder] = {}
 
     def declare(self) -> None:
-        """Declare Basic every subscription that any holder declares (the stricter wins)."""
-        basic = {subscription.value for h in self.holders.values() for subscription in h.basic}
-        self.governor.declare(basic)
+        """Declare every subscription's limit that any holder declares (the lowest wins)."""
+        self.governor.declare(
+            {subscription.value: limit for subscription, limit in _lowest(self.holders).items()}
+        )
 
 
 class GovernorLease:
@@ -270,8 +271,8 @@ class GovernorLease:
     def release(self) -> None:
         """End the hold: stop the session's listener and drop its declarations. Idempotent.
 
-        The subscriptions only this session declared become unpaced again (unless learned
-        Basic). The entry stays while its governor still holds slots or a pause.
+        The subscriptions only this session declared become unpaced again, unless they learned
+        a limit. The entry stays while its governor still holds slots or a pause.
         """
         self.governor.unsubscribe(self._listener)
         self._registry.release(self._key, self._holder)
@@ -293,14 +294,14 @@ class GovernorRegistry:
             one = registry.lease(
                 api_key="k",
                 base_url="https://api.massive.com",
-                basic={Subscription.STOCKS},
+                limits={Subscription.STOCKS: 5},
                 label="MassiveSession #1",
                 listener=lambda: None,
             )
             two = registry.lease(
                 api_key="k",
                 base_url="https://api.massive.com",
-                basic=frozenset(),
+                limits={},
                 label="MassiveSession #2",
                 listener=lambda: None,
             )
@@ -349,22 +350,23 @@ class GovernorRegistry:
         *,
         api_key: str,
         base_url: str,
-        basic: AbstractSet[Subscription],
+        limits: Mapping[Subscription, int],
         label: str,
         listener: Callable[[], None],
     ) -> GovernorLease:
         """Take a hold on the governor of an API key and REST origin, creating it if needed.
 
         Idle entries without a lease are dropped first, and with them what their governors
-        learned; a new governor starts unpaced. The governor then paces the union of
-        every holder's Basic subscriptions. When this session and another holder each declare
-        a non-empty set and the sets differ, one WARNING names both sessions and the union.
+        learned; a new governor starts unpaced. The governor then paces each subscription any
+        holder declares, at the lowest limit declared for it. When this session and another
+        holder each declare a non-empty mapping and the mappings differ, one WARNING names both
+        sessions and the limits paced.
 
         Args:
             api_key: The session's API key; only its SHA-256 digest is kept.
             base_url: The session's REST base URL; its scheme, host, and port are kept
                 (`origin_of`, which the REST client also checks it with).
-            basic: The subscriptions the session declares Basic.
+            limits: The requests per minute the session declares for each subscription.
             label: The session's label, for the WARNING.
             listener: Called after every change of the governor (`RequestGovernor.subscribe`);
                 it must only enqueue.
@@ -374,30 +376,31 @@ class GovernorRegistry:
         """
         digest = hashlib.sha256(api_key.encode()).hexdigest()
         key = (digest, _massive.origin_of(base_url))
-        mine = frozenset(basic)
+        mine = dict(limits)
         with self._lock:
             self._prune()
             entry = self._entries.get(key)
             if entry is None:
                 entry = self._entries[key] = _Entry(self._create())
             conflict = next(
-                (h for h in entry.holders.values() if h.basic and mine and h.basic != mine),
+                (h for h in entry.holders.values() if h.limits and mine and h.limits != mine),
                 None,
             )
             number = next(self._holders)
             entry.holders[number] = _Holder(label, mine)
             entry.declare()
             entry.governor.subscribe(listener)
-            union = frozenset().union(*(h.basic for h in entry.holders.values()))
+            paced = _lowest(entry.holders)
         if conflict is not None:
             logger.warning(
-                "%s declares rest_basic_subscriptions %s, but %s, which uses the same API key, "
-                "declares %s; Massive counts their requests together, so both pace %s",
+                "%s declares rest_requests_per_minute %s, but %s, which uses the same API key, "
+                "declares %s; Massive counts their requests together, so both pace %s, the "
+                "lowest limit declared for each subscription",
                 label,
                 _names(mine),
                 conflict.label,
-                _names(conflict.basic),
-                _names(union),
+                _names(conflict.limits),
+                _names(paced),
             )
         return GovernorLease(
             self, key=key, holder=number, governor=entry.governor, listener=listener
@@ -426,16 +429,33 @@ class GovernorRegistry:
                 del self._entries[key]
 
 
-def _names(subscriptions: Iterable[Subscription]) -> str:
-    """Spell a set of subscriptions for a message.
+def _lowest(holders: Mapping[int, _Holder]) -> dict[Subscription, int]:
+    """Return each subscription any holder declares, with the lowest limit declared for it.
 
     Args:
-        subscriptions: The subscriptions.
+        holders: The holds on one governor.
 
     Returns:
-        Their values, sorted, in braces, such as `"{options, stocks}"`.
+        The requests per minute to pace each declared subscription at.
     """
-    return "{" + ", ".join(sorted(s.value for s in subscriptions)) + "}"
+    lowest: dict[Subscription, int] = {}
+    for holder in holders.values():
+        for subscription, limit in holder.limits.items():
+            lowest[subscription] = min(limit, lowest.get(subscription, limit))
+    return lowest
+
+
+def _names(limits: Mapping[Subscription, int]) -> str:
+    """Spell declared limits for a message.
+
+    Args:
+        limits: The requests per minute of each subscription.
+
+    Returns:
+        Each subscription's value and limit, sorted, in braces, such as
+        `"{options: 5, stocks: 10}"`.
+    """
+    return "{" + ", ".join(f"{s.value}: {n}" for s, n in sorted(limits.items())) + "}"
 
 
 GOVERNORS: Final = GovernorRegistry()
@@ -449,66 +469,72 @@ class RateLimitNotices:
     it is released.
     """
 
-    __slots__ = ("_basic", "_label", "_lock", "_warned")
+    __slots__ = ("_declared", "_label", "_lock", "_warned")
 
-    def __init__(self, label: str, basic: AbstractSet[Subscription]) -> None:
+    def __init__(self, label: str, limits: Mapping[Subscription, int]) -> None:
         """Start with nothing reported.
 
         Args:
             label: The session's label.
-            basic: The subscriptions the session declares Basic.
+            limits: The requests per minute the session declares for each subscription.
         """
         self._label = label
-        self._basic = frozenset(subscription.value for subscription in basic)
+        self._declared = {subscription.value: limit for subscription, limit in limits.items()}
         self._lock = threading.Lock()
         self._warned: set[str] = set()
 
-    def refused(self, bucket: str, error: WireError, *, basic: bool) -> None:
+    def refused(self, bucket: str, error: WireError, *, per_minute: bool) -> None:
         """Log the session's INFO line for a bucket's first 429; later ones log nothing here.
 
-        The line says what the refusal means: a subscription the session declared Basic is
-        refused because other sessions, processes, or keys of the account share its limit; a
-        refusal that names the per-minute maximum shows the Basic limit, which is paced from
-        now on (a subscription could be declared; `OTHER` cannot); any other refusal pauses
-        the requests, and a
-        paid subscription that keeps getting them is a matter for Massive's support.
+        The line says what the refusal means: a subscription the session declared a limit for
+        is refused because other sessions, processes, or keys of the account share its limit;
+        a refusal that names the per-minute maximum says Massive limits the requests per
+        minute, so once the pause ends they are paced at the number Massive answered in the
+        refusal's minute, if any (a subscription's limit could be declared; `OTHER`'s cannot);
+        a declared subscription's refusal means its limit is shared or declared too high; any other
+        refusal pauses the requests, and one that keeps coming is a matter for Massive's
+        support. The governor's own INFO line gives the number once it is learned.
 
         Args:
             bucket: The refused request's bucket.
             error: The refusal.
-            basic: Whether its message named the per-minute maximum.
+            per_minute: Whether its message named the per-minute maximum.
         """
         with self._lock:
             if bucket in self._warned:
                 return
             self._warned.add(bucket)
-        rate = _massive.BASIC_REQUESTS_PER_MINUTE
         what = f"{'an' if bucket[0] in 'aeiou' else 'a'} {bucket} request"
         if bucket == OTHER:
             what = "a request outside Massive's subscriptions"
-        if bucket in self._basic:
+        learns = (
+            "once the pause ends, they are paced at the number of them Massive answered of "
+            "those sent in the refusal's clock minute, if it answered any (the next log line "
+            "and m.rate_limits() give it)"
+        )
+        if bucket in self._declared:
+            declared = self._declared[bucket]
             advice = (
-                f"its requests are already paced at {rate} per minute, so other sessions, "
-                "processes, or API keys of the account are using the same limit; requests "
-                "pause and resume"
+                f"its requests are already paced at the {declared} per minute declared, so "
+                "either other sessions, processes, or API keys of the account share the limit, "
+                f"or {declared} is above Massive's limit; requests pause and resume"
             )
-        elif basic and bucket == OTHER:
+        elif per_minute and bucket == OTHER:
             advice = (
-                f"that is Massive's limit of {rate} requests per minute on reference and other "
-                "data outside the subscriptions, which it counts on their own, so these "
-                "requests are paced at that rate from now on"
+                "that is Massive's limit on reference and other data outside the "
+                f"subscriptions, which it counts on their own; {learns}"
             )
-        elif basic:
+        elif per_minute:
             advice = (
-                f"that is the Basic tier's limit of {rate} requests per minute, so these "
-                "requests are paced at that rate from now on; declare "
-                f"MassiveConfig(rest_basic_subscriptions={{dm.Subscription.{bucket.upper()}}}) "
-                "to pace them from the first request"
+                f"Massive limits these requests per minute; {learns}; declare "
+                f"MassiveConfig(rest_requests_per_minute={{dm.Subscription.{bucket.upper()}: "
+                "<limit>}) to pace them from the first request, with the limit Massive gives "
+                "you"
             )
         else:
             advice = (
-                "requests pause and resume; a paid subscription has no request limit, so if "
-                "this persists, send the request id to Massive's support"
+                "requests pause and resume; if this persists, send the request id to Massive's "
+                "support"
             )
         logger.info(
             "%s: Massive refused %s with HTTP 429 (%s); %s", self._label, what, error, advice
@@ -536,9 +562,9 @@ def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:
             status = RateLimitState.READY
         basis = (
             LimitSource.DECLARED
-            if state.declared
+            if state.declared is not None
             else LimitSource.LEARNED
-            if state.learned
+            if state.learned is not None
             else None
         )
         until = None if state.paused_until is None else round(state.paused_until * 1e9)
@@ -589,17 +615,12 @@ def announce(
 
     One line per bucket of the read:
 
-    - a paced bucket whose requests cannot all start within a minute gets the least time they
-      take (`RequestGovernor.estimate`), such as "stocks.bars history: 250 requests; paced at
-      5 requests a minute (stocks); at that pace they take at least 49 min";
-    - an unpaced subscription's bucket of a download that makes one request per day or per
-      session (`shape`) and more than 5 requests gets the time it would take were the
-      subscription on the Basic tier, which the library learns only at Massive's first refusal
-      unless it is declared: "stocks.bars history: 11 requests, one per day; if the stocks
-      subscription is on the Basic tier (5 requests a minute), they take at least 2 min".
-
-    Both are lower bounds: pages beyond the first, slow responses, and other sessions'
-    requests only add time.
+    a paced bucket whose requests cannot all start within a minute gets the least time they
+    take at its limit (`RequestGovernor.estimate`), such as "stocks.bars history: 250
+    requests; paced at 5 requests a minute (stocks); at that pace they take at least 49 min".
+    It is a lower bound: pages beyond the first, slow responses, and other sessions' requests
+    only add time. An unpaced bucket gets no line: its limit, if any, is unknown until Massive
+    refuses one of its requests.
 
     A read made on a thread that holds the update graph's lock (`pauses_live_tables`), as every
     Deephaven console command does, holds every live table of the server still while it runs,
@@ -612,47 +633,39 @@ def announce(
         governor: The session's governor.
         read: What is read, such as `"stocks.bars history"`.
         buckets: The bucket of each planned request, one entry per request.
-        shape: How the read counts its requests. The default, `ReadShape.PAGED`, announces
-            a read only when it is paced.
+        shape: How the read counts its requests, which the line says; the default,
+            `ReadShape.PAGED`, says nothing of it.
         pauses_live_tables: True when the read runs on a thread that holds the update graph's lock.
     """
-    rate = _massive.BASIC_REQUESTS_PER_MINUTE
+    limits = {state.bucket: state.limit for state in governor.snapshot()}
     for bucket, count in Counter(buckets).items():
         seconds = governor.estimate(bucket, count)
+        limit = limits[bucket]
+        if seconds is None or limit is None or seconds < _MINUTE:
+            continue
         # A paged read says nothing; every other shape must say how it counts its requests.
         words = None if shape is ReadShape.PAGED else _SHAPE_WORDS[shape]
         what = f"{count} requests" if words is None else f"{count} requests, {words}"
-        if seconds is not None:
-            if seconds >= _MINUTE and pauses_live_tables:
-                logger.warning(
-                    "%s: %s; paced at %d requests a minute (%s); this command will pause every "
-                    "live table on the server for at least %d min: leave out wait=True to read "
-                    "in the background",
-                    read,
-                    what,
-                    rate,
-                    bucket,
-                    math.floor(seconds / _MINUTE),
-                )
-            elif seconds >= _MINUTE:
-                logger.info(
-                    "%s: %s; paced at %d requests a minute (%s); at that pace they take at "
-                    "least %d min",
-                    read,
-                    what,
-                    rate,
-                    bucket,
-                    math.floor(seconds / _MINUTE),
-                )
-        elif shape is not ReadShape.PAGED and bucket != OTHER and count > rate:
-            logger.info(
-                "%s: %s; if the %s subscription is on the Basic tier (%d requests a minute), "
-                "they take at least %d min",
+        if pauses_live_tables:
+            logger.warning(
+                "%s: %s; paced at %d requests a minute (%s); this command will pause every "
+                "live table on the server for at least %d min: leave out wait=True to read "
+                "in the background",
                 read,
                 what,
+                limit,
                 bucket,
-                rate,
-                math.ceil((count - rate) / rate),
+                math.floor(seconds / _MINUTE),
+            )
+        else:
+            logger.info(
+                "%s: %s; paced at %d requests a minute (%s); at that pace they take at "
+                "least %d min",
+                read,
+                what,
+                limit,
+                bucket,
+                math.floor(seconds / _MINUTE),
             )
 
 

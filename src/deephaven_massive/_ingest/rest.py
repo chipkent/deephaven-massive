@@ -2792,8 +2792,8 @@ class RestEndpoints:
         to use is kept as sent and logs one WARNING per form of stamp per session), and every
         row gets the library's time columns. A symbol with no data adds no rows. Before the
         first request, one INFO line announces a long download (`rate_limits.announce`): a
-        grouped-daily or per-session download of more than five requests, and any read whose
-        paced requests cannot all start within a minute, with the least time it takes. Logs
+        read whose paced requests cannot all start within a minute, with the least time it
+        takes. Logs
         `source=REST requests=<n>` at INFO.
 
         Args:
