@@ -47,12 +47,14 @@ from deephaven_massive._massive import (
     Transport,
     sources,
 )
-from deephaven_massive._tables import stream
+from deephaven_massive._tables import held_rows, stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import update_cycle
+from deephaven_massive._tables.futures_dates import LookupState, Readiness
+from deephaven_massive._tables.held_rows import DELAYED_AFTER, HeldRows
 from deephaven_massive._tables.liveness import release_scope
-from deephaven_massive._tables.problem_events import ProblemAction, ProblemEvent
+from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
 from deephaven_massive._tables.stream import (
     ChannelPlan,
     Flusher,
@@ -63,7 +65,7 @@ from deephaven_massive._tables.watchlist import skipped_rows_text
 from deephaven_massive.namespaces._options import ADMIN_MESSAGES
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Sequence
     from typing import TypeAlias
 
     from deephaven.execution_context import ExecutionContext
@@ -981,49 +983,310 @@ def test_every_row_takes_the_arrival_of_its_frame(
     assert inserted == [111, 111, 222]
 
 
-def test_a_session_miss_leaves_the_streams_error_alone_and_publishes_its_rows(
-    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    core = massive_session._core
-    spec = core.catalog.by_name["futures.trades"]
-    plan = ChannelPlan.build(core.catalog, spec, "T")
-    updates: list[dict[int, StreamUpdate]] = []
-    monkeypatch.setattr(core, "update_streams", updates.append)
-    calendar = FakeSessionDates()
-    flusher = Flusher(core.exec_ctx, "test-flush", interval=3600.0, sessions=calendar)
-    sinks = []
-    for stream_id, wanted in ((1, ("NQM5",)), (2, ("ESM5",))):
-        opened = open_stream_tables(
-            plan,
-            core.catalog.dataset_schema(spec),
-            wanted,
-            core=core,
-            policy=UNREADABLE_FAILS,
-            stream_id=stream_id,
-            host="socket.test",
-            evidence="test host",
-            recency=Recency.REALTIME,
-            path="/futures",
-            on_shutdown=lambda: None,
-            on_symbols=lambda *_: None,
+class FakeFuturesCalendar(FakeSessionDates):
+    """A futures calendar whose tickers' states the test sets; every ticker waits at first."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.missing = set()
+        self.version = 0
+        self.found: dict[str, LookupState] = {}
+        self.dead = False
+
+    @override
+    def correct(self, symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
+        names = symbols.to_pylist()
+        ready = [self.found.get(n, WAITING).readiness is Readiness.READY for n in names]
+        return pa.array(
+            [d if r else None for d, r in zip(dates.to_pylist(), ready, strict=True)], pa.string()
         )
-        opened.sink.publish_held()
-        flusher.routes.add("T", opened.sink)
-        sinks.append(opened.sink)
-    both = [futures_trade("NQM5", BEFORE_ROLL_MS), futures_trade("ESM5", BEFORE_ROLL_MS)]
-    flusher.rows("T", frame(both, "futures/T"), {}, generation=1)
-    flusher.flush()
-    calendar.missing.clear()
-    flusher.rows("T", frame(both, "futures/T"), {}, generation=1)
-    flusher.flush()
-    flusher.stop()
-    # A miss only leaves its rows without a date: the stream is healthy, so its `Error` is
-    # never written, and every row is published.
-    assert not any(sink.failed for sink in sinks)
-    assert updates[:2] == [
-        {1: StreamUpdate(rows_published=1), 2: StreamUpdate(rows_published=1)},
-        {1: StreamUpdate(rows_published=2), 2: StreamUpdate(rows_published=2)},
+
+    def alive(self) -> bool:
+        return not self.dead
+
+    def states(self, symbols: Iterable[str]) -> dict[str, LookupState]:
+        return {s: self.found.get(s, WAITING) for s in symbols}
+
+    def unplaced(self, symbol: str, instant: int) -> str:
+        return f"no session holds {symbol}"
+
+    def set(self, ticker: str, state: LookupState) -> None:
+        self.found[ticker] = state
+        self.version += 1
+
+
+WAITING = LookupState(Readiness.WAITING, "its product is being looked up")
+
+
+class FuturesFlush:
+    """A futures flusher with a fake calendar and two streams: NQM5's (1) and ESM5's (2)."""
+
+    def __init__(
+        self,
+        core: SessionCore,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        policy: ResolvedPolicy = DEFAULT_POLICY,
+    ) -> None:
+        spec = core.catalog.by_name["futures.trades"]
+        self.plan = ChannelPlan.build(core.catalog, spec, "T")
+        self.updates: list[dict[int, StreamUpdate]] = []
+        self.events: list[ProblemEvent] = []
+        monkeypatch.setattr(core, "update_streams", self.updates.append)
+        monkeypatch.setattr(core, "problems", self.events.extend)
+        self.calendar = FakeFuturesCalendar()
+        self.now = 1_000.0
+        self.held: HeldRows[ChannelPlan] = HeldRows(
+            self.calendar, max_outage=300.0, clock=lambda: self.now
+        )
+        self.flusher = Flusher(
+            core.exec_ctx,
+            "test-flush",
+            interval=3600.0,
+            sessions=self.calendar,
+            held=self.held,
+        )
+        self.sinks: list[StreamSink] = []
+        for stream_id, wanted in ((1, ("NQM5",)), (2, ("ESM5",))):
+            opened = open_stream_tables(
+                self.plan,
+                core.catalog.dataset_schema(spec),
+                wanted,
+                core=core,
+                policy=policy,
+                stream_id=stream_id,
+                host="socket.test",
+                evidence="test host",
+                recency=Recency.REALTIME,
+                path="/futures",
+                on_shutdown=lambda: None,
+                on_symbols=lambda *_: None,
+            )
+            opened.sink.publish_held()
+            self.flusher.routes.add("T", opened.sink)
+            self.sinks.append(opened.sink)
+
+    def send(self, *tickers: str, generation: int = 1) -> None:
+        rows = [futures_trade(t, BEFORE_ROLL_MS) for t in tickers]
+        self.flusher.rows("T", frame(rows, "futures/T"), {}, generation=generation)
+        self.flusher.flush()
+
+    def published(self) -> dict[int, int]:
+        return {sink.stream_id: sink.rows_published for sink in self.sinks}
+
+
+@pytest.fixture
+def futures_flush(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[FuturesFlush]:
+    found = FuturesFlush(massive_session._core, monkeypatch)
+    yield found
+    found.flusher.stop()
+
+
+def test_futures_rows_wait_for_their_date_then_publish_in_order(
+    futures_flush: FuturesFlush,
+) -> None:
+    flush = futures_flush
+    flush.calendar.set("ESM5", LookupState(Readiness.READY, loaded_at=0.0))
+    flush.send("NQM5", "ESM5")
+    # NQM5's row waits; ESM5's, dated, publishes; neither stream is failed or told anything.
+    assert flush.published() == {1: 0, 2: 1}
+    assert flush.held.rows_of(flush.plan) == 1
+    flush.send("NQM5")
+    assert flush.held.rows_of(flush.plan) == 2
+    flush.calendar.set("NQM5", LookupState(Readiness.READY, loaded_at=0.0))
+    flush.flusher.flush()  # no new rows: the held ones publish on their own
+    assert flush.published() == {1: 2, 2: 1}
+    assert flush.held.rows_of(flush.plan) == 0
+    assert not any(sink.failed for sink in flush.sinks)
+    assert flush.events == []
+
+
+def test_held_rows_of_two_sockets_publish_each_with_its_own(futures_flush: FuturesFlush) -> None:
+    flush = futures_flush
+    flush.send("NQM5", generation=1)
+    flush.send("NQM5", generation=2)  # after a reconnect
+    flush.calendar.set("NQM5", LookupState(Readiness.READY, loaded_at=0.0))
+    flush.flusher.flush()
+    assert flush.published()[1] == 2
+    assert flush.sinks[0].rows_generation == 2
+
+
+def test_a_ticker_a_watchlist_removes_drops_its_held_rows(futures_flush: FuturesFlush) -> None:
+    flush = futures_flush
+    flush.send("NQM5")
+    flush.sinks[0].set_symbols(frozenset({"GCM5"}))  # its watchlist removed NQM5
+    flush.send("ESM5")
+    assert flush.held.rows_of(flush.plan) == 1  # only ESM5's, which stream 2 receives
+
+
+def test_held_rows_never_count_as_dropped(futures_flush: FuturesFlush) -> None:
+    # Rows that only wait are read whole: a long wait never looks like a format change.
+    flush = futures_flush
+    for _ in range(stream.DROPPED_RUN_LIMIT + 1):
+        flush.send("NQM5")
+    assert not any(sink.failed for sink in flush.sinks)
+    assert flush.held.rows_of(flush.plan) == stream.DROPPED_RUN_LIMIT + 1
+
+
+def test_a_refused_lookup_fails_only_the_streams_that_receive_the_ticker(
+    futures_flush: FuturesFlush,
+) -> None:
+    flush = futures_flush
+    refusal = dm.EntitlementError("HTTP 403", status=403)
+    flush.calendar.set("NQM5", LookupState(Readiness.REFUSED, "refused", error=refusal))
+    flush.calendar.set("ESM5", LookupState(Readiness.READY, loaded_at=0.0))
+    flush.send("NQM5", "ESM5")
+    assert [sink.failed for sink in flush.sinks] == [True, False]
+    assert flush.published()[2] == 1
+
+
+@pytest.mark.parametrize(
+    ("readiness", "cause"),
+    [
+        (Readiness.UNLISTED, ProblemCause.UNLISTED_CONTRACTS),
+        (Readiness.UNSCHEDULED, ProblemCause.UNSCHEDULED_PRODUCTS),
+    ],
+)
+def test_discarded_rows_are_withheld_reported_and_logged_once_per_stream(
+    *,
+    futures_flush: FuturesFlush,
+    caplog: pytest.LogCaptureFixture,
+    readiness: Readiness,
+    cause: ProblemCause,
+) -> None:
+    flush = futures_flush
+    flush.calendar.set("NQM5", LookupState(readiness, "gone"))
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.stream"):
+        flush.send("NQM5")
+        flush.send("NQM5")
+    assert flush.published() == {1: 0, 2: 0}
+    assert [(e.cause, e.action, e.symbol, e.rows, e.stream_id) for e in flush.events] == [
+        (cause, ProblemAction.WITHHELD, "NQM5", 1, 1)
+    ] * 2
+    assert len(caplog.records) == 1  # once per stream and cause
+    assert caplog.records[0].getMessage().startswith("stream 1: futures.trades: ")
+    assert not flush.sinks[0].failed
+
+
+@pytest.mark.parametrize(
+    ("readiness", "setting"),
+    [
+        (Readiness.UNLISTED, "unlisted_contracts"),
+        (Readiness.UNSCHEDULED, "unscheduled_products"),
+    ],
+)
+def test_discarded_rows_fail_a_stream_whose_setting_raises(
+    *,
+    massive_session: dm.MassiveSession,
+    monkeypatch: pytest.MonkeyPatch,
+    readiness: Readiness,
+    setting: str,
+) -> None:
+    policy = resolve_policy(dm.ErrorPolicy(**{setting: OnError.RAISE}), dm.ErrorPolicy())
+    flush = FuturesFlush(massive_session._core, monkeypatch, policy=policy)
+    flush.calendar.set("NQM5", LookupState(readiness, "gone"))
+    flush.send("NQM5")
+    flush.flusher.stop()
+    assert [sink.failed for sink in flush.sinks] == [True, False]
+
+
+def test_a_long_wait_is_reported_once_as_delayed(
+    futures_flush: FuturesFlush, caplog: pytest.LogCaptureFixture
+) -> None:
+    flush = futures_flush
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.stream"):
+        flush.flusher.flush()
+        flush.now += 1
+        flush.flusher.flush()
+    assert [(e.cause, e.action, e.symbol, e.rows) for e in flush.events] == [
+        (ProblemCause.UNDATED_ROWS, ProblemAction.DELAYED, "NQM5", 1)
     ]
+    assert caplog.messages == [
+        (
+            "stream 1: futures.trades: the rows of 1 [NQM5] have waited over 15 s for their "
+            "trading session; they publish once it loads"
+        )
+    ]
+
+
+def test_a_stream_warns_again_about_a_later_wait(
+    futures_flush: FuturesFlush, caplog: pytest.LogCaptureFixture
+) -> None:
+    flush = futures_flush
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.stream"):
+        for _ in range(2):
+            flush.calendar.set("NQM5", WAITING)
+            flush.send("NQM5")
+            flush.now += DELAYED_AFTER
+            flush.flusher.flush()
+            flush.calendar.set("NQM5", LookupState(Readiness.READY, loaded_at=0.0))
+            flush.flusher.flush()
+    assert len(caplog.records) == 2
+    assert flush.published()[1] == 2
+
+
+def test_past_the_byte_limit_the_streams_of_the_dataset_fail(
+    futures_flush: FuturesFlush, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(held_rows, "HELD_BYTES_LIMIT", 1)
+    futures_flush.send("NQM5")
+    assert all(sink.failed for sink in futures_flush.sinks)
+
+
+def test_held_rows_past_the_byte_limit_fail_their_streams_between_frames(
+    futures_flush: FuturesFlush, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    futures_flush.send("NQM5")
+    monkeypatch.setattr(held_rows, "HELD_BYTES_LIMIT", 1)
+    futures_flush.flusher.flush()  # no new rows: the held ones are settled alone
+    assert all(sink.failed for sink in futures_flush.sinks)
+
+
+def test_a_dead_calendar_fails_the_streams_whose_rows_wait(futures_flush: FuturesFlush) -> None:
+    flush = futures_flush
+    flush.send("NQM5")
+    flush.calendar.dead = True
+    flush.flusher.flush()
+    assert all(sink.failed for sink in flush.sinks)
+    assert flush.held.holding() == ()
+
+
+def test_held_rows_of_a_dataset_no_stream_reads_are_dropped(futures_flush: FuturesFlush) -> None:
+    flush = futures_flush
+    flush.send("NQM5")
+    for sink in flush.sinks:
+        flush.flusher.routes.remove(sink.stream_id)
+    flush.flusher.flush()
+    assert flush.held.holding() == ()
+
+
+def test_a_held_dataset_whose_streams_failed_drops_its_rows(futures_flush: FuturesFlush) -> None:
+    flush = futures_flush
+    flush.send("NQM5")
+    for sink in flush.sinks:
+        sink.fail(dm.MassiveError("gone"))
+    flush.flusher.flush()
+    assert flush.held.holding() == ()
+
+
+def test_a_failure_settling_held_rows_fails_their_streams_as_a_defect(
+    futures_flush: FuturesFlush, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flush = futures_flush
+    flush.send("NQM5")
+
+    def broken(symbols: Iterable[str]) -> dict[str, LookupState]:
+        raise RuntimeError("calendar broke")
+
+    monkeypatch.setattr(flush.calendar, "states", broken)
+    flush.calendar.version += 1
+    flush.flusher.flush()
+    assert all(sink.failed for sink in flush.sinks)
+    assert flush.held.holding() == ()
 
 
 # --- Flusher -----------------------------------------------------------------------------------

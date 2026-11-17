@@ -12,7 +12,8 @@ Unknown: whether Massive's schedules hold their sessions under any query, and wh
 or contracts record names the underlying product. If the schedules serve them, the calendar
 reads them as it reads any product. If a record names the underlying, the calendar can date
 their rows by its sessions. If neither, the evidence goes to Massive in a report. Meanwhile the
-calendar dates no streamed row of such a product: `Date` is null, with a warning.
+calendar dates no streamed row of such a product: its rows are withheld under
+`unscheduled_products`.
 
 Read by `tests/ingest/test_futures_calendar_integration.py::test_response_bodies_of_futures_gaps`,
 on a key with futures data. It records the whole schedules answer for `CLT` and `CL`, and the

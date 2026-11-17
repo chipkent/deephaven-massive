@@ -2481,10 +2481,9 @@ def test_the_live_marker_check_runs_before_deselection() -> None:
 # A plan's name is caught by its word: `Basic`, `Starter`, `Developer`, `Advanced`, `Business`,
 # or `business_expansion`, in any case, as a whole word, in a runbook's lines and in a Python
 # file's comments, docstrings, other strings, and names, each name read as the words its `_`
-# separates (`BASIC_LIMIT`, `classes_on_basic`). The harness may call the library's own names
-# that hold such a word (`_LIBRARY_NAMES`). A line that quotes Massive, holding `massive.com`
-# or a request id, may name one, and so may the spec refresh's tests, which parse Massive's
-# plan tables.
+# separates (`BASIC_LIMIT`, `classes_on_basic`).
+# A line that quotes Massive, holding `massive.com` or a request id, may name one, and so may
+# the spec refresh's tests, which parse Massive's plan tables.
 
 _PLAN_WORD = re.compile(
     r"\b(basic|starter|developer|advanced|business|business_expansion)\b", re.IGNORECASE

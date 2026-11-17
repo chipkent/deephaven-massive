@@ -40,6 +40,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.futures_sessions import futures_session
 from deephaven_massive._datasets.symbols import is_futures_contract
+from deephaven_massive._ingest.futures_calendar import TICKERS_PER_REQUEST, contracts_query
 from deephaven_massive._massive import (
     RestClient,
     RestPath,
@@ -1305,9 +1306,10 @@ def test_contracts_lookup_cost_with_and_without_date(
 ) -> None:
     """What a contracts lookup by `ticker.any_of` costs with a `date` and without one.
 
-    The calendar's lookup sends `ticker.any_of` and no `date`, so it pages through every
-    date of every contract; an earlier run timed it at 14 s for 100 tickers in four of five
-    runs and 0.45 s in the fifth, unexplained. Reads the whole snapshot, takes 500 tickers
+    A lookup by `ticker.any_of` and no `date` pages through every date of every contract; an
+    earlier run timed it at 14 s for 100 tickers in four of five runs and 0.45 s in the fifth,
+    unexplained. The calendar now always sends a `date` range
+    (`test_calendar_contracts_lookup_as_sent`). Reads the whole snapshot, takes 500 tickers
     spread evenly over it (singles and combos), and of them 100 and then 1, spread evenly
     again; finds the latest day the contracts list holds (`_listed_day`). Then times five
     lookups, each at the largest page and up to 5 pages: 1, 100, and 500 tickers with that
@@ -1345,6 +1347,44 @@ def test_contracts_lookup_cost_with_and_without_date(
     assert any(isinstance(run, _Timing) for done in runs.values() for run in done), (
         "no contracts lookup was answered"
     )
+
+
+@pytest.mark.settles("139")
+@pytest.mark.requests(20)
+@pytest.mark.timeout(600)
+def test_calendar_contracts_lookup_as_sent(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """What the calendar's own contracts lookup of 100 tickers costs, and whether it fails.
+
+    Massive answered a 100-ticker `ticker.any_of` lookup with no `date` with HTTP 504 twice in
+    one day. The calendar sends no such lookup: it asks the week up to today's session
+    (`futures_calendar.contracts_query`), at most `TICKERS_PER_REQUEST` tickers a request.
+    Reads the whole snapshot, takes 100 tickers spread evenly over it, and sends the
+    calendar's query for them 5 times, timing each page. Records each run's rows, pages, and
+    seconds, and any failure's status and text, as evidence. Passes when every run is
+    answered; a failure is recorded, then fails the test, so the evidence names it. Sends at
+    most 20 requests: up to 6 for the snapshot, then 5 runs of up to 2 pages.
+    """
+    tickers = tuple(_spread(sorted(_read_snapshot(live_rest, evidence)), TICKERS_PER_REQUEST))
+    today = futures_session(datetime.now(UTC))  # the calendar's today
+    query = contracts_query(tickers, today, page=_LIST_PAGE)
+    evidence(
+        f"the calendar's query: {len(tickers)} tickers, date.gte {query['date.gte']}, "
+        f"date.lte {query['date.lte']}, limit {query['limit']}"
+    )
+    failures: list[str] = []
+    for run in range(1, _COST_RUNS + 1):
+        try:
+            timing = _timed_read(live_rest, _CONTRACTS, query, most=2)
+        except dm.MassiveError as error:
+            failures.append(f"run {run}: HTTP {error.status}: {error}")
+            evidence(f"run {run}: failed with HTTP {error.status}: {error}")
+            continue
+        evidence(
+            f"run {run}: {timing.rows} rows, {len(timing.seconds)} pages"
+            f"{'' if timing.ended else ' (more follow)'}, seconds per page "
+            f"{[round(s, 3) for s in timing.seconds]}, total {sum(timing.seconds):.3f}"
+        )
+    assert failures == []
 
 
 _PRODUCT_FIELDS = ["details.ticker", "details.product_code"]

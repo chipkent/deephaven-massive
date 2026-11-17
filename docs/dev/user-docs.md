@@ -598,5 +598,7 @@ rewrites its intent or content, and it judges a revised hook against the approve
 clarity and directness. A page passes when both graders pass it with a mean holistic score of 9
 or more.
 
-A page gets at most two grading rounds. One still short of the bar after the second goes to the
-owner with its graders' score sheets, and nobody loops on it further.
+A page ships only at a passing grade. One still short of the bar after patching is rewritten
+from its outline and graded again by fresh graders. If a few rounds can't pass it, the owner is
+asked for help with the specific obstacle, given the graders' score sheets, never for sign-off
+on failing text.

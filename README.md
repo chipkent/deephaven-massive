@@ -709,6 +709,8 @@ on_error:
   unreadable_keys: raise
   unconvertible_values: raise
   malformed_rows: log
+  unlisted_contracts: raise
+  unscheduled_products: raise
   refused_venues: raise
 ```
 
