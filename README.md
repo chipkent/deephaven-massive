@@ -656,7 +656,7 @@ see a change. Restart it from a new terminal ([Start the server](#start-the-serv
 | Variable | What you get | Default |
 |---|---|---|
 | `MASSIVE_API_KEY` | Access to Massive. Every session needs it, unless your code passes the key. | Unset |
-| `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` | `history()` of trades, quotes, and as-traded bars (`adjusted=False`) for the whole market or 50 or more symbols, and index values' history, from Massive's flat files on plans that include them. Set both or neither. | Unset |
+| `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` | `history()` of trades, quotes, and as-traded 1-minute and daily bars (`adjusted=False`) for the whole market or 50 or more symbols, and index values' history, from Massive's flat files on plans that include them. Set both or neither. | Unset |
 | `DEEPHAVEN_MASSIVE_CONFIG_FILE` | Your settings file, read by `dm.MassiveConfig.from_file()` called with no path | Unset |
 | `DEEPHAVEN_MASSIVE_LOG` | The library's log at the level you name: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` | Warnings and errors only, in the server's terminal |
 | `DEEPHAVEN_MASSIVE_LOG_FILE` | The log in this file instead of the terminal. Set alone, it logs at `DEBUG`. | Unset |
