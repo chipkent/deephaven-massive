@@ -1573,7 +1573,6 @@ _WIRE_CLIENTS = frozenset(
         "set_reply_capture",
         "RequestGovernor",
         "BucketState",
-        "BASIC_REQUESTS_PER_MINUTE",
         "RATE_WINDOW",
         "RestClient",
         "Page",
@@ -2482,10 +2481,9 @@ def test_the_live_marker_check_runs_before_deselection() -> None:
 # A plan's name is caught by its word: `Basic`, `Starter`, `Developer`, `Advanced`, `Business`,
 # or `business_expansion`, in any case, as a whole word, in a runbook's lines and in a Python
 # file's comments, docstrings, other strings, and names, each name read as the words its `_`
-# separates (`BASIC_LIMIT`, `classes_on_basic`). The harness may call the library's own names
-# that hold such a word (`_LIBRARY_NAMES`). A line that quotes Massive, holding `massive.com`
-# or a request id, may name one, and so may the spec refresh's tests, which parse Massive's
-# plan tables.
+# separates (`BASIC_LIMIT`, `classes_on_basic`).
+# A line that quotes Massive, holding `massive.com` or a request id, may name one, and so may
+# the spec refresh's tests, which parse Massive's plan tables.
 
 _PLAN_WORD = re.compile(
     r"\b(basic|starter|developer|advanced|business|business_expansion)\b", re.IGNORECASE
@@ -2545,17 +2543,11 @@ def _plan_names(root: Path, files: Iterable[Path]) -> list[str]:
 _CODE_TOKENS = frozenset({tokenize.OP, tokenize.NUMBER})
 """The tokens that hold no words: operators and numbers, also inside an f-string."""
 
-_LIBRARY_NAMES = frozenset({"rest_basic_subscriptions", "basic"})
-"""The library's own names that hold a plan's word, which the harness must call:
-`MassiveConfig.rest_basic_subscriptions` and the keyword `basic` of the rate-limit registry's
-`lease`. They are the library's names, so the library's own change renames them."""
-
 
 def _python_prose(source: str) -> dict[int, str]:
     """Return the words a reader reads in Python source, by line.
 
-    The words are its comments, its strings, and its names, each name split on `_`; a name of
-    `_LIBRARY_NAMES` is left out, and `basic` only as a keyword argument (`lease(basic=x)`).
+    The words are its comments, its strings, and its names, each name split on `_`.
 
     Args:
         source: The source.
@@ -2565,19 +2557,11 @@ def _python_prose(source: str) -> dict[int, str]:
         text on the line.
     """
     prose: dict[int, list[str]] = {}
-    tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
-    depth = 0
-    for index, token in enumerate(tokens):
-        if token.type == tokenize.OP:
-            depth += {"(": 1, ")": -1}.get(token.string, 0)
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
         if token.type in _CODE_TOKENS:
             continue
         text = token.string
         if token.type == tokenize.NAME:
-            following = tokens[index + 1].string if index + 1 < len(tokens) else ""
-            keyword = depth > 0 and following == "="
-            if text in _LIBRARY_NAMES and (text != "basic" or keyword):
-                continue
             text = " ".join(text.split("_"))
         for offset, line in enumerate(text.splitlines()):
             prose.setdefault(token.start[0] + offset, []).append(line)
@@ -2598,9 +2582,8 @@ def test_the_live_tests_name_no_plan() -> None:
         ("# needs Stocks Starter", True),
         ("LIMIT = 5  # the Basic pace", True),
         ('tier = "business_expansion"', True),
-        ("config.rest_basic_subscriptions", False),
-        ("lease(basic=config.rest_basic_subscriptions)", False),
-        ("lease(basic=x)", False),
+        ("config.rest_requests_per_minute", False),
+        ("lease(basic=x)", True),
         ("BASIC_LIMIT = 5", True),
         ("def classes_on_basic():", True),
         ("_BASIC_UNDERLYINGS = ()", True),

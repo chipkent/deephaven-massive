@@ -1,10 +1,10 @@
 """The knowledge-base articles the library relies on, and how one is turned into Markdown.
 
-Massive's knowledge base (`https://massive.com/knowledge-base/article/<slug>`) states some
-rules its API documentation does not, and the library depends on a few of them: the wording of
-the HTTP 429 that marks a Basic subscription, for one. The documentation index (`llms.txt`)
-links no article, and articles are published as HTML only (the `.md` address of one answers
-HTTP 404), so they cannot be vendored the way documentation pages are. Instead:
+Massive's knowledge base (`https://massive.com/knowledge-base/article/<slug>`) states some rules
+its API documentation does not, and the library depends on a few of them: the wording of the
+HTTP 429 that says a subscription is over its per-minute limit, for one. The documentation index
+(`llms.txt`) links no article, and articles are published as HTML only (the `.md` address of one
+answers HTTP 404), so they cannot be vendored the way documentation pages are. Instead:
 
 - `ARTICLES` names each article the library relies on, by its slug, with what the library
   takes from it. It is short and reviewed: an article enters it only when code depends on
@@ -50,9 +50,9 @@ ARTICLES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "what-is-the-request-limit-for-massives-restful-apis": (
             "the REST rate governor takes a 429 whose message says \"You've exceeded the "
-            'maximum requests per minute" as the mark of a Basic subscription, and charges '
-            "reference and cross-asset endpoints to a bucket of their own, because the article "
-            "says they are counted in their own bucket"
+            'maximum requests per minute" as saying the subscription has a per-minute limit, '
+            "and charges reference and cross-asset endpoints to a bucket of their own, because "
+            "the article says they are counted in their own bucket"
         ),
     }
 )

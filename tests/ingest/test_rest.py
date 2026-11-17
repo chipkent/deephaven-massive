@@ -51,6 +51,7 @@ from deephaven_massive._errors import (
     LIBRARY_BUG,
     NEW_SESSION,
     READ_STOPPED,
+    BrokenGuaranteeError,
     CutShortError,
     RowDataError,
     UnavailableSymbolError,
@@ -1625,7 +1626,23 @@ def test_limit_caps_rows_across_requests(
     out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=3)
     assert len(out) == 3
     # A cap below the page size is the page size: no request asks for rows it cannot keep.
-    assert [q["limit"] for _, q in fake_rest.get_queries()] == [["3"], ["3"]]
+    # The second request asks only for the row still wanted.
+    assert [q["limit"] for _, q in fake_rest.get_queries()] == [["3"], ["1"]]
+
+
+def test_limit_sends_no_request_once_its_rows_have_arrived(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The symbols take two requests, but the first answers every row the call asked for.
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND, AAPL_DIVIDEND])))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=2)
+    assert len(out) == 2
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["A,B"]]
+    assert (
+        "stocks.dividends: limit=2 rows arrived after 1 of 2 planned requests; the other 1 are "
+        "not sent"
+    ) in caplog.messages
 
 
 def test_limit_caps_each_symbol_s_rows_where_a_request_names_one_symbol(
@@ -2194,9 +2211,9 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
         r"\(.* local time\), but this read waits out at most 300 s of pauses and has spent "
         r"0 s of its patience\. The usual cause is another program or process using the same "
         r"Massive account, whose limit they share\. "
-        r"To go on: retry after that time; stop the other program; or, if this subscription is "
-        r"on the Basic tier, declare it Basic \(rest_basic_subscriptions\) so its requests are "
-        r"paced, or upgrade it\. m\.rate_limits\(\) shows each subscription's state$"
+        r"To go on: retry after that time; stop the other program; or declare the limit Massive "
+        r"gives this subscription \(rest_requests_per_minute\), or upgrade it\. "
+        r"m\.rate_limits\(\) shows each subscription's state$"
     )
     with caplog.at_level(logging.INFO):
         for _ in range(2):
@@ -2619,11 +2636,7 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
         ("ESH5", "2024-04-01"),
         ("NQH5", "2024-04-01"),
     ]
-    assert (
-        "futures.trades history: 6 requests, one per session and symbol, more where a session "
-        "spans several pages; if the futures subscription is on the Basic tier (5 requests a "
-        "minute), they take at least 1 min"
-    ) in caplog.messages
+    assert "requests a minute" not in caplog.text  # unpaced: no limit is known to announce
 
 
 def test_a_short_session_download_is_not_announced(
@@ -2903,7 +2916,7 @@ def test_a_read_fans_out_on_the_callers_pool(
         CRYPTO_LAST, path, request, symbols=request.static_symbols, split=split_pair
     )
     with ThreadPoolExecutor(2) as pool:
-        table, requests = reader.read(
+        table, requests, _ = reader.read(
             CRYPTO_LAST,
             path,
             calls,
@@ -3262,28 +3275,39 @@ def test_an_empty_range_returns_every_column_without_a_request(
     assert fake_rest.get_queries() == []
 
 
-def test_a_long_grouped_daily_download_is_announced(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_a_long_grouped_daily_download_of_a_paced_subscription_is_announced(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    paced = dm.MassiveSession(
+        dm.MassiveConfig(
+            api_key="test-key",
+            rest_base_url=fake_rest.url,
+            rest_requests_per_minute={dm.Subscription.STOCKS: 5},
+        )
+    )
     for day in range(3, 18):
         fake_rest.reply(GROUPED_PATH.format(date=f"2025-03-{day:02d}"), Reply(envelope([])))
-    with caplog.at_level(logging.INFO):
-        history(
-            session,
-            BARS,
-            start="2025-03-03",
-            end="2025-03-17",
-            symbols=dm.ALL,
-            timespan=Timespan.DAY,
-            adjusted=True,
-        )
+    try:
+        with caplog.at_level(logging.INFO):
+            history(
+                paced,
+                BARS,
+                start="2025-03-03",
+                end="2025-03-17",
+                symbols=dm.ALL,
+                timespan=Timespan.DAY,
+                adjusted=True,
+            )
+    finally:
+        paced.close()
     # Stocks have no grouped day on a Saturday or Sunday: 11 weekdays, not 15 days.
     days = sorted(path.rsplit("/", 1)[1] for path, _ in fake_rest.get_queries())
     assert len(days) == 11
     assert all(date.fromisoformat(day).weekday() < 5 for day in days)
     assert (
-        "stocks.bars history: 11 requests, one per day; if the stocks subscription is on the "
-        "Basic tier (5 requests a minute), they take at least 2 min"
+        "stocks.bars history: 11 requests, one per day; paced at 5 requests a minute (stocks); "
+        "at that pace they take at least 2 min"
     ) in caplog.text
 
 
@@ -3595,7 +3619,7 @@ def test_a_session_charges_reads_and_host_decisions_to_their_buckets(
     assert requests_by_bucket(session) == {"stocks": 2, "other": 1}
 
 
-def test_a_learned_basic_subscription_is_paced_and_shown(
+def test_a_learned_limit_is_paced_and_shown(
     *,
     fake_rest: FakeRestServer,
     rest_clock: FakeClock,
@@ -3605,17 +3629,20 @@ def test_a_learned_basic_subscription_is_paced_and_shown(
 ) -> None:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    basic = Reply({"message": "You've exceeded the maximum requests per minute"}, status=429)
-    fake_rest.reply(DIVIDENDS_PATH, basic, Reply(envelope([AAPL_DIVIDEND])))
+    per_minute = Reply({"message": "You've exceeded the maximum requests per minute"}, status=429)
+    ok = Reply(envelope([AAPL_DIVIDEND]))
+    fake_rest.reply(DIVIDENDS_PATH, ok, ok, ok, per_minute, ok)
     try:
         with caplog.at_level(logging.INFO):
-            assert [r["Symbol"] for r in fetch(m, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
+            for _ in range(4):  # three answered, then one refused and retried after a window
+                assert [r["Symbol"] for r in fetch(m, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
         assert rest_clock.waits == [61.0]
-        assert "that is the Basic tier's limit of 5 requests per minute" in caplog.text
+        assert "Massive limits these requests per minute" in caplog.text
+        assert "so they are paced at 3 per minute from now on" in caplog.text
         assert m._core.diagnostics.wait_until_shown(30)
         stocks = next(r for r in dh_to_pylist(m.rate_limits()) if r["Bucket"] == "stocks")
-        assert (stocks["RequestsPerMinute"], stocks["LimitSource"]) == (5, "LEARNED")
-        assert (stocks["Attempts"], stocks["Refusals"]) == (2, 1)
+        assert (stocks["RequestsPerMinute"], stocks["LimitSource"]) == (3, "LEARNED")
+        assert (stocks["Attempts"], stocks["Refusals"]) == (5, 1)
     finally:
         m.close()
 
@@ -3627,7 +3654,7 @@ def test_a_paced_fetch_announces_how_long_it_takes(
     config = dm.MassiveConfig(
         api_key="test-key",
         rest_base_url=fake_rest.url,
-        rest_basic_subscriptions={dm.Subscription.CURRENCIES},
+        rest_requests_per_minute={dm.Subscription.CURRENCIES: 5},
     )
     m = dm.MassiveSession(config)
     pairs = ["C:EURUSD", "C:GBPUSD", "C:AUDUSD", "C:USDJPY", "C:USDCHF", "C:NZDUSD"]
@@ -3663,7 +3690,7 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
         api_key="test-key",
         rest_base_url=fake_rest.url,
         max_concurrency=3,
-        rest_basic_subscriptions={dm.Subscription.CURRENCIES},
+        rest_requests_per_minute={dm.Subscription.CURRENCIES: 5},
     )
     m = dm.MassiveSession(config)
     governor = governor_of(m)
@@ -3708,7 +3735,7 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
     config = dm.MassiveConfig(
         api_key="test-key",
         rest_base_url=fake_rest.url,
-        rest_basic_subscriptions={dm.Subscription.STOCKS},
+        rest_requests_per_minute={dm.Subscription.STOCKS: 5},
     )
     m = dm.MassiveSession(config)
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
@@ -3774,7 +3801,7 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
     config = dm.MassiveConfig(
         api_key="test-key",
         rest_base_url=fake_rest.url,
-        rest_basic_subscriptions={dm.Subscription.STOCKS},
+        rest_requests_per_minute={dm.Subscription.STOCKS: 5},
     )
     m = dm.MassiveSession(config)
     governor = governor_of(m)
@@ -4948,13 +4975,36 @@ def test_one_named_ticker_is_every_row_s_and_none_leaves_symbol_null(
     assert [r["Symbol"] for r in fetch(session, LISTED)] == [None]
 
 
-def test_listing_a_row_under_each_ticker_can_pass_the_limit(
+def test_limit_counts_the_rows_massive_sent_not_those_kept(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # `limit` caps the rows Massive returns; each is then listed under its named tickers.
+    # The first request's two rows reach the cap though one is withheld, as the client stops
+    # paging at the rows that arrived: the second request is not sent.
+    odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([odd, AAPL_DIVIDEND])))
+    out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=2)
+    assert [r["Id"] for r in out] == ["E1"]
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["A,B"]]
+
+
+def test_a_read_mixing_per_symbol_and_shared_requests_is_a_library_defect() -> None:
+    # Neither cap fits such a plan, and no dataset makes one.
+    path = RestPath(key="/x", fields=(), params=())
+    planned = [(path, [rest_requests.Call({}, {}, "AAPL"), rest_requests.Call({}, {})])]
+    with pytest.raises(BrokenGuaranteeError, match="mixes per-symbol requests"):
+        rest._per_symbol("stocks.dividends", planned)
+    assert rest._per_symbol("stocks.dividends", [(path, [rest_requests.Call({}, {})])]) is False
+    assert rest._per_symbol("stocks.dividends", []) is False
+
+
+def test_limit_caps_the_rows_listed_under_each_ticker(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive caps its rows at the limit; listing a row under each named ticker it lists can
+    # give more, and the cap is on the call's rows, so the copy past it is cut.
     fake_rest.reply(LISTED_PATH, _listed((1, ["AAPL", "MSFT"])))
     out = fetch(session, LISTED, symbols=["AAPL", "MSFT"], limit=1)
-    assert [r["Symbol"] for r in out] == ["AAPL", "MSFT"]
+    assert [r["Symbol"] for r in out] == ["AAPL"]
     assert fake_rest.get_queries()[0][1]["limit"] == ["1"]
 
 

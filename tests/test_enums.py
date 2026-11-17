@@ -322,8 +322,8 @@ _CANONICALIZE_ENUMS = "tables/test_symbols.py::test_canonicalize_symbols_rejects
 
 ENUM_PARAMETERS = {
     "MassiveConfig.__init__.websocket_hosts": "test_config.py::test_websocket_hosts_types",
-    "MassiveConfig.__init__.rest_basic_subscriptions": (
-        "test_config.py::test_rest_basic_subscriptions_hold_subscriptions_only"
+    "MassiveConfig.__init__.rest_requests_per_minute": (
+        "test_config.py::test_rest_requests_per_minute_holds_subscriptions_and_positive_counts"
     ),
     "MassiveConfig.__init__.delayed_subscriptions": (
         "test_config.py::test_delayed_subscriptions_hold_subscriptions_only"

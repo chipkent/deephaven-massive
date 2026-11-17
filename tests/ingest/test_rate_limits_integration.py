@@ -97,8 +97,9 @@ def test_a_learned_limit_is_forgotten_once_the_keys_sessions_close(
 
     1. Session A makes one-request calls of the limited subscription (`limited_subscription`)
        until its `m.rate_limits()` row reads `LimitSource` `LEARNED`: Massive answers five,
-       refuses the sixth with HTTP 429, and the library learns the limit from the refusal's
-       text, pauses a minute, and sends it again. Records A's row and the calls it took.
+       refuses the sixth with HTTP 429; the library pauses a minute, sends it again, and on
+       its answer learns the limit: the requests Massive answered of those sent in the
+       refused minute. Records A's row and the calls it took.
     2. Closes A, then waits until the governor holds no slot: 61 s after the last answer.
     3. Opens session B with the same key, and records its row of the class.
 
@@ -112,7 +113,7 @@ def test_a_learned_limit_is_forgotten_once_the_keys_sessions_close(
     about three minutes.
     """
     bucket = limited_subscription.value
-    config = dataclasses.replace(live_config, rest_basic_subscriptions=frozenset())
+    config = dataclasses.replace(live_config, rest_requests_per_minute={})
     threading.Event().wait(_MINUTE)
     start = time.monotonic()
     row: dict[str, Any] = {}
@@ -131,7 +132,7 @@ def test_a_learned_limit_is_forgotten_once_the_keys_sessions_close(
     if row["LimitSource"] != "LEARNED" and not row["Refusals"]:
         pytest.skip(
             f"Massive answered {row['Attempts']} requests of {bucket} in a minute though "
-            "rest_basic_subscriptions lists it"
+            "rest_requests_per_minute lists it"
         )
     assert row["LimitSource"] == "LEARNED", f"Massive refused, but no limit was learned: {row}"
     threading.Event().wait(RATE_WINDOW + 1.0)
