@@ -289,16 +289,13 @@ def _traded(ticker: str, *, close: float = 11.0) -> dict[str, Any]:
     }
 
 
-def _session(ticker: str, *, close: float = 11.0, change: float = 1.0) -> dict[str, Any]:
-    return {
-        "ticker": ticker,
-        "session": {
-            "close": close,
-            "previous_close": 10.0,
-            "change": change,
-            "change_percent": 10.0,
-        },
-    }
+def _session(
+    ticker: str, *, close: float = 11.0, change: float = 1.0, late: float | None = None
+) -> dict[str, Any]:
+    session = {"close": close, "previous_close": 10.0, "change": change, "change_percent": 10.0}
+    if late is not None:
+        session["late_trading_change"] = late
+    return {"ticker": ticker, "session": session}
 
 
 _CONTRACTS = tuple(f"O:SPY{n:02}" for n in range(same_field.SESSION_CONTRACTS + 1))
@@ -310,7 +307,9 @@ def test_session_change_reads_the_traded_contracts_again(
     untraded = [{"details": {"ticker": "O:SPYX"}, "day": {}}, {"day": {"change": 1.0}}]
     chain = untraded + [_traded(t) for t in _CONTRACTS]
     fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope(chain)))
-    fake_rest.reply("/v3/snapshot", Reply(envelope([_session(t) for t in _CONTRACTS])))
+    # Two contracts traded late: they get a verdict line of their own.
+    sessions = [_session(t, late=0.1 if n < 2 else None) for n, t in enumerate(_CONTRACTS)]
+    fake_rest.reply("/v3/snapshot", Reply(envelope(sessions)))
     lines: list[str] = []
     outcome = same_field.session_change(client, lines.append)
     assert outcome == same_field.Outcome(verdict="SAME", rows=(len(chain), len(_CONTRACTS)))
@@ -319,10 +318,10 @@ def test_session_change_reads_the_traded_contracts_again(
         ("/v3/snapshot/options/SPY", {"limit": "250"}),
         ("/v3/snapshot", {"ticker.any_of": read_again, "limit": "20"}),
     ]
-    assert (
-        lines[-1]
-        == "unified session.change is the chain day.change: SAME (20 of 20 contracts compared)"
-    )
+    assert lines[-2:] == [
+        "for contracts that traded late, session.change is the chain day.change: SAME (2 compared)",
+        "unified session.change is the chain day.change: SAME (20 of 20 contracts compared)",
+    ]
 
 
 def test_session_change_compares_only_contracts_with_one_close(
@@ -330,18 +329,32 @@ def test_session_change_compares_only_contracts_with_one_close(
 ) -> None:
     contracts = _CONTRACTS[: same_field.SESSION_WANTED]
     fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope([_traded(t) for t in contracts])))
-    moved = [_session(contracts[0], close=12.0, change=2.0)]
-    missing = [{"ticker": contracts[1], "session": {"close": 11.0}}]
+    # Both traded late, but neither can be compared, so neither counts as a late contract.
+    moved = [_session(contracts[0], close=12.0, change=2.0, late=1.0)]
+    missing = [{"ticker": contracts[1], "session": {"close": 11.0, "late_trading_change": 1.0}}]
     fake_rest.reply(
         "/v3/snapshot",
         Reply(envelope(moved + missing + [_session(t) for t in contracts[2:]])),
         Reply(envelope([_session(contracts[0], change=0.5)])),
+        Reply(envelope([_session(contracts[0], change=0.5, late=-0.5)])),
     )
     lines: list[str] = []
     # A moved close and a missing change leave too few contracts compared to settle anything.
     assert same_field.session_change(client, lines.append).verdict == "INCONCLUSIVE"
     assert any("closes differ" in line for line in lines)
-    assert same_field.session_change(client, _ignore).verdict == "DIFFERENT"
+    no_late = "no compared contract has a late_trading_change, so late trades are untested"
+    assert lines[-2] == no_late
+    lines.clear()
+    # A contract that did not trade late and differs: only the overall verdict is DIFFERENT.
+    assert same_field.session_change(client, lines.append).verdict == "DIFFERENT"
+    assert lines[-2] == no_late
+    lines.clear()
+    # A contract that traded late and differs makes both verdicts DIFFERENT.
+    assert same_field.session_change(client, lines.append).verdict == "DIFFERENT"
+    assert lines[-2] == (
+        "for contracts that traded late, session.change is the chain day.change: DIFFERENT "
+        "(1 compared)"
+    )
 
 
 def test_session_change_without_a_traded_contract_reads_only_the_chain(

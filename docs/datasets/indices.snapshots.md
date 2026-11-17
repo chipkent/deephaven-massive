@@ -51,14 +51,14 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `LastUpdated` | Instant | The nanosecond timestamp of when this information was updated. |
 | `MarketStatus` | String | The market status for the market that trades this ticker. |
 | `Message` | String | The error message while looking for this ticker. |
+| `Name` | String | Name of Index. |
+| `TodaysChange` | double | The value of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionOpen` | double | The open value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionHigh` | double | The highest value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionLow` | double | The lowest value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionClose` | double | The closing value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
-| `SessionChange` | double | The value of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
-| `SessionChangePercent` | double | The percent of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionPreviousClose` | double | The closing value for the index of previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
-| `Name` | String | Name of Index. |
+| `TodaysChangePerc` | double | The percent of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `Timeframe` | String | The time relevance of the data. |
 | `Type` | String | The indices market. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
@@ -77,14 +77,14 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `LastUpdated` | `last_updated` |
 | `MarketStatus` | `market_status` |
 | `Message` | `message` |
+| `Name` | `name` |
+| `TodaysChange` | `session.change` |
 | `SessionOpen` | `session.open` |
 | `SessionHigh` | `session.high` |
 | `SessionLow` | `session.low` |
 | `SessionClose` | `session.close` |
-| `SessionChange` | `session.change` |
-| `SessionChangePercent` | `session.change_percent` |
 | `SessionPreviousClose` | `session.previous_close` |
-| `Name` | `name` |
+| `TodaysChangePerc` | `session.change_percent` |
 | `Timeframe` | `timeframe` |
 | `Type` | `type` |
 | `TimestampInsert` |  |
