@@ -51,6 +51,12 @@ if TYPE_CHECKING:
 
 """The refusal of a stream of bars Massive doesn't stream."""
 
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
+
 OWNER = "namespaces/futures"
 
 Loader = Callable[[str, str], bytes]
@@ -230,8 +236,14 @@ def test_minute_bars_stream_and_keep_their_venues(massive_session: dm.MassiveSes
     assert type(q) is StreamHistoryQuery
     assert q._request.timespan is dm.Timespan.MINUTE
     assert q._request.venues == (dm.FuturesVenue.NYMEX,)
-    with pytest.raises(ValueError, match="venues is empty; leave it out to read every venue"):
+    empty = (
+        "venues=frozenset() is empty, so it would read nothing. Leave venues out to read every "
+        "venue."
+    )
+    with pytest.raises(ValueError, match=whole(empty)):
         massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE, venues=frozenset())
+    every = massive_session.futures.bars(dm.ALL, dm.Timespan.MINUTE)  # the advice
+    assert every._request.venues == tuple(dm.FuturesVenue)
 
 
 def test_bars_take_the_day_timespan(
@@ -272,7 +284,10 @@ def test_snapshots_take_symbols_or_all(massive_session: dm.MassiveSession) -> No
 
 
 def test_snapshot_symbols_are_set_only_through_symbols(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match="ticker_any_of is set through symbols=, not filters"):
+    refusal = (
+        "The filter 'ticker_any_of' sets the symbols of futures.snapshots. Pass symbols= instead."
+    )
+    with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.futures.snapshots("ESZ5", filters={"ticker_any_of": ["NQZ5"]})
 
 
@@ -295,11 +310,17 @@ def test_contracts_take_symbols_and_a_day(massive_session: dm.MassiveSession) ->
     q = contracts(["ESZ5", "NQZ5"], as_of="2025-06-02")
     assert q._request.symbols == ("ESZ5", "NQZ5")
     assert q._request.params == (("date", date(2025, 6, 2)),)
-    with pytest.raises(ValueError, match=r"does not accept dm\.ALL; leave symbols out"):
+    every = "futures.contracts does not take dm.ALL. Leave symbols out to read every contract."
+    with pytest.raises(ValueError, match=whole(every)):
         contracts(dm.ALL)
-    with pytest.raises(ValueError, match="ticker_any_of is set through symbols=, not filters"):
+    assert contracts()._request.symbols is None  # the advice
+    symbols = (
+        "The filter 'ticker_any_of' sets the symbols of futures.contracts. Pass symbols= instead."
+    )
+    with pytest.raises(ValueError, match=whole(symbols)):
         contracts(filters={"ticker_any_of": ["ESZ5"]})
-    with pytest.raises(ValueError, match="date is set through its own argument, as_of="):
+    own = "The filter 'date' has its own argument. Pass as_of= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         contracts(filters={"date": "2025-06-02"})
     with pytest.raises(ValueError, match="as_of"):
         contracts(as_of=datetime(2025, 6, 2, 12, tzinfo=UTC))
@@ -308,7 +329,8 @@ def test_contracts_take_symbols_and_a_day(massive_session: dm.MassiveSession) ->
 def test_products_take_a_day(massive_session: dm.MassiveSession) -> None:
     q = massive_session.futures.products(as_of=date(2025, 6, 2))
     assert q._request.params == (("date", date(2025, 6, 2)),)
-    with pytest.raises(ValueError, match="date is set through its own argument, as_of="):
+    own = "The filter 'date' has its own argument. Pass as_of= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         massive_session.futures.products(filters={"date": "2025-06-02"})
 
 
@@ -368,7 +390,8 @@ def test_product_code_forms_are_set_only_through_product_code(
     massive_session: dm.MassiveSession, call: Callable[[Any], object]
 ) -> None:
     with pytest.raises(
-        ValueError, match="is set through its own argument, product_code=, not filters"
+        ValueError,
+        match=r"^The filter '[a-z_]+' has its own argument\. Pass product_code= instead\.$",
     ):
         call(massive_session.futures)
 
@@ -405,11 +428,17 @@ def test_product_code_is_one_code_or_several(massive_session: dm.MassiveSession,
         key.startswith("product_code")
         for key, _ in _with_product_code(f, name, None)._request.params
     )
-    with pytest.raises(ValueError, match="product_code is empty; pass None for every product"):
+    empty = (
+        "product_code=[] is empty, so it would select nothing. Leave product_code out for every "
+        "product."
+    )
+    with pytest.raises(ValueError, match=whole(empty)):
         _with_product_code(f, name, [])
     with pytest.raises(TypeError, match="product_code must be a str, a sequence of str, or None"):
         _with_product_code(f, name, 5)
-    with pytest.raises(TypeError, match="element 1 of the sequence is int, not str"):
+    with pytest.raises(
+        TypeError, match=whole("product_code.any_of[1] must be a str or date, not int")
+    ):
         _with_product_code(f, name, ["ES", 5])
 
 
@@ -422,10 +451,15 @@ def test_product_code_takes_a_table_of_codes(massive_session: dm.MassiveSession,
     assert values is not None
     assert (values.parameter, values.column, values.table) == ("product_code", "ProductCode", codes)
     assert not any(key.startswith("product_code") for key, _ in query._request.params)
-    with pytest.raises(
-        ValueError, match=r"^a table passed as product_code must have a ProductCode column"
-    ):
+    refusal = (
+        "The table passed as product_code has no ProductCode column. It has Symbol. Name the "
+        'column of values ProductCode, as in t.view("ProductCode = Value").'
+    )
+    with pytest.raises(ValueError, match=whole(refusal)):
         _with_product_code(f, name, new_table([string_col("Symbol", ["ES"])]))
+    # The advice: the renamed column is taken.
+    renamed = new_table([string_col("Symbol", ["ES"])]).view("ProductCode = Symbol")
+    assert _with_product_code(f, name, renamed)._request.value_table is not None
 
 
 def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:
@@ -445,14 +479,22 @@ def test_schedules_select_sessions(massive_session: dm.MassiveSession) -> None:
     # The axis is a calendar date of sessions, so a datetime bound is refused.
     evening = datetime(2025, 12, 22, 18, tzinfo=CHICAGO)
     schedules = massive_session.futures.schedules
-    calendar_date = r"^futures\.schedules: session_end_date is a calendar date; pass dates$"
+    calendar_date = whole(
+        "futures.schedules: session_end_date is a calendar date, so start and end take dates, "
+        "not times. Pass dates, such as start='2025-01-02'."
+    )
     with pytest.raises(ValueError, match=calendar_date):
         schedules(start=evening)
     with pytest.raises(ValueError, match=calendar_date):
         schedules(end=evening)
     for key in ("session_end_date", "session_end_date_gt"):
-        with pytest.raises(ValueError, match=rf"^{key} is set through start= and end="):
+        refusal = (
+            f"The filter {key!r} sets the time range of futures.schedules. Pass start= and end= "
+            "instead."
+        )
+        with pytest.raises(ValueError, match=whole(refusal)):
             massive_session.futures.schedules(filters={key: "2025-12-22"})
+    assert massive_session.futures.schedules(start="2025-01-02")._request.start is not None
 
 
 # Specs: the transports, keys, and schemas they declare.

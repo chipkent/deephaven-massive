@@ -57,6 +57,12 @@ from deephaven_massive.namespaces._query_building import (
 from deephaven_massive.queries import FetchQuery, HistoryQuery, Query, StreamHistoryQuery
 from deephaven_massive.queries._choice import query_class
 
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
+
 FF = Transport.FLAT_FILES
 SESSION_FILES = "us_futures_{venue}/session_aggs_v1"
 STOCK_BARS = DatasetSpec(
@@ -157,7 +163,11 @@ def test_order_without_sort_follows_the_dataset_paths(massive_session: dm.Massiv
     assert build(massive_session, INDICATOR, params={"order": Order.DESC})._request.params == (
         ("order", Order.DESC),
     )
-    with pytest.raises(ValueError, match=r"^stocks\.dividends: order needs sort"):
+    needs_sort = (
+        "stocks.dividends: order needs sort. Pass sort= with the field to order by, or leave "
+        "order out."
+    )
+    with pytest.raises(ValueError, match=whole(needs_sort)):
         build(massive_session, DIVIDENDS, params={"order": Order.DESC, "sort": None})
     build(massive_session, DIVIDENDS, params={"order": Order.DESC, "sort": "pay_date"})
 
@@ -173,7 +183,7 @@ def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSess
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit="10")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="limit must be an int"):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=True)
-    with pytest.raises(ValueError, match="limit must be positive"):
+    with pytest.raises(ValueError, match=whole("limit=0 is not positive.")):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=0)
 
 
@@ -243,9 +253,17 @@ def test_a_request_built_without_a_session_policy_follows_the_defaults(
 def test_the_call_s_policy_must_be_an_error_policy(
     massive_session: dm.MassiveSession, policy: object
 ) -> None:
-    with pytest.raises(TypeError, match=r"^on_error must be dm\.ErrorPolicy"):
+    if policy is dm.OnError.RAISE:
+        refusal = (
+            "on_error=dm.OnError.RAISE is not a dm.ErrorPolicy. To set every cause to RAISE, "
+            "pass on_error=dm.ErrorPolicy(dm.OnError.RAISE)."
+        )
+        match = whole(refusal)
+    else:
+        match = r"^on_error must be dm\.ErrorPolicy"
+    with pytest.raises(TypeError, match=match):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], on_error=policy)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(TypeError, match=r"^on_error must be dm\.ErrorPolicy"):
+    with pytest.raises(TypeError, match=match):
         massive_session.stocks.trades("AAPL", on_error=policy)  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -285,16 +303,20 @@ def test_none_is_refused_where_the_dataset_needs_symbols(
     ]
     with pytest.raises(
         ValueError,
-        match=r"^stocks\.trades needs symbols, got None: pass a ticker, a list of tickers, a "
-        r"table with a Symbol column, or dm\.ALL for every ticker$",
+        match=whole(
+            "stocks.trades needs symbols, and symbols is None. Pass a ticker, a list of tickers, "
+            "a table with a Symbol column, or dm.ALL for every ticker."
+        ),
     ):
         build(massive_session, TRADES_SPEC, symbols_optional=False)
     with pytest.raises(
         ValueError,
-        match=r"^stocks\.trades needs symbols, got None: pass a ticker, a list of tickers, or a "
-        r"table with a Symbol column \(it does not take dm\.ALL: use X\)$",
+        match=whole(
+            "stocks.trades needs symbols, and symbols is None. Pass a ticker, a list of tickers, "
+            "or a table with a Symbol column."
+        ),
     ):
-        build(massive_session, TRADES_SPEC, symbols_optional=False, all_alternative="use X")
+        build(massive_session, TRADES_SPEC, symbols_optional=False, all_alternative="Use X.")
     # A dataset whose symbols only filter it takes None, and one without symbols takes none.
     assert build(massive_session, DIVIDENDS)._request.symbols is None
     with pytest.raises(ValueError, match=r"^stocks\.trades needs symbols"):
@@ -302,8 +324,8 @@ def test_none_is_refused_where_the_dataset_needs_symbols(
 
 
 def test_all_where_the_dataset_cannot_serve_it(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"stocks\.dividends does not accept dm\.ALL; use X$"):
-        build(massive_session, DIVIDENDS, symbols=dm.ALL, all_alternative="use X")
+    with pytest.raises(ValueError, match=whole("stocks.dividends does not take dm.ALL. Use X.")):
+        build(massive_session, DIVIDENDS, symbols=dm.ALL, all_alternative="Use X.")
     assert build(massive_session, TRADES_SPEC, symbols=dm.ALL)._request.symbols is dm.ALL
 
 
@@ -364,15 +386,24 @@ def test_sort_is_checked_when_the_query_is_built(massive_session: dm.MassiveSess
 def test_filter_validation(massive_session: dm.MassiveSession) -> None:
     # Every form of the axis, not only the start/end pair, is set through start= and end=.
     for key in ("ex_dividend_date_gte", "ex_dividend_date", "ex_dividend_date_gt"):
-        with pytest.raises(ValueError, match=rf"^{key} is set through start= and end="):
+        refusal = (
+            f"The filter {key!r} sets the time range of stocks.dividends. Pass start= and end= "
+            "instead."
+        )
+        with pytest.raises(ValueError, match=whole(refusal)):
             build(massive_session, DIVIDENDS, filters={key: "2025-01-01"})
     with pytest.raises(TypeError, match="filters must be a mapping"):
         build(massive_session, DIVIDENDS, filters=[("a", 1)])  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="filter names must be str"):
         build(massive_session, DIVIDENDS, filters={1: "a"})  # type: ignore[dict-item]  # the point: refused at run time
-    with pytest.raises(TypeError, match="sequence of str or date; got dict"):
+    with pytest.raises(
+        TypeError,
+        match=whole(
+            "a must be a str, number, bool, date or time, or list of str or date, not dict"
+        ),
+    ):
         build(massive_session, DIVIDENDS, filters={"a": {"b": 1}})  # type: ignore[dict-item]  # the point: refused at run time
-    with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
+    with pytest.raises(TypeError, match=whole("a[1] must be a str or date, not int")):
         build(massive_session, DIVIDENDS, filters={"a": ["A", 1]})
     # A dataset without a time axis takes its timestamp filters through `filters`, and the
     # request keeps what the text means, never the text.
@@ -430,7 +461,7 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
             filters={"timestamp_gte": day},
         )._request.filters == (("timestamp_gte", date(2025, 1, 2)),)
     # A Java day in a list is a day; the next element is the first the list refuses.
-    with pytest.raises(TypeError, match=r"^a: element 1 of the sequence is int, not str or date$"):
+    with pytest.raises(TypeError, match=whole("a[1] must be a str or date, not int")):
         build(massive_session, DIVIDENDS, filters={"a": [java_day, 1]})
     # An instant between two microseconds rounds outward: an upper bound up, any other down,
     # whether the name is a filter key or a wire name.
@@ -473,7 +504,8 @@ def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession
 
 
 def test_timespan_is_an_enum_on_every_dataset(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
+    refusal = "timespan must be dm.Timespan, such as dm.Timespan.DAY, not 'day'"
+    with pytest.raises(TypeError, match=whole(refusal)):
         build(massive_session, INDICATOR, timespan="day")  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -512,7 +544,10 @@ def test_a_time_axis_refuses_mixed_bounds(massive_session: dm.MassiveSession) ->
 
 def test_a_calendar_date_axis_takes_dates_only(massive_session: dm.MassiveSession) -> None:
     moment = datetime(2025, 1, 2, 9, tzinfo=UTC)
-    message = r"^stocks\.dividends: ex_dividend_date is a calendar date; pass dates$"
+    message = whole(
+        "stocks.dividends: ex_dividend_date is a calendar date, so start and end take dates, not "
+        "times. Pass dates, such as start='2025-01-02'."
+    )
     with pytest.raises(ValueError, match=message):
         build(massive_session, DIVIDENDS, start=moment)
     with pytest.raises(ValueError, match=message):
@@ -523,6 +558,8 @@ def test_a_calendar_date_axis_takes_dates_only(massive_session: dm.MassiveSessio
     assert build(massive_session, INDICATOR, start=moment)._request.start == moment
     assert build(massive_session, NEWS, start=moment)._request.start == moment
     assert build(massive_session, NEWS, start="2025-01-02")._request.start == date(2025, 1, 2)
+    # The advice of the refusal: a date is taken.
+    assert build(massive_session, DIVIDENDS, start="2025-01-02")._request.start == date(2025, 1, 2)
 
 
 def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
@@ -552,7 +589,14 @@ def test_adjusted_is_a_typed_bool(massive_session: dm.MassiveSession) -> None:
             adjusted="false",  # type: ignore[arg-type]  # the point: refused at run time
         )
     # One channel only: adjusted never travels in params, where a transport could drop it.
-    with pytest.raises(ValueError, match=r"adjusted is set through build_query\(adjusted=\.\.\.\)"):
+    with pytest.raises(
+        ValueError,
+        match=whole(
+            "stocks.bars passes adjusted in params, not as build_query(adjusted=). This is a bug "
+            "in deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and report it "
+            "with the log and m.streams() at https://github.com/chipkent/deephaven-massive/issues."
+        ),
+    ):
         build_query(
             massive_session._core,
             spec,
@@ -567,7 +611,8 @@ def test_adjusted_is_refused_in_filters(massive_session: dm.MassiveSession) -> N
     # A filter would reach REST but not the source choice, which could then pick flat files,
     # whose bars are unadjusted.
     with pytest.raises(
-        ValueError, match=r"^adjusted is set through its own argument, adjusted=, not filters"
+        ValueError,
+        match=whole("The filter 'adjusted' has its own argument. Pass adjusted= instead."),
     ):
         build_query(
             massive_session._core,
@@ -596,13 +641,17 @@ def test_a_symbol_table_needs_a_symbol_column(
     table = new_table([string_col("Ticker", ["AAPL"]), string_col("Name", ["Apple"])])
     with pytest.raises(
         ValueError,
-        match=(
-            r"^a symbol table must have a Symbol column; this one has: Ticker, Name\. Name the "
-            r"column of tickers Symbol, as in t\.view\(\"Symbol = Ticker\"\); .* "
-            r"dm\.canonicalize_symbols\(t, asset_class, column=\"Ticker\"\)$"
+        match=whole(
+            "The symbol table has no Symbol column. It has Ticker and Name. Name the column of "
+            'tickers Symbol, as in t.view("Symbol = Ticker"). For tickers in another spelling, see '
+            "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
+            "#underlyings-in-another-spelling."
         ),
     ):
         build(massive_session, TRADES_SPEC, symbols=table)
+    # The advice: the renamed column is taken.
+    renamed = table.view("Symbol = Ticker")
+    assert build(massive_session, TRADES_SPEC, symbols=renamed)._request.symbols is not None
 
 
 def test_a_column_of_tickers_or_codes_must_hold_text(
@@ -612,11 +661,18 @@ def test_a_column_of_tickers_or_codes_must_hold_text(
     numbers = new_table([int_col("Symbol", [1]), int_col("ProductCode", [2])])
     with pytest.raises(
         ValueError,
-        match=r"^the Symbol column of a symbol table must be a String column; this one holds int",
+        match=whole(
+            "The Symbol column of the symbol table holds int, not text. Pass a table whose Symbol "
+            "column holds each value as a String, such as 'AAPL'."
+        ),
     ):
         build(massive_session, TRADES_SPEC, symbols=numbers)
     with pytest.raises(
-        ValueError, match=r"^the ProductCode column of a table passed as product_code must be a"
+        ValueError,
+        match=whole(
+            "The ProductCode column of the table passed as product_code holds int, not text. Pass "
+            "a table whose ProductCode column holds each value as a String, such as 'ES'."
+        ),
     ):
         value_table(numbers, argument="product_code", parameter="product_code", underlying=False)
     # A pandas Series of tickers is a sequence of str, so it reads as a list does.
@@ -982,7 +1038,8 @@ def test_the_summary_rule_reports_every_mismatch() -> None:
 def test_a_typed_parameter_is_reserved_from_filters(massive_session: dm.MassiveSession) -> None:
     # Every typed parameter of the factory, set or not, and each of its suffixed forms.
     for key in ("frequency", "frequency_gte", "frequency_any_of"):
-        with pytest.raises(ValueError, match=f"{key} is set through its own argument"):
+        own = f"The filter {key!r} has its own argument. Pass frequency= instead."
+        with pytest.raises(ValueError, match=whole(own)):
             build(
                 massive_session,
                 DIVIDENDS,
@@ -1003,7 +1060,10 @@ def test_a_fixed_parameter_is_sent_and_reserved(massive_session: dm.MassiveSessi
     q = build(massive_session, fixed, symbols=["AAPL"])
     assert dict(q._request.params) == {"frequency": 4}
     for key in ("frequency", "frequency_gte"):
-        with pytest.raises(ValueError, match=rf"^the library sets {key} itself; it is not a"):
+        library = (
+            f"The library sets {key!r} itself, so it cannot be a filter. Remove it from filters."
+        )
+        with pytest.raises(ValueError, match=whole(library)):
             build(massive_session, fixed, filters={key: 4})
     # A refused filter's list of valid keys leaves the fixed family out.
     with pytest.raises(ValueError, match="has no filter 'nope'") as refused:
@@ -1012,13 +1072,21 @@ def test_a_fixed_parameter_is_sent_and_reserved(massive_session: dm.MassiveSessi
     with pytest.raises(ValueError, match="has no filter 'nope'") as listed:
         build(massive_session, DIVIDENDS, filters={"nope": 1})
     assert "frequency" in str(listed.value)
-    with pytest.raises(ValueError, match=r"the library sets \['frequency'\] itself"):
+    with pytest.raises(
+        ValueError,
+        match=whole(
+            "stocks.dividends takes frequency both typed and fixed. This is a bug in "
+            "deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and report it "
+            "with the log and m.streams() at https://github.com/chipkent/deephaven-massive/issues."
+        ),
+    ):
         build(massive_session, fixed, params={"frequency": 2})
 
 
 def test_a_symbol_filter_names_symbols(massive_session: dm.MassiveSession) -> None:
     for key in ("ticker", "ticker_any_of", "ticker_all_of"):
-        with pytest.raises(ValueError, match=rf"^{key} is set through symbols=, not filters$"):
+        refusal = f"The filter {key!r} sets the symbols of stocks.dividends. Pass symbols= instead."
+        with pytest.raises(ValueError, match=whole(refusal)):
             build(massive_session, DIVIDENDS, filters={key: "AAPL"})
     # The range forms select an alphabetical range, which `symbols` cannot express.
     assert build(massive_session, DIVIDENDS, filters={"ticker_gte": "A"})._request.filters
@@ -1039,7 +1107,10 @@ def test_one_or_any_of_sends_one_value_alone_and_a_sequence_as_any_of() -> None:
         "code": None,
         "code.any_of": ("ES", "NQ"),
     }
-    with pytest.raises(ValueError, match=r"^code is empty; pass None for every code$"):
+    with pytest.raises(
+        ValueError,
+        match=whole("code=() is empty, so it would select nothing. Leave code out for every code."),
+    ):
         one_or_any_of("code", (), every="every code")
     with pytest.raises(
         TypeError, match=r"^code must be a str, a sequence of str, or None, not int$"
@@ -1260,7 +1331,8 @@ def test_bar_periods_are_left_to_massive() -> None:
     _check_bar_period(Timespan.SESSION, 1)
     _check_bar_period(Timespan.DAY, 0)
     _check_bar_period(Timespan.MINUTE, -5)
-    with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
+    refusal = "timespan must be dm.Timespan, such as dm.Timespan.DAY, not 'day'"
+    with pytest.raises(TypeError, match=whole(refusal)):
         _check_bar_period("day", 1)
 
 

@@ -56,9 +56,17 @@ from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, check_symbols
 from deephaven_massive._enums import FuturesVenue, OnError, Order, Timespan, _require_enum
 from deephaven_massive._error_policy import ErrorPolicy, check_policy, resolve_policy
-from deephaven_massive._errors import ErrorSource, MassiveError, library_bug, required
+from deephaven_massive._errors import (
+    ErrorSource,
+    MassiveError,
+    library_bug,
+    required,
+    user_defect,
+)
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import ParamKind
 from deephaven_massive._tables.time_text import deephaven_time_text
+from deephaven_massive._tables.watchlist import UNDERLYINGS_IN_ANOTHER_SPELLING
 from deephaven_massive.queries import FetchQuery, Query
 from deephaven_massive.queries._call import QueryCall
 from deephaven_massive.queries._choice import bar_query_class, query_class
@@ -120,7 +128,7 @@ snapshots take the same size, so every long watchlist is split into requests who
 well under the lengths servers refuse (`DatasetSpec.symbols_per_request`)."""
 
 
-EVERY_TICKER: Final = "leave symbols out, which returns every ticker"
+EVERY_TICKER: Final = "Leave symbols out to read every ticker."
 """The alternative to `dm.ALL` that the REST list datasets name in their `ValueError`."""
 
 
@@ -271,9 +279,10 @@ def _require_text_column(table: Table, column: str, *, what: str) -> None:
     if data_type != dtypes.string:
         # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
         logger.debug("%s refused: column %s is %s, not String", what, column, data_type)
+        example = "'AAPL'" if column == "Symbol" else "'ES'"
         raise ValueError(
-            f"the {column} column of {what} must be a String column; this one holds "
-            f"{data_type}: each row holds one value as text, such as 'AAPL' or 'ES'"
+            f"The {column} column of {what} holds {data_type}, not text. Pass a table whose "
+            f"{column} column holds each value as a String, such as {example}."
         )
 
 
@@ -304,10 +313,11 @@ def value_table(table: Table, *, argument: str, parameter: str, underlying: bool
         # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
         logger.debug("%s refused: a table without %s, columns %s", argument, column, columns)
         raise ValueError(
-            f"a table passed as {argument} must have a {column} column; this one has: "
-            f'{columns}. Name the column {column}, as in t.view("{column} = Value")'
+            f"The table passed as {argument} has no {column} column. It has "
+            f"{prose_list(table.column_names, 'columns')}. Name the column of values {column}, "
+            f'as in t.view("{column} = Value").'
         )
-    _require_text_column(table, column, what=f"a table passed as {argument}")
+    _require_text_column(table, column, what=f"the table passed as {argument}")
     return ValueTable(argument, parameter, column, underlying, table)
 
 
@@ -344,7 +354,9 @@ def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
             f"{name} must be a str, a sequence of str, or None, not {type(value).__name__}"
         )
     if not value:
-        raise ValueError(f"{name} is empty; pass None for {every}")
+        raise ValueError(
+            f"{name}={value!r} is empty, so it would select nothing. Leave {name} out for {every}."
+        )
     return {name: None, plural: tuple(value)}
 
 
@@ -403,17 +415,15 @@ def _value(name: str, value: object) -> ParamValue:
         for index, item in enumerate(items):
             if not isinstance(item, str | date) or isinstance(item, datetime):
                 raise TypeError(
-                    f"{name}: element {index} of the sequence is {type(value[index]).__name__}, "
-                    "not str or date"
+                    f"{name}[{index}] must be a str or date, not {type(value[index]).__name__}"
                 )
         return tuple(item if isinstance(item, date) else str(item) for item in items)
     found = _time_value(name, value)
     if isinstance(found, str | int | float | date):
         return found
     raise TypeError(
-        f"{name} must be a str, int, float, bool, date, datetime, Java LocalDate, Instant, or "
-        "ZonedDateTime, numpy.datetime64, pandas.Timestamp, or sequence of str or date; "
-        f"got {type(value).__name__}"
+        f"{name} must be a str, number, bool, date or time, or list of str or date, not "
+        f"{type(value).__name__}"
     )
 
 
@@ -432,7 +442,9 @@ def _fixed_params(spec: DatasetSpec, params: Mapping[str, object]) -> dict[str, 
     """
     clash = sorted(spec.fixed_params.keys() & params.keys())
     if clash:
-        raise ValueError(f"{spec.name}: the library sets {clash} itself; they are not params")
+        raise ValueError(
+            library_bug(f"{spec.name} takes {prose_list(clash, 'parameters')} both typed and fixed")
+        )
     return dict(spec.fixed_params)
 
 
@@ -454,7 +466,8 @@ def _filters(
             name one of them, nor any of its suffixed forms.
         arguments: The factory's argument name of each typed wire parameter whose argument
             is named differently (`{"type": "ticker_type"}`), for the message that names
-            the argument to use; any other parameter's argument has its wire name.
+            the argument to use; any other parameter's argument has its wire name's base
+            (`filer_cik` for `filer_cik.any_of`).
 
     Returns:
         `(name, value)` pairs sorted by name.
@@ -475,7 +488,9 @@ def _filters(
     if not isinstance(filters, Mapping):
         raise TypeError(f"filters must be a mapping, not {type(filters).__name__}")
     reserved = {
-        filter_key(form): arguments.get(name, name) for name in typed for form in param_family(name)
+        filter_key(form): arguments.get(name, param_base(name))
+        for name in typed
+        for form in param_family(name)
     }
     library = {
         filter_key(form)
@@ -497,18 +512,26 @@ def _filters(
         if not isinstance(key, str):
             raise TypeError(f"filter names must be str, not {type(key).__name__}")
         if key in {filter_key(name) for name in spec.axis_params}:
-            raise ValueError(f"{key} is set through start= and end=, not filters")
+            raise ValueError(
+                f"The filter {key!r} sets the time range of {spec.name}. Pass start= and end= "
+                "instead."
+            )
         if key == "adjusted":
-            raise ValueError("adjusted is set through its own argument, adjusted=, not filters")
+            raise ValueError("The filter 'adjusted' has its own argument. Pass adjusted= instead.")
         if key in symbol_keys:
-            raise ValueError(f"{key} is set through symbols=, not filters")
+            raise ValueError(
+                f"The filter {key!r} sets the symbols of {spec.name}. Pass symbols= instead."
+            )
         if key in elsewhere:
-            raise ValueError(f"{key} is not a filter of {spec.name}; {elsewhere[key]}")
+            raise ValueError(user_defect(f"{spec.name} has no filter {key!r}", elsewhere[key]))
         if key in library:
-            raise ValueError(f"the library sets {key} itself; it is not a filter")
+            raise ValueError(
+                f"The library sets {key!r} itself, so it cannot be a filter. Remove it from "
+                "filters."
+            )
         if key in reserved:
             raise ValueError(
-                f"{key} is set through its own argument, {reserved[key]}=, not filters"
+                f"The filter {key!r} has its own argument. Pass {reserved[key]}= instead."
             )
         pairs.append((key, _value(key, value)))
     return tuple(sorted(pairs))
@@ -571,7 +594,10 @@ def _check_axis(
     if any(isinstance(bound, datetime) for bound in given):
         axis = _calendar_axis(core, spec)
         if axis is not None:
-            raise ValueError(f"{spec.name}: {axis} is a calendar date; pass dates")
+            raise ValueError(
+                f"{spec.name}: {axis} is a calendar date, so start and end take dates, not "
+                "times. Pass dates, such as start='2025-01-02'."
+            )
     if start is not None and end is not None:
         check_order(start, end)
 
@@ -633,7 +659,10 @@ def futures_venues(venues: object) -> tuple[FuturesVenue, ...]:
                 f"venues must hold only dm.FuturesVenue members, not {type(venue).__name__}"
             )
     if not venues:
-        raise ValueError("venues is empty; leave it out to read every venue")
+        raise ValueError(
+            f"venues={venues!r} is empty, so it would read nothing. Leave venues out to read "
+            "every venue."
+        )
     return tuple(venue for venue in FuturesVenue if venue in venues)
 
 
@@ -671,12 +700,11 @@ def _normalized_symbols(
         forms = (
             "a ticker, a list of tickers, a table with a Symbol column, or dm.ALL for every ticker"
             if all_alternative is None
-            else "a ticker, a list of tickers, or a table with a Symbol column (it does not "
-            f"take dm.ALL: {all_alternative})"
+            else "a ticker, a list of tickers, or a table with a Symbol column"
         )
         # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
         logger.debug("%s refused: symbols=None on a dataset that needs symbols", spec.name)
-        raise ValueError(f"{spec.name} needs symbols, got None: pass {forms}")
+        raise ValueError(f"{spec.name} needs symbols, and symbols is None. Pass {forms}.")
     if isinstance(symbols, Table):
         if "Symbol" not in symbols.column_names:
             columns = ", ".join(symbols.column_names)
@@ -685,17 +713,17 @@ def _normalized_symbols(
                 "%s refused: a symbol table without Symbol, columns %s", spec.name, columns
             )
             raise ValueError(
-                f"a symbol table must have a Symbol column; this one has: {columns}. Name the "
-                'column of tickers Symbol, as in t.view("Symbol = Ticker"); for tickers spelled '
-                "another way (lower case, another convention), convert them first with "
-                'dm.canonicalize_symbols(t, asset_class, column="Ticker")'
+                f"The symbol table has no Symbol column. It has "
+                f"{prose_list(symbols.column_names, 'columns')}. Name the column of tickers "
+                'Symbol, as in t.view("Symbol = Ticker"). For tickers in another spelling, see '
+                f"{UNDERLYINGS_IN_ANOTHER_SPELLING}."
             )
-        _require_text_column(symbols, "Symbol", what="a symbol table")
+        _require_text_column(symbols, "Symbol", what="the symbol table")
         normalized = SymbolTable(symbols)
     elif symbols is not None:
         normalized = check_symbols(spec.asset_class, symbols, as_written=spec.symbols_as_written)
     if isinstance(normalized, AllSymbols) and all_alternative is not None:
-        raise ValueError(f"{spec.name} does not accept dm.ALL; {all_alternative}")
+        raise ValueError(user_defect(f"{spec.name} does not take dm.ALL", all_alternative))
     return normalized
 
 
@@ -720,13 +748,15 @@ def _typed_params(
     A `sort` with a suffixed part beside `order` raises the `ValueError` of `Catalog.check_sort`.
     """
     if "adjusted" in params:
-        raise ValueError("adjusted is set through build_query(adjusted=...), not params")
+        raise ValueError(
+            library_bug(f"{spec.name} passes adjusted in params, not as build_query(adjusted=)")
+        )
     library = _fixed_params(spec, params)
     typed = {k: v for k, v in params.items() if v is not None}
     if "order" in typed and "sort" not in typed and not core.catalog.takes_param(spec, "order"):
         raise ValueError(
-            f"{spec.name}: order needs sort, since its paths take the direction as a suffix "
-            "of the sort field"
+            f"{spec.name}: order needs sort. Pass sort= with the field to order by, or leave "
+            "order out."
         )
     sort = typed.get("sort")
     if isinstance(sort, str):  # `list_params` refused any other type

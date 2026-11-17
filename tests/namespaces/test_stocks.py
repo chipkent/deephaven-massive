@@ -18,6 +18,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
@@ -68,6 +69,12 @@ if TYPE_CHECKING:
     from tests._fakes.ws_session import WsSession
 
 """The refusal of a stream of bars Massive doesn't stream."""
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 R = Transport.REST
 FIXTURES = "namespaces/stocks"
@@ -609,8 +616,13 @@ def test_daily_open_close_names_a_new_york_day(
 
 def test_daily_open_close_rejects_all_and_bad_days(massive_session: dm.MassiveSession) -> None:
     open_close = massive_session.stocks.daily_open_close
-    with pytest.raises(ValueError, match=r"use m\.stocks\.bars\(dm\.ALL, dm\.Timespan\.DAY\)"):
+    every = (
+        "stocks.daily_open_close does not take dm.ALL. For every ticker's bar of one day, call "
+        "m.stocks.bars(dm.ALL, dm.Timespan.DAY).history('2025-01-02', '2025-01-02')."
+    )
+    with pytest.raises(ValueError, match=whole(every)):
         open_close(dm.ALL, "2025-06-06")
+    assert massive_session.stocks.bars(dm.ALL, dm.Timespan.DAY)._request.symbols is dm.ALL
     with pytest.raises(ValueError, match="needs a timezone"):
         open_close("AAPL", datetime(2025, 6, 6, 9, 30))  # noqa: DTZ001 - a naive time on purpose
     with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
@@ -640,7 +652,8 @@ def test_list_datasets_filter_by_optional_symbols(
     assert type(make()) is FetchQuery
     assert make()._request.symbols is None
     assert make("AAPL")._request.symbols == ("AAPL",)
-    with pytest.raises(ValueError, match="leave symbols out, which returns every ticker"):
+    every = f"stocks.{name} does not take dm.ALL. Leave symbols out to read every ticker."
+    with pytest.raises(ValueError, match=whole(every)):
         make(dm.ALL)
 
 
@@ -677,7 +690,11 @@ def test_start_and_end_bound_the_date_axis(
     assert (query._request.start, query._request.end) == (date(2024, 1, 1), date(2024, 3, 31))
     with pytest.raises(ValueError, match="must not be after end"):
         make(start="2024-03-31", end="2024-01-01")
-    with pytest.raises(ValueError, match="through start= and end="):
+    refusal = (
+        f"The filter '{axis[0]}_gte' sets the time range of stocks.{name}. Pass start= and end= "
+        "instead."
+    )
+    with pytest.raises(ValueError, match=whole(refusal)):
         make(filters={f"{axis[0]}_gte": "2024-01-01"})
 
 
@@ -688,7 +705,8 @@ def test_start_and_end_bound_the_date_axis(
 def test_the_symbol_parameter_is_set_through_symbols(
     massive_session: dm.MassiveSession, name: str, reserved: str
 ) -> None:
-    with pytest.raises(ValueError, match=f"{reserved} is set through symbols="):
+    refusal = f"The filter {reserved!r} sets the symbols of stocks.{name}. Pass symbols= instead."
+    with pytest.raises(ValueError, match=whole(refusal)):
         factory(massive_session, name)(filters={reserved: ["AAPL"]})
 
 
@@ -759,11 +777,14 @@ def new_york_midnight_ns(day: date) -> int:
 @pytest.mark.parametrize(
     ("name", "alternative"),
     [
-        ("last_trade", r"m\.stocks\.snapshots\(dm\.ALL\)\.fetch\(\)"),
-        ("last_quote", r"m\.stocks\.snapshots\(dm\.ALL\)\.fetch\(\)"),
+        ("last_trade", "For every ticker, call m.stocks.snapshots(dm.ALL).fetch()."),
+        ("last_quote", "For every ticker, call m.stocks.snapshots(dm.ALL).fetch()."),
         (
             "previous_day_bar",
-            r"m\.stocks\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)",
+            (
+                "For every ticker's bar of one day, call m.stocks.bars(dm.ALL, dm.Timespan.DAY)"
+                ".history('2025-01-02', '2025-01-02')."
+            ),
         ),
     ],
 )
@@ -775,9 +796,10 @@ def test_one_row_datasets_are_queries_that_refuse_all(
     assert type(query) is FetchQuery
     assert query._request.symbols == ("AAPL", "MSFT")
     with pytest.raises(
-        ValueError, match=rf"stocks\.{name} does not accept dm\.ALL; use {alternative}"
+        ValueError, match=whole(f"stocks.{name} does not take dm.ALL. {alternative}")
     ):
         make(dm.ALL)
+    assert massive_session.stocks.snapshots(dm.ALL)._request.symbols is dm.ALL  # the advice
 
 
 def test_the_streams_and_daily_bars_have_no_fetch(massive_session: dm.MassiveSession) -> None:
@@ -1669,7 +1691,14 @@ def test_fmv_streams_from_its_host_beside_delayed_stock_trades(
         "stocks.trades": ("delayed.massive.com", "DELAYED", "RUNNING"),
         "stocks.fmv": ("business.massive.com", "REALTIME", "FAILED"),
     }
-    assert "Massive said: not authorized to access FMV.MSFT" in rows["stocks.fmv"]["Error"]
+    assert rows["stocks.fmv"]["Error"] == (
+        'Massive answered the subscription to FMV.MSFT on wss://business.massive.com/stocks: "not '
+        'authorized to access FMV.MSFT". Massive documents stocks.fmv only on its Business feed, '
+        "business.massive.com; its plans are listed at "
+        "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.fmv.md. "
+        "Massive documents one host for FMV data, business.massive.com, and websocket_hosts does "
+        "not apply to it."
+    )
     evidence = {r["Family"]: r["Evidence"] for r in dh_to_pylist(session.session.connections())}
     assert evidence == {
         "TICK": "MassiveConfig.delayed_subscriptions",

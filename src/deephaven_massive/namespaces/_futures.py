@@ -625,7 +625,7 @@ class FuturesNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             symbols_optional=True,
-            all_alternative="leave symbols out for every contract",
+            all_alternative="Leave symbols out to read every contract.",
             params=params,
             filters=filters,
             arguments=_REFERENCE_ARGUMENTS,

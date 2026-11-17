@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import types
 from typing import TYPE_CHECKING
@@ -39,9 +40,12 @@ def test_the_update_graph_check_refuses_only_update_graph_threads(
         update_graph=types.SimpleNamespace(j_update_graph=graph)
     )
     # The refusal names the way to do a listener's usual job without one.
-    with pytest.raises(
-        ValueError, match=r"update-graph thread.*pass a refreshing symbol table as symbols"
-    ):
+    refusal = (
+        "A deephaven_massive call cannot run on a Deephaven update-graph thread, such as inside "
+        "a table listener. To follow a table's changes, pass the refreshing table as symbols, "
+        "or call poll(), from outside the listener."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
         refuse_update_graph_thread(update_thread)
     with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
         refuse_update_graph_thread(dh_exec_ctx)
@@ -149,7 +153,12 @@ def test_a_wait_whose_signal_never_comes_gives_up(
     monkeypatch.setattr(execution_context, "holds_update_graph_lock", lambda _ctx: False)
     with caplog.at_level(logging.WARNING, logger=execution_context.__name__):
         assert not wait_for_update_cycle(_scripted([5, 5], [0], []), 0.5)
-    assert "no update cycle ended within 0.5 s" in caplog.text
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "No update cycle ended within 0.5 s of the wait, after cycle 5. The usual cause is "
+            "another thread holding the update graph's lock."
+        )
+    ]
 
 
 def test_a_wait_gives_up_when_another_thread_takes_the_lock_before_the_cycle(
@@ -159,7 +168,12 @@ def test_a_wait_gives_up_when_another_thread_takes_the_lock_before_the_cycle(
     monkeypatch.setattr(execution_context, "holds_update_graph_lock", lambda _ctx: False)
     with caplog.at_level(logging.WARNING, logger=execution_context.__name__):
         assert not wait_for_update_cycle(_scripted([5], [], [], locks=[True, False]), 0.5)
-    assert "the last finished cycle seen: 5" in caplog.text
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "No update cycle ended within 0.5 s of the wait, after cycle 5. The usual cause is "
+            "another thread holding the update graph's lock."
+        )
+    ]
 
 
 def test_a_wait_gives_up_while_another_thread_holds_the_lock(
@@ -181,15 +195,26 @@ def test_a_wait_gives_up_while_another_thread_holds_the_lock(
     finally:
         done.set()
         thread.join(TIMEOUT)
-    assert "no update cycle ended within 0.2 s" in caplog.text
-    assert "the last finished cycle seen: None" in caplog.text
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "No update cycle ended within 0.2 s of the wait, which never got the update graph's "
+            "lock. The usual cause is another thread holding the lock."
+        )
+    ]
 
 
 @pytest.mark.parametrize("lock", [shared_lock, exclusive_lock], ids=["shared", "exclusive"])
 def test_a_wait_for_an_update_cycle_is_refused_under_the_lock(
     dh_exec_ctx: ExecutionContext, lock: Callable[[UpdateGraph], AbstractContextManager[None]]
 ) -> None:
-    with lock(dh_exec_ctx.update_graph), pytest.raises(RuntimeError, match="would never end"):
+    refusal = (
+        "No update cycle can end while this thread holds the update graph's lock, so the wait "
+        "would never end. Wait without holding the lock."
+    )
+    with (
+        lock(dh_exec_ctx.update_graph),
+        pytest.raises(RuntimeError, match=f"^{re.escape(refusal)}$"),
+    ):
         wait_for_update_cycle(dh_exec_ctx, TIMEOUT)
 
 
@@ -211,4 +236,6 @@ def test_a_wait_for_an_update_cycle_is_refused_on_an_update_graph_thread(
         assert heard.wait(TIMEOUT)
     finally:
         handle.stop()
-    assert "update-graph thread" in str(refused[0])
+    assert str(refused[0]).startswith(
+        "A deephaven_massive call cannot run on a Deephaven update-graph thread"
+    )

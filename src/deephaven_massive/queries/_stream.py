@@ -22,6 +22,7 @@ from deephaven_massive._config import require_positive_int
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.symbols import ALL, SymbolTable
 from deephaven_massive._errors import raises_through
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._tables.columns import (
     describe,
     recency_note,
@@ -394,17 +395,24 @@ class StreamQuery(_StreamShapes):
         else:
             raise TypeError(f"by must be a str or a sequence of str, not {type(by).__name__}")
         if not keys:
-            raise ValueError("by must name at least one column")
-        if not all(isinstance(key, str) for key in keys):
-            raise TypeError("by must contain only column names (str)")
+            raise ValueError(f"by={by!r} names no column. Pass at least one column name.")
+        others = [key for key in keys if not isinstance(key, str)]
+        if others:
+            raise TypeError(
+                f"by must hold only column names as str, not {type(others[0]).__name__}"
+            )
         repeated = sorted({str(key) for key in keys if keys.count(key) > 1})
         if repeated:
-            raise ValueError(f"by names {repeated} more than once")
+            raise ValueError(
+                f"by={by!r} names {prose_list(repeated, 'columns')} more than once. Name each "
+                "column once."
+            )
         columns = self._core.dataset_schema(self._spec).column_names
         unknown = [key for key in keys if key not in columns]
         if unknown:
             raise ValueError(
-                f"{self._spec.name} has no columns {unknown}; columns: {list(columns)}"
+                f"{self._spec.name} has no column {prose_list(unknown, 'columns')}. Pass column "
+                f"names that {self!r}.columns() lists."
             )
         return tuple(str(key) for key in keys)
 

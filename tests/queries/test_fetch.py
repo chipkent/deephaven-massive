@@ -18,6 +18,7 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import (
+    AssetClass,
     PollMode,
 )
 from deephaven_massive._ingest import rest as rest_module
@@ -84,11 +85,10 @@ def test_a_feed_without_start_refuses_to_poll(
 ) -> None:
     # Every cycle would re-read Massive's whole archive; the message names the fix.
     message = (
-        "m.economy.inflation().poll() needs a start or a limit: without either, every cycle "
-        "re-reads the whole archive Massive keeps. Build the query with a start, such as "
-        "m.economy.inflation(..., start=dh_today(to_j_time_zone('America/New_York'))), or "
-        "with a limit and a newest-first order, then call poll(). A fixed start keeps widening "
-        "the window on a poll that runs for days"
+        "m.economy.inflation().poll() needs a start or a limit. Without one, every cycle "
+        "re-reads Massive's whole archive. A start is fixed when the query is built, so the "
+        "window it bounds grows every day the poll runs. For the latest rows, pass "
+        "m.economy.inflation() a limit with sort='date', order=dm.Order.DESC, then call poll()."
     )
     with (
         pytest.raises(ValueError, match=f"^{re.escape(message)}$"),
@@ -103,6 +103,39 @@ def test_a_feed_without_start_refuses_to_poll(
     assert [c[0] for c in rest.calls] == ["fetch"]
 
 
+@pytest.mark.parametrize(
+    ("method", "newest"),
+    [
+        (lambda m, **kw: m.reference.news(**kw), {"order": dm.Order.DESC}),
+        (
+            lambda m, **kw: m.partners.benzinga.news(**kw),
+            {"sort": "published", "order": dm.Order.DESC},
+        ),
+        (
+            lambda m, **kw: m.options.unusual_trades(**kw),
+            {"sort": "sip_timestamp", "order": dm.Order.DESC},
+        ),
+    ],
+    ids=["reference.news", "partners.benzinga.news", "options.unusual_trades"],
+)
+def test_each_feed_polls_as_its_refusal_advises(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    method: Callable[..., FetchQuery],
+    newest: dict[str, object],
+) -> None:
+    # The fix the refusal of a poll without a start or a limit names, on every feed.
+    named = ", ".join(
+        f"{key}=dm.Order.DESC" if key == "order" else f"{key}={value!r}"
+        for key, value in newest.items()
+    )
+    with pytest.raises(ValueError, match=re.escape(f"a limit with {named}, then call poll().")):
+        method(massive_session).poll(60)
+    method(massive_session, limit=50, **newest).poll(60)
+    assert [c[0] for c in rest.calls] == ["poll"]
+
+
 def test_a_feed_with_a_limit_polls_its_latest_rows(
     massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
@@ -111,11 +144,27 @@ def test_a_feed_with_a_limit_polls_its_latest_rows(
     assert [c[0] for c in rest.calls] == ["poll"]
 
 
-@pytest.mark.parametrize("interval", [0, -1, float("inf"), float("nan"), 1e300, 10**400])
+@pytest.mark.parametrize(
+    ("interval", "refusal"),
+    [
+        (0, "interval=0 is not a positive, finite number."),
+        (-1, "interval=-1 is not a positive, finite number."),
+        (float("inf"), "interval=inf is not a positive, finite number."),
+        (float("nan"), "interval=nan is not a positive, finite number."),
+        (
+            1e300,
+            (
+                "interval=1e+300 is longer than a timedelta can hold. Pass a number of seconds, "
+                "such as 60."
+            ),
+        ),
+        (10**400, "interval is an int too large to convert to a float. Pass a smaller number."),
+    ],
+)
 def test_poll_interval_values(
-    massive_session: dm.MassiveSession, rest: Recorder, interval: object
+    *, massive_session: dm.MassiveSession, rest: Recorder, interval: object, refusal: str
 ) -> None:
-    with pytest.raises(ValueError, match=r"interval must be (positive|a positive, finite)"):
+    with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
         feed(massive_session).poll(interval)  # type: ignore[arg-type]  # the point: refused at run time
     assert rest.calls == []
 
@@ -129,10 +178,7 @@ def test_poll_refuses_an_interval_under_one_second(
 ) -> None:
     # A typo such as poll(0.01) for poll(10) would send requests back to back on a plan
     # Massive does not pace; the error names the minimum and the value given.
-    message = (
-        f"interval must be at least 1 second, got {interval!r}: each poll() cycle sends a "
-        "request; use a stream for faster updates"
-    )
+    message = f"interval={interval!r} is below the least 1 s. Pass 1 or more."
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         feed(massive_session).poll(interval)
     assert rest.calls == []
@@ -156,7 +202,8 @@ def test_poll_interval_types(
 
 def test_poll_mode_is_an_enum(massive_session: dm.MassiveSession, rest: Recorder) -> None:
     with pytest.raises(
-        TypeError, match=r"^mode must be dm\.PollMode, e\.g\. dm\.PollMode\.UPSERT$"
+        TypeError,
+        match=r"^mode must be dm\.PollMode, such as dm\.PollMode\.UPSERT, not 'upsert'$",
     ):
         feed(massive_session).poll(
             30,
@@ -294,9 +341,9 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
         result = both.fetch(wait=True)
     assert caplog.messages == [
         (
-            "stocks.last_trade fetch: 1 of the 2 symbols of the call failed and are left out "
-            "of the result for now; m.symbol_reads() shows each one (retrying, or failed): "
-            "AAPL: HTTP 403: not in the plan"
+            "stocks.last_trade fetch: 1 of the 2 symbols failed and are left out of the result "
+            "for now. AAPL: HTTP 403: not in the plan. Check m.symbol_reads() for whether each "
+            "one is retrying or has failed."
         )
     ]
     rest.outcomes = {}  # the raised error's traceback holds the session
@@ -521,13 +568,22 @@ def test_a_table_of_values_with_no_value_it_takes_is_refused(
     *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     empty = new_table([string_col("ProductCode", [None])])
-    with pytest.raises(ValueError, match=r"the product_code table holds no values$"):
+    nothing = (
+        "m.futures.products(product_code=<table>): The product_code table holds no value. Pass "
+        "a table whose ProductCode column holds at least one value."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(nothing)}$"):
         massive_session.futures.products(product_code=empty).fetch(wait=True)
-    options = new_table([string_col("Symbol", ["O:AAPL250117C00150000"])])
+    options = new_table([string_col("Symbol", ["O:AAPL250117C00150000", "X:BTCUSD"])])
     q = massive_session.options.chain(options)
-    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
+    skipped = (
+        "m.options.chain(<table>): No row of the underlying table is a value this dataset takes, "
+        "so the result would read nothing. The table holds 'O:AAPL250117C00150000' and "
+        "'X:BTCUSD'. Fix or delete those rows."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(skipped)}$"):
         q.fetch(wait=True)
-    with pytest.raises(ValueError, match="no row of the underlying table is a value this dataset"):
+    with pytest.raises(ValueError, match=f"^{re.escape(skipped)}$"):
         q.poll(5)
     assert rest.valued == []
 
@@ -586,13 +642,20 @@ def test_fetch_follows_one_refreshing_table_at_a_time(
     rest: Recorder,
 ) -> None:
     q = massive_session.futures.snapshots(live("ESZ6"), product_code=live_codes("ES"))
-    with pytest.raises(
-        ValueError,
-        match=r"both symbols and product_code are refreshing tables\. Use poll\(interval\), "
-        r"which reads both at every cycle, or pass one of them as a static snapshot, such as "
-        r"product_code=table\.snapshot\(\)$",
-    ):
+    refusal = (
+        f"{q!r}.fetch() follows one refreshing table, and both symbols and product_code are "
+        "refreshing tables. Call poll(60) instead, which reads both every 60 s, or pass one of "
+        "them as a snapshot, such as product_code=table.snapshot()."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
         q.fetch(wait=True)
+    # Both fixes the refusal names work.
+    q.poll(60)
+    assert [c[0] for c in rest.calls] == ["poll"]
+    codes = live_codes("ES")
+    snapshot = massive_session.futures.snapshots(live("ESZ6"), product_code=codes.snapshot())
+    snapshot.fetch(wait=True)  # static: read once, as the refusal says
+    rest.valued.clear()
     # A static symbol table beside it is read once, and the codes are followed.
     contracts = new_table([string_col("Symbol", ["ESZ6"])])
     result = massive_session.futures.snapshots(contracts, product_code=live_codes("ES")).fetch(
@@ -690,11 +753,23 @@ def test_fetch_and_poll_refuse_a_bad_symbol_row_when_the_call_raises_and_the_ses
     live: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
+    refusal: Callable[..., str],
 ) -> None:
     rows = ["AAPL", "msft"]
     table = live(*rows) if refreshing else new_table([string_col("Symbol", rows)])
     q = massive_session.stocks.last_trade(table, on_error=RAISES)
-    refused = r"^stocks\.last_trade: a symbol table holds 'msft'"
+    refused = (
+        "^"
+        + re.escape(
+            f"stocks.last_trade: A symbol table holds 'msft'. {refusal(AssetClass.STOCKS, 'msft')} "
+            "Fix the row, or convert the table with dm.canonicalize_symbols(table, "
+            "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), naming the convention "
+            "your tickers come from. If Massive itself writes 'msft', report it at "
+            "https://github.com/chipkent/deephaven-massive/issues, since the library does not know "
+            "that form yet."
+        )
+        + "$"
+    )
     with pytest.raises(ValueError, match=refused):
         q.fetch(wait=True)
     with pytest.raises(ValueError, match=refused):
@@ -709,11 +784,22 @@ def test_fetch_and_poll_refuse_a_bad_value_row_when_the_call_raises_and_the_sess
     live_codes: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
+    refusal: Callable[..., str],
 ) -> None:
     rows = ["ES", " CL"]
     codes = live_codes(*rows) if refreshing else new_table([string_col("ProductCode", rows)])
     q = massive_session.futures.products(product_code=codes, on_error=RAISES)
-    refused = r"^futures\.products: a symbol table holds ' CL'"
+    refused = (
+        "^"
+        + re.escape(
+            "futures.products: A symbol table holds ' CL'. "
+            f"{refusal(AssetClass.FUTURES, ' CL', as_written=True)} "
+            "dm.canonicalize_symbols does not fit these values, since it applies ticker rules "
+            "they do not follow and would null correct ones too. Fix the row to the value "
+            "Massive writes, or delete it."
+        )
+        + "$"
+    )
     with pytest.raises(ValueError, match=refused):
         q.fetch(wait=True)
     with pytest.raises(ValueError, match=refused):

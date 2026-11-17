@@ -10,6 +10,8 @@ from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
+from deephaven_massive._datasets.symbols import check_symbol
+from deephaven_massive._enums import ClassFromPrefix
 from tests._fakes.queries import (
     FlatFiles,
     Recorder,
@@ -58,3 +60,19 @@ def live(dh_input_table: Callable[..., InputTable]) -> Callable[..., InputTable]
         return table
 
     return make
+
+
+@pytest.fixture
+def refusal() -> Callable[..., str]:
+    # The symbol module's refusal of a value, as the sentence a symbol-table row's message quotes.
+    def refused(
+        asset_class: dm.AssetClass | ClassFromPrefix, symbol: str, *, as_written: bool = False
+    ) -> str:
+        try:
+            check_symbol(asset_class, symbol, as_written=as_written)
+        except ValueError as error:
+            text = str(error)
+            return text if text.endswith(".") else f"{text}."
+        raise AssertionError(f"{symbol!r} is accepted")
+
+    return refused

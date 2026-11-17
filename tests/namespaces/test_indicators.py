@@ -34,6 +34,12 @@ from tests._fakes.rest import FakeRestServer, Reply, envelope
 if TYPE_CHECKING:
     from deephaven_massive._tables.problem_events import ProblemEvent
 
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
+
 OWNER = "namespaces/indicators"
 R = Transport.REST
 NAMES = ["sma", "ema", "rsi", "macd"]
@@ -143,26 +149,42 @@ def test_macd_takes_three_windows(massive_session: dm.MassiveSession) -> None:
         "short_window": 12,
         "signal_window": 9,
     }
-    with pytest.raises(ValueError, match="signal_window must be positive"):
+    with pytest.raises(ValueError, match=whole("signal_window=0 is not positive.")):
         massive_session.indicators.macd("AAPL", short_window=12, long_window=26, signal_window=0)
 
 
 def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSession) -> None:
     i = massive_session.indicators
-    with pytest.raises(ValueError, match=r"indicators\.sma does not accept dm\.ALL"):
+    with pytest.raises(
+        ValueError, match=whole("indicators.sma does not take dm.ALL. Pass a list of tickers.")
+    ):
         i.sma(dm.ALL, 20)
     for span in (dm.Timespan.SECOND, dm.Timespan.SESSION):
-        with pytest.raises(ValueError, match=f"Timespan.{span.name}"):
+        refusal = (
+            f"indicators.sma takes no timespan=dm.Timespan.{span.name}. Pass one of "
+            "dm.Timespan.MINUTE, dm.Timespan.HOUR, dm.Timespan.DAY, dm.Timespan.WEEK, "
+            "dm.Timespan.MONTH, dm.Timespan.QUARTER, and dm.Timespan.YEAR."
+        )
+        with pytest.raises(ValueError, match=whole(refusal)):
             i.sma("AAPL", 20, timespan=span)
-    with pytest.raises(ValueError, match="window must be positive"):
+    with pytest.raises(ValueError, match=whole("window=0 is not positive.")):
         i.rsi("AAPL", 0)
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         i.rsi("AAPL", 14, adjusted=1)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="the library sets expand_underlying itself"):
+    library = (
+        "The library sets 'expand_underlying' itself, so it cannot be a filter. Remove it from "
+        "filters."
+    )
+    with pytest.raises(ValueError, match=whole(library)):
         i.sma("AAPL", 20, filters={"expand_underlying": True})
-    with pytest.raises(ValueError, match=r"^adjusted is set through its own argument, adjusted="):
+    adjusted = "The filter 'adjusted' has its own argument. Pass adjusted= instead."
+    with pytest.raises(ValueError, match=whole(adjusted)):
         i.sma("AAPL", 20, filters={"adjusted": True})
-    with pytest.raises(ValueError, match="timestamp_gte is set through start= and end="):
+    axis = (
+        "The filter 'timestamp_gte' sets the time range of indicators.sma. Pass start= and end= "
+        "instead."
+    )
+    with pytest.raises(ValueError, match=whole(axis)):
         i.sma("AAPL", 20, filters={"timestamp_gte": 1})
     with pytest.raises(ValueError, match=r"^'Q:NOPE' is not a Massive stock ticker"):
         i.sma("Q:NOPE", 20)
@@ -173,14 +195,20 @@ def test_a_timespan_passed_as_the_window_names_the_keyword(
 ) -> None:
     # bars() takes its timespan second; an indicator takes its window there.
     i = massive_session.indicators
-    keyword = "timespan is keyword-only, so pass it by name"
-    with pytest.raises(
-        TypeError, match=rf"^window must be an int, not Timespan\.MINUTE: {keyword}"
-    ):
+    refusal = (
+        "window must be an int, not dm.Timespan.MINUTE. If you meant timespan, pass it by name, "
+        "since it is keyword-only: m.indicators.sma('AAPL', timespan=dm.Timespan.MINUTE)."
+    )
+    assert i.sma("AAPL", timespan=dm.Timespan.MINUTE)._request is not None  # the advice
+    with pytest.raises(TypeError, match=whole(refusal)):
         i.sma("AAPL", dm.Timespan.MINUTE)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(TypeError, match=rf"^window must be an int, not 'hour': {keyword}"):
+    with pytest.raises(TypeError, match=whole("window must be an int, not str")):
         i.rsi("AAPL", "hour")  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(TypeError, match=r"^short_window must be an int, not Timespan\.DAY: "):
+    short = (
+        "short_window must be an int, not dm.Timespan.DAY. If you meant timespan, pass it by "
+        "name, since it is keyword-only: m.indicators.sma('AAPL', timespan=dm.Timespan.MINUTE)."
+    )
+    with pytest.raises(TypeError, match=whole(short)):
         i.macd("AAPL", short_window=dm.Timespan.DAY)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^window must be an int, not float$"):
         i.ema("AAPL", 2.5)  # type: ignore[arg-type]  # the point: refused at run time
