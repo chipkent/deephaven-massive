@@ -228,7 +228,9 @@ def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: ExecutionContex
             AssetClass.FOREX,
             convention=None,  # type: ignore[arg-type]  # the point: refused at run time
         )
-    with pytest.raises(TypeError, match=r"^on_error must be dm\.OnError, e\.g\. dm\.OnError\.LOG$"):
+    with pytest.raises(
+        TypeError, match=r"^on_error must be dm\.OnError, such as dm\.OnError\.LOG, not 'log'$"
+    ):
         dm.canonicalize_symbols(
             table,
             AssetClass.FOREX,
