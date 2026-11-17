@@ -323,15 +323,17 @@ def test_a_watch_refuses_a_late_row_that_is_not_canonical(
     watchlist.add(
         new_table([int_col("Key", [1, 2]), string_col("Symbol", ["EUR/USD", "C:GBPUSD"])])
     )
-    wait_for(lambda: len(seen) == 1 and len(refused) == 1)
+    wait_for(lambda: len(seen) == 1 and len(refused) == 1 and len(skipped) == 1)
     assert seen == [(frozenset({"C:GBPUSD"}), frozenset())]  # the bad row is never subscribed
     assert refused == [f"forex.quotes: {invalid_row_message(AssetClass.FOREX, 'EUR/USD')}"]
-    watchlist.delete(new_table([int_col("Key", [1])]))  # removing it changes nothing
+    # The refused value is listed too, so m.problems() names it beside the stream's failure.
+    assert skipped == [("EUR/USD",)]
+    watchlist.delete(new_table([int_col("Key", [1])]))  # removing it refuses nothing more
     watchlist.add(new_table([int_col("Key", [3]), string_col("Symbol", ["C:USDJPY"])]))
-    wait_for(lambda: len(seen) == 2)
+    wait_for(lambda: len(seen) == 2 and len(skipped) == 2)
     assert seen[1] == (frozenset({"C:USDJPY"}), frozenset())
     assert len(refused) == 1
-    assert skipped == []
+    assert skipped[1] == ()
 
 
 def test_a_watch_skips_a_late_row_that_is_not_canonical(
@@ -603,7 +605,7 @@ def test_the_counter_reports_set_changes_of_updates() -> None:
         f"snapshots: {invalid_row_message(ClassFromPrefix.ANY, 'b')}",
         f"snapshots: {invalid_row_message(ClassFromPrefix.ANY, 'x:btc')}",
     ]
-    assert skipped == []
+    assert skipped == [("b",), (), ("x:btc",)]  # refused values are listed as skipped ones are
 
 
 def test_the_counter_reports_skipped_values_of_updates() -> None:

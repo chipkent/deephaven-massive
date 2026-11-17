@@ -56,6 +56,7 @@ from deephaven_massive._error_policy import resolve_policy
 from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError, RowDataError
 from deephaven_massive._ingest import flatfiles
 from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._ingest.refused_venues import RefusedVenues
 from deephaven_massive._log_limits import BoundedLog, LoggedKeys
 from deephaven_massive._massive import (
     DriftReport,
@@ -64,6 +65,7 @@ from deephaven_massive._massive import (
     RowMark,
     Source,
     Transport,
+    WireEntitlementError,
     WireType,
     WireUnit,
 )
@@ -1054,6 +1056,50 @@ def test_rows_withheld_before_a_malformed_line_under_raise_are_listed_too(
         ProblemCause.UNCONVERTIBLE_VALUES,
         ProblemCause.MALFORMED_ROWS,
     ]
+
+
+@pytest.mark.parametrize(
+    ("setting", "late", "cause"),
+    [
+        pytest.param(
+            dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE),
+            trade(30, 1741012200000000030).replace(",AAPL,", ",AAPL,x,"),
+            ProblemCause.MALFORMED_ROWS,
+            id="malformed",
+        ),
+        pytest.param(
+            dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE),
+            trade(30, 1741012200000000030).replace(",1.5,", ",x,"),
+            ProblemCause.UNCONVERTIBLE_VALUES,
+            id="withheld",
+        ),
+    ],
+)
+def test_an_extra_header_is_listed_when_a_later_block_fails_the_read(
+    *,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.ErrorPolicy,
+    late: str,
+    cause: ProblemCause,
+) -> None:
+    # The first blocks find a header Massive's docs lack; a later block fails the read under
+    # RAISE, and the drift is listed with the failure's own problem.
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)
+    monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 1)
+    lines = [trade(n, 1741012200000000000 + n) for n in range(2, 21)] + [late]
+    wider = TRADE_HEADER.replace("\n", ",halted\n") + "".join(
+        line.replace("\n", ",true\n") for line in lines
+    )
+    fake_s3.put(TRADES_0303, gzip.compress(wider.encode()))
+    with dm.MassiveSession(dataclasses.replace(CONFIG, on_error=setting)) as m:
+        events = capture_problems(m, monkeypatch)
+        q = query(m, STOCK_TRADES, symbols=dm.ALL)
+        with pytest.raises(dm.MassiveError):
+            q.history("2025-03-03", "2025-03-03", wait=True)
+    assert sorted(e.cause for e in events) == sorted([cause, ProblemCause.SCHEMA_DRIFT])
+    assert drift_of(events) == [(events[0].stream_id, "halted", extra_header("halted"))]
 
 
 def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
@@ -4613,9 +4659,27 @@ def test_a_refused_venue_is_listed_when_another_file_fails_the_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # One venue is refused and the other's file fails: the call raises the failure, and the
-    # refused venue it met on the way is listed all the same.
+    # refused venue it met on the way is listed all the same. The NYMEX failure is answered
+    # only once the CME refusal is recorded, so it never cancels the CME read first.
+    recorded = threading.Event()
+    add = RefusedVenues.add
+
+    def record(refusals: RefusedVenues, venue: FuturesVenue, error: WireEntitlementError) -> None:
+        add(refusals, venue, error)
+        recorded.set()
+
+    gate: list[bool] = []  # written once, by the thread answering NYMEX, before it fails
+
+    def hold(key: str) -> None:
+        if key.startswith("us_futures_nymex/"):
+            gate.append(recorded.wait(TIMEOUT))
+
+    monkeypatch.setattr(RefusedVenues, "add", record)
+    fake_s3.before_answer = hold
     m = dm.MassiveSession(
-        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG))
+        dataclasses.replace(
+            CONFIG, max_concurrency=2, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+        )
     )
     try:
         events = capture_problems(m, monkeypatch)
@@ -4625,6 +4689,7 @@ def test_a_refused_venue_is_listed_when_another_file_fails_the_call(
         q = m.futures.trades(dm.ALL, venues={FuturesVenue.NYMEX, FuturesVenue.CME})
         with pytest.raises(dm.MassiveError, match="InvalidRequest"):
             q.history("2025-03-04", "2025-03-04", wait=True)
+        assert gate == [True]  # the NYMEX failure waited for the CME refusal
         assert [e.cause for e in events] == [ProblemCause.REFUSED_VENUES]
         assert "CME" in events[0].detail
     finally:

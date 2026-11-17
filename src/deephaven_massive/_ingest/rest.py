@@ -929,8 +929,10 @@ class RestReader:
         its number of threads. A fan-out sets the token when it ends. So if a call fails, or
         this thread is interrupted, the calls not yet started are cancelled, the running ones
         stop waiting for the rate governor at once, the read waits for the requests already on
-        the wire, and the failure of the earliest call that failed on its own is raised. Every
-        page's rows get the library's time columns (`_call`).
+        the wire, and the failure of the earliest call that failed on its own is raised; the
+        symbols Massive had no data for among the calls that completed are first listed as
+        `unavailable_symbols` problems (`_report_missing_of_failed`). Every page's rows get
+        the library's time columns (`_call`).
 
         Args:
             spec: The dataset.
@@ -993,7 +995,13 @@ class RestReader:
             if len(calls) <= 1:
                 outcomes = [run(call) for call in calls]
             else:
-                outcomes = self._fan_out(run, calls, executor=executor, stop=stop)
+                outcomes = self._fan_out(
+                    run,
+                    calls,
+                    executor=executor,
+                    stop=stop,
+                    on_failure=functools.partial(self._report_missing_of_failed, spec),
+                )
         missing = [o.missing for o in outcomes if o.missing is not None]
         if missing and on_missing is not None:
             on_missing(missing)
@@ -1191,6 +1199,31 @@ class RestReader:
             bounded_list(str(one) for one in missing),
         )
 
+    def _report_missing_of_failed(self, spec: DatasetSpec, outcomes: Sequence[_Outcome]) -> None:
+        """List the symbols Massive has no data for among the calls of a read another call failed.
+
+        The read raises the other call's failure, so `ErrorPolicy.unavailable_symbols` decides
+        nothing here: each symbol is only an `unavailable_symbols` problem of the read's table,
+        with the setting, so the failure never hides what Massive answered for it.
+
+        Args:
+            spec: The dataset.
+            outcomes: The outcomes of the calls that completed, in call order.
+        """
+        missing = [o.missing for o in outcomes if o.missing is not None]
+        if not missing:
+            return
+        self.problems(
+            self._unavailable_events(
+                spec, [(one.symbol, f"Massive has no data for it {one.why}") for one in missing]
+            )
+        )
+        logger.debug(
+            "%s: Massive has no data for %s; another request failed the read",
+            spec.name,
+            bounded_list(str(one) for one in missing),
+        )
+
     def _unavailable_events(
         self, spec: DatasetSpec, found: Sequence[tuple[str, str]]
     ) -> list[ProblemEvent]:
@@ -1285,6 +1318,7 @@ class RestReader:
         *,
         executor: ThreadPoolExecutor | None,
         stop: Cancel,
+        on_failure: Callable[[list[_Done]], None] | None = None,
     ) -> list[_Done]:
         """Run several calls concurrently and return their outcomes in call order.
 
@@ -1297,6 +1331,8 @@ class RestReader:
             calls: The calls.
             executor: The caller's pool, or None for one of this read's own.
             stop: The read's token.
+            on_failure: Given the outcomes of the calls that completed, in call order, when one
+                failed, before its failure is raised; or None.
 
         Returns:
             The outcomes, in call order.
@@ -1318,6 +1354,14 @@ class RestReader:
                 pool.shutdown()
         failed = [future for future in futures if future in done and future.exception()]
         if failed:
+            if on_failure is not None:
+                on_failure(
+                    [
+                        future.result()
+                        for future in futures
+                        if not future.cancelled() and future.exception() is None
+                    ]
+                )
             failed[0].result()  # raises the failure
         return [future.result() for future in futures]
 

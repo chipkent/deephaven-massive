@@ -679,17 +679,19 @@ class SymbolWatch:
     `on_change(added, removed)` receives two disjoint frozensets of symbols: those the table now
     holds and did not before, and those it no longer holds. It is never called with both empty. A
     row whose symbol is not Massive's exact ticker of the class is never counted (the transport
-    looks up a crypto pair's split before it subscribes). What else it does follows the rule's
-    `noncanonical` setting: under `OnError.RAISE`, `on_invalid(message)` receives the reason each
-    time such a row arrives, and its owner fails the stream; under `LOG` and `IGNORE` the value
-    is logged once (`SymbolRowRule.skip`), and `on_skipped(values)` receives the sorted distinct
-    values skipped now each time that set changes, empty once every bad row is fixed or deleted.
-    A fixed row is an added symbol like any other. When the watched table itself fails (a
-    `canonicalize_symbols` table under `OnError.RAISE` that met a bad row), `on_invalid` receives
-    that too, whatever the setting, so the stream never follows a frozen table. The callbacks run
-    on the replaying caller thread or an update-graph thread, with the update-graph lock held:
-    they must not block, wait on a library thread, or make a table operation, and an exception
-    one raises is logged at ERROR by the listener's error callback.
+    looks up a crypto pair's split before it subscribes). Under every setting,
+    `on_skipped(values)` receives the sorted distinct values skipped now each time that set
+    changes, empty once every bad row is fixed or deleted, so `m.problems()` lists each one.
+    What else it does follows the rule's `noncanonical` setting: under `OnError.RAISE`,
+    `on_invalid(message)` receives the reason each time such a row arrives, before
+    `on_skipped`, and its owner fails the stream; under `LOG` and `IGNORE` the value is logged
+    once (`SymbolRowRule.skip`). A fixed row is an added symbol like any other. When the
+    watched table itself fails (a `canonicalize_symbols` table under `OnError.RAISE` that met a
+    bad row), `on_invalid` receives that too, whatever the setting, so the stream never follows
+    a frozen table. The callbacks run on the replaying caller thread or an update-graph thread,
+    with the update-graph lock held: they must not block, wait on a library thread, or make a
+    table operation, and an exception one raises is logged at ERROR by the listener's error
+    callback.
 
     `keep_alive_with(table)` ties the view and the listener to another table's liveness, so
     they are not destroyed while that table lives: the transport passes the stream's blink
@@ -844,8 +846,8 @@ class _SymbolCounter(TableListener):
 
         A replay of the initial rows is the same change as rows being added; it is only
         logged at DEBUG with the number of symbols found. Under `RAISE` a bad row is reported
-        to `on_invalid` before the change is; under `LOG` and `IGNORE` the skipped set is
-        reported after it.
+        to `on_invalid` before the change is; under every setting the skipped set is reported
+        after it.
 
         Args:
             update: The update; its added, removed, and modified rows' `Symbol` values.
@@ -893,8 +895,8 @@ class _SymbolCounter(TableListener):
         """Add `step` to the count of each value, forgetting counts that reach zero.
 
         A canonical symbol is counted among the symbols. Any other value is counted among the
-        skipped ones under `LOG` and `IGNORE`, and logged once when it arrives; under `RAISE` an
-        arriving one is reported to `on_invalid` and a leaving one is ignored.
+        skipped ones, so `m.problems()` lists it under every setting. When it arrives, `RAISE`
+        reports it to `on_invalid`, which fails the stream, and `LOG` and `IGNORE` log it once.
 
         Args:
             columns: The `Symbol` values of some rows, as `TableUpdate` returns them: NumPy
@@ -905,11 +907,9 @@ class _SymbolCounter(TableListener):
             symbol = str(value)  # a plain str, not NumPy's subclass, leaves the listener
             counts = self._counts
             if not self._rule.accepts(symbol):
-                if effect_of(self._rule.noncanonical).fails:
-                    if step > 0:
-                        self._on_invalid(self._rule.refusal(symbol))
-                    continue
-                if step > 0:
+                if step > 0 and effect_of(self._rule.noncanonical).fails:
+                    self._on_invalid(self._rule.refusal(symbol))
+                elif step > 0:
                     self._rule.skip(symbol, stream_id=self._stream_id)
                 counts = self._skipped
             count = counts[symbol] + step
