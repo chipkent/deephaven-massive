@@ -22,15 +22,23 @@ from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause
             ProblemCause.UNLISTED_CONTRACTS,
             (
                 "futures.trades: neither Massive's futures snapshot nor its contracts list has "
-                "held 2 [ESZ6, NQZ6] for 30 minutes, so their rows are left out"
+                "held ESZ6 and NQZ6 for 30 minutes, so the library withheld their rows. This "
+                "table stopped because its on_error holds "
+                "dm.ErrorPolicy(unlisted_contracts=dm.OnError.RAISE). To stream the rest, pass "
+                "on_error=dm.ErrorPolicy(unlisted_contracts=dm.OnError.LOG) to the call or to "
+                "dm.MassiveConfig."
             ),
         ),
         (
             Readiness.UNSCHEDULED,
             ProblemCause.UNSCHEDULED_PRODUCTS,
             (
-                "futures.trades: Massive's futures schedules give no session for rows of 2 [ESZ6, "
-                "NQZ6], so those rows are left out"
+                "futures.trades: Massive's futures schedules give no trading session for rows of "
+                "ESZ6 and NQZ6, so the library withheld those rows. This table stopped because "
+                "its on_error holds dm.ErrorPolicy(unscheduled_products=dm.OnError.RAISE). To "
+                "stream the rest, pass "
+                "on_error=dm.ErrorPolicy(unscheduled_products=dm.OnError.LOG) to the call or to "
+                "dm.MassiveConfig."
             ),
         ),
     ],
