@@ -1735,7 +1735,9 @@ class RequestGovernor:
         """
         goes = datetime.fromtimestamp(self._clock.time() + state.pause_until - now, UTC)
         waited = (
-            f", and it has waited {patience.spent:.0f} s already" if round(patience.spent) else ""
+            f", of which it has already waited {patience.spent:.0f} s"
+            if round(patience.spent)
+            else ""
         )
         remedies = (
             "Retry after that time, stop the other program, or set rest_requests_per_minute in "
@@ -1746,8 +1748,8 @@ class RequestGovernor:
         advice = f" {patience.advice}" if patience.advice else ""
         return (
             f"{state.last_refusal} The next request goes at "
-            f"{goes.strftime('%Y-%m-%d %H:%M:%S')} UTC, later than this read waits: it waits at "
-            f"most {patience.seconds:.0f} s for Massive's pauses{waited}. The usual cause is "
+            f"{goes.strftime('%Y-%m-%d %H:%M:%S')} UTC, past the {patience.seconds:.0f} s this "
+            f"read waits for Massive's pauses{waited}. The usual cause is "
             "another program using the same Massive account, which shares its limit. "
             f"{remedies}{advice}"
         )

@@ -456,8 +456,8 @@ def test_a_cert_directory_that_cannot_be_listed_logs_a_warning(
     assert isinstance(record.args[1], FileNotFoundError)  # the error is named, not swallowed
     assert record.getMessage() == (
         f"The certificate directory {str(missing)!r} in SSL_CERT_DIR cannot be listed: "
-        f"{record.args[1]}. OpenSSL may still find certificates there by their hashed names, but "
-        "the library cannot see a change to them, so a client created later may keep trusting a "
+        f"{record.args[1]}. OpenSSL may still use its certificates, but "
+        "the library cannot see changes to them, so a later connection may keep trusting a "
         "removed certificate. Make the directory listable, or remove it from SSL_CERT_DIR."
     )
 

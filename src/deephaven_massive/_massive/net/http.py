@@ -375,10 +375,10 @@ def _entry_identity(entry: os.DirEntry[str], *, configured: bool) -> tuple[int, 
 
 
 _UNLISTABLE: Final = (
-    "The certificate directory %r in SSL_CERT_DIR cannot be listed: %s. OpenSSL may still find "
-    "certificates there by their hashed names, but the library cannot see a change to them, so "
-    "a client created later may keep trusting a removed certificate. Make the directory "
-    "listable, or remove it from SSL_CERT_DIR."
+    "The certificate directory %r in SSL_CERT_DIR cannot be listed: %s. OpenSSL may still use "
+    "its certificates, but the library cannot see changes to them, so a later connection may "
+    "keep trusting a removed certificate. Make the directory listable, or remove it from "
+    "SSL_CERT_DIR."
 )
 """The message for a certificate directory that cannot be listed."""
 

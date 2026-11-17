@@ -340,8 +340,8 @@ def test_the_websocket_client_never_shows_the_api_key(
     [(state, failure)] = [(s, d) for s, d in states if s is WsState.FAILED]
     assert isinstance(failure, WireAuthError)
     assert failure.message == (
-        f'Massive answered the API key at 127.0.0.1/stocks with the status auth_failed: "no such '
-        f'key: {REDACTED}".'
+        "Massive answered the authentication at 127.0.0.1/stocks with status auth_failed: "
+        f'"no such key: {REDACTED}".'
     )
     _assert_no_secret(every_logger_at_debug, failure)
     # The frame log that would show the authentication frame stays off.

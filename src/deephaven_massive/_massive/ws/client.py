@@ -677,7 +677,7 @@ class WsClient:
             return None
         if reply == "auth_failed":
             return WireAuthError(
-                f"Massive answered the API key at {self._host}{self._path} with the status "
+                f"Massive answered the authentication at {self._host}{self._path} with status "
                 f'auth_failed: "{message}".',
                 host=self._host,
                 path=self._path,

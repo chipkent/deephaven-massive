@@ -448,8 +448,8 @@ class FlatFile:
                 yield block.rows, headers.merge(block.drift), block.marks
             if self.malformed_lines and not self.rows_read:
                 raise WireError(
-                    f"Every one of the {self.malformed_lines} lines of Massive's file "
-                    f"{self._location} is malformed. In the first, {self.malformed_reason}.",
+                    f"None of the {self.malformed_lines} lines after the header of Massive's "
+                    f"file {self._location} can be read. In the first, {self.malformed_reason}.",
                     host=self._host,
                     path=self._key,
                     kind=WireFailure.UNREADABLE_ROWS,

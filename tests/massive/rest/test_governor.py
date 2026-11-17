@@ -431,8 +431,8 @@ def test_a_request_whose_patience_ends_before_the_pause_fails_at_once() -> None:
     assert caught.value.status == 429
     # It has waited nothing yet, so the message says only how long it would wait.
     assert str(caught.value) == (
-        f"{REFUSAL} The next request goes at 2027-01-15 08:05:01 UTC, later than this read "
-        f"waits: it waits at most 300 s for Massive's pauses. {GIVE_UP_CAUSE} "
+        f"{REFUSAL} The next request goes at 2027-01-15 08:05:01 UTC, past the 300 s this "
+        f"read waits for Massive's pauses. {GIVE_UP_CAUSE} "
         f"{DECLARABLE_REMEDIES}"
     )
     assert clock.waits == []  # it failed without waiting
@@ -660,8 +660,8 @@ def test_a_waiting_request_fails_when_a_refusal_pushes_the_pause_past_its_patien
     assert impatient.error is not None
     assert impatient.error.status == 429
     assert str(impatient.error) == (
-        f"{REFUSAL} The next request goes at 2027-01-15 08:10:00 UTC, later than this read "
-        f"waits: it waits at most 100 s for Massive's pauses, and it has waited 15 s already. "
+        f"{REFUSAL} The next request goes at 2027-01-15 08:10:00 UTC, past the 100 s this "
+        f"read waits for Massive's pauses, of which it has already waited 15 s. "
         f"{GIVE_UP_CAUSE} {DECLARABLE_REMEDIES}"
     )
 
@@ -689,8 +689,8 @@ def test_a_read_waiting_on_another_reads_requests_charges_their_pauses_to_its_ow
     assert failure is not None
     assert failure.status == 429
     assert str(failure) == (
-        f"{REFUSAL} The next request goes at 2027-01-15 08:02:00 UTC, later than this read "
-        f"waits: it waits at most 90 s for Massive's pauses, and it has waited 60 s already. "
+        f"{REFUSAL} The next request goes at 2027-01-15 08:02:00 UTC, past the 90 s this "
+        f"read waits for Massive's pauses, of which it has already waited 60 s. "
         f"{GIVE_UP_CAUSE} {DECLARABLE_REMEDIES}"
     )
     assert patience.spent == 60.0  # nothing is charged for a pause it will not wait out
@@ -1365,8 +1365,8 @@ def test_a_give_up_message_quotes_its_own_buckets_latest_refusal() -> None:
         )
     for bucket, refusal in refusals.items():
         expected = (
-            f"{refusal} The next request goes at 2027-01-15 08:10:00 UTC, later than this read "
-            f"waits: it waits at most 0 s for Massive's pauses. {GIVE_UP_CAUSE} "
+            f"{refusal} The next request goes at 2027-01-15 08:10:00 UTC, past the 0 s this "
+            f"read waits for Massive's pauses. {GIVE_UP_CAUSE} "
             f"{DECLARABLE_REMEDIES}"
         )
         with pytest.raises(WireError, match=rf"^{re.escape(expected)}$"):
@@ -1846,8 +1846,8 @@ def test_the_give_up_message_ends_with_the_patience_s_advice() -> None:
     with pytest.raises(WireError) as caught:
         governor.admission("other", lane=object(), patience=patience).acquire(Cancel())
     assert str(caught.value) == (
-        f"{REFUSAL} The next request goes at 2027-01-15 08:01:00 UTC, later than this read "
-        f"waits: it waits at most 0 s for Massive's pauses. {GIVE_UP_CAUSE} "
+        f"{REFUSAL} The next request goes at 2027-01-15 08:01:00 UTC, past the 0 s this "
+        f"read waits for Massive's pauses. {GIVE_UP_CAUSE} "
         f"{LEARN_ONLY_REMEDIES} Leave out wait=True to read in the background."
     )
 
@@ -1859,8 +1859,8 @@ def test_the_give_up_message_offers_no_declaration_for_a_learn_only_bucket() -> 
     with pytest.raises(WireError) as caught:
         governor.admission("other", lane=object(), patience=Patience(0.0)).acquire(Cancel())
     assert str(caught.value) == (
-        f"{REFUSAL} The next request goes at 2027-01-15 08:01:00 UTC, later than this read "
-        f"waits: it waits at most 0 s for Massive's pauses. {GIVE_UP_CAUSE} "
+        f"{REFUSAL} The next request goes at 2027-01-15 08:01:00 UTC, past the 0 s this "
+        f"read waits for Massive's pauses. {GIVE_UP_CAUSE} "
         f"{LEARN_ONLY_REMEDIES}"
     )
 
@@ -1888,8 +1888,8 @@ def test_the_give_up_message_says_how_long_the_read_has_waited() -> None:
     with pytest.raises(WireError) as caught:
         governor.admission("stocks", lane=object(), patience=patience).acquire(Cancel())
     assert str(caught.value) == (
-        f"{REFUSAL} The next request goes at 2027-01-15 08:02:00 UTC, later than this read "
-        f"waits: it waits at most 90 s for Massive's pauses, and it has waited 30 s already. "
+        f"{REFUSAL} The next request goes at 2027-01-15 08:02:00 UTC, past the 90 s this "
+        f"read waits for Massive's pauses, of which it has already waited 30 s. "
         f"{GIVE_UP_CAUSE} {DECLARABLE_REMEDIES}"
     )
 

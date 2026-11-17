@@ -902,8 +902,8 @@ def test_a_file_whose_every_line_is_malformed_fails_without_quoting_a_line(
     with pytest.raises(WireError) as info:
         table(opened(KEY, text), plan())
     assert info.value.message == (
-        f"Every one of the 2 lines of Massive's file s3://flatfiles/{KEY} at "
-        "https://files.massive.com is malformed. In the first, row 1 after the header has 2 "
+        f"None of the 2 lines after the header of Massive's file s3://flatfiles/{KEY} at "
+        "https://files.massive.com can be read. In the first, row 1 after the header has 2 "
         "fields where the header has 13."
     )
     assert info.value.kind is WireFailure.UNREADABLE_ROWS  # Massive's data, not the library's
@@ -1026,8 +1026,8 @@ def test_a_chunk_without_a_row_still_hands_on_an_empty_batch(
     with pytest.raises(WireError) as info:
         consume()
     assert info.value.message == (
-        f"Every one of the 40 lines of Massive's file s3://flatfiles/{KEY} at "
-        f"https://files.massive.com is malformed. In the first, {first}."
+        f"None of the 40 lines after the header of Massive's file s3://flatfiles/{KEY} at "
+        f"https://files.massive.com can be read. In the first, {first}."
     )
     assert len(seen) > 1
     assert all(rows == 0 and skipped for rows, skipped in seen)
@@ -1040,8 +1040,8 @@ def test_a_file_whose_every_line_is_not_utf8_fails(
     with pytest.raises(WireError) as info:
         table(opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows)), plan())
     assert info.value.message == (
-        f"Every one of the 2 lines of Massive's file s3://flatfiles/{KEY} at "
-        "https://files.massive.com is malformed. In the first, row 1 after the header is not "
+        f"None of the 2 lines after the header of Massive's file s3://flatfiles/{KEY} at "
+        "https://files.massive.com can be read. In the first, row 1 after the header is not "
         "UTF-8 text."
     )
     assert info.value.kind is WireFailure.UNREADABLE_ROWS

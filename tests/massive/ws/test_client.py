@@ -288,7 +288,7 @@ def test_auth_failed_is_fatal_and_never_retried(
     assert error.host == "127.0.0.1"
     assert error.path == "/stocks"
     assert error.message == (
-        "Massive answered the API key at 127.0.0.1/stocks with the status auth_failed: "
+        "Massive answered the authentication at 127.0.0.1/stocks with status auth_failed: "
         '"authentication failed".'
     )
     assert len(fake_ws_server.connections) == 1

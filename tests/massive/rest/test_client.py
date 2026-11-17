@@ -700,9 +700,9 @@ def test_an_unreadable_ssl_cert_dir_warns_once_when_the_client_is_built(
     [record] = caplog.records
     assert record.getMessage() == (
         f"The certificate directory {str(missing)!r} in SSL_CERT_DIR cannot be listed: "
-        f"[Errno 2] No such file or directory: {str(missing)!r}. OpenSSL may still find "
-        "certificates there by their hashed names, but the library cannot see a change to them, "
-        "so a client created later may keep trusting a removed certificate. Make the directory "
+        f"[Errno 2] No such file or directory: {str(missing)!r}. OpenSSL may still use "
+        "its certificates, but the library cannot see changes to them, "
+        "so a later connection may keep trusting a removed certificate. Make the directory "
         "listable, or remove it from SSL_CERT_DIR."
     )
 
@@ -999,8 +999,8 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
         client.get(_TRADES, _AAPL, {}, bucket="stocks", patience=Patience(300.0))
     assert str(caught.value) == (
         'Massive answered GET /v3/trades/AAPL on 127.0.0.1 with HTTP 429 (request_id r): "quota". '
-        "The next request goes at 2027-01-15 08:05:01 UTC, later than this read waits: it waits "
-        "at most 300 s for Massive's pauses. The usual cause is another program using the same "
+        "The next request goes at 2027-01-15 08:05:01 UTC, past the 300 s this read waits "
+        "for Massive's pauses. The usual cause is another program using the same "
         "Massive account, which shares its limit. Retry after that time, stop the other program, "
         "or set rest_requests_per_minute in dm.MassiveConfig to pace requests."
     )
