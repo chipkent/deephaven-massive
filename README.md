@@ -95,8 +95,8 @@ uv pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-expr
 ### Set your API keys
 
 Open your shell's startup file in a text editor: `~/.zshrc` on macOS, `~/.bashrc` on Linux.
-Paste the lines below at its end. The first is required. Leave out the two S3 lines if your plan
-doesn't include flat files, as [Environment variables](#environment-variables) explains. Copy
+Paste the lines below at its end. The first is required. Leave out the two S3 lines if your
+[Massive plan](https://massive.com/pricing) doesn't include flat files. Copy
 each key from Massive's [keys page](https://massive.com/dashboard/keys) over its placeholder,
 and save the file:
 
@@ -132,8 +132,8 @@ fixes.
 ## Tutorial
 
 Paste each example into the **Console** panel of the Deephaven IDE and run it. Each example's
-**Plan** line names the Massive plans that run it, and [Plans](#plans) shows how recent each
-plan's data is. Examples 8 to 12 read the settings file that Example 7 saves.
+**Plan** line names the Massive plans that run it. [Plans](#plans) shows how recent each plan's
+data is. Examples 8 to 12 read the settings file that Example 7 saves.
 
 | # | Example |
 |---|---|
@@ -177,6 +177,10 @@ query's other methods read the data and return a Deephaven table, so Deephaven's
 it. The
 [dataset index](docs/datasets/README.md) lists each dataset's arguments and columns.
 
+`history()` returns `apple` at once and downloads its rows in the background, so the console
+stays free. Deephaven fills the table when the rows arrive. To wait for the rows instead, pass
+`wait=True`.
+
 Next, one query for every listed stock at once.
 
 <a id="whole-market-day"></a>
@@ -203,9 +207,14 @@ busiest = (
 `day` has a row for every listed US stock that traded that day. Over-the-counter (OTC) stocks
 are left out.
 
-A dataset's `symbols` argument names what to read: `dm.ALL` for every symbol, one symbol as
-text, or several as a list, each spelled as Massive does. Daily bars take `dm.ALL`, and each
-dataset's page says whether it takes it. The ranking is ordinary Deephaven table operations.
+A dataset's `symbols` argument names what to read:
+
+- `dm.ALL` for every symbol
+- one symbol as text
+- several symbols as a list
+
+Spell each symbol as Massive does. Each dataset's page says whether it takes `dm.ALL`. The
+ranking is ordinary Deephaven table operations.
 
 Next, a list of three stocks over a longer range.
 
@@ -233,10 +242,6 @@ returns = year.agg_by(
 
 `returns` has one row per stock, with its close on the first and last day and its percent
 return.
-
-`history()` returns `year` at once and downloads its rows in the background, so the console
-stays free. `year` and `returns` start empty, and Deephaven updates both when the rows arrive. To
-wait for the rows instead, pass `wait=True`.
 
 Dates are `yyyy-MM-dd` text in every table, so they sort by day and join across tables. A range
 includes both of its dates, and for stocks a date is the trading day in New York.
@@ -313,9 +318,8 @@ closes = m.stocks.previous_day_bar(watchlist).poll(60)
 ```
 
 `closes` has a row for each stock with its previous trading day's bar. Each poll sends one
-request per stock, so four stocks polled every 60 seconds send four requests a minute. The session
-keeps to any request limit Massive sets, and [MassiveConfig](#massive-config) shows how to give it
-yours.
+request per stock. [MassiveConfig](#massive-config) shows how the session keeps to Massive's
+request limits.
 
 `watchlist` is a Deephaven [input table](https://deephaven.io/core/docs/how-to-guides/input-tables/),
 which you edit by hand in its panel or in code. By hand, type a symbol into a new row of the
@@ -401,8 +405,7 @@ an error that names the setting to change.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file. [Configuration](#configuration)
-covers the environment variables and the settings a new user needs, and the
-[settings page](docs/configuration.md) lists every setting a file can hold.
+covers the settings a new user needs.
 
 Next, a live table that streams instead of polling.
 
@@ -427,8 +430,7 @@ latest = m.stocks.bars(watchlist, dm.Timespan.MINUTE).last_by()
 `latest` gets a row for each stock with its first minute bar, and the row changes as each minute
 ends.
 
-`last_by()` reads Massive's stream instead of polling, and like the poll in Example 6, the
-stream follows the watchlist.
+`last_by()` streams instead of polling. Like Example 6's poll, the stream follows the watchlist.
 
 Massive sends a minute bar only for a minute with trades, so a table you start while no stock
 trades stays empty until trading resumes. Crypto trades around the clock, so
@@ -583,13 +585,11 @@ nearest_calls = nearest.view(
 ).sort("StrikePrice")
 ```
 
-`nearest_calls` has a row for each call of the nearest expiry, from the lowest strike to the
-highest. `calls` holds every expiry.
+`nearest_calls` has a row for each call of the nearest expiry. `calls` holds every expiry.
 
-A chain is a snapshot of every contract of one underlying, and its arguments narrow it. Massive
-labels a chain delayed on some plans, and listing `options` in `delayed_subscriptions` lets the
-session accept it. The [dataset index](docs/datasets/README.md) lists the other options
-datasets.
+A chain is a snapshot of every contract of one underlying. Its arguments, such as
+`contract_type`, narrow it. Listing `options` in `delayed_subscriptions` lets the session accept
+a chain Massive labels delayed, and changes nothing for a real-time one.
 
 Next, how to stop live tables when you're done with them.
 
@@ -626,10 +626,10 @@ kept = headlines.snapshot()
 m.close()
 ```
 
-Closing stops every live table of the session: `headlines` stops updating, shows an error
-saying the session was closed, and keeps its rows. `kept` is a static copy that you can filter
-and join like any table. A closed session reads nothing more. To read more data, open a new
-one with `m = dm.MassiveSession()`, or rerun any example, since each opens its own.
+Closing stops every live table of the session. `headlines` keeps its rows and shows an error
+saying the session was closed. `kept` is a static copy that you can filter and join like any
+table. A closed session reads nothing more. To read more, open a new session with
+`m = dm.MassiveSession()`. Every example opens its own.
 
 <a id="configuration"></a>
 
@@ -642,13 +642,13 @@ setting from `dm.MassiveConfig`.
 
 ### Environment variables
 
-Set these in your shell's startup file, as Install does for the keys. After you set one, stop
-the server and start it from a new terminal, as [Start the server](#start-the-server) does.
+Set these in your shell's startup file, where Install put your keys. A running server doesn't
+see a change, so restart it from a new terminal, as in [Start the server](#start-the-server).
 
 | Variable | What you get | Default |
 |---|---|---|
 | `MASSIVE_API_KEY` | Access to Massive. Every session needs it, unless your code passes the key. | Unset |
-| `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` | Faster `history()` of the whole market or of 50 or more symbols, and index values' history, from Massive's flat files on plans that include them. Set both or neither. | Unset |
+| `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` | `history()` of trades, quotes, and as-traded bars (`adjusted=False`) for the whole market or 50 or more symbols, and index values' history, from Massive's flat files on plans that include them. Set both or neither. | Unset |
 | `DEEPHAVEN_MASSIVE_CONFIG_FILE` | Your settings file, read by `dm.MassiveConfig.from_file()` called with no path | Unset |
 | `DEEPHAVEN_MASSIVE_LOG` | The library's log at the level you name: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` | Warnings and errors only, in the server's terminal |
 | `DEEPHAVEN_MASSIVE_LOG_FILE` | The log in this file instead of the terminal. Set alone, it logs at `DEBUG`. | Unset |
@@ -663,11 +663,12 @@ to attach the log to an issue.
 
 ### Plans
 
-Massive sells Stocks, Options, and its other subscriptions separately, each on its own plans.
+Massive sells each subscription, such as Stocks or Options, on its own plans. This table covers
+the data the tutorial reads, and each dataset's page has its own.
 
 <!-- The plans table is generated by `uv run python scripts/render_reference.py`; do not edit it by hand. -->
 
-How recent the data is on each of Massive's plans, and how far back its history goes, as Massive's pages state them.
+Each cell gives how recent a plan's data is and how far back its history goes, as Massive's pages state them.
 
 | Data | Stocks Basic | Stocks Starter | Stocks Developer | Stocks Advanced | Stocks Business |
 | --- | --- | --- | --- | --- | --- |
@@ -717,8 +718,8 @@ Leave a limited subscription out, and the session learns its limit from Massive'
 rate-limit error, after a pause. `m.rate_limits()` then shows the learned limit in
 `RequestsPerMinute`. Copy that number into the setting to skip the pause next time.
 
-`dm.MassiveConfig.from_file()` reads the same settings from a YAML file, as
-[Example 7](#what-your-plan-allows) shows. The [settings page](docs/configuration.md) lists every
+`dm.MassiveConfig.from_file()` reads the same settings from a YAML file
+([Example 7](#what-your-plan-allows)). The [settings page](docs/configuration.md) lists every
 setting, its values, and its default, with an example settings file.
 
 <a id="bad-symbols-and-rows"></a>
@@ -729,7 +730,7 @@ By default, one bad symbol or row never stops a table. A stream or `poll()` tabl
 symbol it skips in its `Error` in `m.streams()`.
 
 Each kind of problem is a cause, such as `noncanonical_symbols` for a watchlist row that isn't
-Massive's exact ticker. A `dm.ErrorPolicy`, passed as `MassiveConfig(on_error=...)`, gives each
+Massive's exact ticker. Pass a `dm.ErrorPolicy` as `MassiveConfig(on_error=...)` to give each
 cause one of three settings:
 
 - `dm.OnError.RAISE` fails the call or live table that met the problem.

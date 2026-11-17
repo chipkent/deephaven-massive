@@ -144,7 +144,7 @@ PLANS_TABLE_END: Final = "<!-- End of the generated plans table. -->"
 """The line after the README's generated plans table."""
 
 _GUIDE: Final = (
-    "How recent the data is on each of Massive's plans, and how far back its history goes, as "
+    "Each cell gives how recent a plan's data is and how far back its history goes, as "
     "Massive's pages state them."
 )
 """The paragraph above the table."""
