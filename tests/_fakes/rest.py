@@ -349,9 +349,9 @@ class FakeRestServer:
             @override
             def handle_one_request(self) -> None:
                 # A client may drop the connection before sending a request: urllib3 does when
-                # the TLS certificate names another host. The drop arrives as a reset (macOS,
-                # where the session tickets lie unread) or a TLS EOF with no close_notify, and
-                # ends the connection as a close would. Either error after a request line
+                # the TLS certificate names another host. The drop arrives as a reset, since
+                # the server's session tickets lie unread, or as a TLS EOF without close_notify,
+                # and ends the connection as a close would. Either error after a request line
                 # arrived is still raised.
                 self.raw_requestline = b""
                 try:

@@ -1340,8 +1340,8 @@ def test_the_tls_fake_ends_a_connection_the_client_drops_before_its_request(
     *, linger: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # urllib3 checks the certificate's name after the TLS handshake, and on a mismatch drops
-    # the connection before sending a request: a close, which macOS turns into a reset because
-    # the server's session tickets lie unread. The fake must end that connection as a close.
+    # the connection before sending a request: a close, which becomes a reset when the server's
+    # session tickets lie unread. The fake must end that connection as a close.
     # An error that reached the server's `handle_error` would be printed to a stream an xdist
     # worker may have closed, failing whichever test was tearing down.
     errors: list[BaseException | None] = []
