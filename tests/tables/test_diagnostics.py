@@ -1108,6 +1108,32 @@ def test_a_pause_that_holds_at_release_ends_with_the_session(
     release_scope(dh_exec_ctx, keeper)
 
 
+def test_a_failed_last_pause_row_costs_the_release_nothing(
+    *,
+    dh_exec_ctx: ExecutionContext,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    diagnostics = _diagnostics(dh_exec_ctx)
+    source = _RatePull()
+    source.rows = [_rate_row("stocks", RateLimitState.PAUSED)]
+    diagnostics.watch_rate_limits(source)
+    assert diagnostics.wait_until_shown(TIMEOUT)
+
+    def broken(*_: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(type(diagnostics._ledger), "apply", broken)
+    with caplog.at_level(logging.ERROR, "deephaven_massive._tables.diagnostics"):
+        diagnostics.release()
+    # The failure is logged as the library's, and the writer still ends cleanly: no table fails.
+    [record] = caplog.records
+    assert record.getMessage().startswith(
+        "diagnostics: failed to end the open rate-limit pauses in the problems table."
+    )
+    assert diagnostics._scope_released
+
+
 def test_buckets_paused_in_one_pull_are_rows_of_their_own(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:

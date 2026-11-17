@@ -1050,6 +1050,7 @@ def test_skipped_values_report_both_sources_in_order_across_threads() -> None:
         thread.start()
     for thread in threads:
         thread.join(30)
+        assert not thread.is_alive()  # a deadlock fails here, not as a wrong snapshot
     last = reported[-1]
     assert isinstance(last, ProblemSpans)
     assert sorted(last.spans) == ["refused r1", "v1"]  # each source's last value, 199 % 3
