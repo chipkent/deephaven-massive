@@ -160,6 +160,11 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._ingest import host_decision
 from deephaven_massive._ingest.crypto_tickers import CryptoTickerList
+from deephaven_massive._ingest.option_roots import (
+    OptionRootKinds,
+    RootKind,
+    canonical_underlyings,
+)
 from deephaven_massive._ingest.rate_limits import (
     OTHER,
     PaceCheck,
@@ -595,9 +600,20 @@ class RestState:
         crypto: Massive's list of crypto tickers with their two currencies
             (`RestReader.crypto_pair`): read on first need, and read again when a ticker it
             does not hold is asked for and it is an hour old or more.
+        option_roots: Whether each option root is an option on an index, from Massive's
+            contracts reference, asked once per root (`RestReader._root_underlyings`).
     """
 
-    __slots__ = ("_client", "_lock", "_once", "crypto", "hosts", "label", "pollers")
+    __slots__ = (
+        "_client",
+        "_lock",
+        "_once",
+        "crypto",
+        "hosts",
+        "label",
+        "option_roots",
+        "pollers",
+    )
 
     def __init__(self, client: RestClient, label: str) -> None:
         """Hold the session's client; no request is made.
@@ -614,6 +630,7 @@ class RestState:
             SharedLookup(label, client.governor)
         )
         self.crypto: Final = CryptoTickerList(client, label)
+        self.option_roots: Final = OptionRootKinds(client, label)
         self._once: set[tuple[str, ...]] = set()
 
     @property
@@ -755,6 +772,55 @@ class RestReader:
         """
         return self.state.crypto.pair(
             symbol, reader=self, unreadable=self.policy.unreadable_symbols, cancel=cancel
+        )
+
+    def _underlyings(
+        self, spec: DatasetSpec, rows: list[pa.RecordBatch], *, stop: Cancel
+    ) -> list[pa.RecordBatch]:
+        """Give a page's index underlyings their `I:` by option root, where the dataset asks.
+
+        Only a dataset with `DatasetSpec.underlying_by_root` is changed
+        (`option_roots.canonical_underlyings`); its rows' `Date` is filled by now, which dates
+        each root's lookup.
+
+        Args:
+            spec: The dataset.
+            rows: The page's kept rows, with the library's time columns.
+            stop: The read's token, which ends a lookup's waits.
+
+        Returns:
+            The rows.
+
+        A failed lookup raises the `MassiveError` of `root_kind`.
+        """
+        if not spec.underlying_by_root:
+            return rows
+        return canonical_underlyings(
+            rows, functools.partial(self.root_kind, cancel=stop), dataset=spec.name
+        )
+
+    def root_kind(
+        self, root: str, contract: str, day: str, *, cancel: Cancel | None = None
+    ) -> RootKind:
+        """Return whether an option root's contracts are options on an index.
+
+        The session's `OptionRootKinds.kind` (`_ingest/option_roots.py`), read through this
+        reader: the first call for a root reads Massive's contracts reference of `contract` as
+        of `day`, once per session, blocking the calling thread meanwhile.
+
+        Args:
+            root: The OCC root, such as `"SPXW"`.
+            contract: A canonical options ticker of that root.
+            day: The trading day of the row that names it, as ISO text.
+            cancel: A background read's stop token, or None.
+
+        Returns:
+            The root's kind.
+
+        A failed request raises its public `MassiveError`, naming the root.
+        """
+        return self.state.option_roots.kind(
+            root, contract=contract, day=day, reader=self, cancel=cancel
         )
 
     def read(
@@ -1227,18 +1293,22 @@ class RestReader:
                         for b in batches
                     ]
                 kept.extend(
-                    self._page_rows(
+                    self._underlyings(
                         spec,
-                        batches,
-                        window=window,
-                        time_name=converter.time_name,
-                        fill=functools.partial(times.fill, received=received),
-                        where=f"GET {template}",
-                        page=f"{spec.name}: page {requests} of {template} for "
-                        f"{call.symbol or 'the request'}",
-                        read=len(page.rows),
-                        record=record,
-                        tally=tally,
+                        self._page_rows(
+                            spec,
+                            batches,
+                            window=window,
+                            time_name=converter.time_name,
+                            fill=functools.partial(times.fill, received=received),
+                            where=f"GET {template}",
+                            page=f"{spec.name}: page {requests} of {template} for "
+                            f"{call.symbol or 'the request'}",
+                            read=len(page.rows),
+                            record=record,
+                            tally=tally,
+                        ),
+                        stop=stop,
                     )
                 )
         except WireError as error:

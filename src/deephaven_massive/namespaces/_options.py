@@ -147,6 +147,25 @@ def _keys(symbol: str, time: str | None = None, *, fanout: str | None = None) ->
     )
 
 
+def _list_keys(time: str | None = None) -> SourceKeys:
+    """Build the keys of the open interest or the unusual trades: contract, time, underlying.
+
+    Massive declares `underlying_ticker` optional on both, so a row without one keeps a null
+    `Underlying` rather than being withheld.
+
+    Args:
+        time: The column holding the row's time, renamed to `Timestamp`; None for none.
+
+    Returns:
+        The source's keys.
+    """
+    return SourceKeys(
+        symbol=KeySpec("Ticker"),
+        time=None if time is None else KeySpec(time),
+        fanout=KeySpec("UnderlyingTicker", required=False),
+    )
+
+
 def _stream_bar_keys() -> SourceKeys:
     """Build the keys of a WebSocket bars channel: its contract, window start, and end `e`.
 
@@ -339,27 +358,27 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
     ),
 )
 
-_UNDERLYING_TICKER_NOTE: Final = (
-    "Massive's `root` is the `OptionRoot` column. Massive sends an index without its `I:` "
-    "prefix (`SPX`). So an index here won't match `Underlying` in `m.options.chain()`, "
-    "`m.options.snapshots()`, or `m.options.contracts()`, which write `I:SPX`."
+_ROOT_UNDERLYING_NOTE: Final = (
+    "An index has its `I:` prefix (`I:SPX`), as in `m.options.contracts()`. The library asks "
+    "Massive's contracts reference once per option root and session whether the root's "
+    "contracts are options on an index. Massive's `root` is the `OptionRoot` column."
 )
-"""The note on `UnderlyingTicker` of the datasets whose rows carry it beside no CFI code, from
-which the library could tell an index and give it its `I:` prefix."""
+"""The note on `Underlying` of the datasets whose rows name it bare, with no CFI code."""
 
 OPEN_INTEREST: Final = DatasetSpec(
     name="options.open_interest",
     summary="The open interest of each US-listed options contract at the end of each trading day.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_OPEN_INTEREST,
-    keys={(_REST, _OPEN_INTEREST): _keys("Ticker")},
+    keys={(_REST, _OPEN_INTEREST): _list_keys()},
     time_axis=("date.gte", "date.lte"),
     symbol_param="ticker.any_of",
     # A chain's contracts can number thousands, so a table of them is sent 250 to a request,
     # as the snapshots are, which keeps each request's URL short.
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     poll_keys=("Symbol", "Date"),
-    column_notes={"UnderlyingTicker": _UNDERLYING_TICKER_NOTE},
+    underlying_by_root=True,
+    column_notes={"Underlying": _ROOT_UNDERLYING_NOTE},
 )
 
 UNUSUAL_TRADES: Final = DatasetSpec(
@@ -367,7 +386,7 @@ UNUSUAL_TRADES: Final = DatasetSpec(
     summary="Large trades and sweeps of US-listed options contracts, flagged by Massive.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_UNUSUAL_TRADES,
-    keys={(_REST, _UNUSUAL_TRADES): _keys("Ticker", "SipTimestamp")},
+    keys={(_REST, _UNUSUAL_TRADES): _list_keys("SipTimestamp")},
     time_axis=("sip_timestamp.gte", "sip_timestamp.lt"),
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
@@ -378,7 +397,8 @@ UNUSUAL_TRADES: Final = DatasetSpec(
     # Massive serves the latest days from its real-time data, so a poll, or a fetch that
     # reaches the present, reads current trades; a past range reads final ones.
     latest_is_current=True,
-    column_notes={"UnderlyingTicker": _UNDERLYING_TICKER_NOTE},
+    underlying_by_root=True,
+    column_notes={"Underlying": _ROOT_UNDERLYING_NOTE},
 )
 
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
@@ -1156,6 +1176,11 @@ class OptionsNamespace(Namespace):
         day's figures the next morning, so the latest `Date` is the previous trading day. Leave
         out `symbols` and narrow by `root`, `contract_type`, or `filters` to read many contracts.
 
+        `Underlying` is the canonical ticker, `I:SPX` for an index. To tell an index from a
+        stock, a read asks Massive's contracts reference about one contract of each option root
+        it meets for the first time in the session, so a read of many roots makes that many
+        extra requests once.
+
         Args:
             symbols: Option contracts; leave it out for every contract.
             root: An OCC root, such as `"SPXW"`, or several; leave it out for every root.
@@ -1234,6 +1259,11 @@ class OptionsNamespace(Namespace):
 
         Massive leaves out cancels, late reports, and compression trades. `poll()` appends each
         new trade.
+
+        `Underlying` is the canonical ticker, `I:SPX` for an index. To tell an index from a
+        stock, a read asks Massive's contracts reference about one contract of each option root
+        it meets for the first time in the session, so a read of many roots makes that many
+        extra requests once.
 
         Args:
             symbols: Option contracts; leave it out for every contract.

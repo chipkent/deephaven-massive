@@ -1832,3 +1832,16 @@ def test_history_columns_refuse_a_transport_history_never_reads() -> None:
     # as the flat files.
     with pytest.raises(BrokenGuaranteeError, match=r"^history\(\) never reads by WS\."):
         CATALOG.history_columns(CATALOG.by_name["stocks.trades"], Transport.WS)
+
+
+def test_only_an_options_rest_dataset_classifies_its_underlyings_by_root() -> None:
+    with pytest.raises(ValueError, match="underlying_by_root is for an options REST dataset"):
+        dataclasses.replace(
+            ADMIN,
+            underlying_by_root=True,
+            history_path=None,
+            keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+            time_axis=None,
+        )
+    with pytest.raises(ValueError, match="underlying_by_root is for an options REST dataset"):
+        dataclasses.replace(EXCHANGES, underlying_by_root=True)

@@ -426,6 +426,12 @@ class DatasetSpec:
             taken exactly as Massive writes them (`symbols.is_canonical`), not through the
             asset class's grammar. Only a REST dataset may set it: a stream's topics and a
             flat file's filter follow the class's spellings.
+        underlying_by_root: True for an options REST dataset whose rows name their underlying
+            bare (`SPX`) with nothing that says it is an index, such as the open interest: the
+            REST transport asks Massive's contracts reference once per option root whether its
+            contracts are options on an index, and gives such rows' `Underlying` its `I:`
+            (`option_roots.OptionRootKinds`). Only an options dataset with a REST source may
+            set it.
         option_rows: True for a dataset of every class (`ClassFromPrefix.ANY`) whose rows
             include options contracts beside other classes' tickers (the unified snapshot): it
             gets the derived `OptionRoot` column every options dataset has, null on a row
@@ -489,6 +495,7 @@ class DatasetSpec:
     column_notes: Mapping[str, str] = field(default_factory=dict)
     symbols_as_written: bool = False
     option_rows: bool = False
+    underlying_by_root: bool = False
     serves_current_data: bool = False
     latest_is_current: bool = False
     refused_alternative: str | None = None
@@ -517,6 +524,7 @@ class DatasetSpec:
                 its own columns (and, for futures, its `date` key, the session against which
                 every futures file is checked); a dataset that keeps its symbols as written has
                 channels or flat-file prefixes; a dataset of one class sets `option_rows`; a
+                dataset that is not an options REST dataset sets `underlying_by_root`; a
                 dataset without a fetch path, or whose fetch path is a reference endpoint, sets
                 `serves_current_data` or `latest_is_current`, or a dataset sets both; a
                 dataset whose rows name no
@@ -554,12 +562,14 @@ class DatasetSpec:
         """Check the fields that need the dataset to be of one asset class, or of every class.
 
         A stream, a dataset in a kind, and a flat-file dataset are of one class; symbols kept
-        as written are for REST datasets only; `option_rows` is for a dataset of every class.
+        as written are for REST datasets only; `option_rows` is for a dataset of every class;
+        `underlying_by_root` is for an options REST dataset.
 
         Raises:
             ValueError: If a dataset with channels, flat files, or a kind has no `asset_class`
                 (`ClassFromPrefix.ANY`); a dataset that keeps its symbols as written has
-                channels or flat-file prefixes; or a dataset of one class sets `option_rows`.
+                channels or flat-file prefixes; a dataset of one class sets `option_rows`; or a
+                dataset that is not an options REST dataset sets `underlying_by_root`.
         """
         if self.channels and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
@@ -574,6 +584,11 @@ class DatasetSpec:
         if self.option_rows and self.asset_class is not ClassFromPrefix.ANY:
             # A dataset of one class either is the options class or has no options rows.
             raise ValueError(f"{self.name}: option_rows is for a dataset of every class")
+        if self.underlying_by_root and (
+            self.asset_class is not AssetClass.OPTIONS or not self.rest_paths
+        ):
+            # The REST transport classifies the rows' underlyings by their option roots.
+            raise ValueError(f"{self.name}: underlying_by_root is for an options REST dataset")
 
     def _check_current_data_flags(self) -> None:
         """Check the flags that say a dataset serves current or real-time data.

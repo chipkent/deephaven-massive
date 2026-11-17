@@ -57,7 +57,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ExpirationDate` | String | The date the contract expires (formatted as YYYY-MM-DD). |
 | `OpenInterest` | long | The number of outstanding contracts that have not been closed or exercised, as of the last open interest update of the day. |
 | `StrikePrice` | double | The strike price of the contract. |
-| `UnderlyingTicker` | String | The ticker of the contract's underlying (e.g., SPX). Weekly and adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see root to tell them apart. Massive's `root` is the `OptionRoot` column. Massive sends an index without its `I:` prefix (`SPX`). So an index here won't match `Underlying` in `m.options.chain()`, `m.options.snapshots()`, or `m.options.contracts()`, which write `I:SPX`. |
+| `Underlying` | String | The instrument Massive lists the row under, as Massive's ticker. From REST `underlying_ticker`: "The ticker of the contract's underlying (e.g., SPX). Weekly and adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see root to tell them apart." An index has its `I:` prefix (`I:SPX`), as in `m.options.contracts()`. The library asks Massive's contracts reference once per option root and session whether the root's contracts are options on an index. Massive's `root` is the `OptionRoot` column. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
@@ -75,7 +75,7 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `ExpirationDate` | `expiration_date` |
 | `OpenInterest` | `open_interest` |
 | `StrikePrice` | `strike_price` |
-| `UnderlyingTicker` | `underlying_ticker` |
+| `Underlying` | `underlying_ticker` |
 | `TimestampInsert` |  |
 
 </details>

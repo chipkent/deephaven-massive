@@ -58,7 +58,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. |
 | `Flags` | String[] | The unusual-activity cases the trade meets, as a list. Values: block_premium (notional premium of $100,000 or more), block_size (1,000 contracts or more), iso (intermarket sweep, condition 219). A trade that meets several cases carries every matching flag. |
 | `SequenceNumber` | long | The sequence number represents the sequence in which trade events happened. These are increasing and unique per ticker symbol, but will not always be sequential. Values reset after each trading session/day. |
-| `UnderlyingTicker` | String | The ticker of the contract's underlying (e.g., SPX). Weekly and adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see root to tell them apart. Massive's `root` is the `OptionRoot` column. Massive sends an index without its `I:` prefix (`SPX`). So an index here won't match `Underlying` in `m.options.chain()`, `m.options.snapshots()`, or `m.options.contracts()`, which write `I:SPX`. |
+| `Underlying` | String | The instrument Massive lists the row under, as Massive's ticker. From REST `underlying_ticker`: "The ticker of the contract's underlying (e.g., SPX). Weekly and adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see root to tell them apart." An index has its `I:` prefix (`I:SPX`), as in `m.options.contracts()`. The library asks Massive's contracts reference once per option root and session whether the root's contracts are options on an index. Massive's `root` is the `OptionRoot` column. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
@@ -79,7 +79,7 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Exchange` | `exchange` |
 | `Flags` | `flags` |
 | `SequenceNumber` | `sequence_number` |
-| `UnderlyingTicker` | `underlying_ticker` |
+| `Underlying` | `underlying_ticker` |
 | `TimestampInsert` |  |
 
 </details>

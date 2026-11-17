@@ -1170,42 +1170,96 @@ def test_root_is_the_ticker_s_occ_root(
     assert all(r["OptionRoot"] == _root(r["Symbol"]) for r in library)
 
 
-@pytest.mark.settles("141")
-@pytest.mark.requests(9)
-def test_underlying_ticker_against_the_contracts_reference(
-    live_rest: RestClient, *, evidence: Evidence
-) -> None:
-    """The open interest's `underlying_ticker` beside the contracts reference's, per contract.
+_UNDERLYING_ROOTS = ("SPX", "SPXW", "NDX", "VIX", "RUT", "DJT", "AMCR1", "AAPL")
+"""Roots whose underlying the two new datasets must name as the contracts reference does: index
+roots and their weeklies, the stock `DJT` (a bare ticker an index could share), an adjusted
+root, and a plain stock."""
 
-    Reads one page of open interest of each of the roots `SPY`, `SPXW`, and `AMCR1`, then the
-    contracts reference of up to two contracts of each, and records both `underlying_ticker`
-    values and the reference's CFI code. Reading it: equal values for every contract, the index
-    included, mean one field; the owner then decides whether the columns take one name. A
-    contract the reference doesn't know, or a refusal of it, is recorded and passed over; a
-    refusal of the open interest skips the test, quoting Massive. Fails when `SPY` or `SPXW`
-    has no row, since nothing would be compared.
+_PER_ROOT = 2
+"""Contracts compared per root and dataset."""
+
+
+def _contracts_underlying(
+    session: dm.MassiveSession, ticker: str, *, day: str, table_rows: TableRows
+) -> str | None:
+    """Read one contract's canonical `Underlying` from `m.options.contracts()` as of a day.
+
+    Returns:
+        The contract's `Underlying`, or None when the reference has no row for it.
     """
-    samples = _root_samples(live_rest, evidence)
-    picked = [row for found in samples.values() for row in found[:2]]
-    compared = 0
-    for row in picked:
+    found = table_rows(session.options.contracts(ticker, as_of=day).fetch(wait=True))
+    return str(found[0]["Underlying"]) if found else None
+
+
+@pytest.mark.verifies("141")
+@pytest.mark.requests(95)
+@pytest.mark.timeout(600)
+def test_underlying_matches_the_contracts_reference(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Both new datasets name each contract's underlying as `m.options.contracts()` does.
+
+    For the roots `SPX`, `SPXW`, `NDX`, `VIX`, `RUT`, `DJT`, `AMCR1`, and `AAPL`, reads up to
+    two contracts each from one page of open interest per root and from one page of the latest
+    unusual trades, and two expired `SPXW` contracts from a year earlier. Then it reads each
+    contract's `Underlying` from `m.options.contracts()` as of the row's day. It checks two
+    things for every contract read:
+
+    - Massive's own `underlying_ticker` equals the reference's `Underlying` apart from an
+      index's `I:` prefix, so Massive folds weekly and adjusted roots as the reference does;
+    - the library's `Underlying` on `m.options.open_interest()` and `m.options.unusual_trades()`
+      of those contracts equals the reference's exactly, `I:SPX` included.
+
+    Records every comparison and the roots no row was found for. Fails on any mismatch, or
+    when `SPX` and `AAPL` give no open-interest row, since an index and a stock must both be
+    compared. A refusal skips the test, quoting Massive.
+    """
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for root in _UNDERLYING_ROOTS:
+        found = _page(live_rest, _OPEN_INTEREST, {"root": root, "limit": 50})
+        rows += [("open interest", r) for r in found[:_PER_ROOT]]
+    # Expired contracts, a year back, which the reference must find as of their day.
+    year_ago = (datetime.now(_NEW_YORK).date() - timedelta(days=365)).isoformat()
+    expired = _page(live_rest, _OPEN_INTEREST, {"root": "SPXW", "date.lte": year_ago, "limit": 2})
+    rows += [("open interest", r) for r in expired]
+    trades = _page(live_rest, _UNUSUAL_TRADES, {"limit": 1000})
+    for root in _UNDERLYING_ROOTS:
+        rows += [("unusual trades", r) for r in trades if r.get("root") == root][:_PER_ROOT]
+    seen = {str(r.get("root")) for _, r in rows}
+    evidence(f"roots with rows: {sorted(seen)}; without: {sorted(set(_UNDERLYING_ROOTS) - seen)}")
+    folded: list[str] = []
+    wrong: list[str] = []
+    for source_name, row in rows:
         ticker = str(row["ticker"])
-        try:
-            page = live_rest.get(
-                source(Transport.REST, _CONTRACT), {"options_ticker": ticker}, {}, bucket="options"
-            )
-        except WireError as error:
-            evidence(f"{ticker}: contracts reference {type(error).__name__}: {error}")
-            continue
-        described = page.rows[0] if page.rows else {}
-        compared += bool(described)
-        evidence(
-            f"{ticker}: open interest underlying_ticker {row.get('underlying_ticker')!r}; "
-            f"contracts underlying_ticker {described.get('underlying_ticker')!r}, "
-            f"cfi {described.get('cfi')!r}"
+        day = (
+            str(row.get("date") or "")
+            or datetime.fromtimestamp(int(row["sip_timestamp"]) / 1e9, _NEW_YORK).date().isoformat()
         )
-    evidence(f"compared {compared} contracts")
-    assert all(samples[root] for root in _STANDING_ROOTS)
+        reference = _contracts_underlying(live_session, ticker, day=day, table_rows=table_rows)
+        sent = row.get("underlying_ticker")
+        library = (
+            live_session.options.open_interest(ticker, start=day, end=day)
+            if source_name == "open interest"
+            else live_session.options.unusual_trades(ticker, start=day, end=day)
+        )
+        published = [r["Underlying"] for r in table_rows(library.fetch(wait=True))]
+        evidence(
+            f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r}, "
+            f"library {sorted(set(map(str, published)))}"
+        )
+        if reference is None:
+            continue
+        if sent != reference.removeprefix("I:"):
+            folded.append(f"{ticker}: {sent!r} vs {reference!r}")
+        if any(value != reference for value in published):
+            wrong.append(f"{source_name} {ticker}: {published[:3]} vs {reference!r}")
+    assert {"SPX", "AAPL"} <= {str(r.get("root")) for s, r in rows if s == "open interest"}
+    assert not folded, folded
+    assert not wrong, wrong
 
 
 @pytest.mark.verifies("142")

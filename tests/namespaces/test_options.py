@@ -1289,6 +1289,8 @@ def test_open_interest_sends_its_filters_and_reads_each_contract_s_day(
 ) -> None:
     path = "/options/v1/open-interest"
     fake_rest.reply(path, Reply(body(load_fixture, "open_interest.json")))
+    reference = "/v3/reference/options/contracts/O:SPY260123P00687000"
+    fake_rest.reply(wire(reference), contract_reference("OCASPS"))
     out = rows(
         rest_session.options.open_interest(
             ["O:SPY260123P00687000", "O:SPY260123C00687000"],
@@ -1314,18 +1316,25 @@ def test_open_interest_sends_its_filters_and_reads_each_contract_s_day(
                 "sort": "open_interest.desc",
                 "limit": "50000",
             },
-        )
+        ),
+        # The root's first contract tells a stock from an index, once for both rows.
+        (reference, {"as_of": "2026-01-22"}),
     ]
     picked = ("Symbol", "OptionRoot", "Date", "ContractType", "OpenInterest")
     assert [tuple(r[c] for c in picked) for r in out] == [
         ("O:SPY260123P00687000", "SPY", "2026-01-22", "put", 9871),
         ("O:SPY260123C00687000", "SPY", "2026-01-22", "call", 15234),
     ]
-    assert (out[0]["ExpirationDate"], out[0]["StrikePrice"], out[0]["UnderlyingTicker"]) == (
+    assert (out[0]["ExpirationDate"], out[0]["StrikePrice"], out[0]["Underlying"]) == (
         "2026-01-23",
         687.0,
         "SPY",
     )
+
+
+def contract_reference(cfi: str) -> Reply:
+    # Massive's contracts reference of one contract, by the CFI code that says its underlying.
+    return Reply({"status": "OK", "results": {"cfi": cfi}})
 
 
 def test_open_interest_sends_one_root_as_root(
@@ -1372,14 +1381,20 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
 ) -> None:
     path = "/options/v1/unusual-trades"
     fake_rest.reply(path, Reply(body(load_fixture, "unusual_trades.json")))
+    spy = "/v3/reference/options/contracts/O:SPY260123C00687000"
+    spxw = "/v3/reference/options/contracts/O:SPXW261218C06000000"
+    fake_rest.reply(wire(spy), contract_reference("OCASPS"))
+    fake_rest.reply(wire(spxw), contract_reference("OCEICS"))
     start = datetime(2025, 10, 29, 15, tzinfo=UTC)
     out = rows(
         rest_session.options.unusual_trades(
             "O:SPY260123C00687000", start=start, end=datetime(2025, 10, 29, 16, tzinfo=UTC)
         ).fetch(wait=True)
     )
-    [(sent_path, sent)] = fake_rest.get_queries(one_value=True)
+    [(sent_path, sent), *references] = fake_rest.get_queries(one_value=True)
     assert sent_path == path
+    # Each root is asked about once, as of its trade's New York trading day.
+    assert references == [(spy, {"as_of": "2025-10-29"}), (spxw, {"as_of": "2025-10-29"})]
     assert sent["ticker.any_of"] == "O:SPY260123C00687000"
     assert {"sip_timestamp.gte", "sip_timestamp.lt", "limit"} <= sent.keys()
     picked = ("Symbol", "Date", "Timestamp", "OptionRoot", "Price", "Size", "Flags")
@@ -1403,10 +1418,41 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
             ["block_premium", "iso"],
         ),
     ]
-    assert [(r["UnderlyingTicker"], r["Conditions"], r["Exchange"]) for r in out] == [
+    # SPXW's contracts are options on an index, so their underlying is `I:SPX`.
+    assert [(r["Underlying"], r["Conditions"], r["Exchange"]) for r in out] == [
         ("SPY", [227], 316),
-        ("SPX", [219], 304),
+        ("I:SPX", [219], 304),
     ]
+
+
+def test_one_bare_underlying_is_a_stock_or_an_index_by_each_root(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A stock and an index can share a bare ticker; each root's own contracts say which.
+    stock, index = "O:DJT261218C00030000", "O:DJTW261218C00030000"
+    page = [
+        {"ticker": stock, "root": "DJT", "date": "2026-11-13", "underlying_ticker": "DJT"},
+        {"ticker": index, "root": "DJTW", "date": "2026-11-13", "underlying_ticker": "DJT"},
+    ]
+    fake_rest.reply("/options/v1/open-interest", Reply({"status": "OK", "results": page}))
+    fake_rest.reply(wire(f"/v3/reference/options/contracts/{stock}"), contract_reference("OCASPS"))
+    fake_rest.reply(wire(f"/v3/reference/options/contracts/{index}"), contract_reference("OCEICS"))
+    out = rows(rest_session.options.open_interest().fetch(wait=True))
+    assert [(r["OptionRoot"], r["Underlying"]) for r in out] == [("DJT", "DJT"), ("DJTW", "I:DJT")]
+
+
+def test_a_refused_root_lookup_fails_the_read_with_massive_s_refusal(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(
+        "/options/v1/open-interest",
+        Reply({"status": "OK", "results": [{**LIST_ROW, "underlying_ticker": "SPY"}]}),
+    )
+    refusal = {"status": "NOT_AUTHORIZED", "message": "You are not entitled to this data."}
+    reference = f"/v3/reference/options/contracts/{LIST_ROW['ticker']}"
+    fake_rest.reply(wire(reference), Reply(refusal, status=403))
+    with pytest.raises(dm.EntitlementError, match="option root 'SPY' cannot be classified"):
+        rest_session.options.open_interest().fetch(wait=True)
 
 
 def list_query(m: dm.MassiveSession, spec: DatasetSpec) -> FetchQuery:

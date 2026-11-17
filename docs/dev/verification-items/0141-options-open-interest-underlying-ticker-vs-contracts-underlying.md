@@ -9,16 +9,19 @@ Unknown: whether `underlying_ticker` of `/options/v1/open-interest` and
 adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see
 root to tell them apart.") holds the same value as `underlying_ticker` of the contracts
 reference, `/v3/reference/options/contracts/{options_ticker}` ("The underlying ticker that the
-option contract relates to."), for the same contract. The contracts dataset writes that field as
-`Underlying`, with `I:` restored on an index from the contract's CFI code; the two new endpoints
-send no CFI code.
+option contract relates to."), for the same contract, apart from an index's `I:` prefix, which
+neither writes. Neither new endpoint sends a CFI code. Also unknown: whether the contracts
+reference finds an expired contract as of a past day.
 
-Meanwhile the new datasets keep Massive's text as `UnderlyingTicker`, with a note that an index
-is bare there. If the values agree for every contract, the owner decides whether the column
-takes one name with the contracts' `Underlying`, which would then need the `I:` the new
-endpoints do not mark; if they differ, the names stay apart.
+Meanwhile the two datasets publish `Underlying` as Massive's `underlying_ticker`, with `I:` added
+when the contracts reference gives the contract's root the CFI code of an option on an index.
+The library asks once per root and session, about the first contract of the root it meets, as
+of that row's trading day. If the values differ for some contract, the datasets take the
+contracts reference's underlying instead of the row's.
 
-Settled by `test_underlying_ticker_against_the_contracts_reference` in
-`tests/namespaces/test_options_integration.py`, which reads the open interest of a standard
-(`SPY`), a weekly (`SPXW`), and an adjusted (`AMCR1`) root and the contracts reference of two
-contracts of each, and records both values side by side.
+Verified by `test_underlying_matches_the_contracts_reference` in
+`tests/namespaces/test_options_integration.py`. It reads up to two contracts each of the roots
+`SPX`, `SPXW`, `NDX`, `VIX`, `RUT`, `DJT`, `AMCR1`, and `AAPL` from both endpoints, and two
+expired `SPXW` contracts from a year earlier. It compares Massive's `underlying_ticker` with
+`m.options.contracts()`'s `Underlying` apart from `I:`, and the library's `Underlying` on both
+datasets with it exactly.
