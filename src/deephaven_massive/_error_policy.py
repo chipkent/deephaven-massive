@@ -94,8 +94,7 @@ class ErrorPolicy:
             Defaults to `LOG`.
 
             Set `dm.OnError.RAISE` to fail the table at the first such row. Such a symbol is
-            Massive's data. To report it, so it can go to Massive, see
-            https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
+            Massive's data: `m.problems()` gives what Massive sent, for a report to Massive.
 
             A listed crypto pair is unreadable too when its ticker isn't its two currencies
             written together. Under `dm.OnError.LOG` or `dm.OnError.IGNORE` it gets no rows, and

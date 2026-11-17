@@ -465,10 +465,11 @@ def wire_source(error: WireError) -> ErrorSource:
 
     Returns:
         `ErrorSource.MASSIVE` for a refusal or an error Massive answered with
-        (`WireFailure.REFUSED`); `ErrorSource.NETWORK` for a request that got no answer
+        (`WireFailure.REFUSED`) or Massive's rows the client could not read
+        (`UNREADABLE_ROWS`); `ErrorSource.NETWORK` for a request that got no answer
         (`NO_ANSWER`); `ErrorSource.USER` for this machine's settings (`LOCAL`) or a request
-        the caller stopped (`STOPPED`); and `ErrorSource.LIBRARY` for data the client could not
-        read (`UNREADABLE`) or a failure of the client itself (`CLIENT_DEFECT`).
+        the caller stopped (`STOPPED`); and `ErrorSource.LIBRARY` for data the client could not read
+        (`UNREADABLE`) or a failure of the client itself (`CLIENT_DEFECT`).
     """
     return _SOURCES[error.kind]
 
@@ -480,6 +481,7 @@ _SOURCES: Final = MappingProxyType(
         WireFailure.LOCAL: ErrorSource.USER,
         WireFailure.STOPPED: ErrorSource.USER,
         WireFailure.UNREADABLE: ErrorSource.LIBRARY,
+        WireFailure.UNREADABLE_ROWS: ErrorSource.MASSIVE,
         WireFailure.CLIENT_DEFECT: ErrorSource.LIBRARY,
     }
 )

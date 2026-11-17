@@ -212,6 +212,7 @@ from deephaven_massive._tables.problem_events import (
 from deephaven_massive._tables.transports import FlatFileRead
 from deephaven_massive._tables.withheld import (
     MARK_COLUMNS,
+    WITHHELD_LISTED,
     Failure,
     Withheld,
     failure_of,
@@ -221,6 +222,7 @@ from deephaven_massive._tables.withheld import (
     mark_failures,
     merged,
     placed,
+    reason_sentence,
     with_marks,
     withhold_rows,
 )
@@ -1804,11 +1806,13 @@ class FlatFileHistory:
         transform: _Transform,
         file: FlatFile,
     ) -> Iterator[tuple[pa.RecordBatch, DriftReport, RowMarks]]:
-        """Hand on a file's batches; list its malformed lines when they are all it holds.
+        """Hand on a file's batches; list its malformed lines, and fail, when they are all it holds.
 
         The reader raises after the last block of a file whose every line is malformed
-        (`WireFailure.UNREADABLE`), so the read never reaches its own report of them. A
-        dropped connection is another failure, which reports nothing before its reread.
+        (`WireFailure.UNREADABLE_ROWS`), so the read never reaches its own report of them. The
+        lines are Massive's data, so the read fails with a `RowDataError` whatever
+        `malformed_rows` says, since it withheld every row of the file. Any other wire error,
+        such as a dropped connection, reports nothing before its reread.
 
         Args:
             batches: The file's batches.
@@ -1819,15 +1823,21 @@ class FlatFileHistory:
             Each batch, as the reader hands it on.
 
         Raises:
-            WireError: The reader's failure, unchanged.
+            RowDataError: If every line of the file is malformed.
+            WireError: Any other failure of the reader, unchanged.
         """
         try:
             yield from batches
         except WireError as error:
-            if error.kind is WireFailure.UNREADABLE and file.malformed_lines and not file.rows_read:
-                setting = transform.policy.malformed_rows
-                self._core.problems([_malformed_event(transform, file, setting)])
-            raise
+            if error.kind is not WireFailure.UNREADABLE_ROWS:
+                raise
+            setting = transform.policy.malformed_rows
+            self._core.problems([_malformed_event(transform, file, setting)])
+            raise RowDataError(
+                f"{transform.dataset}: every one of the {file.malformed_lines} lines of Massive's "
+                f"flat file {file.location} is malformed, so the library withheld them all. "
+                f"{reason_sentence(file.malformed_reason)} {WITHHELD_LISTED}"
+            ) from error
 
     def _report_withheld(self, transform: _Transform, withheld: Withheld, *, where: str) -> None:
         """Report a file's withheld rows: drift, problem events, and unreadable spellings.

@@ -134,8 +134,8 @@ A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm
 A cause it leaves unset follows the session's setting.
 
 Whatever the setting, a table fails when Massive's rows stop being readable, since it would
-otherwise hold nothing and show no error. Report it as a [bug](troubleshooting.md#report-a-bug),
-so it can go to Massive.
+otherwise hold nothing and show no error. The rows are Massive's data, and `m.problems()` gives
+what Massive sent and why, for a report to Massive.
 
 - A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows.
 - A `dm.ALL` stream fails after 100 unreadable rows with none read between them.
@@ -361,8 +361,7 @@ ticker, or the call raises `ValueError`. A table whose every row is bad raises
 #### on_error.unreadable_symbols
 
 Set `raise` to fail the table at the first such row. Such a symbol is
-Massive's data. To report it, so it can go to Massive, see
-[Report a bug](troubleshooting.md#report-a-bug).
+Massive's data: `m.problems()` gives what Massive sent, for a report to Massive.
 
 A listed crypto pair is unreadable too when its ticker isn't its two currencies
 written together. Under `log` or `ignore` it gets no rows, and

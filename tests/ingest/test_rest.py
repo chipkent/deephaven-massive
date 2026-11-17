@@ -2308,7 +2308,7 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
         fetch(session, SMA, symbols=["AAPL"])
     assert str(info.value) == (
         "indicators.sma: the library could read none of the 1 rows of the read's symbols and "
-        "window from GET /v1/indicators/sma/{stockTicker} whole, so it withheld them all. "
+        "window from GET /v1/indicators/sma/AAPL whole, so it withheld them all. "
         "Timestamp unit mismatch for indicators.sma.TimestampStart: 1704310200000000000 ms "
         "overflows 64-bit nanoseconds. m.problems() counts the withheld rows by cause and symbol."
     )
@@ -2527,7 +2527,7 @@ def test_a_read_whose_rows_in_the_window_are_all_unreadable_fails(
     with pytest.raises(
         RowDataError,
         match=r"^stocks\.trades: the library could read none of the \d rows of the read's symbols "
-        r"and window from GET /v3/trades/\{stockTicker\} whole",
+        r"and window from GET /v3/trades/AAPL whole",
     ):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
 

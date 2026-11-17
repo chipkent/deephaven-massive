@@ -1038,17 +1038,22 @@ def test_a_file_whose_every_line_is_malformed_fails_the_call(
     fake_s3: FakeS3,
     make_csv_gz: Callable[[str], bytes],
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The reader fails the file after its last block; its lines are still listed.
+    # The reader fails the file after its last block; its lines are still listed, and the
+    # failure is Massive's data, never logged as a bug.
     events = capture_problems(session, monkeypatch)
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + "AAPL,1\nAAPL,2\n"))
-    with pytest.raises(
-        dm.MassiveError,
-        match=rf"^cannot read {re.escape(LOCATION.format(TRADES_0303))}: every one of its 2 "
-        r"lines is malformed, so the file's format may have changed; the first: row 1 after the "
-        r"header has 2 fields where the header has 13\. " + re.escape(LIBRARY_BUG) + "$",
-    ):
+    with caplog.at_level(logging.DEBUG), pytest.raises(RowDataError) as info:
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert str(info.value) == (
+        f"stocks.trades: every one of the 2 lines of Massive's flat file "
+        f"{LOCATION.format(TRADES_0303)} is malformed, so the library withheld them all. Row 1 "
+        "after the header has 2 fields where the header has 13. m.problems() counts the withheld "
+        "rows by cause and symbol."
+    )
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
     assert problems(events) == [
         (ProblemCause.MALFORMED_ROWS, None, LOCATION.format(TRADES_0303), 2)
     ]

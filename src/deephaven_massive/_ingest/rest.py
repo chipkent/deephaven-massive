@@ -206,7 +206,14 @@ from deephaven_massive._ingest.symbol_reads import (
     read_rest_by_value,
 )
 from deephaven_massive._log_limits import bounded_list, log_once
-from deephaven_massive._massive import Cancel, DriftReport, RowFault, Transport, WireError
+from deephaven_massive._massive import (
+    Cancel,
+    DriftReport,
+    RowFault,
+    Transport,
+    WireError,
+    request_target,
+)
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.columns import dataset_table, rest_recency_note
@@ -1387,6 +1394,8 @@ class RestReader:
         requests = 0
         received_rows = 0
         template = converter.rest_path.template
+        # The path as sent, with the call's values in place of the template's placeholders.
+        requested = f"GET {request_target(converter.rest_path, call.path_params, {})}"
         own = own_symbols(spec, call.symbol, call.query)
         zone_class = day_class(spec, map(symbol_class, own))
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
@@ -1453,6 +1462,7 @@ class RestReader:
                             time_name=converter.time_name,
                             fill=functools.partial(times.fill, received=received),
                             where=f"GET {template}",
+                            requested=requested,
                             page=f"{spec.name}: page {requests} of {template} for "
                             f"{call.symbol or 'the request'}",
                             read=len(page.rows),
@@ -1567,6 +1577,7 @@ class RestReader:
         time_name: str,
         fill: Callable[[pa.RecordBatch], pa.RecordBatch],
         where: str,
+        requested: str,
         page: str,
         read: int,
         tally: ReadTally,
@@ -1593,6 +1604,8 @@ class RestReader:
             time_name: The dataset's time column, for `keep_window`.
             fill: Fills the library's time columns (`row_times.TimeRule.fill`).
             where: The request template, for the drift and the events.
+            requested: The request with its path filled in, such as `"GET /v3/trades/AAPL"`,
+                for the message of a read that withheld every row (`ReadTally.failure`).
             page: The dataset, page, path, and symbol, for the DEBUG line.
             read: How many rows the page held, before conversion.
             tally: The read's count of its rows inside the window and of those withheld.
@@ -1620,7 +1633,7 @@ class RestReader:
         if withheld.groups:
             self._report_withheld(spec, withheld, where=where)
         asked = windowed.num_rows
-        tally.add(asked, withheld, source=where)
+        tally.add(asked, withheld, source=requested)
         kept = [fill(batch) for batch in withheld.rows.to_batches()]
         logger.debug(
             "%s: %d rows read, %d converted, %d in the window, %d withheld, %d kept as whole bars",

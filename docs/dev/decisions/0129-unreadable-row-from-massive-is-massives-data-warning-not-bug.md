@@ -13,17 +13,17 @@ two currencies don't make up its ticker. The library withholds the row, or fails
 
 ## Options
 
-1. Massive's data: the message says so and names the `dm.ErrorPolicy` setting as the fix, with
-   no bug-report sentence; the error's `source` is `MASSIVE`, `is_bug` is false, and the log
-   level is WARNING.
-2. The library's defect: the message keeps the bug-report sentence and drops the setting; the
-   error stays `LIBRARY`, a bug, logged at ERROR.
+1. Massive's data: the message names the `dm.ErrorPolicy` setting, with no bug-report sentence;
+   `source` is `MASSIVE`, `is_bug` false, and the level WARNING.
+2. The library's defect: the message keeps the bug-report sentence; `LIBRARY`, a bug, ERROR.
 
 ## Ruling
 
-Option 1, decided by the owner in the coordinating chat session on 2026-11-17. A row Massive
-sent that the library can't read is Massive's data. In a follow-up that day, the owner agreed
-that malformed flat-file lines log at WARNING, like the other causes that skip one value.
+Option 1, decided by the owner in the coordinating chat session on 2026-11-17, for the three
+examples above, logged at WARNING. Under the owner's standing rule that a case unlike its
+siblings is made to match them, the ruling also covers every other cause of a withheld row on
+every transport, a flat file whose every line is malformed, and a WebSocket frame that isn't
+JSON. The owner confirmed this scope when the record was read back on 2026-11-17.
 
 ## Reason
 
@@ -32,12 +32,12 @@ of the other causes that skip one value.
 
 ## Consequences
 
-A handler that branched on `ErrorSource.LIBRARY` or `is_bug` to catch these rows sees `MASSIVE`
-and false instead, a log watched for ERROR no longer shows them, and `m.problems()` gives them
-Source `massive`. A change in Massive's format that leaves every row unreadable still fails the
-read or stream, but no longer asks for a bug report. This supersedes the statement in decision
-99 that such a failure is a library defect.
+These errors have `source` `MASSIVE` and `is_bug` false, log at WARNING, and show Source
+`massive` in `m.problems()`, whose fix names the setting. A read or stream whose every row is
+withheld still fails, but asks for no bug report. This supersedes the statement in decision 99
+that such a failure is a library defect.
 
 ## Rule
 
-The `RowDataError` docstring, and `docs/troubleshooting.md`, "Read the problems table".
+The `RowDataError` docstring, the `WireFailure.UNREADABLE_ROWS` docstring, and
+`docs/troubleshooting.md`, "Read the problems table".

@@ -26,15 +26,15 @@ def withheld(rows: int, reason: str) -> Withheld:
 
 def test_a_read_with_one_row_read_whole_never_fails() -> None:
     tally = ReadTally()
-    tally.add(3, withheld(3, "first"), source="GET /v3/trades/{stockTicker}")
-    tally.add(1, withheld(0, ""), source="GET /v3/trades/{stockTicker}")
+    tally.add(3, withheld(3, "first"), source="GET /v3/trades/AAPL")
+    tally.add(1, withheld(0, ""), source="GET /v3/trades/AAPL")
     assert tally.rows == 4
     tally.check("stocks.trades")
 
 
 def test_a_read_with_no_rows_of_its_symbols_and_window_never_fails() -> None:
     tally = ReadTally()
-    tally.add(0, withheld(0, ""), source="GET /v3/trades/{stockTicker}")
+    tally.add(0, withheld(0, ""), source="GET /v3/trades/AAPL")
     tally.check("stocks.trades")
     ReadTally().check("stocks.trades")
 
@@ -42,15 +42,15 @@ def test_a_read_with_no_rows_of_its_symbols_and_window_never_fails() -> None:
 def test_a_read_whose_rows_are_all_withheld_fails_with_its_first_reason() -> None:
     tally = ReadTally()
     # Each part names what it read; a part with no rows of the read is not named.
-    tally.add(0, withheld(0, ""), source="GET /v3/trades/{stockTicker}")
+    tally.add(0, withheld(0, ""), source="GET /v3/trades/AAPL")
     tally.add(2, withheld(2, "first"), source="the flat files of us_stocks_sip/trades_v1")
-    tally.add(1, withheld(1, "second"), source="GET /v3/trades/{stockTicker}")
+    tally.add(1, withheld(1, "second"), source="GET /v3/trades/AAPL")
     tally.add(1, withheld(1, "third"), source="the flat files of us_stocks_sip/trades_v1")
     with pytest.raises(RowDataError) as info:
         tally.check("stocks.trades")
     assert str(info.value) == (
         "stocks.trades: the library could read none of the 4 rows of the read's symbols and "
-        "window from the flat files of us_stocks_sip/trades_v1, GET /v3/trades/{stockTicker} "
+        "window from the flat files of us_stocks_sip/trades_v1, GET /v3/trades/AAPL "
         "whole, so it withheld them all. First. m.problems() counts the withheld rows by cause "
         "and symbol."
     )
@@ -84,10 +84,10 @@ def test_judge_fails_only_the_symbols_a_wholly_withheld_read_gave_rows() -> None
         "IBM": SymbolFailure(own),  # failed on its own: it keeps its failure
     }
     whole = ReadTally()
-    whole.add(1, withheld(0, ""), source="GET /v3/trades/{stockTicker}")
+    whole.add(1, withheld(0, ""), source="GET /v3/trades/AAPL")
     assert whole.judge("stocks.trades", outcomes) == outcomes
     lost = ReadTally()
-    lost.add(1, withheld(1, "first"), source="GET /v3/trades/{stockTicker}")
+    lost.add(1, withheld(1, "first"), source="GET /v3/trades/AAPL")
     judged = lost.judge("stocks.trades", outcomes)
     assert list(judged) == ["AAPL", "MSFT", "IBM"]
     failed = judged["AAPL"]

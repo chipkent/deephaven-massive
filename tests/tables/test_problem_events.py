@@ -55,6 +55,37 @@ def test_every_row_fault_is_a_withheld_cause_of_massive_s_data() -> None:
         assert cause.traits.source is ProblemSource.MASSIVE
 
 
+def test_the_fix_for_massive_s_unreadable_rows_names_the_setting_not_a_bug_report() -> None:
+    # The rows are Massive's data: the fix says so and names the setting, and never asks for a
+    # bug report to the library.
+    fixes = {
+        cause: CAUSES[cause].fix
+        for cause in (
+            ProblemCause.UNREADABLE_SYMBOLS,
+            ProblemCause.UNREADABLE_KEYS,
+            ProblemCause.UNCONVERTIBLE_VALUES,
+            ProblemCause.MALFORMED_ROWS,
+        )
+    }
+    assert fixes == {
+        **{
+            cause: "The library withheld the row because Massive sent it in a form the library "
+            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. To "
+            f"quiet it, set `{cause.value}` to `dm.OnError.IGNORE`; to fail the table, "
+            "`dm.OnError.RAISE`."
+            for cause in (
+                ProblemCause.UNREADABLE_SYMBOLS,
+                ProblemCause.UNREADABLE_KEYS,
+                ProblemCause.UNCONVERTIBLE_VALUES,
+            )
+        },
+        ProblemCause.MALFORMED_ROWS: "The library skipped the line because Massive sent it in a "
+        "form the library can't read. `Detail` names the file and its first such line, for a "
+        "report to Massive. To quiet it, set `malformed_rows` to `dm.OnError.IGNORE`; to fail "
+        "the read, `dm.OnError.RAISE`.",
+    }
+
+
 def test_a_span_tracker_keeps_each_span_s_start_and_reports_only_changes() -> None:
     tracker = SpanTracker(
         ProblemCause.NONCANONICAL_SYMBOLS, dataset="stocks.trades", stream_id=7, where="here"

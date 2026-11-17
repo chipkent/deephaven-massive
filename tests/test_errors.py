@@ -169,8 +169,10 @@ def test_every_source_has_a_lowercase_value() -> None:
             ErrorSource.USER,
         ),
         # Data Massive delivered that the client could not read is the library's to fix, and
-        # so is a failure of the client itself.
+        # so is a failure of the client itself; a file whose every line is malformed is
+        # Massive's data.
         (WireError("bad file", kind=WireFailure.UNREADABLE), ErrorSource.LIBRARY),
+        (WireError("bad lines", kind=WireFailure.UNREADABLE_ROWS), ErrorSource.MASSIVE),
         (WireError("bug", kind=WireFailure.CLIENT_DEFECT), ErrorSource.LIBRARY),
     ],
 )
