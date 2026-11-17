@@ -84,6 +84,7 @@ from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
@@ -321,12 +322,15 @@ def read_rest_by_symbol(
     current: bool,
     call: int,
     cancel: Cancel | None,
+    tally: ReadTally,
     to_table: Callable[[pa.Table], Table],
 ) -> dict[str, SymbolOutcome]:
     """Make a read by symbol's planned REST requests and return each symbol's outcome.
 
     Each request's rows go to the symbols it names (see the module docstring), and each
-    symbol's rows become one static table, in plan order.
+    symbol's rows become one static table, in plan order. A symbol whose every request Massive
+    had no data for is marked so (`SymbolRows.no_data`). The rows count in `tally`, which the
+    read's entry point judges (`ReadTally.judge`); this read never does.
 
     Args:
         reader: The reader of the session's paths.
@@ -342,6 +346,7 @@ def read_rest_by_symbol(
             (`rest._fetch_is_current`).
         call: The verb call's id, for the log lines.
         cancel: The read's stop token, or None.
+        tally: The whole read's count of its rows and of those withheld.
         to_table: Converts a symbol's Arrow rows to a static Deephaven table.
 
     Returns:
@@ -361,6 +366,7 @@ def read_rest_by_symbol(
         current=current,
         cancel=cancel,
         patience=patience,
+        tally=tally,
     )
     logger.debug(
         "call %d %s by symbol: %d of %d requests answered, waiting out at most %.0f s of pauses",
@@ -372,13 +378,18 @@ def read_rest_by_symbol(
     )
     pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in ordered}
     failures = dict(failed)
+    absent: set[str] = set()
+    answered: set[str] = set()
     for (rest_path, planned), result in zip(units, results, strict=True):
         own = own_symbols(spec, planned.symbol, planned.query)
         if isinstance(result, MassiveError):
             for symbol in own:
                 failures.setdefault(symbol, result)
-            continue
-        _attribute(reader, spec, result, template=rest_path.template, own=own, pieces=pieces)
+        elif result is None:
+            absent.update(own)
+        else:
+            answered.update(own)
+            _attribute(reader, spec, result, template=rest_path.template, own=own, pieces=pieces)
     empty = core.dataset_schema(spec).arrow_schema().empty_table()
     tables = {
         symbol: to_table(pa.concat_tables(rows) if rows else empty)
@@ -394,6 +405,14 @@ def read_rest_by_symbol(
         call=call,
         source=TRANSPORT_LABELS[Transport.REST],
     )
+    # A symbol with no data from every request that named it; one that failed keeps its failure.
+    no_data = absent - answered
+    outcomes = {
+        symbol: replace(outcome, no_data=True)
+        if symbol in no_data and isinstance(outcome, SymbolRows)
+        else outcome
+        for symbol, outcome in outcomes.items()
+    }
     return _with_skipped(outcomes, units)
 
 
@@ -445,7 +464,10 @@ def read_rest_by_value(
     value and `Request.limit` caps each value's requests as it would that call's. A value whose
     read fails gets its own failure; a parameter its path does not take fails it with
     `UnsupportedParameterError`. A rejected API key stops the read, since every value would
-    be refused.
+    be refused. The values are one read: their rows count in one tally, judged after the last
+    value (`ReadTally.judge`), so a value whose rows are all withheld, beside others read
+    whole, gets no rows, and when the library could read none of the rows of every value
+    whole, each value that read fails.
 
     Args:
         reader: The reader of the session's paths.
@@ -466,6 +488,7 @@ def read_rest_by_value(
     pauses = holds_update_graph_lock(core.exec_ctx)
     tables: dict[str, Table] = {}
     failures: dict[str, MassiveError] = {}
+    tally = ReadTally()
     for value in ordered:
         try:
             rows, requests = reader.read_fetch(
@@ -474,6 +497,7 @@ def read_rest_by_value(
                 symbols=request.static_symbols,
                 cancel=cancel,
                 pauses_live_tables=pauses,
+                tally=tally,
             )
         except MassiveError as error:
             failures[value] = error
@@ -487,7 +511,7 @@ def read_rest_by_value(
             "call %d %s by value: %s read in %d requests", call, spec.name, value, requests
         )
         tables[value] = to_table(rows)
-    return symbol_outcomes(
+    outcomes = symbol_outcomes(
         core,
         spec,
         symbols=ordered,
@@ -496,6 +520,7 @@ def read_rest_by_value(
         call=call,
         source=TRANSPORT_LABELS[Transport.REST],
     )
+    return tally.judge(spec.name, outcomes)
 
 
 def _attribute(
