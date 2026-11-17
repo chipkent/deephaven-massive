@@ -577,11 +577,11 @@ details = m.reference.ticker_details(["AAPL", "ZZZZ"]).fetch()
 
 `details` holds Apple's row. Massive answers the ticker-details request for `ZZZZ` with HTTP 404,
 so `problems` gets a row whose `Cause` is `unavailable_symbols` and `Symbol` is `ZZZZ`. Its
-`Detail` says Massive has no data for it and names the request. Most other datasets answer an
+`Detail` gives Massive's answer, HTTP 404, and the path the library asked. Most other datasets answer an
 unlisted ticker with no rows, which is Massive's answer and not a problem.
 
 Every problem the library meets in your tables is a row of `m.problems()`: a skipped symbol, a
-row it left out, an outage. `Cause` says why, and `Detail` gives the value and Massive's answer.
+row it left out, an outage. `Cause` says why, and `Detail` gives Massive's answer or the reason.
 [Read the problems table](docs/troubleshooting.md#problems) says what each problem means and
 what to do about it.
 

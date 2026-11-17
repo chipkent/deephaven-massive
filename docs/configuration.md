@@ -106,7 +106,7 @@ of three values:
 
 The library leaves out any row of Massive's data it can't read. A row it can read is one whose
 symbol, time, and values it can convert to the table's columns. So a result can be partial.
-Say `m.stocks.trades("AAPL").history("2026-10-30")` gets 5 rows from Massive, and the library can't read one
+Say `m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")` gets 5 rows from Massive, and the library can't read one
 of them. The table gets 4 rows. `m.problems()` lists the fifth, and the log warns once.
 
 Set every cause to `raise` when a call must return complete data:
@@ -115,7 +115,8 @@ Set every cause to `raise` when a call must return complete data:
 import deephaven_massive as dm
 
 m = dm.MassiveSession()
-trades = m.stocks.trades("AAPL", on_error=dm.ErrorPolicy(dm.OnError.RAISE)).history("2026-10-30")
+bars = m.stocks.bars("AAPL", dm.Timespan.DAY, on_error=dm.ErrorPolicy(dm.OnError.RAISE))
+apple = bars.history("2026-10-26", "2026-10-30")
 ```
 
 To do the same for every call, pass that policy to `MassiveConfig(on_error=...)`.
@@ -126,15 +127,16 @@ Under `raise`:
 - A problem found later, as the rows arrive, raises from a call with `wait=True`. Without
   `wait=True`, it fails the table.
 - A watchlist read by `fetch()` or `history()` fails only the symbols it met, and
-  `m.symbol_reads()` shows them `FAILED`. A bad watchlist row is the exception, as
-  `on_error.noncanonical_symbols` says.
+  `m.symbol_reads()` shows them `FAILED`. A bad watchlist row instead fails the whole
+  table.
 
 A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
 A cause it leaves unset follows the session's setting.
 
-Whatever the setting, a call or live table fails when the library can read none of the rows
-Massive sends, since Massive has most likely changed its format. A stream fails after 100
-unreadable rows in a row, or, for the symbols you list, 100 whose symbol it can't read.
+Whatever the setting, a `fetch()`, a `history()`, or a `poll()` cycle fails when the library can
+read none of the rows Massive sends, since Massive has most likely changed its format. A
+`dm.ALL` stream fails after 100 unreadable rows in a row. A stream of the symbols you list fails
+after 100 in a row whose symbol it can't read.
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 
