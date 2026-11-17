@@ -37,7 +37,7 @@ other setting at its default:
 | Setting | List in it | Without it |
 |---|---|---|
 | `delayed_subscriptions` | Each subscription Massive serves your key delayed | Every stream and snapshot test of those subscriptions skips, `not listed as delayed` |
-| `rest_requests_per_minute` | Each subscription whose REST requests Massive limits by the minute, with its limit | Each one's first refused request pauses its requests while the library learns the limit, and the rate-limit tests skip |
+| `rest_requests_per_minute` | Each subscription whose REST requests Massive limits by the minute, with its limit, so its requests are paced from the first | Each one's first refused request pauses its requests while the library learns the limit, and the rate-limit tests skip |
 | `websocket_hosts` | A WebSocket host you pin for an asset class | The library picks the host |
 
 Add the variable to your shell's startup file, beside your keys, and open a new terminal:
@@ -64,13 +64,13 @@ connections:
    ```
 
    The command also runs every README example as written and checks it against its text. Run it
-   on a weekday from 09:30 to 16:00 New York time, because stream tests, the README's streaming
-   examples among them, check rows only while their market trades.
+   on a weekday from 09:30 to 16:00 New York time, because stream tests check rows only while
+   their market trades.
 
    The rate-limit tests use up the request limit of one subscription in
-   `rest_requests_per_minute`. They take the first the file lists of indices, futures, options,
-   stocks, and currencies. The ticker-lookup test takes the first of indices, currencies, and
-   stocks. They skip when the file lists none of them.
+   `rest_requests_per_minute`. They use indices if the file lists it, else futures, then options,
+   stocks, and currencies. The ticker-lookup test uses indices, else currencies, else stocks.
+   They skip when the file lists none of them.
 
 3. Run the connection-limit tests, one command after the other:
 
@@ -135,10 +135,6 @@ A subscription Massive limits costs time. At five requests a minute, a test that
 subscription 24 requests runs for about five minutes. While a request waits, a line counts
 down the requests left.
 
-List each subscription Massive limits in `rest_requests_per_minute`, with its limit, so its
-requests are paced from the first. An unlisted one also waits out a pause after its first
-refusal.
-
 <a id="read-the-end-of-a-run"></a>
 
 ### Read the end of a run
@@ -182,10 +178,10 @@ says:
 | Check | Data it reads | What to read | Open an issue when |
 |---|---|---|---|
 | `test_the_options_cap_counts_contracts_or_topics` | Option quote and trade streams | Whether Massive acknowledges all 2,000 topics of 1,000 contracts | Massive acknowledges them all, since the library assumes the cap counts topics |
-| `test_an_index_minute_file_holds_its_own_new_york_day` | Index minute bars, over REST and in the flat files | The minutes REST has that the file lacks | Any minute is missing. The test still passes, since it fails only on a file row outside the New York day or a minute REST doesn't have. |
-| `test_index_day_windows_and_files_across_many_indices` | Index day and minute bars, over REST and in the flat files | Its verdict lines (a), (b), and (c) | Always. The library ends index day bars at 01:00 New York time, and this answer says whether that's right. |
+| `test_an_index_minute_file_holds_its_own_new_york_day` | Index minute bars, over REST and in the flat files | The minutes REST has that the file lacks | Any minute is missing |
+| `test_index_day_windows_and_files_across_many_indices` | Index day and minute bars, over REST and in the flat files | Its verdict lines (a), (b), and (c) | Always. The library ends index day bars at 01:00 New York time, and its verdict lines say whether that's right. |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | Futures bars | Its `VERDICT` lines | A line differs from the library's model: each bar holds the whole sessions that open in its UTC days |
-| `test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent` | Option chain snapshots | Each call's ratio of `GreeksGamma` to Black-Scholes gamma, and the unit it matches | A unit isn't per $0.01, as Massive's description says |
+| `test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent` | Option chain snapshots | Each call's ratio of `GreeksGamma` to Black-Scholes gamma, and the unit it matches | A call matches a unit other than per $0.01, the unit Massive's description gives |
 | A quiet connection, in the [`stream-day` group](#live-run-groups) of a tester's results | Stock streams | In that group's debug log, the stocks connection's `status` lines from 03:45 to 04:00 New York time, and every `no frame for ... during ... trading hours` WARNING | Always, with the longest gap between `status` lines |
 
 The options check skips when Massive refuses the topics, quoting the refusal. It also skips as
@@ -200,6 +196,7 @@ uv run pytest -m integration tests/namespaces/test_indices_integration.py -k min
 uv run pytest -m integration tests/namespaces/test_indices_integration.py -k many_indices 2>&1 | tee -a live-checks.log
 uv run pytest -m integration tests/namespaces/test_futures_integration.py -k bar_buckets 2>&1 | tee -a live-checks.log
 uv run pytest -m integration tests/namespaces/test_options_integration.py -k gamma 2>&1 | tee -a live-checks.log
+uv run pytest -m integration_limits tests/massive/ws/test_client_integration.py -k options_cap 2>&1 | tee -a live-checks.log
 ```
 
 <a id="index-hosts"></a>
