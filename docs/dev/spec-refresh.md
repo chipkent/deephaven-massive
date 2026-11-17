@@ -120,12 +120,13 @@ from Massive" says.
 ## Knowledge-base articles
 
 Some rules the library depends on are stated only in Massive's knowledge base, not in its API
-documentation: the wording of the HTTP 429 that marks a Basic subscription, and that reference
-and cross-asset endpoints are counted in a rate-limit bucket of their own, both from "What is
-the request limit for Massive's RESTful APIs?". `ARTICLES` in `refresh/knowledge_base.py`
-lists each such article by its slug, with what the library takes from it. Articles are HTML
-pages only, so `--fetch` extracts each one's title and article text as Markdown and stores it
-as `vendor/massive/knowledge-base/<slug>.md`, with its URL and hashes in the manifest.
+documentation: the wording of the HTTP 429 that says a subscription is over its per-minute
+request limit, and that reference and cross-asset endpoints are counted in a rate-limit bucket
+of their own, both from "What is the request limit for Massive's RESTful APIs?". `ARTICLES` in
+`refresh/knowledge_base.py` lists each such article by its slug, with what the library takes
+from it. Articles are HTML pages only, so `--fetch` extracts each one's title and article text
+as Markdown and stores it as `vendor/massive/knowledge-base/<slug>.md`, with its URL and hashes
+in the manifest.
 
 - **To depend on another article**, add its slug and the reason to `ARTICLES`, run `--fetch`,
   and cite the vendored file from the code that relies on it.

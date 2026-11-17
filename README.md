@@ -301,8 +301,8 @@ closes = m.stocks.previous_day_bar(watchlist).poll(60)
 ```
 
 `closes` has a row for each stock with its previous trading day's bar. Each poll sends one
-request per stock, so four stocks polled once a minute stay within Basic's five requests a
-minute.
+request per stock, so four stocks polled every 60 seconds send four requests a minute. Massive
+allows five a minute on the plan this example uses.
 
 `watchlist` is a Deephaven [input table](https://deephaven.io/core/docs/how-to-guides/input-tables/),
 which you edit by hand in its panel or in code. By hand, type a symbol into a new row of the

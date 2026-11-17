@@ -24,10 +24,11 @@ runs past 1,000 lines because all three parts are one subject, the settings: wha
 a file spells them, and how they are documented.
 
 What is deliberately *not* configurable: the options contract cap (1,000 per connection), the
-evidence endpoints of the host decision, the plan tier (Massive offers no entitlement endpoint,
-so the library learns the tier from REST evidence instead), and the JSON codec. The wire
-package owns the codec: it uses `orjson` when the optional extra `deephaven-massive[orjson]` is
-installed and the standard library otherwise, and logs the choice once at INFO.
+evidence endpoints of the host decision, what a key's plans include (Massive offers no
+entitlement endpoint, so the library learns it only from Massive's refusals and rate-limit
+answers), and the JSON codec. The wire package owns the codec: it uses `orjson` when the
+optional extra `deephaven-massive[orjson]` is installed and the standard library otherwise, and
+logs the choice once at INFO.
 """
 
 from __future__ import annotations
