@@ -215,7 +215,9 @@ class ProblemLedger:
     def stream_ended(self, stream_id: int, at: int) -> list[ProblemRow]:
         """End each open span of a table that failed, closed, got its rows, or is gone.
 
-        A snapshot that arrives for the table later opens no span: nothing would end it.
+        A snapshot that arrives for the table later adds each span it had not shown as a row
+        already ended (`_late`), since a span reported after the final row, such as a followed
+        read's last failed symbol, still happened; nothing would end an open one.
 
         Args:
             stream_id: The table's `StreamId`.
@@ -300,7 +302,7 @@ class ProblemLedger:
             The rows of the spans it opened, changed, or ended.
         """
         if spans.stream_id in self._final:
-            return []
+            return self._late(spans)
         group: _Group = (spans.stream_id, spans.cause)
         was = self._open.pop(group, {})
         counted = self._overflowed.pop(group, {})
@@ -337,6 +339,30 @@ class ProblemLedger:
             self._open[group] = now
         if overflowed:
             self._overflowed[group] = overflowed
+        return changed
+
+    def _late(self, spans: ProblemSpans) -> list[ProblemRow]:
+        """Add a final table's late snapshot: each span not yet shown, ended when reported.
+
+        Args:
+            spans: The snapshot, which arrived after the table's row became final.
+
+        Returns:
+            The rows it added; a span the table already showed adds nothing.
+        """
+        changed: list[ProblemRow] = []
+        for span in spans.spans.values():
+            key: ProblemKey = (
+                spans.stream_id,
+                spans.cause,
+                self._clean(span.symbol),
+                span.field,
+                span.since,
+            )
+            if key in self._rows:
+                continue
+            row, opened = self._open_span(spans, span)
+            changed.append(self._end(row.key, spans.at) if opened else row)
         return changed
 
     def _open_span(self, spans: ProblemSpans, span: Span) -> tuple[ProblemRow, bool]:

@@ -132,8 +132,12 @@ def test_a_table_that_ended_ends_its_open_spans(ledger: ProblemLedger) -> None:
     [ended] = ledger.stream_ended(7, 500)
     assert (ended.stream_id, ended.ended_at) == (7, 500)
     assert ledger.stream_ended(7, 600) == []
-    # A snapshot that comes after the end opens nothing: nothing would ever end it.
-    assert ledger.apply([snapshot(700, {"outage": Span(detail="late", since=650)})]) == []
+    # A snapshot that comes after the end adds its new span already ended, and nothing for
+    # the span the table showed before it ended.
+    late = {"outage": Span(detail="down", since=60), "other": Span(detail="late", since=650)}
+    [added] = ledger.apply([snapshot(700, late)])
+    assert (added.detail, added.span_start, added.ended_at) == ("late", 650, 700)
+    assert ledger.apply([snapshot(800, late)]) == []
 
 
 def test_a_query_learned_later_fills_the_earlier_rows(ledger: ProblemLedger) -> None:
@@ -221,3 +225,17 @@ def test_an_earlier_event_that_arrives_later_moves_first_seen(ledger: ProblemLed
     ledger.apply([event(at=200)])
     [row] = ledger.apply([event(at=100)])
     assert (row.first_seen, row.last_seen, row.occurrences) == (100, 200, 2)
+
+
+def test_a_late_span_past_the_cap_adds_up_in_the_overflow_row(
+    ledger: ProblemLedger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(problem_ledger, "KEYS_PER_CAUSE", 1)
+    ledger.apply([snapshot(10, {"a": Span(detail="a", since=1)})])
+    ledger.stream_ended(7, 20)
+    [overflow] = ledger.apply([snapshot(30, {"b": Span(detail="b", since=25, rows=2)})])
+    assert (overflow.action, overflow.span_start, overflow.rows) == (
+        ProblemAction.OVERFLOW,
+        None,
+        2,
+    )
