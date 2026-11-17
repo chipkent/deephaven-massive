@@ -4999,6 +4999,34 @@ def test_a_symbol_without_data_is_listed_when_another_request_fails_the_read(
     ]
 
 
+def test_a_symbol_without_data_is_listed_when_a_later_path_fails_a_poll_cycle(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cycle reads the stock path, where ZZZZ answers HTTP 404, then the crypto path, where
+    # X:BTCUSD's request fails. The cycle raises that failure, and m.problems() still lists ZZZZ.
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(b"oops", status=500))
+    events = record_problems(session, monkeypatch)
+    symbols = ("ZZZZ", "X:BTCUSD")
+    q = query(session, SMA, symbols=list(symbols))
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
+    with ThreadPoolExecutor(1) as pool, pytest.raises(dm.MassiveError, match="HTTP 500"):
+        reader.read_cycle(
+            SMA,
+            q._request,
+            symbols=symbols,
+            values=None,
+            record=lambda _: None,
+            on_recency=lambda _: None,
+            executor=pool,
+            cancel=Cancel(),
+            pace=rate_limits.PaceCheck("indicators.sma poll()", 60.0),
+        )
+    why = f"(HTTP 404 from {SMA_STOCK})"
+    assert [(e.cause, e.symbol, e.detail) for e in events] == [
+        (ProblemCause.UNAVAILABLE_SYMBOLS, "ZZZZ", f"Massive has no data for it {why}")
+    ]
+
+
 def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data(
     *, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1000,7 +1000,9 @@ class RestReader:
                     calls,
                     executor=executor,
                     stop=stop,
-                    on_failure=functools.partial(self._report_missing_of_failed, spec),
+                    on_failure=lambda done: self._report_missing_of_failed(
+                        spec, [o.missing for o in done if o.missing is not None]
+                    ),
                 )
         missing = [o.missing for o in outcomes if o.missing is not None]
         if missing and on_missing is not None:
@@ -1199,7 +1201,7 @@ class RestReader:
             bounded_list(str(one) for one in missing),
         )
 
-    def _report_missing_of_failed(self, spec: DatasetSpec, outcomes: Sequence[_Outcome]) -> None:
+    def _report_missing_of_failed(self, spec: DatasetSpec, missing: Sequence[_Missing]) -> None:
         """List the symbols Massive has no data for among the calls of a read another call failed.
 
         The read raises the other call's failure, so `ErrorPolicy.unavailable_symbols` decides
@@ -1208,9 +1210,10 @@ class RestReader:
 
         Args:
             spec: The dataset.
-            outcomes: The outcomes of the calls that completed, in call order.
+            missing: The symbols Massive answered with HTTP 404 in the calls that completed,
+                in call order: those of one path's calls (`_fan_out`), or of a `poll()`
+                cycle's earlier paths (`_read_one_cycle`).
         """
-        missing = [o.missing for o in outcomes if o.missing is not None]
         if not missing:
             return
         self.problems(
@@ -2243,7 +2246,9 @@ class RestReader:
         (no data), and `ErrorPolicy.unavailable_symbols` decides (`_report_missing`): under
         `LOG` and `IGNORE` such symbols are left out of the cycle, each an
         `unavailable_symbols` problem of the table, and named in its `left_out`; under `RAISE`
-        the table fails. A parameter a path does not take never reaches a cycle:
+        the table fails. When a later path's failure fails the cycle, the symbols earlier paths
+        answered with HTTP 404 are still problems of the table (`_report_missing_of_failed`).
+        A parameter a path does not take never reaches a cycle:
         `check_parameters` refused it when the table was made.
         Before reading, the cycle's requests per bucket go to `pace`, which warns once when
         the paced ones outlast the interval.
@@ -2275,19 +2280,24 @@ class RestReader:
         planned, left_out = self._plan_cycle(spec, request, symbols, cancel=cancel)
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
         missing: list[_Missing] = []
-        table, requests = self._read_planned(
-            spec,
-            request,
-            planned,
-            current=spec.serves_current_data or spec.latest_is_current,
-            record=record,
-            on_recency=on_recency,
-            executor=executor,
-            cancel=cancel,
-            patience=patience,
-            tally=tally,
-            on_missing=missing.extend,
-        )
+        try:
+            table, requests = self._read_planned(
+                spec,
+                request,
+                planned,
+                current=spec.serves_current_data or spec.latest_is_current,
+                record=record,
+                on_recency=on_recency,
+                executor=executor,
+                cancel=cancel,
+                patience=patience,
+                tally=tally,
+                on_missing=missing.extend,
+            )
+        except Exception:
+            # A later path's failure fails the cycle; the earlier paths' 404s are still listed.
+            self._report_missing_of_failed(spec, missing)
+            raise
         if missing:
             self._report_missing(spec, missing)
             left_out.extend(str(one) for one in missing)
