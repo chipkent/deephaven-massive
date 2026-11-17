@@ -42,6 +42,13 @@ MAIN_REFS = {"main", "refs/heads/main"}
 # A REST endpoint that merges: `pulls/<number>/merge` or the repository `merges` endpoint.
 MERGE_ENDPOINT = re.compile(r"(?:^|/)pulls/[^/\s]+/merge(?:[?/]|$)|(?:^|/)merges(?:\?|$)")
 MERGE_MUTATION = re.compile(r"\b(?:mergePullRequest|enablePullRequestAutoMerge)\b")
+# gh api options that set the HTTP method, and those that add a field (which makes it POST).
+GH_METHOD = {"-X", "--method"}
+GH_FIELD = {"-f", "-F", "--field", "--raw-field", "--input"}
+# Shell keywords that may start a command before the command itself.
+KEYWORDS = {"if", "then", "else", "elif", "while", "until", "do", "!"}
+# Marks a command substitution, so a quoted one is still checked as a command.
+SUBSTITUTION = "\x1f"
 
 
 def block(what):
@@ -54,8 +61,9 @@ def block(what):
 
 
 def tokenize(command):
-    # Newlines, backticks, and command substitution also start a new command.
-    text = re.sub(r"\n|`|\$\(", " ; ", command)
+    # Newlines and command substitution also start a new command. A substitution inside double
+    # quotes stays in its argument, so it is marked for check() to read that argument too.
+    text = re.sub(r"`|\$\(", f" ; {SUBSTITUTION} ", command.replace("\n", " ; "))
     try:
         lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
@@ -87,7 +95,7 @@ def commands(tokens):
             elif token in wrapper_options:
                 skip_argument = True
             continue
-        if ASSIGNMENT.fullmatch(token):
+        if ASSIGNMENT.fullmatch(token) or token in KEYWORDS or token == SUBSTITUTION:
             continue
         if token in WRAPPERS:
             wrapper_options = WRAPPERS[token]
@@ -122,7 +130,11 @@ def check_git(arguments):
     options = rest[1:]
     if "--all" in options or "--mirror" in options or "--branches" in options:
         block("`git push` of every branch pushes `main`")
-    for refspec in positionals(options, PUSH_ARGUMENT)[1:]:
+    words = positionals(options, PUSH_ARGUMENT)
+    # The first positional is the repository unless `--repo` names it.
+    if not any(option == "--repo" or option.startswith("--repo=") for option in options):
+        words = words[1:]
+    for refspec in words:
         destination = refspec.lstrip("+").rsplit(":", 1)[-1]
         if destination in MAIN_REFS:
             block(f"`git push` to `main` (refspec `{refspec}`)")
@@ -133,8 +145,16 @@ def check_gh(arguments):
     if words[:2] == ["pr", "merge"]:
         block("`gh pr merge` merges a pull request")
     if words[:1] == ["api"]:
+        # gh api sends GET unless a method is given or a field makes it POST; GET only reads.
+        method = "POST" if any(a.split("=", 1)[0] in GH_FIELD for a in arguments) else "GET"
+        for option, value in zip(arguments, arguments[1:]):
+            if option in GH_METHOD:
+                method = value.upper()
         for argument in arguments:
-            if MERGE_ENDPOINT.search(argument):
+            if argument.startswith(("--method=", "-X")) and argument not in GH_METHOD:
+                method = argument.split("=", 1)[-1].removeprefix("-X").upper()
+        for argument in arguments:
+            if MERGE_ENDPOINT.search(argument) and method != "GET":
                 block(f"`gh api` call to a merge endpoint (`{argument}`)")
             if MERGE_MUTATION.search(argument):
                 block("`gh api graphql` call to a merge mutation")
@@ -142,6 +162,9 @@ def check_gh(arguments):
 
 def check(command):
     for argv in commands(tokenize(command)):
+        for argument in argv:
+            if SUBSTITUTION in argument:
+                check(argument)
         name = argv[0].rsplit("/", 1)[-1]
         if name == "git":
             check_git(argv[1:])
