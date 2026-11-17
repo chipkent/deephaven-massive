@@ -105,13 +105,6 @@ class ErrorPolicy:
 
             A symbol Massive answers with no rows and no error has no rows, whatever this
             setting says.
-
-            A `poll()` over a watchlist also skips a symbol it can't request with your
-            arguments, as this setting says. For example, `m.options.contracts` reads a
-            contract you list in `symbols` with `as_of` alone. A watchlist poll with
-            `contract_type` set therefore skips every contract on the list, so leave
-            `contract_type` out. Passed in code, such a symbol makes `poll()` raise
-            `ValueError`.
         unreadable_keys: Decides whether a row of Massive's data whose key the library can't
             read fails the table; the row is left out either way. Defaults to `LOG`.
 

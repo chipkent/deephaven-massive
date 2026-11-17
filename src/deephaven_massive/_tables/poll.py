@@ -42,9 +42,8 @@ makes its requests on the poller's pool of `max_concurrency` threads. Each cycle
 table's row of `m.streams()`: `RowsPublished`, `RequestsPerCycle`, `SymbolCount` for a reactive
 table, and `SchemaDrift` from each page's drift.
 
-**Symbols left out.** By default one symbol never fails a whole table. A symbol of a reactive
-table that routes to a path lacking a parameter the poll sends, and a symbol Massive answers
-with HTTP 404, follow `ErrorPolicy.unavailable_symbols`: under `LOG`, the default, and `IGNORE`
+**Symbols left out.** By default one symbol never fails a whole table. Symbols Massive answers
+with HTTP 404 follow `ErrorPolicy.unavailable_symbols`: under `LOG`, the default, and `IGNORE`
 they have no rows in the cycle (a `REPLACE` table drops their rows), and every good cycle lists
 them, with the reason, in the row's `Error` (`NotePart.LEFT_OUT`, `CycleRows.left_out`),
 clearing the list once none is left out, so the table never loses rows without saying why; the
@@ -330,7 +329,7 @@ class CycleRows:
         patience: The most seconds of rate-limit pauses the cycle's reads would wait out (their
             patience), for the cycle's log line.
         left_out: The symbols the cycle has no rows for, each with why, such as
-            `"<symbol> (<path> does not take ['<parameter>'])"` or
+            `"X:FOOUSD (its currencies cannot be read)"` or
             `"AAPL1 (HTTP 404 from /v3/trades/{stockTicker})"`, in the order found; empty for
             none. The row's `Error` lists them (`NotePart.LEFT_OUT`).
     """

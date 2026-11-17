@@ -342,13 +342,6 @@ other values, the call skips the symbol and reads the others, and a stream or
 A symbol Massive answers with no rows and no error has no rows, whatever this
 setting says.
 
-A `poll()` over a watchlist also skips a symbol it can't request with your
-arguments, as this setting says. For example, `m.options.contracts` reads a
-contract you list in `symbols` with `as_of` alone. A watchlist poll with
-`contract_type` set therefore skips every contract on the list, so leave
-`contract_type` out. Passed in code, such a symbol makes `poll()` raise
-`ValueError`.
-
 #### on_error.unreadable_keys
 
 A key can't be read when it is one of these:

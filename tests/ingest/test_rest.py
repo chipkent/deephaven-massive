@@ -7,7 +7,6 @@ import logging
 import math
 import re
 import threading
-import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
@@ -163,24 +162,6 @@ SMA = DatasetSpec(
             symbol=KeySpec("stockTicker", from_request=True), time=KeySpec("Timestamp")
         ),
         (R, SMA_CRYPTO): SourceKeys(
-            symbol=KeySpec("cryptoTicker", from_request=True), time=KeySpec("Timestamp")
-        ),
-    },
-    latest_is_current=True,
-)
-MACD_CRYPTO = "/v1/indicators/macd/{cryptoTicker}"
-WINDOWED = DatasetSpec(
-    summary="A dataset for the tests: its crypto path takes no `window`, its stock path does.",
-    name="indicators.windowed",
-    row_times=RowTimes.BAR,
-    fetch_path=SMA_STOCK,
-    fetch_paths_by_class={AssetClass.CRYPTO: MACD_CRYPTO},
-    time_axis=("timestamp.gte", "timestamp.lt"),
-    keys={
-        (R, SMA_STOCK): SourceKeys(
-            symbol=KeySpec("stockTicker", from_request=True), time=KeySpec("Timestamp")
-        ),
-        (R, MACD_CRYPTO): SourceKeys(
             symbol=KeySpec("cryptoTicker", from_request=True), time=KeySpec("Timestamp")
         ),
     },
@@ -389,7 +370,6 @@ SPECS = (
     LISTED,
     DIVIDENDS,
     MIXED,
-    WINDOWED,
     CRYPTO_LAST,
     MOVERS,
     CONTRACTS,
@@ -2963,46 +2943,6 @@ def test_a_read_fans_out_on_the_callers_pool(
     assert (table.num_rows, requests) == (2, 2)
 
 
-class _RefusalError(ValueError):
-    """A path's refusal of a parameter, which a test can hold weakly to see it freed."""
-
-
-def test_a_parameter_one_path_refuses_leaves_no_cycle(
-    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The crypto path refuses `window` and the stock path takes it, so the check passes. The
-    # crypto path's error must be freed when the check returns, not left in a reference cycle
-    # with the check's frame: that cycle holds the reader, and through it the session, until
-    # the cyclic collector runs. The collector stays off, so only reference counting frees it.
-    refusals: list[weakref.ref[_RefusalError]] = []
-    real = rest_requests.shared_params
-
-    def base(
-        spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
-    ) -> tuple[dict[str, object], dict[str, object]]:
-        try:
-            return real(spec, rest_path, request, fixed=fixed)
-        except ValueError as error:
-            refusal = _RefusalError(str(error))
-            refusals.append(weakref.ref(refusal))
-            try:
-                raise refusal from None
-            finally:
-                del refusal  # this frame must not hold its own error
-
-    monkeypatch.setattr(rest, "shared_params", base)
-    reader = _endpoints(session)._reader("poll", session._core.policy)
-    enabled = gc.isenabled()
-    gc.disable()
-    try:
-        reader.check_parameters(WINDOWED, Request(params=(("window", 20),)))
-        assert len(refusals) == 1
-        assert refusals[0]() is None
-    finally:
-        if enabled:
-            gc.enable()
-
-
 def test_a_failed_history_is_logged_and_raised(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -3157,6 +3097,20 @@ def test_a_decision_is_shared_even_if_recording_it_fails(
     later = session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
     assert later.recency is Recency.REALTIME
     assert len(snapshots.requests) == 1
+
+
+def test_a_parameter_a_named_contract_lacks_fails_a_watchlist_poll_at_the_call(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A contract the watchlist names reads the per-contract path, which takes no filter of the
+    # list path, so the poll fails as a list of the same contracts does.
+    watch = new_table([string_col("Symbol", ["O:SPY250117C00600000"])])
+    for symbols in (watch, ["O:SPY250117C00600000"]):
+        q = query(session, CONTRACTS, symbols=symbols, filters={"strike_price_gte": 1})
+        assert isinstance(q, FetchQuery)
+        with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
+            q.poll(60)
+    assert fake_rest.requests == []
 
 
 def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(

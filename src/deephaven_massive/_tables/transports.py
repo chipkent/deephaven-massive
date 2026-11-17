@@ -405,8 +405,7 @@ class RestTransport(Protocol):
             ValueError: Before the table exists, if a path the call reads does not take a
                 parameter or filter the request sets, even when another of its paths does.
                 Over a reactive symbol table, whose symbols choose the paths at each cycle,
-                only a parameter that no fetch path takes raises here; one the cycle's path
-                lacks fails the table then.
+                a parameter that any of the dataset's fetch paths lacks raises here.
             SessionClosedError: If the session is closed. A cycle's failure later fails the
                 table instead of raising.
         """
