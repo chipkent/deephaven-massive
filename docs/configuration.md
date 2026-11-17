@@ -133,10 +133,12 @@ Under `raise`:
 A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
 A cause it leaves unset follows the session's setting.
 
-Whatever the setting, a `fetch()`, a `history()`, or a `poll()` cycle fails when the library can
-read none of the rows Massive sends, since Massive has most likely changed its format. A
-`dm.ALL` stream fails after 100 unreadable rows in a row. A stream of the symbols you list fails
-after 100 in a row whose symbol it can't read.
+Whatever the setting, a table fails when Massive's rows stop being readable, since Massive has
+most likely changed its format. Report it as a [bug](troubleshooting.md#report-a-bug).
+
+- A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows.
+- A `dm.ALL` stream fails after 100 unreadable rows with none read between them.
+- A stream of the symbols you list fails after 100 rows whose symbol it can't read.
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 

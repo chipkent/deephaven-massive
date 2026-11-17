@@ -47,7 +47,7 @@ Each row says what happened in these columns:
 | `Cause` | Why. [Each cause](#problem-causes) has a row of its own. |
 | `Action` | What the library did. |
 | `Source` | Whose problem it is: `massive`, `user` for your input, or `library`. |
-| `Policy` | The [`on_error`](configuration.md#on-error) setting that applied: `log`, `ignore`, or `raise`. It comes from the call, from `MassiveConfig`, or, for a value `dm.canonicalize_symbols` refused, from that function. Null for a cause with no setting. |
+| `Policy` | The [`on_error`](configuration.md#on-error) setting that applied: `log`, `ignore`, or `raise`. It comes from the call or from `MassiveConfig`. For a value `dm.canonicalize_symbols` refused, it's that function's `on_error`. Null for a cause with no setting. |
 | `FirstSeen`, `LastSeen` | When the problem first and last happened. |
 | `SpanStart`, `EndedAt` | When a lasting problem began and cleared. |
 | `Rows`, `Occurrences` | How many rows it covers, and how many times it happened. |
