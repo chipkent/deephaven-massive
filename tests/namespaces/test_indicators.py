@@ -21,8 +21,9 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import RestPath, RowFault, Transport, source, to_batch
+from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive.namespaces import _indicators as indicators
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import FetchQuery
@@ -410,7 +411,7 @@ def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_withheld_with_a_wa
     out = dh_to_pylist(sma("AAPL", 20, timespan=timespan).fetch(wait=True))
     assert [r["Value"] for r in out] == [2.0]
     assert [(e.cause, e.field, e.rows) for e in events] == [
-        (RowFault.UNCONVERTIBLE_VALUES, "TimestampStart", 1)
+        (ProblemCause.UNCONVERTIBLE_VALUES, "TimestampStart", 1)
     ]
     strict = dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)
     with pytest.raises(dm.MassiveError, match=r"\(1 under unconvertible_values\)"):

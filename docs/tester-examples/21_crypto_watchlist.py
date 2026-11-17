@@ -4,6 +4,7 @@ import deephaven_massive as dm
 
 m = dm.MassiveSession()
 streams = m.streams()
+problems = m.problems()
 
 pairs = new_table({"Symbol": ["X:ETHUSD", "X:LINKUSD"]})
 crypto_watchlist = input_table(init_table=pairs, key_cols="Symbol")

@@ -16,12 +16,14 @@ from deephaven_massive._datasets.symbols import strict_converter
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._on_error import effect_of
-from deephaven_massive._tables.liveness import new_scope
+from deephaven_massive._tables.execution_context import wait_for_update_cycle
+from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.symbols import _row_converter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
@@ -40,7 +42,7 @@ def wait_for(condition: Callable[[], bool]) -> None:
     assert condition()
 
 
-def test_canonicalize_a_static_table(dh_exec_ctx: object) -> None:
+def test_canonicalize_a_static_table(dh_exec_ctx: ExecutionContext) -> None:
     table = new_table(
         [
             string_col("Pair", ["EUR/USD", None, "gbp-usd", "C:USDJPY"]),
@@ -53,13 +55,15 @@ def test_canonicalize_a_static_table(dh_exec_ctx: object) -> None:
     assert not result.is_refreshing
 
 
-def test_canonicalize_a_static_table_with_a_convention(dh_exec_ctx: object) -> None:
+def test_canonicalize_a_static_table_with_a_convention(dh_exec_ctx: ExecutionContext) -> None:
     table = new_table([string_col("Symbol", ["BRK-B", "BAC-PL", "AAPL"])])
     result = dm.canonicalize_symbols(table, AssetClass.STOCKS, convention=SymbolConvention.YAHOO)
     assert values(result) == ["BRK.B", "BACpL", "AAPL"]
 
 
-def test_a_convention_names_case_whitespace_and_emptiness_per_row(dh_exec_ctx: object) -> None:
+def test_a_convention_names_case_whitespace_and_emptiness_per_row(
+    dh_exec_ctx: ExecutionContext,
+) -> None:
     table = new_table([string_col("Symbol", ["brk-b", "BRK-B ", ""])])
     with pytest.raises(ValueError, match=r"^3 value\(s\) of Symbol are not stock") as raised:
         dm.canonicalize_symbols(
@@ -73,7 +77,7 @@ def test_a_convention_names_case_whitespace_and_emptiness_per_row(dh_exec_ctx: o
     )
 
 
-def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: object) -> None:
+def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: ExecutionContext) -> None:
     table = new_table([string_col("Symbol", ["BRK-B", "b1", "b2", "b3", "b4", "b5", "b6"])])
     with pytest.raises(
         ValueError, match=r"^7 value\(s\) of Symbol are not stock tickers: "
@@ -87,7 +91,7 @@ def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: object) -> None:
 
 
 def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
-    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
+    dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
 ) -> None:
     bad = [f"b{i:02}" for i in range(25)]
     # Out of order in the table: the values are logged sorted, before the formula runs.
@@ -105,7 +109,7 @@ def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
 
 
 def test_a_bad_value_under_ignore_is_nulled_and_logged_only_at_debug(
-    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
+    dh_exec_ctx: ExecutionContext, caplog: pytest.LogCaptureFixture
 ) -> None:
     table = new_table([string_col("Symbol", ["EUR/USD", "b00"])])
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.symbols"):
@@ -119,7 +123,7 @@ def test_a_bad_value_under_ignore_is_nulled_and_logged_only_at_debug(
 
 
 def test_canonicalize_a_refreshing_table(
-    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+    dh_exec_ctx: ExecutionContext, dh_input_table: Callable[..., InputTable]
 ) -> None:
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
@@ -131,22 +135,24 @@ def test_canonicalize_a_refreshing_table(
     assert values(result) == ["X:BTCUSD", None]
     source.add(new_table([string_col("Symbol", ["no pe!"])]))  # a later bad row fails the table
     wait_for(lambda: bool(result.j_table.isFailed()))
-    scope.release()
+    release_scope(dh_exec_ctx, scope)
 
 
 def test_a_bad_initial_row_of_a_refreshing_table_raises(
-    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+    dh_exec_ctx: ExecutionContext, dh_input_table: Callable[..., InputTable]
 ) -> None:
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["no pe!"])]))
     scope = new_scope()
     with scope.open(), pytest.raises(ValueError, match=r"^1 value\(s\) of Symbol are not crypto"):
         dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
-    scope.release()
+    release_scope(dh_exec_ctx, scope)
 
 
 def test_a_bad_row_of_a_refreshing_table_is_nulled(
-    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture, dh_input_table: Callable[..., InputTable]
+    dh_exec_ctx: ExecutionContext,
+    caplog: pytest.LogCaptureFixture,
+    dh_input_table: Callable[..., InputTable],
 ) -> None:
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
@@ -159,10 +165,32 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
     assert caplog.text.count("cannot read 'no pe!'") == 1
     failed = bool(result.j_table.isFailed())  # pytest cannot describe a Java method
     assert not failed
-    scope.release()
+    release_scope(dh_exec_ctx, scope)
 
 
-def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: object) -> None:
+def test_a_failing_input_fails_the_converted_table_and_nothing_else(
+    dh_exec_ctx: ExecutionContext,
+    *,
+    caplog: pytest.LogCaptureFixture,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # The watch of the refused values ignores its input's failure: the converted table fails
+    # with its input on its own, and the watch's listener, run by the cycle that fails the
+    # input, raises nothing.
+    source = dh_input_table({"Symbol": dtypes.string})
+    scope = new_scope()
+    with scope.open():
+        strict = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
+        result = dm.canonicalize_symbols(strict, AssetClass.CRYPTO, on_error=OnError.LOG)
+    with caplog.at_level(logging.ERROR):
+        source.add(new_table([string_col("Symbol", ["no pe!"])]))  # fails `strict`
+        wait_for(lambda: bool(result.j_table.isFailed()))
+        assert wait_for_update_cycle(dh_exec_ctx, 10.0)
+    assert not [r for r in caplog.records if r.name.startswith("deephaven_massive")]
+    release_scope(dh_exec_ctx, scope)
+
+
+def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: ExecutionContext) -> None:
     table = new_table([string_col("Symbol", ["C:EURUSD"]), int_col("Size", [1])])
     with pytest.raises(TypeError, match=r"^table must be a Deephaven Table, not list$"):
         dm.canonicalize_symbols([], AssetClass.FOREX)  # type: ignore[arg-type]  # the point: refused at run time
@@ -255,17 +283,18 @@ def _listeners(table: Table) -> int:
 
 
 def test_canonicalizing_a_refreshing_table_leaves_no_hidden_table(
-    dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
+    dh_exec_ctx: ExecutionContext, dh_input_table: Callable[..., InputTable]
 ) -> None:
-    # The pre-check reads the rows without a derived table, so the source's only child is the
-    # result's own formula, and none is left once the scope is released.
+    # The pre-check reads the rows without a derived table, so the source's children are the
+    # result's own formula and the watch of the values it refuses, which the result keeps; none
+    # is left once the scope is released.
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["EUR/USD", "EUR/USD"])]))
     assert _listeners(source) == 0
     scope = new_scope()
     with scope.open():
         result = dm.canonicalize_symbols(source, AssetClass.FOREX)
-    assert _listeners(source) == 1
+    assert _listeners(source) == 2
     assert values(result) == ["C:EURUSD", "C:EURUSD"]
-    scope.release()
+    release_scope(dh_exec_ctx, scope)
     assert _listeners(source) == 0

@@ -421,8 +421,8 @@ def _with_skipped(
 
     A pair whose currencies Massive's crypto ticker list gives but can't be read as its ticker
     is planned as a call the reader never sends (`Call.unsplit`), so its read ends with no
-    rows; `unreadable_symbols` already logged it. A stream and a `poll()` name such a pair in
-    their `Error`, so a read by symbol names it in its `m.symbol_reads()` row. A pair Massive
+    rows; `unreadable_symbols` already logged it, and the read lists it in `m.problems()`. A
+    read by symbol also names it in its `m.symbol_reads()` row. A pair Massive
     has no data for is not named: it is reported as HTTP 404 is.
 
     Args:

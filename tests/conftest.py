@@ -1593,6 +1593,33 @@ def stream_rows(
     return rows
 
 
+@pytest.fixture
+def problem_rows(
+    massive_session: MassiveSession,
+    drain: Callable[[], None],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> Callable[[], list[dict[str, Any]]]:
+    """Return a function that drains the session and reads `m.problems()`, in a stable order.
+
+    Returns:
+        A function returning one dictionary per `m.problems()` row, ordered by `StreamId`,
+        `Cause`, `Symbol`, `Field`, and `FirstSeen`, a null before any value.
+    """
+
+    def rows() -> list[dict[str, Any]]:
+        drain()
+
+        def key(row: dict[str, Any]) -> tuple[object, ...]:
+            return tuple(
+                (row[c] is not None, row[c] if row[c] is not None else 0)
+                for c in ("StreamId", "Cause", "Symbol", "Field", "FirstSeen")
+            )
+
+        return sorted(dh_to_pylist(massive_session.problems()), key=key)
+
+    return rows
+
+
 _AWS_IDENTITY_VARIABLES = (
     "AWS_PROFILE",
     "AWS_DEFAULT_PROFILE",
@@ -2323,8 +2350,8 @@ def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
 
     A pass means rows reached the case's table, or, for a call that may return none (a
     `fetch()` or `history()`), that the call succeeded with the dataset's columns. A pass that
-    logged a library warning or showed a `SchemaDrift` is counted apart, "passed with drift",
-    and each one is listed with what it saw. The skips are grouped: the refusals by the
+    logged a library warning or showed a row of `m.problems()` is counted apart, "passed with
+    drift", and each one is listed with what it saw. The skips are grouped: the refusals by the
     subscription and verb Massive refused, with the first refusal's text once, the other skips
     by their reason, each group with its count and its cases.
 
@@ -2789,14 +2816,15 @@ def table_rows() -> Callable[[Table], list[dict[str, Any]]]:
 def stream_report(
     table_rows: Callable[[Table], list[dict[str, Any]]],
 ) -> Callable[[MassiveSession], list[str]]:
-    """Return a function that describes a session's connections and streams, one line each.
+    """Return a function that describes a session's connections, streams, and problems.
 
     Call it before releasing a stream: a release is carried out on the session's reaper
     thread, so a report taken after it may or may not still show the stream's topics.
 
     Returns:
         A function mapping a session to lines such as `connection stocks/TICK
-        socket.massive.com CONNECTED acked=1 ...` and `stream 1 stocks.trades RUNNING ...`.
+        socket.massive.com CONNECTED acked=1 ...`, `stream 1 stocks.trades RUNNING ...`, and
+        `problem 1 outage None None: ...`.
     """
 
     def report(session: MassiveSession) -> list[str]:
@@ -2804,13 +2832,17 @@ def stream_report(
             f"connection {r['Transport']} {r['AssetClass']}/{r['Family']} host={r['Host']} "
             f"recency={r['Recency']} evidence={r['Evidence']!r} state={r['State']} "
             f"topics={r['Topics']} acked={r['AckedTopics']} pending={r['PendingTopics']} "
-            f"error={r['LastError']!r} drift={r['SchemaDrift']!r}"
+            f"error={r['LastError']!r}"
             for r in table_rows(session.connections())
         ]
         lines.extend(
             f"stream {r['StreamId']} {r['Dataset']} host={r['Host']} state={r['State']} "
-            f"rows={r['RowsPublished']} error={r['Error']!r} drift={r['SchemaDrift']!r}"
+            f"rows={r['RowsPublished']} error={r['Error']!r}"
             for r in table_rows(session.streams())
+        )
+        lines.extend(
+            f"problem {r['StreamId']} {r['Cause']} {r['Symbol']} {r['Field']}: {r['Detail']}"
+            for r in table_rows(session.problems())
         )
         return lines
 

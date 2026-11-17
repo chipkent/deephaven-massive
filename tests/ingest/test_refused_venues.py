@@ -7,6 +7,12 @@ from deephaven_massive._ingest import refused_venues
 from deephaven_massive._ingest.refused_venues import RefusedVenues, refused_note, refused_source
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import WireEntitlementError
+from deephaven_massive._tables.problem_events import (
+    Problem,
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+)
 
 
 def _refusal(venue: str, request_id: str) -> WireEntitlementError:
@@ -58,18 +64,19 @@ def test_a_source_names_the_skipped_venues() -> None:
     )
 
 
-def test_a_report_logs_each_venue_once_for_the_call_that_keeps_the_record(
+def test_a_report_gives_each_venue_once_for_the_call_that_keeps_the_record(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The record of what a call logged is the call's own: a second read of the call logs only
-    # a venue new to it, and another call, with its own record, logs every venue again.
+    # The record of what a call reported is the call's own: a second read of the call reports
+    # only a venue new to it, and another call, with its own record, reports every venue again.
     call = LoggedKeys()
+    problems: list[Problem] = []
 
     def report(logged: LoggedKeys, *venues: FuturesVenue) -> None:
         refused = RefusedVenues(OnError.IGNORE, call="MassiveSession #1 call-2", logged=logged)
         for venue in venues:
             refused.add(venue, _refusal(venue.name, "r"))
-        refused.report("futures.trades")
+        refused.report("futures.trades", problems=problems.extend, stream_id=2)
 
     with caplog.at_level(logging.DEBUG, logger=refused_venues.__name__):
         report(call, FuturesVenue.CME)
@@ -79,6 +86,17 @@ def test_a_report_logs_each_venue_once_for_the_call_that_keeps_the_record(
     skipped = [r for r in caplog.records if "skipping the flat files" in r.getMessage()]
     assert [r.levelno for r in skipped] == [logging.DEBUG] * 3
     assert [r.getMessage().split("S3 refused: ")[1] for r in skipped] == [
+        "CME: CME denied",
+        "NYMEX: NYMEX denied",
+        "CME: CME denied",
+    ]
+    events = [p for p in problems if isinstance(p, ProblemEvent)]
+    assert [(e.cause, e.action, e.stream_id, e.policy) for e in events] == [
+        (ProblemCause.REFUSED_VENUES, ProblemAction.SKIPPED, 2, OnError.IGNORE)
+    ] * 3
+    # Each exchange is its own row of m.problems(): a later refusal never merges into another.
+    assert [e.field for e in events] == ["CME", "NYMEX", "CME"]
+    assert [e.detail.split("S3 refused: ")[1] for e in events] == [
         "CME: CME denied",
         "NYMEX: NYMEX denied",
         "CME: CME denied",

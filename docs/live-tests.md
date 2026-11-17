@@ -148,7 +148,7 @@ prints up to four sections:
 
 | Section | What it holds |
 |---|---|
-| `smoke coverage` | The smoke tests that passed, passed with drift, were refused, were skipped, and failed. Refusals are grouped by subscription and call, with Massive's text once. Drift is a library WARNING or a `SchemaDrift`, each listed. |
+| `smoke coverage` | The smoke tests that passed, passed with drift, were refused, were skipped, and failed. Refusals are grouped by subscription and call, with Massive's text once. Drift is a library WARNING or a row of `m.problems()`, each listed. |
 | `open questions` | The questions the run touched, in groups: `verified`, `ran, evidence to read`, `refused by Massive`, `not listed as delayed`, and `not verified`. Under each refused or unlisted question, each distinct reason follows, Massive's refusal or the library's message quoted. |
 | `live debug log` | The path of the run's debug log |
 | `live evidence` | The evidence file's lines again |

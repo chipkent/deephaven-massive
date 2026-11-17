@@ -163,11 +163,11 @@ Each of these has a source. Check it again before you write:
 
 ### Teaching plan
 
-Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13. Each example adds
-one idea, in dependency order: the call pattern, static tables, charts, polling, watchlists,
-settings, streaming, then stopping. Each title names the idea, then what the example does.
-Examples 1 to 6 and 13 run on Stocks Basic, the free plan, and 7 to 12 on Stocks Starter or
-higher.
+Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13 and the problems
+table added before it on 2026-11-16. Each example adds one idea, in dependency order: the call
+pattern, static tables, charts, polling, watchlists, settings, streaming, problems, then
+stopping. Each title names the idea, then what the example does. Examples 1 to 6, 13, and 14
+run on Stocks Basic, the free plan, and 7 to 12 on Stocks Starter or higher.
 
 | # | Title | Builds on | Plan |
 |---|---|---|---|
@@ -183,7 +183,8 @@ higher.
 | 10 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 8 | Stocks Starter or higher |
 | 11 | Backfill: start with today's minute bars, then continue live | 3, 10 | Stocks Starter or higher |
 | 12 | Dashboards: show a live chart and table together with deephaven.ui | 4, 9 | Stocks Starter or higher |
-| 13 | Stopping live tables: release one table or close the session | 5 | Stocks Basic |
+| 13 | Problems: see what went wrong in your tables | 1 | Stocks Basic |
+| 14 | Stopping live tables: release one table or close the session | 5 | Stocks Basic |
 
 The owner's decisions behind it:
 

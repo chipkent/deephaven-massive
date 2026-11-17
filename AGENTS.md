@@ -193,23 +193,26 @@ These protect the owner's repository, money, and secrets.
   - **A row the library cannot read or derive whole is withheld:** a symbol or key it can't
     read, a value that doesn't fit its column, a number the column would round, and a line that
     isn't a row. A withheld row is never published with a null, a default, a rounded or
-    re-stamped value, or a guess; it is reported with its cause, the symbol as Massive sent it,
-    and its count.
+    re-stamped value, or a guess; it is reported in `m.problems()` with its cause, the symbol
+    as Massive sent it, and its count.
   - **A column the dataset's docs define as the library's derivation is the library's:**
     `Date`, `TimestampEnd`, a day bar's 00:00. Where Massive sends its own value, it is never
     replaced.
   - **One bad symbol or row never fails the table.** Each cause has its own `dm.ErrorPolicy`
     setting, set for a session in `MassiveConfig(on_error=...)` and for one call with the
     dataset method's `on_error=`. The setting decides only whether the table fails (`RAISE`)
-    and how loudly the log reports the problem (`LOG`, the default, warns once per distinct
-    problem; `IGNORE` logs only at DEBUG), never whether a row is published; a live table also
-    lists each skipped symbol in its `m.streams()` `Error` and counts withheld rows in its
-    `SchemaDrift`. A refusal of part of what a call explicitly asked for (a futures
+    and how loudly the log reports the problem, never whether a row is published or whether
+    `m.problems()` lists it. A refusal of part of what a call explicitly asked for (a futures
     exchange the plan lacks) defaults to `RAISE`, because asking for data the plan lacks is a
-    bug in the caller. A new cause gets a new setting, never a hard-coded failure or a silent
-    skip.
-  - **Only a problem that affects every row a table would receive fails it (until decision A
-    lands in #667, also every row of one of its named symbols), whatever the setting:**
+    bug in the caller. A new cause gets a new setting and a new `ProblemCause`, never a
+    hard-coded failure or a silent skip.
+  - **Every problem is a row of `m.problems()`, and only a real one** (decision 124): a
+    withheld row, a skipped symbol or line, an outage, a pause, a failed table. Valid data (a
+    null Massive sent, a symbol with no rows in the range) is never a problem.
+  - **The log is an alarm:** one WARNING per table and cause (`LOG`; `IGNORE` logs only at
+    DEBUG) that points at `m.problems()`, with the details at DEBUG.
+  - **Only a problem that affects every row a table would receive fails it, whatever the
+    setting:**
     authentication, a closed session, a plan without the dataset, a refusal of everything a
     call asked for, a read or stream whose rows it would receive are all withheld, and a library
     defect.

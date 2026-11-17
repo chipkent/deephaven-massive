@@ -22,8 +22,8 @@ columns. No human reads anything:
   session, no row fails the case.
 
 A dataset Massive refuses the key is a skip that quotes Massive's refusal, never a failure.
-Each case also notes every WARNING the library logged and every `SchemaDrift` the session's
-`streams()` and `connections()` show; a pass with any of them is counted "passed with drift"
+Each case also notes every WARNING the library logged and every row of the session's
+`problems()`; a pass with any of them is counted "passed with drift"
 in the coverage that ends the terminal summary (passed, not entitled, otherwise skipped,
 failed), which lists each one and groups the refusals by the subscription and verb refused,
 and the other skips by their reason.
@@ -55,7 +55,7 @@ from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import RestClient, Transport, WireEntitlementError, source
 from deephaven_massive._session import CATALOG
 from deephaven_massive.queries import FetchQuery, HistoryQuery, NoSymbolStreamQuery, StreamQuery
-from tests._live import streams
+from tests._live import problems, streams
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -481,7 +481,7 @@ class _Case:
     record_property: Callable[[str, object], None]
 
     def drift(self) -> list[str]:
-        """Return what the case saw drift: the library's warnings and any `SchemaDrift`.
+        """Return what the case saw drift: the library's warnings and the session's problems.
 
         The notice that an `AUTO` history read chose a source leaving some columns null
         (`_SOURCE_CHOICE`) is the documented behavior of a small read, not drift: it is
@@ -489,8 +489,8 @@ class _Case:
 
         Returns:
             One line per WARNING or worse a `deephaven_massive` logger emitted during the
-            case, the source-choice notice excepted, and per non-empty `SchemaDrift` of the
-            session's streams and connections.
+            case, the source-choice notice excepted, and per row of the session's
+            `problems()`, read once every problem the case queued shows.
         """
         found = []
         for record in self.caplog.records:
@@ -501,10 +501,7 @@ class _Case:
                 self.evidence(f"source choice: {message}")
                 continue
             found.append(f"{record.levelname} {record.name}: {message}")
-        for view in (self.session.streams(), self.session.connections()):
-            found.extend(
-                f"SchemaDrift {r['SchemaDrift']}" for r in self.table_rows(view) if r["SchemaDrift"]
-            )
+        found.extend(problems.problem_lines(self.session, self.table_rows))
         return found
 
     def failure(self) -> str | None:
@@ -763,7 +760,7 @@ def test_every_dataset_and_verb_returns_its_columns(
     quotes sent no row in the extended hours, and when a stream of a subscription listed in
     `delayed_subscriptions` sent no row. Massive's refusal is a skip that quotes it, and so is
     a history the request cannot be served without S3 credentials; anything else fails.
-    Every library WARNING and every `SchemaDrift` the case saw is recorded, and counted in the
+    Every library WARNING and every problem the case saw is recorded, and counted in the
     coverage.
     """
     spec = CATALOG.by_name[name]

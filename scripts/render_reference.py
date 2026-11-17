@@ -1,4 +1,4 @@
-"""Regenerate the generated user docs: `docs/datasets/` and the settings of `docs/configuration.md`.
+"""Regenerate the generated user docs: `docs/datasets/`, the settings, and the problem causes.
 
 Run it from a source checkout:
 
@@ -16,7 +16,8 @@ what it does to each table.
 
 It also rewrites the generated part of `docs/configuration.md`, between its two marker lines,
 from `MassiveConfig`: each setting's settings-file key, docstring entry, values, and default.
-The rest of that page is written by hand and kept as it is.
+The rest of that page is written by hand and kept as it is. It rewrites the table of problem
+causes in `docs/troubleshooting.md` the same way, from `problem_events.CAUSES`.
 All the logic is in `deephaven_massive._datasets.column_reference` and
 `deephaven_massive._config`, where the unit tests and the coverage gate reach it; this script
 only wires it up.
@@ -32,8 +33,12 @@ import atexit
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from deephaven_server import Server
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _exit() -> None:
@@ -60,12 +65,18 @@ from deephaven_massive._datasets.column_reference import (  # noqa: E402 - needs
     render,
     sync,
 )
+from deephaven_massive._tables.cause_reference import (  # noqa: E402 - needs the server above
+    with_causes_reference,
+)
 
 _DIRECTORY = Path(__file__).resolve().parent.parent / "docs" / "datasets"
 """The dataset reference's directory, found from this script's place in the checkout."""
 
 _CONFIGURATION_PAGE = _DIRECTORY.parent / "configuration.md"
 """The settings page, whose generated part this script rewrites."""
+
+_TROUBLESHOOTING_PAGE = _DIRECTORY.parent / "troubleshooting.md"
+"""The troubleshooting page, whose table of problem causes this script rewrites."""
 
 
 def main() -> None:
@@ -87,13 +98,24 @@ def main() -> None:
         sys.stdout.write(f"deleted {shown / name}\n")
     if not result.written and not result.deleted:
         sys.stdout.write(f"{shown}/ is up to date\n")
-    page = _CONFIGURATION_PAGE.read_text(encoding="utf-8")
-    rendered = _config.with_settings_reference(page)
-    shown_page = _CONFIGURATION_PAGE.relative_to(_DIRECTORY.parent.parent)
+    _rewrite(_CONFIGURATION_PAGE, _config.with_settings_reference)
+    _rewrite(_TROUBLESHOOTING_PAGE, with_causes_reference)
+
+
+def _rewrite(path: Path, render_part: Callable[[str], str]) -> None:
+    """Rewrite a page's generated part, and say whether it changed.
+
+    Args:
+        path: The page.
+        render_part: Returns the page with its generated part rendered again.
+    """
+    page = path.read_text(encoding="utf-8")
+    rendered = render_part(page)
+    shown_page = path.relative_to(_DIRECTORY.parent.parent)
     if rendered == page:
         sys.stdout.write(f"{shown_page} is up to date\n")
     else:
-        _CONFIGURATION_PAGE.write_text(rendered, encoding="utf-8")
+        path.write_text(rendered, encoding="utf-8")
         sys.stdout.write(f"wrote {shown_page}\n")
 
 

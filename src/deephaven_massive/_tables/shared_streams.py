@@ -13,8 +13,8 @@ core weakly. Every entry point that can change what keeps the session alive (`re
 `_release_hold`, `shut_down`) holds the core in a local variable until it returns and updates the
 live set (`live_set.sync`) in the same `registry_lock` section as the change. The core reads and
 changes the registry's rows through the by-id methods (`row`, `change_row`, `record_failure`,
-`live_fails`, `close_rows`, and `in`), always under `registry_lock`, when a transport reports a row
-change, a failure, or drift by stream id, and when the session closes.
+`live_fails`, and `close_rows`), always under `registry_lock`, when a transport reports a row
+change or a failure by stream id, and when the session closes.
 
 Lock order: the update-graph (UG) lock, then `registry_lock`, then the live set's leaf lock. A
 stream is registered under `registry_lock` before it opens (with an id from `stream_ids.py`),
@@ -154,8 +154,8 @@ class SharedStreams:
         """Create the empty registry of a core, which it refers to weakly.
 
         Args:
-            core: The session's core, with its `registry_lock`, result registry, diagnostics,
-                and drift registry already created.
+            core: The session's core, with its `registry_lock`, result registry, and diagnostics
+                already created.
         """
         self._core: Final = weakref.ref(core)
         self._lock: Final = core.registry_lock
@@ -163,7 +163,6 @@ class SharedStreams:
         self._exec_ctx: Final = core.exec_ctx
         self._results: Final = core.results
         self._diagnostics: Final = core.diagnostics
-        self._drift: Final = core.drift
         self._defer: Final = core.defer
         self._stream_ids: dict[StreamKey, int] = {}
         self._streams: dict[int, _StreamEntry] = {}
@@ -175,17 +174,6 @@ class SharedStreams:
         Read with `registry_lock` held (`live_set.sync`).
         """
         return bool(self._streams)
-
-    def __contains__(self, stream_id: object) -> bool:
-        """Return whether a stream is registered; `registry_lock` is held.
-
-        Args:
-            stream_id: The stream id.
-
-        Returns:
-            True while the stream is in the registry.
-        """
-        return stream_id in self._streams
 
     def row(self, stream_id: int) -> StreamRow | None:
         """Return a registered stream's current row; `registry_lock` is held.
@@ -690,8 +678,8 @@ class SharedStreams:
         building a result or opening the stream failed. At zero holds a running stream's row
         becomes `RELEASED` (a failed or closed one keeps its state). The record stays in the
         registry until the blink table shuts down; if it already has (`shut_down` ran
-        while holds were outstanding) or the stream never opened, the record is deleted now,
-        and the drift registry forgets the stream. Releasing the stream scope drops the
+        while holds were outstanding) or the stream never opened, the record is deleted now.
+        Releasing the stream scope drops the
         library's reference to the blink table; the table dies, and its shutdown callback
         releases the topics, when nothing else (a derived table, an open panel) refers to it.
         Releasing the scope of a stream that has already shut down is a harmless decrement. The
@@ -718,7 +706,7 @@ class SharedStreams:
                 del self._stream_ids[state.key]
             if not held and (state.shut_down or not opened):
                 del self._streams[stream_id]
-                self._drift.forget(stream_id)
+                self._diagnostics.stream_gone(stream_id)
             else:
                 self._streams[stream_id] = replace(state, row=row)
             if opened:
@@ -742,10 +730,10 @@ class SharedStreams:
         shuts the table down on the next cycle), a gRPC thread, or Deephaven's liveness-cleanup
         thread. The stream's key is unmapped, so no new verb reuses the dead table, and a
         reactive stream's watchlist listener is stopped on the reaper. With no holds left the
-        record is deleted and the drift registry forgets the stream; with holds outstanding (a
+        record is deleted; with holds outstanding (a
         failure shut the table down while results are still held) the record is marked shut
         down and deleted when the last hold is released. It takes only `registry_lock` (and the
-        leaf locks of the drift registry and the live set), makes no Deephaven call, and writes
+        leaf lock of the live set), makes no Deephaven call, and writes
         no row: the stream's last row stays in `m.streams()`. An unknown id is ignored.
 
         Args:
@@ -765,7 +753,7 @@ class SharedStreams:
                 self._streams[stream_id] = replace(state, shut_down=True)
             else:
                 del self._streams[stream_id]
-                self._drift.forget(stream_id)
+                self._diagnostics.stream_gone(stream_id)
             live_set.sync(core)
 
     # --- By-id reports and the close: the core calls these with `registry_lock` held. -------

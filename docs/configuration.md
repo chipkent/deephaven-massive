@@ -98,26 +98,48 @@ of three values:
 
 | Value | What it does |
 |---|---|
-| `log` | Skips the symbol or row, keeps the rest, and logs a warning. |
+| `log` | Skips the symbol or row, keeps the rest, and logs a warning for the first problem of each cause on each table. |
 | `ignore` | Does the same, logging only at `DEBUG`. |
 | `raise` | Fails whatever met the problem. |
 
-Under `log` and `ignore`, a stream or `poll()` table names each symbol it skips in its `Error`
-in `m.streams()`. A symbol the library can't read logs an error instead of a warning.
+`m.problems()` lists each problem a table met, with its cause and the setting that applied.
+
+By default, the library leaves out any row of Massive's data it can't read. A row it can read is one whose
+symbol, time, and values it can convert to the table's columns. So a result can be partial.
+Say `m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")` gets 5 rows from Massive, and the library can't read one
+of them. The table gets 4 rows. `m.problems()` lists the fifth, and the log warns once.
+
+Set every cause to `raise` when a call must return complete data:
+
+```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+bars = m.stocks.bars("AAPL", dm.Timespan.DAY, on_error=dm.ErrorPolicy(dm.OnError.RAISE))
+apple = bars.history("2026-10-26", "2026-10-30")
+```
+
+To do the same for every call, pass that policy to `MassiveConfig(on_error=...)`.
 
 Under `raise`:
 
-- A problem found at the call raises at once.
-- One found while reading raises only from a call with `wait=True`.
-- A live table fails.
-- A watchlist read by `fetch()` or `history()` fails only the symbols it met, and
-  `m.symbol_reads()` shows them `FAILED`. A bad watchlist row is the exception, as
-  `on_error.noncanonical_symbols` says.
+- A problem found when you make the call raises at once.
+- A problem found later, as the rows arrive, raises from a call with `wait=True`. Without
+  `wait=True`, it fails the table.
+- A watchlist read by `fetch()` or `history()` fails only the symbols with a problem, and
+  `m.symbol_reads()` shows them `FAILED`. A watchlist row whose value isn't Massive's exact
+  ticker fails the whole table.
 
-To change a cause for one call only, pass the dataset method a policy, such as
-`m.stocks.trades(watchlist, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE))`.
-A cause the call leaves unset follows the session's setting. `dm.ErrorPolicy(dm.OnError.RAISE)`
-sets every cause at once.
+A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
+A cause it leaves unset follows the session's setting.
+
+Whatever the setting, a table fails when Massive's rows stop being readable, since Massive has
+most likely changed its format. Report it as a [bug](troubleshooting.md#report-a-bug).
+
+- A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows.
+- A `dm.ALL` stream fails after 100 unreadable rows with none read between them.
+- A stream of the symbols you list fails after 100 rows whose symbol it can't read, with none
+  read between them.
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 
@@ -283,9 +305,8 @@ Set `0` to fail at the first outage. Each kind of table counts its own time:
 - Any other `fetch()` or `history()` without `wait=True` counts the time it waits
   out Massive's rate limits.
 
-While a stream, a `poll()` table, or a watchlist waits, its `m.streams()` row shows
-why in `Error`. A failed table stays failed, so call the method again for a new one.
-See
+Until the limit passes, `m.problems()` lists the problem with the time it began. A
+failed table stays failed, so call the method again for a new one. See
 [Live table messages](troubleshooting.md#live-table-messages).
 
 #### flush_interval
@@ -343,15 +364,15 @@ library bug. To report it, see
 [Report a bug](troubleshooting.md#report-a-bug).
 
 A listed crypto pair is unreadable too when its ticker isn't its two currencies
-written together. Under `log` or `ignore` it gets no rows. A
-watchlist read by `fetch()` names it in `Error` in `m.symbol_reads()`.
+written together. Under `log` or `ignore` it gets no rows, and
+`m.problems()` lists it. A watchlist read by `fetch()` also names it in `Error` in
+`m.symbol_reads()`.
 
 #### on_error.unavailable_symbols
 
 Set `raise` when a missing symbol means your list is wrong. Under
 `log` and `ignore`, the call skips the symbol and reads the
-others. A stream or `poll()` table also names it in its row's `Error` in
-`m.streams()`.
+others, and `m.problems()` lists it.
 
 A symbol Massive answers with no rows and no error has no rows, whatever this
 setting says.
@@ -389,10 +410,10 @@ value it can't read.
 Set `raise` when a `history()` read from flat files must have every row
 of each file it reads.
 
-- `log` skips the line, keeps the file's other rows, and logs one warning
-  per file with the count of such lines and the first one's row number. The warning
-  never quotes the line.
-- `ignore` does the same with no warning: only the `DEBUG` log names it.
+- `log` skips the line, keeps the file's other rows, and logs one
+  warning. `m.problems()` gives each file's count of such lines and the first
+  one's row number, never the line itself.
+- `ignore` does the same, logging only at `DEBUG`.
 - `raise` makes `history()` raise `MassiveError`, naming the file and the
   first such line's row. A `history()` of a live table instead marks every symbol
   of the read `FAILED` in `m.symbol_reads()`.
@@ -410,9 +431,9 @@ then and later, until a list holds it.
 
 - `raise` fails the stream at that point.
 - `log` leaves the rows out and logs one warning per stream.
-- `ignore` does the same with no warning: only the `DEBUG` log names it.
+- `ignore` does the same, logging only at `DEBUG`.
 
-A live table counts the rows left out in `SchemaDrift` in `m.streams()`.
+`m.problems()` lists the rows left out under `unlisted_contracts`.
 
 #### on_error.unscheduled_products
 
@@ -424,9 +445,9 @@ Massive publishes its sessions, its rows are dated and published again.
 
 - `raise` fails the stream at the first row left out.
 - `log` leaves the rows out and logs one warning per stream.
-- `ignore` does the same with no warning: only the `DEBUG` log names it.
+- `ignore` does the same, logging only at `DEBUG`.
 
-A live table counts the rows left out in `SchemaDrift` in `m.streams()`.
+`m.problems()` lists the rows left out under `unscheduled_products`.
 
 #### on_error.refused_venues
 
@@ -438,12 +459,9 @@ read the ones it does.
 
 - `raise` makes `history()` raise `EntitlementError`, naming the
   exchange and the setting.
-- `log` skips every file of each refused exchange over the whole range,
-  logs one warning with Massive's status and text, and names the exchanges in the
-  table's description. For a watchlist, each symbol's `Transport` in
-  `m.symbol_reads()` names them instead.
-- `ignore` does the same with no warning: only the `DEBUG` log and the
-  description or `m.symbol_reads()` name them.
+- `log` skips every file of each refused exchange over the whole range and
+  logs one warning. `m.problems()` lists the exchanges with Massive's status and text.
+- `ignore` does the same, logging only at `DEBUG`.
 
 It applies only when REST can't serve the call: `dm.ALL`, or
 `source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive

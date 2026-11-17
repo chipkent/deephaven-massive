@@ -261,6 +261,21 @@ class HeldRows(Generic[_K]):
         """
         return sum(w.rows for w in self._held.get(key, {}).values())
 
+    def waiting(self, key: _K) -> dict[str, int]:
+        """Return the tickers of a dataset whose reported wait still holds, with their rows.
+
+        A wait is reported once it passes `DELAYED_AFTER` (`Settled.delayed`), and holds while
+        any row of the ticker does, though settling published or discarded its older rows.
+
+        Args:
+            key: The dataset's plan.
+
+        Returns:
+            Each such ticker's held rows.
+        """
+        held = self._held.get(key, {})
+        return {ticker: waiting.rows for ticker, waiting in held.items() if waiting.reported}
+
     def keep(self, keys: Iterable[_K]) -> None:
         """Drop the held rows of every dataset not among `keys`: no stream receives them now.
 

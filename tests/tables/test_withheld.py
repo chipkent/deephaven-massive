@@ -6,11 +6,12 @@ import pyarrow as pa
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._error_policy import ResolvedPolicy, resolve_policy
+from deephaven_massive._error_policy import DEFAULT_POLICY, ResolvedPolicy, resolve_policy
 from deephaven_massive._massive import DriftReport, RowFault, RowMark, Transport
 from deephaven_massive._tables.problem_events import (
     EVENTS_PER_PAYLOAD,
     ProblemAction,
+    ProblemCause,
     ProblemEvent,
 )
 from deephaven_massive._tables.withheld import (
@@ -233,23 +234,43 @@ def test_events_give_one_per_group_of_the_streams_rows() -> None:
         transport=Transport.WS,
         where="wss://h/stocks channel T",
         stream_id=7,
+        policy=resolve_policy(None, dm.ErrorPolicy(unconvertible_values=dm.OnError.IGNORE)),
         holds={"B"}.__contains__,
     )
     expected = ProblemEvent(
-        cause=VALUES,
+        cause=ProblemCause.UNCONVERTIBLE_VALUES,
         action=ProblemAction.WITHHELD,
         dataset="stocks.trades",
-        transport=Transport.WS,
         stream_id=7,
-        where="wss://h/stocks channel T",
+        where="WS wss://h/stocks channel T",
         symbol="B b",  # as Massive sent it
         field="Price",
         rows=1,
-        reason="price b",
+        detail="price b",
         at=event.at,
+        policy=dm.OnError.IGNORE,
     )
     assert event == expected
     assert event.at > 0
+
+
+def test_each_event_records_the_setting_of_its_own_cause() -> None:
+    groups = (
+        WithheldGroup(VALUES, "A", "A", "Price", 2, "price"),
+        WithheldGroup(KEYS, "B", "B", "Timestamp", 1, "time"),
+    )
+    withheld = Withheld(pa.table({}), groups, "price")
+    found = withheld.events(
+        dataset="stocks.trades",
+        transport=Transport.REST,
+        where="GET /v3/trades",
+        stream_id=None,
+        policy=policy(unconvertible_values=dm.OnError.IGNORE, unreadable_keys=dm.OnError.RAISE),
+    )
+    assert [(e.cause, e.policy) for e in found] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, dm.OnError.IGNORE),
+        (ProblemCause.UNREADABLE_KEYS, dm.OnError.RAISE),
+    ]
 
 
 def test_events_past_the_cap_are_one_overflow_event_per_fault() -> None:
@@ -264,15 +285,19 @@ def test_events_past_the_cap_are_one_overflow_event_per_fault() -> None:
     ]
     withheld = Withheld(pa.table({}), (*shown, *rest), "price 0")
     found = withheld.events(
-        dataset="stocks.trades", transport=Transport.REST, where="GET /v3/trades", stream_id=None
+        dataset="stocks.trades",
+        transport=Transport.REST,
+        where="GET /v3/trades",
+        stream_id=None,
+        policy=DEFAULT_POLICY,
     )
     assert len(found) == EVENTS_PER_PAYLOAD + 2
     assert {e.action for e in found[:EVENTS_PER_PAYLOAD]} == {ProblemAction.WITHHELD}
-    assert found[0] == replace(found[0], symbol="S0", field="Price", rows=1, reason="price 0")
-    overflow = [(e.action, e.cause, e.symbol, e.field, e.rows, e.reason) for e in found[-2:]]
+    assert found[0] == replace(found[0], symbol="S0", field="Price", rows=1, detail="price 0")
+    overflow = [(e.action, e.cause, e.symbol, e.field, e.rows, e.detail) for e in found[-2:]]
     assert overflow == [
-        (ProblemAction.OVERFLOW, VALUES, None, None, 6, "price x"),
-        (ProblemAction.OVERFLOW, KEYS, None, None, 3, "time y"),
+        (ProblemAction.OVERFLOW, ProblemCause.UNCONVERTIBLE_VALUES, None, None, 6, "price x"),
+        (ProblemAction.OVERFLOW, ProblemCause.UNREADABLE_KEYS, None, None, 3, "time y"),
     ]
 
 
