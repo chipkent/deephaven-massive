@@ -681,10 +681,10 @@ def test_connection_rows_replace_by_their_key(
 DRIFT_LOGGER = "deephaven_massive._tables.diagnostics"
 
 
-def status(path: str, value: str) -> str:
+def status(requested: str, value: str) -> str:
     return (
-        f"Massive answered a request to {path} with status {value!r}, which Massive does not "
-        "document. Nothing to do: the library kept the rows Massive sent."
+        f"stocks.trades: Massive answered {requested} with status {value!r}, which Massive does "
+        "not document. Nothing to do: the library kept the rows Massive sent."
     )
 
 
@@ -701,13 +701,16 @@ def test_drift_warns_once_per_path_and_undocumented_status(
 ) -> None:
     registry = DriftRegistry()
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        registry.report_statuses("/v3/trades/{stockTicker}", frozenset({"PARTIAL", "MAYBE"}))
-        registry.report_statuses("/v3/trades/{stockTicker}", frozenset({"PARTIAL"}))
-        registry.report_statuses("/v3/quotes/{stockTicker}", frozenset({"PARTIAL"}))
+        trades, quotes = "/v3/trades/{stockTicker}", "/v3/quotes/{stockTicker}"
+        report = functools.partial(registry.report_statuses, dataset="stocks.trades")
+        report(trades, frozenset({"PARTIAL", "MAYBE"}), requested="GET /v3/trades/AAPL")
+        report(trades, frozenset({"PARTIAL"}), requested="GET /v3/trades/MSFT")
+        report(quotes, frozenset({"PARTIAL"}), requested="GET /v3/quotes/AAPL")
+    # The path's template says whether a status is new; the WARNING names the request as sent.
     assert drift_warnings(caplog) == [
-        status("/v3/trades/{stockTicker}", "MAYBE"),
-        status("/v3/trades/{stockTicker}", "PARTIAL"),
-        status("/v3/quotes/{stockTicker}", "PARTIAL"),
+        status("GET /v3/trades/AAPL", "MAYBE"),
+        status("GET /v3/trades/AAPL", "PARTIAL"),
+        status("GET /v3/quotes/AAPL", "PARTIAL"),
     ]
 
 

@@ -693,21 +693,28 @@ class DriftRegistry:
         self._lock = threading.Lock()
         self._statuses: set[tuple[str, str]] = set()
 
-    def report_statuses(self, path: str, statuses: frozenset[str]) -> None:
+    def report_statuses(
+        self, path: str, statuses: frozenset[str], *, dataset: str, requested: str
+    ) -> None:
         """Log a WARNING for each undocumented REST envelope status not yet seen for the path.
 
         Args:
-            path: The REST path template, such as `"/v3/trades/{stockTicker}"`.
+            path: The REST path template, such as `"/v3/trades/{stockTicker}"`, which says
+                whether a status was seen before.
             statuses: The page's statuses outside the documented ones (`DriftReport.statuses`).
+            dataset: The dataset that read the page, such as `"stocks.trades"`.
+            requested: The request as sent, such as `"GET /v3/trades/AAPL"`, which the
+                WARNING names.
         """
         with self._lock:
             new = sorted(status for status in statuses if (path, status) not in self._statuses)
             self._statuses.update((path, status) for status in new)
         for status in new:
             logger.warning(
-                "Massive answered a request to %s with status %r, which Massive does not "
-                "document. Nothing to do: the library kept the rows Massive sent.",
-                path,
+                "%s: Massive answered %s with status %r, which Massive does not document. "
+                "Nothing to do: the library kept the rows Massive sent.",
+                dataset,
+                requested,
                 status,
             )
 

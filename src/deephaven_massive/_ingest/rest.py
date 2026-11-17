@@ -1491,7 +1491,9 @@ class RestReader:
                 received = time.time_ns()
                 requests += 1
                 received_rows += len(page.rows)
-                self.drift.report_statuses(template, page.drift.statuses)
+                self.drift.report_statuses(
+                    template, page.drift.statuses, dataset=spec.name, requested=requested
+                )
                 if current:
                     self._check_recency(
                         spec,
