@@ -278,6 +278,20 @@ PINNED_EVENTS: dict[str, tuple[Callable[[], Fetch], Recency, str, bool]] = {
         "the host check's snapshot ({path}) failed: connection refused",
         True,
     ),
+    # A pinned stream never waited on REST before, so a rate-limit pause it gave up on, or a
+    # session closed meanwhile, leaves the recency unknown instead of failing the stream.
+    "a rate-limit pause given up on": (
+        raising(dm.MassiveError("rate limited past the patience", status=429)),
+        Recency.UNKNOWN,
+        "the host check's snapshot ({path}) failed: rate limited past the patience",
+        True,
+    ),
+    "closed session": (
+        raising(dm.SessionClosedError("MassiveSession #1 is closed")),
+        Recency.UNKNOWN,
+        "the host check's snapshot ({path}) failed: MassiveSession #1 is closed",
+        True,
+    ),
 }
 
 
@@ -316,16 +330,10 @@ def test_a_pinned_business_host_without_a_label_is_never_real_time() -> None:
 
 @pytest.mark.parametrize(
     "error",
-    [
-        # The caller gave up on a rate-limit pause: the next caller decides again.
-        dm.MassiveError("rate limited past the patience", status=429),
-        dm.SessionClosedError("MassiveSession #1 is closed"),
-        dm.MassiveError("a defect", source=dm.ErrorSource.LIBRARY),
-        KeyError("a defect"),
-    ],
-    ids=["gave up", "closed", "library defect", "unexpected"],
+    [dm.MassiveError("a defect", source=dm.ErrorSource.LIBRARY), KeyError("a defect")],
+    ids=["library defect", "unexpected"],
 )
-def test_a_pinned_host_s_read_propagates_what_is_not_massive_s_answer(error: Exception) -> None:
+def test_a_pinned_host_s_read_propagates_only_a_defect(error: Exception) -> None:
     with pytest.raises(type(error)) as info:
         run(AssetClass.INDICES, raising(error)(), indices=FMV_HOST)
     assert info.value is error
@@ -336,7 +344,7 @@ def test_every_error_source_is_decided(source: dm.ErrorSource) -> None:
     # A source either leaves a pinned host's recency unknown or propagates; none falls through.
     error = dm.MassiveError("a failure", status=500, source=source)
     fetch = raising(error)()
-    if source in (dm.ErrorSource.MASSIVE, dm.ErrorSource.NETWORK):
+    if source is not dm.ErrorSource.LIBRARY:
         assert run_pinned(INDICES, fetch, FMV_HOST).recency is Recency.UNKNOWN
     else:
         with pytest.raises(dm.MassiveError):

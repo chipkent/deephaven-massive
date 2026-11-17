@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, assert_never
 
 from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
@@ -301,7 +300,7 @@ def decide(
 
     The rules, in order: the FMV family uses the host its class's FMV page lists, whatever the
     settings; a TICK host pinned in `websocket_hosts` is used, with the recency Massive's
-    snapshot gives it (`_pinned`), and a failure of that snapshot at Massive or on the network
+    snapshot gives it (`_pinned`), and any failure of that snapshot but a library defect
     leaves the recency `UNKNOWN` instead of raising, since the snapshot only labels a host the
     user already chose; a subscription in `delayed_subscriptions` uses `delayed.massive.com`
     with no request; forex and crypto use `socket.massive.com` with no
@@ -333,8 +332,7 @@ def decide(
             the label and the fix. It is an `EntitlementError`.
         AuthenticationError: If `fetch` raises it (a rejected key) and no host is pinned.
         MassiveError: If `fetch` fails otherwise (a transport failure, a server error) and no
-            host is pinned; for a pinned host, only a closed session, a library defect, or a
-            rate-limit pause the caller gave up on (`_pinned_recency`).
+            host is pinned; for a pinned host, only a library defect (`_pinned_recency`).
     """
     subscription = subscription_of(asset_class)
     listed = subscription in delayed_subscriptions
@@ -455,7 +453,7 @@ def _pinned(
         gave no usable answer.
 
     Raises:
-        MassiveError: If the snapshot's read fails other than at Massive or on the network
+        MassiveError: If the snapshot's read fails with a library defect
             (`_pinned_recency`).
     """
     found = _pinned_recency(asset_class, listed=listed, fetch=fetch)
@@ -492,11 +490,10 @@ def _pinned_recency(
         `DELAYED` for a listed subscription, with no request; `UNKNOWN` for forex and crypto,
         whose snapshots carry no recency label, with no request; otherwise what the class's
         snapshot (`SNAPSHOT_PROBES`) shows (`_pinned_labels`), or `UNKNOWN` when Massive
-        refuses it or its read fails at Massive or on the network.
+        refuses it or its read fails other than with a library defect.
 
     Raises:
-        MassiveError: If the read fails otherwise (`_answered_or_unreachable`): a closed
-            session, a library defect, or a rate-limit pause the caller gave up on.
+        MassiveError: If the read fails with a library defect (`_leaves_recency_unknown`).
     """
     if listed:
         return _PinnedRecency(Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
@@ -510,7 +507,7 @@ def _pinned_recency(
             Recency.UNKNOWN, _REFUSED_SNAPSHOT.format(probe.path, error), warn=True
         )
     except MassiveError as error:
-        if not _answered_or_unreachable(error):
+        if not _leaves_recency_unknown(error):
             raise
         # Unlike the unpinned path, which propagates this error: the host is already chosen and
         # the snapshot only labels it, and a pinned stream never needed REST before, so a
@@ -526,25 +523,25 @@ def _pinned_recency(
     return _pinned_labels(asset_class, labels)
 
 
-def _answered_or_unreachable(error: MassiveError) -> bool:
-    """Return whether a failed snapshot read failed at Massive or on the network.
+def _leaves_recency_unknown(error: MassiveError) -> bool:
+    """Return whether a failed snapshot read leaves a pinned host's recency unknown.
 
-    Such a failure leaves a pinned host's recency unknown. Any other one propagates: a closed
-    session or another stop of the caller's own (`ErrorSource.USER`), a library defect
-    (`ErrorSource.LIBRARY`), and a rate-limit pause the caller's patience could not cover (a
-    429, which the client raises only then), which `SharedLookup` treats as the caller giving
-    up, so the next caller decides again.
+    A stream from a pinned host made no REST request before its recency was read, so no
+    failure of the read fails it: Massive's refusal or error, no answer, a rate-limit pause
+    the caller's patience could not cover, and a stop of the caller's own (such as a closed
+    session, which then fails the stream where it would have anyway). Only a library defect
+    propagates.
 
     Args:
         error: The read's error.
 
     Returns:
-        True for a `MASSIVE` or `NETWORK` error other than a 429.
+        False for a `LIBRARY` error; True for any other.
     """
     source = error.source
-    if source is ErrorSource.MASSIVE or source is ErrorSource.NETWORK:
-        return error.status != HTTPStatus.TOO_MANY_REQUESTS
-    if source is ErrorSource.USER or source is ErrorSource.LIBRARY:
+    if source is ErrorSource.MASSIVE or source is ErrorSource.NETWORK or source is ErrorSource.USER:
+        return True
+    if source is ErrorSource.LIBRARY:
         return False
     assert_never(source)  # a new source decides here whether it leaves the recency unknown
 

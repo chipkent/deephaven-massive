@@ -229,9 +229,10 @@ class MassiveConfig:
             no delayed feed for it.
 
             Leave a delayed subscription out, and a stream of its current data raises
-            `EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
-            `poll()` table of that data fails with the same message, and `fetch(wait=True)`
-            raises it. A stream from a host you set in `websocket_hosts` still opens.
+            `EntitlementError`. Its message gives the line of Python to add. A stream from a host
+            you set in `websocket_hosts` still opens, and its `Recency` shows `DELAYED`. A
+            `fetch()` or `poll()` table of that data fails with the same message, and
+            `fetch(wait=True)` raises it.
             `history()` and other past data don't depend on this setting.
         rest_requests_per_minute: Gives each subscription's REST request limit on your plan,
             so its requests keep to it from the first one. Defaults to an empty mapping.
@@ -273,11 +274,12 @@ class MassiveConfig:
             - `DELAYED`: Massive labels the data `DELAYED`, or its subscription is in
               `delayed_subscriptions`.
             - `REALTIME`: Massive labels the data `REAL-TIME`.
-            - `UNKNOWN`: Massive gave no label, or the library couldn't read one. Forex and
-              crypto data never carries a label.
+            - `UNKNOWN`: Massive gave no label, or the library couldn't read one. A forex or
+              crypto stream always shows `UNKNOWN`.
 
-            Reading the label costs one REST request, made by the asset class's first stream in
-            each session.
+            For stocks, options, indices, or futures not in `delayed_subscriptions`, reading the
+            label costs one REST request. The asset class's first stream in each session makes
+            it.
         subscription_confirmation_timeout: Sets how many seconds Massive has to confirm a stream's
             channel before the library asks again. Defaults to 5 seconds.
 
