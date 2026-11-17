@@ -1338,7 +1338,7 @@ def test_a_certificate_for_another_name_fails_at_once_over_the_network(
 
 @pytest.mark.parametrize(
     ("sent", "linger", "raised"),
-    [(b"", False, False), (b"", True, False), (b"GET /x HTTP/1.1\r\n", True, True)],
+    [(b"", False, False), (b"", True, False), (b"GET /x HTTP/1.1\r\n", False, True)],
     ids=["close", "reset", "reset after the request line"],
 )
 def test_the_tls_fake_ends_a_connection_the_client_drops_before_its_request(
@@ -1350,7 +1350,9 @@ def test_the_tls_fake_ends_a_connection_the_client_drops_before_its_request(
     # reached the server's `handle_error` would be printed to a stream an xdist worker may have
     # closed, failing whichever test was tearing down. A drop after the request line is still
     # an error. The client drops only once the server reached the point under test: its
-    # handshake done, or the request line read.
+    # handshake done, or the request line read. Before Python 3.13, `ssl` reads a reset as the
+    # end of the stream, so a real reset after the request line would end the request there and
+    # fail only the reply's write. That case raises the reset where 3.13 does: reading headers.
     errors: list[BaseException | None] = []
     reached = threading.Event()
     served = threading.Event()
@@ -1370,6 +1372,8 @@ def test_the_tls_fake_ends_a_connection_the_client_drops_before_its_request(
 
     def request_line_read(handler: http.server.BaseHTTPRequestHandler) -> bool:
         reached.set()
+        if raised:
+            raise ConnectionResetError
         return parse_request(handler)
 
     def signal_served(server: LoopbackHTTPServer, request: socket.socket) -> None:
@@ -1397,7 +1401,7 @@ def test_the_tls_fake_ends_a_connection_the_client_drops_before_its_request(
         server.close()
     if raised:
         [error] = errors
-        assert isinstance(error, ConnectionResetError | BrokenPipeError)
+        assert isinstance(error, ConnectionResetError)
     else:
         assert errors == []
     assert server.requests == []
