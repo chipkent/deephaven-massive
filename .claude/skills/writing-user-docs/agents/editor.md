@@ -68,7 +68,8 @@ was written. Change the passes this way:
      a review round?
 - Pass 2: the panel is two readers, the owner and that later user. A word coined in the code
   ("the pair's split", "the reference lane") is a fault unless the text defines it at first use.
-- Pass 3: source each claim in the diff or the repository.
+- Pass 3: source each claim in the diff or the repository. The owner's quoted words come from
+  a session you can't see: mark them UNCHECKED, for the owner to confirm, and count no fault.
 - Pass 4: the sections are the standard's, in its order, and each of its banned patterns is a
   fault on criterion 3 or 7. Skip the checks for badges, steps, and file formats.
 - Pass 5: mark Teaching N/A.
