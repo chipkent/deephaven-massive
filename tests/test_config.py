@@ -60,16 +60,24 @@ def test_an_environment_value_with_surrounding_whitespace_is_refused(
     # Never trimmed; the message names the variable but never the value, which may be a key.
     monkeypatch.setenv("MASSIVE_API_KEY", "k")
     monkeypatch.setenv(variable, " secret-value ")
-    with pytest.raises(ValueError, match=f"^{variable} has leading or trailing whitespace") as e:
+    refusal = (
+        f"The environment variable {variable} has leading or trailing whitespace. Set it again "
+        "with the whitespace removed."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$") as e:
         MassiveConfig()
     assert "secret-value" not in str(e.value)
 
 
 @pytest.mark.parametrize("key", [" massive", "massive\n"])
 def test_an_api_key_with_surrounding_whitespace_is_refused(key: str) -> None:
-    with pytest.raises(ValueError, match=r"^api_key has leading or trailing whitespace") as e:
+    refusal = (
+        "api_key has leading or trailing whitespace. Pass the key with the whitespace removed."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$") as e:
         MassiveConfig(api_key=key)
     assert "massive" not in str(e.value)
+    assert MassiveConfig(api_key=key.strip()).api_key == "massive"  # the message's fix
 
 
 @pytest.mark.parametrize("value", ["", "  ", " AKIA9", "AKIA9 "])
@@ -77,9 +85,16 @@ def test_an_api_key_with_surrounding_whitespace_is_refused(key: str) -> None:
 def test_an_s3_credential_must_be_exact(name: str, value: str) -> None:
     both: dict[str, Any] = {"s3_access_key_id": "AKIA9", "s3_secret_access_key": "AKIA9"}
     both[name] = value
-    with pytest.raises(ValueError, match=f"^{name} is blank or has leading or trailing") as e:
+    refusal = (
+        f"{name} is blank or has leading or trailing whitespace. Pass the credential with "
+        "nothing around it, or None for no flat files."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$") as e:
         MassiveConfig(api_key="k", **both)
     assert "AKIA9" not in str(e.value)
+    # The message's two fixes: the credential with nothing around it, or no flat files.
+    MassiveConfig(api_key="k", **{**both, name: "AKIA9"})
+    MassiveConfig(api_key="k", s3_access_key_id=None, s3_secret_access_key=None)
 
 
 def test_polygon_api_key_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,11 +109,18 @@ def test_blank_environment_values_are_absent(monkeypatch: pytest.MonkeyPatch) ->
         MassiveConfig()
 
 
-def test_missing_key_raises_authentication_error() -> None:
-    with pytest.raises(dm.AuthenticationError, match="MASSIVE_API_KEY"):
+def test_missing_key_raises_authentication_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = (
+        "No Massive API key is set. Pass dm.MassiveConfig(api_key=...) or set MASSIVE_API_KEY."
+    )
+    with pytest.raises(dm.AuthenticationError, match=rf"^{re.escape(expected)}$"):
         MassiveConfig()
     with pytest.raises(dm.AuthenticationError):
         MassiveConfig(api_key=" ")
+    # The message's two fixes.
+    assert MassiveConfig(api_key="k").api_key == "k"
+    monkeypatch.setenv("MASSIVE_API_KEY", "from-env")
+    assert MassiveConfig().api_key == "from-env"
 
 
 def test_s3_credentials_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,9 +130,26 @@ def test_s3_credentials_from_the_environment(monkeypatch: pytest.MonkeyPatch) ->
     assert (cfg.s3_access_key_id, cfg.s3_secret_access_key) == ("id", "secret")
 
 
-def test_partial_s3_credentials_are_rejected() -> None:
-    with pytest.raises(ValueError, match="both s3_access_key_id and s3_secret_access_key"):
+def test_partial_s3_credentials_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    value = "s3-value"
+    fix = (
+        "Pass both s3_access_key_id and s3_secret_access_key to dm.MassiveConfig, or set both "
+        "MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY."
+    )
+    only_id = f"Flat files need both S3 credentials, and only s3_access_key_id is set. {fix}"
+    with pytest.raises(ValueError, match=rf"^{re.escape(only_id)}$"):
         MassiveConfig(api_key="k", s3_access_key_id="id")
+    only_secret = (
+        f"Flat files need both S3 credentials, and only s3_secret_access_key is set. {fix}"
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(only_secret)}$"):
+        MassiveConfig(api_key="k", s3_secret_access_key=value)
+    # The message's two fixes.
+    both = MassiveConfig(api_key="k", s3_access_key_id="id", s3_secret_access_key=value)
+    assert (both.s3_access_key_id, both.s3_secret_access_key) == ("id", value)
+    monkeypatch.setenv("MASSIVE_S3_ACCESS_KEY_ID", "id")
+    monkeypatch.setenv("MASSIVE_S3_SECRET_ACCESS_KEY", value)
+    assert MassiveConfig(api_key="k").s3_secret_access_key == value
 
 
 def test_defaults(base: MassiveConfig) -> None:
@@ -162,30 +201,40 @@ def test_frozen_and_secrets_hidden() -> None:
 
 def test_reconnect_backoff_bounds(base: MassiveConfig) -> None:
     assert dataclasses.replace(base, reconnect_backoff=15.0).reconnect_backoff == 15.0
-    with pytest.raises(ValueError, match="reconnect_backoff"):
+    with pytest.raises(
+        ValueError, match=r"^reconnect_backoff=0 is not a positive, finite number\.$"
+    ):
         dataclasses.replace(base, reconnect_backoff=0)
     with pytest.raises(
         ValueError,
-        match=r"^reconnect_backoff must be at least 15 s, not 14\.99, which limits reconnect "
-        r"churn$",
+        match=r"^reconnect_backoff=14\.99 is below the minimum of 15 s\. Pass "
+        r"reconnect_backoff=15 or more\.$",
     ):
         dataclasses.replace(base, reconnect_backoff=14.99)
-    with pytest.raises(ValueError, match="max_reconnect_backoff must not be below"):
+    refusal = (
+        "max_reconnect_backoff=20 is below reconnect_backoff=30. Pass a max_reconnect_backoff "
+        "of 30 or more."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         dataclasses.replace(base, reconnect_backoff=30.0, max_reconnect_backoff=20.0)
+    # The message's fix.
+    fixed = dataclasses.replace(base, reconnect_backoff=30.0, max_reconnect_backoff=30.0)
+    assert fixed.max_reconnect_backoff == 30.0
 
 
 def test_max_outage_may_be_zero_but_not_negative(base: MassiveConfig) -> None:
     # Zero means "fail at the first disconnect", so it is a valid limit; an int becomes a float.
     zero = dataclasses.replace(base, max_outage=0).max_outage
     assert (zero, type(zero)) == (0.0, float)
-    for bad in (-1, float("inf"), float("nan")):
-        with pytest.raises(
-            ValueError,
-            match=r"max_outage must be zero or more seconds, got .*; 0 fails live tables at the "
-            "first disconnect",
-        ):
+    for bad, shown in ((-1, "-1"), (float("inf"), "inf"), (float("nan"), "nan")):
+        refusal = (
+            f"max_outage={shown} is not a finite number of seconds, zero or more. Pass 0 to fail "
+            "live tables at the first disconnect, or the seconds to wait out an outage."
+        )
+        with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
             dataclasses.replace(base, max_outage=bad)
-    with pytest.raises(ValueError, match="max_outage must be finite, got an int too large"):
+    refusal = "max_outage is an int too large to convert to a float. Pass a smaller number."
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         dataclasses.replace(base, max_outage=10**400)
 
 
@@ -196,24 +245,30 @@ def test_max_outage_is_a_number(base: MassiveConfig, value: object) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "change"),
+    ("expected", "change"),
     [
         (
-            "subscription_confirmation_timeout",
+            "subscription_confirmation_timeout=0.0 is not a positive, finite number.",
             lambda c: dataclasses.replace(c, subscription_confirmation_timeout=0.0),
         ),
-        ("flush_interval", lambda c: dataclasses.replace(c, flush_interval=-1.0)),
         (
-            "subscription_confirmation_timeout",
+            "flush_interval=-1.0 is not a positive, finite number.",
+            lambda c: dataclasses.replace(c, flush_interval=-1.0),
+        ),
+        (
+            "subscription_confirmation_timeout=inf is not a positive, finite number.",
             lambda c: dataclasses.replace(c, subscription_confirmation_timeout=float("inf")),
         ),
         (
-            "subscription_confirmation_timeout",
+            "subscription_confirmation_timeout=nan is not a positive, finite number.",
             lambda c: dataclasses.replace(c, subscription_confirmation_timeout=float("nan")),
         ),
-        ("max_concurrency", lambda c: dataclasses.replace(c, max_concurrency=0)),
         (
-            "flat_file_symbol_threshold",
+            "max_concurrency=0 is not positive.",
+            lambda c: dataclasses.replace(c, max_concurrency=0),
+        ),
+        (
+            "flat_file_symbol_threshold=-5 is not positive.",
             lambda c: dataclasses.replace(c, flat_file_symbol_threshold=-5),
         ),
     ],
@@ -227,19 +282,33 @@ def test_max_outage_is_a_number(base: MassiveConfig, value: object) -> None:
     ],
 )
 def test_positive_numbers(
-    base: MassiveConfig, name: str, change: Callable[[MassiveConfig], MassiveConfig]
+    base: MassiveConfig, expected: str, change: Callable[[MassiveConfig], MassiveConfig]
 ) -> None:
-    with pytest.raises(ValueError, match=f"{name} must be positive"):
+    with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         change(base)
+
+
+def test_a_positive_number_that_overflows_a_float_is_refused() -> None:
+    refusal = "interval is an int too large to convert to a float. Pass a smaller number."
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
+        _config.require_positive_number("interval", 10**400)
+    assert _config.require_positive_number("interval", 10**300) == 1e300  # the message's fix
+
+
+def test_a_count_above_its_maximum_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"^capacity=11 is not between 1 and 10\.$"):
+        _config.require_positive_int("capacity", 11, maximum=10)
 
 
 @pytest.mark.parametrize("value", [60.0, 90.0])
 def test_subscription_confirmation_timeout_is_below_the_no_ack_resend_interval(
     base: MassiveConfig, value: float
 ) -> None:
-    with pytest.raises(
-        ValueError, match=r"subscription_confirmation_timeout must be below 60 s, not \d+: "
-    ):
+    refusal = (
+        f"subscription_confirmation_timeout={value:g} is not below 60 s, the interval at which "
+        "the library sends an unconfirmed subscription again. Pass a value below 60."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         dataclasses.replace(base, subscription_confirmation_timeout=value)
     assert (
         dataclasses.replace(
@@ -284,7 +353,10 @@ def test_websocket_hosts_are_validated_and_frozen() -> None:
     ],
 )
 def test_websocket_hosts_must_be_bare_hostnames(host: str) -> None:
-    with pytest.raises(ValueError, match="bare hostname"):
+    refusal = (
+        f"websocket_hosts[stocks]={host!r} is not a bare hostname, such as 'delayed.massive.com'."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         MassiveConfig(api_key="k", websocket_hosts={AssetClass.STOCKS: host})
 
 
@@ -293,19 +365,34 @@ def test_websocket_hosts_must_be_bare_hostnames(host: str) -> None:
 )
 def test_websocket_hosts_are_taken_exactly_as_written(host: str) -> None:
     # Never trimmed or lower-cased; the message names the hostname to write.
-    with pytest.raises(ValueError, match=r"; write 'delayed\.massive\.com'$"):
+    refusal = (
+        f"websocket_hosts[stocks]={host!r} is not a lower-case hostname with nothing around it. "
+        "Pass 'delayed.massive.com'."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         MassiveConfig(api_key="k", websocket_hosts={AssetClass.STOCKS: host})
+    fixed = {AssetClass.STOCKS: "delayed.massive.com"}  # the message's fix
+    assert (
+        MassiveConfig(
+            api_key="k", websocket_hosts=fixed, delayed_subscriptions={Subscription.STOCKS}
+        ).websocket_hosts
+        == fixed
+    )
 
 
 def test_websocket_hosts_types(base: MassiveConfig) -> None:
     with pytest.raises(
         TypeError,
-        match=r"^websocket_hosts key must be dm\.AssetClass, e\.g\. dm\.AssetClass\.STOCKS$",
+        match=r"^websocket_hosts key must be dm\.AssetClass, such as dm\.AssetClass\.STOCKS, "
+        r"not 'stocks'$",
     ):
         dataclasses.replace(base, websocket_hosts={"stocks": "delayed.massive.com"})  # type: ignore[dict-item]  # the point: refused at run time
-    with pytest.raises(TypeError, match="must be a hostname str"):
+    with pytest.raises(TypeError, match=r"^websocket_hosts\[stocks\] must be a str, not int$"):
         dataclasses.replace(base, websocket_hosts={AssetClass.STOCKS: 5})  # type: ignore[dict-item]  # the point: refused at run time
-    with pytest.raises(TypeError, match="websocket_hosts must be a mapping"):
+    with pytest.raises(
+        TypeError,
+        match=r"^websocket_hosts must be a mapping of dm\.AssetClass to hostname, not list$",
+    ):
         dataclasses.replace(base, websocket_hosts=["delayed.massive.com"])  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -334,23 +421,34 @@ def test_rest_requests_per_minute_holds_subscriptions_and_positive_counts(
     with pytest.raises(
         TypeError,
         match=r"^each rest_requests_per_minute key must be dm\.Subscription, "
-        r"e\.g\. dm\.Subscription\.OPTIONS$",
+        r"such as dm\.Subscription\.OPTIONS, not 'options'$",
     ):
         dataclasses.replace(base, rest_requests_per_minute={"options": 5})  # type: ignore[dict-item]  # the point: refused at run time
     # An asset class names the subscription that covers it.
-    with pytest.raises(TypeError, match=r"e\.g\. dm\.Subscription\.STOCKS$"):
+    with pytest.raises(
+        TypeError,
+        match=r"^each rest_requests_per_minute key must be dm\.Subscription, such as "
+        r"dm\.Subscription\.STOCKS, not dm\.AssetClass\.STOCKS$",
+    ):
         dataclasses.replace(base, rest_requests_per_minute={AssetClass.STOCKS: 5})  # type: ignore[dict-item]  # the point: refused at run time
     # Forex and crypto are one subscription, whichever way they are spelled.
-    for currency in (AssetClass.FOREX, AssetClass.CRYPTO, "forex", "Crypto"):
-        with pytest.raises(
-            TypeError,
-            match=r"^rest_requests_per_minute must hold dm\.Subscription members; forex and "
-            r"crypto are one subscription, dm\.Subscription\.CURRENCIES$",
-        ):
+    for currency, shown in (
+        (AssetClass.FOREX, "forex"),
+        (AssetClass.CRYPTO, "crypto"),
+        ("forex", "forex"),
+        ("Crypto", "Crypto"),
+    ):
+        refusal = (
+            f"rest_requests_per_minute holds '{shown}', but forex and crypto are one "
+            "subscription. Pass dm.Subscription.CURRENCIES in its place."
+        )
+        with pytest.raises(TypeError, match=rf"^{re.escape(refusal)}$"):
             dataclasses.replace(base, rest_requests_per_minute={currency: 5})  # type: ignore[dict-item]  # the point: refused at run time
+    fixed = dataclasses.replace(base, rest_requests_per_minute={Subscription.CURRENCIES: 5})
+    assert fixed.rest_requests_per_minute == {Subscription.CURRENCIES: 5}  # the message's fix
     for limit in (0, -5):
         with pytest.raises(
-            ValueError, match=rf"^rest_requests_per_minute\[stocks\] must be positive, got {limit}$"
+            ValueError, match=rf"^rest_requests_per_minute\[stocks\]={limit} is not positive\.$"
         ):
             dataclasses.replace(base, rest_requests_per_minute={Subscription.STOCKS: limit})
     with pytest.raises(
@@ -380,19 +478,31 @@ def test_delayed_subscriptions_hold_subscriptions_only(base: MassiveConfig) -> N
         TypeError, match=r"^delayed_subscriptions must be a set of dm\.Subscription, such as "
     ):
         dataclasses.replace(base, delayed_subscriptions=[Subscription.STOCKS])  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(TypeError, match=r"^each delayed_subscriptions member must be"):
+    with pytest.raises(
+        TypeError,
+        match=r"^each delayed_subscriptions member must be dm\.Subscription, such as "
+        r"dm\.Subscription\.OPTIONS, not 'options'$",
+    ):
         dataclasses.replace(base, delayed_subscriptions={"options"})  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(TypeError, match=r"forex and crypto are one subscription"):
+    with pytest.raises(
+        TypeError,
+        match=r"^delayed_subscriptions holds 'forex', but forex and crypto are one subscription\. "
+        r"Pass dm\.Subscription\.CURRENCIES in its place\.$",
+    ):
         dataclasses.replace(base, delayed_subscriptions={"forex"})  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_currencies_cannot_be_delayed(base: MassiveConfig) -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"^delayed_subscriptions cannot hold dm\.Subscription\.CURRENCIES: Massive has no "
-        r"delayed forex or crypto feed",
-    ):
+    refusal = (
+        "delayed_subscriptions holds dm.Subscription.CURRENCIES, but Massive has no delayed forex "
+        "or crypto feed, so their streams are always real-time. Remove dm.Subscription.CURRENCIES "
+        "from delayed_subscriptions."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         dataclasses.replace(base, delayed_subscriptions={Subscription.CURRENCIES})
+    # The message's fix.
+    kept = {Subscription.STOCKS}
+    assert dataclasses.replace(base, delayed_subscriptions=kept).delayed_subscriptions == kept
 
 
 def test_the_delayed_fix_is_a_sentence_naming_the_setting() -> None:
@@ -406,17 +516,22 @@ def test_the_delayed_fix_is_a_sentence_naming_the_setting() -> None:
 
 
 def test_a_delayed_pin_needs_the_subscription_listed(base: MassiveConfig) -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"^websocket_hosts pins options to the delayed feed delayed\.massive\.com, but "
-        r"delayed_subscriptions does not list dm\.Subscription\.OPTIONS; to use the delayed "
-        r"feed, pass delayed_subscriptions=\{dm\.Subscription\.OPTIONS\} to "
-        r"dm\.MassiveConfig\.$",
-    ):
-        dataclasses.replace(base, websocket_hosts={AssetClass.OPTIONS: "delayed.massive.com"})
+    pinned = {AssetClass.OPTIONS: "delayed.massive.com"}
+    refusal = (
+        "websocket_hosts pins options to the delayed feed 'delayed.massive.com', but "
+        "delayed_subscriptions does not include dm.Subscription.OPTIONS. To stream delayed "
+        "options data, pass delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
+        dataclasses.replace(base, websocket_hosts=pinned)
+    # The message's fix: the pin and the subscription together.
+    both = dataclasses.replace(
+        base, websocket_hosts=pinned, delayed_subscriptions={Subscription.OPTIONS}
+    )
+    assert both.delayed_subscriptions == {Subscription.OPTIONS}
     # Any host named as a delayed feed asks for delayed data.
     with pytest.raises(
-        ValueError, match=r"^websocket_hosts pins stocks to the delayed feed delayed\.x"
+        ValueError, match=r"^websocket_hosts pins stocks to the delayed feed 'delayed\.x"
     ):
         dataclasses.replace(base, websocket_hosts={AssetClass.STOCKS: "delayed.x.example.com"})
 
@@ -425,24 +540,28 @@ def test_a_delayed_pin_needs_the_subscription_listed(base: MassiveConfig) -> Non
 def test_forex_and_crypto_cannot_pin_a_delayed_feed(
     base: MassiveConfig, asset_class: AssetClass
 ) -> None:
-    with pytest.raises(
-        ValueError, match=r"Massive has no delayed forex or crypto feed; remove the pin$"
-    ):
+    refusal = (
+        f"websocket_hosts pins {asset_class} to 'delayed.massive.com', but Massive has no "
+        f"delayed forex or crypto feed. Remove the {asset_class} pin from websocket_hosts."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         dataclasses.replace(base, websocket_hosts={asset_class: "delayed.massive.com"})
 
 
 def test_a_listed_subscription_cannot_pin_another_host(base: MassiveConfig) -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"^delayed_subscriptions lists dm\.Subscription\.STOCKS, whose streams use "
-        r"Massive's delayed feed delayed\.massive\.com, but websocket_hosts pins stocks to "
-        r"socket\.massive\.com; remove one of the two$",
-    ):
-        dataclasses.replace(
-            base,
-            delayed_subscriptions={Subscription.STOCKS},
-            websocket_hosts={AssetClass.STOCKS: "socket.massive.com"},
-        )
+    listed = {Subscription.STOCKS}
+    pinned = {AssetClass.STOCKS: "socket.massive.com"}
+    refusal = (
+        "delayed_subscriptions includes dm.Subscription.STOCKS, whose streams use Massive's "
+        "delayed feed 'delayed.massive.com', but websocket_hosts pins stocks to "
+        "'socket.massive.com'. Remove dm.Subscription.STOCKS from delayed_subscriptions, or "
+        "remove the stocks pin from websocket_hosts."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
+        dataclasses.replace(base, delayed_subscriptions=listed, websocket_hosts=pinned)
+    # The message's two fixes.
+    assert dataclasses.replace(base, websocket_hosts=pinned).websocket_hosts == pinned
+    assert dataclasses.replace(base, delayed_subscriptions=listed).delayed_subscriptions == listed
 
 
 def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
@@ -460,7 +579,11 @@ def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
 def test_on_error_is_a_policy(base: MassiveConfig) -> None:
     strict = dm.ErrorPolicy(dm.OnError.RAISE)
     assert dataclasses.replace(base, on_error=strict).on_error is strict
-    with pytest.raises(TypeError, match=r"^on_error must be dm\.ErrorPolicy, not a dm\.OnError"):
+    with pytest.raises(
+        TypeError,
+        match=r"^on_error=dm\.OnError\.RAISE is not a dm\.ErrorPolicy\. To set every cause to "
+        r"RAISE, pass on_error=dm\.ErrorPolicy\(dm\.OnError\.RAISE\)\.$",
+    ):
         dataclasses.replace(base, on_error=dm.OnError.RAISE)  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -478,8 +601,8 @@ def test_connection_taken_is_the_enum(base: MassiveConfig) -> None:
     assert dataclasses.replace(base, connection_taken=reconnect).connection_taken is reconnect
     with pytest.raises(
         TypeError,
-        match=r"^connection_taken must be dm\.ConnectionTaken, e\.g\. "
-        r"dm\.ConnectionTaken\.RECONNECT$",
+        match=r"^connection_taken must be dm\.ConnectionTaken, such as "
+        r"dm\.ConnectionTaken\.RECONNECT, not 'reconnect'$",
     ):
         dataclasses.replace(base, connection_taken="reconnect")  # type: ignore[arg-type]  # the point: refused at run time
 
@@ -489,9 +612,23 @@ def test_api_key_must_be_a_string() -> None:
         MassiveConfig(api_key=None)  # type: ignore[arg-type]  # the point: refused at run time
 
 
-@pytest.mark.parametrize("api_key", ["s3c r3t", "s3c\tr3t", "s3cr3t\r\nX: y", "s3cr\u00e9t"])
-def test_an_api_key_no_header_can_carry_is_refused_at_the_config(api_key: str) -> None:
-    with pytest.raises(ValueError, match=r"^api_key must be non-empty visible ASCII") as info:
+@pytest.mark.parametrize(
+    ("api_key", "kind", "index"),
+    [
+        ("s3c r3t", "whitespace", 3),
+        ("s3c\tr3t", "whitespace", 3),
+        ("s3cr3t\r\nX: y", "whitespace", 6),
+        ("s3cr\u00e9t", "non-ASCII", 4),
+    ],
+)
+def test_an_api_key_no_header_can_carry_is_refused_at_the_config(
+    api_key: str, kind: str, index: int
+) -> None:
+    refusal = (
+        f"api_key holds a {kind} character at index {index}, and an API key may hold only "
+        "visible ASCII. Pass the key without that character."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$") as info:
         MassiveConfig(api_key=api_key)
     assert "s3c" not in str(info.value)
 
@@ -550,7 +687,15 @@ _URL_SETTERS: dict[str, Callable[[MassiveConfig, str], MassiveConfig]] = {
     ],
 )
 def test_a_url_setting_must_be_an_http_url_with_a_host(name: str, url: str) -> None:
-    with pytest.raises(ValueError, match=f"^{name} must be an http or https URL with a host"):
+    example = {
+        "rest_base_url": "https://api.massive.com",
+        "s3_endpoint_url": "https://files.massive.com",
+    }
+    shown = "https://***@" if url == "https://u@" else url
+    refusal = (
+        f"{name}={shown!r} is not an http or https URL with a host, such as {example[name]!r}."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         _URL_SETTERS[name](MassiveConfig(api_key="k"), url)
 
 
@@ -575,38 +720,58 @@ def test_the_s3_endpoint_may_hold_what_the_rest_base_url_may_not(url: str) -> No
     assert MassiveConfig(api_key="k", s3_endpoint_url=url).s3_endpoint_url == url
 
 
+_ORIGIN_ONLY = (
+    "names more than a scheme, host, and port. Pass only those, such as 'https://api.massive.com'."
+)
+_CLEAR_TEXT = (
+    "would send the API key in clear text. Use https, or use http only for a loopback host "
+    "such as a local test server."
+)
+_NO_PORT = "is not an absolute http or https URL with a valid port."
+
+
 @pytest.mark.parametrize(
-    ("url", "reason"),
+    ("url", "shown", "reason"),
     [
-        ("https://api.massive.com/v3", "must name only a scheme, host, and port"),
-        ("https://api.massive.com?apiKey=1", "must name only a scheme, host, and port"),
-        ("https://api.massive.com#top", "must name only a scheme, host, and port"),
-        ("https://u:hunter2@api.massive.com", "must name only a scheme, host, and port"),
-        ("http://api.massive.com", "would send the API key in clear text; use https"),
-        ("http://10.0.0.1:8080", "would send the API key in clear text; use https"),
-        ("https://api.massive.com:99999", "is not an absolute http or https URL"),
-        ("https://api.massive.com:0", "is not an absolute http or https URL"),
+        ("https://api.massive.com/v3", "https://api.massive.com/v3", _ORIGIN_ONLY),
+        ("https://api.massive.com?apiKey=1", "https://api.massive.com?***", _ORIGIN_ONLY),
+        ("https://api.massive.com#top", "https://api.massive.com#***", _ORIGIN_ONLY),
+        ("https://u:hunter2@api.massive.com", "https://***@api.massive.com", _ORIGIN_ONLY),
+        ("http://api.massive.com", "http://api.massive.com", _CLEAR_TEXT),
+        ("http://10.0.0.1:8080", "http://10.0.0.1:8080", _CLEAR_TEXT),
+        ("https://api.massive.com:99999", "https://api.massive.com:99999", _NO_PORT),
+        ("https://api.massive.com:0", "https://api.massive.com:0", _NO_PORT),
     ],
 )
 def test_a_rest_base_url_the_client_would_refuse_is_refused_at_the_config(
-    url: str, reason: str
+    url: str, shown: str, reason: str
 ) -> None:
-    with pytest.raises(ValueError, match=f"^rest_base_url '.*' {reason}") as info:
+    refusal = f"rest_base_url={shown!r} {reason}"
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$") as info:
         MassiveConfig(api_key="k", rest_base_url=url)
     assert "hunter2" not in str(info.value)
 
 
+def test_the_rest_base_urls_its_refusals_suggest_are_accepted() -> None:
+    for url in ("https://api.massive.com", "https://api.massive.com:8443", "http://localhost:9000"):
+        assert MassiveConfig(api_key="k", rest_base_url=url).rest_base_url == url
+
+
 def test_a_refused_url_never_shows_a_password() -> None:
-    with pytest.raises(ValueError, match="must be an http") as info:
+    refusal = (
+        "rest_base_url='ftp://***@api.massive.com' is not an http or https URL with a host, such "
+        "as 'https://api.massive.com'."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         MassiveConfig(api_key="k", rest_base_url="ftp://u:hunter2@api.massive.com")
-    assert "hunter2" not in str(info.value)
-    assert "'ftp://***@api.massive.com'" in str(info.value)
 
 
 @pytest.mark.parametrize("bucket", ["", "  "])
 def test_the_bucket_must_not_be_blank(bucket: str) -> None:
-    with pytest.raises(ValueError, match=r"^s3_bucket must name a bucket"):
+    refusal = f"s3_bucket={bucket!r} is not a bucket name, such as 'flatfiles'."
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         MassiveConfig(api_key="k", s3_bucket=bucket)
+    assert MassiveConfig(api_key="k", s3_bucket="flatfiles").s3_bucket == "flatfiles"
 
 
 @pytest.mark.parametrize("name", ["rest_base_url", "s3_endpoint_url", "s3_bucket"])
@@ -616,11 +781,14 @@ def test_the_text_settings_must_be_strings(base: MassiveConfig, name: str) -> No
 
 
 def test_a_refused_ws_host_never_shows_a_password() -> None:
-    with pytest.raises(ValueError, match=r"got '\*\*\*@delayed\.massive\.com'$") as info:
+    refusal = (
+        "websocket_hosts[stocks]='***@delayed.massive.com' is not a bare hostname, such as "
+        "'delayed.massive.com'."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         dm.MassiveConfig(
             api_key="k", websocket_hosts={dm.AssetClass.STOCKS: "u:hunter2@delayed.massive.com"}
         )
-    assert "hunter2" not in str(info.value)
 
 
 # --- The settings file -------------------------------------------------------------------------
@@ -641,12 +809,12 @@ def _refused(tmp_path: Path, text: str) -> str:
     """Read a file holding `text`, which `from_file` must refuse.
 
     Returns:
-        The refusal's message after its leading `settings file <path>`.
+        The refusal's message after its leading `Settings file <path>`.
     """
     file = _settings(tmp_path, text)
-    with pytest.raises(ValueError, match=f"^settings file {re.escape(str(file))}") as info:
+    with pytest.raises(ValueError, match=f"^Settings file {re.escape(str(file))}") as info:
         MassiveConfig.from_file(file)
-    return str(info.value).removeprefix(f"settings file {file}")
+    return str(info.value).removeprefix(f"Settings file {file}")
 
 
 @pytest.fixture
@@ -767,8 +935,8 @@ def test_the_path_comes_from_the_environment_variable(
 def test_no_path_and_no_variable_is_refused_naming_the_variable() -> None:
     with pytest.raises(
         ValueError,
-        match=r"^no settings file: pass its path to MassiveConfig\.from_file, or set "
-        r"DEEPHAVEN_MASSIVE_CONFIG_FILE to it$",
+        match=r"^No settings file was given\. Pass its path to dm\.MassiveConfig\.from_file, or "
+        r"set DEEPHAVEN_MASSIVE_CONFIG_FILE to it\.$",
     ):
         MassiveConfig.from_file()
 
@@ -796,16 +964,15 @@ def test_a_leading_tilde_is_the_home_folder(
 
 def test_a_missing_file_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     missing = tmp_path / "absent.yaml"
-    with pytest.raises(
-        FileNotFoundError, match=f"^settings file {re.escape(str(missing))} does not exist$"
-    ):
+    refusal = f"Settings file {missing} does not exist. Pass the path of an existing file."
+    with pytest.raises(FileNotFoundError, match=rf"^{re.escape(refusal)}$"):
         MassiveConfig.from_file(str(missing))
     monkeypatch.setenv(CONFIG_FILE_VARIABLE, str(missing))
-    with pytest.raises(
-        FileNotFoundError,
-        match=rf"^settings file {re.escape(str(missing))} does not exist "
-        r"\(from DEEPHAVEN_MASSIVE_CONFIG_FILE\)$",
-    ):
+    refusal = (
+        f"Settings file {missing} does not exist. Set DEEPHAVEN_MASSIVE_CONFIG_FILE to the path "
+        "of an existing file."
+    )
+    with pytest.raises(FileNotFoundError, match=rf"^{re.escape(refusal)}$"):
         MassiveConfig.from_file()
 
 
@@ -817,57 +984,63 @@ def test_a_refusal_is_logged_at_debug(tmp_path: Path, caplog: pytest.LogCaptureF
     ):
         MassiveConfig.from_file(missing)
     assert caplog.messages == [
-        f"MassiveConfig.from_file({missing!r}) refused: settings file {missing} does not exist"
+        (
+            f"MassiveConfig.from_file({missing!r}) refused: Settings file {missing} does not "
+            "exist. Pass the path of an existing file."
+        )
     ]
 
 
 def test_a_file_that_is_not_utf8_is_refused(tmp_path: Path) -> None:
     file = tmp_path / "settings.yaml"
     file.write_bytes(b"s3_bucket: caf\xe9\n")
-    with pytest.raises(
-        ValueError,
-        match=f"^settings file {re.escape(str(file))} is not UTF-8 text: invalid continuation byte",
-    ):
+    refusal = (
+        f"Settings file {file} is not UTF-8 text: invalid continuation byte at byte 14. Save it "
+        "as UTF-8."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         MassiveConfig.from_file(file)
 
 
 def test_a_control_character_is_refused(tmp_path: Path) -> None:
-    assert "unacceptable character #x0007" in _refused(tmp_path, "s3_bucket: a\x07b\n")
+    assert _refused(tmp_path, "s3_bucket: a\x07b\n") == (
+        " holds the character U+0007 at offset 12, which YAML does not allow. Remove it."
+    )
 
 
 def test_a_syntax_error_names_its_line_and_column(tmp_path: Path) -> None:
     message = _refused(tmp_path, "max_outage: 600\ndelayed_subscriptions: [options\n")
-    assert message == ", line 3, column 1: expected ',' or ']', but got '<stream end>'"
+    assert message == (
+        ", line 3, column 1: The text is not valid YAML. The YAML parser says \"expected ',' or "
+        "']', but got '<stream end>'\"."
+    )
+
+
+_NOT_A_MAPPING = (
+    "The file is not a mapping of setting names to values. Write one setting per line, such as "
+    "'max_outage: 600'."
+)
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        (
-            "",
-            (
-                ": the top level must be a mapping of setting names to values, such as "
-                "'max_outage: 600'"
-            ),
-        ),
-        (
-            "# only a comment\n",
-            (
-                ": the top level must be a mapping of setting names to "
-                "values, such as 'max_outage: 600'"
-            ),
-        ),
-        ("- max_outage\n", ", line 1, column 1: the top level must be a mapping"),
-        ("max_outage\n", ", line 1, column 1: the top level must be a mapping"),
+        ("", f": {_NOT_A_MAPPING}"),
+        ("# only a comment\n", f": {_NOT_A_MAPPING}"),
+        ("- max_outage\n", f", line 1, column 1: {_NOT_A_MAPPING}"),
+        ("max_outage\n", f", line 1, column 1: {_NOT_A_MAPPING}"),
     ],
 )
 def test_the_top_level_must_be_a_mapping(tmp_path: Path, text: str, expected: str) -> None:
-    assert _refused(tmp_path, text).startswith(expected)
+    assert _refused(tmp_path, text) == expected
 
 
 def test_a_second_document_is_refused(tmp_path: Path) -> None:
     message = _refused(tmp_path, "max_outage: 600\n---\nmax_concurrency: 4\n")
-    assert message == ", line 2, column 1: a second document starts here; a settings file holds one"
+    assert message == (
+        ", line 2, column 1: A second YAML document starts here, and a settings file holds one. "
+        "Put every setting in the first document."
+    )
 
 
 @pytest.mark.parametrize(
@@ -875,17 +1048,47 @@ def test_a_second_document_is_refused(tmp_path: Path) -> None:
     [
         (
             "s3_bucket: !!python/object:os.system ls\n",
-            ", line 1, column 12: a tag (tag:yaml.org,2002:python/object:os.system) is not allowed",
+            (
+                ", line 1, column 12: The tag 'tag:yaml.org,2002:python/object:os.system'"
+                " is not allowed. Write the plain value."
+            ),
         ),
-        ("s3_bucket: !!str ON\n", ", line 1, column 12: a tag (tag:yaml.org,2002:str) is not"),
-        ("s3_bucket: !custom ON\n", ", line 1, column 12: a tag (!custom) is not allowed"),
-        ("delayed_subscriptions: !!seq [options]\n", ", line 1, column 24: a tag"),
-        ("websocket_hosts: !!map {stocks: a.example.com}\n", ", line 1, column 18: a tag"),
-        ("!!python/name:os.system max_outage: 1\n", ", line 1, column 1: a tag"),
+        (
+            "s3_bucket: !!str ON\n",
+            (
+                ", line 1, column 12: The tag 'tag:yaml.org,2002:str' is not allowed. "
+                "Write the plain value."
+            ),
+        ),
+        (
+            "s3_bucket: !custom ON\n",
+            (", line 1, column 12: The tag '!custom' is not allowed. Write the plain value."),
+        ),
+        (
+            "delayed_subscriptions: !!seq [options]\n",
+            (
+                ", line 1, column 24: The tag 'tag:yaml.org,2002:seq' is not allowed. "
+                "Write the plain value."
+            ),
+        ),
+        (
+            "websocket_hosts: !!map {stocks: a.example.com}\n",
+            (
+                ", line 1, column 18: The tag 'tag:yaml.org,2002:map' is not allowed. "
+                "Write the plain value."
+            ),
+        ),
+        (
+            "!!python/name:os.system max_outage: 1\n",
+            (
+                ", line 1, column 1: The tag 'tag:yaml.org,2002:python/name:os.system'"
+                " is not allowed. Write the plain value."
+            ),
+        ),
     ],
 )
 def test_a_tag_is_refused(tmp_path: Path, text: str, expected: str) -> None:
-    assert _refused(tmp_path, text).startswith(expected)
+    assert _refused(tmp_path, text) == expected
 
 
 def test_an_anchor_and_an_alias_are_refused(tmp_path: Path) -> None:
@@ -893,10 +1096,12 @@ def test_an_anchor_and_an_alias_are_refused(tmp_path: Path) -> None:
         tmp_path, "max_outage: &seconds 300\nsubscription_confirmation_timeout: *seconds\n"
     )
     assert message == (
-        ", line 1, column 13: an anchor (&seconds) is not allowed; write each value out"
+        ", line 1, column 13: The anchor &seconds is not allowed. Write each value out in full."
     )
     message = _refused(tmp_path, "max_outage: 300\nsubscription_confirmation_timeout: *seconds\n")
-    assert message == ", line 2, column 36: an alias (*name) is not allowed; write the value out"
+    assert message == (
+        ", line 2, column 36: The alias *seconds is not allowed. Write the value out in full."
+    )
 
 
 def test_deep_nesting_is_refused_at_its_line_instead_of_overflowing_the_stack(
@@ -904,27 +1109,29 @@ def test_deep_nesting_is_refused_at_its_line_instead_of_overflowing_the_stack(
 ) -> None:
     # Thousands of levels would exhaust Python's recursion limit inside PyYAML's composer.
     flow = "max_outage: " + "[" * 5000 + "]" * 5000 + "\n"
-    assert _refused(tmp_path, flow) == (
-        ", line 1, column 22: lists and mappings nest more than 10 deep here; a setting needs "
-        "two levels at most"
+    nested = (
+        "Lists and mappings nest more than 10 levels deep here. Write each setting with two "
+        "levels at most."
     )
+    assert _refused(tmp_path, flow) == f", line 1, column 22: {nested}"
     block = "".join(f"{'  ' * level}k:\n" for level in range(3000))
-    assert _refused(tmp_path, block).startswith(", line 11, column 21: lists and mappings nest")
+    assert _refused(tmp_path, block) == f", line 11, column 21: {nested}"
     # Ten levels, the top mapping's included, are composed and refused by the setting itself.
     shallow = "max_outage: " + "[" * 9 + "]" * 9 + "\n"
-    assert _refused(tmp_path, shallow).startswith(", line 1, column 13: max_outage must be")
+    assert _refused(tmp_path, shallow) == (
+        ", line 1, column 13: In max_outage, the value is a list or mapping, not a number of "
+        "seconds."
+    )
 
 
 def test_a_duplicate_key_is_refused(tmp_path: Path) -> None:
     message = _refused(tmp_path, "max_outage: 300\nmax_concurrency: 2\nmax_outage: 600\n")
-    assert message == (
-        ", line 3, column 1: max_outage is set twice; set it once (it is first set on line 1)"
-    )
+    assert message == ", line 3, column 1: max_outage is set twice, first on line 1. Remove one."
 
 
 def test_a_key_that_is_not_text_is_refused(tmp_path: Path) -> None:
     message = _refused(tmp_path, "[max_outage]: 300\n")
-    assert message == ", line 1, column 1: must be a setting name, not a list or mapping"
+    assert message == ", line 1, column 1: A setting name is a list or mapping here, not text."
 
 
 @pytest.mark.parametrize(
@@ -940,27 +1147,38 @@ def test_a_credential_is_refused_without_showing_it(
 ) -> None:
     message = _refused(tmp_path, f"max_outage: 300\n{name}: hunter2-secret\n")
     assert message == (
-        f", line 2, column 1: {name} is a credential, which a settings file may not hold; "
-        f"remove it and set {variable} in the environment, or pass it in code (the value is "
-        "not shown)"
+        f", line 2, column 1: {name} is a credential, which a settings file may not hold. "
+        f"Remove it, and set {variable} in the environment or pass "
+        f"dm.MassiveConfig({name}=...)."
     )
+    assert "hunter2" not in message
 
 
 def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
     message = _refused(tmp_path, "max_outages: 300\n")
-    assert (
-        message == ", line 1, column 1: unknown setting 'max_outages'; did you mean 'max_outage'?"
+    assert message == (
+        ", line 1, column 1: 'max_outages' is not a setting. Write max_outage if you meant that "
+        "setting."
+    )
+    every = (
+        "Write one of websocket_hosts, subscription_confirmation_timeout, reconnect_backoff, "
+        "max_reconnect_backoff, connection_taken, max_outage, flat_file_symbol_threshold, "
+        "max_concurrency, rest_requests_per_minute, delayed_subscriptions, flush_interval, "
+        "rest_base_url, s3_endpoint_url, s3_bucket, or on_error."
     )
     # A pasted secret as a key shows only its first 40 characters.
     secret = "a" * 40 + "hunter2-tail"
     message = _refused(tmp_path, f"{secret}: 1\n")
-    assert message.startswith(f", line 1, column 1: unknown setting '{'a' * 40}…'; the settings")
+    assert message == f", line 1, column 1: '{'a' * 40}…' is not a setting. {every}"
     assert "hunter2" not in message
     message = _refused(tmp_path, "zzz: 1\n")
-    assert message == (
-        ", line 1, column 1: unknown setting 'zzz'; the settings are "
-        + ", ".join(_config._CONVERTERS)
-    )
+    assert message == f", line 1, column 1: 'zzz' is not a setting. {every}"
+
+
+_SECONDS = "is not a finite number of seconds. Write one such as 300 or 0.5."
+_WHOLE = "is not a whole number. Write one such as 8."
+_SUBSCRIPTIONS = "stocks, options, indices, currencies, or futures"
+_EMPTY = "the value is empty. Write a value, or leave the setting out to keep its default."
 
 
 @pytest.mark.parametrize(
@@ -970,160 +1188,159 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
         (
             "on_error: {noncanonical_symbols: Raise}\n",
             (
-                ", line 1, column 34: on_error 'Raise' is not an error setting for "
-                "noncanonical_symbols; write one of raise, log, ignore, exactly as shown"
+                ", line 1, column 34: In on_error, 'Raise' is not an error setting for "
+                "noncanonical_symbols. Write raise, log, or ignore, exactly as shown."
             ),
         ),
         (
             'on_error:\n  unreadable_symbols: " raise"\n',
             (
-                ", line 2, column 23: on_error ' raise' is not an error setting for "
-                "unreadable_symbols; write one of raise, log, ignore, exactly as shown"
+                ", line 2, column 23: In on_error, ' raise' is not an error setting for "
+                "unreadable_symbols. Write raise, log, or ignore, exactly as shown."
             ),
         ),
         (
             "on_error: raise\n",
             (
-                ", line 1, column 11: on_error must be a mapping of cause to raise, log, or "
-                "ignore, such as {malformed_rows: raise}"
+                ", line 1, column 11: In on_error, the value is not a mapping of each cause to "
+                "raise, log, or ignore. Write one such as {malformed_rows: raise}."
             ),
         ),
         (
             "on_error: {malformed_row: raise}\n",
             (
-                ", line 1, column 12: on_error has no cause 'malformed_row'; the causes are "
+                ", line 1, column 12: In on_error, 'malformed_row' is not a cause. Write "
                 "noncanonical_symbols, unreadable_symbols, unavailable_symbols, unreadable_keys, "
                 "unconvertible_values, malformed_rows, unlisted_contracts, unscheduled_products, "
-                "refused_venues"
+                "or refused_venues."
             ),
         ),
         (
             "on_error: {malformed_rows: raise, malformed_rows: log}\n",
-            ", line 1, column 35: on_error sets 'malformed_rows' twice",
+            ", line 1, column 35: In on_error, 'malformed_rows' is set twice. Remove one.",
+        ),
+        (
+            "on_error: {[malformed_rows]: raise}\n",
+            ", line 1, column 12: In on_error, the value is a list or mapping, not a cause.",
         ),
         (
             "connection_taken: Reconnect\n",
             (
-                ", line 1, column 19: connection_taken 'Reconnect' "
-                "is not a connection_taken value; write one of fail, reconnect, exactly as shown"
+                ", line 1, column 19: In connection_taken, 'Reconnect' is not a valid value. "
+                "Write fail or reconnect, exactly as shown."
             ),
         ),
         (
             "on_error: {unreadable_symbols: [log]}\n",
             (
-                ", line 1, column 32: on_error must be an error setting for "
-                "unreadable_symbols (raise, log, ignore), not a list or mapping"
+                ", line 1, column 32: In on_error, the value is a list or mapping, not an error "
+                "setting for unreadable_symbols."
             ),
         ),
         # The subscription lists.
         (
             "delayed_subscriptions: options\n",
             (
-                ", line 1, column 24: delayed_subscriptions must "
-                "be a list of subscriptions, such as [stocks, options], or [] for none"
+                ", line 1, column 24: In delayed_subscriptions, the value is not a list of "
+                "subscriptions. Write one such as [stocks, options], or [] for none."
             ),
         ),
         (
             "delayed_subscriptions: [Options]\n",
             (
-                ", line 1, column 25: delayed_subscriptions 'Options' is not a subscription; "
-                "write one of stocks, options, indices, currencies, futures, exactly as shown"
+                ", line 1, column 25: In delayed_subscriptions, 'Options' is not a subscription. "
+                f"Write {_SUBSCRIPTIONS}, exactly as shown."
             ),
         ),
         (
             "delayed_subscriptions: [stocks, stocks]\n",
-            ", line 1, column 33: delayed_subscriptions lists 'stocks' twice",
+            ", line 1, column 33: In delayed_subscriptions, 'stocks' is listed twice. Remove one.",
         ),
         (
             "rest_requests_per_minute: {forex: 5}\n",
-            ", line 1, column 28: rest_requests_per_minute 'forex' is not a subscription",
+            (
+                ", line 1, column 28: In rest_requests_per_minute, 'forex' is not a "
+                f"subscription. Write {_SUBSCRIPTIONS}, exactly as shown."
+            ),
         ),
         (
             "rest_requests_per_minute: {stocks: 5, stocks: 6}\n",
-            ", line 1, column 39: rest_requests_per_minute limits 'stocks' twice",
+            ", line 1, column 39: In rest_requests_per_minute, 'stocks' is set twice. Remove one.",
         ),
         (
             "rest_requests_per_minute: [stocks]\n",
             (
-                ", line 1, column 27: rest_requests_per_minute must be a mapping of subscription "
-                "to requests per minute, such as {stocks: 5}, or {} for none"
+                ", line 1, column 27: In rest_requests_per_minute, the value is not a mapping of "
+                "subscription to requests per minute. Write one such as {stocks: 5}, or {} for "
+                "none."
             ),
         ),
         (
             "rest_requests_per_minute: {stocks: five}\n",
-            ", line 1, column 36: rest_requests_per_minute 'five' is not a whole number",
+            f", line 1, column 36: In rest_requests_per_minute, 'five' {_WHOLE}",
         ),
         # The durations.
-        (
-            "max_outage: soon\n",
-            (
-                ", line 1, column 13: max_outage 'soon' is not a finite "
-                "number of seconds; write one such as 300 or 0.5"
-            ),
-        ),
-        ("max_outage: .inf\n", ", line 1, column 13: max_outage '.inf' is not a finite"),
-        ("max_outage: nan\n", ", line 1, column 13: max_outage 'nan' is not a finite"),
-        ("max_outage: 1e999\n", ", line 1, column 13: max_outage '1e999' is not a finite"),
+        ("max_outage: soon\n", f", line 1, column 13: In max_outage, 'soon' {_SECONDS}"),
+        ("max_outage: .inf\n", f", line 1, column 13: In max_outage, '.inf' {_SECONDS}"),
+        ("max_outage: nan\n", f", line 1, column 13: In max_outage, 'nan' {_SECONDS}"),
+        ("max_outage: 1e999\n", f", line 1, column 13: In max_outage, '1e999' {_SECONDS}"),
         (
             "subscription_confirmation_timeout: 0700\n",
-            ", line 1, column 36: subscription_confirmation_timeout '0700' is not a finite",
+            f", line 1, column 36: In subscription_confirmation_timeout, '0700' {_SECONDS}",
         ),
-        ("flush_interval: 1_0\n", ", line 1, column 17: flush_interval '1_0' is not a finite"),
-        ("flush_interval: \n", ", line 1, column 16: flush_interval '' is not a finite"),
+        ("flush_interval: 1_0\n", f", line 1, column 17: In flush_interval, '1_0' {_SECONDS}"),
+        ("flush_interval: \n", f", line 1, column 16: In flush_interval, '' {_SECONDS}"),
         (
             "max_outage: {a: 1}\n",
-            ", line 1, column 13: max_outage must be a number of seconds, not a list or mapping",
+            (
+                ", line 1, column 13: In max_outage, the value is a list or mapping, not a "
+                "number of seconds."
+            ),
         ),
         # The counts.
-        (
-            "max_concurrency: 8.0\n",
-            ", line 1, column 18: max_concurrency '8.0' is not a whole number; write one such as 8",
-        ),
-        ("max_concurrency: 010\n", ", line 1, column 18: max_concurrency '010' is not a whole"),
+        ("max_concurrency: 8.0\n", f", line 1, column 18: In max_concurrency, '8.0' {_WHOLE}"),
+        ("max_concurrency: 010\n", f", line 1, column 18: In max_concurrency, '010' {_WHOLE}"),
         (
             "flat_file_symbol_threshold: fifty\n",
-            ", line 1, column 29: flat_file_symbol_threshold 'fifty' is not a whole number",
+            f", line 1, column 29: In flat_file_symbol_threshold, 'fifty' {_WHOLE}",
         ),
         # The host mapping.
         (
             "websocket_hosts: delayed.massive.com\n",
             (
-                ", line 1, column 18: websocket_hosts must be a mapping of "
-                "asset class to hostname, such as {stocks: delayed.massive.com}"
+                ", line 1, column 18: In websocket_hosts, the value is not a mapping of asset "
+                "class to hostname. Write one such as {stocks: delayed.massive.com}."
             ),
         ),
         (
             "websocket_hosts: {Stocks: a.example.com}\n",
             (
-                ", line 1, column 19: websocket_hosts 'Stocks' is not "
-                "an asset class; write one of stocks, options, futures, indices, forex, crypto"
+                ", line 1, column 19: In websocket_hosts, 'Stocks' is not an asset class. Write "
+                "stocks, options, futures, indices, forex, or crypto, exactly as shown."
             ),
         ),
         (
             "websocket_hosts:\n  stocks: a.example.com\n  stocks: b.example.com\n",
-            ", line 3, column 3: websocket_hosts pins 'stocks' twice",
+            ", line 3, column 3: In websocket_hosts, 'stocks' is set twice. Remove one.",
         ),
         (
             "websocket_hosts: {stocks: [a.example.com]}\n",
-            ", line 1, column 27: websocket_hosts must be a hostname, not a list or mapping",
+            (
+                ", line 1, column 27: In websocket_hosts, the value is a list or mapping, not a "
+                "hostname."
+            ),
         ),
         # The counts: more digits than Python converts, without echoing them.
         (
             "max_concurrency: " + "9" * 5000 + "\n",
             (
-                ", line 1, column 18: max_concurrency is a number of 5000 characters, too "
-                "long to read; write one such as 8"
+                ", line 1, column 18: In max_concurrency, the number is 5000 characters long, "
+                "too long to read. Write one such as 8."
             ),
         ),
         # The text settings.
         *(
-            (
-                text,
-                (
-                    f", line 1, column {column}: {name} is empty; write the value, or leave "
-                    "the setting out for its default"
-                ),
-            )
+            (text, f", line 1, column {column}: In {name}, {_EMPTY}")
             for text, name, column in [
                 ("rest_base_url:\n", "rest_base_url", 15),
                 ("s3_endpoint_url: ~\n", "s3_endpoint_url", 18),
@@ -1134,14 +1351,14 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
         ),
         (
             "rest_base_url: [https://api.massive.com]\n",
-            ", line 1, column 16: rest_base_url must be text, not a list or mapping",
+            ", line 1, column 16: In rest_base_url, the value is a list or mapping, not text.",
         ),
     ],
 )
 def test_each_converter_refuses_what_it_cannot_convert(
     tmp_path: Path, text: str, expected: str
 ) -> None:
-    assert _refused(tmp_path, text).startswith(expected)
+    assert _refused(tmp_path, text) == expected
 
 
 @pytest.mark.usefixtures("key")
@@ -1160,27 +1377,40 @@ def test_tickers_like_on_and_no_stay_text(tmp_path: Path) -> None:
 def test_the_constructor_still_validates_and_its_message_names_the_line(tmp_path: Path) -> None:
     message = _refused(tmp_path, "max_concurrency: 2\nmax_outage: -1\n")
     assert message == (
-        ", line 2, column 1: max_outage must be zero or more seconds, got -1.0; 0 fails live "
-        "tables at the first disconnect"
+        ", line 2, column 1: max_outage=-1.0 is not a finite number of seconds, zero or more. "
+        "Pass 0 to fail live tables at the first disconnect, or the seconds to wait out an outage."
     )
     message = _refused(tmp_path, "delayed_subscriptions: [currencies]\n")
-    assert message.startswith(
-        ", line 1, column 1: delayed_subscriptions cannot hold dm.Subscription.CURRENCIES"
+    assert message == (
+        ", line 1, column 1: delayed_subscriptions holds dm.Subscription.CURRENCIES, but Massive "
+        "has no delayed forex or crypto feed, so their streams are always real-time. Remove "
+        "dm.Subscription.CURRENCIES from delayed_subscriptions."
     )
     message = _refused(tmp_path, "websocket_hosts: {stocks: Socket.massive.com}\n")
-    assert message.startswith(
-        ", line 1, column 1: websocket_hosts[stocks]='Socket.massive.com' must"
+    assert message == (
+        ", line 1, column 1: websocket_hosts[stocks]='Socket.massive.com' is not a lower-case "
+        "hostname with nothing around it. Pass 'socket.massive.com'."
     )
     message = _refused(tmp_path, "max_outage: 600\nrest_base_url: ON\n")
-    assert message.startswith(", line 2, column 1: rest_base_url must be an http or https URL")
+    assert message == (
+        ", line 2, column 1: rest_base_url='ON' is not an http or https URL with a host, such as "
+        "'https://api.massive.com'."
+    )
     message = _refused(tmp_path, "max_outage: 600\nrest_base_url: https://api.massive.com/v3\n")
-    assert message.startswith(
-        ", line 2, column 1: rest_base_url 'https://api.massive.com/v3' must name only a scheme"
+    assert message == (
+        ", line 2, column 1: rest_base_url='https://api.massive.com/v3' names more than a scheme, "
+        "host, and port. Pass only those, such as 'https://api.massive.com'."
     )
     message = _refused(tmp_path, "s3_bucket: '~'\ns3_endpoint_url: '0700'\n")
-    assert message.startswith(", line 2, column 1: s3_endpoint_url must be an http or https URL")
+    assert message == (
+        ", line 2, column 1: s3_endpoint_url='0700' is not an http or https URL with a host, "
+        "such as 'https://files.massive.com'."
+    )
     message = _refused(tmp_path, "reconnect_backoff: 200\n")
-    assert message == ": max_reconnect_backoff must not be below reconnect_backoff"
+    assert message == (
+        ": max_reconnect_backoff=120 is below reconnect_backoff=200. Pass a "
+        "max_reconnect_backoff of 200 or more."
+    )
 
 
 @pytest.mark.parametrize(
@@ -1193,17 +1423,19 @@ def test_an_environment_problem_names_the_variable_and_not_the_file(
     monkeypatch.setenv("MASSIVE_API_KEY", "k")
     monkeypatch.setenv(variable, " padded ")
     file = _settings(tmp_path, "max_outage: 600\n")
-    with pytest.raises(ValueError, match=f"^{variable} has leading or trailing whitespace"):
+    with pytest.raises(
+        ValueError, match=rf"^The environment variable {variable} has leading or trailing "
+    ):
         MassiveConfig.from_file(file)
     monkeypatch.setenv("MASSIVE_API_KEY", "k")
     monkeypatch.delenv("MASSIVE_S3_SECRET_ACCESS_KEY", raising=False)
     monkeypatch.setenv("MASSIVE_S3_ACCESS_KEY_ID", "AKIA9")
-    with pytest.raises(ValueError, match=r"^flat files need both s3_access_key_id"):
+    with pytest.raises(ValueError, match=r"^Flat files need both S3 credentials, and only "):
         MassiveConfig.from_file(file)
 
 
 def test_a_missing_key_is_still_an_authentication_error(tmp_path: Path) -> None:
-    with pytest.raises(dm.AuthenticationError, match="no Massive API key") as missing:
+    with pytest.raises(dm.AuthenticationError, match=r"^No Massive API key is set\.") as missing:
         MassiveConfig.from_file(_settings(tmp_path, "max_outage: 600\n"))
     # Massive refused nothing: the settings lack the key, and that is no bug.
     assert (missing.value.source, missing.value.is_bug) == (dm.ErrorSource.USER, False)
@@ -1234,10 +1466,12 @@ def test_reading_a_file_keeps_the_gil_disabled(tmp_path: Path) -> None:
 
 
 def test_a_refused_rest_base_url_never_shows_its_query() -> None:
-    with pytest.raises(ValueError, match="must name only") as info:
+    refusal = (
+        "rest_base_url='https://api.massive.com?***' names more than a scheme, host, and port. "
+        "Pass only those, such as 'https://api.massive.com'."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         MassiveConfig(api_key="k", rest_base_url="https://api.massive.com?apiKey=hunter2")
-    assert "'https://api.massive.com?***'" in str(info.value)
-    assert "hunter2" not in str(info.value)
 
 
 @pytest.mark.parametrize(
@@ -1252,15 +1486,21 @@ def test_an_early_rest_base_url_refusal_never_shows_its_query(
     url: str, shown: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="deephaven_massive")
-    with pytest.raises(ValueError, match=r"^rest_base_url must be an http") as info:
+    refusal = (
+        f"rest_base_url={shown} is not an http or https URL with a host, such as "
+        "'https://api.massive.com'."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         MassiveConfig(api_key="k", rest_base_url=url)
-    assert str(info.value).endswith(f"not {shown}")
-    assert "hunter2" not in str(info.value)
     assert "hunter2" not in caplog.text
 
 
 def test_an_s3_endpoint_refusal_still_shows_its_query() -> None:
-    with pytest.raises(ValueError, match=r"not 'ftp://files\.massive\.com\?x=1'$"):
+    with pytest.raises(
+        ValueError,
+        match=r"^s3_endpoint_url='ftp://files\.massive\.com\?x=1' is not an http or https URL "
+        r"with a host, such as 'https://files\.massive\.com'\.$",
+    ):
         MassiveConfig(api_key="k", s3_endpoint_url="ftp://files.massive.com?x=1")
 
 
@@ -1425,12 +1665,18 @@ def test_the_reference_refuses_an_example_that_misses_or_adds_a_setting(
 ) -> None:
     example = dict(_config._EXAMPLE)
     first = next(iter(example))
-    monkeypatch.setattr(_config, "_EXAMPLE", {k: v for k, v in example.items() if k != first})
-    with pytest.raises(ValueError, match="not every file setting once"):
-        _config.settings_reference()
-    monkeypatch.setattr(_config, "_EXAMPLE", {**example, "api_key": example[first]})
-    with pytest.raises(ValueError, match="not every file setting once"):
-        _config.settings_reference()
+    settings = sorted(_config._CONVERTERS)
+    for changed in (
+        {k: v for k, v in example.items() if k != first},
+        {**example, "api_key": example[first]},
+    ):
+        monkeypatch.setattr(_config, "_EXAMPLE", changed)
+        refusal = (
+            f"The settings reference lists {sorted(changed)}, not every file setting once. "
+            f"Give _EXAMPLE one entry for each of {settings}."
+        )
+        with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
+            _config.settings_reference()
 
 
 def test_the_reference_refuses_an_example_that_misses_a_cause(
@@ -1439,7 +1685,12 @@ def test_the_reference_refuses_an_example_that_misses_a_cause(
     comments = dict(_config._CAUSE_COMMENTS)
     del comments["malformed_rows"]
     monkeypatch.setattr(_config, "_CAUSE_COMMENTS", comments)
-    with pytest.raises(ValueError, match="not every cause once"):
+    causes = sorted(f.name for f in dataclasses.fields(dm.ErrorPolicy))
+    refusal = (
+        f"The example file comments on {sorted(comments)}, not every cause once. Give "
+        f"_CAUSE_COMMENTS one entry for each of {causes}."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         _config.settings_reference()
 
 
@@ -1473,7 +1724,11 @@ def test_only_the_generated_part_of_the_page_is_rewritten() -> None:
     ],
 )
 def test_a_page_without_both_markers_is_refused(page: str) -> None:
-    with pytest.raises(ValueError, match="SETTINGS_REFERENCE_START and SETTINGS_REFERENCE_END"):
+    with pytest.raises(
+        ValueError,
+        match=r"^The configuration page lacks the line SETTINGS_REFERENCE_START, or "
+        r"SETTINGS_REFERENCE_END after it\. Put the two lines around its generated part\.$",
+    ):
         _config.with_settings_reference(page)
 
 

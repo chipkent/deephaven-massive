@@ -172,7 +172,7 @@ rest_requests_per_minute:
   currencies: 5
   futures: 5
 
-# Seconds a live table waits out an outage before it fails; 0 fails at once.
+# Seconds a live table waits out an outage before it fails, or 0 to fail at once.
 max_outage: 600
 
 # Seconds between the batches of streamed rows added to live tables.
@@ -212,7 +212,7 @@ websocket_hosts:
 # Seconds Massive has to confirm a stream's channel before the library asks again.
 subscription_confirmation_timeout: 5  # the default
 
-# Shortest wait, in seconds, before reconnecting a dropped stream; at least 15.
+# Shortest wait, in seconds, before reconnecting a dropped stream: 15 or more.
 reconnect_backoff: 30  # the default
 
 # Longest wait, in seconds, before reconnecting a dropped stream.

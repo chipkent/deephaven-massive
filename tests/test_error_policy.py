@@ -1,6 +1,7 @@
 """Tests for `_error_policy.py`: the error policy, its defaults, and how a call's resolves."""
 
 import dataclasses
+import re
 from dataclasses import fields
 
 import pytest
@@ -69,7 +70,9 @@ def test_the_first_argument_is_positional_only() -> None:
 @pytest.mark.parametrize("cause", CAUSES)
 def test_a_cause_must_be_the_enum(cause: str) -> None:
     # A plain string equal to a member's value is refused too: `OnError` is a `StrEnum`.
-    with pytest.raises(TypeError, match=f"{cause} must be dm.OnError, e.g. dm.OnError.RAISE"):
+    with pytest.raises(
+        TypeError, match=rf"^{cause} must be dm\.OnError, such as dm\.OnError\.RAISE, not 'raise'$"
+    ):
         ErrorPolicy(**{cause: "raise"})  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -130,13 +133,24 @@ def test_check_policy_returns_a_policy() -> None:
 
 
 def test_check_policy_shows_how_to_set_every_cause_to_a_bare_member() -> None:
-    with pytest.raises(TypeError, match=r"pass dm.ErrorPolicy\(dm.OnError.RAISE\)"):
+    refusal = (
+        "on_error=dm.OnError.RAISE is not a dm.ErrorPolicy. To set every cause to RAISE, pass "
+        "on_error=dm.ErrorPolicy(dm.OnError.RAISE)."
+    )
+    with pytest.raises(TypeError, match=rf"^{re.escape(refusal)}$"):
         check_policy(dm.OnError.RAISE)
+    # The policy it names sets every cause to the member.
+    named = check_policy(dm.ErrorPolicy(dm.OnError.RAISE))
+    assert set(_settings(named).values()) == {dm.OnError.RAISE}
 
 
 @pytest.mark.parametrize("value", [None, "raise", {"malformed_rows": "raise"}])
 def test_check_policy_refuses_anything_else(value: object) -> None:
-    with pytest.raises(TypeError, match=r"on_error must be dm\.ErrorPolicy, such as .*, not "):
+    refusal = (
+        "on_error must be dm.ErrorPolicy, such as dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE), "
+        f"not {type(value).__name__}"
+    )
+    with pytest.raises(TypeError, match=rf"^{re.escape(refusal)}$"):
         check_policy(value)
 
 
