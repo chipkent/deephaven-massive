@@ -104,7 +104,7 @@ of three values:
 
 `m.problems()` lists each problem a table met, with its cause and the setting that applied.
 
-The library leaves out any row of Massive's data it can't read. A row it can read is one whose
+By default, the library leaves out any row of Massive's data it can't read. A row it can read is one whose
 symbol, time, and values it can convert to the table's columns. So a result can be partial.
 Say `m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")` gets 5 rows from Massive, and the library can't read one
 of them. The table gets 4 rows. `m.problems()` lists the fifth, and the log warns once.
@@ -126,9 +126,9 @@ Under `raise`:
 - A problem found when you make the call raises at once.
 - A problem found later, as the rows arrive, raises from a call with `wait=True`. Without
   `wait=True`, it fails the table.
-- A watchlist read by `fetch()` or `history()` fails only the symbols it met, and
-  `m.symbol_reads()` shows them `FAILED`. A bad watchlist row instead fails the whole
-  table.
+- A watchlist read by `fetch()` or `history()` fails only the symbols with a problem, and
+  `m.symbol_reads()` shows them `FAILED`. A watchlist row whose value isn't Massive's exact
+  ticker fails the whole table.
 
 A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
 A cause it leaves unset follows the session's setting.
