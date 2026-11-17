@@ -28,7 +28,6 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    NEW_SESSION,
     MassiveError,
     required,
     session_closed,
@@ -111,7 +110,11 @@ def test_a_session_collected_unclosed_runs_its_closers(
             logging.INFO,
             f"{name} was garbage-collected without close(); closing its connections and pollers",
         ),
-        (logging.ERROR, f"{name}: a transport failed to close. {LIBRARY_BUG}"),
+        (
+            logging.ERROR,
+            "A connection or poller of a session collected without close() failed to close. "
+            + LIBRARY_BUG,
+        ),
     ]
 
 
@@ -145,7 +148,9 @@ def test_closers_run_and_failures_are_logged(
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.session_core"):
         massive_session.close()
     assert ran == ["second"]
-    assert "a transport failed to close" in caplog.text
+    assert [r.getMessage() for r in caplog.records] == [
+        f"A connection or poller of the closing session failed to close. {LIBRARY_BUG}"
+    ]
 
 
 def test_diagnostics_that_cannot_be_built_stop_the_reaper(
@@ -290,10 +295,16 @@ def test_a_long_verb_in_a_console_command_is_reported_once_per_pause(
         # The command's two verbs share one pause: the second logs only at DEBUG.
         assert [r.levelno for r in paused] == [logging.WARNING, logging.DEBUG]
         message = paused[0].getMessage()
-        assert message.startswith(
-            f"{label(massive_session)}: m.test.trades().append_only() ran for "
+        assert re.fullmatch(
+            re.escape("m.test.trades().append_only() ran for ")
+            + r"\d+"
+            + re.escape(
+                " s inside a Deephaven console command, and live tables do not update until the "
+                "command ends. Leave out wait=True so that fetch() or history() reads in the "
+                "background."
+            ),
+            message,
         )
-        assert "the command ends; leave out wait=True to let fetch() or history() read" in message
         caplog.clear()
         next_update_cycle()  # the live tables updated again: the pause ended
         console_command(lambda: made.append(q.ring(7)))
@@ -509,7 +520,8 @@ def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContex
     try:
         assert core.catalog is catalog
         assert core.thread_prefix == "t"
-        with pytest.raises(RuntimeError, match=r"^core has no transports attached$"):
+        unattached = f"The session has no connections attached. {LIBRARY_BUG}"
+        with pytest.raises(RuntimeError, match=rf"^{re.escape(unattached)}$"):
             core.rest_transport()
         ports = _Ports()
         core.attach(ports)
@@ -518,7 +530,8 @@ def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContex
         assert core.flat_file_transport() is _FLAT_FILES
         assert not core.read_stop().is_set()
         assert ports.asked == ["rest", "streams", "flat_files", "read_stop"]
-        with pytest.raises(RuntimeError, match=r"^core already has its transports attached$"):
+        attached = f"The session's connections are already attached. {LIBRARY_BUG}"
+        with pytest.raises(RuntimeError, match=rf"^{re.escape(attached)}$"):
             core.attach(_Ports())
         assert core.rest_transport() is _REST
         assert ports.asked == ["rest", "streams", "flat_files", "read_stop", "rest"]
@@ -617,11 +630,47 @@ def test_a_table_that_cannot_be_failed_does_not_spare_the_others(
     second = stream_query(massive_session, ["MSFT"]).append_only()
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.session_core"):
         massive_session.close()
-    assert f"{label(massive_session)}: could not fail the table of stream 1" in caplog.text
-    assert f"{label(massive_session)} closed; 1 live tables failed, streams 1 [2]" in caplog.text
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "Could not fail the live table of stream 1, so it stops updating with no Error in "
+            f"m.streams(). {LIBRARY_BUG}"
+        ),
+        (
+            "The session closed and failed its live tables, listed in m.streams() by StreamId: "
+            "2. Open a new dm.MassiveSession() to read again."
+        ),
+    ]
     assert list(fake_streams.failed) == [2]
     massive_session.release(first)
     massive_session.release(second)
+
+
+def test_close_lists_the_tables_it_failed_and_logs_at_info_when_none(
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreamTransport,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger = "deephaven_massive._tables.session_core"
+    first = stream_query(massive_session).append_only()
+    second = stream_query(massive_session, ["MSFT"]).append_only()
+    with caplog.at_level(logging.WARNING, logger=logger):
+        massive_session.close()
+    assert caplog.messages == [
+        (
+            "The session closed and failed its live tables, listed in m.streams() by StreamId: "
+            "1 and 2. Open a new dm.MassiveSession() to read again."
+        )
+    ]
+    assert sorted(fake_streams.failed) == [1, 2]
+    massive_session.release(first)
+    massive_session.release(second)
+    caplog.clear()
+    quiet = dm.MassiveSession(dm.MassiveConfig(api_key="close-quiet"))
+    name = label(quiet)
+    with caplog.at_level(logging.INFO, logger=logger):
+        quiet.close()
+    assert caplog.messages[-1] == f"{name} closed with no live table to fail"
 
 
 def test_a_dying_reaper_fails_the_sessions_live_tables(
@@ -645,8 +694,10 @@ def test_a_dying_reaper_fails_the_sessions_live_tables(
     assert not reaper.is_alive()
     assert [args.exc_type for args in escaped] == [_Fatal]
     text = fake_streams.failed[1]
-    assert text.startswith(f"{label(massive_session)}: its reaper thread died (_Fatal")
-    assert text.endswith(f"this table no longer updates. {NEW_SESSION}")
+    assert text == (
+        "This table no longer updates because a library thread of its session died: _Fatal(). "
+        "Open a new dm.MassiveSession() to read again."
+    )
     assert core.diagnostics.wait_until_shown(TIMEOUT)
     (row,) = dh_to_pylist(core.diagnostics.streams)  # no view: nothing could release it
     assert (row["State"], row["Error"]) == ("FAILED", text)
@@ -692,9 +743,10 @@ def test_a_diagnostics_writer_dying_after_the_call_fails_the_returned_table(
     writer.join(TIMEOUT)
     assert not writer.is_alive()
     assert [args.exc_type for args in escaped] == [_Fatal]
-    text = fake_streams.failed[1]
-    assert text.startswith(f"{label(massive_session)}: its diagnostics writer thread died (_Fatal")
-    assert text.endswith(f"this table no longer updates. {NEW_SESSION}")
+    assert fake_streams.failed[1] == (
+        "This table no longer updates because a library thread of its session died: _Fatal(). "
+        "Open a new dm.MassiveSession() to read again."
+    )
     massive_session.release(result)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
@@ -721,9 +773,11 @@ def test_a_diagnostics_writer_dying_during_the_call_makes_it_raise(
     monkeypatch.setattr(core.streams, "_require_unfailed", after_the_death)
     with pytest.raises(
         dm.MassiveError,
-        match=rf"^test\.trades stream 1 failed: {re.escape(label(massive_session))}: its "
-        r"diagnostics writer thread died \(_Fatal\(\)\); this table no longer updates. "
-        + re.escape(NEW_SESSION)
+        match="^"
+        + re.escape(
+            "test.trades stream 1 failed: This table no longer updates because a library "
+            "thread of its session died: _Fatal(). Open a new dm.MassiveSession() to read again."
+        )
         + "$",
     ):
         stream_query(massive_session).append_only()
@@ -764,20 +818,23 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
         writer.join(TIMEOUT)
     assert not writer.is_alive()
     assert [args.exc_type for args in escaped] == [_Fatal]
-    text = f"{label(massive_session)}: its diagnostics writer thread died (_Fatal()); this table"
-    assert fake_streams.failed[1].startswith(text)  # the live table fails as before
-    assert [str(error) for error in publisher.failures] == [
-        f"{text} no longer updates. {NEW_SESSION}"
-    ]
+    text = (
+        "This table no longer updates because a library thread of its session died: _Fatal(). "
+        "Open a new dm.MassiveSession() to read again."
+    )
+    assert fake_streams.failed[1] == text  # the live table fails as before
+    assert [str(error) for error in publisher.failures] == [text]
     assert diagnostics._scope in handed
     assert "their scope is handed to the reaper" in caplog.text
     assert wait_for_update_cycle(core.exec_ctx, TIMEOUT)  # the cycle that delivers the failures
     assert held.j_table.isFailed()
     with pytest.raises(
         dm.MassiveError,
-        match=rf"^{re.escape(label(massive_session))}: its diagnostics tables failed when their "
-        r"writer thread died \(_Fatal\(\)\); see the ERROR logged then. "
-        + re.escape(NEW_SESSION)
+        match="^"
+        + re.escape(
+            "This session's diagnostics tables failed when a library thread died: _Fatal(). "
+            "Open a new dm.MassiveSession() to read again."
+        )
         + "$",
     ):
         massive_session.connections()
@@ -815,7 +872,6 @@ def test_a_writer_dying_as_it_releases_its_tables_leaves_the_scope_alone(
     diagnostics = Diagnostics(
         dh_exec_ctx,
         "dying diagnostics",
-        label="TestSession",
         redactor=Redactor(),
         release_later=handed.append,
         on_death=deaths.append,
@@ -826,7 +882,13 @@ def test_a_writer_dying_as_it_releases_its_tables_leaves_the_scope_alone(
     assert [type(death) for death in deaths] == [_Fatal]
     assert diagnostics._scope not in handed
     assert len(handed) == 4  # the four other tables' unused pins: they were destroyed
-    assert f"could not fail the connections table. {LIBRARY_BUG}" in caplog.text
+    unfailed = (
+        "m.connections(): could not fail the table after a library thread died, so it stops "
+        "updating with no error. This is a bug in deephaven-massive. Turn on "
+        "dm.enable_debug_logging(), reproduce it, and report it with the log and m.streams() at "
+        "https://github.com/chipkent/deephaven-massive/issues."
+    )
+    assert [r.getMessage() for r in caplog.records if r.name.endswith(".diagnostics")] == [unfailed]
     for scope in handed:
         release_scope(dh_exec_ctx, scope)
 
@@ -870,7 +932,7 @@ def test_a_thread_of_a_freed_session_dies_quietly() -> None:
     def gone() -> None:
         return None  # the core was collected
 
-    _core.SessionCore._thread_died(gone, "reaper", _Fatal())
+    _core.SessionCore._thread_died(gone, _Fatal())
 
 
 def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(
@@ -953,7 +1015,15 @@ def test_an_unexpected_exception_escaping_a_verb_is_raised_as_a_library_bug(
 
     with (
         caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.session_core"),
-        pytest.raises(dm.MassiveError, match=r"^m\.x\(\)\.fetch\(\) failed: RuntimeError") as bug,
+        pytest.raises(
+            dm.MassiveError,
+            match="^"
+            + re.escape(
+                "m.x().fetch() failed on an unexpected error: RuntimeError('the index broke'). "
+                + LIBRARY_BUG
+            )
+            + "$",
+        ) as bug,
     ):
         core.run_verb("m.x().fetch()", body)
     assert (bug.value.source, bug.value.is_bug, bug.value.is_retryable) == (
@@ -963,6 +1033,7 @@ def test_an_unexpected_exception_escaping_a_verb_is_raised_as_a_library_bug(
     )
     assert bug.value.__cause__ is broken
     (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert record.getMessage() == f"m.x().fetch() failed on an unexpected error. {LIBRARY_BUG}"
     assert record.exc_info is not None  # logged with its traceback
 
 
