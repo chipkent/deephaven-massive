@@ -40,7 +40,7 @@ import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, assert_never
 
 import pytest
 from deephaven import update_graph
@@ -69,6 +69,7 @@ StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
 RecencyLabel: TypeAlias = "Callable[[dm.Subscription], RecencyAnswer]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
+MarketStatus: TypeAlias = "Callable[[str], str]"
 ConsoleCommand: TypeAlias = "Callable[..., None]"
 Names: TypeAlias = "dict[str, Any]"
 Rows: TypeAlias = "list[dict[str, Any]]"
@@ -439,6 +440,7 @@ def test_the_live_examples_fill_in_the_current_stock_session(
     table_rows: TableRows,
     stream_report: StreamReport,
     skip_if_not_entitled: SkipIfNotEntitled,
+    market_status: MarketStatus,
     evidence: Evidence,
 ) -> None:
     """Whether Examples 7 to 12 fill with what the stock session of the moment sends.
@@ -462,8 +464,13 @@ def test_the_live_examples_fill_in_the_current_stock_session(
       the stream (`doc_examples.seam_gaps`). Outside it, REST may hold minutes made only of
       trades reported late, which no live bar had, so those minutes are recorded but not
       required.
-    - overnight: Example 8's `latest` and the other live tables stay empty, and `spy` holds
-      the bars REST has of the day Example 11 read, or none on a day the market is closed.
+    - no session (`CLOSED`: a closed day, the hours from the after-hours close to 21:00, a
+      night before a closed day), or the overnight window while Massive's stock status says
+      `closed`: Example 8's `latest` and the other live tables stay empty, and `spy` holds the
+      bars REST has of the day Example 11 read, or none on a day the market is closed.
+    - the overnight session while Massive's status says the market trades: what each live
+      table holds is recorded, and the test skips, since bars come only for minutes with
+      trades, and no one has yet seen how often overnight minutes have them.
 
     A run whose feed crosses from one session to another while it watches is skipped after
     the checks that hold at any hour. When Massive refuses Example 7's snapshot or Example
@@ -520,23 +527,84 @@ def test_the_live_examples_fill_in_the_current_stock_session(
                 pytest.skip("no bar on the delayed feed, whose lag the tests do not know")
             if first_session != last_session:
                 pytest.skip(f"the feed moved from {first_session} to {last_session} meanwhile")
-            if first_session == streams.OVERNIGHT:
-                _check_overnight(
-                    seen[-1], backfill_day, live_session, table_rows=table_rows, evidence=evidence
+            _check_session(
+                first_session,
+                seen,
+                ran,
+                backfill_day=backfill_day,
+                live_session=live_session,
+                market_status=market_status,
+                locked_rows=locked_rows,
+                table_rows=table_rows,
+                evidence=evidence,
+            )
+    finally:
+        run.console.close()
+
+
+def _check_session(
+    session: streams.StockSession,
+    seen: list[dict[str, Any]],
+    ran: dict[str, Names],
+    *,
+    backfill_day: date,
+    live_session: dm.MassiveSession,
+    market_status: MarketStatus,
+    locked_rows: Callable[..., list[Rows]],
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Check Examples 8 to 12 by the stock session the feed is in, as the test's docstring says.
+
+    In the overnight window Massive's stock status decides. Under `closed`, the tables must hold
+    what they hold when no session runs, and a filled live table fails, quoting the status.
+    Under any status saying the market trades, the tables are recorded.
+    """
+    match session:
+        case streams.StockSession.CLOSED:
+            _check_closed(
+                seen[-1],
+                backfill_day,
+                live_session,
+                table_rows=table_rows,
+                evidence=evidence,
+            )
+        case streams.StockSession.OVERNIGHT:
+            status = market_status("stocks")
+            if streams.market_state(status) is streams.MarketState.CLOSED:
+                last = seen[-1]
+                filled = [n for n in ("latest", "since_start") if last[n]]
+                assert not filled, (
+                    f"{filled} filled in the overnight window while /v1/marketstatus/now says "
+                    f"stocks are {status!r}: before the first overnight session that is rows "
+                    "from nowhere; after it, Massive streams a session its status does not name"
                 )
-            else:
-                _check_streaming(seen, first_session, evidence=evidence)
-                _check_seam(
-                    ran["backfill-then-live"],
+                _check_closed(
+                    seen[-1],
                     backfill_day,
                     live_session,
-                    strict=first_session == streams.REGULAR,
-                    locked_rows=locked_rows,
                     table_rows=table_rows,
                     evidence=evidence,
                 )
-    finally:
-        run.console.close()
+            else:
+                _record_overnight(seen[-1], status, evidence=evidence)
+        case (
+            streams.StockSession.PRE_MARKET
+            | streams.StockSession.REGULAR
+            | streams.StockSession.AFTER_HOURS
+        ):
+            _check_streaming(seen, session, evidence=evidence)
+            _check_seam(
+                ran["backfill-then-live"],
+                backfill_day,
+                live_session,
+                strict=session is streams.StockSession.REGULAR,
+                locked_rows=locked_rows,
+                table_rows=table_rows,
+                evidence=evidence,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _check_snapshot(
@@ -593,7 +661,7 @@ def _check_snapshot(
     assert _symbols(rows) == _STOCKS
 
 
-def _feed_session(seen: dict[str, Any], *, delayed: bool) -> str | None:
+def _feed_session(seen: dict[str, Any], *, delayed: bool) -> streams.StockSession | None:
     """Name the stock session the feed is in, by its own time.
 
     Args:
@@ -656,15 +724,17 @@ def _watch_minute(
     return seen
 
 
-def _check_streaming(seen: list[dict[str, Any]], session: str, *, evidence: Evidence) -> None:
+def _check_streaming(
+    seen: list[dict[str, Any]], session: streams.StockSession, *, evidence: Evidence
+) -> None:
     """Check Examples 8 to 12 while the stock market trades."""
     last = seen[-1]
-    evidence(f"checked in the {session} session")
-    assert last["latest"], f"no minute bar of Example 8 arrived in the {session} session"
+    evidence(f"checked in the {session.value} session")
+    assert last["latest"], f"no minute bar of Example 8 arrived in the {session.value} session"
     assert last["since_start"], "Example 10's since_start holds no bar"
     published = [minute["published"] for minute in seen]
     assert published[-1] > 0, "Example 12's chart got no bar"
-    if session != streams.REGULAR:
+    if session is not streams.StockSession.REGULAR:
         return
     assert _symbols(last["latest"]) == _STOCKS
     ends = {row["Symbol"]: row["TimestampEnd"] for row in seen[0]["latest"]}
@@ -724,7 +794,7 @@ def _check_seam(
         assert not missing, f"Example 11's spy lacks {len(missing)} minutes that REST has"
 
 
-def _check_overnight(
+def _check_closed(
     last: dict[str, Any],
     day: date,
     live_session: dm.MassiveSession,
@@ -732,10 +802,10 @@ def _check_overnight(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Check Examples 8 to 11 between sessions: the live tables empty, `spy` only history."""
-    evidence("checked overnight")
-    assert not last["latest"], "Example 8's latest filled overnight"
-    assert not last["since_start"], "Example 10's since_start filled overnight"
+    """Check Examples 8 to 11 while nothing trades: the live tables empty, `spy` only history."""
+    evidence("checked while nothing trades")
+    assert not last["latest"], "Example 8's latest filled while nothing trades"
+    assert not last["since_start"], "Example 10's since_start filled while nothing trades"
     assert all(row["Close"] is None for row in last["changes"]), last["changes"]
     spy = {int(row["TimestampStart"]) for row in last["spy"]}
     if not is_trading_day(day):
@@ -745,6 +815,23 @@ def _check_overnight(
     rest = _rest_minutes(live_session, table_rows, day)
     evidence(f"example 11 overnight, {day}: spy {len(spy)} minutes, REST {len(rest)}")
     assert spy == rest, "Example 11's spy does not hold the day's minutes from history"
+
+
+def _record_overnight(last: dict[str, Any], status: str, *, evidence: Evidence) -> None:
+    """Record what Examples 8 to 12 hold in the overnight session, then skip.
+
+    Bars come only for minutes with trades, and no one has yet seen how often overnight
+    minutes have them, so no table must fill; what filled is the evidence of what Massive
+    streams overnight.
+    """
+    ends = [int(r["TimestampEnd"]) for r in (*last["latest"], *last["since_start"])]
+    evidence(
+        f"overnight, Massive's stock status {status}: Example 8's latest "
+        f"{_symbols(last['latest'])}, Example 10's since_start {len(last['since_start'])} rows, "
+        f"Example 12's stream published {last['published']} rows, "
+        f"latest bar end {max(ends, default=None)}"
+    )
+    pytest.skip(f"overnight session ({status}): bars recorded, not required")
 
 
 # --- Single examples ----------------------------------------------------------------------------

@@ -113,9 +113,11 @@ OPTION_CONTRACTS: Final = 10
 
 SESSION_OPENS: Final = {"stocks": time(4, 0), "options": time(9, 30), "indices": time(9, 30)}
 """When each class's session opens on a trading day, New York time: stock trades from the
-extended hours, options and the S&P indices from the regular session. A class not listed,
-currencies and futures, trades through the night, so its session counts as open from the
-stream day's start (`DAY_START`)."""
+extended hours, options and the S&P indices from the regular session. Stocks keep 04:00 though
+the overnight session trades from 21:00 the evening before: stock trading has opened by 04:00
+on every trading day, with or without that session, so a unit with no row by then has failed.
+A class not listed, currencies and futures, trades through the night, so its session counts as
+open from the stream day's start (`DAY_START`)."""
 
 SESSION_GRACE: Final = timedelta(minutes=5)
 """How long past its session's open a unit may go without a row."""

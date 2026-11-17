@@ -5,7 +5,8 @@ worth a WARNING only when its market is trading; at night or at a weekend the si
 market's. `in_trading_hours` gives that gate, per asset class, from each market's regular hours:
 
 - **Stocks, options, and indices**: weekdays, 09:30 to 16:00 New York time, the regular
-  session. Extended hours are left out, since many symbols trade nothing then.
+  session. The pre-market, the after hours, and the overnight stock session (21:00 to 04:00)
+  are left out, since many symbols trade nothing then.
 - **Futures**: Sunday 17:00 to Friday 16:00 Chicago time, less the daily pause from 16:00 to
   17:00 (`futures_sessions`).
 - **Forex**: Sunday 17:00 to Friday 17:00 New York time, the global interbank week.

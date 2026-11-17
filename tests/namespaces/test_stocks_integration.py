@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as clock_time
 from functools import partial
 from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
@@ -21,6 +22,8 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._massive import RestClient, Transport, WireError, source
+from tests._live import streams
+from tests._live.calendar import is_trading_day, trading_day_after, trading_day_before
 from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
@@ -1023,3 +1026,192 @@ def test_past_stock_data_is_served_with_the_default_config(
         session.close()
     assert previous.size == 1, "previous_day_bar returned no row"
     assert day.size == 1, f"daily_open_close returned no row for {previous_trading_day}"
+
+
+# --- The overnight stock session ----------------------------------------------------------------
+
+_OVERNIGHT_SYMBOLS: Final = ("SPY", "QQQ", "AAPL")
+"""Stocks whose trades the overnight stream test waits for: among the most traded in the regular
+session."""
+
+
+@pytest.mark.requests(2)
+@pytest.mark.timeout(60)
+def test_what_massive_calls_the_overnight_stock_session(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What `/v1/marketstatus/now` and the unified snapshot say in the overnight stock session.
+
+    The live tests read `/v1/marketstatus/now` to decide whether stock rows are due, and know
+    its statuses by name (`streams.MarketState`); no Massive page says what it reports in the
+    overnight session. Runs between 21:00 and 04:00 New York time on a night before a trading
+    day (`streams.stock_session`), and skips at any other hour. Reads `/v1/marketstatus/now`,
+    which belongs to no subscription, records its `market`, `exchanges`, `earlyHours`, and
+    `afterHours`, and fails when `market` is a status the tests do not know
+    (`streams.market_state`), naming it, so the tests learn it by name. Then reads SPY's
+    unified snapshot and records its `market_status`, which Massive documents as
+    `overnight_trading` in this session from 2026-12-07, and its `session`; a refused snapshot
+    skips, quoting Massive. A `market` of `closed` beside a snapshot of `overnight_trading`
+    means the tests need another sign of the session.
+    """
+    now = datetime.now(UTC)
+    session = streams.stock_session(now)
+    evidence(f"New York clock {now.astimezone(_NEW_YORK)}: {session.value}")
+    if session is not streams.StockSession.OVERNIGHT:
+        pytest.skip(f"not the overnight window: the clock is in {session.value}")
+    body = live_rest.get(source(Transport.REST, "/v1/marketstatus/now"), {}, {}, bucket="other")
+    status: Any = body.body
+    fields = ("market", "exchanges", "earlyHours", "afterHours", "serverTime")
+    evidence(f"/v1/marketstatus/now: { ({f: status.get(f) for f in fields}) }")
+    state = streams.market_state(str(status.get("market")))
+    evidence(f"market status read as {state.name}")
+    snapshot = live_rest.get(
+        source(Transport.REST, "/v3/snapshot"), {}, {"ticker.any_of": "SPY"}, bucket="stocks"
+    ).rows
+    evidence(
+        "SPY unified snapshot: "
+        f"{[(row.get('market_status'), row.get('session')) for row in snapshot]}"
+    )
+
+
+def _ended_trading_day(wall: datetime) -> date:
+    """Return the latest trading day whose after-hours session has ended by a New York time.
+
+    Returns:
+        The day of `wall` from 20:00 on a trading day, else the trading day before it.
+    """
+    ended = wall >= datetime.combine(wall.date(), streams.EXTENDED_CLOSE, _NEW_YORK)
+    return wall.date() if ended and is_trading_day(wall.date()) else trading_day_before(wall.date())
+
+
+def _last_trade(live_rest: RestClient, day: date) -> list[datetime]:
+    """Return when the last SPY trade Massive files under a date happened, in New York time.
+
+    One request: `/v3/trades/SPY` with `timestamp` the date, newest first, one trade.
+
+    Returns:
+        The trade's SIP time, or nothing when Massive has no trade under the date.
+    """
+    trades = live_rest.get(
+        source(Transport.REST, "/v3/trades/{stockTicker}"),
+        {"stockTicker": "SPY"},
+        {"timestamp": day, "order": "desc", "sort": "timestamp", "limit": 1},
+        bucket="stocks",
+    ).rows
+    return [datetime.fromtimestamp(int(str(t["sip_timestamp"])) / 1e9, _NEW_YORK) for t in trades]
+
+
+@pytest.mark.settles("145")
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_which_day_massive_counts_overnight_stock_trades_in(
+    rest_rows: RestRows, live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Which trading day Massive counts SPY's trades from 21:00 to midnight in.
+
+    Takes the latest trading day D whose after-hours session has ended, and reads SPY's
+    unadjusted minute bars from 21:00 on the evening before D to 00:00 after D. Skips,
+    recording the count, when no minute starts before 04:00 on D: Massive had no overnight
+    session before D, as before 2026-12-07. Otherwise records three answers, each read by a
+    person:
+
+    - D's day bar's open beside the opens of the first minute from 21:00 the evening before,
+      from midnight, and from 04:00: the one it equals is where Massive's day of D begins;
+    - the time of the last trade Massive files under the date before D (`/v3/trades` with
+      `timestamp` that date, newest first), as supporting evidence only: near 20:00 would mean
+      the evening's overnight trades count in D, but Massive does not document which day or
+      zone a date `timestamp` selects;
+    - D's day-bar volume beside the minutes' volume over the trade-date span (21:00 before D
+      to 20:00 on D) and over D's calendar day, as supporting evidence, since late prints and
+      corrections can keep either sum from matching.
+
+    Passes when the requests worked.
+    """
+    day = _ended_trading_day(datetime.now(_NEW_YORK))
+    start = datetime.combine(day - timedelta(days=1), streams.OVERNIGHT_OPEN, _NEW_YORK)
+    midnight = datetime.combine(day, clock_time(0), _NEW_YORK)
+    opening = datetime.combine(day, streams.EXTENDED_OPEN, _NEW_YORK)
+    close = datetime.combine(day, streams.EXTENDED_CLOSE, _NEW_YORK)
+    end = midnight + timedelta(days=1)
+    params = {"stocksTicker": "SPY", "multiplier": 1, "timespan": "minute"}
+    params |= {"from": int(start.timestamp() * 1000), "to": int(end.timestamp() * 1000) - 1}
+    minutes = rest_rows(_RANGE, params, {"sort": "asc", "limit": 50_000, "adjusted": False})
+    bars = [(int(bar["t"]), float(bar["o"]), float(bar["v"])) for bar in minutes]
+    overnight = [t for t, _, _ in bars if t < opening.timestamp() * 1000]
+    evidence(f"SPY minutes from {start} to {end}: {len(bars)}; before {opening}: {len(overnight)}")
+    if not overnight:
+        pytest.skip(f"Massive has no SPY minute between {start} and {opening}")
+    day_params = {"stocksTicker": "SPY", "multiplier": 1, "timespan": "day"}
+    day_params |= {"from": day, "to": day}
+    days = rest_rows(_RANGE, day_params, {"adjusted": False})
+    evidence(f"SPY day bar of {day}: {[(b.get('t'), b.get('o'), b.get('v')) for b in days]}")
+    for since in (start, midnight, opening):
+        first = next((bar for bar in bars if bar[0] >= since.timestamp() * 1000), None)
+        evidence(f"open of the first minute from {since}: {first and first[1]}")
+    before = day - timedelta(days=1)
+    evidence(f"last SPY trade Massive files under {before}: {_last_trade(live_rest, before)}")
+
+    def volume(low: datetime, high: datetime) -> float:
+        lo, hi = low.timestamp() * 1000, high.timestamp() * 1000
+        return sum(v for t, _, v in bars if lo <= t < hi)
+
+    evidence(f"minute volume, trade-date span {start} to {close}: {volume(start, close)}")
+    evidence(f"minute volume, calendar day {midnight} to {end}: {volume(midnight, end)}")
+
+
+@pytest.mark.settles("145")
+@pytest.mark.timeout(200)
+def test_overnight_stock_trades_stream(
+    live_session: dm.MassiveSession,
+    *,
+    wait_rows: WaitRows,
+    wait_acked: WaitAcked,
+    market_status: MarketStatus,
+    stream_report: Report,
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """What the trade stream sends in the overnight stock session, and the `Date` it gets.
+
+    Streams the trades of SPY, QQQ, and AAPL and asserts that Massive acknowledged the three
+    topics, whatever the hour. Waits for trades only in the overnight window
+    (`streams.stock_session`) while Massive's stock status says the market trades
+    (`streams.market_state`); at any other time it skips after the acknowledgement. Records
+    how many trades came, their conditions and exchanges, and for the first five trades the
+    library's `Date`, the New York calendar date, beside the date the trade counts in under
+    the trade-date convention Massive's blog describes (the next trading day for one at 21:00
+    or later). No trade in the wait skips: one minute of the overnight session may have
+    none. A refused stream skips, quoting Massive; a failed one fails the test.
+    """
+    table = live_session.stocks.trades(list(_OVERNIGHT_SYMBOLS)).append_only()
+    acked = wait_acked(live_session, len(_OVERNIGHT_SYMBOLS), time.monotonic() + _STREAM_WAIT)
+    now = datetime.now(UTC)
+    session = streams.stock_session(now)
+    status = market_status("stocks")
+    trading = streams.market_state(status) is not streams.MarketState.CLOSED
+    overnight = session is streams.StockSession.OVERNIGHT and trading
+    deadline = time.monotonic() + _STREAM_WAIT
+    received = wait_rows(live_session, table, deadline) if overnight else []
+    rows, failure = _stream_evidence(
+        live_session,
+        table,
+        rows=received,
+        report=stream_report,
+        evidence=evidence,
+        table_rows=table_rows,
+    )
+    skip_if_not_entitled(live_session)
+    assert failure is None, f"the trade stream failed: {failure}"
+    assert acked >= len(_OVERNIGHT_SYMBOLS), "Massive did not acknowledge every trade topic"
+    if not overnight:
+        pytest.skip(f"not the overnight session: {session.value}, Massive says {status}")
+    evidence(f"{len(rows)} trades; conditions {sorted({str(r['Conditions']) for r in rows})}")
+    evidence(f"exchanges {sorted({r['Exchange'] for r in rows})}")
+    for row in rows[:5]:
+        stamp = datetime.fromtimestamp(int(row["Timestamp"]) / 1e9, _NEW_YORK)
+        late = stamp.time() >= streams.OVERNIGHT_OPEN
+        counted = trading_day_after(stamp.date()) if late else stamp.date()
+        evidence(f"{row['Symbol']} at {stamp}: Date {row['Date']}, trade date {counted}")
+    if not rows:
+        pytest.skip(f"no trade in {_STREAM_WAIT:.0f} s of the overnight session")

@@ -22,6 +22,13 @@ from deephaven_massive._enums import AssetClass
         (datetime(2026, 10, 30, 16, 0, tzinfo=NEW_YORK), False),
         (datetime(2026, 10, 31, 12, 0, tzinfo=NEW_YORK), False),
         (datetime(2026, 11, 1, 12, 0, tzinfo=NEW_YORK), False),
+        # The extended hours and the overnight session, which starts on Sunday 2026-12-06.
+        (datetime(2026, 12, 7, 4, 0, tzinfo=NEW_YORK), False),  # pre-market
+        (datetime(2026, 12, 7, 19, 0, tzinfo=NEW_YORK), False),  # after hours
+        (datetime(2026, 12, 7, 20, 30, tzinfo=NEW_YORK), False),  # the nightly pause
+        (datetime(2026, 12, 6, 21, 30, tzinfo=NEW_YORK), False),  # Sunday overnight
+        (datetime(2026, 12, 7, 22, 0, tzinfo=NEW_YORK), False),  # Monday overnight
+        (datetime(2026, 12, 8, 2, 0, tzinfo=NEW_YORK), False),  # the same night, after midnight
     ],
 )
 def test_the_regular_session_is_weekdays_from_09_30_to_16_00_new_york(
