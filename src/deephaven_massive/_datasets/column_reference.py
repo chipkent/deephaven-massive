@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 __all__ = [
     "COMMAND",
     "INDEX",
+    "NOT_INCLUDED",
     "PAGES_URL",
     "DatasetCall",
     "QueryMethod",
@@ -105,7 +106,7 @@ _PAGE_AREAS: Final = (
 _FROM_REQUEST: Final = "request"
 """The wire-field cell of a key the library fills from the request rather than from a field."""
 
-_NOT_INCLUDED: Final = "Not included"
+NOT_INCLUDED: Final = "Not included"
 """Massive's word for a plan without the data, which a plan cell shows alone."""
 
 _INDEX_GUIDE: Final = (
@@ -1033,9 +1034,9 @@ def _terms_text(access: str, recency: str | None, history: str | None) -> str:
         "Not included" for a plan without the data; otherwise its recency and history, such as
         "15-minute delayed, 5 years", or its access text when the page gives neither.
     """
-    if access == _NOT_INCLUDED:
-        return _NOT_INCLUDED
-    shown = [part for part in (recency, history) if part and part != _NOT_INCLUDED]
+    if access == NOT_INCLUDED:
+        return NOT_INCLUDED
+    shown = [part for part in (recency, history) if part and part != NOT_INCLUDED]
     return ", ".join(shown) or access
 
 

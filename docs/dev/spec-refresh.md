@@ -35,7 +35,8 @@ gate, and what to do when a refresh adds something new.
 - **The README's plans table**: which of Massive's plans include the data the tutorial reads,
   rendered by the same command from the same plan tables, between two marker lines of
   `README.md`. Its rows name Massive's pages (`_datasets/readme_plans.py`, `ROWS`), and its
-  columns are the plans those pages list.
+  columns are the plans those pages list. A test also checks each README example's `**Plan:**`
+  line against the same plan tables, so a refresh that changes them fails until the lines match.
 
 Each WebSocket channel in `ws.json` also carries the hosts its page's "Connection" table
 lists, one per feed (`Real-Time`, `Delayed`, `Business`). The library streams from those

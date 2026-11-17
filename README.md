@@ -14,7 +14,7 @@ Market data from [Massive](https://massive.com) as live and historical
 - **Spend your time trading, not coding.** Live tables that follow your watchlist are already
   built.
 
-This charts a year of Apple's daily closes on Massive's free Stocks Basic plan:
+This charts a year of Apple's daily closes:
 
 ```python
 import deephaven.plot.express as dx
@@ -131,24 +131,25 @@ fixes.
 
 ## Tutorial
 
-Paste each example into the **Console** panel of the Deephaven IDE and run it. The table gives
-each example's plan, and Examples 8 to 12 read the settings file that Example 7 saves.
+Paste each example into the **Console** panel of the Deephaven IDE and run it. Each example's
+**Plan** line names the Massive plans that run it, and Examples 8 to 12 read the settings file
+that Example 7 saves.
 
-| # | Example | Plan |
-|---|---|---|
-| 1 | [Queries: read a week of Apple's daily bars](#read-daily-bars) | Stocks Basic |
-| 2 | [Symbol lists: rank every listed US stock by one day's dollar volume](#whole-market-day) | Stocks Basic |
-| 3 | [Date ranges: compare three stocks' price returns over a year](#compare-stocks) | Stocks Basic |
-| 4 | [Charts: plot a stock's daily closes for a year](#chart-closes) | Stocks Basic |
-| 5 | [Live tables: poll for the latest news headlines](#follow-the-news) | Stocks Basic |
-| 6 | [Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes](#drive-with-a-watchlist) | Stocks Basic |
-| 7 | [Plans and settings: load your settings from a file and read a delayed market snapshot](#what-your-plan-allows) | Stocks Starter or higher |
-| 8 | [Streaming: stream minute bars for the stocks on your list](#stream-minute-bars) | Stocks Starter or higher |
-| 9 | [Live calculations: track each stock's change since the previous close](#change-since-close) | Stocks Starter or higher |
-| 10 | [Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started](#table-shapes) | Stocks Starter or higher |
-| 11 | [Backfill: start with today's minute bars, then continue live](#backfill-then-live) | Stocks Starter or higher |
-| 12 | [Dashboards: show a live chart and table together with deephaven.ui](#dashboard) | Stocks Starter or higher |
-| 13 | [Stopping live tables: release one table or close the session](#stop-live-tables) | Stocks Basic |
+| # | Example |
+|---|---|
+| 1 | [Queries: read a week of Apple's daily bars](#read-daily-bars) |
+| 2 | [Symbol lists: rank every listed US stock by one day's dollar volume](#whole-market-day) |
+| 3 | [Date ranges: compare three stocks' price returns over a year](#compare-stocks) |
+| 4 | [Charts: plot a stock's daily closes for a year](#chart-closes) |
+| 5 | [Live tables: poll for the latest news headlines](#follow-the-news) |
+| 6 | [Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes](#drive-with-a-watchlist) |
+| 7 | [Plans and settings: load your settings from a file and read a delayed market snapshot](#what-your-plan-allows) |
+| 8 | [Streaming: stream minute bars for the stocks on your list](#stream-minute-bars) |
+| 9 | [Live calculations: track each stock's change since the previous close](#change-since-close) |
+| 10 | [Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started](#table-shapes) |
+| 11 | [Backfill: start with today's minute bars, then continue live](#backfill-then-live) |
+| 12 | [Dashboards: show a live chart and table together with deephaven.ui](#dashboard) |
+| 13 | [Stopping live tables: release one table or close the session](#stop-live-tables) |
 
 <a id="plans"></a>
 
@@ -170,7 +171,9 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 ### Queries: read a week of Apple's daily bars
 
-Read Apple's daily bars for the last week of October 2026, with Stocks Basic:
+**Plan:** Any Stocks plan
+
+Read Apple's daily bars for the last week of October 2026:
 
 ```python
 import deephaven_massive as dm
@@ -195,7 +198,9 @@ Next, one query for every listed stock at once.
 
 ### Symbol lists: rank every listed US stock by one day's dollar volume
 
-Find the stocks that traded the most dollars on October 30, 2026, with Stocks Basic. Read that
+**Plan:** Any Stocks plan
+
+Find the stocks that traded the most dollars on October 30, 2026. Read that
 day's bar for every listed US stock, then rank them in Deephaven:
 
 ```python
@@ -223,8 +228,9 @@ Next, a list of three stocks over a longer range.
 
 ### Date ranges: compare three stocks' price returns over a year
 
-Compare the price returns of Apple, Microsoft, and Nvidia over a year from their daily bars,
-with Stocks Basic:
+**Plan:** Any Stocks plan
+
+Compare the price returns of Apple, Microsoft, and Nvidia over a year from their daily bars:
 
 ```python
 import deephaven_massive as dm
@@ -256,7 +262,9 @@ Next, the same kind of table as a chart.
 
 ### Charts: plot a stock's daily closes for a year
 
-Draw Nvidia's daily closes for a year on Stocks Basic, charted with
+**Plan:** Any Stocks plan
+
+Draw Nvidia's daily closes for a year, charted with
 [Deephaven Express](https://deephaven.io/core/plotly/docs/):
 
 ```python
@@ -277,7 +285,9 @@ Next, a table that keeps changing.
 
 ### Live tables: poll for the latest news headlines
 
-Follow the news on Apple, Nvidia, and Tesla with Stocks Basic. Ask Massive for each stock's
+**Plan:** Any Stocks plan
+
+Follow the news on Apple, Nvidia, and Tesla. Ask Massive for each stock's
 newest headlines every five minutes:
 
 ```python
@@ -303,8 +313,9 @@ Next, a live table whose stocks you change while it runs.
 
 ### Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes
 
-Keep a live table of previous closes that follows your list of stocks through the day, with
-Stocks Basic:
+**Plan:** Any Stocks plan
+
+Keep a live table of previous closes that follows your list of stocks through the day:
 
 ```python
 import deephaven_massive as dm
@@ -317,8 +328,8 @@ closes = m.stocks.previous_day_bar(watchlist).poll(60)
 ```
 
 `closes` has a row for each stock with its previous trading day's bar. Each poll sends one
-request per stock, so four stocks polled every 60 seconds send four requests a minute. Massive
-allows five a minute on the plan this example uses.
+request per stock, so four stocks polled every 60 seconds send four requests a minute. If Massive
+limits your requests, the session keeps to the limit, as [MassiveConfig](#massive-config) shows.
 
 `watchlist` is a Deephaven [input table](https://deephaven.io/core/docs/how-to-guides/input-tables/),
 which you edit by hand in its panel or in code. By hand, type a symbol into a new row of the
@@ -340,7 +351,7 @@ live one as it changes.
 To read a list from Yahoo Finance, convert it first. Yahoo spells some tickers differently:
 Yahoo's `BRK-B` is Massive's `BRK.B`, and Yahoo's `BAC-PL` is Massive's `BACpL`. Tell the
 converter whose tickers they are with `convention=`. This reads the previous closes of a table
-of Yahoo tickers, with Stocks Basic:
+of Yahoo tickers:
 
 ```python
 import deephaven_massive as dm
@@ -373,18 +384,20 @@ Next, settings for the paid plans.
 
 ### Plans and settings: load your settings from a file and read a delayed market snapshot
 
-Read a snapshot of three stocks with Stocks Starter or higher. First, save your plan's setting in
-a settings file. Starter and Developer are 15 minutes late, so their file accepts delayed data.
-Advanced and Business are real-time. In a new terminal, run the commands for your plan.
+**Plan:** Stocks Starter or higher
 
-Starter or Developer:
+Read a snapshot of three stocks. First, save your plan's setting in a settings file. The
+Snapshots row of the [plans table](#plans) shows whether your plan's data is delayed or real-time.
+A delayed plan's file accepts delayed data. In a new terminal, run the commands for your plan.
+
+If the table shows your plan delayed:
 
 ```bash
 mkdir -p ~/massive
 echo "delayed_subscriptions: [stocks]" > ~/massive/settings.yaml
 ```
 
-Advanced or Business:
+If it shows your plan real-time:
 
 ```bash
 mkdir -p ~/massive
@@ -402,7 +415,7 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 ```
 
 `snapshot` has one row per stock, with columns such as `DayClose`, `PrevDayClose`, and
-`TodaysChangePerc`. On Starter or Developer without the setting, the `snapshot` table fails with
+`TodaysChangePerc`. On a delayed plan without the setting, the `snapshot` table fails with
 an error that names the setting to change.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
@@ -416,8 +429,9 @@ Next, a live table that streams instead of polling.
 
 ### Streaming: stream minute bars for the stocks on your list
 
-Watch the latest minute bar of each stock on your list as it arrives, with Stocks Starter or
-higher:
+**Plan:** Stocks Starter or higher
+
+Watch the latest minute bar of each stock on your list as it arrives:
 
 ```python
 import deephaven_massive as dm
@@ -437,8 +451,9 @@ stream follows the watchlist.
 
 Massive sends a minute bar only for a minute with trades, so a table you start while no stock
 trades stays empty until trading resumes.
-Crypto trades around the clock, and on Currencies Starter or higher,
-`m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).last_by()` streams at any hour.
+Crypto trades around the clock, so `m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).last_by()`
+streams at any hour on a plan that includes it, as the
+[crypto bars page](docs/datasets/crypto.bars.md#plans) shows.
 
 The example runs as written. A type checker rejects its `last_by()`, because `bars()` declares two
 classes and only `StreamHistoryQuery` has stream methods. You get that class for 1-second and
@@ -459,7 +474,9 @@ Next, a calculation on the live bars.
 
 ### Live calculations: track each stock's change since the previous close
 
-Find how far each stock has moved today, with Stocks Starter or higher. Join the live minute
+**Plan:** Stocks Starter or higher
+
+Find how far each stock has moved today. Join the live minute
 bars to the previous closes, and compute the change:
 
 ```python
@@ -488,8 +505,9 @@ Next, other ways to keep a stream's rows.
 
 ### Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started
 
-Stream SPY's minute bars into three tables that keep different rows, with Stocks Starter or
-higher:
+**Plan:** Stocks Starter or higher
+
+Stream SPY's minute bars into three tables that keep different rows:
 
 ```python
 import deephaven_massive as dm
@@ -515,8 +533,9 @@ All three share one stream from Massive, so pick the method by the rows you need
 
 ### Backfill: start with today's minute bars, then continue live
 
-Start with every minute bar SPY has had today, then add each new one as it ends, with Stocks
-Starter or higher:
+**Plan:** Stocks Starter or higher
+
+Start with every minute bar SPY has had today, then add each new one as it ends:
 
 ```python
 import deephaven_massive as dm
@@ -543,8 +562,10 @@ Next, a live chart and a live table on one screen.
 
 ### Dashboards: show a live chart and table together with deephaven.ui
 
+**Plan:** Stocks Starter or higher
+
 Put a live chart and a live table side by side with
-[deephaven.ui](https://deephaven.io/core/ui/docs/), on Stocks Starter or higher. The table is
+[deephaven.ui](https://deephaven.io/core/ui/docs/). The table is
 Example 9's change table:
 
 ```python
@@ -579,7 +600,9 @@ Next, how to stop live tables when you're done with them.
 
 ### Stopping live tables: release one table or close the session
 
-Stop the live tables you no longer need, on Stocks Basic. This example starts two polls of its
+**Plan:** Any Stocks plan
+
+Stop the live tables you no longer need. This example starts two polls of its
 own:
 
 ```python

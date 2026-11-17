@@ -14,11 +14,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._datasets.column_reference import COMMAND
+from deephaven_massive._datasets.column_reference import COMMAND, plan_cell
 from deephaven_massive._datasets.readme_plans import (
     PLANS_TABLE_END,
     PLANS_TABLE_START,
     ROWS,
+    expected_plan_line,
+    plan_line_problems,
     plans_table,
     with_plans_table,
 )
@@ -86,17 +88,20 @@ def test_a_row_shows_what_each_dataset_page_shows_for_the_same_plan() -> None:
 def test_a_plan_one_page_lists_gets_a_column_with_empty_cells_elsewhere() -> None:
     base = provenance()
     plans = {t.plan: t.recency or "" for t in base.plans[SNAPSHOTS].plans}
-    changed = _with_page(base, SNAPSHOTS, {**plans, "Stocks Platinum": "Real-time"})
+    changed = _with_page(base, SNAPSHOTS, {**plans, "A new plan": "Real-time"})
     rows = _lines(plans_table(CATALOG, changed))
-    assert rows[0][-1] == "Stocks Platinum"
+    assert rows[0][-1] == "A new plan"
     assert [row[-1] for row in rows[2:]] == ["", "", "", "", "Real-time"]
 
 
 def test_a_page_with_different_terms_for_one_plan_shows_both() -> None:
     base = provenance()
-    changed = _with_page(base, BARS_HISTORY, {"Stocks Basic": "Real-time"})
+    first = base.plans[BARS_HISTORY].plans[0].plan
+    other = ROWS[0].urls[1]
+    changed = _with_page(base, BARS_HISTORY, {first: "A new recency"})
+    unchanged = plan_cell(first, [(other, base.plans[other])])
     cell = _lines(plans_table(CATALOG, changed))[2][1]
-    assert cell == "stocks: Real-time; stocks: End-of-day, 2 years"
+    assert cell == f"stocks: A new recency; stocks: {unchanged}"
 
 
 @pytest.mark.parametrize(
@@ -140,3 +145,110 @@ def test_the_rewrite_keeps_everything_outside_the_markers_and_is_idempotent() ->
 def test_a_readme_without_both_markers_is_refused(page: str) -> None:
     with pytest.raises(ValueError, match="PLANS_TABLE_START and PLANS_TABLE_END"):
         with_plans_table(page, CATALOG, provenance())
+
+
+# --- The Plan lines -----------------------------------------------------------------------------
+
+
+def _example(anchor: str, plan: str | None) -> str:
+    """Return one tutorial example's anchor, heading, and Plan line, when given one."""
+    line = f"**Plan:** {plan}\n\n" if plan is not None else ""
+    return f'<a id="{anchor}"></a>\n\n### An example\n\n{line}Some text.\n\n'
+
+
+def _readme(plans: dict[str, str | None]) -> str:
+    """Return a README whose tutorial holds an example per entry, then a later section."""
+    body = "".join(_example(anchor, plan) for anchor, plan in plans.items())
+    return f'# Title\n\n<a id="tutorial"></a>\n\n## Tutorial\n\n{body}## Next steps\n'
+
+
+def _expected() -> dict[str, str | None]:
+    """Return each example's Plan line, as the README holds it today."""
+    return {anchor: _line(anchor) for row in ROWS for anchor in row.examples}
+
+
+def _line(anchor: str) -> str:
+    """Return the Plan line `expected_plan_line` gives one example, on the real provenance."""
+    return expected_plan_line(
+        [
+            [(url, provenance().plans[url]) for url in row.urls]
+            for row in ROWS
+            if anchor in row.examples
+        ]
+    )
+
+
+def test_every_plan_line_of_the_readme_is_massives() -> None:
+    page = README.read_text(encoding="utf-8")
+    assert plan_line_problems(page, CATALOG, provenance()) == []
+
+
+def test_a_plan_line_is_any_plan_or_the_first_plan_that_includes_the_data() -> None:
+    plans = list(dict.fromkeys(t.plan for t in provenance().plans[SNAPSHOTS].plans))
+    snapshots = provenance().plans[SNAPSHOTS]
+    every = dataclasses.replace(
+        snapshots, plans=tuple(dataclasses.replace(t, access="Included") for t in snapshots.plans)
+    )
+    assert expected_plan_line([[(SNAPSHOTS, every)]]) == f"Any {plans[0].split()[0]} plan"
+    later = dataclasses.replace(
+        snapshots,
+        plans=tuple(
+            dataclasses.replace(t, access="Not included" if i == 0 else "Included")
+            for i, t in enumerate(snapshots.plans)
+        ),
+    )
+    assert expected_plan_line([[(SNAPSHOTS, later)]]) == f"{plans[1]} or higher"
+
+
+def test_a_wrong_missing_or_unknown_plan_line_is_a_problem() -> None:
+    plans = _expected()
+    plans["read-daily-bars"] = "Not a plan"
+    plans["stream-minute-bars"] = None
+    plans["an-example-no-row-reads"] = _line("read-daily-bars")
+    del plans["dashboard"]
+    assert plan_line_problems(_readme(plans), CATALOG, provenance()) == [
+        "an-example-no-row-reads: no row of ROWS names this example",
+        "dashboard: not an example of the tutorial",
+        f"read-daily-bars: **Plan:** 'Not a plan'; expected {_line('read-daily-bars')!r}",
+        (
+            "stream-minute-bars: no **Plan:** line under its heading; expected "
+            f"{_line('stream-minute-bars')!r}"
+        ),
+    ]
+    assert plan_line_problems(_readme(_expected()), CATALOG, provenance()) == []
+
+
+def test_a_readme_without_a_tutorial_is_refused() -> None:
+    with pytest.raises(ValueError, match="tutorial"):
+        plan_line_problems("# Title\n", CATALOG, provenance())
+
+
+def test_plans_no_plan_line_can_describe_are_refused() -> None:
+    snapshots = provenance().plans[SNAPSHOTS]
+    # Included only in the middle: no "X or higher" says it.
+    gapped = dataclasses.replace(
+        snapshots,
+        plans=tuple(
+            dataclasses.replace(t, access="Included" if i == 1 else "Not included")
+            for i, t in enumerate(snapshots.plans)
+        ),
+    )
+    with pytest.raises(ValueError, match="no Plan line can say"):
+        expected_plan_line([[(SNAPSHOTS, gapped)]])
+    # Included by none.
+    none = dataclasses.replace(
+        snapshots,
+        plans=tuple(dataclasses.replace(t, access="Not included") for t in snapshots.plans),
+    )
+    with pytest.raises(ValueError, match="no Plan line can say"):
+        expected_plan_line([[(SNAPSHOTS, none)]])
+    # Included by every plan, of two families.
+    mixed = dataclasses.replace(
+        snapshots,
+        plans=(
+            dataclasses.replace(snapshots.plans[-1], plan="One kind"),
+            dataclasses.replace(snapshots.plans[-1], plan="Another kind"),
+        ),
+    )
+    with pytest.raises(ValueError, match="share no first word"):
+        expected_plan_line([[(SNAPSHOTS, mixed)]])
