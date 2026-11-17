@@ -592,14 +592,15 @@ import deephaven_massive as dm
 from deephaven import agg
 
 m = dm.MassiveSession(dm.MassiveConfig.from_file("~/massive/settings.yaml"))
-calls = m.options.chain("AAPL", contract_type=dm.ContractType.CALL).fetch()
+calls = m.options.chain("AAPL", contract_type=dm.ContractType.CALL).fetch(wait=True)
 nearest = calls.where_in(calls.agg_by(agg.min_("ExpirationDate")), "ExpirationDate")
 nearest_calls = nearest.view(
     ["StrikePrice", "DayClose", "ImpliedVolatility", "OpenInterest", "GreeksDelta"]
 ).sort("StrikePrice")
 ```
 
-`nearest_calls` has a row for each call of the nearest expiry. `calls` holds every expiry.
+`nearest_calls` has a row for each call of the nearest expiry. `calls` holds every expiry. With
+`wait=True`, `fetch()` returns once the chain has loaded, so `calls` is a static table.
 
 A chain is a snapshot of every contract of one underlying. Its arguments, such as
 `contract_type`, narrow it.
