@@ -131,8 +131,8 @@ def no_data_alarm(dataset: str, read: int, symbol: str, *, why: str) -> str:
     # The WARNING of a read's first symbol Massive has no data for.
     return (
         f"{dataset} table {read}: unavailable_symbols: {symbol}: Massive has no data for it "
-        f"{why} (at {dataset}); m.problems() lists it and every later unavailable_symbols "
-        "problem of this table, which the log shows at DEBUG only"
+        f"{why} (at {dataset}). m.problems() lists it and every later unavailable_symbols "
+        "problem of this table, which the log shows at DEBUG only."
     )
 
 
@@ -2177,7 +2177,7 @@ def test_the_first_part_of_a_page_gives_a_drift_sample(
     fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
     [drift] = [e for e in events if e.cause is ProblemCause.SCHEMA_DRIFT]
     assert drift.field == "new"
-    assert drift.detail.endswith('; first value "good"')
+    assert drift.detail.endswith(' Its first value: "good".')
 
 
 def test_drift_is_a_problem_of_each_read_and_its_status_is_logged_once(
@@ -2202,7 +2202,7 @@ def test_drift_is_a_problem_of_each_read_and_its_status_is_logged_once(
         (ProblemCause.SCHEMA_DRIFT, "brand_new", 1),
         (ProblemCause.SCHEMA_DRIFT, "brand_new", 2),
     ]
-    assert all(e.detail.endswith("; first value 1") for e in events)
+    assert all(e.detail.endswith(" Its first value: 1.") for e in events)
     assert [a.split(":")[0] for a in alarms(caplog)] == [
         "stocks.dividends table 1",
         "stocks.dividends table 2",
@@ -2229,7 +2229,7 @@ def test_drift_of_a_per_symbol_request_names_the_symbol(
         "new",
         f"GET {CRYPTO_LAST_PATH}",
     )
-    assert drift.detail.endswith('; first sent for X:BTCUSD; first value "x"')
+    assert drift.detail.endswith(' It was first sent for X:BTCUSD. Its first value: "x".')
 
 
 def test_a_row_without_its_symbol_is_a_data_failure(
@@ -2275,14 +2275,14 @@ def test_one_odd_row_costs_the_call_only_itself(
         (
             "stocks.dividends table 1: unconvertible_values: 1 rows of AAPL, "
             + next(e.detail for e in events if e.cause is ProblemCause.UNCONVERTIBLE_VALUES)
-            + f" (at REST GET {DIVIDENDS_PATH}); m.problems() lists it and every later "
-            "unconvertible_values problem of this table, which the log shows at DEBUG only"
+            + f" (at REST GET {DIVIDENDS_PATH}). m.problems() lists it and every later "
+            "unconvertible_values problem of this table, which the log shows at DEBUG only."
         ),
         (
             f"stocks.dividends table 1: unreadable_keys: 1 rows, {DIVIDENDS_PATH}: row 0: no "
-            f"Ticker (wire key 'ticker'), which the dataset needs (at REST GET {DIVIDENDS_PATH}); "
+            f"Ticker (wire key 'ticker'), which the dataset needs (at REST GET {DIVIDENDS_PATH}). "
             "m.problems() lists it and every later unreadable_keys problem of this table, which "
-            "the log shows at DEBUG only"
+            "the log shows at DEBUG only."
         ),
     ]
 

@@ -566,11 +566,11 @@ def _pinned_labels(asset_class: AssetClass, labels: RecencyLabels) -> _PinnedRec
 
 
 ONE_FEED_NOTES: Final[Mapping[Feed, str]] = {
-    Feed.REAL_TIME: "{name} streams only in real time, on the plans listed at {page}",
-    Feed.DELAYED: "Massive documents {name} only on its Delayed feed, {host}; its plans are "
-    "listed at {page}",
-    Feed.BUSINESS: "Massive documents {name} only on its Business feed, {host}; its plans are "
-    "listed at {page}",
+    Feed.REAL_TIME: "{name} streams only in real time. Its plans are listed at {page}.",
+    Feed.DELAYED: "Massive documents {name} only on its Delayed feed, {host}. Its plans are "
+    "listed at {page}.",
+    Feed.BUSINESS: "Massive documents {name} only on its Business feed, {host}. Its plans are "
+    "listed at {page}.",
 }
 """What a refusal of a dataset documented on one feed adds, by that feed."""
 
@@ -588,9 +588,9 @@ def refusal_note(spec: DatasetSpec) -> str:
         spec: A WebSocket dataset.
 
     Returns:
-        For example `"options.admin_messages streams only in real time, on the plans listed at
-        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.admin_messages.md"`,
-        or `"Massive documents stocks.fmv only on its Business feed, business.massive.com; its
+        For example `"options.admin_messages streams only in real time. Its plans are listed at
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.admin_messages.md."`,
+        or `"Massive documents stocks.fmv only on its Business feed, business.massive.com. Its
         plans are listed at ..."`; `""` for a dataset whose pages document several hosts.
     """
     hosts = dataset_hosts(spec)

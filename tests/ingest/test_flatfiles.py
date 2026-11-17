@@ -328,8 +328,9 @@ def alarms(caplog: pytest.LogCaptureFixture) -> list[str]:
 def alarm(cause: str, head: str, detail: str, *, where: str, read: int = 1) -> str:
     # The WARNING of a read's first problem of a cause.
     return (
-        f"stocks.trades table {read}: {cause}: {head}{detail} (at {where}); m.problems() lists "
-        f"it and every later {cause} problem of this table, which the log shows at DEBUG only"
+        f"stocks.trades table {read}: {cause}: {head}{detail.removesuffix('.')} (at {where}). "
+        f"m.problems() lists it and every later {cause} problem of this table, which the log "
+        "shows at DEBUG only."
     )
 
 
@@ -2785,9 +2786,9 @@ NYMEX_ALARM = (
     r"futures\.trades table \d+: refused_venues: Massive refused the flat files of NYMEX for "
     "the whole range: Massive answered the read of "
     rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com with HTTP 403 "
-    rf'\(request_id {REQUEST_ID}\): "AccessDenied: Access Denied" \(at [^)]*call-\d+\); '
+    rf'\(request_id {REQUEST_ID}\): "AccessDenied: Access Denied" \(at [^)]*call-\d+\)\. '
     r"m\.problems\(\) lists it and every later refused_venues problem of this table, which the "
-    r"log shows at DEBUG only"
+    r"log shows at DEBUG only\."
 )
 """The WARNING of the read's `refused_venues` problem after S3 refused `REFUSED_0305`."""
 
@@ -4377,8 +4378,8 @@ def csv_rows(
 def extra_header(name: str) -> str:
     # The detail of the `schema_drift` problem of a header Massive's docs lack.
     return (
-        f"Massive sent the field {name!r}, which its documentation lacks; the rows are "
-        "published without it"
+        f"Massive sent the field {name!r}, which its documentation lacks, so the rows are "
+        "published without it."
     )
 
 

@@ -144,8 +144,8 @@ def test_fmv_of_a_delayed_subscription_streams_from_its_documented_host() -> Non
 
 def test_a_dataset_documented_only_in_real_time_streams_only_in_real_time() -> None:
     assert refusal_note(ADMIN) == (
-        "options.admin_messages streams only in real time, on the plans listed at "
-        f"{PAGES}options.admin_messages.md"
+        "options.admin_messages streams only in real time. Its plans are listed at "
+        f"{PAGES}options.admin_messages.md."
     )
 
 
@@ -155,8 +155,8 @@ def test_a_dataset_documented_on_another_feed_alone_names_that_feed(spec: Datase
     (only,) = {h for c in spec.channels.values() for h in channel_hosts(spec.single_class, c)}
     assert only.feed is Feed.BUSINESS
     assert refusal_note(spec) == (
-        f"Massive documents {spec.name} only on its Business feed, {only.host}; its plans are "
-        f"listed at {page_url(spec)}"
+        f"Massive documents {spec.name} only on its Business feed, {only.host}. Its plans are "
+        f"listed at {page_url(spec)}."
     )
 
 
