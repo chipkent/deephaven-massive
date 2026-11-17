@@ -72,10 +72,11 @@ def test_a_child_that_exits_cleanly_without_a_result_fails(tmp_path: Path) -> No
 def test_a_child_that_does_not_end_in_time_is_stopped_showing_its_output(
     tmp_path: Path,
 ) -> None:
-    # The limit leaves the child time to print before it is stopped, however busy the machine.
+    # The child prints within about 50 ms, so the limit leaves it ample time to print before
+    # it is stopped, even on a busy machine.
     script = {"print": ["starting the server", f"key {KEY}"], "hang": True}
     with pytest.raises(ProbeChildError) as raised:
-        _probe(tmp_path, script, limit=timedelta(seconds=5))
+        _probe(tmp_path, script, limit=timedelta(seconds=2))
     message = str(raised.value)
-    assert message.startswith("the probe's child did not end within 0:00:05: starting the server")
+    assert message.startswith("the probe's child did not end within 0:00:02: starting the server")
     assert KEY not in message
