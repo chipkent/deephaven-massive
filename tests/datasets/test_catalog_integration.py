@@ -646,8 +646,8 @@ def _may_go_quiet(asset_class: dm.AssetClass, family: str) -> bool:
     """Tell whether a stream of one symbol may send no row in its wait, though rows are due.
 
     Returns:
-        True for a stock's trades or quotes while the market is in the extended hours
-        (`streams.may_go_quiet`).
+        True for a stock's trades or quotes in the pre-market, after-hours, or overnight
+        session (`streams.may_go_quiet`).
     """
     return streams.may_go_quiet(_MARKETS[asset_class], family, now=datetime.now(UTC))
 
@@ -667,10 +667,10 @@ def _stream_case(
     and before the regular session's close for a stream that needs it (`rows_due`), unless
     the stream is one of `_RARE`. A minute bar stream waits until just past the next minute
     boundary, any other for `_TICK_WAIT`. When no rows are due, the case skips after the
-    acknowledgement. A stock trade or quote stream that gets no row while the market is in
-    the extended hours skips too, since one stock can go that long without a tick then
-    (`streams.may_go_quiet`), when the market is in the extended hours both as the wait
-    starts and as it ends; a wait that reaches the regular session fails. A stream of a
+    acknowledgement. A stock trade or quote stream that gets no row in the pre-market,
+    after-hours, or overnight session skips too, since one stock can go that long without a
+    tick then (`streams.may_go_quiet`), when the feed is in one of those sessions both as the
+    wait starts and as it ends; a wait that reaches the regular session fails. A stream of a
     subscription listed in `delayed_subscriptions` (`delayed`) that gets no row skips: the
     delayed feed lags by an amount the tests do not know.
 
@@ -724,7 +724,7 @@ def _stream_case(
         )
     if not rows and quiet:
         pytest.skip(
-            f"not exercised: no row in {wait:.0f} s of the extended-hours session (acknowledged)"
+            f"not exercised: no row in {wait:.0f} s outside the regular session (acknowledged)"
         )
     assert rows, f"{case.name}: no row arrived in {wait:.0f} s, though rows were due"
     return columns, drift

@@ -36,6 +36,8 @@ from deephaven_massive._tables.diagnostics import LimitSource, RateLimitState
 from tests._fakes.clock import FakeClock
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from deephaven.execution_context import ExecutionContext
 
 LOGGER = rate_limits.__name__
@@ -57,6 +59,7 @@ def _lease(
     limits: dict[Subscription, int] | None = None,
     label: str = "MassiveSession #1",
     listener: object = None,
+    on_pause: Callable[[_massive.PauseNotice], None] | None = None,
 ) -> rate_limits.GovernorLease:
     return registry.lease(
         api_key=api_key,
@@ -64,7 +67,12 @@ def _lease(
         limits=limits or {},
         label=label,
         listener=listener if callable(listener) else (lambda: None),
+        on_pause=on_pause or _ignore_pause,
     )
+
+
+def _ignore_pause(notice: _massive.PauseNotice) -> None:
+    del notice
 
 
 def _paced(governor: _massive.RequestGovernor) -> dict[str, int | None]:
@@ -186,6 +194,33 @@ def test_a_lease_listener_hears_changes_until_the_lease_is_released() -> None:
     lease.release()
     governor.declare({})
     assert heard == [1]
+
+
+def test_a_lease_hears_each_pause_from_the_one_open_until_the_lease_is_released() -> None:
+    # A session that takes its lease mid-pause hears of that pause at once, then of its end,
+    # and of nothing once it has released the lease.
+    clock = FakeClock()
+    registry = _registry(clock)
+    first = _lease(registry, label="MassiveSession #1")
+    governor = first.governor
+    permit = governor.admission("stocks", lane=object()).acquire(_massive.Cancel())
+    governor.refused(permit, retry_after=20.0, message="HTTP 429")
+    heard: list[tuple[str, float, float, bool]] = []
+    second = _lease(
+        registry,
+        label="MassiveSession #2",
+        on_pause=lambda n: heard.append((n.bucket, n.started, n.ends, n.ended)),
+    )
+    start = clock.time()
+    assert heard == [("stocks", start, start + 20.0, False)]
+    clock.advance(20.0)
+    governor.snapshot()  # finds the pause over
+    assert heard[1:] == [("stocks", start, start + 20.0, True)]
+    second.release()
+    permit = governor.admission("stocks", lane=object()).acquire(_massive.Cancel())
+    governor.refused(permit, retry_after=5.0, message="HTTP 429")
+    assert len(heard) == 2
+    first.release()
 
 
 def test_concurrent_leases_share_one_governor() -> None:
