@@ -72,6 +72,9 @@ NOT_LISTED: Final = Unsplit("Massive's crypto ticker list does not hold it", no_
 CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
 """Massive's crypto tickers: each one's `(base, quote)`, or why its currencies cannot be used."""
 
+_READ_FAILED: Final = "Reading Massive's crypto ticker list failed"
+"""What failed when the list's read fails, for its messages."""
+
 _UNREADABLE_LIMIT: Final = 100
 """The most listed tickers whose currencies do not join logged per process, per level."""
 _logged_unjoined: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.WARNING)
@@ -190,8 +193,8 @@ class CryptoTickerList:
                 currencies do not join to it.
 
         A failed read raises its public error (`AuthenticationError`, `EntitlementError`, or
-        `MassiveError`), and so does a stopped one (`"... cancelled"`). Every message names the
-        ticker.
+        `MassiveError`), and so does a stopped one (`"... The read stopped ..."`). Every message
+        names the ticker.
         """
         where = f"{symbol!r} cannot be split into its two currencies"
         tickers = self._listed(where, reader, cancel)
@@ -240,7 +243,7 @@ class CryptoTickerList:
             return self._tickers(reader, cancel)
         except MassiveError as public:
             named = copy_error(
-                public, f"{where}: reading Massive's crypto tickers failed: {public}"
+                public, f"{where}, since reading Massive's crypto ticker list failed. {public}"
             )
             raise named from public
 
@@ -301,15 +304,13 @@ class CryptoTickerList:
                 "try again" if stopped else "get a copy of the error",
                 public,
             )
-            self._lookup.fail(claim, public, "the read failed", stopped=stopped)
+            self._lookup.fail(claim, public, _READ_FAILED, stopped=stopped)
             raise public from error
         except BaseException as error:
             # The reader's own unexpected error propagates; its waiters get a MassiveError.
-            self._lookup.fail(claim, error, "the read failed")
+            self._lookup.fail(claim, error, _READ_FAILED)
             if source_of(error) is ErrorSource.LIBRARY:
-                logger.exception(
-                    "%s: reading Massive's crypto tickers failed. %s", self._label, LIBRARY_BUG
-                )
+                logger.exception("%s. %s", _READ_FAILED, LIBRARY_BUG)
             raise
         self._lookup.complete(claim, tickers)
         return tickers

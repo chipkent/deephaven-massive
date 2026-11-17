@@ -99,6 +99,7 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._ingest.rate_limits import bucket_of
 from deephaven_massive._ingest.rest_requests import largest_page
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import Cancel, Transport, source
 from deephaven_massive._tables.futures_dates import UNLISTED_AFTER, LookupState, Readiness
 
@@ -760,9 +761,8 @@ class FuturesCalendar:
             tickers, products, strays = _lookup_keys(items)
             for stray in strays:
                 logger.error(
-                    "%s: futures schedules: the lookup queue holds %r, which is no lookup; the "
-                    "worker skips it and loads the others. %s",
-                    self._label,
+                    "The futures schedule lookups were handed %r, which is neither a ticker nor "
+                    "a product. The library skips it and looks up the others. %s",
                     stray,
                     LIBRARY_BUG,
                 )
@@ -800,9 +800,8 @@ class FuturesCalendar:
                 closed = self._closed
             if not closed:  # a lookup cut short by the close is no failure
                 logger.exception(
-                    "%s: futures schedules: looking up %s failed. %s",
-                    self._label,
-                    ", ".join(sorted(keys)),
+                    "Looking up the futures schedules of %s failed. %s",
+                    prose_list(sorted(keys), kind),
                     LIBRARY_BUG,
                 )
             defect = MassiveError(f"{error!r}", is_bug=True)
@@ -920,9 +919,8 @@ class FuturesCalendar:
         self._snapshot_refusals += 1
         if self._snapshot_refusals == _REFUSALS:
             logger.warning(
-                "%s: futures schedules: Massive refused the futures snapshot twice (%s); "
-                "futures products are looked up in the contracts list only",
-                self._label,
+                "Massive refused the futures snapshot twice, so the library looks up futures "
+                "products in Massive's contracts list only. The latest refusal: %s",
                 failure_text(error),
             )
 
@@ -1066,9 +1064,9 @@ class FuturesCalendar:
         for text, (error, keys) in by_text.items():
             logger.log(
                 logging.ERROR if error.is_bug else logging.WARNING,
-                "%s: futures schedules: looking up %s failed: %s; their rows wait for it",
-                self._label,
-                ", ".join(sorted(keys)),
+                "Looking up the futures schedules of %s failed, so their rows wait until a "
+                "later lookup succeeds. %s",
+                prose_list(sorted(keys), "tickers and products"),
                 text,
                 exc_info=error if error.is_bug else None,
             )

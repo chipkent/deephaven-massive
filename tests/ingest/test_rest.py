@@ -48,7 +48,6 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    READ_STOPPED,
     BrokenGuaranteeError,
     CutShortError,
     RowDataError,
@@ -82,6 +81,7 @@ from deephaven_massive._tables.transports import (
     SymbolOutcome,
     SymbolRows,
 )
+from deephaven_massive.namespaces import _crypto as crypto_ns
 from deephaven_massive.namespaces import _futures as futures_ns
 from deephaven_massive.namespaces import _options as options_ns
 from deephaven_massive.namespaces import _reference as reference
@@ -131,8 +131,8 @@ def no_data_alarm(dataset: str, read: int, symbol: str, *, why: str) -> str:
     # The WARNING of a read's first symbol Massive has no data for.
     return (
         f"{dataset} table {read}: unavailable_symbols: {symbol}: Massive has no data for it "
-        f"{why} (at {dataset}); m.problems() lists it and every later unavailable_symbols "
-        "problem of this table, which the log shows at DEBUG only"
+        f"{why} (at {dataset}). m.problems() lists it and every later unavailable_symbols "
+        "problem of this table, which the log shows at DEBUG only."
     )
 
 
@@ -1016,7 +1016,7 @@ def test_a_host_decision_that_breaks_is_a_library_defect_logged_at_error(
     [record] = caplog.records
     assert (record.levelno, record.getMessage()) == (
         logging.ERROR,
-        f"deciding the stocks WebSocket host failed: RuntimeError('the rule broke'). {LIBRARY_BUG}",
+        f"Deciding the stocks WebSocket host failed: RuntimeError('the rule broke'). {LIBRARY_BUG}",
     )
 
 
@@ -1070,7 +1070,10 @@ def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     (result,) = results
     if outcome == "fails":
         assert isinstance(result, dm.EntitlementError)
-        assert str(result).endswith("reading Massive's crypto tickers failed: refused")
+        assert str(result) == (
+            "'X:DOTUSD' cannot be split into its two currencies, since reading Massive's crypto "
+            "ticker list failed. refused"
+        )
         # Each waiter raises a copy, so no exception object is raised on two threads.
         assert isinstance(result.__cause__, dm.EntitlementError)
         assert result.__cause__ is not refused
@@ -1177,9 +1180,11 @@ def _gave_up_after_two_pauses(result: object) -> None:
     # pause takes it past that, after it spent 60 s.
     assert isinstance(result, dm.MassiveError)
     assert result.status == 429
+    # The governor's sentences say why the read gave up; the read adds where to watch the pace.
     assert re.search(
-        r"rate limited: Massive is refusing .*this read waits out at most 90 s of pauses and "
-        r"has spent 60 s",
+        r'with HTTP 429: "slow down"\. The next request goes at .*, past the 90 s this read '
+        r"waits for Massive's pauses, of which it has already waited 60 s\. .* See each "
+        r"subscription's pace in m\.rate_limits\(\)\.$",
         str(result),
     )
 
@@ -1376,8 +1381,11 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
         stop.set()
         stopped = joiner.join()
         assert isinstance(stopped, dm.MassiveError)
-        assert str(stopped).endswith(
-            f"waiting for the crypto ticker list: cancelled. {READ_STOPPED}"
+        assert str(stopped) == (
+            "'X:DOTUSD' cannot be split into its two currencies, since reading Massive's crypto "
+            "ticker list failed. Waiting for the crypto ticker list ended. The read stopped "
+            "because its table was released or its session closed. Call the method again for a "
+            "new table."
         )
         clock.advance(60.0)
         assert maker.join() == ("DOT", "USD")
@@ -1483,8 +1491,8 @@ def test_a_poll_with_a_max_outage_of_zero_fails_at_its_first_rate_limit_pause(
         (row,) = dh_to_pylist(m.streams())
     finally:
         m.close()
-    assert "rate limited: Massive is refusing" in row["Error"]
-    assert "raise MassiveConfig.max_outage to wait longer" in row["Error"]
+    assert 'with HTTP 429: "slow down". The next request goes at ' in row["Error"]
+    assert "Pass a larger max_outage to dm.MassiveConfig to wait longer." in row["Error"]
     assert len(fake_rest.get_queries()) == 1
 
 
@@ -1861,7 +1869,7 @@ def test_order_without_sort_fails_on_a_chosen_path_without_order(
 ) -> None:
     q = query(session, ROUTED, symbols=["O:SPY251219C00600000"], params={"order": Order.ASC})
     assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"does not take \['order'\]"):
+    with pytest.raises(ValueError, match=r"^options\.routed does not take order\.$"):
         q.fetch(wait=True)
     assert fake_rest.requests == []
 
@@ -1871,7 +1879,7 @@ def test_a_filter_a_chosen_path_lacks_fails_never_drops(
 ) -> None:
     q = query(session, ROUTED, symbols=["O:SPY251219C00600000"], filters={"strike_price_gte": 1})
     assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
+    with pytest.raises(ValueError, match=r"^options\.routed does not take strike_price_gte\.$"):
         q.fetch(wait=True)
     assert fake_rest.requests == []
 
@@ -1990,7 +1998,7 @@ def test_an_explicit_adjusted_fails_on_another_path_without_it(
     # A path that isn't a crypto pair's and lacks `adjusted` would drop unadjusted prices.
     q = query(session, DIVIDENDS, symbols=["AAPL"], adjusted=False)
     assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"dividends does not take \['adjusted'\]"):
+    with pytest.raises(ValueError, match=r"^stocks\.dividends does not take adjusted=False\.$"):
         q.fetch(wait=True)
     assert fake_rest.requests == []
 
@@ -2150,9 +2158,9 @@ def test_error_rows_of_a_snapshot_are_kept_and_logged_once(
     # One WARNING per page, naming each ticker once per session.
     assert [r.message for r in caplog.records if "error rows" in r.message] == [
         (
-            f"indices.snapshots: Massive answered error rows from {INDEX_SNAPSHOT_PATH} for 2 "
-            "[I:VIX (NOT_ENTITLED: Not entitled), I:RUT (NOT_ENTITLED: Not entitled)]; the rows "
-            "are kept with their Error and Message columns"
+            'indices.snapshots: Massive answered error rows for I:VIX with "NOT_ENTITLED: Not '
+            'entitled" and I:RUT with "NOT_ENTITLED: Not entitled". The rows are kept, with '
+            "Massive's answer in their Error and Message columns."
         )
     ]
 
@@ -2169,7 +2177,7 @@ def test_the_first_part_of_a_page_gives_a_drift_sample(
     fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
     [drift] = [e for e in events if e.cause is ProblemCause.SCHEMA_DRIFT]
     assert drift.field == "new"
-    assert drift.detail.endswith('; first value "good"')
+    assert drift.detail.endswith(' Its first value: "good".')
 
 
 def test_drift_is_a_problem_of_each_read_and_its_status_is_logged_once(
@@ -2187,14 +2195,14 @@ def test_drift_is_a_problem_of_each_read_and_its_status_is_logged_once(
     with caplog.at_level(logging.WARNING):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
         fetch(session, DIVIDENDS, symbols=["AAPL"])
-    assert caplog.text.count("undocumented response status 'PARTIAL'") == 1
+    assert caplog.text.count("with status 'PARTIAL', which Massive does not document") == 1
     # Each read's drift is its own problem, with the field and the first value it held; each
     # read's first warns once.
     assert [(e.cause, e.field, e.stream_id) for e in events] == [
         (ProblemCause.SCHEMA_DRIFT, "brand_new", 1),
         (ProblemCause.SCHEMA_DRIFT, "brand_new", 2),
     ]
-    assert all(e.detail.endswith("; first value 1") for e in events)
+    assert all(e.detail.endswith(" Its first value: 1.") for e in events)
     assert [a.split(":")[0] for a in alarms(caplog)] == [
         "stocks.dividends table 1",
         "stocks.dividends table 2",
@@ -2221,7 +2229,7 @@ def test_drift_of_a_per_symbol_request_names_the_symbol(
         "new",
         f"GET {CRYPTO_LAST_PATH}",
     )
-    assert drift.detail.endswith('; first sent for X:BTCUSD; first value "x"')
+    assert drift.detail.endswith(' It was first sent for X:BTCUSD. Its first value: "x".')
 
 
 def test_a_row_without_its_symbol_is_a_data_failure(
@@ -2267,14 +2275,14 @@ def test_one_odd_row_costs_the_call_only_itself(
         (
             "stocks.dividends table 1: unconvertible_values: 1 rows of AAPL, "
             + next(e.detail for e in events if e.cause is ProblemCause.UNCONVERTIBLE_VALUES)
-            + f" (at REST GET {DIVIDENDS_PATH}); m.problems() lists it and every later "
-            "unconvertible_values problem of this table, which the log shows at DEBUG only"
+            + f" (at REST GET {DIVIDENDS_PATH}). m.problems() lists it and every later "
+            "unconvertible_values problem of this table, which the log shows at DEBUG only."
         ),
         (
             f"stocks.dividends table 1: unreadable_keys: 1 rows, {DIVIDENDS_PATH}: row 0: no "
-            f"Ticker (wire key 'ticker'), which the dataset needs (at REST GET {DIVIDENDS_PATH}); "
+            f"Ticker (wire key 'ticker'), which the dataset needs (at REST GET {DIVIDENDS_PATH}). "
             "m.problems() lists it and every later unreadable_keys problem of this table, which "
-            "the log shows at DEBUG only"
+            "the log shows at DEBUG only."
         ),
     ]
 
@@ -2324,8 +2332,8 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
             DIVIDENDS_PATH,
             ["AAPL"],
             (
-                "stocks.dividends: the Stocks subscription of your plan does not include this "
-                "data; Massive answered GET /stocks/v1/dividends?"
+                "stocks.dividends: Massive refused this read for the Stocks subscription. "
+                "Massive answered GET /stocks/v1/dividends?limit=1000&ticker.any_of=AAPL"
             ),
         ),
         (
@@ -2333,8 +2341,8 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
             CONTRACTS_PATH,
             None,
             (
-                "options.contracts: your account does not include this data; Massive answered "
-                "GET /v3/reference/options/contracts?"
+                "options.contracts: Massive refused this read for your account. Massive answered "
+                "GET /v3/reference/options/contracts?limit=1000"
             ),
         ),
     ],
@@ -2351,8 +2359,7 @@ def test_a_refusal_names_the_dataset_and_its_subscription(
     fake_rest.reply(path, Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403))
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, spec, symbols=symbols)
-    assert str(info.value).startswith(refusal)
-    assert str(info.value).endswith(' on 127.0.0.1 with HTTP 403: "upgrade".')
+    assert str(info.value) == f'{refusal} on 127.0.0.1 with HTTP 403: "upgrade".'
     assert (info.value.status, info.value.source) == (403, dm.ErrorSource.MASSIVE)
 
 
@@ -2365,11 +2372,18 @@ def test_a_refusal_names_the_alternative_where_one_exists(
     serve_pairs(fake_rest)
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
-    assert str(info.value).startswith(
-        "crypto.last: the Currencies subscription of your plan does not include this data; "
-        'Massive answered GET /v1/last/crypto/BTC/USD on 127.0.0.1 with HTTP 403: "{}".'
+    assert str(info.value) == (
+        "crypto.last: Massive refused this read for the Currencies subscription. Massive "
+        'answered GET /v1/last/crypto/BTC/USD on 127.0.0.1 with HTTP 403: "{}". Call '
+        "m.crypto.snapshots with the same symbols, which carries the same values."
     )
-    assert str(info.value).endswith("; try m.crypto.snapshots(...), which carries the same values")
+    # The advice works: the alternative the message names serves the same symbol.
+    fake_rest.reply(
+        "/v2/snapshot/locale/global/markets/crypto/tickers",
+        Reply({"status": "OK", "tickers": [{"ticker": "X:BTCUSD", "todaysChange": 1.0}]}),
+    )
+    (row,) = fetch(session, crypto_ns.SNAPSHOTS, symbols=["X:BTCUSD"])
+    assert row["Symbol"] == "X:BTCUSD"
 
 
 @pytest.mark.parametrize(
@@ -2412,14 +2426,16 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     refusal = {"status": "ERROR", "request_id": "r7", "message": "slow down"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(refusal, status=429, headers={"Retry-After": "700"}))
     given_up = (
-        r"^rate limited: Massive is refusing stocks requests with HTTP 429 \(latest refusal: "
-        r".*r7.*\)\. Its next request, a probe, goes at 2027-01-15T08:10:00\+00:00 "
-        r"\(.* local time\), but this read waits out at most 300 s of pauses and has spent "
-        r"0 s of its patience\. The usual cause is another program or process using the same "
-        r"Massive account, whose limit they share\. "
-        r"To go on: retry after that time; stop the other program; or declare the limit Massive "
-        r"gives this subscription \(rest_requests_per_minute\), or upgrade it\. "
-        r"m\.rate_limits\(\) shows each subscription's state$"
+        "^"
+        + re.escape(
+            "Massive answered GET /stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 "
+            'with HTTP 429 (request_id r7): "slow down". The next request goes at 2027-01-15 '
+            "08:10:00 UTC, past the 300 s this read waits for Massive's pauses. The usual cause is "
+            "another program using the same Massive account, which shares its limit. Retry after "
+            "that time, stop the other program, or set rest_requests_per_minute in "
+            "dm.MassiveConfig to pace requests. See each subscription's pace in m.rate_limits()."
+        )
+        + "$"
     )
     with caplog.at_level(logging.INFO):
         for _ in range(2):
@@ -2432,14 +2448,15 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     warnings = [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.INFO and "request with HTTP 429 (" in r.getMessage()
+        if r.levelno == logging.INFO and "request with HTTP 429. " in r.getMessage()
     ]
     assert len(warnings) == 1
-    assert warnings[0].startswith(
-        f"{session._core.label}: Massive refused a stocks request with HTTP 429 (Massive answered "
-        "GET "
+    assert warnings[0] == (
+        "Massive refused a stocks request with HTTP 429. Massive answered GET "
+        "/stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 with HTTP 429 "
+        '(request_id r7): "slow down". Requests pause and resume. If this persists, send the '
+        "request_id to Massive's support."
     )
-    assert warnings[0].endswith("send the request id to Massive's support")
     assert "test-key" not in caplog.text
 
 
@@ -3175,7 +3192,7 @@ def test_a_missing_symbol_warns_once_per_read_and_an_error_row_once_per_session(
     assert alarms(caplog) == [
         no_data_alarm("crypto.last", read, "X:ETHUSD", why=why) for read in (1, 3)
     ]
-    assert caplog.text.count("for 1 [I:VIX (NOT_ENTITLED: Not entitled)]") == 1
+    assert caplog.text.count('error rows for I:VIX with "NOT_ENTITLED: Not entitled".') == 1
 
 
 def test_a_read_fans_out_on_the_callers_pool(
@@ -3377,7 +3394,9 @@ def test_a_poll_checks_each_value_of_a_table_as_the_parameter_it_is_sent_as(
     )
     reader.check_parameters(CONTRACTS, Request(value_table=underlyings))
     named = Request(symbols=("O:SPY250117C00600000",), value_table=underlyings)
-    with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
+    with pytest.raises(
+        ValueError, match=r"^options\.contract_details does not take underlying_ticker\.$"
+    ):
         reader.check_parameters(CONTRACT_DETAILS, named)
 
 
@@ -3387,7 +3406,7 @@ def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
     watch = new_table([string_col("Symbol", ["X:BTCUSD"])])
     q = query(session, SMA, symbols=watch, params={"bogus": 1})
     assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"does not take \['bogus'\]"):
+    with pytest.raises(ValueError, match=r"^indicators\.sma does not take bogus\.$"):
         q.poll(60)
     assert fake_rest.requests == []
 
@@ -3413,10 +3432,13 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
     with caplog.at_level(logging.WARNING, LOGGER):
         (row,) = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
     assert row["Symbol"] == "X:BTCUSD"
-    assert (
-        "error rows from /v1/last/crypto/{from}/{to} for 1 [X:BTCUSD (NOT_ENTITLED: Not entitled)]"
-        in caplog.text
-    )
+    assert [r.getMessage() for r in caplog.records if "error rows" in r.getMessage()] == [
+        (
+            'crypto.last: Massive answered error rows for X:BTCUSD with "NOT_ENTITLED: Not '
+            "entitled\". The rows are kept, with Massive's answer in their Error and Message "
+            "columns."
+        )
+    ]
 
 
 def test_a_nanosecond_inclusive_axis_fails_a_reactive_poll_at_once(
@@ -3561,9 +3583,9 @@ def test_a_long_grouped_daily_download_of_a_paced_subscription_is_announced(
     assert len(days) == 11
     assert all(date.fromisoformat(day).weekday() < 5 for day in days)
     assert (
-        "stocks.bars history: 11 requests, one per day; paced at 5 requests a minute (stocks); "
-        "at that pace they take at least 2 min"
-    ) in caplog.text
+        "stocks.bars history: 11 requests, one per day, paced at 5 requests a minute for "
+        "stocks. At that pace they take at least 2 min."
+    ) in caplog.messages
 
 
 def unexpected_stamps(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -3846,12 +3868,12 @@ def test_each_path_logs_its_bucket_and_why_once(
         fetch(session, DIVIDENDS, symbols=["MSFT"])  # the same path and bucket: not logged again
         fetch(session, NEWS)
     charged = [message for message in caplog.messages if " is charged to the " in message]
-    later = "; later requests of this path charged to it are not logged"
-    stocks = "is charged to the stocks bucket: its data's class"
-    other = "is charged to the other bucket: a reference endpoint"
+    later = ". Later requests of this path charged to it are not logged."
+    stocks = "is charged to the stocks bucket as its data's class"
+    other = "is charged to the other bucket as a reference endpoint"
     assert charged == [
-        f"{DIVIDENDS.name} {DIVIDENDS_PATH} (symbols: AAPL) {stocks}{later}",
-        f"{NEWS.name} {NEWS_PATH} (symbols: none) {other}{later}",
+        f"{DIVIDENDS.name} {DIVIDENDS_PATH}, symbols AAPL, {stocks}{later}",
+        f"{NEWS.name} {NEWS_PATH}, symbols none, {other}{later}",
     ]
     # Each fetch names its patience once, in its own line, not once per request.
     reads = [m for m in caplog.messages if " fetch: " in m]
@@ -3923,8 +3945,8 @@ def test_a_paced_fetch_announces_how_long_it_takes(
     finally:
         m.close()
     assert (
-        "forex.conversion fetch: 6 requests; paced at 5 requests a minute (currencies); at that "
-        "pace they take at least 1 min"
+        "forex.conversion fetch: 6 requests, paced at 5 requests a minute for currencies. At "
+        "that pace they take at least 1 min."
     ) in caplog.messages
 
 
@@ -4016,8 +4038,8 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
         m.close()
     assert (
         "stocks.dividends poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
-        "per minute, so a cycle takes at least 37 s, longer than the 30 s interval; cycles run "
-        "late"
+        "per minute, so a cycle takes at least 37 s, longer than the 30 s interval, and cycles "
+        "run late. To keep them on time, call poll(37) or a longer interval."
     ) in caplog.messages
 
 
@@ -4226,11 +4248,12 @@ def test_a_404_after_the_first_page_means_the_data_was_cut_short(
         TRADES_PATH.format(stockTicker="AAPL"),
         Reply(envelope([{"sip_timestamp": start}], next_url=f"{fake_rest.url}{gone}")),
     )
-    with pytest.raises(dm.MassiveError, match="AAPL's data was cut short") as info:
+    with pytest.raises(dm.MassiveError) as info:
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
-    assert str(info.value).startswith(
-        "stocks.trades: AAPL's data was cut short: Massive answered HTTP 404 for page 2 of "
-        "/v3/trades/{stockTicker} after 1 page had arrived; retry the call"
+    assert str(info.value) == (
+        "stocks.trades: the rows of AAPL were cut short after 1 page arrived. Massive answered "
+        'GET /v3/trades/AAPL?cursor=gone on 127.0.0.1 with HTTP 404: "{"status":"NOT_FOUND"}". '
+        "Call m.stocks.trades again to read AAPL from the start."
     )
     assert info.value.status == 404
     # Unlike any other 404: a new call starts over with a new cursor.
@@ -4272,9 +4295,9 @@ def test_every_page_of_bars_must_echo_the_requested_adjustment(
     fake_rest.reply(second, Reply(envelope(later, adjusted=False)))
     with pytest.raises(
         dm.MassiveError,
-        match=r"^stocks\.bars: Massive answered /v2/aggs/ticker/\{stocksTicker\}/range/.* with "
-        r"adjusted=False although adjusted=True was requested, so the call would mix "
-        r"split-adjusted and as-traded prices; retry it$",
+        match=r"^stocks\.bars: Massive answered with bars of adjusted=False, and the call asked "
+        r"for adjusted=True\. The table would mix split-adjusted and as-traded prices, so the "
+        r"read stopped\. Call m\.stocks\.bars again\.$",
     ) as mixed:
         daily_bars(session, adjusted=True)
     assert mixed.value.is_retryable  # the next answer may agree with the request
@@ -4289,8 +4312,12 @@ def test_a_page_without_its_adjusted_echo_warns_once_per_path(
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
             assert [r["Close"] for r in daily_bars(session, adjusted=True)] == [1.0]
-    assert caplog.text.count("answered without its adjusted echo") == 1
-    assert "(adjusted=True requested) cannot be checked" in caplog.text
+    assert caplog.messages == [
+        (
+            "stocks.bars: Massive answered without saying whether its bars are adjusted, so the "
+            "library cannot check that they match adjusted=True."
+        )
+    ]
 
 
 def test_only_bars_with_an_explicit_adjustment_are_checked(
@@ -4479,7 +4506,7 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
     rest = session._core.rest_transport()
     q = query(session, SMA, symbols=["X:BTCUSD"], params={"bogus": 1})
     assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['bogus'\]"):
+    with pytest.raises(ValueError, match=r"^indicators\.sma does not take bogus\.$"):
         q.fetch(wait=False)
     # The check splits no crypto pair, which would read Massive's list.
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
@@ -4506,7 +4533,7 @@ def test_a_pair_massive_does_not_list_fails_a_fetch_under_raise_never_at_the_cal
         background = pair.fetch()
         assert background.is_refreshing
         session.release(background)
-        with pytest.raises(UnavailableSymbolError, match=r"no data for 1 \[X:DOTUSD \(Massive"):
+        with pytest.raises(UnavailableSymbolError, match=r": Massive has no data for X:DOTUSD\. "):
             pair.fetch(wait=True)
         assert sent_data(fake_rest) == []
 
@@ -5053,9 +5080,9 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
     day = date(2025, 3, 3)
     no_data = (
-        r"^stocks\.trades: Massive has no data for 1 \[ZZZZ \(HTTP 404 from "
-        r"/v3/trades/\{stockTicker\}\)\]\. Remove the symbol; to leave it out and read the "
-        r"others, pass on_error=dm\.ErrorPolicy\(unavailable_symbols=dm\.OnError\.LOG\)"
+        r"^stocks\.trades: Massive has no data for ZZZZ\. Remove it, or, to read the others, "
+        r"pass on_error=dm\.ErrorPolicy\(unavailable_symbols=dm\.OnError\.LOG\) to the call "
+        r"or to dm\.MassiveConfig\.$"
     )
 
     def session_with(setting: dm.OnError) -> dm.MassiveSession:
@@ -5116,9 +5143,9 @@ def test_each_rest_verb_follows_the_call_s_unavailable_symbols_over_the_session_
             history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"], on_error=call)
             assert pair.fetch(wait=True).size == 0
             return
-        with pytest.raises(UnavailableSymbolError, match=r"no data for 1 \[ZZZZ \("):
+        with pytest.raises(UnavailableSymbolError, match=r"Massive has no data for ZZZZ\. "):
             history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"], on_error=call)
-        with pytest.raises(UnavailableSymbolError, match=r"no data for 1 \[X:DOTUSD \("):
+        with pytest.raises(UnavailableSymbolError, match=r"Massive has no data for X:DOTUSD\. "):
             pair.fetch(wait=True)
         assert _failed_soon(pair.poll(60))
 
@@ -5157,18 +5184,16 @@ def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
     with caplog.at_level(logging.DEBUG, LOGGER):
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
     (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warning.startswith(
-        f"indices.snapshots: Massive answered error rows from {INDEX_SNAPSHOT_PATH} for 25 "
-        "[I:X00 (NOT_ENTITLED: Not entitled), "
-    )
-    assert warning.endswith(
-        "I:X19 (NOT_ENTITLED: Not entitled), +5 more]; the rows are kept with their Error and "
-        "Message columns"
+    assert warning == (
+        "indices.snapshots: Massive answered error rows for 25 tickers, the first 3: I:X00 with "
+        '"NOT_ENTITLED: Not entitled", I:X01 with "NOT_ENTITLED: Not entitled", and I:X02 with '
+        '"NOT_ENTITLED: Not entitled". The rows are kept, with Massive\'s answer in their Error '
+        "and Message columns."
     )
     debug = [r.getMessage() for r in caplog.records if "an error row" in r.getMessage()]
     assert debug[-1] == (
         f"indices.snapshots: Massive answered an error row from {INDEX_SNAPSHOT_PATH} for "
-        "I:X24 (NOT_ENTITLED: Not entitled)"
+        'I:X24 with "NOT_ENTITLED: Not entitled"'
     )
     assert len(debug) == 25
 
@@ -5182,9 +5207,12 @@ def test_an_error_row_answer_is_cut_in_the_warning_and_whole_at_debug(
     with caplog.at_level(logging.DEBUG, LOGGER):
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
     (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    shown = "I:VIX (NOT_ENTITLED: " + message
-    assert f"for 1 [{shown[: rest._ANSWER_SHOWN - 1]}…]; the rows are kept" in warning
-    assert any(f"for {shown})" in r.getMessage() for r in caplog.records)
+    shown = 'I:VIX with "NOT_ENTITLED: ' + message
+    assert warning == (
+        f"indices.snapshots: Massive answered error rows for {shown[: rest._ANSWER_SHOWN - 1]}…. "
+        "The rows are kept, with Massive's answer in their Error and Message columns."
+    )
+    assert any(f'for {shown}"' in r.getMessage() for r in caplog.records)
 
 
 def test_the_facts_a_session_warned_about_are_bounded(
@@ -5252,9 +5280,9 @@ def test_an_unknown_recency_label_warns_once_per_subscription_and_value(
             assert [r["Symbol"] for r in out] == ["I:SPX", "I:NDX"]  # served
     assert caplog.messages == [
         (
-            f"indices.snapshots: {INDEX_SNAPSHOT_PATH} answered timeframe='SOMETIMES', which is "
-            "neither DELAYED nor REAL-TIME, for indices data; the library cannot tell whether "
-            "the row is delayed and serves it"
+            "indices.snapshots: Massive labels indices data timeframe='SOMETIMES', which is "
+            "neither DELAYED nor REAL-TIME. The library cannot tell whether those rows are "
+            "delayed, and serves them."
         )
     ]
 
@@ -5290,10 +5318,10 @@ def test_a_row_is_listed_under_each_named_ticker_it_lists(
                 (2, "AAPL"),
             ]
     assert [q["tickers.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]] * 2
-    assert [m for m in caplog.messages if "list none" in m] == [
+    assert [m for m in caplog.messages if "lists none" in m] == [
         (
-            "partners.benzinga.news: 1 rows Massive returned from /benzinga/v2/news list none "
-            "of the request's tickers (2 [AAPL, MSFT]) in Tickers, so they are left out"
+            "partners.benzinga.news: Massive sent 1 rows from /benzinga/v2/news whose Tickers "
+            "lists none of the requested tickers AAPL and MSFT, so they are left out."
         )
     ]
     assert events == []
@@ -5324,7 +5352,12 @@ def test_a_read_mixing_per_symbol_and_shared_requests_is_a_library_defect() -> N
     # Neither cap fits such a plan, and no dataset makes one.
     path = RestPath(key="/x", fields=(), params=())
     planned = [(path, [rest_requests.Call({}, {}, "AAPL"), rest_requests.Call({}, {})])]
-    with pytest.raises(BrokenGuaranteeError, match="mixes per-symbol requests"):
+    with pytest.raises(
+        BrokenGuaranteeError,
+        match=r"^stocks\.dividends planned requests of one symbol beside requests of several, so "
+        r"limit can cap neither each symbol nor the whole call\. This is a bug in "
+        r"deephaven-massive\. ",
+    ):
         rest._per_symbol("stocks.dividends", planned)
     assert rest._per_symbol("stocks.dividends", [(path, [rest_requests.Call({}, {})])]) is False
     assert rest._per_symbol("stocks.dividends", []) is False
@@ -5452,10 +5485,15 @@ def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
 
 
 def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:
+    answer = 'Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 404: "gone".'
     error = _massive.WireError(
-        "not found", status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
+        answer, status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
     )
-    with pytest.raises(CutShortError, match="after 2 pages had arrived") as info:
+    with pytest.raises(
+        CutShortError,
+        match=rf"^stocks\.trades: the rows of AAPL were cut short after 2 pages arrived\. "
+        rf"{re.escape(answer)} Call m\.stocks\.trades again to read AAPL from the start\.$",
+    ) as info:
         _not_found(session, error, symbol="AAPL", requests=2)
     assert info.value.request_id == "r1"
 

@@ -73,7 +73,11 @@ def test_the_list_asks_for_the_largest_page_its_path_documents() -> None:
 
 def test_a_path_without_a_documented_page_size_is_refused() -> None:
     path = source(Transport.REST, "/v1/marketstatus/now")
-    with pytest.raises(ValueError, match="documents no maximum page size"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Massive's documentation of /v1/marketstatus/now gives no maximum limit\. This is "
+        r"a bug in deephaven-massive\. ",
+    ):
         largest_page(path)
 
 
@@ -291,7 +295,10 @@ def test_a_failed_read_of_the_crypto_ticker_list_keeps_its_public_error_and_is_r
     reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     with pytest.raises(
         dm.EntitlementError,
-        match=r"^'X:DOTUSD' cannot be split into its two currencies: reading Massive's crypto",
+        match=r"^'X:DOTUSD' cannot be split into its two currencies, since reading Massive's "
+        r"crypto ticker list failed\. Massive answered GET "
+        r"/v3/reference/tickers\?market=crypto&active=true&limit=1000 on 127\.0\.0\.1 with "
+        r'HTTP 403: "\{"status": "ERROR"\}"\.$',
     ) as raised:
         reader.crypto_pair("X:DOTUSD")
     assert raised.value.status == 403
@@ -330,9 +337,11 @@ def test_an_unexpected_failure_reading_the_crypto_ticker_list_reaches_every_wait
     # A defect of the library: one ERROR, with its trace and how to report it.
     [record] = caplog.records
     assert (record.levelno, record.exc_info is not None) == (logging.ERROR, True)
-    assert record.getMessage().endswith(f"reading Massive's crypto tickers failed. {LIBRARY_BUG}")
+    assert record.getMessage() == f"Reading Massive's crypto ticker list failed. {LIBRARY_BUG}"
     (future,) = claimed
-    with pytest.raises(dm.MassiveError, match=r"^the read failed: RuntimeError") as waited:
+    with pytest.raises(
+        dm.MassiveError, match=r"^Reading Massive's crypto ticker list failed: RuntimeError"
+    ) as waited:
         future.result()  # the waiters get a MassiveError
     assert waited.value.source is dm.ErrorSource.LIBRARY
     assert str(waited.value).endswith(LIBRARY_BUG)

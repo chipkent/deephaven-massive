@@ -111,7 +111,7 @@ class SessionClients:
 
         Raises:
             SessionClosedError: If the core has been garbage-collected: the session is gone, as
-                if closed (`"MassiveSession #1 is closed; ..."`).
+                if closed (`"This session is closed. ..."`).
         """
         core = self._core()
         if core is None:
@@ -280,7 +280,8 @@ class SessionClients:
         access_key_id, secret_access_key = config.s3_access_key_id, config.s3_secret_access_key
         if access_key_id is None or secret_access_key is None:
             raise ValueError(
-                "flat files need MassiveConfig s3_access_key_id and s3_secret_access_key"
+                "Reading flat files needs S3 credentials. Pass s3_access_key_id and "
+                "s3_secret_access_key to dm.MassiveConfig."
             )
         factory = _massive.FlatFileClient
         with core.registry_lock:

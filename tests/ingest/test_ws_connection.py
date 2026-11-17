@@ -2169,7 +2169,7 @@ def test_a_refusal_adds_a_real_time_note_only_to_the_streams_that_carry_one(
     ws_session.on_loop(connection, lambda: connection._refused(("AD.*", "T.*"), "no"))
     ws_session.flush()
     errors = {r["Dataset"]: r["Error"] for r in streams_of(ws_session, dh_to_pylist)}
-    note = "options.admin_messages streams only in real time, on the plans listed at "
+    note = "options.admin_messages streams only in real time. Its plans are listed at "
     assert note in errors["options.admin_messages"]
     assert errors["options.trades"] == (
         'Massive answered the subscription to AD.* and T.* on wss://socket.test/options: "no". '

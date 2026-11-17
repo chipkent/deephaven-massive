@@ -489,7 +489,10 @@ def test_a_transient_failure_is_logged_once_per_run(
         clock.now += RETRY_DELAYS[0]
         state(calendar, "ESM4")
     assert caplog.messages == [
-        "test: futures schedules: looking up ESM4 failed: HTTP 503; their rows wait for it"
+        (
+            "Looking up the futures schedules of ESM4 failed, so their rows wait until a later "
+            "lookup succeeds. HTTP 503"
+        )
     ]
 
 
@@ -560,8 +563,8 @@ def test_a_snapshot_refused_twice_is_given_up_for_the_contracts_list(
     assert fetch.paths().count(SNAPSHOT_PATH) == 2
     assert caplog.messages == [
         (
-            "test: futures schedules: Massive refused the futures snapshot twice (HTTP 403); "
-            "futures products are looked up in the contracts list only"
+            "Massive refused the futures snapshot twice, so the library looks up futures "
+            "products in Massive's contracts list only. The latest refusal: HTTP 403"
         )
     ]
     assert state(calendar, "NEWZ6").readiness is Readiness.READY
@@ -947,8 +950,8 @@ def test_a_lookup_answer_the_library_cannot_read_is_logged_as_a_defect(
     assert record.levelno == logging.ERROR
     assert record.exc_info is not None  # a bug, with its traceback
     assert record.getMessage() == (
-        f"test: futures schedules: looking up ESM4 failed: bad page. {LIBRARY_BUG}; their rows "
-        "wait for it"
+        "Looking up the futures schedules of ESM4 failed, so their rows wait until a later "
+        f"lookup succeeds. bad page. {LIBRARY_BUG}"
     )
     assert found.readiness is Readiness.WAITING
     assert found.failing_since is not None
@@ -963,7 +966,7 @@ def test_the_worker_outlives_an_unexpected_error(
     [record] = caplog.records
     assert record.levelno == logging.ERROR
     assert record.exc_info is not None
-    assert record.getMessage() == f"test: futures schedules: looking up ESM4 failed. {LIBRARY_BUG}"
+    assert record.getMessage() == f"Looking up the futures schedules of ESM4 failed. {LIBRARY_BUG}"
     assert found.reason == "looking up its product failed: ValueError('bad answer')"
     fetch.answers[SNAPSHOT_PATH] = list(SNAPSHOT)
     clock.now += RETRY_DELAYS[0]
@@ -983,8 +986,9 @@ def test_a_lookup_the_worker_has_no_rule_for_is_a_logged_defect(
         idle(calendar)
     assert caplog.messages == [
         (
-            "test: futures schedules: the lookup queue holds ('prices', frozenset({'ESM4'})), "
-            f"which is no lookup; the worker skips it and loads the others. {LIBRARY_BUG}"
+            "The futures schedule lookups were handed ('prices', frozenset({'ESM4'})), which is "
+            "neither a ticker nor a product. The library skips it and looks up the others. "
+            f"{LIBRARY_BUG}"
         )
     ]
     assert correct(calendar, [FOLDED]) == (["2024-04-01"], [])

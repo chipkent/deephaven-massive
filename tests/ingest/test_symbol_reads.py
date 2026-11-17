@@ -252,23 +252,19 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
         (
             logging.WARNING,
             (
-                "stocks.dividends: 1 of the 3 rows Massive returned from /stocks/v1/dividends "
-                "for 2 [AAPL, MSFT] name none of those symbols, so no symbol's read owns them "
-                "and they are left out"
+                "stocks.dividends: 1 of the 3 rows Massive returned for AAPL and MSFT name none "
+                "of those symbols, so no symbol's read owns them and they are left out."
             ),
         )
     ]
     # The shared failure is logged once, at DEBUG: it is expected, and the caller reports it.
     failed = [r for r in caplog.records if "fails this symbol alone" in r.getMessage()]
     assert [r.levelno for r in failed] == [logging.DEBUG, logging.DEBUG]
-    assert (
-        failed[0]
-        .getMessage()
-        .startswith(
-            "call 7 stocks.dividends TSLA: the read from REST failed (not retryable), which "
-            "fails this symbol alone: stocks.dividends: the Stocks subscription of your plan "
-            "does not include "
-        )
+    assert failed[0].getMessage() == (
+        "call 7 stocks.dividends TSLA: the read from REST failed, which fails this symbol alone. "
+        "stocks.dividends: Massive refused this read for the Stocks subscription. Massive "
+        "answered GET /stocks/v1/dividends?limit=5000&ticker.any_of=NVDA%2CTSLA on 127.0.0.1 "
+        'with HTTP 403: "upgrade".'
     )
 
 
@@ -334,9 +330,16 @@ def test_a_row_listing_none_of_the_named_tickers_belongs_to_no_symbol(
         out = _fetch(session, LISTED, ["MSFT", "AAPL"])
     assert _rows(out["AAPL"]) == []
     assert [(r["BenzingaId"], r["Symbol"]) for r in _rows(out["MSFT"])] == [(1, "MSFT")]
-    listing = [r for r in caplog.records if "list none of the request's tickers" in r.getMessage()]
-    assert [r.levelno for r in listing] == [logging.WARNING]
-    assert "so they are left out" in listing[0].getMessage()
+    listing = [r for r in caplog.records if "lists none of the requested" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in listing] == [
+        (
+            logging.WARNING,
+            (
+                "partners.benzinga.news: Massive sent 1 rows from /benzinga/v2/news whose Tickers "
+                "lists none of the requested tickers AAPL and MSFT, so they are left out."
+            ),
+        )
+    ]
 
 
 def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
@@ -346,7 +349,12 @@ def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
     with caplog.at_level(logging.WARNING, LOGGER):
         out = _fetch(session, NEWS, ["AAPL"])
     assert _rows(out["AAPL"]) == []
-    assert "returned from /v2/reference/news for no symbol name none" in caplog.text
+    assert caplog.messages == [
+        (
+            "reference.news: 1 of the 1 rows Massive returned for no symbol name none of those "
+            "symbols, so no symbol's read owns them and they are left out."
+        )
+    ]
 
 
 @pytest.mark.parametrize("setting", list(dm.OnError))
@@ -402,7 +410,11 @@ def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_ra
     if setting is dm.OnError.RAISE:
         nope = _failure(out["X:NOPEUSD"])
         assert isinstance(nope.error, UnavailableSymbolError)
-        assert "Massive's crypto ticker list does not hold it" in str(nope.error)
+        assert str(nope.error) == (
+            "crypto.last: Massive has no data for X:NOPEUSD. Remove it, or, to read the others, "
+            "pass on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
+        )
         assert not nope.error.is_retryable
     # No request was made for the pair the list does not hold.
     assert [p for p, _ in fake_rest.get_queries() if p != TICKERS_PATH] == [
@@ -415,7 +427,7 @@ def test_a_parameter_the_path_does_not_take_raises_before_any_request(
 ) -> None:
     # The call refuses such a parameter for every path its symbol table could reach, so a
     # fetch read by symbol never fails one symbol for it.
-    with pytest.raises(ValueError, match=r"dividends does not take \['adjusted'\]"):
+    with pytest.raises(ValueError, match=r"^stocks\.dividends does not take adjusted=False\.$"):
         _fetch(session, DIVIDENDS, ["AAPL", "MSFT"], adjusted=False)
     assert fake_rest.get_queries() == []
 
@@ -485,8 +497,10 @@ def test_each_symbol_s_history_ends_in_its_own_outcome(
         "WMT": True,
     }
     assert isinstance(_failure(out["AMZN"]).error, CutShortError)
-    assert "AMZN's data was cut short" in str(_failure(out["AMZN"]).error)
-    assert str(_failure(out["WMT"]).error).startswith("rate limited: ")
+    assert str(_failure(out["AMZN"]).error).startswith(
+        "stocks.trades: the rows of AMZN were cut short after 1 page arrived. "
+    )
+    assert str(_failure(out["WMT"]).error).startswith("Massive answered GET ")
     # MSFT's missing data warns as history() warns it, as a problem; no failure warns.
     warned = [r for r in caplog.records if r.name in {LOGGER, REST_LOGGER}]
     assert [r.getMessage() for r in warned if r.levelno >= logging.WARNING] == []
@@ -577,9 +591,9 @@ def test_a_split_by_symbol_warns_about_rows_no_symbol_owns(
     assert [part.size for part in out.values()] == [0, 2, 1]
     assert caplog.messages == [
         (
-            "stocks.trades: 2 of the 5 rows read from flat files for 3 [NVDA, AAPL, MSFT] name "
-            "none of those symbols (or no symbol), so no symbol's read owns them and they are "
-            "left out"
+            "stocks.trades: 2 of the 5 rows read from flat files for NVDA, AAPL, and MSFT name "
+            "none of those symbols, or no symbol, so no symbol's read owns them and they are "
+            "left out."
         )
     ]
 
@@ -703,7 +717,7 @@ def test_a_parameter_the_path_does_not_take_fails_each_value_before_any_request(
     error = _failure(out["ES"]).error
     assert isinstance(error, UnsupportedParameterError)
     assert str(error) == (
-        "futures.products: /futures/v1/products does not take ['adjusted']; leave that "
-        "parameter out, or read these symbols in a call without it"
+        "futures.products does not take adjusted=False. Leave that argument out, or read these "
+        "symbols in a call without it."
     )
     assert fake_rest.get_queries() == []
