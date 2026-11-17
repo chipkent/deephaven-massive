@@ -72,6 +72,7 @@ from deephaven_massive._massive.spec.types import (
     RestPath,
     Source,
     Transport,
+    WsChannel,
 )
 
 if TYPE_CHECKING:
@@ -177,6 +178,8 @@ def _load(transport: Transport) -> Mapping[str, Source]:
 @overload
 def sources(transport: Literal[Transport.REST]) -> Mapping[str, RestPath]: ...
 @overload
+def sources(transport: Literal[Transport.WS]) -> Mapping[str, WsChannel]: ...
+@overload
 def sources(transport: Transport) -> Mapping[str, Source]: ...
 def sources(transport: Transport) -> Mapping[str, Source]:
     """Return every generated source of a transport, loading its file on first use.
@@ -197,7 +200,8 @@ def sources(transport: Transport) -> Mapping[str, Source]:
         A read-only mapping from each source's key (a REST path template such as
         `"/v3/trades/{stockTicker}"`, a channel such as `"stocks/T"`, or a prefix such as
         `"us_stocks_sip/trades_v1"`) to its value, in the generated file's order. For REST
-        every value is a `RestPath`. Every call for one transport returns the same mapping.
+        every value is a `RestPath`, and for WebSocket a `WsChannel`. Every call for one
+        transport returns the same mapping.
     """
     with _lock:
         return _load(transport)
@@ -205,6 +209,8 @@ def sources(transport: Transport) -> Mapping[str, Source]:
 
 @overload
 def source(transport: Literal[Transport.REST], key: str) -> RestPath: ...
+@overload
+def source(transport: Literal[Transport.WS], key: str) -> WsChannel: ...
 @overload
 def source(transport: Transport, key: str) -> Source: ...
 def source(transport: Transport, key: str) -> Source:
@@ -220,7 +226,7 @@ def source(transport: Transport, key: str) -> Source:
     propagates.
 
     Returns:
-        The source; a `RestPath` for REST.
+        The source; a `RestPath` for REST, a `WsChannel` for WebSocket.
 
     Raises:
         KeyError: If the transport has no generated source with that key (one that is

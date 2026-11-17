@@ -112,7 +112,8 @@ def rest_page(path: str) -> str:
 
 def ws_page(cluster: str, channel: str) -> str:
     return (
-        f"### A feed\n\n| Real-Time | `wss://socket.massive.com/{cluster}` |\n\n"
+        "### A feed\n\n## Connection\n\n| Feed | URL |\n| --- | --- |\n"
+        f"| Real-Time | `wss://socket.massive.com/{cluster}` |\n\n"
         f"The channel prefix for this feed is `{channel}`.\n"
     )
 

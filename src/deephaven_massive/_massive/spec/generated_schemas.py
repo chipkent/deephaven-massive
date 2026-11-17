@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 
 from deephaven_massive._massive.spec.types import (
     Conversion,
+    Feed,
+    FeedHost,
     Field,
     Membership,
     Param,
@@ -34,6 +36,7 @@ from deephaven_massive._massive.spec.types import (
     Transport,
     WireType,
     WireUnit,
+    WsChannel,
 )
 
 if TYPE_CHECKING:
@@ -90,7 +93,8 @@ def parse(
         transport: The transport the file describes.
         text: The file's JSON text: `{"sources": [{"key", "result_key", "params", "fields",
             "memberships"}, ...]}`, as the refresh writes it, with `"ignored_keys"` on a source
-            that ignores some key. `result_key` and `params` are read for REST only.
+            that ignores some key. `result_key` and `params` are read for REST only, and
+            `hosts` (`[{"feed", "host"}, ...]`) for WebSocket only.
         descriptions: For each source key, each described wire key mapped to its description
             (the transport's part of `DescriptionsFile.texts`). A field it does not name gets
             `""`; by default nothing is described.
@@ -322,7 +326,7 @@ def _source(
             key, and asset class.
 
     Returns:
-        A `RestPath` for REST, a `Source` otherwise.
+        A `RestPath` for REST, a `WsChannel` for WebSocket, and a `Source` for flat files.
     """
     key = _text(entry, "key")
     described = descriptions.get(key, {})
@@ -331,22 +335,41 @@ def _source(
     memberships = tuple(_membership(item) for item in _list(_member(entry, "memberships")))
     # Written only for a source that ignores some key.
     ignored = frozenset(_string_list(entry.get("ignored_keys", []), f"ignored keys of {key!r}"))
-    if transport is not Transport.REST:
-        return Source(
+    if transport is Transport.REST:
+        return RestPath(
             key=key,
-            transport=transport,
             fields=fields,
             memberships=memberships,
             ignored_keys=ignored,
+            result_key=_optional(entry, "result_key"),
+            params=tuple(_param(item) for item in _list(_member(entry, "params"))),
         )
-    return RestPath(
-        key=key,
-        fields=fields,
-        memberships=memberships,
-        ignored_keys=ignored,
-        result_key=_optional(entry, "result_key"),
-        params=tuple(_param(item) for item in _list(_member(entry, "params"))),
+    if transport is Transport.WS:
+        return WsChannel(
+            key=key,
+            fields=fields,
+            memberships=memberships,
+            ignored_keys=ignored,
+            hosts=tuple(_feed_host(item) for item in _list(_member(entry, "hosts"))),
+        )
+    # Flat files, the one transport left: a source of fields and memberships alone.
+    return Source(
+        key=key, transport=transport, fields=fields, memberships=memberships, ignored_keys=ignored
     )
+
+
+def _feed_host(item: dict[str, object]) -> FeedHost:
+    """Build one of a channel's documented hosts from its JSON object.
+
+    A feed label `spec.types.Feed` does not name raises `ValueError`.
+
+    Args:
+        item: `{"feed", "host"}`.
+
+    Returns:
+        The feed and its host.
+    """
+    return FeedHost(feed=Feed(_text(item, "feed")), host=_text(item, "host"))
 
 
 def _list(value: object) -> list[dict[str, object]]:
