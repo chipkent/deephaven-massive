@@ -12,8 +12,8 @@ class but crypto, and the `{cryptoTicker}` template for crypto (`fetch_paths_by_
 Every default of a signature is the default Massive's specification gives the parameter (the
 windows, `timespan` day, `series_type` close, and `adjusted=True`, bars adjusted for splits,
 never for dividends). `adjusted` is sent to a path that declares it; the crypto path does
-not, since a pair has no splits, so `True` is left out there and `False` raises `ValueError`
-for a crypto symbol. Massive does not echo the basis of an indicator, so it cannot be
+not, and a pair has no splits, so either value is left out there (`shared_params`). Massive
+does not echo the basis of an indicator, so it cannot be
 checked. Each row is one indicator value of
 one bar of the requested `Symbol`: the bar's window, `TimestampStart` to the exclusive
 `TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class (UTC for
@@ -313,8 +313,8 @@ class IndicatorsNamespace(Namespace):
             window: The number of bars averaged.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
-            adjusted: Split-adjusted bars. Crypto has no adjusted bars, so `False` fails the read of
-                a crypto symbol.
+            adjusted: Split-adjusted bars. It has no effect on a crypto pair, which has no
+                splits.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
             order: The direction of the bars' times. The endpoints have no `sort`.
@@ -391,8 +391,8 @@ class IndicatorsNamespace(Namespace):
             window: The number of bars the average spans.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
-            adjusted: Split-adjusted bars. Crypto has no adjusted bars, so `False` fails the read of
-                a crypto symbol.
+            adjusted: Split-adjusted bars. It has no effect on a crypto pair, which has no
+                splits.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
             order: The direction of the bars' times. The endpoints have no `sort`.
@@ -468,8 +468,8 @@ class IndicatorsNamespace(Namespace):
             window: The number of bars looked back over.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
-            adjusted: Split-adjusted bars. Crypto has no adjusted bars, so `False` fails the read of
-                a crypto symbol.
+            adjusted: Split-adjusted bars. It has no effect on a crypto pair, which has no
+                splits.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
             order: The direction of the bars' times. The endpoints have no `sort`.
@@ -550,8 +550,8 @@ class IndicatorsNamespace(Namespace):
             signal_window: The bars of the signal line's average.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
-            adjusted: Split-adjusted bars. Crypto has no adjusted bars, so `False` fails the read of
-                a crypto symbol.
+            adjusted: Split-adjusted bars. It has no effect on a crypto pair, which has no
+                splits.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
             order: The direction of the bars' times. The endpoints have no `sort`.

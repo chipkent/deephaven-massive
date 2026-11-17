@@ -159,7 +159,6 @@ from deephaven_massive._errors import (
     from_wire,
     library_bug,
     required,
-    required_instance,
 )
 from deephaven_massive._ingest import host_decision
 from deephaven_massive._ingest.crypto_tickers import CryptoTickerList
@@ -267,6 +266,10 @@ _FACTS_LIMIT: Final = 10_000
 """The most facts a session remembers having warned about (`RestState.first`); past it, it
 forgets them all and starts over, so a long `poll()` over many symbols keeps its memory bounded,
 at the cost of warning about an old fact once more."""
+
+_ANY_VALUE: Final = "VALUE"
+"""The value a value-table poll's parameters are checked with (`RestReader.check_parameters`):
+the check reads only which parameters a request carries, never their values."""
 
 _ANSWER_SHOWN: Final = 200
 """The most characters of one error row's answer a WARNING shows (`_cut`); the row's DEBUG
@@ -2077,12 +2080,12 @@ class RestReader:
     ) -> poll.CycleRows:
         """Run one read of a `poll()` cycle: the planned requests of `read_fetch` for its symbols.
 
-        By default one symbol never fails the table. A reactive symbol table can route a new
-        symbol to a path that lacks a parameter the caller set (`adjusted=False` on the crypto
-        indicators), and Massive can answer HTTP 404 for a symbol (no data).
-        `ErrorPolicy.unavailable_symbols` decides (`_unavailable`): under `LOG` and `IGNORE`
-        such symbols are left out of the cycle, each an `unavailable_symbols` problem of the
-        table, and named in its `left_out`; under `RAISE` the table fails.
+        By default one symbol never fails the table. Massive can answer HTTP 404 for a symbol
+        (no data), and `ErrorPolicy.unavailable_symbols` decides (`_report_missing`): under
+        `LOG` and `IGNORE` such symbols are left out of the cycle, each an
+        `unavailable_symbols` problem of the table, and named in its `left_out`; under `RAISE`
+        the table fails. A parameter a path does not take never reaches a cycle:
+        `check_parameters` refused it when the table was made.
         Before reading, the cycle's requests per bucket go to `pace`, which warns once when
         the paced ones outlast the interval.
 
@@ -2106,10 +2109,9 @@ class RestReader:
 
         Raises:
             UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a
-                symbol Massive answered with HTTP 404 or whose path does not take a parameter
-                the poll sends (`_unavailable`).
+                symbol Massive answered with HTTP 404 (`_report_missing`).
 
-        Any other error is that of `read_fetch`, but for a parameter a path does not take.
+        Any other error is that of `read_fetch`.
         """
         planned, left_out = self._plan_cycle(spec, request, symbols, cancel=cancel)
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
@@ -2132,50 +2134,6 @@ class RestReader:
             left_out.extend(str(one) for one in missing)
         return poll.CycleRows(table, requests, patience.seconds, tuple(left_out))
 
-    def _unavailable(
-        self,
-        spec: DatasetSpec,
-        template: str,
-        symbols: Sequence[str],
-        *,
-        reason: str,
-    ) -> None:
-        """Apply `ErrorPolicy.unavailable_symbols` to symbols whose path refuses a parameter.
-
-        Each is an `unavailable_symbols` problem of the table, whatever the setting. Under
-        `LOG` and `IGNORE` the cycle leaves them out; under `RAISE` the table fails.
-
-        Args:
-            spec: The dataset.
-            template: The path that cannot serve them.
-            symbols: The symbols.
-            reason: Why, for the log and the error, such as `"/v1/indicators/sma/{cryptoTicker}
-                does not take ['adjusted']"`.
-
-        Raises:
-            UnavailableSymbolError: Under `RAISE`, naming the symbols, the path, the reason,
-                and the setting.
-        """
-        self.problems(
-            self._unavailable_events(
-                spec, [(name, f"{template} cannot serve it: {reason}") for name in symbols]
-            )
-        )
-        if effect_of(self.policy.unavailable_symbols).fails:
-            raise UnavailableSymbolError(
-                f"{spec.name} poll(): {', '.join(symbols)} cannot be polled: {reason}. Remove "
-                "the symbol; to leave it out and keep polling the others, "
-                f"{policy_hint('unavailable_symbols', OnError.LOG)}",
-                source=ErrorSource.USER,
-                is_bug=True,
-            )
-        logger.debug(
-            "%s poll(): %s left out of the cycle: %s",
-            spec.name,
-            bounded_list(symbols),
-            reason,
-        )
-
     def _plan_cycle(
         self,
         spec: DatasetSpec,
@@ -2184,16 +2142,15 @@ class RestReader:
         *,
         cancel: Cancel,
     ) -> tuple[list[tuple[RestPath, list[Call]]], list[str]]:
-        """Plan a `poll()` cycle path by path, leaving out each path that refuses a parameter.
+        """Plan a `poll()` cycle path by path (`fetch_paths`, `_plan_path`).
 
-        A path that does not take a parameter the caller set (`shared_params` raises
-        `ValueError`) is left out with its symbols, and the cycle reads every other path, as
-        `ErrorPolicy.unavailable_symbols` says (`_unavailable`): each symbol is an
-        `unavailable_symbols` problem of the table. A crypto pair Massive's crypto ticker list
-        gives no split for is planned as a call that is never sent (`Call.unsplit`): the read
-        reports a pair Massive has no data for as it reports HTTP 404, and the cycle leaves out
-        one whose currencies cannot be read, named with why, an `unreadable_symbols` problem
-        of the table each cycle (`_call`).
+        Every path a symbol can be read on takes the request's parameters: when the poll was
+        made, static symbols were planned (`plan_fetch`), or, with a reactive table or a value
+        table, `check_parameters` checked each path. A crypto pair Massive's crypto ticker
+        list gives no split for is planned as a call that is never sent (`Call.unsplit`): the
+        read reports a pair Massive has no data for as it reports HTTP 404, and the cycle
+        leaves out one whose currencies cannot be read, named with why, an
+        `unreadable_symbols` problem of the table each cycle (`_call`).
 
         Args:
             spec: The dataset, with a fetch path.
@@ -2203,75 +2160,63 @@ class RestReader:
 
         Returns:
             Each path the cycle reads with its calls (`plan_fetch`), and each symbol left out
-            with why, such as `"X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take
-            ['adjusted'])"`.
+            with why, such as `"X:FOOUSD (its currencies cannot be read)"`.
 
-        A failed read of the crypto ticker list raises the `MassiveError` of `crypto_pair`, and
-        a refusing path under `RAISE` the `UnavailableSymbolError` of `_unavailable`.
+        A failed read of the crypto ticker list raises the `MassiveError` of `crypto_pair`.
         """
         if symbols == ():
             return [], []
         planned = []
         left_out: list[str] = []
         for template, own in fetch_paths(spec, symbols):
-            try:
-                path = self._plan_path(
-                    spec, request, template=template, own=own, split=None, cancel=cancel
-                )
-            except ValueError as error:
-                reason = str(error).removeprefix(f"{spec.name}: ")
-            else:
-                planned.append(path)
-                left_out.extend(
-                    f"{call.symbol} ({call.unsplit.why})"
-                    for call in path[1]
-                    if call.unsplit is not None and not call.unsplit.no_data
-                )
-                continue
-            # Only a reactive table's symbols can meet a refusing path here: static symbols
-            # were planned when the table was made, so `own` is a tuple.
-            names = required_instance(own, tuple, f"the symbols refused by {template}")
-            self._unavailable(spec, template, names, reason=reason)
-            left_out.extend(f"{name} ({reason})" for name in names)
+            path = self._plan_path(
+                spec, request, template=template, own=own, split=None, cancel=cancel
+            )
+            planned.append(path)
+            left_out.extend(
+                f"{call.symbol} ({call.unsplit.why})"
+                for call in path[1]
+                if call.unsplit is not None and not call.unsplit.no_data
+            )
         return planned, left_out
 
     def check_parameters(self, spec: DatasetSpec, request: Request) -> None:
-        """Check, before any symbol is known, that some fetch path can take the parameters.
+        """Check, before the first cycle, that every path the poll can read takes the parameters.
 
         A `poll()` over a reactive symbol table cannot plan its paths until it reads the
-        table, but a parameter that none of the dataset's fetch paths takes (`fetch_path`,
-        `detail_path`, and the per-class paths) can never succeed, so it fails at once.
+        table, but the parameters are known now, and the table may come to hold a symbol of
+        any path `fetch_paths` routes a symbol to: the `detail_path` when the dataset has one,
+        else `fetch_path` and the per-class paths. So a parameter any of them lacks fails now,
+        as it would for the same symbols passed in code, rather than leaving that path's
+        symbols out of every cycle. A `fetch()` that follows the table checks the same. A poll
+        with a value table and static symbols, or none, reads the paths `fetch_paths` gives
+        those symbols, and only those are checked, with the parameter each value is sent as
+        (`Request.for_value`).
 
         Args:
             spec: The dataset, with a fetch path.
             request: The normalized arguments.
 
-        When every fetch path refuses a parameter, the first path's `ValueError` (from
-        `shared_params` or `axis_query`) is raised.
+        The first refusing path's `ValueError` (from `shared_params` or `axis_query`) is
+        raised.
         """
-        candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
-        errors: list[ValueError] = []
-        templates = [template for template in candidates if template is not None]
-        try:
-            for template in templates:
-                rest_path = self.rest_path(template)
-                try:
-                    shared_params(spec, rest_path, request, fixed={})
-                    axis_query(
-                        spec,
-                        rest_path,
-                        dates=(request.start, request.end),
-                        asset_class=spec.asset_class,
-                    )
-                except ValueError as error:
-                    errors.append(error)
-            if len(errors) == len(templates):
-                raise errors[0]
-        finally:
-            # Each error's traceback holds this frame, and the frame's list holds the error: a
-            # cycle that keeps this reader, and so its session, alive after the session is
-            # dropped, until the cyclic garbage collector next runs. Emptying the list breaks it.
-            errors.clear()
+        symbols = request.symbols
+        sent = request if request.value_table is None else request.for_value(_ANY_VALUE)
+        if isinstance(symbols, SymbolTable):
+            # Every path a symbol of the table could be read on (`fetch_paths`): a dataset with
+            # a detail path reads every named symbol there, and an empty table reads nothing.
+            default = required(spec.fetch_path, f"{spec.name}'s fetch path")
+            templates = (
+                [spec.detail_path]
+                if spec.detail_path is not None
+                else [default, *spec.fetch_paths_by_class.values()]
+            )
+        else:
+            templates = [template for template, _ in fetch_paths(spec, symbols)]
+        for template in templates:
+            rest_path = self.rest_path(template)
+            shared_params(spec, rest_path, sent, fixed={})
+            axis_query(spec, rest_path, dates=(sent.start, sent.end), asset_class=spec.asset_class)
 
     def plan_fetch(
         self,
@@ -2774,17 +2719,21 @@ class RestEndpoints:
         """Plan `fetch`'s requests with no request, so a parameter error raises now.
 
         A background `fetch()` calls it on the caller thread before its table exists. Crypto
-        pairs are not split here (`_unsplit`): the read splits them.
+        pairs are not split here (`_unsplit`): the read splits them. A request that follows a
+        symbol table is checked against every path the table's symbols could reach
+        (`RestReader.check_parameters`), since the table may come to hold a symbol of any.
 
         Args:
             spec: The dataset, with a fetch path.
-            request: The normalized arguments, with static symbols.
+            request: The normalized arguments, with static symbols or a symbol table.
 
         A parameter a path does not take raises the `ValueError` of `shared_params`.
         """
-        self._reader("check", request.on_error, waiter=Waiter.CALL).plan_fetch(
-            spec, request, request.static_symbols, split=_unsplit
-        )
+        reader = self._reader("check", request.on_error, waiter=Waiter.CALL)
+        if isinstance(request.symbols, SymbolTable):
+            reader.check_parameters(spec, request)
+        else:
+            reader.plan_fetch(spec, request, request.static_symbols, split=_unsplit)
 
     def fetch_by_symbol(
         self,
@@ -2800,8 +2749,9 @@ class RestEndpoints:
         See `RestTransport.fetch_by_symbol` for what is read and returned, and
         `_ingest/symbol_reads.py` for how a failure is classed. The requests are planned with
         the crypto pairs split by Massive's ticker list, so a pair the list does not hold
-        fails alone; a parameter a symbol's path does not take fails that path's symbols.
-        Before the first request, one INFO line announces a read whose paced requests cannot
+        fails alone. A parameter a symbol's path does not take never reaches here: the call
+        checked every path its symbol table could reach (`check_fetch`). Before the first
+        request, one INFO line announces a read whose paced requests cannot
         all start within a minute (`rate_limits.announce`).
 
         Args:
@@ -3088,10 +3038,10 @@ class RestEndpoints:
             The live table, tracked by the session.
 
         A parameter the caller set that a path of the call does not take raises `ValueError`
-        before the table exists. With static symbols every path is planned now; with a reactive
-        table, whose symbols choose the paths at each cycle, only a parameter that no fetch path
-        takes fails here (`RestReader.check_parameters`), and the symbols of a path that lacks
-        one are left out of each cycle and listed in the table's `Error` (`read_cycle`).
+        before the table exists. With static symbols and no value table every path is planned
+        now; otherwise `RestReader.check_parameters` checks the paths now: with a reactive
+        table, whose symbols choose the paths at each cycle, a parameter that any fetch path
+        lacks fails here, since the table may come to hold a symbol of that path.
         """
         reader = self._reader("poll", request.on_error, waiter=Waiter.LIVE_TABLE)
         if isinstance(request.symbols, SymbolTable) or request.value_table is not None:

@@ -9,7 +9,10 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from deephaven import dtypes, new_table
+from deephaven.column import string_col
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
@@ -24,6 +27,7 @@ from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive.namespaces import _indicators as indicators
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import FetchQuery
+from tests._fakes.queries import until
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
@@ -427,11 +431,37 @@ def test_adjusted_false_reaches_only_a_path_that_takes_it(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply("/v1/indicators/ema/AAPL", sample(load_fixture, "sma_stock"))
-    rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch(wait=True)
-    assert dict(fake_rest.get_queries())["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
-    # Unadjusted prices are never dropped silently on the crypto path, which has no basis.
-    with pytest.raises(ValueError, match=r"\{cryptoTicker\} does not take \['adjusted'\]"):
-        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=False).fetch(wait=True)
+    fake_rest.reply("/v1/indicators/ema/X%3ABTCUSD", sample(load_fixture, "sma_stock"))
+    rest_session.indicators.ema(["AAPL", "X:BTCUSD"], 20, adjusted=False).fetch(wait=True)
+    queries = dict(fake_rest.get_queries())
+    assert queries["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
+    # The crypto path declares no `adjusted`, and a pair has no splits to adjust for.
+    assert "adjusted" not in queries["/v1/indicators/ema/X:BTCUSD"]
+
+
+def test_an_unadjusted_poll_of_a_watchlist_reads_its_crypto_pair_too(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The session's own SMA: the stock request carries `adjusted`, the pair's leaves it out.
+    fake_rest.reply("/v1/indicators/sma/AAPL", sample(load_fixture, "sma_stock"))
+    # 2024-01-03 00:00 UTC: a crypto pair's day value carries the start of its UTC day.
+    day = {"values": [{"timestamp": 1704240000000, "value": 97000.0}]}
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(envelope(day)))
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])]))
+    table = rest_session.indicators.sma(watch, 20, adjusted=False).poll(60)
+    until(lambda: {r["Symbol"] for r in dh_to_pylist(table)} == {"AAPL", "X:BTCUSD"})
+    queries = dict(fake_rest.get_queries())
+    assert queries["/v1/indicators/sma/AAPL"]["adjusted"] == ["false"]
+    assert "adjusted" not in queries["/v1/indicators/sma/X:BTCUSD"]
+    until(lambda: len(dh_to_pylist(rest_session.streams())) == 1)  # the row is shown async
+    (row,) = dh_to_pylist(rest_session.streams())
+    assert row["Error"] is None
 
 
 _SIGNATURE_PARAMS: Final = ("window", "short_window", "long_window", "signal_window")

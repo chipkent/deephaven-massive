@@ -269,7 +269,8 @@ def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
     assert result.is_refreshing
     until(lambda: len(rest.fetched) == 1)
     assert " read_" in rest.fetched[0][2]
-    assert rest.checks == [("fetch", LAST_TRADE_SPEC, rest.checks[0][2])]  # checked at the call
+    # Checked at the call: every path the table could reach.
+    assert [check[:2] for check in rest.checks] == [("fetch", LAST_TRADE_SPEC)]
     massive_session.release(result)
     follows(massive_session)
 
@@ -379,7 +380,9 @@ def test_a_fetch_of_an_empty_refreshing_table_fills_as_symbols_are_added(
     result = q.fetch(wait=True)
     assert result.is_refreshing
     assert result.size == 0
-    assert (rest.fetched, rest.checks) == ([], [])  # the first read checks the parameters
+    assert rest.fetched == []
+    # The call checks every path a symbol of the table could reach, though it holds none.
+    assert [check[:2] for check in rest.checks] == [("fetch", LAST_TRADE_SPEC)]
     wl.add(new_table([string_col("Symbol", ["AAPL"])]))
     until(lambda: len(dh_to_pylist(result)) == 1)
     massive_session.release(result)

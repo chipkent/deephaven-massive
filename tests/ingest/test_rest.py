@@ -7,7 +7,6 @@ import logging
 import math
 import re
 import threading
-import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
@@ -20,9 +19,10 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 from deephaven.update_graph import shared_lock
 from typing_extensions import Unpack, override
 
@@ -1941,17 +1941,31 @@ def test_symbols_route_to_their_class_path_and_send_only_its_parameters(
     assert [(r["Symbol"], r["Value"]) for r in out] == [("AAPL", 185.0), ("X:BTCUSD", 97000.0)]
 
 
-def test_an_explicit_adjusted_fails_on_a_path_without_it(
+@pytest.mark.parametrize("adjusted", [False, True])
+def test_a_crypto_pair_path_leaves_adjusted_out_whatever_its_value(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, adjusted: bool
+) -> None:
+    # `adjusted` is split adjustment and a crypto pair has no splits, so the crypto path,
+    # which doesn't declare it, gets the same request either way; the stock path gets it.
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": [_SMA_VALUE]})))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(envelope({"values": [_SMA_VALUE]})))
+    watch = new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])])
+    out = fetch(session, SMA, symbols=watch, adjusted=adjusted)
+    assert sorted(r["Symbol"] for r in out) == ["AAPL", "X:BTCUSD"]
+    requests = dict(fake_rest.get_queries())
+    assert requests["/v1/indicators/sma/AAPL"]["adjusted"] == [str(adjusted).lower()]
+    assert "adjusted" not in requests["/v1/indicators/sma/X:BTCUSD"]
+
+
+def test_an_explicit_adjusted_fails_on_another_path_without_it(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
+    # A path that isn't a crypto pair's and lacks `adjusted` would drop unadjusted prices.
+    q = query(session, DIVIDENDS, symbols=["AAPL"], adjusted=False)
     assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
+    with pytest.raises(ValueError, match=r"dividends does not take \['adjusted'\]"):
         q.fetch(wait=True)
     assert fake_rest.requests == []
-    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
-    fetch(session, SMA, symbols=["AAPL"], adjusted=False)
-    assert fake_rest.get_queries()[0][1]["adjusted"] == ["false"]
 
 
 def test_a_per_symbol_detail_path_serves_named_symbols(
@@ -3173,46 +3187,6 @@ def test_a_read_fans_out_on_the_callers_pool(
     assert (table.num_rows, requests) == (2, 2)
 
 
-class _RefusalError(ValueError):
-    """A path's refusal of a parameter, which a test can hold weakly to see it freed."""
-
-
-def test_a_parameter_one_path_refuses_leaves_no_cycle(
-    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The crypto path refuses `adjusted` and the stock path takes it, so the check passes. The
-    # crypto path's error must be freed when the check returns, not left in a reference cycle
-    # with the check's frame: that cycle holds the reader, and through it the session, until
-    # the cyclic collector runs. The collector stays off, so only reference counting frees it.
-    refusals: list[weakref.ref[_RefusalError]] = []
-    real = rest_requests.shared_params
-
-    def base(
-        spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
-    ) -> tuple[dict[str, object], dict[str, object]]:
-        try:
-            return real(spec, rest_path, request, fixed=fixed)
-        except ValueError as error:
-            refusal = _RefusalError(str(error))
-            refusals.append(weakref.ref(refusal))
-            try:
-                raise refusal from None
-            finally:
-                del refusal  # this frame must not hold its own error
-
-    monkeypatch.setattr(rest, "shared_params", base)
-    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
-    enabled = gc.isenabled()
-    gc.disable()
-    try:
-        reader.check_parameters(SMA, Request(adjusted=False))
-        assert len(refusals) == 1
-        assert refusals[0]() is None
-    finally:
-        if enabled:
-            gc.enable()
-
-
 def test_a_failed_history_is_logged_and_raised(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -3367,6 +3341,63 @@ def test_a_decision_is_shared_even_if_recording_it_fails(
     later = session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
     assert later.recency is Recency.REALTIME
     assert len(snapshots.requests) == 1
+
+
+def test_a_parameter_a_named_contract_lacks_fails_a_watchlist_poll_at_the_call(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A contract the watchlist names reads the per-contract path, which takes no filter of the
+    # list path, so the poll fails as a list of the same contracts does.
+    watch = new_table([string_col("Symbol", ["O:SPY250117C00600000"])])
+    for symbols in (watch, ["O:SPY250117C00600000"]):
+        q = query(session, CONTRACTS, symbols=symbols, filters={"strike_price_gte": 1})
+        assert isinstance(q, FetchQuery)
+        with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
+            q.poll(60)
+    assert fake_rest.requests == []
+
+
+@pytest.mark.parametrize("held", [[], ["O:SPY250117C00600000"]], ids=["empty", "a contract"])
+def test_a_parameter_a_named_contract_lacks_fails_a_watchlist_fetch_at_the_call(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_input_table: Callable[..., InputTable],
+    held: list[str],
+) -> None:
+    # As a poll does: a contract the watchlist names, now or later, reads the per-contract
+    # path, which takes no filter of the list path, so the fetch fails at the call.
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    if held:
+        watch.add(new_table([string_col("Symbol", held)]))
+    q = query(session, CONTRACTS, symbols=watch, filters={"strike_price_gte": 1})
+    assert isinstance(q, FetchQuery)
+    for wait in (False, True):
+        with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
+            q.fetch(wait=wait)
+    assert fake_rest.requests == []
+
+
+def test_a_poll_checks_only_the_paths_its_symbols_can_reach(*, session: dm.MassiveSession) -> None:
+    # A poll of contracts by a table of underlyings names no contract: it reads only the list
+    # path, so a filter the per-contract path lacks is fine. A watchlist may name contracts.
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
+    listed = Request(filters=(("strike_price_gte", 1),))
+    reader.check_parameters(CONTRACTS, listed)
+    watch = SymbolTable(new_table([string_col("Symbol", ["O:SPY250117C00600000"])]))
+    with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
+        reader.check_parameters(CONTRACTS, dataclasses.replace(listed, symbols=watch))
+    # Each value of a table of underlyings is sent as `underlying_ticker`, which the list path
+    # takes and a named contract's path doesn't.
+    with entered(session._core.exec_ctx):
+        table = new_table([string_col("Underlying", ["SPY"])])
+    underlyings = ValueTable(
+        "underlying", "underlying_ticker", "Underlying", underlying=True, table=table
+    )
+    reader.check_parameters(CONTRACTS, dataclasses.replace(listed, value_table=underlyings))
+    named = Request(symbols=("O:SPY250117C00600000",), value_table=underlyings)
+    with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
+        reader.check_parameters(CONTRACTS, named)
 
 
 def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
@@ -4465,9 +4496,9 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     rest = session._core.rest_transport()
-    q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
+    q = query(session, SMA, symbols=["X:BTCUSD"], params={"bogus": 1})
     assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
+    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['bogus'\]"):
         q.fetch(wait=False)
     # The check splits no crypto pair, which would read Massive's list.
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})

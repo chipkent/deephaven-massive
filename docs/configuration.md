@@ -370,14 +370,12 @@ written together. Under `log` or `ignore` it gets no rows, and
 
 #### on_error.unavailable_symbols
 
-Set `raise` when a missing symbol means your list is wrong.
+Set `raise` when a missing symbol means your list is wrong. Under
+`log` and `ignore`, the call skips the symbol and reads the
+others, and `m.problems()` lists it.
 
 A symbol Massive answers with no rows and no error has no rows, whatever this
 setting says.
-
-This setting also covers a watchlist symbol a `poll()` can't request with your
-arguments. For example, an indicator poll with `adjusted=False` can't request a
-crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
 
 #### on_error.unreadable_keys
 
