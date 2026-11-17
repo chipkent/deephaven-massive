@@ -408,12 +408,13 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     half day's week and the week before, and the month bars of the two whole months before
     the current one; and the library's `TimestampStart`, `TimestampEnd`, and `Date` for the
     same requests: about 14 requests in all. Passes when every source
-    answered and each grouped-daily row is stamped where the library expects a 1-day bar: at
-    00:00, 13:00, or 16:00 New York time of its own day. Reading the rest: range stamps there,
-    longer bars at 00:00 New York time on their period's first day (or the weekend before a
-    week's Monday), and matching values confirm the library's day label; minute bars ending at
-    12:59 on the half day confirm a whole day cut short; a raw stamp of any other form is
-    served by the library, labelled by the New York day it falls on, with a WARNING in the log.
+    answered and each grouped-daily row is stamped where grouped daily is expected to stamp a
+    1-day bar: at 00:00, 13:00, or 16:00 New York time of its own day. Reading the rest: range
+    stamps there, a `/prev` stamp there or at 04:00, longer bars at 00:00 New York time on
+    their period's first day (or the weekend before a week's Monday), and matching values
+    confirm the library's day label; minute bars ending at 12:59 on the half day confirm a
+    whole day cut short; a raw stamp of any other form is withheld by the library, with a
+    WARNING in the log.
     Grouped-daily volume runs a little below the range bar's, so only the stamps are asserted.
     """
     days = stamp_days["day"]
