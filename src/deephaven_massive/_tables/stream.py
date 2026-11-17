@@ -1387,6 +1387,7 @@ class Flusher:
             routed = [sink for sinks in routes.values() for sink in sinks]
             self._forget(routed)
             self._end_unheld_stale(routed)
+            self._end_unheld_undated(routed)
             found, self._drift = self._drift, {}
             events, self._events = self._events, []
             new_generation, self._new_generation = self._new_generation, False
@@ -1770,7 +1771,9 @@ class Flusher:
         """Update one stream's tickers whose rows wait for their date; return its new spans.
 
         A ticker joins when its wait passes `held_rows.DELAYED_AFTER` (`Settled.delayed`), and
-        leaves when its rows publish (`Settled.resumed`), are discarded, or fail.
+        leaves when its rows publish (`Settled.resumed`) or are discarded, or when the stream
+        stops receiving it (`_end_unheld_undated`). A ticker whose lookup fails fails every
+        stream that receives it, so its span ends with the stream.
 
         Args:
             plan: The dataset's plan for the channel.
@@ -1795,7 +1798,7 @@ class Flusher:
             )
             found = self._undated[sink.stream_id] = ({}, tracker)
         waiting, tracker = found
-        ended = settled.resumed.union(settled.failed, *settled.discarded.values())
+        ended = settled.resumed.union(*settled.discarded.values())
         for ticker in ended & waiting.keys():
             del waiting[ticker]
         waiting.update({t: (delay.rows, delay.reason) for t, delay in delays.items()})
@@ -2054,6 +2057,32 @@ class Flusher:
         stale.update(held)
         spans = tracker.update({symbol: (symbol, None, why, 0) for symbol, why in stale.items()})
         if spans is not None:
+            self._events.append((sink, (spans,)))
+
+    def _end_unheld_undated(self, routed: list[StreamSink]) -> None:
+        """End the `undated_rows` spans of tickers their streams no longer receive.
+
+        A ticker dropped from a stream's watchlist can never publish to the stream again, so
+        its span would hold until the stream closed. Runs at every flush, after `_forget`, as
+        `_end_unheld_stale` does.
+
+        Args:
+            routed: The streams the flush routed.
+        """
+        if not self._undated:
+            return
+        sinks = {sink.stream_id: sink for sink in routed}
+        for stream_id, (waiting, tracker) in self._undated.items():
+            sink = sinks[stream_id]
+            if sink.receives_all:
+                continue
+            gone = [ticker for ticker in waiting if not sink.holds(ticker)]
+            if not gone:
+                continue
+            for ticker in gone:
+                del waiting[ticker]
+            spans = tracker.update({t: (t, None, why, rows) for t, (rows, why) in waiting.items()})
+            assert spans is not None  # the tracker held each ticker that just left
             self._events.append((sink, (spans,)))
 
     def _end_unheld_stale(self, routed: list[StreamSink]) -> None:

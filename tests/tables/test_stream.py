@@ -49,7 +49,7 @@ from deephaven_massive._tables import held_rows, problem_reporter, stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.futures_dates import LookupState, Readiness
-from deephaven_massive._tables.held_rows import DELAYED_AFTER, HeldRows
+from deephaven_massive._tables.held_rows import DELAYED_AFTER, Delayed, HeldRows, Settled
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.problem_events import (
     Problem,
@@ -1017,7 +1017,10 @@ WAITING = LookupState(Readiness.WAITING, "its product is being looked up")
 
 
 class FuturesFlush:
-    """A futures flusher with a fake calendar and two streams: NQM5's (1) and ESM5's (2)."""
+    """A futures flusher with a fake calendar and two streams: NQM5's (1) and ESM5's (2).
+
+    `first` replaces stream 1's symbols, such as `ALL` for a stream of every ticker.
+    """
 
     def __init__(
         self,
@@ -1025,6 +1028,7 @@ class FuturesFlush:
         monkeypatch: pytest.MonkeyPatch,
         *,
         policy: ResolvedPolicy = DEFAULT_POLICY,
+        first: NormalizedSymbols = ("NQM5",),
     ) -> None:
         spec = core.catalog.by_name["futures.trades"]
         self.plan = ChannelPlan.build(core.catalog, spec, "T")
@@ -1045,7 +1049,8 @@ class FuturesFlush:
             held=self.held,
         )
         self.sinks: list[StreamSink] = []
-        for stream_id, wanted in ((1, ("NQM5",)), (2, ("ESM5",))):
+        streams: tuple[tuple[int, NormalizedSymbols], ...] = ((1, first), (2, ("ESM5",)))
+        for stream_id, wanted in streams:
             opened = open_stream_tables(
                 self.plan,
                 core.catalog.dataset_schema(spec),
@@ -1237,6 +1242,70 @@ def test_a_discarded_ticker_ends_its_wait(futures_flush: FuturesFlush) -> None:
     flush.calendar.set("NQM5", LookupState(Readiness.UNSCHEDULED, "gone"))
     flush.flusher.flush()
     assert [list(found) for found in undated(flush)] == [["NQM5"], []]
+
+
+def undated_snapshots(flush: FuturesFlush, stream_id: int) -> list[ProblemSpans]:
+    # Each `undated_rows` snapshot one stream reported, whole.
+    return [
+        p
+        for p in flush.events
+        if isinstance(p, ProblemSpans)
+        and p.cause is ProblemCause.UNDATED_ROWS
+        and p.stream_id == stream_id
+    ]
+
+
+def test_a_ticker_dropped_from_the_watchlist_ends_its_wait(futures_flush: FuturesFlush) -> None:
+    # The stream no longer receives the ticker, so its rows can never publish to it: the span
+    # ends at the next flush, though another stream keeps the ticker's rows waiting.
+    flush = futures_flush
+    nqm5, esm5 = flush.sinks
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    flush.flusher.flush()
+    esm5.set_symbols(frozenset({"ESM5", "NQM5"}))  # keeps NQM5's rows waiting
+    nqm5.set_symbols(frozenset({"GCM5"}))
+    flush.flusher.flush()
+    assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"], []]
+
+
+def test_a_stream_of_every_ticker_keeps_its_wait_across_flushes(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A `dm.ALL` stream names no ticker, yet receives every one: a flush never ends its wait as
+    # if the ticker had left its watchlist.
+    flush = FuturesFlush(massive_session._core, monkeypatch, first=ALL)
+    try:
+        flush.send("NQM5")
+        flush.now += DELAYED_AFTER
+        flush.flusher.flush()
+        flush.flusher.flush()
+        assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"]]
+    finally:
+        flush.flusher.stop()
+
+
+def test_a_later_report_of_a_waiting_ticker_updates_its_rows_and_keeps_its_start(
+    futures_flush: FuturesFlush,
+) -> None:
+    # Driven through the stream's span bookkeeping directly: settling reports a wait once, so
+    # a second report for an open span takes a wait the stream's flushes cannot stage alone.
+    flush = futures_flush
+    sink = flush.sinks[0]
+
+    def report(rows: int) -> ProblemSpans | None:
+        settled = Settled(None, delayed={"NQM5": Delayed(rows, "its product is being looked up")})
+        return flush.flusher._undated_spans(
+            flush.plan, settled, sink, where="test", receives=sink.holds
+        )
+
+    first = report(1)
+    assert first is not None
+    assert report(1) is None  # nothing changed
+    later = report(3)
+    assert later is not None
+    assert (first.spans["NQM5"].rows, later.spans["NQM5"].rows) == (1, 3)
+    assert later.spans["NQM5"].since == first.spans["NQM5"].since
 
 
 def test_past_the_byte_limit_the_streams_of_the_dataset_fail(
@@ -1611,6 +1680,40 @@ def test_a_stale_symbol_the_stream_no_longer_holds_ends_its_span(
     problems.clear()
     flusher.flush()
     assert stale_spans(problems, 8) == []  # ended once
+
+
+def test_a_stale_symbol_whose_run_reaches_the_limit_again_updates_its_detail_in_place(
+    massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The run starts over at the limit; a second full run with another first reason restates
+    # why, and the span keeps the start it had.
+    core = massive_session._core
+    problems: list[Problem] = []
+    monkeypatch.setattr(core, "problems", problems.extend)
+    plan = ChannelPlan.build(core.catalog, TRADES, "T")
+    every, _ = make_sink(core, ALL, plan, stream_id=7)
+    flusher.routes.add("T", every)
+    limit = stream.DROPPED_RUN_LIMIT
+    flusher.rows(
+        "T", frame([trade("AAPL"), *[trade("ILLQ", SipTimestamp=5)] * limit]), {}, generation=1
+    )
+    flusher.flush()
+    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)
+    lost = frame([trade("ILLQ", Price=None)] * limit)
+    marks = unread_keys(*range(limit), reason="a T row for ILLQ: no Price", sent="ILLQ")
+    flusher.rows("T", lost, marks, generation=1)
+    flusher.flush()
+    assert not every.failed
+    first, later = (
+        p.spans["ILLQ"]
+        for p in problems
+        if isinstance(p, ProblemSpans) and p.cause is ProblemCause.STALE_SYMBOL
+    )
+    assert first.detail.startswith(f"the last {limit} rows were withheld; the first: timestamp")
+    assert later.detail == (
+        f"the last {limit} rows were withheld; the first: a T row for ILLQ: no Price"
+    )
+    assert later.since == first.since
 
 
 def test_a_dataset_whose_every_row_is_withheld_fails_its_streams_and_marks_nothing_stale(
