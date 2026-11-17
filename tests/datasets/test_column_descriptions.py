@@ -349,7 +349,11 @@ def description(dataset: DatasetSpec, name: str) -> str:
             "New York time",
             "a week's Monday, a month's, quarter's, or year's first weekday",
         ),
-        (indices.BARS, "New York time", "a week's Sunday, a month's, quarter's, or year's 1st"),
+        (
+            indices.BARS,
+            "Chicago time (01:00 New York time)",
+            "a week's Sunday, a month's, quarter's, or year's 1st",
+        ),
         (forex.BARS, "UTC", "a week's Sunday, a month's, quarter's, or year's 1st)"),
         (crypto.BARS, "UTC", "a week's Sunday, a month's, quarter's, or year's 1st)"),
     ],
@@ -397,7 +401,19 @@ def test_the_library_describes_its_time_columns() -> None:
     assert stock_end.startswith("The exclusive end of the bar's window, as an Instant")
     assert 'on=["Symbol", "Timestamp>=TimestampEnd"]' in stock_end
     assert "at 00:00 New York time after its window's last day. A row read before" in stock_end
-    assert "Chicago day is not verified. A row read" in description(indices.BARS, "TimestampEnd")
+    index_end = description(indices.BARS, "TimestampEnd")
+    assert (
+        "ends at 00:00 Chicago time (01:00 New York time) after its window's last day. A row"
+        in (index_end)
+    )
+    index_start = description(indices.BARS, "TimestampStart")
+    assert index_start.startswith(
+        "The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 "
+        "Chicago time (01:00 New York time) of its window's first day (a week's Sunday, a "
+        "month's, quarter's, or year's 1st), Massive's own stamp. Massive's index days are "
+        "Chicago days"
+    )
+    assert "though Massive's documentation says index days are Eastern" in index_start
     assert description(stocks.BARS, "Date").startswith(
         "The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart`"
     )
@@ -433,7 +449,7 @@ def test_the_daily_summaries_and_indicators_describe_their_windows() -> None:
         f"the next day. {FINISHED}"
     )
     assert description(indices.DAILY_OPEN_CLOSE, "TimestampEnd").endswith(
-        f"Chicago day is not verified. {FINISHED}"
+        f"says index days are Eastern. {FINISHED}"
     )
     # A crypto summary not in UTC gets its date's widest window in any zone.
     for name in ("TimestampStart", "TimestampEnd"):
@@ -447,6 +463,7 @@ def test_the_daily_summaries_and_indicators_describe_their_windows() -> None:
         "The start of the bar the value is computed at, as an Instant."
     )
     assert "day zone of the symbol's class" in description(indicators.SMA, "TimestampEnd")
+    assert "for an index at 00:00 Chicago time" in description(indicators.SMA, "TimestampStart")
     assert "day zone of the symbol's class" in description(indicators.SMA, "Date")
 
 
@@ -455,8 +472,8 @@ FINISHED = (
     'values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows '
     "read after their window ended. That test reads the local clock, which can be off, and a "
     "row read within moments of its end, or from a delayed feed, may still lack the window's "
-    "last trades; an end set later than the window's (an index day's extra hour, a stamp kept "
-    "as sent) only keeps a finished row out longer."
+    "last trades; an end set later than the window's (an index day summary's extra hour) only "
+    "keeps a finished row out longer."
 )
 
 

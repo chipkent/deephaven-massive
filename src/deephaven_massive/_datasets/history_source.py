@@ -218,8 +218,8 @@ def history_window(
     kept inside the range. A bar is kept only when its whole window lies inside the range and
     has ended by now: its `TimestampStart` must be no earlier than the range's start
     (`bar_periods.bar_starts` selects the starts that fit), and its `TimestampEnd` no later than
-    `HistoryWindow.bars.latest`. The end is conservative, so a bar whose window might reach past
-    the range is left out: an index day bar ends at 01:00 New York time. A futures bar of a
+    `HistoryWindow.bars.latest`, so a bar whose window reaches past the range is left out: an
+    index day bar ends at 01:00 New York time, midnight in Chicago. A futures bar of a
     session or longer named by datetimes is kept by its own window, `TimestampStart` and
     `TimestampEnd` as filled, and only once it has certainly ended
     (`bar_periods.futures_bar_ended`); named by dates, by the rules of `_futures_sessions`.

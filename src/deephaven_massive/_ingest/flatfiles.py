@@ -18,9 +18,10 @@ to keep.
   renamed to the dataset's columns, have their condition and indicator lists parsed, and are
   converted to the column types here. 1-day bars, which `day_aggs_v1` stamps at the day's
   start, the 16:00 New York session close (stocks), midnight in Chicago (indices), or
-  23:59:59.999 UTC (forex and crypto), are stamped at 00:00 of their day in the class day zone
-  (`row_times.stamp_rule`); a stamp of another form is kept as sent and logs one WARNING per
-  form of stamp per session, so every bar of a file is served. Every
+  23:59:59.999 UTC (forex and crypto), are stamped at 00:00 of their day in the class's bar
+  zone, Chicago for indices, so an index bar keeps its stamp (`row_times.stamp_rule`); a bar
+  at a stamp of another form is withheld and logs one WARNING per form of stamp per session.
+  Every
   block's rows then get the library's time columns (`row_times.TimeRule`), with
   `TimestampInsert` the instant the block was decoded. The
   headers, their types, and their timestamp units are the prefix's generated fields

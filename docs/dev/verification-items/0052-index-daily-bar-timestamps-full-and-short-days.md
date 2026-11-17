@@ -4,5 +4,6 @@ Date: 2026-10-28
 
 Status: open
 
-A known stamp moves to 00:00 New York time; any other is kept with a null `Date` and a WARNING.
+A bar stamped at midnight in Chicago keeps that stamp, and another known stamp moves there; a
+bar at any other stamp is withheld with a WARNING.
 Settled by `tests/namespaces/test_indices_integration.py`.
