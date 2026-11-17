@@ -269,8 +269,8 @@ def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
     assert result.is_refreshing
     until(lambda: len(rest.fetched) == 1)
     assert " read_" in rest.fetched[0][2]
-    # Checked at the call: every path the table could reach, then the symbols it holds.
-    assert [check[:2] for check in rest.checks] == [("fetch", LAST_TRADE_SPEC)] * 2
+    # Checked at the call: every path the table could reach.
+    assert [check[:2] for check in rest.checks] == [("fetch", LAST_TRADE_SPEC)]
     massive_session.release(result)
     follows(massive_session)
 

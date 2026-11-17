@@ -393,9 +393,9 @@ class PermanentError(MassiveError):
     errors whose cause is settled for the session or the request: a row that breaks its
     dataset's schema (`RowDataError`), a symbol table's row that is not Massive's ticker
     (`SymbolRowError`), a symbol Massive has no data for under
-    `unavailable_symbols=OnError.RAISE` (`UnavailableSymbolError`), and, in a read by symbol, a
-    parameter a symbol's path does not take (`UnsupportedParameterError`,
-    `_ingest/symbol_reads.py`).
+    `unavailable_symbols=OnError.RAISE` (`UnavailableSymbolError`), and, in a `history()` or
+    value-table read by symbol, a parameter a symbol's path does not take
+    (`UnsupportedParameterError`, `_ingest/symbol_reads.py`).
 
     A `poll()` table fails with any of them except `UnsupportedParameterError` rather than
     retrying it every cycle. `UnsupportedParameterError` never reaches a `poll()` cycle: the

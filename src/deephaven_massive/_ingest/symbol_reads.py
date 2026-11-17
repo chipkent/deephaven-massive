@@ -123,9 +123,9 @@ RestUnit: TypeAlias = "tuple[RestPath, Call]"
 class UnsupportedParameterError(PermanentError):
     """A parameter the call set that a symbol's path does not take, in a read by symbol.
 
-    A dataset with a path per symbol class can route one symbol to a path that lacks a
-    parameter the call set. That symbol's read
-    fails with this error before any request, and the other symbols are read. The parameter is
+    A `history()` or value-table read by symbol can meet a path that lacks a parameter the
+    call set when the call did not check it. That symbol's read fails with this error before
+    any request, and the other symbols are read. The parameter is
     the caller's, so its source is `ErrorSource.USER`, and it is a bug.
     """
 
