@@ -106,14 +106,17 @@ of three values:
 |---|---|
 | `log` | Skips the symbol or row, keeps the rest, and logs a warning for the first problem of each cause on each table. |
 | `ignore` | Does the same, logging only at `DEBUG`. |
-| `raise` | Fails whatever met the problem. |
+| `raise` | Fails the call, or the live table, that met the problem. |
 
 `m.problems()` lists each problem a table met, with its cause and the setting that applied.
 
-By default, the library leaves out any row of Massive's data it can't read. A row it can read is one whose
-symbol, time, and values it can convert to the table's columns. So a result can be partial.
-Say `m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")` gets 5 rows from Massive, and the library can't read one
-of them. The table gets 4 rows. `m.problems()` lists the fifth, and the log warns once.
+Whatever the setting, the library never publishes a row of Massive's data it can't read: one
+whose symbol, time, or values don't convert to the table's columns.
+
+So under `log` a result can be partial. Suppose this call gets 5 rows from Massive, and the
+library can't read one of them:
+`m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")`. The table gets 4
+rows. `m.problems()` lists the fifth, and the log warns once.
 
 Set every cause to `raise` when a call must return complete data:
 
@@ -127,22 +130,26 @@ apple = bars.history("2026-10-26", "2026-10-30")
 
 To do the same for every call, pass that policy to `MassiveConfig(on_error=...)`.
 
+A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
+In a call's policy, a cause it leaves unset follows the session's. A cause the session's policy
+leaves unset follows the default.
+
 Under `raise`:
 
 - A problem found when you make the call raises at once.
 - A problem found later, as the rows arrive, raises from a call with `wait=True`. Without
   `wait=True`, it fails the table.
-- A watchlist read by `fetch()` or `history()` fails only the symbols with a problem, and
-  `m.symbol_reads()` shows them `FAILED`. A watchlist row whose value isn't Massive's exact
-  ticker fails the whole table.
+- A watchlist read by `fetch()` or `history()` fails only the symbols whose read met the
+  problem, and `m.symbol_reads()` shows them `FAILED`.
+- A malformed flat-file line fails every symbol of that file's read.
+- A watchlist row whose value isn't Massive's exact ticker fails the whole table.
 
-A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
-A cause it leaves unset follows the session's setting.
+A read or stream fails, whatever the setting, when Massive's rows stop being readable. Massive
+has most likely changed its format. Report it as a [bug](troubleshooting.md#report-a-bug).
 
-Whatever the setting, a table fails when Massive's rows stop being readable, since Massive has
-most likely changed its format. Report it as a [bug](troubleshooting.md#report-a-bug).
-
-- A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows.
+- A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows. For
+  a watchlist read, its symbols fail instead, and `m.symbol_reads()` shows them `FAILED`.
+- A watchlist read without `wait=True` fails its table when every symbol it started with fails.
 - A `dm.ALL` stream fails after 100 unreadable rows with none read between them.
 - A stream of the symbols you list fails after 100 rows whose symbol it can't read, with none
   read between them.
