@@ -1340,12 +1340,11 @@ def day_starts(
     Massive stamps the same bar of a day or longer differently by source: at the start of the
     day on the aggregates range, at the session close (16:00 New York time) on the stock
     grouped daily, at the pre-market open (04:00 New York time) on the stock `/prev`, at the
-    day's last millisecond in the forex day files. Every
-    expected stamp moves to 00:00 of its date in `zone`, so every source labels a bar alike. A
-    stamp is expected when its wall-clock time of day in `zone`, to the millisecond, is 00:00
-    or one of `known`, on a day `weekdays` and `months` allow (`_expected_stamp`); any other
-    is kept as sent, since which day it covers is not known, and marked so that the caller
-    can warn.
+    day's last millisecond in the forex day files. Every expected stamp moves to 00:00 of its
+    date in `zone`, so every source labels a bar alike. A stamp is expected when its
+    wall-clock time of day in `zone`, to the millisecond, is 00:00 or one of `known`, on a day
+    `weekdays` and `months` allow (`_expected_stamp`); any other is kept as sent, since which
+    day it covers is not known, and marked so that the caller can warn.
 
     The zone's offsets come from `zoneinfo`, one conversion per distinct stamp (a batch of
     daily bars holds about one per day), applied to the column with Arrow's `take`; Arrow's
