@@ -58,7 +58,7 @@ from deephaven_massive._datasets.bar_periods import (
     intraday,
 )
 from deephaven_massive._datasets.catalog import timespan_key
-from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS, joined_with_and
 from deephaven_massive._datasets.dates import (
     DaySpan,
     TimeRange,
@@ -85,6 +85,7 @@ from deephaven_massive._errors import (
     required,
     unmatched_form,
 )
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import ParamKind, Transport, source
 
 if TYPE_CHECKING:
@@ -326,8 +327,9 @@ def _futures_sessions(
         reserved = {filter_key(name) for name in param_family(session_date_param(spec))}
         if any(key in reserved for key, _ in request.filters):
             raise ValueError(
-                f"{spec.name}: history() dates set session_end_date themselves; drop the "
-                "session_end_date filter, or pass datetimes to combine it with a time range"
+                f"{spec.name}: history() with dates sets session_end_date itself, so it takes no "
+                "session_end_date filter. Leave the filter out, or pass datetimes as start and "
+                "end to combine it with a time range."
             )
         return HistoryWindow(span, None, span, None, now=now)
     multiplier = request.multiplier
@@ -460,12 +462,22 @@ def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
     return None
 
 
+class _FlatFileProblem(NamedTuple):
+    """One lasting reason flat files cannot serve a request, and what the caller can do."""
+
+    why: str
+    """The reason, as a clause that starts lower case or with a code name, with no period."""
+    fix: str
+    """The sentence that tells the caller what to do, or empty when nothing the caller passes
+    lets flat files serve the request."""
+
+
 def _flat_file_problems(
     spec: DatasetSpec,
     request: Request,
     *,
     config: MassiveConfig,
-) -> list[str]:
+) -> list[_FlatFileProblem]:
     """List every lasting reason flat files cannot serve a request; empty when none holds.
 
     These reasons do not change with time: credentials, the dataset's files, and adjustment.
@@ -477,32 +489,60 @@ def _flat_file_problems(
         config: The session's configuration (credentials).
 
     Returns:
-        One human-readable reason per violated constraint, in a fixed order: credentials, the
-        dataset's files, adjustment.
+        One reason per violated constraint, in a fixed order: credentials, the dataset's
+        files, adjustment.
     """
     problems = []
     if config.s3_access_key_id is None:
         problems.append(
-            "no S3 credentials are configured (MassiveConfig s3_access_key_id and "
-            "s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY)"
+            _FlatFileProblem(
+                "no S3 credentials are set",
+                "Set s3_access_key_id and s3_secret_access_key in dm.MassiveConfig, or the "
+                "environment variables MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY.",
+            )
         )
     if flat_file_prefix(spec, request) is None:
         if spec.is_bars and spec.flat_file_prefixes:
-            spans = ", ".join(f"1-{span}" for span in spec.flat_file_prefixes)
+            spans = joined_with_and([f"1-{span}" for span in spec.flat_file_prefixes])
             # Futures day bars are read from REST; the session files hold session bars, which
             # are not yet shown to be the same bars.
             day = request.timespan is Timespan.DAY and Timespan.SESSION in spec.flat_file_prefixes
-            hint = "; use dm.Timespan.SESSION for every contract's daily bars" if day else ""
-            problems.append(f"{spec.name} flat files hold only {spans} bars{hint}")
+            fix = "Pass timespan=dm.Timespan.SESSION for each contract's daily bars." if day else ""
+            problems.append(_FlatFileProblem(f"{spec.name} flat files hold only {spans} bars", fix))
         else:
-            problems.append(f"{spec.name} has no flat files")
+            problems.append(_FlatFileProblem(f"{spec.name} has no flat files", ""))
     if request.adjusted is True:
         problems.append(
-            "adjusted=True needs REST, since flat-file bars are unadjusted (as traded) and one "
-            "history() never mixes adjusted and unadjusted prices; pass adjusted=False for "
-            "the flat files"
+            _FlatFileProblem(
+                "flat-file bars are as traded and adjusted=True asks for split-adjusted ones",
+                "Pass adjusted=False.",
+            )
         )
     return problems
+
+
+def _whys(problems: list[_FlatFileProblem]) -> str:
+    """Join the reasons of flat-file problems as one clause.
+
+    Args:
+        problems: At least one problem.
+
+    Returns:
+        The reasons joined with `and`.
+    """
+    return prose_list((problem.why for problem in problems), "reasons", shown=len(problems))
+
+
+def _fixes(problems: list[_FlatFileProblem]) -> str:
+    """Join the fixes of flat-file problems, each a sentence, with a leading space.
+
+    Args:
+        problems: The problems.
+
+    Returns:
+        The fixes, each after a space, or empty when none has one.
+    """
+    return "".join(f" {problem.fix}" for problem in problems if problem.fix)
 
 
 class Alternative(StrEnum):
@@ -569,7 +609,9 @@ def choose_source(
     flat = _flat_file_problems(spec, request, config=config)
     if requested is HistorySource.FLAT_FILES:
         if flat:
-            raise ValueError(f"{spec.name} cannot be read from flat files: {'; '.join(flat)}")
+            raise ValueError(
+                f"{spec.name} cannot be read from flat files, since {_whys(flat)}.{_fixes(flat)}"
+            )
         return SourceChoice(HistorySource.FLAT_FILES, "requested")
     rest = rest_history_problem(spec, request)
     if (
@@ -580,23 +622,21 @@ def choose_source(
     ):
         # Only adjustment holds flat files back, and only dm.ALL holds REST back: say so.
         raise ValueError(
-            f"{spec.name} history of every symbol (dm.ALL) with adjusted=True has no source: "
-            "only REST serves split-adjusted bars, and REST reads bars one symbol at a time "
-            "(every symbol at once only for 1-day bars), while flat files hold as-traded "
-            "prices. Pass adjusted=False to read the as-traded flat files, or name the symbols "
-            "to read adjusted bars from REST"
+            f"{spec.name} history with symbols=dm.ALL and adjusted=True has no source. Only "
+            "REST serves split-adjusted bars, and REST reads these bars one symbol at a time. "
+            "Pass adjusted=False, or name the symbols."
         )
     if flat and rest is not None:
         raise ValueError(
-            f"{spec.name} history has no possible source. "
-            f"Flat files: {'; '.join(flat)}. REST: {rest}."
+            f"{spec.name} history has no source. Flat files cannot serve it, since "
+            f"{_whys(flat)}. REST cannot serve it, since {rest}.{_fixes(flat)}"
         )
     if rest is not None:
         return SourceChoice(HistorySource.FLAT_FILES, f"REST cannot serve it: {rest}")
     if flat:
         return SourceChoice(
             HistorySource.REST,
-            f"flat files cannot serve it: {'; '.join(flat)}",
+            f"flat files cannot serve it, since {_whys(flat)}",
             Alternative.UNAVAILABLE,
         )
     count = _listed_count(request.symbols)
@@ -604,13 +644,25 @@ def choose_source(
         return SourceChoice(HistorySource.FLAT_FILES, "every symbol", Alternative.AVAILABLE)
     threshold = config.flat_file_symbol_threshold
     if count >= threshold:
-        reason = f"{count} symbols >= flat_file_symbol_threshold {threshold}"
+        reason = f"{_symbols(count)}, at least flat_file_symbol_threshold={threshold}"
         return SourceChoice(HistorySource.FLAT_FILES, reason, Alternative.AVAILABLE)
     return SourceChoice(
         HistorySource.REST,
-        f"{count} symbols < flat_file_symbol_threshold {threshold}",
+        f"{_symbols(count)}, fewer than flat_file_symbol_threshold={threshold}",
         Alternative.AVAILABLE,
     )
+
+
+def _symbols(count: int) -> str:
+    """Count symbols in words, for the reason of a choice.
+
+    Args:
+        count: How many symbols a call lists.
+
+    Returns:
+        `1 symbol`, or the count and `symbols`, such as `3 symbols`.
+    """
+    return f"{count} symbol" if count == 1 else f"{count} symbols"
 
 
 def _listed_count(symbols: NormalizedSymbols | None) -> int | None:
@@ -677,15 +729,14 @@ def warn_unfilled(
     if not missing:
         return
     columns = ", ".join(sorted(missing))
-    remedy = f"pass source=dm.HistorySource.{other.name} to get them"
     warnings.log(
         f"history source {spec.name} {choice.source.name}: {columns}",
-        "%s history: AUTO read %s (%s); the read leaves %s null, which the other source, "
-        "%s, fills: %s (logged once per session)",
+        "%s history: AUTO read %s for %s, and that read leaves %s null, which %s "
+        "fills. Pass source=dm.HistorySource.%s to fill them.",
         spec.name,
         TRANSPORT_LABELS[HISTORY_TRANSPORTS[choice.source]],
         choice.reason,
-        columns,
+        prose_list(sorted(missing), "columns", shown=len(missing)),
         TRANSPORT_LABELS[HISTORY_TRANSPORTS[other]],
-        remedy,
+        other.name,
     )

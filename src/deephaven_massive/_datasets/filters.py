@@ -24,6 +24,7 @@ factories reserve the typed parameters (`namespaces/_query_building.py`).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Final, TypeAlias
@@ -32,6 +33,7 @@ import numpy as np
 
 from deephaven_massive._datasets.dates import instant_bound, parse_date_like, require_aware
 from deephaven_massive._datasets.source_columns import INSTANT_WIRE_TYPES
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import ParamKind, encode_value
 
 if TYPE_CHECKING:
@@ -51,6 +53,8 @@ __all__ = [
     "symbol_family",
     "takes_instants",
 ]
+
+logger = logging.getLogger(__name__)
 
 FilterValue: TypeAlias = (
     str
@@ -191,7 +195,7 @@ def _date_text(item: date, kind: ParamKind | None, *, label: str) -> str:
         ValueError: If the list is not of dates.
     """
     if kind is not ParamKind.DATE:
-        raise ValueError(f"{label} takes no dates, not {item!r}")
+        raise ValueError(f"{label} takes no dates, not {item!r}. Pass its values as text.")
     return item.isoformat()
 
 
@@ -242,7 +246,10 @@ def _list_items(
             texts.append(_date_text(item, kind, label=f"{spec.name} filter {key!r}"))
         elif isinstance(item, (int, float)) and not isinstance(item, bool):
             if base is None or kind not in _NUMBER_KINDS:
-                raise ValueError(f"{spec.name} filter {key!r} takes no numbers, not {item!r}")
+                raise ValueError(
+                    f"{spec.name} filter {key!r} takes no numbers, not {item!r}. Pass its "
+                    "values as text."
+                )
             try:
                 texts.append(encode_value(base, item, label=f"{spec.name} filter {key!r}"))
             except TypeError as error:
@@ -252,7 +259,10 @@ def _list_items(
         else:
             return value  # the encoder names the item it cannot send
     if texts and not any(texts):  # an empty tuple is the encoder's to refuse
-        raise ValueError(f"{spec.name} filter {key!r} has no value in {value!r}")
+        raise ValueError(
+            f"{spec.name} filter {key!r} has no value in {value!r}. Pass at least one value "
+            "that is not empty, or leave the filter out."
+        )
     return tuple(texts)
 
 
@@ -288,8 +298,9 @@ def _check_day_filter(
         instant_bound(spec.asset_class, name, value, unit=unit, upper=suffix in ("gt", "lte"))
     except ValueError:
         raise ValueError(
-            f"{spec.name} filter {key!r}: {name} has no exact unit to end a day with; "
-            f"pass an aware datetime, or a date to {base}_gte or {base}_lt"
+            f"{spec.name} filter {key!r} takes no date, since Massive's {name} has no exact "
+            f"unit to end a day with. Pass an aware datetime to {key}, or a date to "
+            f"{base}_gte or {base}_lt."
         ) from None
 
 
@@ -392,6 +403,23 @@ def _declared(
     return params
 
 
+def _unknown_filter(spec: DatasetSpec, key: str, keys: list[str]) -> str:
+    """Say that a dataset has no filter of a key, naming the keys it has.
+
+    Args:
+        spec: The dataset.
+        key: The key the caller passed.
+        keys: The dataset's filter keys, sorted.
+
+    Returns:
+        The message, which lists every key, or says the dataset takes none.
+    """
+    if not keys:
+        return f"{spec.name} has no filter {key!r}, and takes none. Leave filters out."
+    named = prose_list(keys, "filters", shown=len(keys))
+    return f"{spec.name} has no filter {key!r}. Pass one of {named}."
+
+
 def _check_listed(kind: ParamKind, listed: tuple[str, ...], text: str, *, label: str) -> None:
     """Refuse a filter value its enum parameter does not list.
 
@@ -411,7 +439,8 @@ def _check_listed(kind: ParamKind, listed: tuple[str, ...], text: str, *, label:
             them.
     """
     if kind is ParamKind.ENUM and text not in listed:
-        raise ValueError(f"{label} takes one of {list(listed)}, not {text!r}")
+        values = prose_list((repr(value) for value in listed), "values", shown=len(listed))
+        raise ValueError(f"{label}={text!r} is not one of its values. Pass one of {values}.")
 
 
 def check_filters(
@@ -482,7 +511,7 @@ def check_filters(
             require_aware(key, value, value)
         found = params.get(key)
         if found is None:
-            raise ValueError(f"{spec.name} has no filter {key!r}; valid filters: {sorted(params)}")
+            raise ValueError(_unknown_filter(spec, key, sorted(params)))
         label = f"{spec.name} filter {key!r}"
         forms = []
         for rest_path, index in found:
@@ -496,19 +525,19 @@ def check_filters(
                 kind=param.kind,
                 unit=param.unit,
             )
-            where = f" (on {rest_path.template})" if len(found) > 1 else ""
             try:
                 text = encode_value(param, parsed, label=label)
             except (TypeError, ValueError) as error:
-                raise ValueError(f"{error}{where}") from None
-            _check_listed(param.kind, param.values, text, label=f"{label}{where}")
+                logger.debug("%s: %s refuses %r: %s", label, rest_path.template, parsed, error)
+                raise ValueError(str(error)) from None
+            _check_listed(param.kind, param.values, text, label=label)
             forms.append(parsed)
         first = forms[0]
         if any(type(form) is not type(first) or form != first for form in forms):
+            read = prose_list((repr(form) for form in forms), "values", shown=len(forms))
             raise ValueError(
-                f"{label}: the dataset's paths read {value!r} as different values "
-                f"({[f'{type(form).__name__} {form!r}' for form in forms]}), so it cannot "
-                "be sent alike"
+                f"{label} reads {value!r} as {read} on the dataset's requests, which the "
+                "library cannot send alike. Leave the filter out."
             )
         checked.append((key, first))
     return tuple(checked)

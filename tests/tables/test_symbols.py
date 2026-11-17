@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import TYPE_CHECKING
 
@@ -65,29 +66,37 @@ def test_a_convention_names_case_whitespace_and_emptiness_per_row(
     dh_exec_ctx: ExecutionContext,
 ) -> None:
     table = new_table([string_col("Symbol", ["brk-b", "BRK-B ", ""])])
-    with pytest.raises(ValueError, match=r"^3 value\(s\) of Symbol are not stock") as raised:
+    with pytest.raises(
+        ValueError, match=r"^canonicalize_symbols cannot convert 3 values"
+    ) as raised:
         dm.canonicalize_symbols(
             table, AssetClass.STOCKS, convention=SymbolConvention.YAHOO, on_error=OnError.RAISE
         )
-    assert str(raised.value).startswith(
-        "3 value(s) of Symbol are not stock tickers: '' is empty, not a ticker; "
-        "'BRK-B ' has surrounding whitespace; write 'BRK-B'; "
-        "'brk-b' is not a YAHOO ticker: the YAHOO convention writes tickers in upper case; "
-        "use 'BRK-B' if that is the ticker you mean. "
+    assert str(raised.value) == (
+        "canonicalize_symbols cannot convert 3 values of Symbol to stock tickers. '' is empty, "
+        "not a ticker. 'BRK-B ' has surrounding whitespace. Pass 'BRK-B'. 'brk-b' is not a "
+        "YAHOO ticker. The YAHOO convention writes tickers in upper case. If you mean 'BRK-B', "
+        "pass 'BRK-B'. Pass on_error=dm.OnError.LOG to give their rows a null symbol instead."
     )
 
 
 def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: ExecutionContext) -> None:
     table = new_table([string_col("Symbol", ["BRK-B", "b1", "b2", "b3", "b4", "b5", "b6"])])
     with pytest.raises(
-        ValueError, match=r"^7 value\(s\) of Symbol are not stock tickers: "
+        ValueError,
+        match=r"^canonicalize_symbols cannot convert 7 values of Symbol to stock tickers\. The "
+        r"first 5: 'BRK-B' is not a Massive stock ticker\. ",
     ) as raised:
         dm.canonicalize_symbols(table, AssetClass.STOCKS, on_error=OnError.RAISE)
     message = str(raised.value)
-    assert "'BRK-B' is not a Massive stock ticker" in message
     assert "'b4'" in message  # the first five in sorted order
     assert "'b5'" not in message
-    assert message.endswith("Pass on_error=dm.OnError.LOG to null them instead")
+    assert message.endswith(
+        "Pass on_error=dm.OnError.LOG to give their rows a null symbol instead."
+    )
+    # The advice works: under LOG the bad rows get a null symbol and the table is made.
+    logged = dm.canonicalize_symbols(table, AssetClass.STOCKS, on_error=OnError.LOG)
+    assert values(logged) == [None] * 7
 
 
 def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
@@ -102,8 +111,8 @@ def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
     messages = [r.getMessage() for r in caplog.records]
     assert len(messages) == 21  # twenty values, then one record that says the rest are not
     assert messages[0] == (
-        "canonicalize_symbols: cannot read 'b00' as a forex pair of two three-letter codes; "
-        "write it as BASE/QUOTE, such as 'EUR/USD'; its rows get a null Symbol"
+        "canonicalize_symbols: 'b00' becomes a null Symbol. 'b00' is not a forex pair of two "
+        "three-letter currency codes. Write it as BASE/QUOTE, such as 'EUR/USD'."
     )
     assert messages[-1] == "20 values were reported. Further ones are not logged."
 
@@ -116,8 +125,8 @@ def test_a_bad_value_under_ignore_is_nulled_and_logged_only_at_debug(
         result = dm.canonicalize_symbols(table, AssetClass.FOREX, on_error=OnError.IGNORE)
     assert values(result) == ["C:EURUSD", None]
     message = (
-        "canonicalize_symbols: cannot read 'b00' as a forex pair of two three-letter codes; "
-        "write it as BASE/QUOTE, such as 'EUR/USD'; its rows get a null Symbol"
+        "canonicalize_symbols: 'b00' becomes a null Symbol. 'b00' is not a forex pair of two "
+        "three-letter currency codes. Write it as BASE/QUOTE, such as 'EUR/USD'."
     )
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [(logging.DEBUG, message)]
 
@@ -144,7 +153,14 @@ def test_a_bad_initial_row_of_a_refreshing_table_raises(
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["no pe!"])]))
     scope = new_scope()
-    with scope.open(), pytest.raises(ValueError, match=r"^1 value\(s\) of Symbol are not crypto"):
+    with (
+        scope.open(),
+        pytest.raises(
+            ValueError,
+            match=r"^canonicalize_symbols cannot convert 1 value of Symbol to crypto tickers\. "
+            r"'no pe!' is not a crypto pair\. ",
+        ),
+    ):
         dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
     release_scope(dh_exec_ctx, scope)
 
@@ -162,7 +178,7 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
         source.add(new_table([string_col("Symbol", ["BTC-USD", "no pe!", None, "no pe!"])]))
         wait_for(lambda: result.size == 4)
     assert values(result) == ["X:BTCUSD", None, None, None]
-    assert caplog.text.count("cannot read 'no pe!'") == 1
+    assert caplog.text.count("'no pe!' becomes a null Symbol") == 1
     failed = bool(result.j_table.isFailed())  # pytest cannot describe a Java method
     assert not failed
     release_scope(dh_exec_ctx, scope)
@@ -215,7 +231,8 @@ def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: ExecutionContex
             on_error="log",  # type: ignore[arg-type]  # the point: refused at run time
         )
     with pytest.raises(
-        ValueError, match=r"^the YAHOO convention applies to stocks only, not forex$"
+        ValueError,
+        match=r"^convention=dm\.SymbolConvention\.YAHOO is for stock tickers, not forex\. ",
     ):
         dm.canonicalize_symbols(table, AssetClass.FOREX, convention=SymbolConvention.YAHOO)
     with pytest.raises(TypeError, match=r"^column must be a str, not int$"):
@@ -224,21 +241,30 @@ def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: ExecutionContex
             AssetClass.FOREX,
             column=1,  # type: ignore[arg-type]  # the point: refused at run time
         )
-    with pytest.raises(ValueError, match=r"^column 'Size' must be a String column of the table$"):
-        dm.canonicalize_symbols(table, AssetClass.FOREX, column="Size")
     with pytest.raises(
         ValueError,
-        match=r"^table has no column 'Pair' \(columns: Symbol, Size\); pass column='Symbol', ",
+        match=r"^column='Size' names a column of int, not of String\. Pass the name of a String "
+        r"column of symbols\.$",
     ):
+        dm.canonicalize_symbols(table, AssetClass.FOREX, column="Size")
+    pair = (
+        "table has no column 'Pair'. Its columns are Symbol and Size. Pass column='Symbol', or "
+        "the name of another String column of symbols."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(pair)}$"):
         dm.canonicalize_symbols(table, AssetClass.FOREX, column="Pair")
+    assert values(dm.canonicalize_symbols(table, AssetClass.FOREX, column="Symbol")) == ["C:EURUSD"]
     tickers = new_table([string_col("Ticker", ["C:EURUSD"])])
     with pytest.raises(
-        ValueError, match=r"^table has no column 'Symbol' \(columns: Ticker\); pass column='Ticker'"
+        ValueError,
+        match=r"^table has no column 'Symbol'\. Its columns are Ticker\. Pass column='Ticker'",
     ):
         dm.canonicalize_symbols(tickers, AssetClass.FOREX)
     sizes = new_table([int_col("Size", [1])])
     with pytest.raises(
-        ValueError, match=r"^table has no column 'Symbol' \(columns: Size\); it has no String"
+        ValueError,
+        match=r"^table has no column 'Symbol'\. Its columns are Size\. Pass a table with a "
+        r"String column of symbols\.$",
     ):
         dm.canonicalize_symbols(sizes, AssetClass.FOREX)
 
@@ -249,20 +275,23 @@ def test_the_row_converter_raises_or_nulls(caplog: pytest.LogCaptureFixture) -> 
     convert = strict_converter(AssetClass.FOREX, SymbolConvention.MASSIVE)
     log = BoundedLog(logging.getLogger("deephaven_massive._tables.symbols"), limit=5, level=30)
     strict = _row_converter(
-        convert, effect=effect_of(OnError.RAISE), log=log, consequence="its rows get a null S"
+        convert, effect=effect_of(OnError.RAISE), log=log, consequence="becomes a null S"
     )
     assert strict(None) is None
     assert strict("EUR/USD") == "C:EURUSD"
-    with pytest.raises(ValueError, match="cannot read 'no pe!'"):
+    with pytest.raises(ValueError, match=r"^'no pe!' is not a forex pair of two"):
         strict("no pe!")
     lenient = _row_converter(
-        convert, effect=effect_of(OnError.LOG), log=log, consequence="its rows get a null S"
+        convert, effect=effect_of(OnError.LOG), log=log, consequence="becomes a null S"
     )
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
         assert lenient("no pe!") is None
         assert lenient("GBP-USD") == "C:GBPUSD"
-    assert [m.split(";")[0] for m in caplog.messages] == [
-        "canonicalize_symbols: cannot read 'no pe!' as a forex pair of two three-letter codes"
+    assert caplog.messages == [
+        (
+            "canonicalize_symbols: 'no pe!' becomes a null S. 'no pe!' is not a forex pair of "
+            "two three-letter currency codes. Write it as BASE/QUOTE, such as 'EUR/USD'."
+        )
     ]
 
 

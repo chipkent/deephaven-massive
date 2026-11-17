@@ -1,6 +1,7 @@
 """Tests for `deephaven_time_text`: Deephaven's date and time text in date arguments."""
 
 import logging
+import re
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -62,10 +63,22 @@ def test_text_neither_reads_names_both_forms(text: str) -> None:
 
 
 def test_a_refusal_keeps_deephaven_s_reason_and_names_the_zones_it_reads() -> None:
-    reason = r"Deephaven: No matching time zone: EST\)"
-    zones = r"Deephaven reads zones such as ET, CT, UTC, and America/New_York$"
-    with pytest.raises(ValueError, match=rf"{reason}\. {zones}"):
+    message = (
+        "start='2025-03-03T09:30 EST' is neither ISO-8601 text nor Deephaven date or time text, "
+        "and Deephaven says: No matching time zone: EST. Pass text such as '2025-03-03', "
+        "'2025-03-03T09:30:00-05:00', or '2025-03-03T09:30 America/New_York', in a zone "
+        "Deephaven reads, such as ET, CT, UTC, or America/New_York."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         deephaven_time_text("2025-03-03T09:30 EST", "start")
+    # The advice works: each example form, and each zone named, reads.
+    morning = datetime(2025, 3, 3, 14, 30, tzinfo=UTC)
+    assert _bound("2025-03-03") == date(2025, 3, 3)
+    assert _bound("2025-03-03T09:30:00-05:00") == morning
+    assert _bound("2025-03-03T09:30 America/New_York") == morning
+    assert _bound("2025-03-03T09:30 ET") == morning
+    assert _bound("2025-03-03T09:30 CT") == morning + timedelta(hours=1)
+    assert _bound("2025-03-03T09:30 UTC") == morning - timedelta(hours=5)
 
 
 def test_a_date_without_dashes_is_an_iso_date_never_an_epoch_count() -> None:
@@ -81,12 +94,18 @@ def test_deephaven_date_text_is_a_date() -> None:
 @pytest.mark.parametrize("text", ["2025-03-03 ET", "2025-03-03 America/New_York", "2025-03-03 UTC"])
 def test_a_day_and_a_zone_without_a_time_is_refused(text: str) -> None:
     # Deephaven reads it as that midnight, so as an end it would drop the day.
-    with pytest.raises(ValueError, match=r"names a day and a zone but no time; pass '2025-03-03'"):
+    message = (
+        f"end={text!r} names a day and a zone but no time. Pass '2025-03-03' for the whole day, "
+        "or a time such as '2025-03-03T00:00 ET'."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         deephaven_time_text(text, "end")
+    assert _bound("2025-03-03") == date(2025, 3, 3)
+    assert _bound("2025-03-03T00:00 ET") == datetime(2025, 3, 3, 5, tzinfo=UTC)
 
 
 def test_iso_text_refused_for_another_reason_keeps_its_error() -> None:
-    with pytest.raises(ValueError, match=r"needs a timezone: pass an aware datetime or a date"):
+    with pytest.raises(ValueError, match=r"has no timezone\. Pass an aware datetime or a date\.$"):
         deephaven_time_text("2025-03-03T09:30", "start")
 
 
