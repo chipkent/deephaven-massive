@@ -1871,10 +1871,11 @@ _SESSION_CHANGE = (
 )
 _INDEX_CHANGE = (
     'The indices snapshot documents `session.{key}` as "The {measure} of the change for the '
-    "index from the previous trading day.\", a number, the text of the unified snapshot's "
+    "index from the previous trading day.\", a number: the unified snapshot's text for "
     '`session.{key}` ("The {measure} of the price change for the asset from the previous '
-    'trading day."), which serves the same `session` object of an index and takes the name '
-    "`todays_change` and `todays_change_perc`, so an index's change has one name in both tables."
+    'trading day."), with "index" for "asset" and without "price". The unified snapshot serves '
+    "the same `session` object of an index and reads it as `todays_change` and "
+    "`todays_change_perc`, so an index's change has one name in both tables."
 )
 
 SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(

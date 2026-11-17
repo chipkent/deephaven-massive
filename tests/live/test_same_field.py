@@ -329,20 +329,25 @@ def test_session_change_compares_only_contracts_with_one_close(
 ) -> None:
     contracts = _CONTRACTS[: same_field.SESSION_WANTED]
     fake_rest.reply("/v3/snapshot/options/SPY", Reply(envelope([_traded(t) for t in contracts])))
-    moved = [_session(contracts[0], close=12.0, change=2.0)]
-    missing = [{"ticker": contracts[1], "session": {"close": 11.0}}]
+    # Both traded late, but neither can be compared, so neither counts as a late contract.
+    moved = [_session(contracts[0], close=12.0, change=2.0, late=1.0)]
+    missing = [{"ticker": contracts[1], "session": {"close": 11.0, "late_trading_change": 1.0}}]
     fake_rest.reply(
         "/v3/snapshot",
         Reply(envelope(moved + missing + [_session(t) for t in contracts[2:]])),
+        Reply(envelope([_session(contracts[0], change=0.5)])),
         Reply(envelope([_session(contracts[0], change=0.5, late=-0.5)])),
     )
     lines: list[str] = []
     # A moved close and a missing change leave too few contracts compared to settle anything.
     assert same_field.session_change(client, lines.append).verdict == "INCONCLUSIVE"
     assert any("closes differ" in line for line in lines)
-    assert lines[-2] == (
-        "no compared contract has a late_trading_change, so late trades are untested"
-    )
+    no_late = "no compared contract has a late_trading_change, so late trades are untested"
+    assert lines[-2] == no_late
+    lines.clear()
+    # A contract that did not trade late and differs: only the overall verdict is DIFFERENT.
+    assert same_field.session_change(client, lines.append).verdict == "DIFFERENT"
+    assert lines[-2] == no_late
     lines.clear()
     # A contract that traded late and differs makes both verdicts DIFFERENT.
     assert same_field.session_change(client, lines.append).verdict == "DIFFERENT"
