@@ -15,8 +15,11 @@ only `warn_unfilled` logs.
   end or after now, whose `TimestampStart` lies before the range's start, or (for futures bars
   of several sessions or longer) that has not certainly ended, is dropped once its time
   columns are filled (`HistoryWindow.bars`).
-- `partition_dates` turns a window into the dates of the flat files it needs, in the asset
-  class's day zone; a futures date names a trading session.
+- `partition_dates` turns a window into the dates it covers, in the asset class's day zone;
+  a futures date names a trading session. `file_dates` turns it into the dates of the flat
+  files it needs, and `file_days` says which instants each of those files holds: the class's
+  day, except where Massive cuts a prefix's files at midnight in another zone (an index
+  minute file holds the Chicago day, 01:00 to 01:00 New York time).
 - `rest_history_problem` says why REST cannot serve a request, if it cannot: the dataset has
   no REST history endpoint, or the symbols are `dm.ALL` and the request is not daily bars with
   a grouped-daily endpoint.
@@ -65,10 +68,13 @@ from deephaven_massive._datasets.dates import (
     bounds,
     day_class,
     day_end,
+    day_start,
     day_zone,
+    midnight,
 )
 from deephaven_massive._datasets.filters import filter_key, param_family
 from deephaven_massive._datasets.futures_sessions import (
+    CHICAGO,
     futures_session,
     futures_session_before,
     futures_session_end,
@@ -89,6 +95,7 @@ from deephaven_massive._massive import ParamKind, Transport, source
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from datetime import tzinfo
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
@@ -101,10 +108,13 @@ __all__ = [
     "HISTORY_TRANSPORTS",
     "PUBLICATION_NOTE",
     "Alternative",
+    "FileDays",
     "HistoryWindow",
     "SourceChoice",
     "choose_source",
     "current_partition",
+    "file_dates",
+    "file_days",
     "flat_file_prefix",
     "history_window",
     "partition_dates",
@@ -368,7 +378,7 @@ def _futures_sessions(
 
 
 def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...]:
-    """Return the dates of the flat files a `history()` window needs, oldest first.
+    """Return the dates a `history()` window covers, oldest first.
 
     For futures named by date they are the sessions kept (`HistoryWindow.sessions`). For
     futures named by instants they are the sessions of the first and last kept instant and
@@ -395,6 +405,92 @@ def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...
         first, last = futures_session(times.start), futures_session_before(times.end)
         return DaySpan(first, last).days()
     return times.partition_dates(day_zone(spec.asset_class))
+
+
+_FILE_DAY_ZONES: Final[Mapping[str, tzinfo]] = MappingProxyType(
+    {"us_indices/minute_aggs_v1": CHICAGO}
+)
+"""The prefixes whose file of a date holds that date's day in another zone than the class's.
+
+Massive's index minute file of a date holds the bars from midnight to midnight in Chicago,
+01:00 to 01:00 New York time, while REST and the indices' documented days are New York's, so
+the New York day's first hour lies in the previous date's file. Every other prefix's file
+holds its class's day (for futures, its session)."""
+
+
+@dataclass(frozen=True)
+class FileDays:
+    """Which instants each flat file of one request holds: the day its date names.
+
+    The file of a date holds `[start(day), start(day + 1))`. Frozen, so reader threads may
+    share it.
+
+    Attributes:
+        asset_class: The dataset's class, whose day rules (`dates.day_start`; for futures,
+            the session's hours) cut the files when `zone` is None.
+        zone: The zone at whose midnight Massive cuts the files when it is not the class's
+            day zone (`_FILE_DAY_ZONES`); None when the files hold the class's days.
+    """
+
+    asset_class: AssetClass
+    zone: tzinfo | None
+
+    def start(self, day: date) -> datetime:
+        """Return the first instant the file of a date holds, the previous file's end.
+
+        Args:
+            day: The file's date.
+
+        Returns:
+            Midnight of the date in `zone`, or the date's start under the class's day rules.
+        """
+        if self.zone is None:
+            return day_start(self.asset_class, day)
+        return midnight(day, self.zone)
+
+
+def file_days(spec: DatasetSpec, request: Request) -> FileDays:
+    """Return which instants each flat file of a request holds.
+
+    Args:
+        spec: The dataset, which has flat files.
+        request: The normalized arguments; for bars, the timespan selects the prefix.
+
+    Returns:
+        The files' days: the class's, or midnight to midnight in the zone Massive cuts the
+        prefix's files in (`_FILE_DAY_ZONES`).
+    """
+    prefix = flat_file_prefix(spec, request)
+    # Every prefix not in the table holds its class's days (for futures, its sessions), the
+    # library's own days, so None is the answer for it, not a guess.
+    zone = None if prefix is None else _FILE_DAY_ZONES.get(prefix)
+    return FileDays(spec.single_class, zone)
+
+
+def file_dates(spec: DatasetSpec, request: Request, window: HistoryWindow) -> tuple[date, ...]:
+    """Return the dates of the flat files a `history()` window needs, oldest first.
+
+    They are the `partition_dates`, except for a prefix whose files Massive cuts at midnight in
+    another zone (`file_days`): then they are the dates, in that zone, of the kept range's first
+    and last instant and every date between. A window of New York days of an index's minute
+    bars so also reads the file of the day before its first, which holds the first day's hour
+    from 00:00 to 01:00 New York time; the read keeps only the window's rows of it.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments; for bars, the timespan selects the prefix.
+        window: The call's window (`history_window`).
+
+    Returns:
+        The files' dates; none for an empty window.
+    """
+    zone = file_days(spec, request).zone
+    if zone is None:
+        return partition_dates(spec, window)
+    times = window.times
+    if times is None or times.empty:
+        return ()
+    return times.partition_dates(zone)
 
 
 def current_partition(spec: DatasetSpec, *, now: datetime | None = None) -> date:

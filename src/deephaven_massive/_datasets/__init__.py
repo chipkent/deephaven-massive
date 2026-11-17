@@ -24,8 +24,8 @@ Deephaven:
 - `symbols`: Massive's canonical ticker grammar, the public converters, and the check of the
   symbols a query takes;
 - `wire_symbols`: the spellings each transport sends and takes, read and written;
-- `history_source`: the window of a `history()` call, its partition dates, when a flat file
-  is published, and the choice between flat files and REST.
+- `history_source`: the window of a `history()` call, its partition and file dates, when a
+  flat file is published, and the choice between flat files and REST.
 
 Layer: datasets, above the wire (`_massive`) and the vocabulary (the root `_config`, `_enums`,
 `_errors`, `_log_limits`, `_types`), which it may import; it imports nothing from the tables
