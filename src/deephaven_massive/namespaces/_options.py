@@ -927,15 +927,13 @@ class OptionsNamespace(Namespace):
         Lists the contracts of one underlying, or of every underlying, so you can find their
         tickers. To read contracts you can already name, use `contract_details()`.
 
-        A table of underlyings is read in one of two ways:
+        A table of underlyings lists each one's contracts. With a live table, add an underlying
+        and its contracts appear. Remove it and they leave. What a failed underlying does to the
+        result depends on the method you call: see `fetch()` and `poll()`.
 
-        - A live table is followed. Add an underlying and its contracts appear. Remove it and
-          they leave. An error on one underlying fails only that underlying.
-        - A static table is a fixed list. In `fetch()`, an error from Massive on one underlying
-          fails the whole table.
-
-        A row that isn't Massive's exact stock or index ticker is skipped and logged. To fail
-        instead, pass `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
+        By default, a row of the table that isn't Massive's exact stock or index ticker is
+        skipped and logged. `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`
+        makes it an error instead.
 
         Args:
             underlying: Massive's exact ticker of the underlying, such as `"AAPL"` or `"I:SPX"`.
@@ -1013,10 +1011,10 @@ class OptionsNamespace(Namespace):
         request. To find a contract's ticker first, list its underlying's contracts with
         `contracts()`.
 
-        By default, a contract Massive has no data for gets no row and is logged at `WARNING`. To
-        fail the table instead, pass
-        `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`. `fetch(wait=True)` then
-        raises `MassiveError`.
+        By default, a contract Massive has no data for gets no row and is logged at `WARNING`.
+        `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)` makes it an error
+        instead. What an error does to the result depends on the method you call: see `fetch()`
+        and `poll()`.
 
         Args:
             symbols: Option contracts to describe.
