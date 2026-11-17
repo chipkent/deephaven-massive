@@ -2007,14 +2007,14 @@ def skip_if_not_entitled(
     table_rows: Callable[[Table], list[dict[str, Any]]],
     evidence: Callable[[str], None],
 ) -> Callable[[MassiveSession], None]:
-    """Return a function that skips a test whose stream, poll, or background read was refused.
+    """Return a function that skips a test whose stream, poll, read, or symbol was refused.
 
     A refused stream or background read does not raise: its row in `m.streams()` turns
-    `FAILED` with the refusal as its `Error`. Two refusals skip, as `pytest_runtest_call` skips
-    them when they raise: Massive's (`refusals.is_entitlement_text`), and the owner's settings
+    `FAILED` with the refusal as its `Error`, and so does a watchlist symbol's row in
+    `m.symbol_reads()` when Massive refuses it after its table opens. Two refusals skip, as
+    `pytest_runtest_call` skips them when they raise: Massive's, and the owner's settings
     refusing delayed data their `delayed_subscriptions` do not list
-    (`refusals.is_not_listed_text`).
-    Call this after recording the evidence.
+    (`refusals.failed_row_refusal`). Call this after recording the evidence.
 
     Args:
         table_rows: Snapshots a table into rows.
@@ -2022,21 +2022,16 @@ def skip_if_not_entitled(
 
     Returns:
         A function of the session: it skips the test, `refused: <Error>`, quoting the first
-        of the session's streams Massive refused, or else `not listed as delayed: <Error>`,
-        quoting the first the settings refused.
+        of the session's streams or symbols Massive refused, or else `not listed as delayed:
+        <Error>`, quoting the first the settings refused.
     """
 
     def check(session: MassiveSession) -> None:
-        errors = [
-            " ".join(str(row["Error"]).split())
-            for row in table_rows(session.streams())
-            if row["State"] == "FAILED"
-        ]
-        reasons = [f"{summary.REFUSED}{e}" for e in errors if refusals.is_entitlement_text(e)]
-        reasons += [f"{summary.NOT_LISTED}{e}" for e in errors if refusals.is_not_listed_text(e)]
-        if reasons:
-            evidence(reasons[0])
-            pytest.skip(reasons[0])
+        rows = [*table_rows(session.streams()), *table_rows(session.symbol_reads())]
+        reason = refusals.failed_row_refusal(rows)
+        if reason is not None:
+            evidence(reason)
+            pytest.skip(reason)
 
     return check
 

@@ -8,7 +8,9 @@ earliest day the request asked for (`refused_request`), so a reader can judge it
 the library built with no status is not Massive's refusal (`is_massive_refusal`). Nor is the
 library's refusal of delayed data the owner's settings do not list (`is_not_listed_text`),
 which a background read reports only as text. A stream's, a poll's, or a followed read's
-refusal is likewise only text (`is_entitlement_text`).
+refusal is likewise only text (`is_entitlement_text`), and so is a watchlist symbol's; a
+test reads them from the failed rows of `m.streams()` and `m.symbol_reads()`
+(`failed_row_refusal`).
 
 `tests/conftest.py` calls these from its hook and fixtures, and the live run's and tester's
 example runners from their verdicts. Every function here is pure.
@@ -23,9 +25,12 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven_massive import EntitlementError, ErrorSource
 from deephaven_massive._massive import WireEntitlementError
+from tests._live import summary
 from tests._live.classes import class_of_path
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
     from deephaven_massive._errors import MassiveError
     from deephaven_massive._massive import WireError
 
@@ -121,6 +126,26 @@ def is_entitlement_text(text: object) -> bool:
         True when it holds one of `_ENTITLEMENT_MARKS`.
     """
     return isinstance(text, str) and any(mark in text for mark in _ENTITLEMENT_MARKS)
+
+
+def failed_row_refusal(rows: Iterable[Mapping[str, object]]) -> str | None:
+    """Return why a live test skips, from the rows of `m.streams()` and `m.symbol_reads()`.
+
+    A refusal that comes after a table opens raises nothing: the stream's, read's, or watchlist
+    symbol's row turns `FAILED` with the refusal as its `Error`. Massive's refusal
+    (`is_entitlement_text`) skips first, as `refused: <Error>`; then the settings' refusal of
+    delayed data (`is_not_listed_text`), as `not listed as delayed: <Error>`.
+
+    Args:
+        rows: The rows, each with `State` and `Error`.
+
+    Returns:
+        The skip reason, quoting the first such row's `Error` on one line, or None.
+    """
+    errors = [" ".join(str(row["Error"]).split()) for row in rows if row["State"] == "FAILED"]
+    reasons = [f"{summary.REFUSED}{e}" for e in errors if is_entitlement_text(e)]
+    reasons += [f"{summary.NOT_LISTED}{e}" for e in errors if is_not_listed_text(e)]
+    return reasons[0] if reasons else None
 
 
 def refused_request(error: BaseException) -> tuple[str | None, date | None]:

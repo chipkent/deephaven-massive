@@ -309,9 +309,16 @@ class MassiveError(Exception):
         an `EntitlementError`, a `SessionClosedError`, or a bug.
 
         Before it raises, the library has retried a server failure or a failed connection a few
-        times. It raises a rate limit as soon as the read would spend more than 10 minutes in
-        all waiting out rate limits, or 90 seconds for a console command with `wait=True`. Wait
-        before you call again.
+        times. A read that Massive keeps refusing fails with a rate-limit error once waiting out
+        the refusals would take longer than:
+
+        - for a call you wait for (`wait=True`, or opening a stream with `append_only()` or
+          `last_by()`): 10 minutes, or 90 seconds inside a console command;
+        - for a read that feeds a live table (a `fetch()` or `history()` without `wait=True`, a
+          watchlist's reads after the call returns, a `poll()` cycle, or a stream's lookups):
+          `max_outage` in `MassiveConfig`.
+
+        Wait before you call again.
         """
         return self._is_retryable
 

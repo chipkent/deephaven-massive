@@ -47,7 +47,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
 )
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, FirstRead
+from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, RETRY_EVERY, FirstRead
 from deephaven_massive._tables.followed_read import FollowedRead, FollowPlan, open_followed_read
 from deephaven_massive._tables.read_pool import ReadPool
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
@@ -113,7 +113,9 @@ class Script:
         self.answers: dict[str, list[Answer]] = {}
         self._lock = threading.Lock()
 
-    def read(self, names: tuple[str, ...], stop: threading.Event) -> Mapping[str, SymbolOutcome]:
+    def read(
+        self, names: tuple[str, ...], stop: threading.Event | None
+    ) -> Mapping[str, SymbolOutcome]:
         del stop
         with self._lock:
             self.calls.append(names)
@@ -348,26 +350,120 @@ def test_a_permanent_failure_fails_only_its_symbol(
     massive_session.release(result)
 
 
-def test_a_transient_failure_retries_after_1_5_and_15_minutes_then_fails(
+def settled(
+    m: dm.MassiveSession, name: str, *, attempts: int, states: frozenset[SymbolReadState]
+) -> bool:
+    # Whether the symbol's row shows its `attempts`th read since its add ended in one of `states`.
+    found = [r for (_, n), r in reads(m).items() if n == name]
+    return bool(found) and found[0].attempts == attempts and found[0].state in states
+
+
+def retry_after(
+    m: dm.MassiveSession, script: Script, *, clock: FakeClock, name: str, earlier: int = 0
+) -> float:
+    # Waits until the symbol's latest read has failed and it retries, checks the retry does not
+    # read before its time, then moves the clock to it; returns the delay it waited. `earlier`
+    # is how many reads of it came before its latest add.
+    count = script.reads_of(name)
+    until(functools.partial(settled, m, name, attempts=count - earlier, states=_RETRYING))
+    due = row(m, name).next_attempt_at
+    assert due is not None
+    delay = round(due / 1e9 - clock.time(), 6)
+    clock.advance(delay - 1)
+    m._core.follows.wake()
+    assert script.reads_of(name) == count  # not due yet
+    clock.advance(1)
+    m._core.follows.wake()
+    until(functools.partial(script.read_count_is, name, count + 1))
+    return delay
+
+
+def run_out_retries(
+    m: dm.MassiveSession, script: Script, *, clock: FakeClock, name: str, earlier: int = 0
+) -> list[float]:
+    # Moves the clock through each retry of a symbol that keeps failing until it is FAILED;
+    # returns the delays it waited.
+    delays: list[float] = []
+    while True:
+        attempts = script.reads_of(name) - earlier
+        until(functools.partial(settled, m, name, attempts=attempts, states=_SETTLED))
+        if state(m, name) is SymbolReadState.FAILED:
+            return delays
+        delays.append(retry_after(m, script, clock=clock, name=name, earlier=earlier))
+
+
+_RETRYING = frozenset({SymbolReadState.RETRYING})
+_SETTLED = frozenset({SymbolReadState.RETRYING, SymbolReadState.FAILED})
+
+
+def test_a_transient_failure_retries_soon_then_every_minute_until_max_outage(
     watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
 ) -> None:
-    assert RETRY_DELAYS == (60.0, 300.0, 900.0)
+    # Read again 2, 8, and 30 s after the first failures, then every minute; the failure that
+    # lands 340 s after the first is the first at or past max_outage (300 s), so it is final.
+    assert (RETRY_DELAYS, RETRY_EVERY) == ((2.0, 8.0, 30.0), 60.0)
+    assert massive_session._core.config.max_outage == 300.0
     script = Script(massive_session)
     script.answers["AAPL"] = [refused(503, "unavailable")]
     result = follow(massive_session, watchlist("AAPL"), script)
-    for attempt, delay in enumerate(RETRY_DELAYS, start=1):
-        retrying = wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
-        assert retrying.attempts == attempt
-        assert retrying.next_attempt_at == int((clock.time() + delay) * 1e9)
-        assert retrying.error == "HTTP 503: unavailable"
-        clock.advance(delay - 1)
-        massive_session._core.follows.wake()
-        assert script.reads_of("AAPL") == attempt  # not due yet
-        clock.advance(1)
-        massive_session._core.follows.wake()
-        until(functools.partial(script.read_count_is, "AAPL", attempt + 1))
-    failed = wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
-    assert (failed.attempts, failed.next_attempt_at) == (4, None)
+    retrying = wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+    assert (retrying.attempts, retrying.error) == (1, "HTTP 503: unavailable")
+    delays = run_out_retries(massive_session, script, clock=clock, name="AAPL")
+    assert delays == [2.0, 8.0, 30.0, 60.0, 60.0, 60.0, 60.0, 60.0]
+    failed = row(massive_session, "AAPL")
+    assert (failed.attempts, failed.next_attempt_at) == (9, None)
+    assert failed.error == (
+        "AAPL has failed for 340 s, as long as MassiveConfig.max_outage allows (300 s); "
+        "the latest error: HTTP 503: unavailable"
+    )
+    massive_session.release(result)
+
+
+def test_a_max_outage_of_zero_fails_a_symbol_at_its_first_failure(
+    watchlist: Callable[..., InputTable], clock: FakeClock
+) -> None:
+    del clock  # the run of failures is timed on it, though no time passes
+    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", max_outage=0))
+    try:
+        script = Script(m)
+        script.answers["AAPL"] = [refused(429, "too many requests")]
+        result = follow(m, watchlist("AAPL", "MSFT"), script)
+        failed = wait_state(m, "AAPL", SymbolReadState.FAILED)
+        assert (failed.attempts, script.reads_of("AAPL")) == (1, 1)
+        assert failed.error is not None
+        assert failed.error.startswith(
+            "AAPL has failed for 0 s, as long as MassiveConfig.max_outage allows (0 s); "
+        )
+        m.release(result)
+    finally:
+        m.close()
+
+
+def test_rows_end_a_run_of_failures_so_the_next_one_starts_over(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    clock: FakeClock,
+) -> None:
+    # AAPL fails for 220 s, gets rows, then is removed and added back: its new failures start a
+    # new run, with the full max_outage and the 2 s first retry.
+    script = Script(massive_session)
+    failing = refused(503, "busy")
+    answers: list[Answer] = [failing] * 6
+    script.answers["AAPL"] = [*answers, SymbolRows(rows_of(massive_session, "AAPL", 1))]
+    wl = watchlist("AAPL")
+    result = follow(massive_session, wl, script)
+    until(functools.partial(script.read_count_is, "AAPL", 1))
+    delays = [retry_after(massive_session, script, clock=clock, name="AAPL") for _ in range(6)]
+    assert delays == [2.0, 8.0, 30.0, 60.0, 60.0, 60.0]
+    wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+    script.answers["AAPL"] = [failing]
+    delete(wl, "AAPL")
+    wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
+    add(wl, "AAPL")
+    until(functools.partial(script.read_count_is, "AAPL", 8))
+    delays = run_out_retries(massive_session, script, clock=clock, name="AAPL", earlier=7)
+    assert delays == [2.0, 8.0, 30.0, 60.0, 60.0, 60.0, 60.0, 60.0]
     massive_session.release(result)
 
 
@@ -659,6 +755,31 @@ def test_the_first_read_s_failures_retry_or_fail(
     massive_session._core.follows.wake()
     assert wait_state(massive_session, "MSFT", SymbolReadState.DONE).attempts == 2
     assert script.calls == [("MSFT",)]
+    massive_session.release(result)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_a_run_of_failures_starts_when_its_first_failure_lands(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    clock: FakeClock,
+    status: int,
+) -> None:
+    # A read that took 360 s, longer than max_outage, and then failed has failed once, not for
+    # its whole length, even when the failure is a rate-limit refusal: it may have spent that
+    # time receiving pages. The symbol retries, and its run counts from that failure.
+    first = FirstRead(
+        {"AAPL": refused(status, "refused")},
+        began_at=int(clock.time() * 1e9),
+        seconds=360.0,
+    )
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(status, "refused")]
+    result = follow(massive_session, watchlist("AAPL"), script, first=first)
+    assert wait_state(massive_session, "AAPL", SymbolReadState.RETRYING).attempts == 1
+    delays = run_out_retries(massive_session, script, clock=clock, name="AAPL", earlier=-1)
+    assert delays == [2.0, 8.0, 30.0, 60.0, 60.0, 60.0, 60.0, 60.0]
     massive_session.release(result)
 
 
@@ -1737,14 +1858,14 @@ def test_a_table_whose_call_time_symbols_all_fail_for_good_fails(
     assert row(massive_session, "AAPL").state is SymbolReadState.FAILED
 
 
-def test_a_call_time_symbol_counts_as_failed_once_its_retries_run_out(
+def test_a_call_time_symbol_counts_as_failed_once_it_has_failed_for_max_outage(
     *,
     watchlist: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     clock: FakeClock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # While AAPL is read again, the table waits; once its last retry fails, every call-time
+    # While AAPL is read again, the table waits; once it has failed for max_outage, every call-time
     # symbol has failed, and the table fails, as a call that waits would have raised.
     failures: list[Exception] = []
     publish = TablePublisher.publish_failure
@@ -1759,18 +1880,16 @@ def test_a_call_time_symbol_counts_as_failed_once_its_retries_run_out(
     script.answers["MSFT"] = [refused(403, "not in the plan")]
     result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
     wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
-    for attempt, delay in enumerate(RETRY_DELAYS, start=1):
-        wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
-        assert not result.j_table.isFailed()
-        clock.advance(delay)
-        massive_session._core.follows.wake()
-        until(functools.partial(script.read_count_is, "AAPL", attempt + 1))
+    wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+    assert not result.j_table.isFailed()
+    run_out_retries(massive_session, script, clock=clock, name="AAPL")
     until(lambda: bool(result.j_table.isFailed()))
-    # The table fails with AAPL's error, the first by name, but calling again cannot help
-    # MSFT, so the failure is not retryable, though AAPL's HTTP 503 alone would be.
+    # The table fails with AAPL's error, the first by name, which names max_outage; calling
+    # again cannot help MSFT, so it is not retryable, though AAPL's HTTP 503 alone would be.
     (failure,) = failures
     assert isinstance(failure, dm.MassiveError)
     assert (failure.status, failure.is_retryable) == (503, False)
+    assert "as long as MassiveConfig.max_outage allows (300 s)" in str(failure)
 
 
 def test_deleting_an_unsettled_call_time_symbol_keeps_the_table(

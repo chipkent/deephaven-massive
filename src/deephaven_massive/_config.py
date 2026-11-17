@@ -300,14 +300,24 @@ class MassiveConfig:
             Sessions with the same key and streaming settings share one connection whatever
             this setting. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
-        max_outage: Sets how many seconds a stream or `poll()` table may stay cut off from Massive
-            before it fails. Defaults to 300 seconds.
+        max_outage: Sets how many seconds a live table waits out an outage or Massive's rate
+            limits before it fails. Defaults to 300 seconds.
 
-            Raise it to ride out longer outages, or set `0` to fail at the first one. A stream
-            counts the time its connection is down, and a `poll()` table counts the time its
-            polls keep failing or stop arriving. Until the limit passes, the table's
-            `m.streams()` row shows the problem in `Error`. A failed table stays failed, so call
-            the method again for a new one. See
+            Set `0` to fail at the first outage. Each kind of table counts its own time:
+
+            - A stream counts the time its connection is down.
+            - A `poll()` table counts the time its polls keep failing or stop arriving. A poll
+              that would wait longer than `max_outage` for Massive's rate limits gives up, and
+              counts as a failed poll.
+            - A watchlist's `fetch()` or `history()` counts the time each symbol's reads keep
+              failing with a temporary error. Then `m.symbol_reads()` shows that symbol
+              `FAILED`. Delete its row and add it back to read it again.
+            - Any other `fetch()` or `history()` without `wait=True` counts the time it waits
+              out Massive's rate limits.
+
+            While a stream, a `poll()` table, or a watchlist waits, its `m.streams()` row shows
+            why in `Error`. A failed table stays failed, so call the method again for a new one.
+            See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
         flat_file_symbol_threshold: Sets how many symbols in a list make a `history()` call read
             Massive's flat files instead of a request per symbol, when both can serve it. Defaults
@@ -1599,7 +1609,7 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     ),
     "max_outage": _Example(
         600.0,
-        "Seconds a stream or poll() table rides out an outage before it fails; 0 fails at once.",
+        "Seconds a live table waits out an outage before it fails; 0 fails at once.",
     ),
     "flush_interval": _Example(
         0.05, "Seconds between the batches of streamed rows added to live tables."
