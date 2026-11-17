@@ -874,7 +874,7 @@ def test_previous_day_bar_fetches_the_previous_session(
     assert fake_rest.get_queries(one_value=True) == [
         ("/v2/aggs/ticker/AAPL/prev", {"adjusted": "true"})
     ]
-    # `/prev` stamps the bar at the 16:00 New York close (1605042000000); its window is its
+    # `/prev` stamped the bar at the 16:00 New York close (1605042000000); its window is its
     # whole New York day, as the range stamps it, and its `Date` that day.
     assert [
         (r["Symbol"], r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"], r["Vwap"])
@@ -890,6 +890,35 @@ def test_previous_day_bar_fetches_the_previous_session(
         )
     ]
     assert out[0]["TimestampInsert"] is not None
+
+
+def test_previous_day_bar_stamped_at_the_premarket_open_is_its_day(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Fixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # `/prev` stamped AAPL's 2026-11-16 bar at 2026-11-16T09:00:00Z, 04:00 New York time, in
+    # the live run of 2026-11-17, while the range stamped the same bar at 00:00: the bar is
+    # read as that New York day, with no WARNING.
+    body = json.loads(load_fixture(FIXTURES, "bars_prev.json"))
+    stamp = int(datetime(2026, 11, 16, 9, tzinfo=UTC).timestamp() * 1000)
+    [bar] = body["results"]
+    fake_rest.reply(
+        "/v2/aggs/ticker/AAPL/prev", Reply(body={**body, "results": [{**bar, "t": stamp}]})
+    )
+    with caplog.at_level(logging.WARNING):
+        out = table_rows(rest_session.stocks.previous_day_bar("AAPL").fetch(wait=True))
+    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
+        (
+            "2026-11-16",
+            new_york_midnight_ns(date(2026, 11, 16)),
+            new_york_midnight_ns(date(2026, 11, 17)),
+            115.97,
+        )
+    ]
+    assert not stamp_warnings(caplog)
 
 
 def test_previous_day_bar_sends_adjusted_false_when_asked(

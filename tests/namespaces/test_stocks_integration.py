@@ -88,8 +88,9 @@ _DAY_FILE = "us_stocks_sip/day_aggs_v1"
 _MINUTE_FILE = "us_stocks_sip/minute_aggs_v1"
 _DAY_NS = 86_400 * 1_000_000_000
 _DAY_STAMPS = frozenset({(0, 0, 0), (13, 0, 0), (16, 0, 0)})
-"""The New York times of day (hour, minute, second) at which the library expects a stock 1-day
-bar's stamp: midnight, a half day's 13:00 close, and the 16:00 close."""
+"""The New York times of day (hour, minute, second) at which grouped daily and the day files are
+expected to stamp a stock 1-day bar: midnight, a half day's 13:00 close, and the 16:00 close.
+The library also accepts the 04:00 pre-market open, where `/prev` stamps it."""
 _STREAM_WAIT = 60.0
 """Seconds a stream test waits for its first frame; stocks trade on weekdays only."""
 
