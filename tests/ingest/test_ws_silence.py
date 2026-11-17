@@ -52,20 +52,17 @@ def test_a_silent_connection_warns_once_while_its_market_trades(
         (
             logging.WARNING,
             (
-                f"{_URL}: no frame for 300 s during stocks trading hours, though 1 topics are "
-                "acknowledged, so its live tables may be stale; a market holiday or symbols "
-                "that are not trading explain it, and m.connections() shows the connection's "
-                "state"
+                f"{_URL}: Massive has sent nothing for 300 s during stocks trading hours, "
+                "though it confirmed 1 subscription, so the live tables on this connection "
+                "may be stale. The usual causes are a market holiday or symbols that are not "
+                "trading. Check the connection's row in m.connections()."
             ),
         ),
         (logging.INFO, f"{_URL}: frames arrive again"),
     ]
     # The streams show the silence while it lasts, but keep running: nothing fails them.
     assert notes == [
-        (
-            "no data since 2027-01-15T08:00:00Z during stocks trading hours; quiet symbols or "
-            "a market holiday may explain it"
-        ),
+        "Massive has sent nothing since 2027-01-15T08:00:00Z during stocks trading hours.",
         None,
     ]
 

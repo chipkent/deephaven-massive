@@ -34,6 +34,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import (
+    LIBRARY_BUG,
     BrokenGuaranteeError,
     MassiveError,
     session_closed,
@@ -345,7 +346,14 @@ def test_a_permanent_failure_fails_only_its_symbol(
     assert (failed.attempts, failed.next_attempt_at, failed.rows) == (1, None, 0)
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "AAPL failed after 1 attempt (not retryable)" in warnings[0]
+    assert re.fullmatch(
+        r"test\.trades call \d+: AAPL failed after 1 attempt and is left out of the result\. "
+        + re.escape(
+            "HTTP 403: not in the plan (request_id abc). To read it again, delete its row from "
+            "the symbol table and add it back."
+        ),
+        warnings[0],
+    )
     until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
     massive_session.release(result)
 
@@ -413,8 +421,8 @@ def test_a_transient_failure_retries_soon_then_every_minute_until_max_outage(
     failed = row(massive_session, "AAPL")
     assert (failed.attempts, failed.next_attempt_at) == (9, None)
     assert failed.error == (
-        "AAPL has failed for 340 s, as long as MassiveConfig.max_outage allows (300 s); "
-        "the latest error: HTTP 503: unavailable"
+        "AAPL has failed for 340 s, as long as max_outage=300 s allows. The latest error: "
+        "HTTP 503: unavailable"
     )
     massive_session.release(result)
 
@@ -431,8 +439,9 @@ def test_a_max_outage_of_zero_fails_a_symbol_at_its_first_failure(
         failed = wait_state(m, "AAPL", SymbolReadState.FAILED)
         assert (failed.attempts, script.reads_of("AAPL")) == (1, 1)
         assert failed.error is not None
-        assert failed.error.startswith(
-            "AAPL has failed for 0 s, as long as MassiveConfig.max_outage allows (0 s); "
+        assert failed.error == (
+            "AAPL has failed for 0 s, as long as max_outage=0 s allows. The latest error: "
+            "HTTP 429: too many requests"
         )
         m.release(result)
     finally:
@@ -1138,8 +1147,9 @@ def test_a_retrying_symbol_that_gives_up_ends_its_span_and_opens_a_failed_one(
     # Each wait for a retry is a span of its own, ended once the retry starts; the last one
     # gives up, and the failed span stays open.
     gave_up = (
-        f"AAPL has failed for {sum(schedule):.0f} s, as long as MassiveConfig.max_outage allows "
-        f"({massive_session._core.config.max_outage:.0f} s); the latest error: HTTP 503: busy"
+        f"AAPL has failed for {sum(schedule):.0f} s, as long as "
+        f"max_outage={massive_session._core.config.max_outage:.0f} s allows. The latest error: "
+        "HTTP 503: busy"
     )
     expected = [
         ("symbol_read_failed", "AAPL", gave_up, False),
@@ -1264,13 +1274,15 @@ def test_a_dying_coordinator_fails_every_followed_table(
     with caplog.at_level(logging.ERROR):
         massive_session._core.follows.wake()
         until(lambda: bool(first.j_table.isFailed()) and bool(second.j_table.isFailed()))
-    assert "massive #" in caplog.text
-    assert "died; its queue is no longer handled" in caplog.text
+    assert "A library thread died, so its session's live tables fail. " in caplog.text
     until(lambda: [args.exc_type for args in escaped] == [SystemExit])
     assert massive_session._core.follows.following == 0
     with massive_session._core.registry_lock:
         errors = [w.row.error for w in massive_session._core.workers._workers.values()]
-    assert all("the follow coordinator died" in (e or "") for e in errors)
+    assert all(
+        (e or "").startswith("The library thread that follows symbol tables died: SystemExit(")
+        for e in errors
+    )
 
 
 def _holds_rows(to_list: ToList, table: Table, count: int) -> bool:
@@ -1532,11 +1544,11 @@ def test_one_result_s_defect_leaves_the_others_following(
         add(broken_list, "NVDA")
         add(healthy_list, "MSFT")
         until(lambda: bool(broken.j_table.isFailed()))
-    assert "follow: handling _" in caplog.text  # its start's set, or the later change
+    assert ": handling _" in caplog.text  # its start's set, or the later change
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
     with massive_session._core.registry_lock:
         error = massive_session._core.workers._workers[broken_id].row.error or ""
-    assert "RuntimeError: a defect" in error
+    assert "RuntimeError('a defect')" in error
     massive_session.release(healthy)
     massive_session.release(broken)
 
@@ -1598,10 +1610,13 @@ def test_a_defect_in_any_step_fails_only_its_result(
             massive_session._core.follows.wake()
         until(lambda: bool(broken.j_table.isFailed()))
     broken_id = max(_calls(massive_session))
-    assert f"call {broken_id} follow: {step} failed (test.trades)" in caplog.text
+    assert f"test.trades call {broken_id}: {step} failed. {LIBRARY_BUG}" in caplog.text
     with massive_session._core.registry_lock:
         error = massive_session._core.workers._workers[broken_id].row.error or ""
-    assert f"the followed read failed {step}: RuntimeError: a defect in {method}" in error
+    assert error == (
+        f"test.trades: the read that follows its symbol table failed while {step}: "
+        f"RuntimeError('a defect in {method}'). {LIBRARY_BUG}"
+    )
     add(healthy_list, "MSFT")
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
     if method != "_show":  # its symbol is stopped, never left queued or loading
@@ -1638,7 +1653,12 @@ def test_a_defect_while_failing_a_broken_result_is_logged_too(
     monkeypatch.setattr(FollowedRead, "fail_table", cannot_fail)
     with caplog.at_level(logging.ERROR, logger=LOGGER):
         broken = follow(massive_session, watchlist("NVDA"), Script(massive_session))
-        until(lambda: "failing its table after writing its rows failed raised too" in caplog.text)
+        until(
+            lambda: (
+                "stopping its table after writing its rows failed raised an error too"
+                in caplog.text
+            )
+        )
     monkeypatch.undo()
     add(healthy_list, "MSFT")  # the coordinator goes on
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
@@ -1961,7 +1981,7 @@ def test_a_call_time_symbol_counts_as_failed_once_it_has_failed_for_max_outage(
     (failure,) = failures
     assert isinstance(failure, dm.MassiveError)
     assert (failure.status, failure.is_retryable) == (503, False)
-    assert "as long as MassiveConfig.max_outage allows (300 s)" in str(failure)
+    assert "as long as max_outage=300 s allows" in str(failure)
 
 
 def test_deleting_an_unsettled_call_time_symbol_keeps_the_table(
