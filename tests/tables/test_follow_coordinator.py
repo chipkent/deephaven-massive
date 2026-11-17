@@ -1063,6 +1063,33 @@ def test_failed_and_retrying_symbols_are_spans_with_their_errors(
     massive_session.release(result)
 
 
+def test_a_retrying_symbol_removed_from_the_watchlist_ends_its_span(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # AAPL waits for its retry when its row is deleted: no read of it is missing any more, so
+    # its span ends, and no failed span opens. MSFT lands, so the table lives on.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(503, "busy")]
+    wl = watchlist("AAPL", "MSFT")
+    result = follow(massive_session, wl, script)
+    wait_state(massive_session, "MSFT", SymbolReadState.DONE)
+    wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+    until(
+        lambda: (
+            troubled(problem_rows) == [("symbol_read_retrying", "AAPL", "HTTP 503: busy", False)]
+        )
+    )
+    delete(wl, "AAPL")
+    wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
+    until(
+        lambda: troubled(problem_rows) == [("symbol_read_retrying", "AAPL", "HTTP 503: busy", True)]
+    )
+    massive_session.release(result)
+
+
 def test_a_retrying_symbol_s_span_ends_when_its_retry_lands(
     watchlist: Callable[..., InputTable],
     *,
