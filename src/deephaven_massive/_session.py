@@ -538,7 +538,7 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `Loading`: how many symbols a watchlist's read has yet to read.
             - `RequestsPerCycle`: the REST requests of the latest poll.
             - `State`: `RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or `CLOSED`.
-            - `Error`: why it failed; null while it runs.
+            - `Error`: why it failed or closed; null while it runs.
             - `CreatedAt`: when it started.
 
             The problems of a table that keeps running, such as rows the library withheld or
