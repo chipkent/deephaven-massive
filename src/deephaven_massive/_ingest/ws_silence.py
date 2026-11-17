@@ -86,17 +86,19 @@ class SilenceCheck:
             return
         self.quiet_at = now
         logger.warning(
-            "%s: no frame for %.0f s during %s trading hours, though %d topics are "
-            "acknowledged, so its live tables may be stale; a market holiday or symbols that "
-            "are not trading explain it, and m.connections() shows the connection's state",
+            "%s: Massive has sent nothing for %.0f s during %s trading hours, though it "
+            "confirmed %d %s, so the live tables on this connection may be stale. "
+            "The usual causes are a market holiday or symbols that are not trading. Check "
+            "the connection's row in m.connections().",
             self._url,
             silent,
             self._asset_class.value,
             acknowledged,
+            "subscription" if acknowledged == 1 else "subscriptions",
         )
         self.note = (
-            f"no data since {utc_text(last_frame / 1e9)} during {self._asset_class.value} "
-            "trading hours; quiet symbols or a market holiday may explain it"
+            f"Massive has sent nothing since {utc_text(last_frame / 1e9)} during "
+            f"{self._asset_class.value} trading hours."
         )
         self._on_note()
 

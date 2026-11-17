@@ -90,6 +90,10 @@ class Loop:
     changes: list[tuple[int, int, int, int]]
 
 
+URL = "wss://socket.test/stocks"
+"""The connection URL each WARNING of the tests' subscriptions starts with."""
+
+
 def make_loop(*, cap: int | None = None) -> Loop:
     sender, timers = FakeSender(), FakeTimers()
     refused: list[tuple[tuple[str, ...], str]] = []
@@ -101,6 +105,7 @@ def make_loop(*, cap: int | None = None) -> Loop:
         cap=cap,
         on_refused=lambda topics, message: refused.append((topics, message)),
         on_change=lambda: changes.append(subs.counts()),
+        url=URL,
     )
     return Loop(subs, sender, timers, refused, changes)
 
@@ -165,7 +170,13 @@ def test_an_unparsed_acknowledgement_acknowledges_the_step_and_warns_once(
         loop.subs.reconcile()
         loop.subs.status(ack())
     assert loop.subs.counts() == (3, 3, 0, 0)
-    assert len([r for r in caplog.records if "named no topic" in r.message]) == 1
+    unnamed = [r.getMessage() for r in caplog.records if "without naming it" in r.getMessage()]
+    assert unnamed == [
+        (
+            f"{URL}: Massive confirmed a subscription without naming it, so the library takes it "
+            "as confirming every subscription it sent last."
+        )
+    ]
 
 
 def test_removed_topics_are_unsubscribed_after_the_step() -> None:
@@ -340,10 +351,10 @@ def test_a_missing_acknowledgement_is_resent_once_then_counted_without_a_reconne
     (record,) = caplog.records
     assert record.levelno == logging.WARNING
     assert record.getMessage() == (
-        "generation 1: no acknowledgement from Massive after 10.0 s and one re-send for the "
-        "topics 2 [T.AAPL, T.IBM]; they stay subscribed and are re-sent every 60 s, they count "
-        "in NoAckTopics of m.connections() and in their streams' Error, and the connection is "
-        "not reconnected for them"
+        f"{URL}: Massive has not confirmed the subscriptions T.AAPL and T.IBM after 10 s and "
+        "one re-send, so their live tables may miss their rows. The library re-sends them "
+        "every 60 s. "
+        "m.problems() lists them until Massive confirms."
     )
 
 

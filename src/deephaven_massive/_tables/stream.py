@@ -447,7 +447,7 @@ class ChannelPlan:
         renamed = rename(spec, source)
         symbol = spec.keys_for(Transport.WS, key).symbol
         if spec.names_symbols and (symbol is None or symbol.from_request):
-            raise ValueError(f"{spec.name}: the WebSocket source {key} declares no symbol key")
+            raise ValueError(f"{spec.name}: the WebSocket source {key} declares no symbol key.")
         # A WebSocket source has no key filled from a request: every column has its field.
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
         # A decoded row holds its values in the order of the source's fields.
@@ -1172,6 +1172,7 @@ class Flusher:
         "_thread",
         "_undated",
         "_unrouted",
+        "_url",
         "_waits",
         "routes",
     )
@@ -1181,6 +1182,7 @@ class Flusher:
         exec_ctx: ExecutionContext,
         name: str,
         *,
+        url: str,
         interval: float,
         sessions: FuturesSessionDates | None = None,
         held: HeldRows[ChannelPlan] | None = None,
@@ -1192,6 +1194,8 @@ class Flusher:
             exec_ctx: The execution context every flush enters: that of the session which
                 created the connection.
             name: The thread's name, for thread dumps.
+            url: The connection's URL, such as `"wss://socket.massive.com/stocks"`, which
+                starts its messages and names where its problems came from.
             interval: Seconds between flushes (`MassiveConfig.flush_interval`).
             sessions: For a futures connection, the schedule calendar that corrects its rows'
                 session dates; None otherwise.
@@ -1204,6 +1208,7 @@ class Flusher:
                 of the new socket reach it. Does nothing by default.
         """
         self._exec_ctx = exec_ctx
+        self._url = url
         self._on_new_generation = on_new_generation
         self._interval = interval
         self._sessions = sessions
@@ -1332,14 +1337,15 @@ class Flusher:
             return
         if overflowing:
             logger.warning(
-                "%s: %d rows (about %d MB) wait to be published, and %d more of %s would pass "
-                "the %d MB a connection keeps; the flushes have stopped keeping up (a stalled "
-                "or slow update graph), so rows are dropped from now on, and the next flush "
-                "fails every stream of this connection",
-                self._thread.name,
-                backlog,
+                "%s: %s rows, about %d MB, wait to be published, and %s more on channel %s would "
+                "pass the %d MB the library keeps for one connection. Deephaven's update graph "
+                "fell behind the stream, or stopped, as it does while a console command runs. "
+                "The library drops the rows from now on and stops every live table of this "
+                "connection.",
+                self._url,
+                f"{backlog:,}",
                 held // 2**20,
-                len(rows),
+                f"{len(rows):,}",
                 channel,
                 HELD_BYTES_LIMIT // 2**20,
             )
@@ -1347,12 +1353,12 @@ class Flusher:
         buffer.put((arrived, generation, rows, marks, nbytes))
         if warn:
             logger.warning(
-                "%s: %d rows are waiting to be published, more than %d; the flushes are "
-                "falling behind (a stalled or slow update graph), so memory grows until they "
-                "catch up, up to %d MB",
-                self._thread.name,
-                backlog,
-                BACKLOG_WARNING_ROWS,
+                "%s: %s rows wait to be published, more than %s. Deephaven's update graph is "
+                "falling behind the stream, as it does while a console command runs, so memory "
+                "grows until it catches up. Past %d MB, the live tables of this connection stop.",
+                self._url,
+                f"{backlog:,}",
+                f"{BACKLOG_WARNING_ROWS:,}",
                 HELD_BYTES_LIMIT // 2**20,
             )
 
@@ -1400,8 +1406,8 @@ class Flusher:
         except BaseException as death:
             error = MassiveError(
                 library_bug(
-                    f"the flush thread {self._thread.name} died ({death!r}); this table no "
-                    "longer updates"
+                    f"{self._url}: the library thread that publishes this connection's rows "
+                    f"died: {death!r}. This table no longer updates"
                 ),
                 source=ErrorSource.LIBRARY,
             )
@@ -1417,7 +1423,11 @@ class Flusher:
         try:
             self.flush()
         except Exception:
-            logger.exception("%s: a flush failed; continuing. %s", self._thread.name, LIBRARY_BUG)
+            logger.exception(
+                "%s: publishing one batch of rows failed, and the next batch goes on. %s",
+                self._url,
+                LIBRARY_BUG,
+            )
 
     def flush(self) -> None:
         """Apply the queued failures, publish every buffered row, then report the queued drift.
@@ -1501,8 +1511,8 @@ class Flusher:
                 self._report_drift(sinks, drift, where=where)
             except Exception:
                 logger.exception(
-                    "%s: could not report the drift of %s. %s",
-                    self._thread.name,
+                    "%s: the library could not report the fields Massive sent beyond its "
+                    "documentation. %s",
                     where,
                     LIBRARY_BUG,
                 )
@@ -1547,8 +1557,8 @@ class Flusher:
                 sink.fail(error)
             except Exception:
                 logger.exception(
-                    "%s: could not fail stream %d (%s). %s",
-                    self._thread.name,
+                    "%s: the library could not stop stream %d with this error: %s %s",
+                    self._url,
                     sink.stream_id,
                     error,
                     LIBRARY_BUG,
@@ -1597,17 +1607,21 @@ class Flusher:
             sum(len(f[2]) for f in frames),
             len(sinks),
         )
-        error = MassiveError(
-            f"{self._thread.name}: {overflow.rows} rows (about {overflow.held // 2**20} MB) "
-            f"waited to be published, and {overflow.dropped} more would pass the "
-            f"{HELD_BYTES_LIMIT // 2**20} MB the library keeps for one connection: Deephaven's "
-            "update graph fell behind the stream, or stopped, as it does while a console "
-            f"command runs. The rows from {missing} on are missing, so "
-            "this table stopped; call the method again for a new live table",
-            source=ErrorSource.USER,
-            is_retryable=True,
-        )
-        self._fail_each(sinks, error)
+        by_dataset: dict[str, list[StreamSink]] = {}
+        for sink in sinks:
+            by_dataset.setdefault(sink.plan.dataset, []).append(sink)
+        for dataset, failing in by_dataset.items():
+            error = MassiveError(
+                f"{dataset}: {overflow.rows:,} rows, about {overflow.held // 2**20} MB, waited "
+                f"to be published, and {overflow.dropped:,} more would pass the "
+                f"{HELD_BYTES_LIMIT // 2**20} MB the library keeps for one connection. "
+                "Deephaven's update graph fell behind the stream, or stopped, as it does while "
+                f"a console command runs. The rows from {missing} on are missing, so this table "
+                "stopped. Call the method again for a new live table.",
+                source=ErrorSource.USER,
+                is_retryable=True,
+            )
+            self._fail_each(failing, error)
 
     def _publish(
         self,
@@ -1636,7 +1650,8 @@ class Flusher:
             except Exception as error:  # one dataset's failure never costs the others their rows
                 failure = MassiveError(
                     library_bug(
-                        f"{plan.dataset}: could not publish a {plan.channel} batch: {error}"
+                        f"{plan.dataset}: the library could not publish the rows Massive sent "
+                        f"on channel {plan.channel}: {error!r}"
                     ),
                     source=ErrorSource.LIBRARY,
                 )
@@ -1775,7 +1790,11 @@ class Flusher:
                 continue
             if self._sessions is not None and not self._sessions.alive():
                 held.drop(plan, why="the futures schedule worker stopped")
-                self._fail_each(readers, _defect(plan, "the futures schedule worker stopped"))
+                stopped = (
+                    "the library thread that reads Massive's futures schedules stopped, so the "
+                    "rows that wait for their trading session can never be dated"
+                )
+                self._fail_each(readers, _defect(plan, stopped))
                 continue
             if plan in settled:
                 continue
@@ -1786,7 +1805,11 @@ class Flusher:
                 if readers:
                     self._publish_released(plan, result, readers=readers, updates=updates)
             except Exception as error:  # one dataset's failure never costs the others their rows
-                failure = _defect(plan, f"could not publish its held rows: {error}")
+                failure = _defect(
+                    plan,
+                    "the library could not publish the rows that waited for their trading "
+                    f"session: {error!r}",
+                )
                 mark_failure_logged(failure)
                 logger.exception("%s", failure)
                 held.drop(plan, why=str(failure))
@@ -1817,7 +1840,9 @@ class Flusher:
             The streams that go on.
         """
         if settled.overflow:
-            failure = MassiveError(f"{plan.dataset}: {settled.overflow}")
+            failure = MassiveError(
+                f"{plan.dataset}: {settled.overflow} Call the method again for a new live table."
+            )
             held.drop(plan, why=str(failure))
             self._waits.pop(plan, None)
             self._fail_each(readers, failure)
@@ -1894,7 +1919,7 @@ class Flusher:
         def receives(ticker: str) -> bool:
             return sink.receives_all or sink.holds(ticker)
 
-        where = f"{self._thread.name} channel {plan.channel}"
+        where = f"{self._url} channel {plan.channel}"
         discarded = {
             readiness: mine
             for readiness, tickers in settled.discarded.items()
@@ -1913,10 +1938,7 @@ class Flusher:
         for readiness, tickers in discarded.items():
             rule = DISCARDS[readiness]
             if effect_of(rule.setting(sink.policy)).fails:
-                failure = (
-                    f"{rule.message(plan.dataset, tickers)} (ErrorPolicy.{rule.cause.value}=RAISE)"
-                )
-                self._fail_each([sink], MassiveError(failure))
+                self._fail_each([sink], MassiveError(rule.message(plan.dataset, tickers)))
                 return False
         return True
 
@@ -1998,7 +2020,7 @@ class Flusher:
             if not counts:
                 kept.append(sink)
                 continue
-            where = f"{self._thread.name} channel {plan.channel}"
+            where = f"{self._url} channel {plan.channel}"
             found = withheld.events(
                 dataset=plan.dataset,
                 transport=Transport.WS,
@@ -2091,8 +2113,8 @@ class Flusher:
             return named
         count, reason = ended
         failure = RowDataError(
-            f"{plan.dataset}: the library could read none of the last {count} rows Massive sent "
-            f"on channel {plan.channel} whole, so it withheld them all and published none. "
+            f"{plan.dataset}: the library could not read the last {count:,} rows Massive sent "
+            f"on channel {plan.channel} whole, so it withheld them and published none. "
             f"{reason_sentence(reason)} {WITHHELD_LISTED}"
         )
         whole = plan.symbol_field is None
@@ -2126,9 +2148,9 @@ class Flusher:
             return False
         count, first = ended
         failure = RowDataError(
-            f"{plan.dataset}: the library could read the symbol of none of the last {count} rows "
-            f"Massive sent on channel {plan.channel}, so it withheld them all and published "
-            f"none. {reason_sentence(first)} {WITHHELD_LISTED}"
+            f"{plan.dataset}: the library could not read the symbol of the last {count:,} rows "
+            f"Massive sent on channel {plan.channel}, so it withheld them and published none. "
+            f"{reason_sentence(first)} {WITHHELD_LISTED}"
         )
         failing = [sink for sink in readers if not sink.receives_all]
         self._fail_each(failing, failure)
@@ -2170,7 +2192,10 @@ class Flusher:
             ended = _extend_run(runs, symbol, dropped=rows, reason=reason)
             if ended is not None:
                 count, first = ended
-                became[symbol] = f"the last {count} rows were withheld; the first: {first}"
+                became[symbol] = (
+                    f"The library withheld the last {count:,} rows of this symbol. "
+                    f"{reason_sentence(first)}"
+                )
         for sink in going:
             self._mark_stale(plan, sink, became)
 
@@ -2197,7 +2222,7 @@ class Flusher:
                 ProblemCause.STALE_SYMBOL_DATA,
                 dataset=plan.dataset,
                 stream_id=sink.stream_id,
-                where=f"{self._thread.name} channel {plan.channel}",
+                where=f"{self._url} channel {plan.channel}",
             )
             found = self._stale[sink.stream_id] = ({}, tracker)
         stale, tracker = found
@@ -2302,8 +2327,8 @@ class Flusher:
                 core.problems(problems)
             except Exception:
                 logger.exception(
-                    "%s: could not report the problems of stream %d. %s",
-                    self._thread.name,
+                    "%s: the library could not report the problems of stream %d. %s",
+                    self._url,
                     sink.stream_id,
                     LIBRARY_BUG,
                 )
@@ -2350,10 +2375,7 @@ def _defect(plan: ChannelPlan, what: str) -> MassiveError:
     Returns:
         A `MassiveError` of the library.
     """
-    return MassiveError(
-        f"{plan.dataset}: {what}, so its held futures rows would never be dated",
-        source=ErrorSource.LIBRARY,
-    )
+    return MassiveError(f"{plan.dataset}: {what}.", source=ErrorSource.LIBRARY)
 
 
 def _with_rows(converted: Converted, rows: pa.Table | None) -> Converted:
