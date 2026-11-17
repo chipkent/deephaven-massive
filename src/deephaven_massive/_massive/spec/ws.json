@@ -227,7 +227,8 @@
     {"column": "Exchange", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "x"},
     {"column": "Message", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "m"},
     {"column": "SipTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "t"},
-    {"column": "SequenceNumber", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "q"}
+    {"column": "SequenceNumber", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "q"},
+    {"column": "Retransmission", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "rt"}
    ],
    "memberships": [
     {"group": "options", "kind": "admin_messages", "position": 0, "projection": null}

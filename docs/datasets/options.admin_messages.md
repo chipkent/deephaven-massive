@@ -46,6 +46,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. |
 | `Message` | String | The administrative message text as distributed by OPRA. |
 | `SequenceNumber` | long | The sequence number represents the sequence in which admin events happened. These are increasing and unique, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11). |
+| `Retransmission` | Boolean | Whether this message is a retransmission (a replay of a previously sent message, e.g., during gap recovery), rather than an original real-time message. Only present, and set to true, when it is a retransmission; it is omitted otherwise. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. |
 
 <a id="massive-fields"></a>
@@ -62,6 +63,7 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Exchange` | `x` |
 | `Message` | `m` |
 | `SequenceNumber` | `q` |
+| `Retransmission` | `rt` |
 | `TimestampInsert` |  |
 
 </details>
@@ -72,4 +74,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

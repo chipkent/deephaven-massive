@@ -67,7 +67,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `StrikePrice` | double | The strike price of the option contract. |
 | `Type` | String | The type of option contract: standard or binary. It can be missing, for example on contracts listed before this field was added, so a missing type says nothing about the contract. |
 | `Underlying` | String | The instrument Massive lists the row under, as Massive's ticker. From REST `underlying_ticker`: "The underlying ticker that the option contract relates to." |
-| `UnderlyingType` | String | What the contract is based on. For now only set on KPI binary options, as kpi. |
+| `UnderlyingType` | String | What the contract is based on: kpi on Cboe KPI binary options, equity on NYSE American equity binary options (roots that start with B1). Missing on other contracts for now. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
@@ -108,4 +108,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
