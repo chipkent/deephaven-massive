@@ -1230,8 +1230,8 @@ class OptionsNamespace(Namespace):
         list of index tickers once. A root whose underlying isn't on that list keeps its bare
         ticker and costs nothing more. A root whose underlying is on it, such as `SPX`, costs one
         request to Massive's Contract Overview the first time the session meets that root. If
-        Massive can't say, the root's rows keep the bare ticker (`SPX`), and the log names the
-        root at `WARNING`.
+        Massive can't say, the library leaves the root's rows out and lists them in
+        `m.problems()` as `unreadable_symbols`.
 
         Args:
             symbols: Option contracts; leave it out for every contract.
@@ -1317,8 +1317,8 @@ class OptionsNamespace(Namespace):
         list of index tickers once. A root whose underlying isn't on that list keeps its bare
         ticker and costs nothing more. A root whose underlying is on it, such as `SPX`, costs one
         request to Massive's Contract Overview the first time the session meets that root. If
-        Massive can't say, the root's rows keep the bare ticker (`SPX`), and the log names the
-        root at `WARNING`.
+        Massive can't say, the library leaves the root's rows out and lists them in
+        `m.problems()` as `unreadable_symbols`.
 
         Args:
             symbols: Option contracts; leave it out for every contract.
