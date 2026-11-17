@@ -60,8 +60,7 @@ output to `live-checks.log`, the file to attach to an issue.
    | `integration_smoke` | Every dataset and method once |
    | `integration_rate_limits` | Three tests that go past a subscription's request limit on purpose. Each uses a subscription you list in `rest_requests_per_minute`. |
 
-2. Run the WebSocket limit tests alone, one command after the other. Three go past Massive's
-   subscription or connection limits, and one subscribes a whole channel, so they disturb the
+2. Run the WebSocket limit tests alone, one command after the other, because they disturb the
    key's connections:
 
    ```bash
@@ -177,8 +176,9 @@ uv run pytest -m integration tests/namespaces/test_futures_integration.py -k bar
 uv run pytest -m integration tests/namespaces/test_options_integration.py -k gamma 2>&1 | tee -a live-checks.log
 ```
 
-The options test skips when Massive refuses the topics, quoting the refusal. When it skips as
-inconclusive, because the socket reconnected without saying why, run it again with its command.
+The options test skips when Massive refuses every topic, quoting the refusal. When it skips as
+inconclusive, because Massive refused some topics or the socket reconnected without saying why,
+run it again with its command.
 
 A tester's results hold one more check, of a quiet connection in the
 [`stream-day` group](#live-run-groups). In that group's debug log, read the stocks connection's
