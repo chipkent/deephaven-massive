@@ -618,7 +618,7 @@ def test_the_throughput_summary_gives_rates_peaks_and_problems(tmp_path: Path) -
             {"time": at(0), "Cause": "schema_drift"},
             {"time": at(20), "Cause": "outage"},
             {"time": at(20), "Cause": "schema_drift"},
-            {"time": at(999), "Cause": "stale_symbol"},  # outside the hour
+            {"time": at(999), "Cause": "stale_symbol_data"},  # outside the hour
         ],
     )
     stream_capture.append_csv(

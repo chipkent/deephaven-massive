@@ -83,7 +83,7 @@ Each cause, and what to do about it:
 | `unlisted_contracts` | `massive` | `WITHHELD` | no | Massive streamed rows of a futures contract missing from its snapshot and contracts list for 30 minutes. The library can't date them, so it leaves them out. | Look the contract up with `m.futures.contracts()`. If Massive lists it, report a [bug](#report-a-bug) with the row's `Detail`. |
 | `unscheduled_products` | `massive` | `WITHHELD` | no | Massive's futures schedules give no trading session for rows it streamed, so the library can't date them. The rows are left out. | Report it as a [bug](#report-a-bug) with the row's `Detail`, so it can go to Massive. |
 | `undated_rows` | `library` | `DELAYED` | yes | A futures contract's rows have waited over 15 seconds for its trading session from Massive's schedules. They publish, dated, once it loads. | Nothing, unless it lasts. The table fails once the wait passes [`max_outage`](configuration.md#settings-reference). |
-| `stale_symbol` | `library` | `GAP` | yes | The last 100 rows of a symbol were all left out, so its latest values may be stale. It ends when a row of the symbol is published. | The symbol's `WITHHELD` rows in this table say why its rows were left out. Do what their cause says. |
+| `stale_symbol_data` | `library` | `GAP` | yes | The last 100 rows of a symbol were all left out, so its latest values may be stale. It ends when a row of the symbol is published. | The symbol's `WITHHELD` rows in this table say why its rows were left out. Do what their cause says. |
 | `schema_drift` | `massive` | `PUBLISHED` | no | Massive sent a field its documentation lacks. The rows are published without it. | Report it as a [bug](#report-a-bug), so the library can add the field. The rows are fine. |
 | `outage` | `library` | `GAP` | yes | The connection was down, so rows may be missing. | Nothing. The library reconnects, and the table fails only after [`max_outage`](configuration.md#settings-reference). If `Detail` says another program took the connection, see [Live tables](#live-table-messages). |
 | `quiet_feed` | `massive` | `DELAYED` | yes | The connection received nothing for a while during trading hours. | Nothing, unless it lasts. `m.connections()` shows the connection. |
@@ -246,9 +246,12 @@ Act on these states:
 | Table | `State` | Why | What to do |
 |---|---|---|---|
 | `m.streams()` | `FAILED` | The table stopped, and `Error` says why. | Fix what `Error` names, then run the line that made the table again. |
-| `m.connections()` | `WAITING` | The library hasn't connected: no live table on this connection has a symbol to stream yet. | Add a symbol to your watchlist; the connection opens at the first one. If the watchlist has symbols, they were skipped, and `Error` in `m.streams()` names each one. |
+| `m.connections()` | `WAITING` | The library hasn't connected: no live table on this connection has a symbol to stream yet. | Add a symbol to your watchlist; the connection opens at the first one. If the watchlist has symbols, they were skipped, and `m.problems()` lists each one under `noncanonical_symbols`. |
 | `m.connections()` | `WAITING_SLOT` | Massive refused this connection at login: your account has no free connection for this asset class. | Stop any other program that uses your key. The library keeps trying, and its live tables fail after `max_outage`. |
 | `m.symbol_reads()` | `FAILED` | The symbol's read failed, and `Error` says why. | Fix what `Error` names, then delete the symbol's row from the watchlist and add it back. |
+
+`Error` in `m.streams()` and `LastError` in `m.connections()` give the latest status in a few
+words. `m.problems()` holds every problem with its cause, so you can filter it.
 
 <a id="the-log"></a>
 

@@ -1617,12 +1617,12 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
 
 
 def stale_spans(problems: list[Problem], stream_id: int) -> list[dict[str, str]]:
-    # Each `stale_symbol` snapshot of one stream, as its symbols and their details.
+    # Each `stale_symbol_data` snapshot of one stream, as its symbols and their details.
     return [
         {name: span.detail for name, span in p.spans.items()}
         for p in problems
         if isinstance(p, ProblemSpans)
-        and p.cause is ProblemCause.STALE_SYMBOL
+        and p.cause is ProblemCause.STALE_SYMBOL_DATA
         and p.stream_id == stream_id
     ]
 
@@ -1755,7 +1755,7 @@ def test_a_stale_symbol_whose_run_reaches_the_limit_again_updates_its_detail_in_
     first, later = (
         p.spans["ILLQ"]
         for p in problems
-        if isinstance(p, ProblemSpans) and p.cause is ProblemCause.STALE_SYMBOL
+        if isinstance(p, ProblemSpans) and p.cause is ProblemCause.STALE_SYMBOL_DATA
     )
     assert first.detail.startswith(f"the last {limit} rows were withheld; the first: timestamp")
     assert later.detail == (

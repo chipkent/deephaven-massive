@@ -122,7 +122,7 @@ def test_the_causes_are_pinned() -> None:
         "unlisted_contracts",
         "unscheduled_products",
         "undated_rows",
-        "stale_symbol",
+        "stale_symbol_data",
         "schema_drift",
         "outage",
         "quiet_feed",

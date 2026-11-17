@@ -121,14 +121,16 @@ def test_a_span_warns_and_an_empty_snapshot_only_queues(
 ) -> None:
     queued: list[Sequence[Problem]] = []
     reporter = ProblemReporter(queued.append, REDACTOR)
-    stale = spans(ProblemCause.STALE_SYMBOL, {"ESZ6": Span(symbol="ESZ6", detail="why", since=1)})
+    stale = spans(
+        ProblemCause.STALE_SYMBOL_DATA, {"ESZ6": Span(symbol="ESZ6", detail="why", since=1)}
+    )
     with caplog.at_level(logging.DEBUG, problem_reporter.__name__):
-        reporter([spans(ProblemCause.STALE_SYMBOL, {})])
+        reporter([spans(ProblemCause.STALE_SYMBOL_DATA, {})])
         reporter([stale])
     assert warnings(caplog) == [
         (
-            "stocks.trades table 7: stale_symbol: ESZ6: why (at here); m.problems() lists it "
-            "and every later stale_symbol problem of this table, which the log shows at DEBUG "
+            "stocks.trades table 7: stale_symbol_data: ESZ6: why (at here); m.problems() lists it "
+            "and every later stale_symbol_data problem of this table, which the log shows at DEBUG "
             "only"
         )
     ]
