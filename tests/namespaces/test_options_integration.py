@@ -1175,8 +1175,8 @@ def test_root_is_the_ticker_s_occ_root(
 _UNDERLYING_ROOTS = ("SPX", "SPXW", "NDX", "VIX", "RUT", "DJT", "AMCR1", "AAPL")
 """Roots whose underlying the two new datasets must name as the contracts reference does: index
 roots and their weeklies, the stock `DJT`, an adjusted root, and a plain stock. `I:DJT` is not
-on Massive's index list, so `DJT`'s rows are judged by the index-list pre-filter alone; roots
-whose bare underlying is on the list are compared by
+on Massive's index list, so `DJT`'s rows are judged by the index-list pre-filter alone. An option
+on a stock or fund whose ticker is also on the list is looked for and compared by
 `test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_reference`."""
 
 _PER_ROOT = 2
