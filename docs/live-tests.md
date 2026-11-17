@@ -27,7 +27,7 @@ settings from it and leaves every other setting at its default:
 |---|---|---|
 | `delayed_subscriptions` | Each subscription Massive serves your key delayed | Every stream and snapshot test of those subscriptions skips, `not listed as delayed` |
 | `rest_requests_per_minute` | Each subscription Massive limits by the minute, and its limit | The rate-limit tests skip, and other tests run slower |
-| `websocket_hosts` | `indices: business.massive.com`, when Massive serves your index values there. See [`websocket_hosts`](configuration.md#setting-details). | The library picks the host, which may not serve your index values |
+| `websocket_hosts` | `indices: business.massive.com`, when Massive serves your key real-time index values. Leave it out when you list `indices` in `delayed_subscriptions`: the library refuses that pair, and the run stops. See [`websocket_hosts`](configuration.md#setting-details). | The library picks the host, which may not serve your index values |
 
 Keep only the settings your key needs. A file that sets all three looks like this:
 
@@ -67,11 +67,13 @@ output to `live-checks.log`, the file to attach to an issue.
 
    | Marker | What it runs |
    |---|---|
-   | `integration` | Every live test without one of the other markers: the open-question tests, every README example as written, and a few live-table tests. An open question is a behavior the library relies on that Massive's docs leave open ([the list](dev/verification-items/README.md)). |
+   | `integration` | Every live test without another live marker, the README's examples among them |
    | `integration_smoke` | Every dataset and method once |
    | `integration_rate_limits` | Three tests that go past a subscription's request limit on purpose |
 
-   A test of a subscription Massive limits waits its turn, and prints the requests it has left.
+   Most `integration` tests answer an open question: a behavior the library relies on that
+   Massive's docs leave open ([the list](dev/verification-items/README.md)). A test of a
+   subscription Massive limits waits its turn, and prints the requests it has left.
 
 2. Run the WebSocket limit tests alone, one command after the other, because they disturb the
    key's connections:
@@ -166,6 +168,8 @@ one, the same section says where. Don't share that log, and open an issue that n
 ## Read the checks a pass doesn't settle
 
 Read the evidence of these five tests after every run, and open an issue as the table says.
+A tester's results hold one more hand check, of the
+[`stream-day` group](#live-run-groups).
 Find each one's lines under `live evidence` at the end of the run, or in
 `live-evidence-<UTC time>.log` ([Read the end of a run](#read-the-end-of-a-run)):
 
@@ -187,7 +191,7 @@ uv run pytest -m integration tests/namespaces/test_futures_integration.py -k bar
 uv run pytest -m integration tests/namespaces/test_options_integration.py -k gamma 2>&1 | tee -a live-checks.log
 ```
 
-When the options test skips because the socket reconnected without saying why, run it again.
+When the options cap test skips because the socket reconnected without saying why, run it again.
 When it skips because Massive refused some channel subscriptions for want of a plan, your key
 can't answer it.
 
@@ -241,13 +245,15 @@ groups run these tests:
 | `stream-night-reconcile` | The night's minute bars against REST history |
 | `half-day` | The bar-stamp tests, on the trading day after a half day |
 
-The `stream-day` group also answers whether Massive sends any message on a stocks connection
-while no stock trades. The library warns when a connection gets no message for 5 minutes in
-trading hours, and this answer says whether that warning is right.
+The `stream-day` group also answers a hand check: does Massive send any message on a stocks
+connection while no stock trades? The library warns when a stocks connection gets no message for
+5 minutes in trading hours. If Massive sends nothing on a quiet connection, a healthy connection
+can trip that warning.
 
 The group connects at 03:45 New York time, before pre-market trading opens at 04:00. In its
-debug log, Massive's status messages read `wss://<host>/stocks status <KIND>: <message>`. Open
-an issue with the stocks lines between 03:45 and 04:00, or say there were none.
+debug log, Massive's status messages read `wss://<host>/stocks status <KIND>: <message>`. After
+the subscriptions' acknowledgements, note each stocks status line up to 04:00, and the longest
+gap between them. Put them, or "none", in a comment on the tester's results issue.
 
 <a id="live-run-reruns"></a>
 
