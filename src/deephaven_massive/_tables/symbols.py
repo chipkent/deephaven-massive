@@ -86,18 +86,19 @@ def canonicalize_symbols(
     The table form of `canonical_symbol`: use it to turn a watchlist written in another
     spelling (`EUR/USD`, Yahoo's `BRK-B`) into one a dataset accepts as `symbols=`. The
     converted column keeps its name. Each row converts as `canonical_symbol(value, asset_class,
-    convention=convention)` would; a null stays null.
+    convention=convention)` would; a null stays null. The current rows convert when you call.
+    On a live table, each row added later converts as it arrives.
 
-    The table's current rows are checked when you call, and on a live table every row added
-    later converts as it arrives. Under `OnError.LOG`, the default, a bad row gets a null
-    symbol, which every dataset ignores, and each bad value is logged once at WARNING, at most
-    20 per table, so the table and every table made from it keep updating. Under
-    `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. A `fetch()`,
-    `history()`, or `poll()` of the returned table, or a stream of a live one, lists each such
-    value in `m.problems()` under the cause `noncanonical_symbols`. Under `OnError.RAISE`, a
-    current bad value raises `ValueError` here, and a bad row added later fails the live table,
-    along with any dataset that follows it as a watchlist. This function's `on_error` is its
-    own: a session's `dm.ErrorPolicy` doesn't apply to it.
+    By default, a value that doesn't convert gets a null symbol. Every dataset skips a null
+    symbol, so one bad row never stops the table. A dataset that reads the returned table lists
+    each such value in `m.problems()` under the cause `noncanonical_symbols`. A table made from
+    it, such as one filtered with `where`, doesn't list them, so pass the returned table itself.
+    This function's `on_error` decides what happens to these values. A session's
+    `dm.ErrorPolicy` doesn't apply.
+
+    Set `on_error=dm.OnError.RAISE` to fail instead. A bad current value then raises
+    `ValueError` from this call. A bad row added later fails the live table and every live
+    table that reads it as `symbols=`.
 
     Example:
         ::
@@ -116,16 +117,19 @@ def canonicalize_symbols(
         asset_class: The class of every symbol in the column. Required: nothing is inferred,
             so a table that mixes classes is converted one class's rows at a time.
         column: The column to convert, `"Symbol"` by default. The converted values replace
-            the column's values and keep its name, so a column named anything but `Symbol`
-            must be renamed before the table is passed as `symbols=`
-            (`.rename_columns("Symbol = Ticker")`). Every other column is kept unchanged.
+            the column's values and keep its name. A dataset reads `symbols=` from a `Symbol`
+            column, so rename any other column before you convert it
+            (`.rename_columns("Symbol = Ticker")`) and pass the returned table as `symbols=`.
+            Every other column is kept unchanged.
         convention: The convention the symbols come from: `SymbolConvention.MASSIVE`, the
             default, for Massive's own spelling and the unambiguous spellings of the class, or,
             for stocks only, `YAHOO`, `NASDAQ`, or `CMS`: the source the tickers came from,
             not the exchange they trade on.
-        on_error: What a value that does not convert does. `OnError.LOG`, the default,
-            writes a null symbol for it and logs the value once at WARNING; `OnError.IGNORE`
-            writes a null symbol and logs it at DEBUG only; `OnError.RAISE` fails.
+        on_error: How a value that doesn't convert is logged, or whether it fails:
+
+            - `OnError.LOG`, the default: logged once at WARNING, at most 20 values per table.
+            - `OnError.IGNORE`: logged at DEBUG only.
+            - `OnError.RAISE`: fails, as above.
 
     Returns:
         A table with the same rows and columns, whose `column` holds canonical tickers (or
