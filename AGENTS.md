@@ -310,8 +310,8 @@ These protect the owner's repository, money, and secrets.
   start.
 - **Keep context small.** Hand over to a fresh agent, with a written handover (the branch state,
   what is done, what remains, any traps), at about 150,000 tokens of context or after a PR's
-  first push. Batch reads: one script over many files, not many single greps, and send a wide
-  search to a search agent that returns only its conclusion.
+  first push (decision 130). Batch reads: one script over many files, not many single greps,
+  and send a wide search to a search agent that returns only its conclusion.
 - **One PR per change that can merge on its own.** A PR holds one change with everything it
   needs to be correct: the code, its tests, and its docs together (a new column lands with its
   docs page and tests in one PR). A mechanical step the change needs (a rename, a file move, a
@@ -349,7 +349,8 @@ These protect the owner's repository, money, and secrets.
   renames a public name lands (a text merge can't catch the old name in your new code; rerun the
   tests). Read both sides of each merge conflict, never take one wholesale, regenerate a
   generated file instead of merging it, and say in the PR body how you resolved it. A merge push
-  is reviewed only for its conflict resolutions (`pre-push-review`).
+  is reviewed only for its conflict resolutions and what the merge forced you to change
+  (`pre-push-review`, decision 130).
 - **A decision record is the evidence behind a rule, not the rule.** Rules live here, in the
   user docs and docstrings, and in the `docs/dev/` page on their subject; a record holds the
   owner's ruling that set one, and the rule links it (`decision N`). A verification item is a

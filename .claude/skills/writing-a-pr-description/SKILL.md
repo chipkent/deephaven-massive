@@ -81,9 +81,10 @@ would. Two passes help:
 The author reads its own text in the code's vocabulary, so a fresh editor grades it. Spawn a
 grader with no other context when the PR opens, and again only when a push changes what the PR
 does. A push that only merges `main` or fixes review findings gets no new grade: update the
-affected lines yourself. A `test:`, `chore:`, or small `fix:` PR gets one grade. `<base>` is the
-PR's base: `origin/main`, or the branch below it in a stack. The three-dot diff leaves out what
-a merge of `main` brought in.
+affected lines yourself. An issue body or report is graded once it is written, before it is
+posted, against the sources it cites in place of a diff. A `test:`, `chore:`, or small `fix:` PR
+gets one grade. `<base>` is the PR's base branch: `origin/main`, or the branch below it in a
+stack. The three-dot diff leaves out what a merge of that base brought in.
 
 ```text
 Read <repo>/.claude/skills/writing-user-docs/agents/editor.md and follow it exactly, with its
@@ -92,9 +93,10 @@ section "Grading a PR description". Grade <worktree>/.git-pr-body.md against the
 ```
 
 Rewrite from its sheet and grade again with a fresh grader until the description passes, with
-at most three fresh grades, or one for a PR that gets one. When the last grade allowed doesn't
-pass, push the description anyway and send the grader's remaining objections to the owner
-verbatim (`writing-to-the-owner`).
+at most three fresh grades, or one for a PR that gets one (decision 130). The limit is per PR,
+not per push: once a PR has had its grades, later pushes get none, and you update the affected
+lines yourself. When the last grade allowed doesn't pass, push the description anyway and send
+the grader's remaining objections to the owner verbatim (`writing-to-the-owner`).
 
 ## 5. Publish
 
