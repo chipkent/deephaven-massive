@@ -34,12 +34,13 @@ everything else belongs here:
   list gives. Every pair, whatever its source, is split on the `symbol changes` worker before
   it is subscribed: a crypto stream of a symbol list opens with no topic and submits its pairs
   as its first change, as a symbol table's watch does. A pair the list gives no split for is
-  one Massive has no data for, under `ErrorPolicy.unavailable_symbols`: skipped, logged once,
-  and listed in the stream's `Error` under `LOG` and `IGNORE`, or the stream's failure under
-  `RAISE`. A list that cannot be read is an outage of the pairs it leaves unsplit: they wait,
-  the stream's `Error` says why, the worker tries again after the reconnect backoff, and the
-  stream fails once they have waited `MassiveConfig.max_outage`. A failure no retry can fix (a
-  rejected key, a plan without reference data) fails the stream at once.
+  one Massive has no data for, under `ErrorPolicy.unavailable_symbols`: skipped and listed in
+  `m.problems()` as `unavailable_symbols` under `LOG` and `IGNORE`, or the stream's failure
+  under `RAISE`. A list that cannot be read is an outage of the pairs it leaves unsplit: they
+  wait, each a `symbol_read_retrying` span of `m.problems()` that says why, the worker tries
+  again after the reconnect backoff, and the stream fails once they have waited
+  `MassiveConfig.max_outage`. A failure no retry can fix (a rejected key, a plan without
+  reference data) fails the stream at once.
 - **Sharing.** Sessions in one process with the same API key and equal connection settings
   (`CONNECTION_SETTINGS`, and the same Deephaven update graph) share one `ConnectionGroup`, so
   their streams ride the same connections: individual plans allow one connection per cluster,
