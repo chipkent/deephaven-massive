@@ -16,7 +16,7 @@ import time
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, assert_never
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -75,7 +75,7 @@ StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
 
-_CONTRACTS = "/v3/reference/options/contracts"
+_CONTRACTS = option_requests.CONTRACTS
 _NEW_YORK = ZoneInfo("America/New_York")
 _CHAIN = "/v3/snapshot/options/{underlyingAsset}"
 _SNAPSHOT = "/v3/snapshot"
@@ -1210,9 +1210,16 @@ def _row_day(row: Mapping[str, Any]) -> str:
     )
 
 
+RowSource: TypeAlias = Literal["open interest", "unusual trades"]
+"""The dataset a raw row came from."""
+
+Sample: TypeAlias = "tuple[RowSource, dict[str, Any]]"
+"""A raw row to compare, with the dataset it came from."""
+
+
 def _published_underlyings(
     session: dm.MassiveSession,
-    source_name: str,
+    source_name: RowSource,
     ticker: str,
     *,
     day: str,
@@ -1224,11 +1231,13 @@ def _published_underlyings(
         The `Underlying` of each row, from `m.options.open_interest()` for "open interest" and
         `m.options.unusual_trades()` for "unusual trades".
     """
-    library = (
-        session.options.open_interest(ticker, start=day, end=day)
-        if source_name == "open interest"
-        else session.options.unusual_trades(ticker, start=day, end=day)
-    )
+    match source_name:
+        case "open interest":
+            library = session.options.open_interest(ticker, start=day, end=day)
+        case "unusual trades":
+            library = session.options.unusual_trades(ticker, start=day, end=day)
+        case _:
+            assert_never(source_name)
     return [str(r["Underlying"]) for r in table_rows(library.fetch(wait=True))]
 
 
@@ -1259,7 +1268,7 @@ def test_underlying_matches_the_contracts_reference(
     when `SPX` and `AAPL` give no open-interest row, since an index and a stock must both be
     compared. A refusal skips the test, quoting Massive.
     """
-    rows: list[tuple[str, dict[str, Any]]] = []
+    rows: list[Sample] = []
     for root in _UNDERLYING_ROOTS:
         found = _page(live_rest, option_requests.open_interest(root=root, limit=50))
         rows += [("open interest", r) for r in found[:_PER_ROOT]]
@@ -1465,9 +1474,6 @@ _PER_SEARCH = 8
 """The most collision roots compared from each search: the whole-market pages, and the stock
 list."""
 
-Sample: TypeAlias = "tuple[str, dict[str, Any]]"
-"""A raw row to compare, with the name of the dataset it came from."""
-
 
 def _market_collisions(
     client: RestClient, listed: Collection[str], evidence: Evidence
@@ -1484,10 +1490,11 @@ def _market_collisions(
         WireEntitlementError: When Massive refuses the key either dataset.
     """
     found: dict[str, Sample] = {}
-    for source_name, request in (
+    reads: tuple[tuple[RowSource, option_requests.Request], ...] = (
         ("open interest", option_requests.open_interest(limit=50000)),
         ("unusual trades", option_requests.unusual_trades(limit=1000)),
-    ):
+    )
+    for source_name, request in reads:
         rows = _page(client, request)
         roots = {_root(str(r["ticker"])) for r in rows}
         for row in rows:
