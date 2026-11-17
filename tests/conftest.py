@@ -2026,6 +2026,12 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
         else:
             raise
         _record(item.config, item.nodeid, reason)
+        # pytest keeps the error for post-mortem debugging until the next test's call; a skip
+        # has nothing to debug, and its traceback's frames would keep the test's sessions alive
+        # past the leak check (`_check_nothing_outlives_the_test`).
+        del sys.last_type, sys.last_value, sys.last_traceback
+        if sys.version_info >= (3, 12):
+            del sys.last_exc
         pytest.skip(reason)
 
 
