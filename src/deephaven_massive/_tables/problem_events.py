@@ -177,8 +177,7 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             span=False,
             summary="Massive has no data for the symbol. It answered HTTP 404, or the pair isn't "
             "on its crypto ticker list.",
-            fix="Look the symbol up in Massive's lists, such as `m.reference.tickers()`. If "
-            "`Detail` names an argument the dataset doesn't take, drop it from the call.",
+            fix="Look the symbol up in Massive's lists, such as `m.reference.tickers()`.",
         ),
         _C.UNREADABLE_KEYS: CauseTraits(
             policy="unreadable_keys",
@@ -220,9 +219,8 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_MASSIVE,
             action=ProblemAction.WITHHELD,
             span=False,
-            summary="Massive streamed rows of a futures contract that neither its futures "
-            "snapshot nor its contracts list has held for 30 minutes, so the library can't "
-            "date them. The rows are left out.",
+            summary="Massive streamed rows of a futures contract missing from its snapshot and "
+            "contracts list for 30 minutes. The library can't date them, so it leaves them out.",
             fix="Look the contract up with `m.futures.contracts()`. If Massive lists it, report "
             "a [bug](#report-a-bug) with the row's `Detail`.",
         ),
@@ -271,11 +269,10 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_LIBRARY,
             action=ProblemAction.GAP,
             span=True,
-            summary="The connection was down, so rows may be missing. It also covers a "
-            "connection that another program took with your API key.",
-            fix="Nothing: the library reconnects, and the table fails only after "
+            summary="The connection was down, so rows may be missing.",
+            fix="Nothing. The library reconnects, and the table fails only after "
             "[`max_outage`](configuration.md#settings-reference). "
-            "If `Detail` says another connection took it, see "
+            "If `Detail` says another program took the connection, see "
             "[Live tables](#live-table-messages).",
         ),
         _C.QUIET_FEED: CauseTraits(
@@ -292,8 +289,8 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             action=ProblemAction.DELAYED,
             span=True,
             summary="The table has more contracts than Massive's cap of 1,000 per connection, "
-            "counting a contract's trades and quotes as two. The contracts past the cap wait for "
-            "room; `Rows` counts them. `Detail` reads `over capacity: <n>/1000; <k> deferred`.",
+            "counting a contract's trades and quotes as two. The contracts past the cap wait, "
+            "and `Rows` counts them.",
             fix="Watch fewer contracts. The waiting ones subscribe as others leave.",
         ),
         _C.UNACKNOWLEDGED_TOPICS: CauseTraits(

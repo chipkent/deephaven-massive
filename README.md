@@ -564,7 +564,7 @@ Next, where the library lists the symbols it skipped and why.
 
 ### Problems: see what went wrong in your tables
 
-Find out why a read gave fewer rows than you asked for, on Stocks Basic. This asks for the
+Find out why a table has fewer rows than you asked for, on Stocks Basic. This asks for the
 details of Apple and of `ZZZZ`, a ticker Massive doesn't list:
 
 ```python
@@ -577,11 +577,11 @@ details = m.reference.ticker_details(["AAPL", "ZZZZ"]).fetch()
 
 `details` holds Apple's row. Massive answers the ticker-details request for `ZZZZ` with HTTP 404,
 so `problems` gets a row whose `Cause` is `unavailable_symbols` and `Symbol` is `ZZZZ`. Its
-`Detail` says Massive has no data for it, with the HTTP 404 and the request. On most other
-datasets, Massive answers an unlisted ticker with no rows. That empty answer is Massive's, not a
-problem, so it gets no row in `problems`.
+`Detail` says Massive has no data for it and names the request. Most other datasets answer an
+unlisted ticker with no rows, which is Massive's answer and not a problem.
 
-A skipped symbol is a row of `m.problems()`, with its cause and the reason.
+Every problem the library meets in your tables is a row of `m.problems()`: a skipped symbol, a
+row it left out, an outage. `Cause` says why, and `Detail` gives the value and Massive's answer.
 [Read the problems table](docs/troubleshooting.md#problems) says what each problem means and
 what to do about it.
 

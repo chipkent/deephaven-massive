@@ -12,19 +12,18 @@ the [diagnostics tables](#diagnostics), [turn on the debug log](#the-log), and
 
 `m.problems()` is a live table with one row for each problem of the session and its tables.
 Some problems happen once, such as a row left out. Others last, such as an outage. A lasting
-problem has a `SpanStart`, and its `EndedAt` stays null until it clears.
+problem has a `SpanStart`, and its `EndedAt` stays null until it clears. Valid data, such as a
+null Massive sent or a symbol with no rows in the range, has no row.
 
-A problem that happens again adds to its row: `Rows` and `Occurrences` grow. A null Massive sent,
-or a symbol with no rows in the range, is valid data, so it has no row.
+A problem that happens again adds to its row: `Rows` and `Occurrences` grow.
 
-Call `problems()` on the session whose tables you're checking. This example opens a new
-session, so its problems table starts empty:
+Call `problems()` on the session whose tables you're checking, here `m`:
 
 ```python
 import deephaven_massive as dm
 
-demo = dm.MassiveSession()
-problems = demo.problems()
+m = dm.MassiveSession()  # or the session you already have
+problems = m.problems()
 lasting = problems.where("!isNull(SpanStart) && isNull(EndedAt)")
 ```
 
@@ -33,18 +32,18 @@ lasting = problems.where("!isNull(SpanStart) && isNull(EndedAt)")
 To see which tables have problems, count them beside each table's row of `m.streams()`:
 
 ```python continues
-per_table = demo.streams().natural_join(problems.count_by("Problems", "StreamId"), "StreamId")
+per_table = m.streams().natural_join(problems.count_by("Problems", "StreamId"), "StreamId")
 ```
 
 Each row says what happened in these columns:
 
 | Column | What it holds |
 |---|---|
-| `StreamId` | The table's row in `m.streams()`. A `wait=True` read has no such row, so its problems carry an id of their own. Null for a rate-limit pause, since a pause holds the whole session. |
+| `StreamId` | The table's row in `m.streams()`, or the id of a `wait=True` call. Null for a rate-limit pause. |
 | `Query` | The call that made the table. |
 | `Dataset` | The table's dataset. |
 | `Symbol` | The symbol the problem concerns, when it concerns one. |
-| `Field` | The column the problem concerns, when it concerns one. For a flat-file line, the file, and for a rate-limit pause, its `Bucket` in `m.rate_limits()`. |
+| `Field` | The column the problem concerns, when it concerns one. For a flat-file line, the file. For a rate-limit pause, its `Bucket` in `m.rate_limits()`. |
 | `Cause` | Why. [Each cause](#problem-causes) has a row of its own. |
 | `Action` | What the library did. |
 | `Source` | Whose problem it is: `massive`, `user` for your input, or `library`. |
@@ -63,8 +62,8 @@ Each row says what happened in these columns:
 | `GAP` | Rows may be missing. |
 | `DELAYED` | Rows come late. |
 | `FAILED` | A read or a table failed. |
-| `PUBLISHED` | It published the rows, without a field Massive's documentation lacks. |
-| `OVERFLOW` | More than 1,000 problems of one cause came in one batch of rows, or one table met more than 10,000 different problems of that cause. This row counts the rest. |
+| `PUBLISHED` | It published the rows but left out a field Massive's documentation doesn't list. |
+| `OVERFLOW` | There were too many different problems to list each one. This row counts the rest. |
 
 <a id="problem-causes"></a>
 
@@ -76,19 +75,19 @@ Each cause, and what to do about it:
 |---|---|---|---|---|---|
 | `noncanonical_symbols` | `user` | `SKIPPED` | yes | A value of a watchlist or other table you pass isn't Massive's exact ticker, so its row is skipped. | Fix or delete the row. Massive's lists, such as `m.reference.tickers()`, show its spelling. |
 | `unreadable_symbols` | `library` | `WITHHELD` | no | Massive sent a row whose symbol the library can't read as Massive's ticker. The row is left out. | Report a [bug](#report-a-bug) with the row's `Detail`. |
-| `unavailable_symbols` | `massive` | `SKIPPED` | no | Massive has no data for the symbol. It answered HTTP 404, or the pair isn't on its crypto ticker list. | Look the symbol up in Massive's lists, such as `m.reference.tickers()`. If `Detail` names an argument the dataset doesn't take, drop it from the call. |
+| `unavailable_symbols` | `massive` | `SKIPPED` | no | Massive has no data for the symbol. It answered HTTP 404, or the pair isn't on its crypto ticker list. | Look the symbol up in Massive's lists, such as `m.reference.tickers()`. |
 | `unreadable_keys` | `library` | `WITHHELD` | no | Massive sent a row whose symbol, time, or other key the library can't read. The row is left out. | Report a [bug](#report-a-bug) with the row's `Detail`. |
 | `unconvertible_values` | `library` | `WITHHELD` | no | Massive sent a row with a value the library can't read as its column's type. The row is left out. | Report a [bug](#report-a-bug) with the row's `Detail`. |
 | `malformed_rows` | `library` | `SKIPPED` | no | A line of a flat file isn't a row the library can read. The line is left out. | Report a [bug](#report-a-bug) with the row's `Detail`. |
 | `refused_venues` | `massive` | `SKIPPED` | no | Massive refused the flat files of a futures exchange the call named (HTTP 403). | Name in `venues` only the exchanges your plan includes. |
-| `unlisted_contracts` | `massive` | `WITHHELD` | no | Massive streamed rows of a futures contract that neither its futures snapshot nor its contracts list has held for 30 minutes, so the library can't date them. The rows are left out. | Look the contract up with `m.futures.contracts()`. If Massive lists it, report a [bug](#report-a-bug) with the row's `Detail`. |
+| `unlisted_contracts` | `massive` | `WITHHELD` | no | Massive streamed rows of a futures contract missing from its snapshot and contracts list for 30 minutes. The library can't date them, so it leaves them out. | Look the contract up with `m.futures.contracts()`. If Massive lists it, report a [bug](#report-a-bug) with the row's `Detail`. |
 | `unscheduled_products` | `massive` | `WITHHELD` | no | Massive's futures schedules give no trading session for rows it streamed, so the library can't date them. The rows are left out. | Report it as a [bug](#report-a-bug) with the row's `Detail`, so it can go to Massive. |
 | `undated_rows` | `library` | `DELAYED` | yes | A futures contract's rows have waited over 15 seconds for its trading session from Massive's schedules. They publish, dated, once it loads. | Nothing, unless it lasts. The table fails once the wait passes [`max_outage`](configuration.md#settings-reference). |
 | `stale_symbol` | `library` | `GAP` | yes | The last 100 rows of a symbol were all left out, so its latest values may be stale. It ends when a row of the symbol is published. | The symbol's `WITHHELD` rows in this table say why its rows were left out. Do what their cause says. |
 | `schema_drift` | `massive` | `PUBLISHED` | no | Massive sent a field its documentation lacks. The rows are published without it. | Report it as a [bug](#report-a-bug), so the library can add the field. The rows are fine. |
-| `outage` | `library` | `GAP` | yes | The connection was down, so rows may be missing. It also covers a connection that another program took with your API key. | Nothing: the library reconnects, and the table fails only after [`max_outage`](configuration.md#settings-reference). If `Detail` says another connection took it, see [Live tables](#live-table-messages). |
+| `outage` | `library` | `GAP` | yes | The connection was down, so rows may be missing. | Nothing. The library reconnects, and the table fails only after [`max_outage`](configuration.md#settings-reference). If `Detail` says another program took the connection, see [Live tables](#live-table-messages). |
 | `quiet_feed` | `massive` | `DELAYED` | yes | The connection received nothing for a while during trading hours. | Nothing, unless it lasts. `m.connections()` shows the connection. |
-| `options_cap` | `massive` | `DELAYED` | yes | The table has more contracts than Massive's cap of 1,000 per connection, counting a contract's trades and quotes as two. The contracts past the cap wait for room; `Rows` counts them. `Detail` reads `over capacity: <n>/1000; <k> deferred`. | Watch fewer contracts. The waiting ones subscribe as others leave. |
+| `options_cap` | `massive` | `DELAYED` | yes | The table has more contracts than Massive's cap of 1,000 per connection, counting a contract's trades and quotes as two. The contracts past the cap wait, and `Rows` counts them. | Watch fewer contracts. The waiting ones subscribe as others leave. |
 | `unacknowledged_topics` | `massive` | `DELAYED` | yes | Massive has not confirmed some of the table's subscriptions, so the library keeps sending them. | Nothing, unless it lasts. Then report a [bug](#report-a-bug) with the row's `Detail`. |
 | `rate_limited` | `massive` | `DELAYED` | yes | Massive refused a request for coming too fast (HTTP 429), so the requests of that Massive subscription wait until the pause ends. | Nothing: the requests go on after the pause. `m.rate_limits()` shows it. |
 | `poll_cycle_failed` | `library` | `GAP` | yes | `poll()` cycles failed, so rows may be missing. It ends with the next good cycle. | Fix what `Detail` names. The poll keeps trying, and the table fails once its cycles have failed for [`max_outage`](configuration.md#settings-reference). |
@@ -153,7 +152,7 @@ failed, `Error` in its `m.streams()` row says why.
 | Live tables stop updating while a console command runs | Deephaven updates no live table until the command ends. | Keep console commands short. Leave out `wait=True` from `fetch()` and `history()`: the call returns at once, and its table fills in the background. |
 | `AuthenticationError` from a live table that mentions WebSocket streams | Massive gives this answer for a wrong key, and may give it for a plan that doesn't stream this asset class. | Run `m.reference.market_status().fetch()` with the same key. If it works, your key is right, so read this data with `history()` or `poll()`. |
 | A watchlist row never appears, and `m.problems()` names its value | The value isn't Massive's exact ticker, so the table skips the row. | Fix or delete the row. [`symbols`](datasets/README.md#symbols) shows Massive's spelling for each asset class. |
-| A row of a table you converted never appears | `dm.canonicalize_symbols` couldn't convert it, so its `Symbol` is null, and every dataset skips the row. `m.problems()` lists the value under `noncanonical_symbols` for each live table that reads its symbols from the converted table. | Fix the rows in the table you started from. `.where("isNull(Symbol)")` on the converted table lists them. [Symbols from another source](../README.md#convert-symbols) shows the conversion. |
+| A row of a table you converted never appears | `dm.canonicalize_symbols` couldn't convert it, so its `Symbol` is null, and every dataset skips the row. `m.problems()` lists the value under `noncanonical_symbols` for each live table that reads its symbols straight from the converted table. | Fix the rows in the table you started from. `.where("isNull(Symbol)")` on the converted table lists them. [Symbols from another source](../README.md#convert-symbols) shows the conversion. |
 | A symbol gets no rows, and the log says Massive has no data for it | Massive doesn't serve that ticker. | Look it up in Massive's lists: `m.reference.tickers()`, `m.options.contracts()`, or `m.futures.contracts()`. |
 | `... another connection with this API key took the WebSocket connection ...` | A newer connection with your key took this one's place: another program, or a session on this server with different streaming settings. Massive allows your account one connection per asset class. | Stop the other program, give both sessions the same `MassiveConfig`, or set `connection_taken=dm.ConnectionTaken.RECONNECT` in [`MassiveConfig`](configuration.md#settings-reference) to take the connection back. Then run the line that made the table again. Under `RECONNECT`, if the other program also reconnects, the two take turns, and each loses data while the other holds the connection. |
 | `... longer than MassiveConfig.max_outage ...` | The table got no data for longer than `max_outage`, which defaults to 300 seconds. | To allow longer outages, raise `max_outage` in [`MassiveConfig`](../README.md#massive-config). |

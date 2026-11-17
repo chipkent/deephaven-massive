@@ -102,46 +102,39 @@ of three values:
 | `ignore` | Does the same, logging only at `DEBUG`. |
 | `raise` | Fails whatever met the problem. |
 
-`m.problems()` lists each problem a table met, with its cause and the setting that
-applied. Under `raise`, the error that fails the call names the problem.
+`m.problems()` lists each problem a table met, with its cause and the setting that applied.
 
-The library never publishes a row of Massive's data it can't read whole: it leaves the row
-out. Three causes cover such rows: `unreadable_keys`, `unreadable_symbols`, and
-`unconvertible_values`. So a result can be partial. Say Massive answers a `fetch()` with 5
-rows, and the library can't read one of them. The table gets 4 rows, `m.problems()` lists the
-fifth, and under `log` the log warns once.
+The library leaves out any row of Massive's data it can't read. A row it can read is one whose
+symbol, time, and values it can convert to the table's columns. So a result can be partial.
+Say `m.stocks.trades("AAPL").history("2026-10-30")` gets 5 rows from Massive, and the library can't read one
+of them. The table gets 4 rows. `m.problems()` lists the fifth, and the log warns once.
 
-Set every cause to `raise` when you need complete data, for one call, such as
-`m.stocks.trades("AAPL", on_error=dm.ErrorPolicy(dm.OnError.RAISE))`. The table then fails at
-the first row it leaves out, and a `wait=True` call raises. To do the same for every call, pass
-that policy to `MassiveConfig(on_error=...)`. A policy can also set one cause, such as
-`dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`; a cause it leaves unset follows the
-session's setting.
+Set every cause to `raise` when a call must return complete data:
 
-Whatever the setting, a call or live table fails when the library can read none of the rows it
-would receive, since Massive's format has most likely changed. Rows outside the call's symbols
-or range are ignored for this rule:
+```python
+import deephaven_massive as dm
 
-| Call or table | Fails when the library can read none of |
-|---|---|
-| A `fetch()` or `history()` from REST | The rows of all its pages. |
-| A `history()` from flat files | The rows of all its files, and of the REST pages of any days REST fills. |
-| A `fetch()` or `history()` that follows a symbol table | The rows of one batch of its symbols. Those symbols fail, and the table goes on. |
-| A `poll()` table | The rows of one cycle. |
-| A `dm.ALL` stream | 100 consecutive rows of its channel. |
-| A stream of named symbols | 100 consecutive rows whose symbol the library can't read. |
+m = dm.MassiveSession()
+trades = m.stocks.trades("AAPL", on_error=dm.ErrorPolicy(dm.OnError.RAISE)).history("2026-10-30")
+```
 
-A stream of named symbols keeps running when one symbol's last 100 rows were all left out.
-`m.problems()` lists that symbol under `stale_symbol` until one of its rows is published.
+To do the same for every call, pass that policy to `MassiveConfig(on_error=...)`.
 
 Under `raise`:
 
-- A problem found at the call raises at once.
-- One found while reading raises only from a call with `wait=True`.
-- A live table fails.
+- A problem found when you make the call raises at once.
+- A problem found later, as the rows arrive, raises from a call with `wait=True`. Without
+  `wait=True`, it fails the table.
 - A watchlist read by `fetch()` or `history()` fails only the symbols it met, and
   `m.symbol_reads()` shows them `FAILED`. A bad watchlist row is the exception, as
   `on_error.noncanonical_symbols` says.
+
+A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
+A cause it leaves unset follows the session's setting.
+
+Whatever the setting, a call or live table fails when the library can read none of the rows
+Massive sends, since Massive has most likely changed its format. A stream fails after 100
+unreadable rows in a row, or, for the symbols you list, 100 whose symbol it can't read.
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 
