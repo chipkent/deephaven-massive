@@ -497,7 +497,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `BufferedRows`: rows waiting to reach their tables. Past 1,000,000, a WARNING is
               logged.
             - `Reconnects`, `LastMessageAt`, `NextReconnectAt`, `UpdatedAt`, and `LastError`.
-              `LastError` is the connection's latest error, kept after it recovers.
+              `LastError` is the latest error. A WebSocket connection keeps it after it
+              reconnects.
 
             A connection's problems, such as an outage, are rows of `m.problems()`, one for each
             live table on it.

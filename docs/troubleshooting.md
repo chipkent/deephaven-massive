@@ -246,13 +246,13 @@ Act on these states:
 | Table | `State` | Why | What to do |
 |---|---|---|---|
 | `m.streams()` | `FAILED` | The table stopped, and `Error` says why. | Fix what `Error` names, then run the line that made the table again. |
-| `m.connections()` | `WAITING` | The library hasn't connected: no live table on this connection has a symbol to stream yet. | Add a symbol to your watchlist. The connection opens at the first one. If your watchlist already has symbols, the library couldn't stream them yet. Each has a row in `m.problems()`, and its `Cause` says why. |
+| `m.connections()` | `WAITING` | The library hasn't connected: no live table on this connection has a symbol to stream yet. | Add a symbol to your watchlist. The connection opens at the first one. If your watchlist already has symbols, the library isn't streaming them. Each has a row in `m.problems()`, and its `Cause` says why. |
 | `m.connections()` | `WAITING_SLOT` | Massive refused this connection at login: your account has no free connection for this asset class. | Stop any other program that uses your key. The library keeps trying, and its live tables fail after `max_outage`. |
 | `m.symbol_reads()` | `FAILED` | The symbol's read failed, and `Error` says why. | Fix what `Error` names, then delete the symbol's row from the watchlist and add it back. |
 
 `Error` in `m.streams()` says why a table failed. `LastError` in `m.connections()` shows a
-connection's latest error. Each holds one message. For every problem, each with its `Cause`, read
-`m.problems()`.
+connection's latest error. Each holds one message. `m.problems()` has a row for every problem,
+with its `Cause`.
 
 <a id="the-log"></a>
 
