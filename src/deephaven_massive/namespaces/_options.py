@@ -359,9 +359,10 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
 )
 
 _ROOT_UNDERLYING_NOTE: Final = (
-    "An index has its `I:` prefix (`I:SPX`), as in `m.options.contracts()`. The library asks "
-    "Massive's contracts reference once per option root and session whether the root's "
-    "contracts are options on an index. Massive's `root` is the `OptionRoot` column."
+    "Massive's `root` is the `OptionRoot` column. An index has its `I:` prefix (`I:SPX`), as "
+    "in `m.options.contracts()`. If Massive's Contract Overview can't say whether a root is an "
+    "index, its rows keep the bare ticker, the log names the root at WARNING, and a read an "
+    "hour later asks again."
 )
 """The note on `Underlying` of the datasets whose rows name it bare, with no CFI code."""
 
@@ -1176,10 +1177,12 @@ class OptionsNamespace(Namespace):
         day's figures the next morning, so the latest `Date` is the previous trading day. Leave
         out `symbols` and narrow by `root`, `contract_type`, or `filters` to read many contracts.
 
-        `Underlying` is the canonical ticker, `I:SPX` for an index. To tell an index from a
-        stock, a read asks Massive's contracts reference about one contract of each option root
-        it meets for the first time in the session, so a read of many roots makes that many
-        extra requests once.
+        `Underlying` is Massive's ticker, with `I:` for an index (`I:SPX`), as in
+        `m.options.contracts()`. The first read of each option root in a session sends one extra
+        request, to Massive's Contract Overview, to learn whether the root's contracts are
+        options on an index. A first read of every contract meets thousands of roots, so it
+        sends thousands of extra requests. If Massive can't say, the root's rows keep the bare
+        ticker (`SPX`), the log names the root at WARNING, and a read an hour later asks again.
 
         Args:
             symbols: Option contracts; leave it out for every contract.
@@ -1260,10 +1263,12 @@ class OptionsNamespace(Namespace):
         Massive leaves out cancels, late reports, and compression trades. `poll()` appends each
         new trade.
 
-        `Underlying` is the canonical ticker, `I:SPX` for an index. To tell an index from a
-        stock, a read asks Massive's contracts reference about one contract of each option root
-        it meets for the first time in the session, so a read of many roots makes that many
-        extra requests once.
+        `Underlying` is Massive's ticker, with `I:` for an index (`I:SPX`), as in
+        `m.options.contracts()`. The first read of each option root in a session sends one extra
+        request, to Massive's Contract Overview, to learn whether the root's contracts are
+        options on an index. A first read of every contract meets thousands of roots, so it
+        sends thousands of extra requests. If Massive can't say, the root's rows keep the bare
+        ticker (`SPX`), the log names the root at WARNING, and a read an hour later asks again.
 
         Args:
             symbols: Option contracts; leave it out for every contract.

@@ -14,6 +14,7 @@ import functools
 import inspect
 import json
 import logging
+import threading
 from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -1426,7 +1427,10 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
 
 
 def test_one_bare_underlying_is_a_stock_or_an_index_by_each_root(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A stock and an index can share a bare ticker; each root's own contracts say which.
     stock, index = "O:DJT261218C00030000", "O:DJTW261218C00030000"
@@ -1437,8 +1441,36 @@ def test_one_bare_underlying_is_a_stock_or_an_index_by_each_root(
     fake_rest.reply("/options/v1/open-interest", Reply({"status": "OK", "results": page}))
     fake_rest.reply(wire(f"/v3/reference/options/contracts/{stock}"), contract_reference("OCASPS"))
     fake_rest.reply(wire(f"/v3/reference/options/contracts/{index}"), contract_reference("OCEICS"))
-    out = rows(rest_session.options.open_interest().fetch(wait=True))
+    with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.option_roots"):
+        out = rows(rest_session.options.open_interest().fetch(wait=True))
     assert [(r["OptionRoot"], r["Underlying"]) for r in out] == [("DJT", "DJT"), ("DJTW", "I:DJT")]
+    assert caplog.records == []  # each root is classified, so none warns
+
+
+def test_a_poll_of_unusual_trades_names_an_index_underlying_from_its_first_cycle(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    trade = {**LIST_ROW, "ticker": "O:SPXW261218C06000000", "root": "SPXW"}
+    fake_rest.reply(
+        "/options/v1/unusual-trades",
+        Reply({"status": "OK", "results": [{**trade, "underlying_ticker": "SPX"}]}),
+    )
+    reference = "/v3/reference/options/contracts/O:SPXW261218C06000000"
+    fake_rest.reply(wire(reference), contract_reference("OCEICS"))
+    table = rest_session.options.unusual_trades(limit=10).poll(60)
+    pace = threading.Event()  # never set; only paces the bounded wait for the first cycle
+    found: list[dict[str, Any]] = []
+    for _ in range(500):
+        found = rows(table)
+        if found:
+            break
+        pace.wait(0.02)
+    rest_session.release(table)
+    assert [(r["Symbol"], r["Underlying"]) for r in found] == [("O:SPXW261218C06000000", "I:SPX")]
+    # The poll asked about the root once, as of the trade's New York day.
+    assert [q for q in fake_rest.get_queries(one_value=True) if q[0] == reference] == [
+        (reference, {"as_of": "2025-10-29"})
+    ]
 
 
 def test_a_refused_root_lookup_fails_the_read_with_massive_s_refusal(

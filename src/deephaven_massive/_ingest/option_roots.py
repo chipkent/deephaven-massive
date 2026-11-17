@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from deephaven_massive._ingest.crypto_tickers import TickerListReader
-    from deephaven_massive._massive import Cancel, RestClient
+    from deephaven_massive._massive import Cancel, Patience, RestClient
 
 __all__ = ["REREAD_AFTER", "OptionRootKinds", "RootKind", "canonical_underlyings"]
 
@@ -97,6 +97,7 @@ class OptionRootKinds:
         contract: str,
         day: str,
         reader: TickerListReader,
+        patience: Patience,
         cancel: Cancel | None = None,
     ) -> RootKind:
         """Return what a root's contracts are options on, asking Massive on first need.
@@ -115,7 +116,9 @@ class OptionRootKinds:
                 `"O:SPXW261218C06000000"`.
             day: The trading day of the row that names the contract, as ISO text, for
                 `as_of`, so an expired contract is still found.
-            reader: The read the lookup serves, whose patience and error conversion it uses.
+            reader: The read the lookup serves, whose error conversion it uses.
+            patience: The patience of the read, taken on its own thread (`RestReader.patience`),
+                which the lookup's pauses are charged to.
             cancel: A background read's stop token, or None.
 
         Returns:
@@ -136,7 +139,14 @@ class OptionRootKinds:
         if known is not None:
             return known
         try:
-            return self._ask(root, contract=contract, day=day, reader=reader, cancel=cancel)
+            return self._ask(
+                root,
+                contract=contract,
+                day=day,
+                reader=reader,
+                patience=patience,
+                cancel=cancel,
+            )
         except MassiveError as public:
             named = copy_error(
                 public,
@@ -152,6 +162,7 @@ class OptionRootKinds:
         contract: str,
         day: str,
         reader: TickerListReader,
+        patience: Patience,
         cancel: Cancel | None,
     ) -> RootKind:
         """Ask Massive about one root, single-flight, and keep the answer.
@@ -161,6 +172,7 @@ class OptionRootKinds:
             contract: The contract whose reference is read.
             day: The `as_of` day.
             reader: The read the lookup serves.
+            patience: The read's patience.
             cancel: The caller's stop token, or None.
 
         Returns:
@@ -170,7 +182,6 @@ class OptionRootKinds:
         copy; an unexpected error of the reader, a defect, is logged at ERROR with how to report
         it and propagates.
         """
-        patience = reader.patience()
         claim = self._lookup.claim_or_wait(
             root,
             bucket=OTHER,
@@ -202,6 +213,16 @@ class OptionRootKinds:
                 return RootKind.UNKNOWN
             public = reader.public_error(error)
             stopped = cancel is not None and cancel.is_set() and error.status is None
+            logger.debug(
+                "%s: asking the contracts reference about option root %s failed (status %s, "
+                "stop set %s); its waiters %s: %s",
+                self._label,
+                root,
+                error.status,
+                cancel is not None and cancel.is_set(),
+                "try again" if stopped else "get a copy of the error",
+                public,
+            )
             self._lookup.fail(claim, public, "the request failed", stopped=stopped)
             raise public from error
         except BaseException as error:
@@ -301,6 +322,7 @@ def _canonical(
         bare.to_pylist(),
         strict=True,
     ):
+        # `Symbol` and `Date` are required keys of every dataset that asks, so both are text.
         if wanted and isinstance(root, str) and root not in firsts:
             firsts[root] = (str(symbol), str(day))
     index_roots: list[str] = []

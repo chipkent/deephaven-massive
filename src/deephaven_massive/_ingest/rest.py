@@ -601,7 +601,7 @@ class RestState:
             (`RestReader.crypto_pair`): read on first need, and read again when a ticker it
             does not hold is asked for and it is an hour old or more.
         option_roots: Whether each option root is an option on an index, from Massive's
-            contracts reference, asked once per root (`RestReader._root_underlyings`).
+            contracts reference, asked once per root (`RestReader.root_kind`).
     """
 
     __slots__ = (
@@ -775,7 +775,7 @@ class RestReader:
         )
 
     def _underlyings(
-        self, spec: DatasetSpec, rows: list[pa.RecordBatch], *, stop: Cancel
+        self, spec: DatasetSpec, rows: list[pa.RecordBatch], *, stop: Cancel, patience: Patience
     ) -> list[pa.RecordBatch]:
         """Give a page's index underlyings their `I:` by option root, where the dataset asks.
 
@@ -787,6 +787,9 @@ class RestReader:
             spec: The dataset.
             rows: The page's kept rows, with the library's time columns.
             stop: The read's token, which ends a lookup's waits.
+            patience: The read's patience, taken on its own thread, which a lookup's pauses
+                are charged to: `_call` may run on a fan-out worker, whose own patience would
+                not know a console caller holds the update graph's lock.
 
         Returns:
             The rows.
@@ -796,11 +799,19 @@ class RestReader:
         if not spec.underlying_by_root:
             return rows
         return canonical_underlyings(
-            rows, functools.partial(self.root_kind, cancel=stop), dataset=spec.name
+            rows,
+            functools.partial(self.root_kind, patience=patience, cancel=stop),
+            dataset=spec.name,
         )
 
     def root_kind(
-        self, root: str, contract: str, day: str, *, cancel: Cancel | None = None
+        self,
+        root: str,
+        contract: str,
+        day: str,
+        *,
+        patience: Patience | None = None,
+        cancel: Cancel | None = None,
     ) -> RootKind:
         """Return whether an option root's contracts are options on an index.
 
@@ -812,6 +823,8 @@ class RestReader:
             root: The OCC root, such as `"SPXW"`.
             contract: A canonical options ticker of that root.
             day: The trading day of the row that names it, as ISO text.
+            patience: The read's patience; None takes it now, on the calling thread
+                (`patience`).
             cancel: A background read's stop token, or None.
 
         Returns:
@@ -820,7 +833,12 @@ class RestReader:
         A failed request raises its public `MassiveError`, naming the root.
         """
         return self.state.option_roots.kind(
-            root, contract=contract, day=day, reader=self, cancel=cancel
+            root,
+            contract=contract,
+            day=day,
+            reader=self,
+            patience=self.patience() if patience is None else patience,
+            cancel=cancel,
         )
 
     def read(
@@ -1309,6 +1327,7 @@ class RestReader:
                             tally=tally,
                         ),
                         stop=stop,
+                        patience=patience,
                     )
                 )
         except WireError as error:

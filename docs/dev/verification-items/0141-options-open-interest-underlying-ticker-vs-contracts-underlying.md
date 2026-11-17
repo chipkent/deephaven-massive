@@ -16,8 +16,9 @@ reference finds an expired contract as of a past day.
 Meanwhile the two datasets publish `Underlying` as Massive's `underlying_ticker`, with `I:` added
 when the contracts reference gives the contract's root the CFI code of an option on an index.
 The library asks once per root and session, about the first contract of the root it meets, as
-of that row's trading day. If the values differ for some contract, the datasets take the
-contracts reference's underlying instead of the row's.
+of that row's trading day, and again an hour later about a root it could not classify. If the
+values differ for some contract, the datasets take the contracts reference's underlying instead
+of the row's.
 
 Verified by `test_underlying_matches_the_contracts_reference` in
 `tests/namespaces/test_options_integration.py`. It reads up to two contracts each of the roots

@@ -246,3 +246,9 @@ def test_a_kind_no_case_handles_is_refused() -> None:
             lambda *_: "index",  # type: ignore[arg-type]  # the point: refused at run time
             dataset="d",
         )
+
+
+def test_a_row_already_prefixed_beside_a_bare_one_is_not_prefixed_twice() -> None:
+    batch = page([SPXW, "O:SPXW261218P06000000"], ["SPXW", "SPXW"], ["I:SPX", "SPX"])
+    [out] = canonical_underlyings([batch], lambda *_: RootKind.INDEX, dataset="d")
+    assert out.column("Underlying").to_pylist() == ["I:SPX", "I:SPX"]
