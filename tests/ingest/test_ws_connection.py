@@ -12,7 +12,6 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from types import SimpleNamespace
 from typing import Any, TypeAlias
 
 import pytest
@@ -23,7 +22,7 @@ from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
-from deephaven_massive._ingest import futures_calendar, ws, ws_connection
+from deephaven_massive._ingest import futures_calendar, ws, ws_connection, ws_silence
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.host_decision import recency_of
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
@@ -1823,73 +1822,6 @@ def test_an_outage_without_live_tables_logs_nothing(
     assert not [m for m in messages if "is down" in m or "reconnected after" in m]
 
 
-def _quiet_connection(
-    acknowledged: frozenset[str], last: int, notes: list[str | None] | None = None
-) -> ws_connection.Connection:
-    # The state `Connection._check_frames` reads, without a socket: a live connection's status
-    # frames would move its last-frame time while the test owns it. Each note the streams
-    # would show goes to `notes`.
-    state: ws_connection.Connection = SimpleNamespace(  # type: ignore[assignment]  # a fake: only what _check_frames reads
-        url=_URL,
-        asset_class=AssetClass.STOCKS,
-        _state=ConnectionState.CONNECTED,
-        subscriptions=SimpleNamespace(acknowledged=acknowledged),
-        _episodes=ws_connection._Episodes(last_frame_at=last),
-        _last_message_at=None,
-        _set_quiet_note=(notes if notes is not None else []).append,
-    )
-    for name in ("_check_frames", "_heard"):
-        method = getattr(ws_connection.Connection, name)
-        setattr(state, name, functools.partial(method, state))
-    return state
-
-
-def test_a_silent_connection_warns_once_while_its_market_trades(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    trading = [False]
-    monkeypatch.setattr(ws_connection, "in_trading_hours", lambda _asset_class, _moment: trading[0])
-    last = 1_800_000_000 * 10**9
-    notes: list[str | None] = []
-    connection = _quiet_connection(frozenset({"T.AAPL"}), last, notes)
-    quiet = last + int(ws_connection.NO_FRAMES_WARNING * 1e9)
-    with (
-        caplog.at_level(logging.INFO, logger=ws.__name__),
-        caplog.at_level(logging.INFO, logger=ws_connection.__name__),
-    ):
-        connection._check_frames(quiet)  # silent long enough, but the market is closed
-        trading[0] = True
-        connection._check_frames(quiet - 10**9)  # not silent long enough yet
-        connection._check_frames(quiet)
-        connection._check_frames(quiet + 60 * 10**9)  # the same episode: logged once
-        connection._heard()  # a frame arrives: the recovery is logged at once
-        connection._heard()  # and only once
-    assert [
-        (r.levelno, r.getMessage())
-        for r in caplog.records
-        if r.name in {ws.__name__, ws_connection.__name__}
-    ] == [
-        (
-            logging.WARNING,
-            (
-                f"{_URL}: no frame for 300 s during stocks trading hours, though 1 topics are "
-                "acknowledged, so its live tables may be stale; a market holiday or symbols "
-                "that are not trading explain it, and m.connections() shows the connection's "
-                "state"
-            ),
-        ),
-        (logging.INFO, f"{_URL}: frames arrive again"),
-    ]
-    # The streams show the silence while it lasts, but keep running: nothing fails them.
-    assert notes == [
-        (
-            "no data since 2027-01-15T08:00:00Z during stocks trading hours; quiet symbols or "
-            "a market holiday may explain it"
-        ),
-        None,
-    ]
-
-
 def test_any_frame_clears_the_silence_note_and_the_stream_keeps_running(
     *,
     ws_session: WsSession,
@@ -1897,12 +1829,12 @@ def test_any_frame_clears_the_silence_note_and_the_stream_keeps_running(
     monkeypatch: pytest.MonkeyPatch,
     dh_to_pylist: ToPylist,
 ) -> None:
-    monkeypatch.setattr(ws_connection, "in_trading_hours", lambda _asset_class, _moment: True)
+    monkeypatch.setattr(ws_silence, "in_trading_hours", lambda _asset_class, _moment: True)
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     ws_session.wait(lambda s: any(status.kind is StatusKind.ACK for status in s.statuses))
     connection = ws_session.connection()
-    later = int(2 * ws_connection.NO_FRAMES_WARNING * 1e9)
+    later = int(2 * ws_silence.NO_FRAMES_WARNING * 1e9)
 
     def error() -> str | None:
         [row] = streams_of(ws_session, dh_to_pylist)
@@ -1921,19 +1853,6 @@ def test_any_frame_clears_the_silence_note_and_the_stream_keeps_running(
         fake_ws_server.send(frame)
         wait_for(lambda: error() is None)
     ws_session.session.release(result)
-
-
-def test_a_connection_with_nothing_acknowledged_is_never_silent(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    monkeypatch.setattr(ws_connection, "in_trading_hours", lambda _asset_class, _moment: True)
-    connection = _quiet_connection(frozenset(), 0)
-    with (
-        caplog.at_level(logging.INFO, logger=ws.__name__),
-        caplog.at_level(logging.INFO, logger=ws_connection.__name__),
-    ):
-        connection._check_frames(int(2 * ws_connection.NO_FRAMES_WARNING * 1e9))
-    assert not caplog.records
 
 
 def test_the_summary_checks_for_silence(
