@@ -1737,6 +1737,17 @@ def test_a_dataset_without_symbols_is_a_stream_with_at_most_its_archive(
         changed()
 
 
+def test_a_stream_without_symbols_needs_no_archive() -> None:
+    stream = dataclasses.replace(
+        ADMIN,
+        history_path=None,
+        keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+        time_axis=None,
+        kind=None,
+    )
+    assert problems(stream) == ()
+
+
 def test_a_dataset_without_symbols_reads_its_archive_by_time_alone() -> None:
     by_ticker = dataclasses.replace(
         ADMIN,

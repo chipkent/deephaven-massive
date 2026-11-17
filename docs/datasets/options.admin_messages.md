@@ -21,7 +21,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 | Argument | Description |
 | --- | --- |
-| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
+| [`on_error`](README.md#on_error) | What a bad row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -43,10 +43,10 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the New York date of `Timestamp`. | REST, WebSocket |
 | `Timestamp` | Instant | The row's event time. From REST `timestamp`: "The SIP timestamp in Unix nanoseconds."; WebSocket `t`: "The SIP timestamp in Unix nanoseconds." | REST, WebSocket |
 | `MessageId` | String | The unique identifier for this admin message, composed of the SIP timestamp and the sequence number. | REST, WebSocket |
-| `Exchange` | long | The exchange ID. See Exchanges mapping for details. | REST, WebSocket |
+| `Exchange` | long | The exchange ID. See Exchanges mapping for details. Massive's mapping of exchange IDs: https://massive.com/docs/rest/options/market-operations/exchanges. | REST, WebSocket |
 | `Message` | String | The administrative message text as distributed by OPRA. | REST, WebSocket |
 | `SequenceNumber` | long | The sequence number represents the sequence in which admin events happened. These are increasing and unique, but will not always be sequential. | REST, WebSocket |
-| `Retransmission` | Boolean | True if this record was retransmitted. Omitted when false. | REST, WebSocket |
+| `Retransmission` | Boolean | True if this record was retransmitted. Omitted when false. Null on an original message, which Massive sends without the field. | REST, WebSocket |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. On `history()` rows, it's the download time. | REST, WebSocket |
 
 <a id="massive-fields"></a>

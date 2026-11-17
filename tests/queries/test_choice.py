@@ -15,6 +15,8 @@ from deephaven_massive._session import CATALOG, MassiveSession
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
+    NoSymbolStreamHistoryQuery,
+    NoSymbolStreamQuery,
     Query,
     StreamHistoryQuery,
     StreamQuery,
@@ -139,6 +141,11 @@ _CHANNELS = {"channels": {NotBars.ANY: "T"}}
         ({**_HISTORY}, HistoryQuery),
         ({"grouped_daily_path": "/v2/aggs/grouped/locale/us/market/stocks/{date}"}, HistoryQuery),
         ({**_CHANNELS, **_HISTORY}, StreamHistoryQuery),
+        ({**_CHANNELS, "names_symbols": False}, NoSymbolStreamQuery),
+        (
+            {**_CHANNELS, "history_path": "/options/v1/admin-messages", "names_symbols": False},
+            NoSymbolStreamHistoryQuery,
+        ),
     ],
 )
 def test_the_query_class_follows_the_transports(

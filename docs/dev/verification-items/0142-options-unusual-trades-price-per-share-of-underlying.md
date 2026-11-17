@@ -17,5 +17,6 @@ goes and the vendor's text returns.
 
 Verified by `test_unusual_trade_prices_are_per_share` in
 `tests/namespaces/test_options_integration.py`, which reads one page of unusual trades and
-asserts that every trade flagged `block_premium` has price x size x 100 of $100,000 or more and
-every other trade less, recording the counts.
+asserts, for the trades of standard roots with a price and a size, that every one flagged
+`block_premium` has price x size x 100 of $100,000 or more and every other one less, recording
+the counts.

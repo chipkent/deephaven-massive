@@ -679,12 +679,11 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
 class NoSymbolStreamHistoryQuery(NoSymbolStreamQuery, HistoryQuery):
     """A query of a stream whose rows name no symbol, with its history: live and past rows.
 
-    Massive both streams and keeps OPRA's administrative messages, `m.options.admin_messages()`,
-    whose rows name no instrument. Their dataset methods
-    return this class, which has every method of `NoSymbolStreamQuery` and `history(start, end)`
-    from `HistoryQuery`: the stream methods follow the live feed, and `history()` reads a past
-    range, with the same columns. Like `NoSymbolStreamQuery`, it has no `last_by()`, since the
-    rows have no `Symbol`.
+    OPRA's administrative messages, read by `m.options.admin_messages()`, name no symbol.
+    Massive streams them and serves their history, and the dataset method returns this class.
+    Its methods are `blink()`, `append_only()`, `ring(capacity)`, and `history(start, end)`.
+    The stream methods follow the live feed, and `history()` reads a past range with the same
+    columns. It has no `last_by()`, since the rows have no `Symbol`.
 
     Import it as `from deephaven_massive.queries import NoSymbolStreamHistoryQuery` to annotate
     your own code. You get one from a dataset method and never construct one.

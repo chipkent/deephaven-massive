@@ -593,9 +593,10 @@ def dataset_schema(
 
     Derived columns, which every transport computes from `Symbol`, follow the leading key
     columns, with the library's own description: `OptionRoot` on every options dataset with a
-    `Symbol` (`symbols.option_roots`). Where a source of the dataset carries the column itself
-    (Massive's `root`, spelled `OptionRoot`), that column takes the place, with Massive's
-    description, and no transport computes it.
+    `Symbol` (`symbols.option_roots`). Where a REST source of the dataset carries the column
+    itself (Massive's `root`, spelled `OptionRoot`), that column takes the place, with
+    Massive's description, and the REST rows keep Massive's value; no WebSocket channel or flat
+    file carries the column.
 
     Args:
         spec: The dataset whose schema is built; it names the schema, decides the leading

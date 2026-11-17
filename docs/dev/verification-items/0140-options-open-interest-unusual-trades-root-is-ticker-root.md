@@ -17,6 +17,7 @@ its ticker's root, the two are different fields: `root` takes a name of its own 
 library's `OptionRoot` returns beside it.
 
 Verified by `test_root_is_the_ticker_s_occ_root` in
-`tests/namespaces/test_options_integration.py`, which reads one page of each endpoint for a
-standard root (`SPY`), a weekly root (`SPXW`), and an adjusted root (`AMCR1`) and asserts that
-every row's `root` is its ticker's root, recording the roots and counts it saw.
+`tests/namespaces/test_options_integration.py`, which reads one page of open interest for a
+standard root (`SPY`), a weekly root (`SPXW`), and an adjusted root (`AMCR1`), and one page of
+the latest unusual trades of any root, and asserts that every row's `root` is its ticker's
+root, recording the roots and counts it saw.

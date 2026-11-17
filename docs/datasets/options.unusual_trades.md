@@ -28,7 +28,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`sort`](README.md#sort) | Any of Massive's field names, such as `"size"`. Fields: any REST field under [Massive fields](#massive-fields). |
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
-| [`filters`](README.md#filters) | Further endpoint parameters, such as `{"ticker_gte": "O:SPY"}`. Keys: `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`filters`](README.md#filters) | Further endpoint parameters, such as `{"ticker_gte": "O:SPY", "ticker_lt": "O:SPZ"}`, the contracts whose tickers sort from `O:SPY` up to `O:SPZ`: those of every root that starts with `SPY`. Keys: `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
 | [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
@@ -58,7 +58,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Exchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. |
 | `Flags` | String[] | The unusual-activity cases the trade meets, as a list. Values: block_premium (notional premium of $100,000 or more), block_size (1,000 contracts or more), iso (intermarket sweep, condition 219). A trade that meets several cases carries every matching flag. |
 | `SequenceNumber` | long | The sequence number represents the sequence in which trade events happened. These are increasing and unique per ticker symbol, but will not always be sequential. Values reset after each trading session/day. |
-| `UnderlyingTicker` | String | The ticker of the contract's underlying (e.g., SPX). Weekly and adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see root to tell them apart. It is Massive's text as sent, an index bare (`SPX`), so it is not the `Underlying` of the chain and the contracts, which writes an index as `I:SPX`. |
+| `UnderlyingTicker` | String | The ticker of the contract's underlying (e.g., SPX). Weekly and adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see root to tell them apart. Massive's `root` is the `OptionRoot` column. Massive sends an index without its `I:` prefix (`SPX`). So this column won't match `Underlying` in `m.options.chain()`, `m.options.snapshots()`, or `m.options.contracts()`, which write `I:SPX`. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>

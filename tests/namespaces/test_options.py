@@ -1409,6 +1409,101 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
     ]
 
 
+def list_query(m: dm.MassiveSession, spec: DatasetSpec) -> FetchQuery:
+    # The query of one of the two options list datasets, with every argument left out.
+    if spec is options.OPEN_INTEREST:
+        return m.options.open_interest()
+    return m.options.unusual_trades()
+
+
+LIST_ROW = {
+    "ticker": "O:SPY260123C00687000",
+    "root": "SPY",
+    "date": "2026-01-22",
+    "sip_timestamp": 1761751432123456800,
+    "sequence_number": 1,
+}
+"""A row each of the two list datasets reads whole: the one's keys and the other's."""
+
+BAD_LIST_ROWS = [
+    (RowFault.UNREADABLE_SYMBOLS, {**LIST_ROW, "ticker": "SPY 260123C00687000"}),
+    (RowFault.UNCONVERTIBLE_VALUES, {**LIST_ROW, "strike_price": "x", "price": "x"}),
+]
+"""A row of each kind both list datasets withhold, with its cause."""
+
+
+@pytest.mark.parametrize("spec", [options.OPEN_INTEREST, options.UNUSUAL_TRADES])
+@pytest.mark.parametrize(("cause", "bad"), BAD_LIST_ROWS)
+@pytest.mark.parametrize("policy", [dm.OnError.LOG, dm.OnError.IGNORE])
+def test_a_list_dataset_withholds_a_row_it_cannot_read_whole(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    spec: DatasetSpec,
+    cause: RowFault,
+    bad: dict[str, object],
+    policy: dm.OnError,
+) -> None:
+    fake_rest.reply(spec.rest_paths[0], Reply({"status": "OK", "results": [bad, LIST_ROW]}))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(**{cause.value: policy}),
+    )
+    with dm.MassiveSession(config) as m:
+        events: list[ProblemEvent] = []
+        monkeypatch.setattr(m._core, "problems", events.extend)
+        out = rows(list_query(m, spec).fetch(wait=True))
+    # No trace of the bad row; the whole one beside it lands, and the cause is recorded.
+    assert [(r["Symbol"], r["OptionRoot"]) for r in out] == [("O:SPY260123C00687000", "SPY")]
+    assert [(e.cause, e.rows) for e in events] == [(cause, 1)]
+
+
+@pytest.mark.parametrize("spec", [options.OPEN_INTEREST, options.UNUSUAL_TRADES])
+@pytest.mark.parametrize(("cause", "bad"), BAD_LIST_ROWS)
+def test_a_list_dataset_fails_on_a_row_it_cannot_read_whole_under_raise(
+    *, fake_rest: FakeRestServer, spec: DatasetSpec, cause: RowFault, bad: dict[str, object]
+) -> None:
+    fake_rest.reply(spec.rest_paths[0], Reply({"status": "OK", "results": [bad, LIST_ROW]}))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(**{cause.value: dm.OnError.RAISE}),
+    )
+    with dm.MassiveSession(config) as m, pytest.raises(RowDataError, match=f"1 under {cause}"):
+        list_query(m, spec).fetch(wait=True)
+
+
+def test_an_unusual_trade_without_its_sip_time_is_withheld(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    timeless = {k: v for k, v in LIST_ROW.items() if k != "sip_timestamp"}
+    fake_rest.reply(
+        "/options/v1/unusual-trades", Reply({"status": "OK", "results": [timeless, LIST_ROW]})
+    )
+    out = rows(rest_session.options.unusual_trades().fetch(wait=True))
+    assert [r["Timestamp"] for r in out] == [1761751432123456800]
+
+
+@pytest.mark.parametrize("spec", [options.OPEN_INTEREST, options.UNUSUAL_TRADES])
+def test_a_row_without_massive_s_root_has_a_null_option_root(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, spec: DatasetSpec
+) -> None:
+    # Massive's `root` is optional: its absence is null, never the root read from `Symbol`.
+    rootless = {k: v for k, v in LIST_ROW.items() if k != "root"}
+    fake_rest.reply(spec.rest_paths[0], Reply({"status": "OK", "results": [rootless]}))
+    [out] = rows(list_query(rest_session, spec).fetch(wait=True))
+    assert (out["Symbol"], out["OptionRoot"]) == ("O:SPY260123C00687000", None)
+
+
+def test_unusual_trades_poll_as_a_feed(rest_session: dm.MassiveSession) -> None:
+    # Without a start or a limit, each poll would read Massive's whole archive.
+    with pytest.raises(ValueError, match=r"poll\(\) needs a start or a limit"):
+        rest_session.options.unusual_trades().poll(60)
+    assert options.UNUSUAL_TRADES.is_feed
+    assert options.UNUSUAL_TRADES.poll_keys == ("Symbol", "Timestamp", "SequenceNumber")
+
+
 def test_the_list_datasets_take_only_option_contracts_and_refuse_all(
     massive_session: dm.MassiveSession,
 ) -> None:

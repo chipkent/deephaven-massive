@@ -1106,14 +1106,14 @@ def _page(client: RestClient, path: str, query: Mapping[str, object]) -> list[di
         The rows.
 
     Raises:
-        WireEntitlementError: When Massive refuses the key the path; the live-test hook skips,
-            quoting it.
+        WireEntitlementError: When Massive refuses the key access to the path; the live-test
+            hook skips, quoting it.
     """
     return client.get(source(Transport.REST, path), {}, query, bucket="options").rows
 
 
 @pytest.mark.verifies("140")
-@pytest.mark.requests(4)
+@pytest.mark.requests(3)
 def test_root_is_the_ticker_s_occ_root(
     live_session: dm.MassiveSession,
     *,
@@ -1123,8 +1123,9 @@ def test_root_is_the_ticker_s_occ_root(
 ) -> None:
     """Massive's `root` of the open interest and unusual trades is each ticker's OCC root.
 
-    Reads one page of open interest of the roots `SPY`, `SPXW`, and `AMCR1`, one page of
-    unusual trades, and the library's open interest of `SPXW`, and records the roots and counts.
+    Reads one page of open interest of the roots `SPY`, `SPXW`, and `AMCR1`, one page of the
+    latest unusual trades of any root, and the library's open interest of `SPXW`, and records
+    the roots and counts.
     Fails on any row whose `root` is not its ticker's root: the two datasets then can't give
     Massive's `root` the name `OptionRoot`. A refusal skips the test, quoting Massive.
     """
@@ -1185,20 +1186,32 @@ def test_unusual_trade_prices_are_per_share(live_rest: RestClient, *, evidence: 
     """An unusual trade's `price` is per share of the underlying, not per contract.
 
     Reads one page of unusual trades and checks Massive's own rule for `block_premium`, a
-    notional premium of price x size x 100 of $100,000 or more: every flagged trade meets it
-    and every other trade falls short. Fails when either set breaks the rule, which would mean
+    notional premium of price x size x 100 of $100,000 or more, on the trades of standard roots
+    that carry a price and a size: every flagged trade meets it and every other trade falls
+    short. Fails when either set breaks the rule, which would mean
     the price is not per share and the column's corrected description is wrong. A refusal
     skips the test, quoting Massive.
     """
     rows = _page(live_rest, _UNUSUAL_TRADES, {"limit": 1000})
-    premium = {id(r): float(r["price"]) * float(r["size"]) * 100 for r in rows}
-    flagged = [r for r in rows if "block_premium" in (r.get("flags") or [])]
-    others = [r for r in rows if "block_premium" not in (r.get("flags") or [])]
+    # A trade without a price or size can't be checked; an adjusted root (`AAPL1`) may have
+    # another multiplier than the 100 shares Massive's rule assumes, so only standard roots
+    # are judged.
+    judged = [
+        r
+        for r in rows
+        if r.get("price") is not None
+        and r.get("size") is not None
+        and not any(c.isdigit() for c in _root(str(r["ticker"])))
+    ]
+    premium = {id(r): float(r["price"]) * float(r["size"]) * 100 for r in judged}
+    flagged = [r for r in judged if "block_premium" in (r.get("flags") or [])]
+    others = [r for r in judged if "block_premium" not in (r.get("flags") or [])]
     low = [(r["ticker"], r["price"], r["size"]) for r in flagged if premium[id(r)] < 100_000]
     high = [(r["ticker"], r["price"], r["size"]) for r in others if premium[id(r)] >= 100_000]
     evidence(
-        f"{len(rows)} trades: {len(flagged)} block_premium, {len(others)} other; "
-        f"flagged under $100,000 {low[:5]}; unflagged at $100,000 or more {high[:5]}"
+        f"{len(rows)} trades, {len(judged)} judged: {len(flagged)} block_premium, "
+        f"{len(others)} other; flagged under $100,000 {low[:5]}; unflagged at $100,000 or "
+        f"more {high[:5]}"
     )
     assert flagged
     assert not low

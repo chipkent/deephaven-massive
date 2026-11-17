@@ -274,6 +274,13 @@ ADMIN_MESSAGES: Final = DatasetSpec(
     # Massive sends the messages per exchange (`AD.<exchange id>`), and no message names a
     # contract outside its free text, which the library never parses.
     names_symbols=False,
+    # The archive's own texts, which describe these columns first, link nothing and describe
+    # the wire, so each note says what the column holds.
+    column_notes={
+        "Exchange": "Massive's mapping of exchange IDs: "
+        "https://massive.com/docs/rest/options/market-operations/exchanges.",
+        "Retransmission": "Null on an original message, which Massive sends without the field.",
+    },
 )
 
 _SNAPSHOT_REVISION: Final = ("LastQuoteLastUpdated", "LastTradeSipTimestamp")
@@ -333,8 +340,9 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
 )
 
 _UNDERLYING_TICKER_NOTE: Final = (
-    "It is Massive's text as sent, an index bare (`SPX`), so it is not the `Underlying` of the "
-    "chain and the contracts, which writes an index as `I:SPX`."
+    "Massive's `root` is the `OptionRoot` column. Massive sends an index without its `I:` "
+    "prefix (`SPX`). So this column won't match `Underlying` in `m.options.chain()`, "
+    "`m.options.snapshots()`, or `m.options.contracts()`, which write `I:SPX`."
 )
 """The note on `UnderlyingTicker` of the datasets whose rows carry it beside no CFI code, from
 which the library could tell an index and give it its `I:` prefix."""
@@ -487,14 +495,18 @@ def _expired(value: object) -> bool | None:
 class OptionsNamespace(Namespace):
     """The US options datasets, reached as `m.options`.
 
-    Each method returns a query of one dataset, and together they cover trades, quotes, bars, each
-    contract's last trade and previous day's bar, fair market value, OPRA's administrative messages,
-    option chains, snapshots, contract reference data, each contract's daily open and close, its
-    open interest by day, and the unusual trades Massive flags. A contract's ticker is `O:`
-    followed by its OCC symbol, such as `O:AAPL250117C00150000`. A method reads nothing, so it
-    never blocks, and you can call it from any thread. You reach it through a session and never
-    construct it. Import it as `from deephaven_massive.namespaces import OptionsNamespace` to
-    annotate your own code.
+    Each method returns a query of one dataset. The datasets cover:
+
+    - market data: trades, quotes, bars, and fair market value;
+    - each contract's last trade, previous day's bar, and daily open and close;
+    - option chains, snapshots, and contract reference data;
+    - each contract's open interest by day, and the unusual trades Massive flags;
+    - OPRA's administrative messages.
+
+    A contract's ticker is `O:` followed by its OCC symbol, such as `O:AAPL250117C00150000`. A
+    method reads nothing, so it never blocks, and you can call it from any thread. You reach it
+    through a session and never construct it. Import it as
+    `from deephaven_massive.namespaces import OptionsNamespace` to annotate your own code.
 
     Example:
         ::
@@ -778,14 +790,16 @@ class OptionsNamespace(Namespace):
         Each row holds one message from one exchange: the text exactly as OPRA sends it in
         `Message`, the exchange's ID in `Exchange`, and its sequence number and SIP timestamp.
         The library never parses the text, so a FLEX trade's details stay in it, as in
-        Massive's sample `TEXT CFLEX SPY LST PM EUR 4 LEGS 1 @ 733.36`. The call takes no
-        symbols: the stream methods follow every exchange's messages live, and `history()` reads
-        every exchange's past messages from Massive's archive. To keep one exchange's, filter
-        on `Exchange`. The rows have no `Symbol` column, so the query has no `last_by()`.
+        Massive's sample `TEXT CFLEX SPY LST PM EUR 4 LEGS 1 @ 733.36`.
+
+        The call takes no symbols. The stream methods follow every exchange's messages live.
+        `history()` reads every exchange's past messages from Massive's archive. To keep one
+        exchange's messages, filter on `Exchange`. The rows have no `Symbol` column, so the
+        query has no `last_by()`.
 
         Args:
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
-                the default, takes each cause from the session's `MassiveConfig.on_error`.
+            on_error: What a bad row does in this call (`dm.ErrorPolicy`). None, the default,
+                takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -1211,10 +1225,15 @@ class OptionsNamespace(Namespace):
     ) -> FetchQuery:
         """Large trades and sweeps of US-listed options contracts, flagged by Massive.
 
-        Each row is one trade that meets at least one of Massive's unusual-activity cases, and
-        `Flags` names every case it meets: `block_premium` (a premium of $100,000 or more),
-        `block_size` (1,000 contracts or more), or `iso` (an intermarket sweep). Massive leaves
-        out cancels, late reports, and compression trades. `poll()` appends each new trade.
+        Each row is one trade that meets at least one of Massive's unusual-activity cases.
+        `Flags` names every case the trade meets:
+
+        - `block_premium`: a notional premium (price x size x 100) of $100,000 or more;
+        - `block_size`: 1,000 contracts or more;
+        - `iso`: an intermarket sweep.
+
+        Massive leaves out cancels, late reports, and compression trades. `poll()` appends each
+        new trade.
 
         Args:
             symbols: Option contracts; leave it out for every contract.
@@ -1224,7 +1243,9 @@ class OptionsNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
-            filters: Further endpoint parameters, such as `{"ticker_gte": "O:SPY"}`.
+            filters: Further endpoint parameters, such as
+                `{"ticker_gte": "O:SPY", "ticker_lt": "O:SPZ"}`, the contracts whose tickers sort
+                from `O:SPY` up to `O:SPZ`: those of every root that starts with `SPY`.
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
                 the default, takes each cause from the session's `MassiveConfig.on_error`.
 
@@ -1247,7 +1268,7 @@ class OptionsNamespace(Namespace):
         Example:
             ::
 
-                blocks = m.options.unusual_trades(limit=100).poll(60)
+                unusual = m.options.unusual_trades(limit=100).poll(60)
         """
         return list_query(
             self._core,
