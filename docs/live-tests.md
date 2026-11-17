@@ -27,7 +27,7 @@ settings from it and leaves every other setting at its default:
 |---|---|---|
 | `delayed_subscriptions` | Each subscription Massive serves your key delayed | Every stream and snapshot test of those subscriptions skips, `not listed as delayed` |
 | `rest_requests_per_minute` | Each subscription Massive limits by the minute, and its limit | The rate-limit tests skip, and other tests run slower |
-| `websocket_hosts` | `indices: business.massive.com`, when your Massive dashboard shows your indices data as real-time | The library picks the host, which may not serve your index values |
+| `websocket_hosts` | `indices: business.massive.com`, when Massive serves your index values from that host | The library picks the host, which may not serve your index values |
 
 Leave `websocket_hosts` out when you list `indices` in `delayed_subscriptions`. The library
 refuses that pair, and the run stops ([`websocket_hosts`](configuration.md#setting-details)).
@@ -251,11 +251,13 @@ while no stock trades. The library warns when a stocks connection gets no messag
 during the regular session, 09:30 to 16:00 New York time. If Massive sends nothing on a quiet
 connection, a healthy connection can trip that warning.
 
-The group connects at 03:45 New York time. No stock trades before pre-market opens at 04:00, so
-these 15 minutes show what Massive sends on a quiet stocks connection. The library logs each of
-Massive's status messages as `wss://<host>/stocks status <KIND>: <message>`. In the debug log of
-the day's `stream-day/<date>-<n>/` folder, note each stocks status line from the subscriptions'
-acknowledgements to 04:00, and the longest stretch with no line. Put them, or "none", in a comment on the tester's results issue.
+The group connects at 03:45 New York time, before pre-market opens at 04:00. These 15 minutes
+show what Massive sends on a quiet stocks connection, until Massive starts its overnight stock
+session on 2026-12-07. The library logs each of Massive's status messages as
+`wss://<host>/stocks status <KIND>: <message>`. In the debug log of the day's
+`stream-day/<date>-<n>/` folder, note each stocks status line from the subscriptions'
+acknowledgements to 04:00, and the longest stretch with no line. Put them, or "none", in a
+comment on the tester's results issue.
 
 <a id="live-run-reruns"></a>
 
