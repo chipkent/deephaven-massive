@@ -753,7 +753,7 @@ class SymbolWatch:
             on_change: Receives each change of the set of symbols; see the class documentation.
             stream_id: The stream that follows the table, named in the watch's log records.
             on_invalid: Receives the message of a bad row under `RAISE`, or of a failed table.
-            on_skipped: Receives the values skipped now under `LOG` and `IGNORE`, each time
+            on_skipped: Receives the values skipped now, under every setting, each time
                 that set changes.
         """
         # Without its null rows: `TableUpdate` hands a String column over as NumPy text, in
@@ -830,7 +830,7 @@ class _SymbolCounter(TableListener):
             on_change: Receives each change of the set of symbols.
             stream_id: The stream that follows the table, named in the log records.
             on_invalid: Receives the message of a bad row under `RAISE`, or of a failed table.
-            on_skipped: Receives the values skipped now under `LOG` and `IGNORE`.
+            on_skipped: Receives the values skipped now, under every setting.
         """
         self._rule = rule
         self._stream_id = stream_id
