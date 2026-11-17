@@ -153,6 +153,36 @@ class ErrorPolicy:
 
             Only a `history()` that reads flat files meets such a line. Under any setting, a
             file whose every line is malformed fails the read.
+        unlisted_contracts: Decides what happens to the rows of a futures ticker Massive
+            streams that neither its futures snapshot nor its contracts list has held for 30
+            minutes. Defaults to `LOG`.
+
+            A futures stream dates each row from its product's trading schedule, which it finds
+            through those lists, and holds the rows until then. Massive's lists sometimes lag
+            its stream, so a ticker missing from both waits and is asked about again, at 2, 8,
+            and 30 seconds and then every minute. After 30 minutes its rows are left out,
+            then and later, until a list holds it.
+
+            - `dm.OnError.RAISE` fails the stream at that point.
+            - `dm.OnError.LOG` leaves the rows out and logs one warning per stream.
+            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
+
+            A live table counts the rows left out in `SchemaDrift` in `m.streams()`.
+        unscheduled_products: Decides what happens to the rows of a futures product that
+            Massive's schedules give no session for: none at all, or none that holds the row's
+            time. Defaults to `LOG`.
+
+            A futures stream dates each row from its product's trading schedule. A row no
+            session holds waits while the library loads the schedule again. If Massive's answer
+            still has no session for it, the library can't date the row, so it leaves the row
+            out. A product with no session at all is asked about again each day, and once
+            Massive publishes its sessions, its rows are dated and published again.
+
+            - `dm.OnError.RAISE` fails the stream at the first row left out.
+            - `dm.OnError.LOG` leaves the rows out and logs one warning per stream.
+            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
+
+            A live table counts the rows left out in `SchemaDrift` in `m.streams()`.
         refused_venues: Decides what a futures `history()` does when Massive refuses the flat
             files of an exchange the call names in `venues`, as it does for an exchange the
             plan doesn't include. Defaults to `RAISE`.
@@ -187,6 +217,8 @@ class ErrorPolicy:
     unreadable_keys: OnError | None
     unconvertible_values: OnError | None
     malformed_rows: OnError | None
+    unlisted_contracts: OnError | None
+    unscheduled_products: OnError | None
     refused_venues: OnError | None
 
     def __init__(
@@ -200,6 +232,8 @@ class ErrorPolicy:
         unreadable_keys: OnError | None = None,
         unconvertible_values: OnError | None = None,
         malformed_rows: OnError | None = None,
+        unlisted_contracts: OnError | None = None,
+        unscheduled_products: OnError | None = None,
         refused_venues: OnError | None = None,
     ) -> None:
         """Set each cause you name, and every other one to `every`.
@@ -213,6 +247,8 @@ class ErrorPolicy:
             unreadable_keys: A row of Massive's data whose key the library can't read.
             unconvertible_values: A row of Massive's data with a value the library can't read.
             malformed_rows: A flat-file line that isn't a readable row.
+            unlisted_contracts: A futures ticker Massive streams that its lists don't hold.
+            unscheduled_products: A futures row Massive's schedules give no session for.
             refused_venues: A futures exchange the call names whose flat files Massive
                 refuses.
 
@@ -227,6 +263,8 @@ class ErrorPolicy:
             "unreadable_keys": unreadable_keys,
             "unconvertible_values": unconvertible_values,
             "malformed_rows": malformed_rows,
+            "unlisted_contracts": unlisted_contracts,
+            "unscheduled_products": unscheduled_products,
             "refused_venues": refused_venues,
         }
         if every is not None:
@@ -270,6 +308,8 @@ class ResolvedPolicy:
     unreadable_keys: OnError
     unconvertible_values: OnError
     malformed_rows: OnError
+    unlisted_contracts: OnError
+    unscheduled_products: OnError
     refused_venues: OnError
 
 
@@ -321,6 +361,12 @@ def resolve_policy(call: ErrorPolicy | None, session: ErrorPolicy) -> ResolvedPo
             default.unconvertible_values,
         ),
         malformed_rows=_first(given.malformed_rows, session.malformed_rows, default.malformed_rows),
+        unlisted_contracts=_first(
+            given.unlisted_contracts, session.unlisted_contracts, default.unlisted_contracts
+        ),
+        unscheduled_products=_first(
+            given.unscheduled_products, session.unscheduled_products, default.unscheduled_products
+        ),
         refused_venues=_first(given.refused_venues, session.refused_venues, default.refused_venues),
     )
 

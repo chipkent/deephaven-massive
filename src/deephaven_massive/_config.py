@@ -1540,6 +1540,8 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
             unreadable_keys=OnError.LOG,
             unconvertible_values=OnError.LOG,
             malformed_rows=OnError.LOG,
+            unlisted_contracts=OnError.LOG,
+            unscheduled_products=OnError.LOG,
             refused_venues=OnError.RAISE,
         ),
         "What each kind of problem does: raise, log, or ignore.",
@@ -1584,6 +1586,8 @@ _CAUSE_COMMENTS: Final[Mapping[str, str]] = {
     "unreadable_keys": "A row of Massive's data whose key the library can't read.",
     "unconvertible_values": "A row of Massive's data with a value the library can't read.",
     "malformed_rows": "A flat-file line that isn't a readable row.",
+    "unlisted_contracts": "A futures ticker Massive streams that its lists don't hold.",
+    "unscheduled_products": "A futures row Massive's schedules give no session for.",
     "refused_venues": "A futures exchange you name that the plan lacks.",
 }
 """The comment above each cause of `on_error` in the example settings file, keyed by cause."""

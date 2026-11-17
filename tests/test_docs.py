@@ -698,6 +698,8 @@ def test_the_error_policy_example_matches_its_settings_file(
         unreadable_keys=dm.OnError.RAISE,
         unconvertible_values=dm.OnError.RAISE,
         malformed_rows=dm.OnError.LOG,
+        unlisted_contracts=dm.OnError.RAISE,
+        unscheduled_products=dm.OnError.RAISE,
         refused_venues=dm.OnError.RAISE,
     )
     assert isinstance(names["week"], Table)

@@ -107,6 +107,7 @@ from deephaven_massive._tables.diagnostics import (
     describe_symbols,
     utc_text,
 )
+from deephaven_massive._tables.held_rows import HeldRows
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink
 
 if TYPE_CHECKING:
@@ -119,8 +120,8 @@ if TYPE_CHECKING:
     from deephaven_massive._ingest.futures_calendar import RowFetch
     from deephaven_massive._ingest.ws import WsConnections
     from deephaven_massive._massive import RowMarks, Source, Status
+    from deephaven_massive._tables.futures_dates import FuturesSessionDates
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._tables.stream import FuturesSessionDates
     from deephaven_massive._tables.transports import HostDecision
 
 __all__ = [
@@ -478,6 +479,7 @@ class Connection:
             f"{group.label} flush {decision.host}{self.path}",
             interval=group.flush_interval,
             sessions=sessions,
+            held=None if sessions is None else HeldRows(sessions, max_outage=group.max_outage),
             # Rows of a reconnected socket may recover a stream the outage holds down.
             on_new_generation=lambda: self.post(self._check_recovered),
         )
@@ -2042,19 +2044,9 @@ class ConnectionGroup:
         if calendar is not None:
             calendar.close(wait=wait)
 
-    def wake_schedule_waiters(self) -> None:
-        """Wake every thread waiting for futures schedules, so each checks its stop event.
-
-        A session's close calls it after it set its stop event (`FuturesCalendar.wake`). The
-        calendar is read under the lock and woken outside it; a group without a calendar has
-        no waiter. Never blocks.
-        """
-        with self.lock:
-            calendar = self._calendar
-        if calendar is not None:
-            calendar.wake()
-
-    def futures_calendar(self, *, contracts_path: str, schedules_path: str) -> FuturesCalendar:
+    def futures_calendar(
+        self, *, snapshot_path: str, contracts_path: str, schedules_path: str
+    ) -> FuturesCalendar:
         """Return the group's futures schedule calendar, creating it on first use.
 
         The calendar dates the streamed futures rows of every session on the group's futures
@@ -2066,6 +2058,7 @@ class ConnectionGroup:
         first wins, and the other is closed at once. Never waits on the network.
 
         Args:
+            snapshot_path: The `futures.snapshots` dataset's REST path.
             contracts_path: The `futures.contracts` dataset's REST path.
             schedules_path: The `futures.schedules` dataset's REST path.
 
@@ -2081,6 +2074,7 @@ class ConnectionGroup:
             return found
         candidate = FuturesCalendar(
             self._fetch_rows,
+            snapshot_path=snapshot_path,
             contracts_path=contracts_path,
             schedules_path=schedules_path,
             label=self.label,

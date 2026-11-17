@@ -872,11 +872,11 @@ def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
 
 
 def looked_up(ws_session: WsSession, *tickers: str) -> None:
-    # Wait until the calendar has asked Massive's contracts for every ticker.
+    # Wait until the calendar has asked Massive's snapshot for every ticker.
     def asked() -> bool:
         sent: set[str] = set()
         for path, query in ws_session.fetched:
-            if path == "/futures/v1/contracts":
+            if path == "/futures/v1/snapshot":
                 asked_for = query["ticker.any_of"]
                 assert isinstance(asked_for, tuple)
                 sent.update(asked_for)
@@ -901,13 +901,18 @@ def test_one_calendar_wins_a_race_and_closes_with_the_connections(
     def racing(
         fetch: Callable[..., list[dict[str, object]]],
         *,
+        snapshot_path: str,
         contracts_path: str,
         schedules_path: str,
         label: str,
     ) -> futures_calendar.FuturesCalendar:
         def make() -> futures_calendar.FuturesCalendar:
             return real(
-                fetch, contracts_path=contracts_path, schedules_path=schedules_path, label=label
+                fetch,
+                snapshot_path=snapshot_path,
+                contracts_path=contracts_path,
+                schedules_path=schedules_path,
+                label=label,
             )
 
         calendar = make()
@@ -936,13 +941,18 @@ def test_no_calendar_outlives_a_closed_transport(
     def closing(
         fetch: Callable[..., list[dict[str, object]]],
         *,
+        snapshot_path: str,
         contracts_path: str,
         schedules_path: str,
         label: str,
     ) -> futures_calendar.FuturesCalendar:
         def make() -> futures_calendar.FuturesCalendar:
             return real(
-                fetch, contracts_path=contracts_path, schedules_path=schedules_path, label=label
+                fetch,
+                snapshot_path=snapshot_path,
+                contracts_path=contracts_path,
+                schedules_path=schedules_path,
+                label=label,
             )
 
         calendar = make()
@@ -1003,7 +1013,8 @@ def test_the_calendar_outlives_the_session_that_made_it(ws_session: WsSession) -
     del mine
     assert calendar._thread.is_alive()
     group = ws_session.connections.group
-    assert group.futures_calendar(contracts_path="x", schedules_path="y") is calendar
+    found = group.futures_calendar(snapshot_path="w", contracts_path="x", schedules_path="y")
+    assert found is calendar
     looked_up(ws_session, "NQZ5")  # read through the open session
     other.close()
     assert not calendar._thread.is_alive()  # the group's last session closed it
