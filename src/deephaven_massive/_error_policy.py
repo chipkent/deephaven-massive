@@ -99,16 +99,19 @@ class ErrorPolicy:
             answers HTTP 404, or its crypto ticker list doesn't hold the pair. Defaults to
             `LOG`.
 
-            Set `dm.OnError.RAISE` when a missing symbol means your list is wrong.
+            Set `dm.OnError.RAISE` when a missing symbol means your list is wrong. Under the
+            other values, the call skips the symbol and reads the others, and a stream or
+            `poll()` table names it in its `Error` in `m.streams()`.
 
             A symbol Massive answers with no rows and no error has no rows, whatever this
             setting says.
 
-            This setting also covers a watchlist symbol a `poll()` can't request with your
-            arguments. For example, a `poll()` of `m.options.contracts` over a watchlist, with
-            `contract_type` set, can't request a contract the watchlist names, since a named
-            contract takes only `as_of`. Passed in code, such a symbol raises `ValueError` at
-            the call.
+            A `poll()` over a watchlist also skips a symbol it can't request with your
+            arguments, as this setting says. For example, `m.options.contracts` reads a
+            contract you list in `symbols` with `as_of` alone. A watchlist poll with
+            `contract_type` set therefore skips every contract on the list, so leave
+            `contract_type` out. Passed in code, such a symbol makes `poll()` raise
+            `ValueError`.
         unreadable_keys: Decides whether a row of Massive's data whose key the library can't
             read fails the table; the row is left out either way. Defaults to `LOG`.
 

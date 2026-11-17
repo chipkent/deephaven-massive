@@ -335,16 +335,19 @@ watchlist read by `fetch()` names it in `Error` in `m.symbol_reads()`.
 
 #### on_error.unavailable_symbols
 
-Set `raise` when a missing symbol means your list is wrong.
+Set `raise` when a missing symbol means your list is wrong. Under the
+other values, the call skips the symbol and reads the others, and a stream or
+`poll()` table names it in its `Error` in `m.streams()`.
 
 A symbol Massive answers with no rows and no error has no rows, whatever this
 setting says.
 
-This setting also covers a watchlist symbol a `poll()` can't request with your
-arguments. For example, a `poll()` of `m.options.contracts` over a watchlist, with
-`contract_type` set, can't request a contract the watchlist names, since a named
-contract takes only `as_of`. Passed in code, such a symbol raises `ValueError` at
-the call.
+A `poll()` over a watchlist also skips a symbol it can't request with your
+arguments, as this setting says. For example, `m.options.contracts` reads a
+contract you list in `symbols` with `as_of` alone. A watchlist poll with
+`contract_type` set therefore skips every contract on the list, so leave
+`contract_type` out. Passed in code, such a symbol makes `poll()` raise
+`ValueError`.
 
 #### on_error.unreadable_keys
 
