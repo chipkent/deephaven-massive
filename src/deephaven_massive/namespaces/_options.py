@@ -934,17 +934,16 @@ class OptionsNamespace(Namespace):
         A table of underlyings lists each one's contracts:
 
         - In a live table, add an underlying and its contracts appear. Remove it and they leave.
-        - A row that isn't a stock or index ticker follows `on_error`'s `noncanonical_symbols`,
-          which by default skips and logs it.
-        - In a static table, an error from Massive on one underlying fails the call.
+        - A row that isn't Massive's exact stock or index ticker is skipped and logged. To fail
+          the call instead, pass `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
+        - In a static table, an error from Massive on one underlying fails `fetch()`.
 
         Args:
             underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or a
                 table of them in a `Symbol` column. Leave it out for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
-            expired: True lists only expired contracts. False, the default, lists active
-                contracts.
+            expired: True asks Massive for expired contracts. False is the default.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A table of underlyings caps the rows of
@@ -1009,11 +1008,11 @@ class OptionsNamespace(Namespace):
     ) -> FetchQuery:
         """Reference data on named options contracts: type, exercise style, expiration, and strike.
 
-        Reads each contract you name into the same columns as `contracts()`, with one request per
-        contract. To find a contract's ticker first, list its underlying's contracts with
+        Reads each contract you name into the same columns as `contracts()`. Each contract is one
+        request. To find a contract's ticker first, list its underlying's contracts with
         `contracts()`.
 
-        By default, a contract Massive has no data for gets no row and is logged as a `WARNING`. To
+        By default, a contract Massive has no data for gets no row and is logged at `WARNING`. To
         fail the call instead, pass `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`.
 
         Args:
@@ -1030,8 +1029,8 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None, empty, or `dm.ALL`;
-                - a ticker isn't Massive's exact ticker of an option contract, such as the stock
-                  ticker `"AAPL"`;
+                - a ticker isn't Massive's exact option ticker, such as `"O:AAPL250117C00150000"`;
+                - a ticker is an underlying, such as `"AAPL"`;
                 - a table has no `Symbol` column;
                 - `as_of` is a `datetime` or isn't a date.
 
