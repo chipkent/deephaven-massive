@@ -2647,12 +2647,12 @@ def test_the_live_harness_files_leave_out_the_spec_refresh(tmp_path: Path) -> No
 # plans over time, so the library learns that only from Massive's answers, and each dataset's
 # generated page lists the plans Massive's spec gives it; its docstring links that page. Every
 # module under `src/` is checked, less the spec refresh, which parses Massive's plan tables, and
-# so are the tests that say what Massive serves a key. A plan is caught when named by its tier:
-# with its asset class (`Currencies Basic`), as a plan, tier, or key (`a Business plan`, `a Basic
-# key`, `Business-only`), two tiers together (`Starter and Developer`), a class's plans (`every
-# Futures plan`), or a free or paid plan, tier, or key. Each comment, string line, and name is
-# read on its own, a name as the words its `_` separates (`test_a_business_key`), and a
-# reference wrapped onto the next line counts.
+# so are the live harness's Python files and the other tests that say what Massive serves a key. A
+# plan is caught when named by its tier: with its asset class (`Currencies Basic`), as a plan,
+# tier, or key (`a Business plan`, `a Basic key`, `Business-only`), two tiers together (`Starter
+# and Developer`), a class's plans (`every Futures plan`), or a free or paid plan, tier, key, or
+# example. Each comment, string line, and name is read on its own, a name as the words its `_`
+# separates (`test_a_business_key`), and a reference wrapped onto the next line counts.
 
 _TIER = r"(?:basic|starter|developer|advanced|business)"
 _CLASS = r"(?:stocks|options|indices|currencies|futures)"
@@ -2661,19 +2661,13 @@ _PLAN_REFERENCE = re.compile(
     rf"|\b{_TIER}(?:-only|\s+(?:plans?|tiers?|keys?))\b"
     rf"|\b{_TIER}\s+(?:and|or)\s+{_TIER}\b"
     rf"|\b{_CLASS}\s+plans?\b"
-    rf"|\b(?:free|paid)\s+(?:{_TIER}\s+)?(?:plans?|tiers?|keys?)\b",
+    rf"|\b(?:free|paid)\s+(?:{_TIER}\s+)?(?:plans?|tiers?|keys?|examples?)\b",
     re.IGNORECASE,
 )
 """Words that name a Massive plan by its tier, or a plan's contents by its asset class."""
 
-_TIER_CHECKED_TESTS = (
-    "tests/_live/__init__.py",
-    "tests/ingest/test_host_decision.py",
-    "tests/live/test_doc_examples_integration.py",
-    "tests/live/tester/test_examples.py",
-    "tests/test_docs.py",
-)
-"""The test files that say what Massive serves a key, and the live helpers' summary."""
+_TIER_CHECKED_TESTS = ("tests/ingest/test_host_decision.py", "tests/test_docs.py")
+"""The tests outside the live harness that say what Massive serves a key."""
 
 
 def _tier_checked_files(root: Path) -> list[Path]:
@@ -2683,8 +2677,9 @@ def _tier_checked_files(root: Path) -> list[Path]:
         root: The repository root.
 
     Returns:
-        Every module under `src/`, less `_massive/refresh/` and `_massive/spec/`, and the tests
-        of `_TIER_CHECKED_TESTS`; sorted.
+        Every module under `src/`, less `_massive/refresh/` and `_massive/spec/`, the Python
+        files of the live harness (`_live_harness_files`), and the tests of
+        `_TIER_CHECKED_TESTS`; sorted.
     """
     package = root / "src" / "deephaven_massive"
     refresh, spec = package / "_massive" / "refresh", package / "_massive" / "spec"
@@ -2693,7 +2688,8 @@ def _tier_checked_files(root: Path) -> list[Path]:
         for path in (root / "src").rglob("*.py")
         if not path.is_relative_to(refresh) and not path.is_relative_to(spec)
     ]
-    return sorted([*library, *(root / path for path in _TIER_CHECKED_TESTS)])
+    harness = [path for path in _live_harness_files(root) if path.suffix == ".py"]
+    return sorted({*library, *harness, *(root / path for path in _TIER_CHECKED_TESTS)})
 
 
 def _plan_references(root: Path, files: Iterable[Path]) -> list[str]:
@@ -2744,6 +2740,8 @@ def test_the_library_and_its_tests_name_no_plan() -> None:
         ("# which every Futures plan includes", True),
         ("# a free Basic plan's requests", True),
         ("# the examples that need a paid plan's streams", True),
+        ("# the settings file the paid examples read", True),
+        ("def _run_free_examples():", True),
         ("def test_a_business_key_streams():", True),
         ('filters = {"section": "business"}  # the business description', False),
         ("# ISO-8601's basic form", False),
@@ -2783,19 +2781,22 @@ def test_the_tier_checked_files_are_the_library_and_the_listed_tests(tmp_path: P
         "src/deephaven_massive/_massive/spec/types.py",
         "src/deephaven_massive/_massive/rest/governor.py",
         "tests/ingest/test_rest.py",
+        "tests/_live/pacing.py",
+        "tests/conftest.py",
+        "scripts/live_run.py",
         *_TIER_CHECKED_TESTS,
     ]:
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / relative).write_text("")
     found = [str(path.relative_to(tmp_path)) for path in _tier_checked_files(tmp_path)]
     assert found == [
+        "scripts/live_run.py",
         "src/deephaven_massive/_config.py",
         "src/deephaven_massive/_massive/rest/governor.py",
         "src/deephaven_massive/namespaces/_stocks.py",
-        "tests/_live/__init__.py",
+        "tests/_live/pacing.py",
+        "tests/conftest.py",
         "tests/ingest/test_host_decision.py",
-        "tests/live/test_doc_examples_integration.py",
-        "tests/live/tester/test_examples.py",
         "tests/test_docs.py",
     ]
 
