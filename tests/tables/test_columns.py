@@ -525,12 +525,27 @@ def test_a_joined_dataset_table_is_flat(dh_exec_ctx: object) -> None:
     assert dataset_table(rows, ("Date",)).j_table.isFlat()
 
 
-def test_the_recency_note_of_an_unknown_host_never_claims_real_time() -> None:
-    note = recency_note(Recency.UNKNOWN, host="x.example.com")
-    assert (
-        note
-        == "Live data from x.example.com, a pinned host whose recency the library does not know."
-    )
+@pytest.mark.parametrize(
+    ("recency", "note"),
+    [
+        (Recency.REALTIME, "Live real-time data from socket.massive.com."),
+        (
+            Recency.DELAYED,
+            "Live delayed data from socket.massive.com, 15 minutes behind (10 for futures).",
+        ),
+        (
+            Recency.UNKNOWN,
+            (
+                "Live data from socket.massive.com. Massive hasn't said whether it is real-time "
+                "or delayed."
+            ),
+        ),
+    ],
+)
+def test_the_recency_note_names_the_host_never_a_feed(recency: Recency, note: str) -> None:
+    # A pinned host's recency comes from Massive's label, so the note never calls a host a
+    # feed: business.massive.com may serve delayed data. Every member has a note.
+    assert recency_note(recency, host="socket.massive.com") == note
 
 
 @pytest.mark.parametrize(

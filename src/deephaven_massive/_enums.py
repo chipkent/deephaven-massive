@@ -608,8 +608,9 @@ def subscription_of(asset_class: AssetClass | ClassFromPrefix) -> Subscription |
 class Recency(StrEnum):
     """How fresh the data of a WebSocket host or a live table is (internal).
 
-    `REALTIME` for Massive's real-time and FMV hosts, `DELAYED` for its delayed feed, and
-    `UNKNOWN` for a pinned host the library does not know, or a REST table of a subscription
+    `REALTIME` for Massive's real-time and FMV hosts, `DELAYED` for its delayed feed, a pinned
+    host's as Massive's snapshot labels it, and `UNKNOWN` for a pinned host without such a
+    label, or a REST table of a subscription
     listed in `MassiveConfig.delayed_subscriptions` (REST serves what Massive serves the key).
     `UNKNOWN` is never shown as real-time.
     """

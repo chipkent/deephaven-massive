@@ -91,8 +91,9 @@ class HostDecision:
 
     Attributes:
         host: The hostname, such as `"delayed.massive.com"`.
-        recency: Whether the host serves real-time or delayed data (`host_decision.recency_of`),
-            or `UNKNOWN` for a pinned host the library does not know.
+        recency: Whether Massive serves the host's data real-time or delayed, as Massive's
+            answers and the session's settings show it (`host_decision.decide`), or `UNKNOWN`
+            when nothing shows it.
         evidence: Why: a human-readable account of the decision, shown in `m.connections()`.
     """
 

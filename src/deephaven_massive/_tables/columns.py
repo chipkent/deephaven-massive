@@ -468,16 +468,14 @@ def recency_note(recency: Recency, *, host: str) -> str:
         host: The stream's WebSocket host.
 
     Returns:
-        For example `"Live data from Massive's delayed feed (delayed.massive.com), 15 minutes
-        behind (10 for futures)."`; `UNKNOWN` never claims real-time.
+        For example `"Live delayed data from delayed.massive.com, 15 minutes behind (10 for
+        futures)."`; `UNKNOWN` never claims real-time.
     """
     if recency is Recency.REALTIME:
-        return f"Live data from Massive's real-time feed ({host})."
+        return f"Live real-time data from {host}."
     if recency is Recency.DELAYED:
-        return (
-            f"Live data from Massive's delayed feed ({host}), 15 minutes behind (10 for futures)."
-        )
-    return f"Live data from {host}, a pinned host whose recency the library does not know."
+        return f"Live delayed data from {host}, 15 minutes behind (10 for futures)."
+    return f"Live data from {host}. Massive hasn't said whether it is real-time or delayed."
 
 
 def rest_recency_note(

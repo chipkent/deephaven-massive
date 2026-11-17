@@ -16,7 +16,6 @@ from deephaven_massive._datasets.feeds import (
     channel_only_host,
     dataset_hosts,
     fmv_host,
-    host_feed,
 )
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars
 from deephaven_massive._errors import BrokenGuaranteeError
@@ -77,9 +76,6 @@ def test_every_page_gives_a_host_one_feed() -> None:
         for listed in channel.hosts:
             labels.setdefault(listed.host, set()).add(listed.feed)
     assert all(len(found) == 1 for found in labels.values()), labels
-    for host, (feed,) in ((h, tuple(f)) for h, f in labels.items()):
-        assert host_feed(host) is feed
-    assert host_feed("pinned.example.com") is None
 
 
 def test_the_real_time_and_delayed_hosts_are_the_pages() -> None:

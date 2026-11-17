@@ -476,7 +476,8 @@ class StreamRow:
         host: The serving host; null for a background read.
         path: The cluster path; null for a background read.
         recency: Whether the table's data is real-time or delayed: a stream's host's
-            (`REALTIME` or `DELAYED`; `UNKNOWN` on a pinned host the library does not know);
+            (`REALTIME` or `DELAYED`; on a pinned host, as Massive's snapshot labels it, and
+            `UNKNOWN` without a label);
             for a `poll()` table of current data, what Massive's labels on its latest cycle
             showed (`REALTIME`, or `DELAYED` for a subscription in
             `MassiveConfig.delayed_subscriptions`; a delayed label on any other fails the

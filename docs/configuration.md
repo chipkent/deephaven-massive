@@ -249,6 +249,8 @@ no delayed feed for it.
 Leave a delayed subscription out, and a stream of its current data raises
 `EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
 `poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
+A stream from a host set in `websocket_hosts` is the exception: it opens, and
+`m.connections()` shows its recency.
 `history()` and other past data don't depend on this setting.
 
 #### rest_requests_per_minute
@@ -454,6 +456,17 @@ class, except Fair Market Value (FMV) streams, which always use
 An entry must agree with `delayed_subscriptions`. Give a class a host whose name
 starts with `delayed.` exactly when its subscription is listed there, and never give
 one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
+
+The library opens a stream from a host set here whatever the class's snapshot says,
+and `m.connections()` shows its `Recency`:
+
+- `DELAYED`: `delayed_subscriptions` lists the class, or its snapshot says delayed.
+- `REALTIME`: the class's snapshot says real-time.
+- `UNKNOWN`: forex or crypto, or a snapshot with no label, refused, or not read.
+
+For stocks, options, indices, and futures not in `delayed_subscriptions`, the
+library reads the class's snapshot from Massive once a session, on the class's first
+stream. A new session reads it again.
 
 #### subscription_confirmation_timeout
 
