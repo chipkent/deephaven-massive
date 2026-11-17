@@ -172,8 +172,8 @@ PINNED_HOSTS = (FMV_HOST, REALTIME_HOST, "opts.example.com")
 """Hosts a user may pin: the FMV channels' Business host (index values' one documented host),
 the real-time host, and one no page lists. None of their names sets a recency."""
 
-LABELLED = (AssetClass.STOCKS, AssetClass.OPTIONS, AssetClass.INDICES, AssetClass.FUTURES)
-"""The classes with a snapshot probe, so a pinned host's recency is read from Massive's label."""
+DELAYABLE = (AssetClass.STOCKS, AssetClass.OPTIONS, AssetClass.INDICES, AssetClass.FUTURES)
+"""The classes with a delayed feed, which `delayed_subscriptions` may list."""
 
 REFUSED_ROW = {"ticker": "AAPL", "error": "NOT_ENTITLED", "message": "Not entitled."}
 
@@ -296,7 +296,7 @@ PINNED_EVENTS: dict[str, tuple[Callable[[], Fetch], Recency, str, bool]] = {
 
 
 @pytest.mark.parametrize("host", PINNED_HOSTS)
-@pytest.mark.parametrize("asset_class", LABELLED)
+@pytest.mark.parametrize("asset_class", list(AssetClass))
 @pytest.mark.parametrize("event", PINNED_EVENTS)
 def test_a_pinned_host_s_recency_is_massive_s_label(
     caplog: pytest.LogCaptureFixture, *, host: str, asset_class: AssetClass, event: str
@@ -357,7 +357,7 @@ def test_an_unplanned_error_source_is_refused() -> None:
         run_pinned(INDICES, raising(error)(), FMV_HOST)
 
 
-@pytest.mark.parametrize("asset_class", LABELLED)
+@pytest.mark.parametrize("asset_class", DELAYABLE)
 def test_a_listed_subscription_s_pinned_host_is_delayed_with_no_request(
     asset_class: AssetClass,
 ) -> None:
@@ -377,24 +377,9 @@ def test_a_listed_subscription_s_pinned_host_is_delayed_with_no_request(
     assert fetch.probes == []
 
 
-@pytest.mark.parametrize("host", PINNED_HOSTS)
-@pytest.mark.parametrize("asset_class", [AssetClass.FOREX, AssetClass.CRYPTO])
-def test_a_pinned_forex_or_crypto_host_is_unknown_with_no_request(
-    asset_class: AssetClass, host: str
-) -> None:
-    # Their snapshots carry no recency label, so nothing from Massive says what the host serves.
-    fetch = Snapshot([{"timeframe": "REAL-TIME"}])
-    decision = run_pinned(asset_class, fetch, host)
-    assert decision == HostDecision(
-        host, Recency.UNKNOWN, f"websocket_hosts, no {asset_class} snapshot labels recency"
-    )
-    assert fetch.probes == []
-
-
-def test_every_class_s_pin_is_decided() -> None:
-    # Each class either has a snapshot probe or is forex or crypto, decided with no request.
-    assert set(LABELLED) == set(SNAPSHOT_PROBES)
-    assert set(LABELLED) | {AssetClass.FOREX, AssetClass.CRYPTO} == set(AssetClass)
+def test_every_class_has_a_snapshot_to_label_a_pinned_host() -> None:
+    # So no pinned host's recency is decided without Massive's label.
+    assert set(SNAPSHOT_PROBES) == set(AssetClass)
 
 
 def test_only_a_pinned_host_s_evidence_is_pinned() -> None:

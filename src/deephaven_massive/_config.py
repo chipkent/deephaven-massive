@@ -228,13 +228,13 @@ class MassiveConfig:
             `dm.Subscription.CURRENCIES`, the one subscription for forex and crypto: Massive has
             no delayed feed for it.
 
-            Leave a delayed subscription out, and its current data fails with `EntitlementError`.
-            The message gives the line of Python to add. A stream raises it at the call, a
-            `fetch()` or `poll()` table fails with it, and `fetch(wait=True)` raises it.
-            `history()` and other past data don't depend on this setting.
+            Leave a delayed subscription out, and a call for its current data fails with
+            `EntitlementError`. The message gives the line of Python to add. A stream raises the
+            error at the call. A `fetch()` or `poll()` table fails with it. `history()` and other
+            past data don't depend on this setting.
 
-            A stream from a host you set in `websocket_hosts` is the exception: it opens, and
-            its `Recency` in `m.connections()` shows `DELAYED`.
+            A stream from a host you set in `websocket_hosts` still opens. Its `Recency` in
+            `m.connections()` shows `DELAYED`.
         rest_requests_per_minute: Gives each subscription's REST request limit on your plan,
             so its requests keep to it from the first one. Defaults to an empty mapping.
 
@@ -269,19 +269,15 @@ class MassiveConfig:
             starts with `delayed.` exactly when its subscription is listed there, and never give
             one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
 
-            A stream from a host set here opens whether Massive labels its data real-time or
-            delayed. Its `Recency` in `m.connections()` shows the label:
+            A stream from a host set here opens whatever Massive labels its data. Its `Recency`
+            in `m.connections()` shows the label:
 
-            - `DELAYED`: Massive labels the data `DELAYED`, or its subscription is in
-              `delayed_subscriptions`.
+            - `DELAYED`: Massive labels the data `DELAYED`, or `delayed_subscriptions` lists its
+              subscription.
             - `REALTIME`: Massive labels the data `REAL-TIME`.
-            - `UNKNOWN`: Massive gave no label, or the library couldn't read one. A forex or
-              crypto stream from a host set here always shows `UNKNOWN`: Massive's snapshots
-              label neither.
+            - `UNKNOWN`: Massive gave no label the library could read.
 
-            Reading the label costs one REST request per asset class in each session, made by
-            that class's first stream. Forex, crypto, and a subscription listed in
-            `delayed_subscriptions` make none.
+            The label costs one REST request for each asset class's first stream in a session.
         subscription_confirmation_timeout: Sets how many seconds Massive has to confirm a stream's
             channel before the library asks again. Defaults to 5 seconds.
 

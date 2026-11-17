@@ -31,8 +31,8 @@ Massive's text and the documented host (`refusal_note`), and the library never r
 Recency comes from Massive's answers and the user's settings, never from a host's name: the
 real-time feed is shown real-time once the snapshot raises no delayed label, the delayed feed
 delayed, and a pinned host as its class's snapshot labels the key's data. A pinned host whose
-snapshot gives no documented label (no label, a refusal, a failed read, or a forex or crypto
-class, whose snapshots carry none) is `UNKNOWN`, which is never shown as real-time.
+snapshot gives no documented label (no label, an undocumented one, a refusal, or a failed
+read) is `UNKNOWN`, which is never shown as real-time.
 
 `decide` is pure apart from logging: the REST request itself is made by the caller's `fetch`
 callable, which the REST transport (`_ingest/rest.py`) supplies, so every HTTP error has
@@ -131,9 +131,14 @@ SNAPSHOT_PROBES: Final[Mapping[AssetClass, SnapshotProbe]] = {
     AssetClass.FUTURES: SnapshotProbe(
         "/futures/v1/snapshot", {}, {"product_code": "ES", "limit": FUTURES_PROBE_CONTRACTS}
     ),
+    AssetClass.FOREX: SnapshotProbe("/v3/snapshot", {}, {"ticker.any_of": ("C:EURUSD",)}),
+    AssetClass.CRYPTO: SnapshotProbe("/v3/snapshot", {}, {"ticker.any_of": ("X:BTCUSD",)}),
 }
-"""The snapshot each class's TICK host is checked against: the unified snapshot of two liquid
-stocks, one contract of the SPY option chain, the S&P 500 index, and the E-mini S&P contracts.
+"""The snapshot that shows each class's recency: the unified snapshot of two liquid stocks,
+one contract of the SPY option chain, the S&P 500 index, the E-mini S&P contracts, and the
+unified snapshot of EUR/USD and of BTC/USD, whose `fx` and `crypto` rows carry the same
+`last_trade` and `last_quote` timeframes in Massive's spec. Forex and crypto have one
+documented host and no delayed feed, so only a host pinned for them reads theirs.
 
 The futures snapshot lists a product's contracts by ticker, so far-dated contracts that do not
 trade yet come first (`ESH0`, `ESH1`, ...), and only a contract that trades carries a
@@ -487,8 +492,7 @@ def _pinned_recency(
         fetch: Sends the class's snapshot request.
 
     Returns:
-        `DELAYED` for a listed subscription, with no request; `UNKNOWN` for forex and crypto,
-        whose snapshots carry no recency label, with no request; otherwise what the class's
+        `DELAYED` for a listed subscription, with no request; otherwise what the class's
         snapshot (`SNAPSHOT_PROBES`) shows (`_pinned_labels`), or `UNKNOWN` when Massive
         refuses it or its read fails other than with a library defect.
 
@@ -497,8 +501,6 @@ def _pinned_recency(
     """
     if listed:
         return _PinnedRecency(Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
-    if asset_class in (AssetClass.FOREX, AssetClass.CRYPTO):
-        return _PinnedRecency(Recency.UNKNOWN, f"no {asset_class} snapshot labels recency")
     probe = SNAPSHOT_PROBES[asset_class]
     try:
         answer = fetch(probe)
