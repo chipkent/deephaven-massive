@@ -160,7 +160,7 @@ Five tests record what Massive does for you to judge. Find each one's lines unde
 
 | Test | The question | Open an issue when |
 |---|---|---|
-| `test_the_options_cap_counts_contracts_or_topics` | Does Massive's cap of 1,000 option contracts per connection count contracts, or subscriptions? A contract's trades and quotes are two subscriptions, and the library assumes the cap counts these. The test subscribes both for 1,000 contracts. | Massive acknowledges all 2,000 subscriptions. |
+| `test_the_options_cap_counts_contracts_or_topics` | Does Massive's cap of 1,000 option contracts per connection count contracts, or channel subscriptions? A contract's trades and quotes are two channel subscriptions, and the library assumes the cap counts these. The test subscribes both for 1,000 contracts. | Massive acknowledges all 2,000 channel subscriptions. |
 | `test_an_index_minute_file_holds_its_own_new_york_day` | Does an index minute file hold every minute that REST has for its New York day? | Its evidence lists any minute the file lacks. |
 | `test_index_day_windows_and_files_across_many_indices` | Is the library right to end index day bars at 01:00 New York time? | Always. Attach its verdict lines (a), (b), and (c). |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | Does each futures bar of a session or longer hold the whole sessions that open in its UTC days? | Always. Attach its `VERDICT` lines. |
@@ -177,7 +177,7 @@ uv run pytest -m integration tests/namespaces/test_options_integration.py -k gam
 ```
 
 Run the options test again when it skips as inconclusive. That skip means Massive refused
-some of its subscriptions, or the socket reconnected without saying why.
+some of its channel subscriptions, or the socket reconnected without saying why.
 
 <a id="index-hosts"></a>
 
@@ -229,8 +229,8 @@ groups run these tests:
 | `stream-night-reconcile` | The night's minute bars against REST history |
 | `half-day` | The bar-stamp tests, on the trading day after a half day |
 
-The `stream-day` group also answers a question for you to judge: how long does a healthy
-stocks connection go without a frame while no stock trades? In its debug log, read the stocks
+The `stream-day` group also records how long a healthy stocks connection goes without a frame
+while no stock trades. In its debug log, read the stocks
 connection's `status` lines from 03:45 to 04:00 New York time. Open an issue with the longest
 gap between them, and with every `no frame for ... during ... trading hours` WARNING of the day.
 
