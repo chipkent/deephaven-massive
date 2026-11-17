@@ -508,6 +508,30 @@ def test_a_declared_base_that_already_holds_the_branch_is_ignored(
     assert "Ignoring the declared base origin/fix/mine" in capsys.readouterr().out
 
 
+def test_a_declared_base_git_cannot_find_is_ignored(
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A branch never pushed or fetched falls back to the search instead of a traceback.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git-pr-body.md").write_text(
+        "<!-- base: feat/unpushed -->\n## Summary\n\nAdds a column.\n"
+    )
+    outputs = {
+        **_STACKED,
+        "git diff origin/feat/problems-table...HEAD": "",
+        "git diff --name-only origin/feat/problems-table...HEAD": "src/x.py\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main([]) == 0
+    assert "Ignoring the declared base origin/feat/unpushed: git cannot find it" in (
+        capsys.readouterr().out
+    )
+
+
 def test_a_declaration_after_the_first_line_declares_nothing(check: ModuleType) -> None:
     assert check.DECLARED_BASE.match("## Summary\n<!-- base: feat/x -->\n") is None
     declared = check.DECLARED_BASE.match("<!-- base: feat/x -->\n## Summary\n")
