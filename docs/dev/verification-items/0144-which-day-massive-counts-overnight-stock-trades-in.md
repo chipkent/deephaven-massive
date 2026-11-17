@@ -1,4 +1,4 @@
-# 144. Which trading day does Massive count a stock trade made between 21:00 and midnight in?
+# 144. Which trading day holds a stock trade made between 21:00 and midnight?
 
 Date: 2026-11-17
 
@@ -23,7 +23,8 @@ Changing the first two is a public change for the owner. All three wait on this 
 
 Settled by `test_which_day_massive_counts_overnight_stock_trades_in` in
 `tests/namespaces/test_stocks_integration.py`, run after 20:00 New York time on the trading day
-that follows an overnight session. It records which minute's open SPY's day bar opens at: the first
-from 21:00 the evening before, from midnight, or from 04:00. It skips when Massive has no minute
+that follows an overnight session. It records the open of SPY's day bar beside the opens of the
+first minute bars from 21:00 the evening before, from midnight, and from 04:00; the one it equals
+is where Massive's day begins. It skips when Massive has no minute
 of the overnight session. `test_overnight_stock_trades_stream` in the same file records the
 `Date` the library gives the trades it streams in the session.
