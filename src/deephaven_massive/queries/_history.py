@@ -679,8 +679,8 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
 class NoSymbolStreamHistoryQuery(NoSymbolStreamQuery, HistoryQuery):
     """A query of a stream whose rows name no symbol, with its history: live and past rows.
 
-    Massive both streams and keeps a few datasets whose rows name no instrument, such as
-    `m.options.admin_messages()`, the notices of the options exchanges. Their dataset methods
+    Massive both streams and keeps OPRA's administrative messages, `m.options.admin_messages()`,
+    whose rows name no instrument. Their dataset methods
     return this class, which has every method of `NoSymbolStreamQuery` and `history(start, end)`
     from `HistoryQuery`: the stream methods follow the live feed, and `history()` reads a past
     range, with the same columns. Like `NoSymbolStreamQuery`, it has no `last_by()`, since the

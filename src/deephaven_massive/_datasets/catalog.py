@@ -693,8 +693,8 @@ class DatasetSpec:
         The feeds are the news, the filings, and the options' unusual trades.
 
         Massive keeps a feed's whole archive, and its `start` and `end` are the only bound on
-        what a cycle reads, so `poll()` on a feed refuses to start without `start`. Every feed
-        declares a `time_axis`, which the catalog's feed-axis gate checks.
+        what a cycle reads, so `poll()` on a feed refuses to start without `start` or `limit`.
+        Every feed declares a `time_axis`, which the catalog's feed-axis gate checks.
         """
         return self.poll_mode is PollMode.APPEND
 

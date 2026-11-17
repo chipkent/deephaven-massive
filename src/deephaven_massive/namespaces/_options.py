@@ -1167,7 +1167,9 @@ class OptionsNamespace(Namespace):
                 - a ticker isn't Massive's exact ticker of an option contract;
                 - `root` is an empty sequence;
                 - a bound isn't a date, or `end` is before `start`;
-                - `order` is given without `sort`;
+                - `limit` isn't positive;
+                - `order` is given without `sort`, or with a `sort` that has its own `.asc` or
+                  `.desc`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
@@ -1235,8 +1237,11 @@ class OptionsNamespace(Namespace):
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
                 - a ticker isn't Massive's exact ticker of an option contract;
-                - the bounds mix a date and a datetime, or `end` is before `start`;
-                - `order` is given without `sort`;
+                - a bound isn't a date or an aware datetime, the bounds mix the two, or `end` is
+                  before `start`;
+                - `limit` isn't positive;
+                - `order` is given without `sort`, or with a `sort` that has its own `.asc` or
+                  `.desc`;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
 
         Example:
