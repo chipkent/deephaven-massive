@@ -92,8 +92,9 @@ section "Grading a PR description". Grade <worktree>/.git-pr-body.md against the
 ```
 
 Rewrite from its sheet and grade again with a fresh grader until the description passes, with
-at most three fresh grades. If the third doesn't pass, push the description anyway and send the
-grader's remaining objections to the owner verbatim (`writing-to-the-owner`).
+at most three fresh grades, or one for a PR that gets one. When the last grade allowed doesn't
+pass, push the description anyway and send the grader's remaining objections to the owner
+verbatim (`writing-to-the-owner`).
 
 ## 5. Publish
 

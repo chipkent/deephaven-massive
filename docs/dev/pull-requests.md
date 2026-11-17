@@ -176,8 +176,9 @@ Run it on every draft, and before every push that changes the PR:
    title that meets the rules, text that describes the branch after this push, and the issue in
    `closingIssuesReferences`.
 8. **Have a fresh editor grade it** (`writing-a-pr-description`, section 4), and rewrite until
-   it passes, with at most three fresh grades. If the third doesn't pass, push it anyway and send
-   the grader's remaining objections to the owner verbatim.
+   it passes, with at most three fresh grades, or one for a PR that gets one. When the last grade
+   allowed doesn't pass, push it anyway and send the grader's remaining objections to the owner
+   verbatim.
 9. **Run the description check**: `uv run python scripts/check_pr_body.py` on the draft at
    `.git-pr-body.md`. It fails on an item under Check before merging that asks the owner
    anything, on an approval claimed without its decision or the question and the owner's
