@@ -10,8 +10,9 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   for the symbols, each with its path. A dataset whose rows carry no `Symbol` column reads
   each symbol in a request of its own, so every row belongs to the one request that returned
   it; a dataset whose rows list their tickers gets its `Symbol` from them, so its requests are
-  grouped as `fetch()` groups them. A parameter a path does not take, and a crypto ticker list
-  that can't be read, fail their own symbols here, before any request. A crypto pair the list
+  grouped as `fetch()` groups them. A crypto ticker list that can't be read, and, for
+  `history()`, a parameter its path does not take, fail their own symbols here, before any
+  request; a `fetch()` refused every such parameter at the call. A crypto pair the list
   gives no split for is planned as a call never sent. A pair the list doesn't hold has no
   data, as an HTTP 404 means. A pair whose currencies can't make up its ticker is skipped, and
   its `m.symbol_reads()` row says why (`_with_skipped`).
@@ -122,9 +123,9 @@ RestUnit: TypeAlias = "tuple[RestPath, Call]"
 class UnsupportedParameterError(PermanentError):
     """A parameter the call set that a symbol's path does not take, in a read by symbol.
 
-    A dataset with a path per symbol class can route one symbol to a path that lacks a
-    parameter the call set (`adjusted=False` on the crypto indicators). That symbol's read
-    fails with this error before any request, and the other symbols are read. The parameter is
+    A `history()` or value-table read by symbol can meet a path that lacks a parameter the
+    call set when the call did not check it. That symbol's read fails with this error before
+    any request, and the other symbols are read. The parameter is
     the caller's, so its source is `ErrorSource.USER`, and it is a bug.
     """
 
@@ -212,8 +213,9 @@ def fetch_units(
 
     Returns:
         The planned requests in plan order, and the symbols that failed before any request
-        with their errors: a crypto pair whose lookup failed, and every symbol of a path that
-        does not take a parameter the call set (`UnsupportedParameterError`).
+        with their errors: a crypto pair whose lookup failed. A path that does not take a
+        parameter the call set raises the `ValueError` of `plan_calls`, which the call has
+        already checked for (`RestEndpoints.check_fetch`).
     """
     asked = tuple(sorted(_ordered(symbols)))
     alone = _SYMBOL not in columns
@@ -228,18 +230,14 @@ def fetch_units(
     units: list[RestUnit] = []
     for template, own in groups:
         rest_path = reader.rest_path(template)
-        try:
-            calls = plan_calls(
-                spec,
-                rest_path,
-                request,
-                symbols=own,
-                dates=(request.start, request.end),
-                split=split,
-            )
-        except ValueError as error:
-            failed.update(_refused(own, error))
-            continue
+        calls = plan_calls(
+            spec,
+            rest_path,
+            request,
+            symbols=own,
+            dates=(request.start, request.end),
+            split=split,
+        )
         units.extend((rest_path, call) for call in calls if call.symbol not in failed)
     logger.debug(
         "%s fetch by symbol: %d symbols in %d requests (%s); failed before any request: %s",

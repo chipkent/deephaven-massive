@@ -1921,6 +1921,22 @@ SMA = DatasetSpec(
         ),
     },
 )
+MACD_CRYPTO = "/v1/indicators/macd/{cryptoTicker}"
+WINDOWED = DatasetSpec(
+    summary="A dataset for the tests: its crypto path takes no `window`, its stock path does.",
+    name="indicators.windowed",
+    fetch_path=SMA_STOCK,
+    fetch_paths_by_class={AssetClass.CRYPTO: MACD_CRYPTO},
+    poll_keys=("Symbol", "Timestamp"),
+    keys={
+        (R, SMA_STOCK): SourceKeys(
+            symbol=KeySpec("stockTicker", from_request=True), time=KeySpec("Timestamp")
+        ),
+        (R, MACD_CRYPTO): SourceKeys(
+            symbol=KeySpec("cryptoTicker", from_request=True), time=KeySpec("Timestamp")
+        ),
+    },
+)
 INDEX_PATH = "/v3/snapshot/indices"
 INDEX_SNAPSHOTS = DatasetSpec(
     summary="A dataset for the tests.",
@@ -1936,7 +1952,7 @@ INDEX_SNAPSHOTS = DatasetSpec(
 def routed_session(
     fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
 ) -> Iterator[dm.MassiveSession]:
-    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
+    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, WINDOWED, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
     yield m
@@ -1987,52 +2003,63 @@ def test_an_emptied_symbol_table_evicts_every_key(
 SMA_VALUE = Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 1.0}]}))
 """One indicator value, as Massive answers a symbol's indicator path."""
 
-CRYPTO_REFUSED = "X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take ['adjusted'])"
-"""The `Error` text of a crypto symbol whose path does not take `adjusted`."""
 
-
-def test_a_symbol_routed_to_a_path_without_the_parameter_is_left_out_and_listed(
+def test_a_parameter_one_fetch_path_lacks_fails_a_watchlist_poll_as_a_list_at_the_call(
     *,
     routed_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
-    clock: FakeClock,
-    dh_to_pylist: ToPylist,
-    caplog: pytest.LogCaptureFixture,
     dh_input_table: Callable[..., InputTable],
 ) -> None:
-    # One symbol never fails the table: the crypto pair's path does not take `adjusted`, so
-    # it is left out of each cycle and named in the Error, and the stock is polled.
+    # The stock path takes `window` and the crypto path doesn't. The watchlist holds only a
+    # stock now, but it may later hold a pair, so the poll fails at once, as a list holding a
+    # pair would, rather than leave the pair out of every cycle.
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    q = build_query(
+        routed_session._core,
+        WINDOWED,
+        query_type=FetchQuery,
+        symbols=watch,
+        params={"window": 20},
+    )
+    with pytest.raises(ValueError, match=r"macd/\{cryptoTicker\} does not take \['window'\]"):
+        q.poll(60)
+    with pytest.raises(ValueError, match=r"macd/\{cryptoTicker\} does not take \['window'\]"):
+        build_query(
+            routed_session._core,
+            WINDOWED,
+            query_type=FetchQuery,
+            symbols=["AAPL", "X:BTCUSD"],
+            params={"window": 20},
+        ).poll(60)
+    assert fake_rest.requests == []
+
+
+def test_an_unadjusted_poll_reads_a_crypto_pair_without_adjusted(
+    *,
+    routed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # A crypto pair has no splits, so `adjusted=False` means nothing for it: its request leaves
+    # `adjusted` out, and the stock's request sends it.
     fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", SMA_VALUE)
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])]))
     q = build_query(routed_session._core, SMA, query_type=FetchQuery, symbols=watch, adjusted=False)
-    with caplog.at_level(logging.DEBUG, "deephaven_massive._ingest.rest"):
-        table = q.poll(60)  # the stock path takes `adjusted`, so nothing fails up front
-        until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
-        clock.wait_for_sleepers(1)
-        (row,) = streams_of(routed_session, dh_to_pylist)
-        assert (row["State"], row["Error"]) == (
-            "RUNNING",
-            f"no rows this cycle for 1 symbol: {CRYPTO_REFUSED}",
-        )
-        assert row["Path"] == f"{SMA_STOCK}, {SMA_CRYPTO}"
-        next_cycle(clock)  # the next cycle leaves it out again, logging only at DEBUG
-    assert not table.j_table.isFailed()
-    left = [r for r in caplog.records if "X:BTCUSD] left out of the cycle" in r.getMessage()]
-    assert [r.levelno for r in left] == [logging.WARNING, logging.DEBUG]
-    assert left[0].getMessage() == (
-        "indicators.sma poll(): 1 [X:BTCUSD] left out of the cycle: "
-        "/v1/indicators/sma/{cryptoTicker} does not take ['adjusted']; the table lists it in "
-        "its Error and polls the other symbols"
-    )
-    # Once the symbol leaves the table, the Error clears.
-    watch.delete(new_table([string_col("Symbol", ["X:BTCUSD"])]))
-    until(lambda: dh_to_pylist(watch) == [{"Symbol": "AAPL"}])
-    next_cycle(clock)
-    clock.wait_for_sleepers(1)
+    table = q.poll(60)
+    until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL", "X:BTCUSD"])
+    requests = dict(fake_rest.get_queries())
+    assert requests["/v1/indicators/sma/AAPL"]["adjusted"] == ["false"]
+    assert "adjusted" not in requests["/v1/indicators/sma/X:BTCUSD"]
     (row,) = streams_of(routed_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == ("RUNNING", None)
-    assert all("X%3ABTCUSD" not in r.target for r in fake_rest.requests)
+    assert (row["State"], row["Error"], row["Path"]) == (
+        "RUNNING",
+        None,
+        f"{SMA_STOCK}, {SMA_CRYPTO}",
+    )
 
 
 def test_a_replace_poll_lists_a_symbol_massive_has_no_data_for(
@@ -2106,14 +2133,12 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     dh_to_pylist: ToPylist,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The crypto pair's path refuses `adjusted`, and Massive has no data for MSFT: both are
-    # left out and listed, and nothing is logged above DEBUG.
+    # Massive has no data for MSFT: it is left out and listed, and nothing is logged above
+    # DEBUG.
     fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
     fake_rest.reply("/v1/indicators/sma/MSFT", Reply(b"{}", status=404))
-    watch = new_table([string_col("Symbol", ["AAPL", "MSFT", "X:BTCUSD"])])
-    q = build_query(
-        ignoring_session._core, SMA, query_type=FetchQuery, symbols=watch, adjusted=False
-    )
+    watch = new_table([string_col("Symbol", ["AAPL", "MSFT"])])
+    q = build_query(ignoring_session._core, SMA, query_type=FetchQuery, symbols=watch)
     with caplog.at_level(logging.DEBUG, "deephaven_massive._ingest.rest"):
         table = q.poll(60, mode=PollMode.REPLACE)
         until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
@@ -2121,10 +2146,9 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     (row,) = streams_of(ignoring_session, dh_to_pylist)
     assert (row["State"], row["Error"]) == (
         "RUNNING",
-        f"no rows this cycle for 2 symbols: {CRYPTO_REFUSED}; MSFT (HTTP 404 from {SMA_STOCK})",
+        f"no rows this cycle for 1 symbol: MSFT (HTTP 404 from {SMA_STOCK})",
     )
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert any("X:BTCUSD] left out of the cycle" in r.getMessage() for r in caplog.records)
     assert any("no data for 1 [MSFT (" in r.getMessage() for r in caplog.records)
     # A fetch() of the same session follows the same setting: the symbol is left out quietly.
     caplog.clear()
@@ -2132,30 +2156,6 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
         fetched.fetch(wait=True)
     assert caplog.records == []
-
-
-def test_raise_fails_a_poll_on_a_symbol_whose_path_refuses_a_parameter(
-    *,
-    raising_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    dh_to_pylist: ToPylist,
-) -> None:
-    watch = new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])])
-    q = build_query(
-        raising_session._core, SMA, query_type=FetchQuery, symbols=watch, adjusted=False
-    )
-    table = q.poll(60)
-    until(lambda: bool(table.j_table.isFailed()))
-    until(lambda: streams_of(raising_session, dh_to_pylist)[0]["State"] == "FAILED")
-    (row,) = streams_of(raising_session, dh_to_pylist)
-    assert row["Error"] == (
-        "indicators.sma poll(): X:BTCUSD cannot be polled: /v1/indicators/sma/{cryptoTicker} "
-        "does not take ['adjusted']. Remove the symbol; to leave it out and keep polling the "
-        "others, pass on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset "
-        "method or to MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the "
-        "settings file"
-    )
-    assert fake_rest.requests == []
 
 
 def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
@@ -2291,42 +2291,6 @@ def test_a_failed_publish_still_evicts_the_keys_it_dropped(
     script.rows(("AAPL", 4.0))  # the next cycle still tombstones MSFT
     next_cycle(clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 4.0)])
-
-
-def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
-    *,
-    routed_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    clock: FakeClock,
-    dh_to_pylist: ToPylist,
-    dh_input_table: Callable[..., InputTable],
-) -> None:
-    # The default path lacks `adjusted`; only the stock symbols' path takes it.
-    crypto_first = DatasetSpec(
-        summary="A dataset for the tests.",
-        name="indicators.crypto_first",
-        fetch_path=SMA_CRYPTO,
-        fetch_paths_by_class={AssetClass.STOCKS: SMA_STOCK},
-        poll_keys=("Symbol", "Timestamp"),
-        keys=SMA.keys,
-    )
-    fake_rest.reply(
-        "/v1/indicators/sma/AAPL",
-        Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 1.0}]})),
-    )
-    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
-    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
-    q = build_query(
-        routed_session._core, crypto_first, query_type=FetchQuery, symbols=watch, adjusted=False
-    )
-    table = q.poll(60, mode=PollMode.REPLACE)
-    until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
-    watch.delete(new_table([string_col("Symbol", ["AAPL"])]))
-    until(lambda: dh_to_pylist(watch) == [])
-    next_cycle(clock)
-    until(lambda: symbols_of(table, dh_to_pylist) == [])
-    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
-    assert not failed
 
 
 def test_the_path_column_names_the_paths_static_symbols_read(

@@ -396,9 +396,9 @@ class PermanentError(MassiveError):
     errors whose cause is settled for the session or the request: a row that breaks its
     dataset's schema (`RowDataError`), a symbol table's row that is not Massive's ticker
     (`SymbolRowError`), a symbol Massive has no data for under
-    `unavailable_symbols=OnError.RAISE` (`UnavailableSymbolError`), and, in a read by symbol, a
-    parameter a symbol's path does not take (`UnsupportedParameterError`,
-    `_ingest/symbol_reads.py`).
+    `unavailable_symbols=OnError.RAISE` (`UnavailableSymbolError`), and, in a `history()` or
+    value-table read by symbol, a parameter a symbol's path does not take
+    (`UnsupportedParameterError`, `_ingest/symbol_reads.py`).
 
     A `poll()` table fails with any of them except `UnsupportedParameterError` rather than
     retrying it every cycle. `UnsupportedParameterError` never reaches a `poll()` cycle: the
@@ -769,11 +769,9 @@ class UnavailableSymbolError(PermanentError):
     """A symbol Massive has no data for, under `unavailable_symbols=RAISE`.
 
     Massive answered HTTP 404 for it, or its crypto ticker list gives no split for the pair
-    (`ErrorSource.MASSIVE`); or, in a `poll()` cycle, its path does not take a parameter the
-    poll sends (`ErrorSource.USER`, a bug). Under `LOG` and `IGNORE` the symbol gets no rows
-    instead. Under `RAISE` it fails whatever met it: a `fetch()` or `history()` table, which
-    `wait=True` raises; one symbol of a followed read, marked `FAILED`; a `poll()` table; or a
-    stream.
+    (`ErrorSource.MASSIVE`). Under `LOG` and `IGNORE` the symbol gets no rows instead. Under
+    `RAISE` it fails whatever met it: a `fetch()` or `history()` table, which `wait=True`
+    raises; one symbol of a followed read, marked `FAILED`; a `poll()` table; or a stream.
     """
 
 
