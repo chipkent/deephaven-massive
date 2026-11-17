@@ -1544,6 +1544,7 @@ _WIRE_VOCABULARY = frozenset(
         "WireFailure",
         "DriftReport",
         "DriftSample",
+        "PauseNotice",
         "Feed",
         "FeedHost",
         "Field",

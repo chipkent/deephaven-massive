@@ -26,6 +26,7 @@ EXPECTED_INTERFACE = [
     "Page",
     "ParamKind",
     "Patience",
+    "PauseNotice",
     "PlanAccess",
     "Provenance",
     "RATE_WINDOW",

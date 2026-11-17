@@ -69,6 +69,7 @@ from deephaven_massive._errors import EntitlementError, ErrorSource, MassiveErro
 from deephaven_massive._ingest import host_decision, rate_limits, ws_connection
 from deephaven_massive._massive import (
     FlatFileClient,
+    PauseNotice,
     ReadColumn,
     ReadPlan,
     RestClient,
@@ -1903,6 +1904,7 @@ def _live_wait_progress(request: pytest.FixtureRequest, rest_clock: FakeClock) -
         limits=config.rest_requests_per_minute,
         label="live test progress",
         listener=_ignore,
+        on_pause=_ignore_pause,
     )
     requests = pacing.declared_requests(request.node.get_closest_marker("requests"))
     write = functools.partial(_write_live_line, request.config, "live pacing: ")
@@ -2594,6 +2596,7 @@ def live_rest(live_config: MassiveConfig) -> Iterator[RestClient]:
         limits=live_config.rest_requests_per_minute,
         label="live tests",
         listener=_ignore,
+        on_pause=_ignore_pause,
     )
     client = RestClient(
         live_config.api_key,
@@ -2608,6 +2611,14 @@ def live_rest(live_config: MassiveConfig) -> Iterator[RestClient]:
 
 def _ignore() -> None:
     """Note nothing: the raw client's governor listener (only sessions show diagnostics)."""
+
+
+def _ignore_pause(notice: PauseNotice) -> None:
+    """Note nothing: the raw client's pause listener (only sessions show problems).
+
+    Args:
+        notice: The pause's notice.
+    """
 
 
 @pytest.fixture

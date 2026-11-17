@@ -36,6 +36,7 @@ from deephaven_massive._tables.columns import (
 from deephaven_massive._tables.diagnostics import shown_query
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
+from deephaven_massive._tables.refused_values import refused_values_of
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import (
     RestTransport,
@@ -140,13 +141,20 @@ def _read_value_table(
     rule = SymbolRowRule.for_values(spec, values, noncanonical)
     with entered(core.exec_ctx):
         rows = read_symbols(rule, values.table, stream_id=None, reported=live or call is not None)
-    if call is not None and rows.skipped:
-        # Named first: a call that raises below never reaches the read that names it.
-        core.diagnostics.name_read(call, query)
+    if call is not None:
         where = f"the {values.argument} table of {query}"
-        core.problems(
-            rule.skipped_events(rows.skipped, stream_id=call, where=where, field=rule.column)
-        )
+        events = rule.skipped_events(rows.skipped, stream_id=call, where=where, field=rule.column)
+        refused = refused_values_of(
+            values.table, rule.column
+        )  # a table `canonicalize_symbols` returned
+        if refused is not None:
+            events += refused.events(
+                dataset=spec.name, stream_id=call, where=where, field=rule.column
+            )
+        if events:
+            # Named first: a call that raises below never reaches the read that names it.
+            core.diagnostics.name_read(call, query)
+            core.problems(events)
     if rows.skipped and not rows.symbols:
         raise ValueError(
             f"{query}: no row of the {values.argument} table is a value this dataset takes, so "
@@ -493,6 +501,7 @@ class FetchQuery(Query):
             plan=plan,
             note=note if recency is None else f"{note} {recency}",
             first=loaded,
+            values_column=values.column,
         )
 
     @_verb

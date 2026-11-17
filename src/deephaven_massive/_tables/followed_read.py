@@ -865,6 +865,7 @@ def _build(
     *,
     symbol_table: Table,
     rule: SymbolRowRule,
+    values_column: str | None,
     router: _WatchRouter,
     seeded: Mapping[str, Table],
     note: str,
@@ -879,6 +880,8 @@ def _build(
         read: The result's shared state.
         symbol_table: The user's refreshing symbol table, or table of values.
         rule: The dataset's rule for the table's rows, which names the column read.
+        values_column: The column of a table of values, which its problems name in `Field`;
+            None for a symbol table.
         router: Receives the watch's reports.
         seeded: The call-time symbols' static rows (`wait=True`), or empty.
         note: The sentences the description adds after the dataset's summary.
@@ -925,10 +928,12 @@ def _build(
         )
         groups = _shown_row_groups(blink, seed, keyed, reread=read.reread)
         result = describe(groups.ungroup(list(schema.column_names)), spec, schema, note=note)
+        # The problems of a table of values name its column, as a `poll()`'s do.
         skipped = SkippedValues(
             rule,
             stream_id=read.call,
             report=functools.partial(_report_problems, weakref.ref(core)),
+            values=None if values_column is None else rule,
         )
         watch = SymbolWatch(
             rule,
@@ -936,11 +941,11 @@ def _build(
             router.on_change,
             stream_id=read.call,
             on_invalid=router.on_invalid,
-            on_skipped=skipped.update,
+            on_skipped=skipped.update if values_column is None else skipped.update_values,
         )
-        refused = refused_values_of(symbol_table)
+        refused = refused_values_of(symbol_table, rule.column)
         if refused is not None:  # a table `canonicalize_symbols` returned
-            refused.follow(skipped)
+            refused.follow(skipped, field=values_column)
         # A table derived from the result keeps the blink table, and so the watch, alive.
         watch.keep_alive_with(blink)
         built.append((publisher, watch, built_step, empty))
@@ -963,6 +968,7 @@ def open_followed_read(
     plan: FollowPlan,
     note: str,
     first: FirstRead | None,
+    values_column: str | None = None,
 ) -> Table:
     """Create a followed read's result, register it, and start following its symbol table.
 
@@ -991,6 +997,8 @@ def open_followed_read(
         note: The sentences the table description adds after the dataset's summary.
         first: What `history(wait=True)` or `fetch(wait=True)` read of the call-time symbols,
             or None.
+        values_column: For a table passed where the dataset takes one value, its column,
+            which its problems name in `Field`; None for a symbol table.
 
     Returns:
         The refreshing result: every column of the dataset, with the call-time symbols'
@@ -1037,6 +1045,7 @@ def open_followed_read(
                 read,
                 symbol_table=symbol_table,
                 rule=rule,
+                values_column=values_column,
                 router=router,
                 seeded=seeded,
                 note=note,

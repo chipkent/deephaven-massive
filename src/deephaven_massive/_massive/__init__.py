@@ -39,9 +39,10 @@ Interface:
       dataset's file for a day lives.
     - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
       conversion of a page's rows to an Arrow batch with its drift report.
-    - `RequestGovernor`, `BucketState`: when each REST request of a Massive subscription may
-      start (a subscription's declared or learned pace, the pause after a 429), shared by the
-      clients of one API key, and a snapshot of one subscription's state for diagnostics.
+    - `RequestGovernor`, `BucketState`, `PauseNotice`: when each REST request of a Massive
+      subscription may start (a subscription's declared or learned pace, the pause after a
+      429), shared by the clients of one API key; a snapshot of one subscription's state for
+      diagnostics; and the start, lengthening, or end of one subscription's pause.
     - `Patience`: how long one read waits out its buckets' pauses, shared by its requests.
     - `RATE_WINDOW`: the seconds a finished request holds its slot of a paced subscription
       (61: Massive's minute and one second of margin).
@@ -116,6 +117,7 @@ from deephaven_massive._massive.rest.governor import (
     RATE_WINDOW,
     BucketState,
     Patience,
+    PauseNotice,
     RequestGovernor,
 )
 from deephaven_massive._massive.rest.response import Page
@@ -158,6 +160,7 @@ __all__ = [
     "Page",
     "ParamKind",
     "Patience",
+    "PauseNotice",
     "PlanAccess",
     "Provenance",
     "ReadColumn",
