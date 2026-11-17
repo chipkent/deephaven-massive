@@ -57,7 +57,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ExpirationDate` | String | The date the contract expires (formatted as YYYY-MM-DD). |
 | `OpenInterest` | long | The number of outstanding contracts that have not been closed or exercised, as of the last open interest update of the day. |
 | `StrikePrice` | double | The strike price of the contract. |
-| `UnderlyingTicker` | String | The ticker of the contract's underlying (e.g., SPX). Weekly and adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see root to tell them apart. Massive's `root` is the `OptionRoot` column. Massive sends an index without its `I:` prefix (`SPX`). So this column won't match `Underlying` in `m.options.chain()`, `m.options.snapshots()`, or `m.options.contracts()`, which write `I:SPX`. |
+| `UnderlyingTicker` | String | The ticker of the contract's underlying (e.g., SPX). Weekly and adjusted roots are folded in, so SPXW contracts report SPX and AMCR1 contracts report AMCR; see root to tell them apart. Massive's `root` is the `OptionRoot` column. Massive sends an index without its `I:` prefix (`SPX`). So an index here won't match `Underlying` in `m.options.chain()`, `m.options.snapshots()`, or `m.options.contracts()`, which write `I:SPX`. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>

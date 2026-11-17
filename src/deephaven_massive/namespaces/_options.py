@@ -277,9 +277,9 @@ ADMIN_MESSAGES: Final = DatasetSpec(
     # The archive's own texts, which describe these columns first, link nothing and describe
     # the wire, so each note says what the column holds.
     column_notes={
-        "Exchange": "Massive's mapping of exchange IDs: "
+        "Exchange": "Massive lists the exchange IDs at "
         "https://massive.com/docs/rest/options/market-operations/exchanges.",
-        "Retransmission": "Null on an original message, which Massive sends without the field.",
+        "Retransmission": "Null on an original message.",
     },
 )
 
@@ -341,7 +341,7 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
 
 _UNDERLYING_TICKER_NOTE: Final = (
     "Massive's `root` is the `OptionRoot` column. Massive sends an index without its `I:` "
-    "prefix (`SPX`). So this column won't match `Underlying` in `m.options.chain()`, "
+    "prefix (`SPX`). So an index here won't match `Underlying` in `m.options.chain()`, "
     "`m.options.snapshots()`, or `m.options.contracts()`, which write `I:SPX`."
 )
 """The note on `UnderlyingTicker` of the datasets whose rows carry it beside no CFI code, from
@@ -1243,9 +1243,9 @@ class OptionsNamespace(Namespace):
             order: The direction of `sort`.
             limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
                 instead.
-            filters: Further endpoint parameters, such as
-                `{"ticker_gte": "O:SPY", "ticker_lt": "O:SPZ"}`, the contracts whose tickers sort
-                from `O:SPY` up to `O:SPZ`: those of every root that starts with `SPY`.
+            filters: Further endpoint parameters. The range
+                `{"ticker_gte": "O:SPY261218", "ticker_lt": "O:SPY261219"}` holds SPY's contracts
+                that expire on 2026-12-18.
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
                 the default, takes each cause from the session's `MassiveConfig.on_error`.
 
