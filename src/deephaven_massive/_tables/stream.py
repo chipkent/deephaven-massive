@@ -59,8 +59,8 @@ session a `schema_drift` problem per field Massive's documentation lacks, and ea
 withheld rows as problems of their cause (`SessionCore.problems`), outside the flush lock. One
 odd row never fails a stream; but once
 `DROPPED_RUN_LIMIT` rows of a dataset on a channel in a row have been dropped, with none
-published between them, the dataset's streams on the channel fail, since Massive's format has
-most likely changed and the streams would otherwise stay empty without an error. A reactive
+published between them, the dataset's streams on the channel fail with a `RowDataError`,
+Massive's data, since the streams would otherwise stay empty without an error. A reactive
 stream's watchlist that fails queues the stream's failure on its session's reaper
 (`StreamSink.fail_later`), since the listener reports it on an update-graph thread. Rows that
 wait for a flush past `row_memory.HELD_BYTES_LIMIT` fail every stream of the connection
@@ -115,6 +115,7 @@ from deephaven_massive._errors import (
     LIBRARY_BUG,
     ErrorSource,
     MassiveError,
+    RowDataError,
     SessionClosedError,
     library_bug,
     required,
@@ -136,10 +137,12 @@ from deephaven_massive._tables.watchlist import SkippedValues, SymbolRowRule, Sy
 from deephaven_massive._tables.withheld import (
     FAULT,
     MARK_COLUMNS,
+    WITHHELD_LISTED,
     Failure,
     Withheld,
     failure_of,
     mark_failures,
+    reason_sentence,
     with_marks,
     withhold_rows,
 )
@@ -2009,7 +2012,7 @@ class Flusher:
                 counts, sink.policy, dataset=plan.dataset, first_reason=withheld.first_reason
             )
             if failure is not None:
-                self._fail_each([sink], MassiveError(failure, source=ErrorSource.LIBRARY))
+                self._fail_each([sink], RowDataError(failure))
                 continue
             kept.append(sink)
         return kept
@@ -2059,8 +2062,8 @@ class Flusher:
         A flush that publishes a row of the plan ends its run. Otherwise its withheld rows
         extend the run, and once it reaches `DROPPED_RUN_LIMIT` every stream that receives the
         whole channel (a `dm.ALL` stream, or one of a dataset whose rows name no symbol) fails
-        with a `MassiveError` naming the run's length and its first row's reason, a defect of
-        the library to fix (`ErrorSource.LIBRARY`), and the run starts over: nothing the
+        with a `RowDataError` naming the run's length and its first row's reason, Massive's data
+        the library cannot read (`ErrorSource.MASSIVE`), and the run starts over: nothing the
         dataset's channel sends can be read. A stream of named symbols never fails for rows it
         would not have received; its own symbols' runs mark them stale (`_counted_symbols`).
 
@@ -2086,13 +2089,10 @@ class Flusher:
         if ended is None:
             return named
         count, reason = ended
-        failure = MassiveError(
-            library_bug(
-                f"{plan.dataset}: the last {count} rows of channel {plan.channel} were withheld "
-                "because the library could not read them whole, and none was published, so "
-                f"Massive's format has most likely changed; the first: {reason}"
-            ),
-            source=ErrorSource.LIBRARY,
+        failure = RowDataError(
+            f"{plan.dataset}: the library could read none of the last {count} rows Massive sent "
+            f"on channel {plan.channel} whole, so it withheld them all and published none. "
+            f"{reason_sentence(reason)} {WITHHELD_LISTED}"
         )
         whole = plan.symbol_field is None
         failing = [sink for sink in readers if whole or sink.receives_all]
@@ -2124,13 +2124,10 @@ class Flusher:
         if ended is None:
             return False
         count, first = ended
-        failure = MassiveError(
-            library_bug(
-                f"{plan.dataset}: the last {count} rows of channel {plan.channel} with no symbol "
-                "the library could read were withheld, and none was published, so Massive's "
-                f"format has most likely changed; the first: {first}"
-            ),
-            source=ErrorSource.LIBRARY,
+        failure = RowDataError(
+            f"{plan.dataset}: the library could read the symbol of none of the last {count} rows "
+            f"Massive sent on channel {plan.channel}, so it withheld them all and published "
+            f"none. {reason_sentence(first)} {WITHHELD_LISTED}"
         )
         failing = [sink for sink in readers if not sink.receives_all]
         self._fail_each(failing, failure)

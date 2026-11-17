@@ -48,11 +48,11 @@ def test_every_cause_has_traits_and_names_a_real_policy_field() -> None:
     assert fields <= {cause.value for cause in ProblemCause}
 
 
-def test_every_row_fault_is_a_withheld_cause_of_the_library() -> None:
+def test_every_row_fault_is_a_withheld_cause_of_massive_s_data() -> None:
     for fault in RowFault:
         cause = ProblemCause(fault.value)
         assert cause.traits.action is ProblemAction.WITHHELD
-        assert cause.traits.source is ProblemSource.LIBRARY
+        assert cause.traits.source is ProblemSource.MASSIVE
 
 
 def test_a_span_tracker_keeps_each_span_s_start_and_reports_only_changes() -> None:

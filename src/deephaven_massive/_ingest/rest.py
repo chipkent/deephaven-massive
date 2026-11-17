@@ -2800,7 +2800,7 @@ class RestEndpoints:
             A static table in the dataset's schema.
 
         Errors, which the verb's call logs at the level their `is_bug` gives (DEBUG for an
-        expected one, ERROR for a defect such as `RowDataError`): `AuthenticationError` (HTTP 401),
+        expected one, ERROR for a defect): `AuthenticationError` (HTTP 401),
         `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`, or a `DELAYED` label on a subscription
         not in `MassiveConfig.delayed_subscriptions`, `RestReader._check_recency`),
         `RowDataError` for a row that breaks the schema, and `MassiveError` itself for any other

@@ -1002,7 +1002,7 @@ def test_problems_add_up_and_take_their_table_s_query(
     rows = sorted(dh_to_pylist(diagnostics.problems), key=lambda r: r["StreamId"])
     columns = ("StreamId", "Symbol", "Rows", "Occurrences", "Query", "Detail", "Source")
     assert [tuple(r[c] for c in columns) for r in rows] == [
-        (7, "AAPL", 2, 2, STREAM.query, "Price holds 'x' for ***", "library"),
+        (7, "AAPL", 2, 2, STREAM.query, "Price holds 'x' for ***", "massive"),
         (
             9,
             None,
@@ -1010,7 +1010,7 @@ def test_problems_add_up_and_take_their_table_s_query(
             1,
             "m.stocks.trades('AAPL').fetch(wait=True)",
             "Price holds 'x' for ***",
-            "library",
+            "massive",
         ),
     ]
     diagnostics.release()

@@ -7,7 +7,7 @@ import pytest
 from deephaven import arrow as dh_arrow
 
 import deephaven_massive as dm
-from deephaven_massive._errors import RowDataError
+from deephaven_massive._errors import ErrorSource, RowDataError
 from deephaven_massive._massive import RowFault
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import SymbolFailure, SymbolOutcome, SymbolRows
@@ -46,14 +46,15 @@ def test_a_read_whose_rows_are_all_withheld_fails_with_its_first_reason() -> Non
     tally.add(2, withheld(2, "first"), source="the flat files of us_stocks_sip/trades_v1")
     tally.add(1, withheld(1, "second"), source="GET /v3/trades/{stockTicker}")
     tally.add(1, withheld(1, "third"), source="the flat files of us_stocks_sip/trades_v1")
-    with pytest.raises(
-        RowDataError,
-        match=r"^stocks\.trades: the library could read none of the 4 rows of the read's "
-        r"symbols and window from the flat files of us_stocks_sip/trades_v1, "
-        r"GET /v3/trades/\{stockTicker\} whole, so Massive's format may have changed; "
-        r"the first: first",
-    ):
+    with pytest.raises(RowDataError) as info:
         tally.check("stocks.trades")
+    assert str(info.value) == (
+        "stocks.trades: the library could read none of the 4 rows of the read's symbols and "
+        "window from the flat files of us_stocks_sip/trades_v1, GET /v3/trades/{stockTicker} "
+        "whole, so it withheld them all. First. m.problems() counts the withheld rows by cause "
+        "and symbol."
+    )
+    assert (info.value.source, info.value.is_bug) == (ErrorSource.MASSIVE, False)
 
 
 def test_threads_adding_at_once_lose_no_count() -> None:

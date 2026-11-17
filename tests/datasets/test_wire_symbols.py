@@ -19,7 +19,6 @@ from deephaven_massive._datasets.wire_symbols import (
     ws_symbol,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix
-from deephaven_massive._errors import LIBRARY_BUG
 
 STK, OPT, FUT, IDX, FX, CRY = (
     AssetClass.STOCKS,
@@ -142,9 +141,9 @@ def test_the_vendored_crypto_tickers_read_back_from_their_websocket_form(
         assert canonical_from_wire(CRY, websocket) == ticker
 
 
-def test_the_unreadable_symbol_reason_names_the_spelling_and_the_bug() -> None:
+def test_the_unreadable_symbol_reason_names_the_spelling() -> None:
     assert unreadable_symbol_reason("a") == (
-        f"Massive sent the symbol 'a', a spelling the library cannot read. {LIBRARY_BUG}"
+        "Massive sent the symbol 'a', a spelling the library cannot read as Massive's ticker"
     )
 
 

@@ -870,10 +870,23 @@ def test_a_wrong_unit_in_the_time_column_fails_the_read_under_raise(
         query(m, STOCK_TRADES, symbols=dm.ALL, on_error=strict).history(
             "2025-03-03", "2025-03-03", wait=True
         )
-    assert str(info.value).startswith(
-        "stocks.trades: Massive sent rows the library cannot read whole, which it withheld "
-        "(1 under unreadable_keys); the first: timestamp unit mismatch"
+    assert str(info.value) == (
+        "stocks.trades: Massive sent rows the library cannot read whole, so it withheld them: "
+        f"1 under unreadable_keys. They came from {LOCATION.format(TRADES_0303)}. Timestamp unit "
+        "mismatch for stocks.trades.Timestamp: 1741012200000 ns is outside 1990 to 2100. To go on "
+        "without such rows, pass on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the "
+        "dataset method or to MassiveConfig, or write 'on_error: {unreadable_keys: log}' in the "
+        "settings file."
     )
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
+
+
+MALFORMED_FIX = (
+    "To skip such lines and keep the rest of the file, pass "
+    "on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the dataset method or to "
+    "MassiveConfig, or write 'on_error: {malformed_rows: log}' in the settings file."
+)
+"""The fix that ends the message of a malformed line under `malformed_rows=RAISE`."""
 
 
 MALFORMED_ROWS = (
@@ -938,13 +951,10 @@ def test_a_malformed_line_fails_the_read_under_raise(
     assert (listed.cause, listed.policy) == (ProblemCause.MALFORMED_ROWS, dm.OnError.RAISE)
     assert listed.detail.endswith("; malformed_rows=raise fails the read")
     assert str(info.value) == (
-        f"stocks.trades: {LOCATION.format(TRADES_0303)} holds a malformed line, the first: row 2 "
-        "after the header has 2 fields where the header has 13. To skip such lines and keep the "
-        "file's other rows, pass on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the "
-        "dataset method or to MassiveConfig, or write 'on_error: {malformed_rows: log}' in the "
-        f"settings file. {LIBRARY_BUG}"
+        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
+        f"line. Row 2 after the header has 2 fields where the header has 13. {MALFORMED_FIX}"
     )
-    assert info.value.source is dm.ErrorSource.LIBRARY
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
     assert "SECRET" not in str(info.value)
 
 
@@ -957,8 +967,12 @@ def test_a_call_s_malformed_rows_overrides_the_session_s(
     strict = dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)
     with dm.MassiveSession(CONFIG) as m:
         q = query(m, STOCK_TRADES, symbols=dm.ALL, on_error=strict)
-        with pytest.raises(dm.MassiveError, match="holds a malformed line"):
+        with pytest.raises(dm.MassiveError) as info:
             q.history("2025-03-03", "2025-03-03", wait=True)
+        assert str(info.value) == (
+            f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
+            f"line. Row 2 after the header has 2 fields where the header has 13. {MALFORMED_FIX}"
+        )
         kept = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
         assert kept.size > 0
 
@@ -977,9 +991,13 @@ def test_malformed_lines_at_the_end_of_a_file_fail_the_read_under_raise(
         dm.MassiveSession(
             dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE))
         ) as m,
-        pytest.raises(dm.MassiveError, match=r"the first: row 21 after the header is not UTF-8"),
+        pytest.raises(dm.MassiveError) as info,
     ):
         query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert str(info.value) == (
+        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
+        f"line. Row 21 after the header is not UTF-8 text. {MALFORMED_FIX}"
+    )
 
 
 def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
@@ -1007,7 +1025,10 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
     for symbol in ("AAPL", "MSFT"):
         failed = out[symbol]
         assert isinstance(failed, SymbolFailure)
-        assert "holds a malformed line" in str(failed.error)
+        assert str(failed.error) == (
+            f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
+            f"line. Row 2 after the header has 2 fields where the header has 13. {MALFORMED_FIX}"
+        )
         assert not failed.error.is_retryable
 
 
@@ -1048,8 +1069,12 @@ def test_rows_withheld_before_a_malformed_line_under_raise_are_listed_too(
     with dm.MassiveSession(dataclasses.replace(CONFIG, on_error=strict)) as m:
         events = capture_problems(m, monkeypatch)
         q = query(m, STOCK_TRADES, symbols=dm.ALL)
-        with pytest.raises(dm.MassiveError, match="holds a malformed line"):
+        with pytest.raises(dm.MassiveError) as info:
             q.history("2025-03-03", "2025-03-03", wait=True)
+    assert str(info.value) == (
+        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a malformed "
+        f"line. Row 21 after the header has 14 fields where the header has 13. {MALFORMED_FIX}"
+    )
     assert [e.cause for e in events] == [
         ProblemCause.UNCONVERTIBLE_VALUES,
         ProblemCause.MALFORMED_ROWS,
@@ -1059,19 +1084,18 @@ def test_rows_withheld_before_a_malformed_line_under_raise_are_listed_too(
 def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
     *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:
-    # Every row withheld is a change in the file's format, not one odd row.
+    # Every row withheld fails the read, not one odd row; the rows are Massive's data.
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000)))
     with pytest.raises(
         RowDataError,
         match=r"^stocks\.trades: the library could read none of the 1 rows of the read's "
-        r"symbols and window from the flat files of us_stocks_sip/trades_v1 whole, so Massive's "
-        r"format may have changed; the first: timestamp unit mismatch for "
-        r"stocks\.trades\.Timestamp: 1741012200000 ns is outside 1990 to 2100\. "
-        + re.escape(LIBRARY_BUG)
-        + "$",
+        r"symbols and window from the flat files of us_stocks_sip/trades_v1 whole, so it withheld "
+        r"them all\. Timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
+        r"outside 1990 to 2100\. m\.problems\(\) counts the withheld rows by cause and symbol\."
+        "$",
     ) as info:
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
-    assert info.value.source is dm.ErrorSource.LIBRARY
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
 
 
 INSIDE = 1741012200000000000  # 2025-03-03T14:30Z, in the read's window
@@ -1197,12 +1221,16 @@ def test_a_ticker_the_library_cannot_read_fails_the_read_under_raise(
         dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE))
     ) as m:
         every = query(m, STOCK_TRADES, symbols=dm.ALL)
-        with pytest.raises(
-            RowDataError,
-            match=r"^stocks\.trades: Massive sent rows the library cannot read whole, which it "
-            r"withheld \(1 under unreadable_symbols\); the first: Massive sent the symbol 'BRK/B'",
-        ):
+        with pytest.raises(RowDataError) as info:
             every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
+        assert str(info.value) == (
+            "stocks.trades: Massive sent rows the library cannot read whole, so it withheld them: "
+            f"1 under unreadable_symbols. They came from {LOCATION.format(TRADES_0303)}. Massive "
+            "sent the symbol 'BRK/B', a spelling the library cannot read as Massive's ticker. "
+            "To go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the dataset method or "
+            "to MassiveConfig, or write 'on_error: {unreadable_symbols: log}' in the settings file."
+        )
 
 
 def test_a_ticker_the_library_cannot_read_is_withheld_by_default(

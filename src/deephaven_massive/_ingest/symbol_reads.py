@@ -63,7 +63,6 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._errors import (
-    LIBRARY_BUG,
     NEW_SESSION,
     AuthenticationError,
     ErrorSource,
@@ -439,7 +438,7 @@ def _with_skipped(
         assert symbol is not None  # a split is planned only for a call of one pair
         outcome = outcomes[symbol]
         assert isinstance(outcome, SymbolRows)  # an unsent call fails no symbol
-        why = f"skipped: {unsplit.why}; the pair gets no rows. {LIBRARY_BUG}"
+        why = f"skipped: {unsplit.why}, so the pair gets no rows"
         outcomes[symbol] = replace(outcome, skipped=why)
     return outcomes
 

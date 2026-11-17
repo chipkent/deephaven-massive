@@ -168,8 +168,10 @@ from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.refused_values import refused_values_of
 from deephaven_massive._tables.watchlist import SkippedValues, SymbolRowRule, read_symbols
 from deephaven_massive._tables.withheld import (
+    WITHHELD_LISTED,
     failure_of,
     mark,
+    reason_sentence,
     with_marks,
     withhold_rows,
 )
@@ -1393,8 +1395,9 @@ class Poller:
             raise RowDataError(failure)
         if not withheld.rows.num_rows:
             raise RowDataError(
-                f"{dataset}: every one of the cycle's {table.num_rows} rows has a null poll "
-                f"key, so Massive's format may have changed; the first: {withheld.first_reason}"
+                f"{dataset}: every one of the {table.num_rows} rows Massive sent this cycle has "
+                f"a null poll key, so the library withheld them all. "
+                f"{reason_sentence(withheld.first_reason)} {WITHHELD_LISTED}"
             )
         return withheld.rows
 

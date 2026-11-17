@@ -93,7 +93,7 @@ def test_values_follow_the_columns(ledger: ProblemLedger) -> None:
     assert values["Cause"] == "unconvertible_values"
     assert values["Action"] == "WITHHELD"
     assert values["Policy"] == "log"
-    assert values["Source"] == ProblemSource.LIBRARY
+    assert values["Source"] == ProblemSource.MASSIVE
     assert values["SpanStart"] is None
     assert values["EndedAt"] is None
 

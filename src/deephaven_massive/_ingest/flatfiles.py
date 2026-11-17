@@ -1880,6 +1880,7 @@ class FlatFileHistory:
             transform.policy,
             dataset=transform.dataset,
             first_reason=withheld.first_reason,
+            where=where,
         )
         if failure is not None:
             self._core.problems(
@@ -1891,7 +1892,7 @@ class FlatFileHistory:
                     policy=transform.policy,
                 )
             )
-            raise RowDataError(f"{failure} (in {where})")
+            raise RowDataError(failure)
         return merged((before, withheld))
 
 
@@ -1934,8 +1935,8 @@ def _malformed_event(transform: _Transform, file: FlatFile, setting: OnError) ->
 def _malformed_message(dataset: str, file: FlatFile) -> str:
     """Say which file holds a malformed line, under `malformed_rows=RAISE`, and what to do.
 
-    A `RowDataError` carries it (`ErrorSource.LIBRARY`: data from Massive the library
-    can't read), and a retry of the read would meet the same line.
+    A `RowDataError` carries it: a line Massive wrote that the library cannot read is
+    Massive's data (`ErrorSource.MASSIVE`), and a retry of the read would meet the same line.
 
     Args:
         dataset: The dataset read, such as `stocks.trades`.
@@ -1945,10 +1946,11 @@ def _malformed_message(dataset: str, file: FlatFile) -> str:
         The message: the dataset, the file, the first such line's row number and fault (never
         its text), and the setting that skips such lines.
     """
+    reason = file.malformed_reason
     return (
-        f"{dataset}: {file.location} holds a malformed line, the first: "
-        f"{file.malformed_reason}. To skip such lines and keep the file's other rows, "
-        f"{policy_hint('malformed_rows', OnError.LOG)}"
+        f"{dataset}: Massive's flat file {file.location} has a malformed line. "
+        f"{reason[:1].upper()}{reason[1:]}. To skip such lines and keep the rest of the file, "
+        f"{policy_hint('malformed_rows', OnError.LOG)}."
     )
 
 

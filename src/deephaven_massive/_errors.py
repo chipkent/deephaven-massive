@@ -20,7 +20,7 @@ Three more attributes tell code what to do about an error:
 - `source`, an `ErrorSource`: what stopped the call. `MASSIVE`, the default, when Massive
   answered with a refusal or an error; `NETWORK` when no answer came through the library's
   retries; `USER` when the user's code or settings stopped it; and `LIBRARY` for a bug in the
-  library, data from Massive it cannot read included.
+  library. A row Massive sent that the library cannot read is `MASSIVE`: Massive's data.
 - `is_retryable`: whether the same call may succeed later. True for a status in
   `RETRYABLE_STATUSES` (429, 500, 502, 503, 504) and for a `NETWORK` error; false for any
   other unless the raising code says otherwise, and always false for a bug.
@@ -168,8 +168,9 @@ class ErrorSource(StrEnum):
 
     MASSIVE = "massive"
     """Massive refused or failed the request: an HTTP error such as 403 or 503, a rejected key,
-    a plan without the data, a WebSocket status message, or Massive's reference data lacking
-    what you asked for. When Massive answered, the message quotes it."""
+    a plan without the data, a WebSocket status message, Massive's reference data lacking
+    what you asked for, or a row Massive sent that the library can't read. When Massive
+    answered, the message quotes it."""
 
     NETWORK = "network"
     """No answer came: a connection failed through every retry the library made, or a live
@@ -758,11 +759,10 @@ class RowDataError(PermanentError):
     `malformed_rows=RAISE`, or, in a `poll()` cycle, a null or NaN value in one of the
     dataset's poll keys. A `fetch()` or `history()` table fails with it like any `MassiveError`,
     and a call with `wait=True` raises it; a `poll()` table fails with it, since the next cycle
-    would fail alike. Data from Massive that the library cannot read is the library's to fix, so
-    its source is `ErrorSource.LIBRARY`, a bug.
+    would fail alike. A row Massive sent that the library cannot read is Massive's data, not a
+    defect of the library: its source is `ErrorSource.MASSIVE`, it is no bug, and it is logged
+    at WARNING. Its message names the setting that skips such rows, where one does.
     """
-
-    default_source = ErrorSource.LIBRARY
 
 
 class UnavailableSymbolError(PermanentError):

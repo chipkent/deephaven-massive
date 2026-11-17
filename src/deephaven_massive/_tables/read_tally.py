@@ -3,7 +3,7 @@
 A `fetch()` or `history()` may span many REST pages, calls, and paths, or many flat files, read
 on several threads; an `AUTO` `history()` may read both. One unreadable row withholds only that
 row (`withheld.withhold_rows`); the read fails, whatever its policy, only when the library could
-read none of the rows of its symbols and window whole, the sign of a change in Massive's format.
+read none of the rows of its symbols and window whole, a problem of every row it would publish.
 The read's entry point makes its one `ReadTally` and hands it to every part of the read, which
 adds each page's or file's counts as it is read and never checks it; the entry point checks it
 once, after the read's last part: `check` for a static read, `judge` for a read by symbol.
@@ -18,12 +18,12 @@ from typing import TYPE_CHECKING
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._log_limits import log_failure
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
+from deephaven_massive._tables.withheld import WITHHELD_LISTED, Withheld, reason_sentence
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._tables.transports import SymbolOutcome
-    from deephaven_massive._tables.withheld import Withheld
 
 __all__ = ["ReadTally"]
 
@@ -97,8 +97,8 @@ class ReadTally:
             return None
         return RowDataError(
             f"{dataset}: the library could read none of the {asked} rows of the read's "
-            f"symbols and window from {sources} whole, so Massive's format may have changed; "
-            f"the first: {first}"
+            f"symbols and window from {sources} whole, so it withheld them all. "
+            f"{reason_sentence(first)} {WITHHELD_LISTED}"
         )
 
     def check(self, dataset: str) -> None:

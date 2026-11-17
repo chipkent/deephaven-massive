@@ -327,10 +327,10 @@ def test_failure_of_fails_only_a_cause_set_to_raise(fault: RowFault, setting: dm
         assert failure is None
         return
     assert failure == (
-        "stocks.trades: Massive sent rows the library cannot read whole, which it withheld "
-        f"(2 under {fault.value}); the first: the first. To go on without such rows, pass "
+        "stocks.trades: Massive sent rows the library cannot read whole, so it withheld them: "
+        f"2 under {fault.value}. The first. To go on without such rows, pass "
         f"on_error=dm.ErrorPolicy({fault.value}=dm.OnError.LOG) to the dataset method or to "
-        f"MassiveConfig, or write 'on_error: {{{fault.value}: log}}' in the settings file"
+        f"MassiveConfig, or write 'on_error: {{{fault.value}: log}}' in the settings file."
     )
 
 
@@ -341,9 +341,12 @@ def test_failure_of_names_every_failing_cause() -> None:
         dataset="d",
         first_reason="r",
     )
-    assert failure is not None
-    assert "(1 under unreadable_keys, 3 under unconvertible_values)" in failure
-    assert "dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG)" in failure
+    assert failure == (
+        "d: Massive sent rows the library cannot read whole, so it withheld them: 1 under "
+        "unreadable_keys and 3 under unconvertible_values. R. To go on without such rows, pass "
+        "on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the dataset method or to "
+        "MassiveConfig, or write 'on_error: {unreadable_keys: log}' in the settings file."
+    )
 
 
 @pytest.mark.parametrize("setting", list(dm.OnError))

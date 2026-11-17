@@ -163,12 +163,13 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
         ),
         _C.UNREADABLE_SYMBOLS: CauseTraits(
             policy="unreadable_symbols",
-            source=_LIBRARY,
+            source=_MASSIVE,
             action=ProblemAction.WITHHELD,
             span=False,
             summary="Massive sent a row whose symbol the library can't read as Massive's ticker. "
             "The row is left out.",
-            fix="Report a [bug](#report-a-bug) with the row's `Detail`.",
+            fix="Report it as a [bug](#report-a-bug) with the row's `Detail`, so it can go to "
+            "Massive.",
         ),
         _C.UNAVAILABLE_SYMBOLS: CauseTraits(
             policy="unavailable_symbols",
@@ -181,29 +182,32 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
         ),
         _C.UNREADABLE_KEYS: CauseTraits(
             policy="unreadable_keys",
-            source=_LIBRARY,
+            source=_MASSIVE,
             action=ProblemAction.WITHHELD,
             span=False,
             summary="Massive sent a row whose symbol, time, or other key the library can't read. "
             "The row is left out.",
-            fix="Report a [bug](#report-a-bug) with the row's `Detail`.",
+            fix="Report it as a [bug](#report-a-bug) with the row's `Detail`, so it can go to "
+            "Massive.",
         ),
         _C.UNCONVERTIBLE_VALUES: CauseTraits(
             policy="unconvertible_values",
-            source=_LIBRARY,
+            source=_MASSIVE,
             action=ProblemAction.WITHHELD,
             span=False,
             summary="Massive sent a row with a value the library can't read as its column's type. "
             "The row is left out.",
-            fix="Report a [bug](#report-a-bug) with the row's `Detail`.",
+            fix="Report it as a [bug](#report-a-bug) with the row's `Detail`, so it can go to "
+            "Massive.",
         ),
         _C.MALFORMED_ROWS: CauseTraits(
             policy="malformed_rows",
-            source=_LIBRARY,
+            source=_MASSIVE,
             action=ProblemAction.SKIPPED,
             span=False,
             summary="A line of a flat file isn't a row the library can read. The line is left out.",
-            fix="Report a [bug](#report-a-bug) with the row's `Detail`.",
+            fix="Report it as a [bug](#report-a-bug) with the row's `Detail`, so it can go to "
+            "Massive.",
         ),
         _C.REFUSED_VENUES: CauseTraits(
             policy="refused_venues",

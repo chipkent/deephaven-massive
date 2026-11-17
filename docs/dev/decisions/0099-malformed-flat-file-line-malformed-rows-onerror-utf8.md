@@ -2,7 +2,7 @@
 
 Date: 2026-11-10
 
-Status: accepted
+Status: partly superseded: the source of the failure under `RAISE`, a library defect, by [129](0129-unreadable-row-from-massive-is-massives-data-warning-not-bug.md)
 
 Rule 24 gives each cause of a bad row its own `dm.OnError` setting (66, 81); a flat-file line that
 is not a readable row had none: it was skipped with one WARNING per file. The setting is

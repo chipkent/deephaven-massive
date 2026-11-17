@@ -1613,7 +1613,7 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
     assert (every.failed, aapl.failed) == (False, False)
     # The client's marked rows count too.
     lost = frame([trade("AAPL", Ticker=None)] * half)
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         flusher.rows(
             "T",
             lost,
@@ -1623,12 +1623,13 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
         flusher.flush()
     assert every.failed
     assert not aapl.failed
-    error = next(r.getMessage() for r in caplog.records if "were withheld" in r.getMessage())
-    assert error.startswith(
-        f"test.trades stream 1 failed: test.trades: the last {2 * half} rows of channel T were "
-        "withheld because the library could not read them whole, and none was published, so "
-        "Massive's format has most likely changed; the first: timestamp unit mismatch for "
-        "test.trades.Timestamp"
+    [record] = [r for r in caplog.records if "could read none" in r.getMessage()]
+    assert record.levelno == logging.WARNING  # Massive's data, no bug of the library
+    assert record.getMessage() == (
+        f"test.trades stream 1 failed: test.trades: the library could read none of the last "
+        f"{2 * half} rows Massive sent on channel T whole, so it withheld them all and published "
+        "none. Timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100. "
+        "m.problems() counts the withheld rows by cause and symbol."
     )
     assert flusher._runs == {}
 
@@ -1847,14 +1848,17 @@ def test_one_flush_of_dropped_rows_at_the_limit_fails_the_streams_by_the_run_rul
 ) -> None:
     every, _ = make_sink(massive_session._core, ALL)
     flusher.routes.add("T", every)
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         flusher.rows(
             "T", frame([trade("AAPL", SipTimestamp=5)] * stream.DROPPED_RUN_LIMIT), {}, generation=1
         )
         flusher.flush()
     assert every.failed
     assert "could not publish" not in caplog.text
-    assert f"the last {stream.DROPPED_RUN_LIMIT} rows of channel T were withheld" in caplog.text
+    assert (
+        f"the library could read none of the last {stream.DROPPED_RUN_LIMIT} rows Massive sent "
+        "on channel T whole"
+    ) in caplog.text
 
 
 def test_a_flush_forgets_the_run_of_a_dataset_no_longer_routed(
@@ -2789,7 +2793,7 @@ def test_a_named_stream_never_fails_for_another_symbol_s_withheld_rows(
 
 
 def test_a_run_of_rows_with_no_readable_symbol_fails_the_named_streams(
-    massive_session: dm.MassiveSession, flusher: Flusher
+    massive_session: dm.MassiveSession, flusher: Flusher, caplog: pytest.LogCaptureFixture
 ) -> None:
     # Such a row could have been any stream's, so a run of them with nothing published fails
     # the named streams too: otherwise they would wait, empty, with no error.
@@ -2803,11 +2807,19 @@ def test_a_run_of_rows_with_no_readable_symbol_fails_the_named_streams(
     states = [aapl.failed]
     flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # a published row resets it
     flusher.flush()
-    for _ in range(2):
-        flusher.rows("T", nameless, unread_keys(*range(half)), generation=1)
-        flusher.flush()
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            flusher.rows("T", nameless, unread_keys(*range(half)), generation=1)
+            flusher.flush()
     states.append(aapl.failed)
     assert states == [False, True]
+    [record] = [r for r in caplog.records if "could read the symbol" in r.getMessage()]
+    assert record.levelno == logging.WARNING  # Massive's data, no bug of the library
+    assert record.getMessage() == (
+        "test.trades stream 1 failed: test.trades: the library could read the symbol of none of "
+        "the last 100 rows Massive sent on channel T, so it withheld them all and published "
+        "none. A T row: no Ticker. m.problems() counts the withheld rows by cause and symbol."
+    )
     assert flusher._unrouted == {}
 
 

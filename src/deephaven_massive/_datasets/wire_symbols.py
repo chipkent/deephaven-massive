@@ -46,7 +46,6 @@ from deephaven_massive._datasets.symbols import (
     symbol_class,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix
-from deephaven_massive._errors import LIBRARY_BUG
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -257,9 +256,12 @@ def unreadable_symbol_reason(text: str) -> str:
         text: The symbol as Massive sent it.
 
     Returns:
-        The reason, which names the spelling and asks for a bug report.
+        The reason, which names the spelling as Massive sent it; whether Massive's lists hold
+        it, which would make it the library's to read, the site cannot know.
     """
-    return f"Massive sent the symbol {text!r}, a spelling the library cannot read. {LIBRARY_BUG}"
+    return (
+        f"Massive sent the symbol {text!r}, a spelling the library cannot read as Massive's ticker"
+    )
 
 
 @dataclass(frozen=True, slots=True)
