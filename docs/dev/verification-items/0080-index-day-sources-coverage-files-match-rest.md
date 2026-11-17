@@ -2,7 +2,7 @@
 
 Date: 2026-11-02
 
-Status: settled 2026-11-17: every source covers the Chicago day; the day files match REST but the latest day's
+Status: settled 2026-11-17: every source covers the Chicago day, and each day file but the newest matches REST
 
 Items 52 and 60 stand until read. Settled by `tests/namespaces/test_indices_integration.py` (Indices
 Starter and S3).

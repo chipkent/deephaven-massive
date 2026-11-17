@@ -23,7 +23,7 @@ Should an index day bar carry Massive's stamp?
 
 ## Ruling
 
-On 2026-11-17, in the coordinating session, the owner ruled that an index bar of a day or
+On 2026-11-17, in a chat session, the owner ruled that an index bar of a day or
 longer carries Massive's own stamp, for now, rather than one the library moves to 00:00 New
 York time. This replaces, for indices only, the part of decision 56 that places such a bar in
 the New York day.
