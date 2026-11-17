@@ -138,7 +138,8 @@ most likely changed its format. Report it as a [bug](troubleshooting.md#report-a
 
 - A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows.
 - A `dm.ALL` stream fails after 100 unreadable rows with none read between them.
-- A stream of the symbols you list fails after 100 rows whose symbol it can't read.
+- A stream of the symbols you list fails after 100 rows whose symbol it can't read, with none
+  read between them.
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 
