@@ -54,8 +54,9 @@ Settings:
     `dm.MassiveConfig` holds a session's settings. Pass it as `dm.MassiveSession(config)`. Two
     settings match a session to your plans:
 
-    - `delayed_subscriptions` lets live tables and snapshots read a plan's delayed data, as on
-      Stocks Starter.
+    - `delayed_subscriptions` lists the subscriptions whose data Massive serves you delayed.
+      Their streams use Massive's delayed feed, and their `fetch()` and `poll()` tables accept
+      delayed data.
     - `rest_requests_per_minute` keeps a subscription's requests within the limit Massive
       gives your plan from the first request.
 
