@@ -269,7 +269,7 @@ def test_real_time_beside_an_undocumented_timeframe_is_unconfirmed() -> None:
 
 
 @pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.OPTIONS])
-def test_a_business_key_without_trades_streams_real_time(
+def test_a_snapshot_with_only_fmv_streams_real_time(
     snapshot: Callable[[str], Snapshot], asset_class: AssetClass
 ) -> None:
     # No host is guessed from the fmv field: no timeframe means the real-time host.
@@ -355,7 +355,7 @@ def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixt
 
 
 def test_a_snapshot_whose_every_row_is_refused_is_a_refused_snapshot() -> None:
-    # Massive can refuse a Basic key's snapshot with HTTP 200 and an error on every row.
+    # Massive can refuse a key's snapshot with HTTP 200 and an error on every row.
     rows = [
         {"ticker": ticker, "error": "NOT_ENTITLED", "message": "Not entitled to this ticker."}
         for ticker in ("AAPL", "MSFT")
