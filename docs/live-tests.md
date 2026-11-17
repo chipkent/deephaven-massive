@@ -174,7 +174,7 @@ Find each one's lines under `live evidence` at the end of the run, or in
 
 | Test | The question | Open an issue when |
 |---|---|---|
-| `test_the_options_cap_counts_contracts_or_topics` | Does Massive's cap of 1,000 option contracts per connection count contracts, or channel subscriptions? A contract's trades and quotes are two channel subscriptions. The library counts these against the cap. The test subscribes both for 1,000 contracts. | Massive acknowledges all 2,000 channel subscriptions. |
+| `test_the_options_cap_counts_contracts_or_topics` | Does Massive's cap of 1,000 option contracts per connection count contracts, or channel subscriptions? A contract's trades and quotes are two, and the test subscribes both for 1,000 contracts. | Massive acknowledges all 2,000 channel subscriptions. |
 | `test_an_index_minute_file_holds_its_own_new_york_day` | Does an index minute file hold every minute that REST has for its New York day? | Its evidence lists any minute the file lacks. |
 | `test_index_day_windows_and_files_across_many_indices` | Is the library right to end index day bars at 01:00 New York time? | Always. Attach its verdict lines (a), (b), and (c). |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | Does each futures bar of a session or longer hold the whole sessions that open in its UTC days? | Always. Attach its `VERDICT` lines. |
@@ -253,9 +253,9 @@ connection, a healthy connection can trip that warning.
 
 The group connects at 03:45 New York time. No stock trades before pre-market opens at 04:00, so
 these 15 minutes show what Massive sends on a quiet stocks connection. The library logs each of
-Massive's status messages as `wss://<host>/stocks status <KIND>: <message>`. After the
-subscriptions' acknowledgements, note each stocks status line up to 04:00, and the longest gap
-between them. Put them, or "none", in a comment on the tester's results issue.
+Massive's status messages as `wss://<host>/stocks status <KIND>: <message>`. In the debug log of
+the day's `stream-day/<date>-<n>/` folder, note each stocks status line from the subscriptions'
+acknowledgements to 04:00, and the longest stretch with no line. Put them, or "none", in a comment on the tester's results issue.
 
 <a id="live-run-reruns"></a>
 
