@@ -1572,8 +1572,8 @@ def test_the_rows_of_a_root_the_reference_cannot_classify_are_withheld(
     )
 
 
-def test_a_read_of_an_unclassified_root_alone_returns_no_rows_under_log(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+def test_a_read_of_an_unclassified_root_alone_fails_whatever_the_setting(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     page = [
         {"ticker": t, "root": "SPXW", "date": "2026-11-13", "underlying_ticker": "SPX"}
@@ -1585,12 +1585,9 @@ def test_a_read_of_an_unclassified_root_alone_returns_no_rows_under_log(
         wire(f"/v3/reference/options/contracts/{UNCLASSIFIED[0]}"),
         Reply({"status": "OK", "results": {}}),
     )
-    events: list[ProblemEvent] = []
-    monkeypatch.setattr(rest_session._core, "problems", events.extend)
-    # The rows were read whole; only the reference lacks an answer, so the read doesn't fail
-    # as one whose rows the library could not read.
-    assert rows(rest_session.options.open_interest(root="SPXW").fetch(wait=True)) == []
-    assert [(e.cause, e.rows) for e in events] == [(ProblemCause.UNREADABLE_SYMBOLS, 2)]
+    # Every row the read would return is withheld, so it fails under the default LOG too.
+    with pytest.raises(RowDataError, match=r"none of the 2 rows.*option root SPXW"):
+        rest_session.options.open_interest(root="SPXW").fetch(wait=True)
 
 
 def test_the_rows_of_an_unclassified_root_fail_the_read_under_raise(

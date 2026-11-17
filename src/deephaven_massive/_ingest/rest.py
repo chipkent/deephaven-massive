@@ -819,6 +819,7 @@ class RestReader:
         stop: Cancel,
         patience: Patience,
         where: str,
+        tally: ReadTally,
     ) -> list[pa.RecordBatch]:
         """Give a page's index underlyings their `I:` by option root, where the dataset asks.
 
@@ -826,9 +827,8 @@ class RestReader:
         (`option_roots.canonical_underlyings`); its rows' `Date` is filled by now, which dates
         each root's lookup. The rows of a root Massive's contracts reference can't classify
         are withheld as `unreadable_symbols` and reported as `_page_rows` reports its own
-        (`_report_withheld`). The read's `ReadTally` counts them as read whole, as they were:
-        a root the reference lacks is no sign that Massive's format changed, so a read whose
-        every row is such a root's returns no rows under `LOG` instead of failing.
+        (`_report_withheld`), and counted in `tally` as withheld, since `_page_rows` counted
+        them among the page's rows already: a read whose every row is withheld fails.
 
         Args:
             spec: The dataset.
@@ -838,6 +838,7 @@ class RestReader:
                 are charged to: `_call` may run on a fan-out worker, whose own patience would
                 not know a console caller holds the update graph's lock.
             where: The request template, for the events.
+            tally: The read's count of its rows and of those withheld.
 
         Returns:
             The rows to publish.
@@ -856,6 +857,7 @@ class RestReader:
             dataset=spec.name,
         )
         if withheld.groups:
+            tally.add(0, withheld, source=where)
             self._report_withheld(spec, withheld, where=where)
         return list(withheld.rows.to_batches())
 
@@ -1459,6 +1461,7 @@ class RestReader:
                         stop=stop,
                         patience=patience,
                         where=f"GET {template}",
+                        tally=tally,
                     )
                 )
         except WireError as error:
