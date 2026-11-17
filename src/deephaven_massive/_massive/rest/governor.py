@@ -1497,6 +1497,7 @@ class RequestGovernor:
                         ends=wall + bucket.pause_until - now,
                         ended=False,
                         at=wall,
+                        # A pause begins at a refusal, which set `last_refusal`: "" never shows.
                         refusal=bucket.last_refusal or "",
                     )
                     self._tell_pauses((notice,), only=listener)
@@ -1566,6 +1567,7 @@ class RequestGovernor:
                         ends=ends,
                         ended=True,
                         at=ends,
+                        # A pause begins at a refusal, which set `last_refusal`: "" never shows.
                         refusal=bucket.last_refusal or "",
                     )
                 )
