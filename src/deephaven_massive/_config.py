@@ -229,10 +229,9 @@ class MassiveConfig:
             no delayed feed for it.
 
             Leave a delayed subscription out, and a stream of its current data raises
-            `EntitlementError`. Its message gives the line of Python to add. A stream from a host
-            you set in `websocket_hosts` still opens, and its `Recency` shows Massive's label. A
-            `fetch()` or `poll()` table fails with the same message, and `fetch(wait=True)`
-            raises it.
+            `EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
+            `poll()` table of that data fails with the same message, and `fetch(wait=True)`
+            raises it. A stream from a host you set in `websocket_hosts` still opens.
             `history()` and other past data don't depend on this setting.
         rest_requests_per_minute: Gives each subscription's REST request limit on your plan,
             so its requests keep to it from the first one. Defaults to an empty mapping.
@@ -268,16 +267,17 @@ class MassiveConfig:
             starts with `delayed.` exactly when its subscription is listed there, and never give
             one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
 
-            A stream from a host set here opens whatever Massive's label on its data says. Its
-            `Recency` in `m.connections()` shows that label:
+            A stream from a host set here opens whether Massive labels its data real-time or
+            delayed. Its `Recency` in `m.connections()` shows the label:
 
-            - `DELAYED`: its subscription is in `delayed_subscriptions`, or Massive labels the
-              data `DELAYED`.
+            - `DELAYED`: Massive labels the data `DELAYED`, or its subscription is in
+              `delayed_subscriptions`.
             - `REALTIME`: Massive labels the data `REAL-TIME`.
-            - `UNKNOWN`: anything else, such as forex and crypto, whose data carries no label.
+            - `UNKNOWN`: Massive gave no label, or the library couldn't read one. Forex and
+              crypto data never carries a label.
 
-            When the library needs Massive's label, it reads it with one request, on the class's
-            first stream of each session.
+            Reading the label costs one REST request, made by the asset class's first stream in
+            each session.
         subscription_confirmation_timeout: Sets how many seconds Massive has to confirm a stream's
             channel before the library asks again. Defaults to 5 seconds.
 
