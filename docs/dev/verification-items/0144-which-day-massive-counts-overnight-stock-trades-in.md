@@ -21,6 +21,6 @@ trades in the next trading day. Changing the first two is a public change:
 
 Settled by `test_which_day_massive_counts_overnight_stock_trades_in` in
 `tests/namespaces/test_stocks_integration.py`, run after 20:00 New York time on the trading day
-that follows an overnight session. Massive's day begins at the first minute whose open equals
-SPY's day-bar open: 21:00, midnight, or 04:00. `test_overnight_stock_trades_stream` in the same
-file records the `Date` the library gives the trades it streams in the session.
+that follows an overnight session. It takes Massive's day to begin at the first minute whose
+open equals SPY's day-bar open: 21:00, midnight, or 04:00. `test_overnight_stock_trades_stream`
+in the same file records the `Date` the library gives the trades it streams in the session.
