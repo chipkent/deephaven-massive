@@ -1460,6 +1460,34 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
     assert not failed
 
 
+def test_a_skipped_symbol_table_row_is_shown_while_its_cycle_fails(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
+) -> None:
+    # The first cycle's read fails: the row it skipped is listed all the same, since the row
+    # holds it whether or not a read succeeds.
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
+    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    assert script.symbols == [("AAPL",)]
+    (row,) = stream_rows()
+    assert row["State"] == "RUNNING"
+    (skipped,) = problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+    assert (skipped["Symbol"], skipped["Action"], skipped["EndedAt"]) == ("msft", "SKIPPED", None)
+    assert problems_of(massive_session, dh_to_pylist, FAILED)
+    del table
+
+
 def test_a_value_canonicalize_symbols_refuses_is_shown_until_its_row_is_deleted(
     *,
     massive_session: dm.MassiveSession,

@@ -1110,6 +1110,8 @@ class Poller:
         """
         symbols, skipped_symbols = self._symbols()
         values, skipped_values = self._values()
+        # The rows hold these values whether or not the read succeeds, so they are listed now.
+        self._skipped.update(skipped_symbols, values=skipped_values)
         record = self._page_received
         seen = _RecencySeen()
         read = self._read(
@@ -1145,11 +1147,10 @@ class Poller:
             recency=seen.shown(),
         )
         core.update_streams({self._stream_id: update})
-        # A successful cycle ends an earlier run of failed cycles; the skipped values are its.
+        # A successful cycle ends an earlier run of failed cycles.
         ended = self._failures.update({}, at=int(self._began_at * 1e9))  # where rows flow again
         if ended is not None:
             core.problems([ended])
-        self._skipped.update(skipped_symbols, values=skipped_values)
         self._good_at, self._succeeded, self._failing_since = self._began_at, True, None
         if self._failing is not None:
             self._failing = None
