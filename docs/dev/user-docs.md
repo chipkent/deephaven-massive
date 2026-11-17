@@ -163,8 +163,9 @@ Each of these has a source. Check it again before you write:
 
 ### Teaching plan
 
-Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13, and the options
-example and the Yahoo conversion's own example added on 2026-11-17. Each example adds one idea,
+Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13 and the options
+example added on 2026-11-17. The Yahoo conversion became its own example on 2026-11-17, so that
+Example 6 keeps one idea. Each example adds one idea,
 in dependency order: the call pattern, static tables, charts, polling, watchlists, other sources'
 symbols, settings, streaming, options, then stopping. Each title names the idea, then what the
 example does.
