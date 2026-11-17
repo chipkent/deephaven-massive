@@ -10,6 +10,7 @@ import pytest
 from typing_extensions import override
 
 import deephaven_massive as dm
+from deephaven_massive import _massive
 from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._ingest import option_roots, rest, shared_lookup
 from deephaven_massive._ingest.option_roots import REREAD_AFTER, RootKind, canonical_underlyings
@@ -27,7 +28,11 @@ AAPL = "O:AAPL261218C00200000"
 CONTRACT = f"/v3/reference/options/contracts/{SPXW}"
 TICKERS = "/v3/reference/tickers"
 INDEX_QUERY = {"market": ["indices"], "active": ["true"], "limit": ["1000"]}
-"""The query of the first page of Massive's list of listed indices."""
+"""The query of the first page of Massive's list of active indices."""
+RETIRED_QUERY = {"market": ["indices"], "active": ["false"], "limit": ["1000"]}
+"""The query of the first page of Massive's list of retired indices."""
+LIST_QUERIES = [(TICKERS, INDEX_QUERY), (TICKERS, RETIRED_QUERY)]
+"""The requests of a whole index list of one page each."""
 
 
 @pytest.fixture
@@ -79,10 +84,7 @@ def test_an_index_named_root_s_kind_is_its_contract_s_cfi_code_asked_once(
     assert spxw(reader) is kind
     assert spxw(reader, "2026-11-14") is kind
     # The index list once, then one Contract Overview request per root, as of the first day.
-    assert fake_rest.get_queries() == [
-        (TICKERS, INDEX_QUERY),
-        (CONTRACT, {"as_of": ["2026-11-13"]}),
-    ]
+    assert fake_rest.get_queries() == [*LIST_QUERIES, (CONTRACT, {"as_of": ["2026-11-13"]})]
 
 
 def test_a_root_whose_underlying_is_no_listed_index_is_a_stock_s_with_no_lookup(
@@ -94,7 +96,7 @@ def test_a_root_whose_underlying_is_no_listed_index_is_a_stock_s_with_no_lookup(
         kind = reader.root_kind(root, underlying=underlying, contract=AAPL, day="2026-11-13")
         assert kind is RootKind.OTHER
     # The list is read once, and no root's contract is asked about.
-    assert fake_rest.get_queries() == [(TICKERS, INDEX_QUERY)]
+    assert fake_rest.get_queries() == LIST_QUERIES
 
 
 def test_a_contract_the_reference_lacks_is_unknown_and_asked_again_after_an_hour(
@@ -108,13 +110,13 @@ def test_a_contract_the_reference_lacks_is_unknown_and_asked_again_after_an_hour
     assert spxw(reader) is RootKind.UNKNOWN
     clock[0] += REREAD_AFTER - 1
     assert spxw(reader) is RootKind.UNKNOWN  # not an hour old
-    assert len(fake_rest.get_queries()) == 2
+    assert len(fake_rest.get_queries()) == 3
     clock[0] += 1
     assert spxw(reader) is RootKind.INDEX  # asked again
-    assert len(fake_rest.get_queries()) == 3
+    assert len(fake_rest.get_queries()) == 4
     clock[0] += REREAD_AFTER
-    assert spxw(reader) is RootKind.INDEX  # a kind is kept
-    assert len(fake_rest.get_queries()) == 3
+    assert spxw(reader) is RootKind.INDEX  # a kind is kept; the list is never read again
+    assert len(fake_rest.get_queries()) == 4
 
 
 def test_a_failed_lookup_raises_massive_s_error_naming_the_root_and_is_retried(
@@ -131,7 +133,7 @@ def test_a_failed_lookup_raises_massive_s_error_naming_the_root_and_is_retried(
         spxw(reader)
     assert raised.value.status == 403
     assert spxw(reader) is RootKind.OTHER  # not kept
-    assert len(fake_rest.get_queries()) == 3
+    assert len(fake_rest.get_queries()) == 4
 
 
 def test_a_failed_index_list_raises_massive_s_error_naming_the_root_and_is_retried(
@@ -147,7 +149,7 @@ def test_a_failed_index_list_raises_massive_s_error_naming_the_root_and_is_retri
         spxw(reader)
     assert raised.value.status == 403
     assert spxw(reader) is RootKind.OTHER  # read again, and SPX is not listed
-    assert len(fake_rest.get_queries()) == 2
+    assert len(fake_rest.get_queries()) == 3
 
 
 @pytest.mark.parametrize("failing", ["list", "contract"])
@@ -347,3 +349,64 @@ def test_a_kind_no_case_handles_is_refused() -> None:
     batch = page([SPXW], ["SPXW"], ["SPX"])
     with pytest.raises(AssertionError):
         canonical_underlyings([batch], text, dataset="d")  # type: ignore[arg-type]  # the point
+
+
+def test_the_index_list_is_every_page_of_the_active_and_retired_indices(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    second = f"{fake_rest.url}/v3/reference/tickers?cursor=two"
+    first = {"status": "OK", "results": [{"ticker": "I:NDX"}], "next_url": second}
+    fake_rest.reply(f"{TICKERS}?market=indices&active=true&limit=1000", Reply(first))
+    fake_rest.reply(
+        f"{TICKERS}?cursor=two", Reply({"status": "OK", "results": [{"ticker": "SPX"}]})
+    )
+    retired = {"status": "OK", "results": [{"ticker": "I:OLD"}]}
+    fake_rest.reply(f"{TICKERS}?market=indices&active=false&limit=1000", Reply(retired))
+    fake_rest.reply_default(contract("OCEICS"))
+    reader = reader_of(session)
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        # SPX is on the second page, written without its prefix; OLD is a retired index.
+        assert spxw(reader) is RootKind.INDEX
+        assert reader.root_kind("OLD", underlying="OLD", contract=SPXW, day="2020-01-02") is (
+            RootKind.INDEX
+        )
+        assert reader.root_kind("AAPL", underlying="AAPL", contract=AAPL, day="2026-11-13") is (
+            RootKind.OTHER
+        )
+    assert [q[0] for q in fake_rest.get_queries()][:3] == [TICKERS] * 3
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("3 indices in 3 pages" in m for m in messages)
+    assert any(
+        "option root AAPL names AAPL, which is not on Massive's index" in m for m in messages
+    )
+
+
+def test_an_empty_index_list_warns_that_no_underlying_gets_the_prefix(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply(TICKERS, Reply({"status": "OK", "results": []}))
+    with caplog.at_level(logging.WARNING, LOGGER):
+        assert spxw(reader_of(session)) is RootKind.OTHER
+    [record] = caplog.records
+    assert "holds no index, so no option underlying in this session gets" in record.getMessage()
+
+
+def test_a_stopped_index_list_read_lets_a_waiter_read_it_itself(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = reader_of(session)
+    stop = _massive.Cancel()
+    claimed: list[Future[frozenset[str]]] = []
+
+    def stopped(*_: object, **__: object) -> NoReturn:
+        claimed.append(reader.state.option_roots._indices._claim("index tickers")[0])
+        stop.set()  # the caller's table was released while the list was being read
+        raise _massive.WireError("cancelled", kind=_massive.WireFailure.STOPPED)
+
+    monkeypatch.setattr(reader.state.client, "pages", stopped)
+    with pytest.raises(dm.MassiveError):
+        reader.root_kind("SPXW", underlying="SPX", contract=SPXW, day="2026-11-13", cancel=stop)
+    # The stop was the caller's own: a waiter is told to read the list itself, not to fail.
+    (future,) = claimed
+    assert isinstance(future.exception(), shared_lookup._AbandonedError)
+    assert reader.state.option_roots._indices._claim("index tickers")[1]

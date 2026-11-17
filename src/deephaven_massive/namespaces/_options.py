@@ -1177,11 +1177,10 @@ class OptionsNamespace(Namespace):
         out `symbols` and narrow by `root`, `contract_type`, or `filters` to read many contracts.
 
         `Underlying` is Massive's ticker, with `I:` for an index (`I:SPX`), as in
-        `m.options.contracts()`. To tell an index from a stock, a session reads Massive's list of
-        index tickers once. A root whose bare underlying is not on it is a stock's and costs
-        nothing more. A root whose underlying is on it, such as `SPX`, or `DJT`, which a stock
-        shares, costs one request to Massive's Contract Overview the first time the session
-        reads it. This assumes every index option's underlying is on Massive's index list. If
+        `m.options.contracts()`. To tell which roots are on an index, a session reads Massive's
+        list of index tickers once. A root whose underlying isn't on that list keeps its bare
+        ticker and costs nothing more. A root whose underlying is on it, such as `SPX`, costs one
+        request to Massive's Contract Overview the first time the session meets that root. If
         Massive can't say, the root's rows keep the bare ticker (`SPX`), and the log names the
         root at `WARNING`.
 
@@ -1265,11 +1264,10 @@ class OptionsNamespace(Namespace):
         new trade.
 
         `Underlying` is Massive's ticker, with `I:` for an index (`I:SPX`), as in
-        `m.options.contracts()`. To tell an index from a stock, a session reads Massive's list of
-        index tickers once. A root whose bare underlying is not on it is a stock's and costs
-        nothing more. A root whose underlying is on it, such as `SPX`, or `DJT`, which a stock
-        shares, costs one request to Massive's Contract Overview the first time the session
-        reads it. This assumes every index option's underlying is on Massive's index list. If
+        `m.options.contracts()`. To tell which roots are on an index, a session reads Massive's
+        list of index tickers once. A root whose underlying isn't on that list keeps its bare
+        ticker and costs nothing more. A root whose underlying is on it, such as `SPX`, costs one
+        request to Massive's Contract Overview the first time the session meets that root. If
         Massive can't say, the root's rows keep the bare ticker (`SPX`), and the log names the
         root at `WARNING`.
 

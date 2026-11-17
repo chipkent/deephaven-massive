@@ -1334,7 +1334,7 @@ _INDEX_UNDERLYINGS = ("I:SPX", "I:NDX", "I:VIX", "I:RUT", "I:XSP", "I:DJX", "I:O
 
 
 @pytest.mark.verifies("143")
-@pytest.mark.requests(40)
+@pytest.mark.requests(60)
 @pytest.mark.timeout(600)
 def test_index_option_underlyings_are_on_the_index_list(
     live_session: dm.MassiveSession,
@@ -1345,23 +1345,30 @@ def test_index_option_underlyings_are_on_the_index_list(
 ) -> None:
     """Every sampled option on an index names an index on Massive's index list.
 
-    Reads Massive's whole list of listed indices, then up to 20 contracts each of `I:SPX`,
-    `I:NDX`, `I:VIX`, `I:RUT`, `I:XSP`, `I:DJX`, and `I:OEX` from `m.options.contracts()`. For
-    every contract whose CFI code marks an option on an index, its bare underlying must be on
-    the list, as the open interest's and unusual trades' pre-filter assumes. An underlying
-    Massive lists no contract for is recorded, not failed. Also records the list's pages and
-    how many distinct roots of one whole-market page of open interest name a listed index: the
-    Contract Overview requests a first whole-market read sends. A refusal skips the test,
-    quoting Massive.
+    Reads Massive's whole index list, active and retired, then up to 20 contracts each of
+    `I:SPX`, `I:NDX`, `I:VIX`, `I:RUT`, `I:XSP`, `I:DJX`, and `I:OEX` from
+    `m.options.contracts()`. For every contract whose CFI code marks an option on an index:
+
+    - its bare underlying must be on the list;
+    - the bare underlying one whole-market page of open interest gives its root, the value the
+      open interest's and unusual trades' pre-filter reads, must be on the list too.
+
+    An underlying Massive lists no contract for is recorded, not failed. Also records the list's
+    pages and how many distinct roots of that page name a listed index: the Contract Overview
+    requests a first whole-market read sends. The `requests` marker assumes the list fits in
+    50 pages of 1,000. A refusal skips the test, quoting Massive.
     """
     tickers = source(Transport.REST, "/v3/reference/tickers")
-    query = {"market": "indices", "active": "true", "limit": 1000}
     listed: set[str] = set()
     pages = 0
-    for found in live_rest.pages(tickers, {}, query, bucket=OTHER):
-        pages += 1
-        listed |= {str(r["ticker"]).removeprefix("I:") for r in found.rows if r.get("ticker")}
+    for active in ("true", "false"):
+        query = {"market": "indices", "active": active, "limit": 1000}
+        for found in live_rest.pages(tickers, {}, query, bucket=OTHER):
+            pages += 1
+            listed |= {str(r["ticker"]).removeprefix("I:") for r in found.rows if r.get("ticker")}
     evidence(f"index list: {len(listed)} indices in {pages} pages")
+    market = _page(live_rest, _OPEN_INTEREST, {"limit": 50000})
+    roots = {str(r.get("root")): str(r.get("underlying_ticker")) for r in market}
     off_list: list[str] = []
     compared = 0
     for underlying in _INDEX_UNDERLYINGS:
@@ -1371,12 +1378,12 @@ def test_index_option_underlyings_are_on_the_index_list(
         on_index = [r for r in rows if is_index_option(str(r.get("Cfi") or ""))]
         compared += len(on_index)
         named = sorted({str(r["Underlying"]) for r in on_index})
-        evidence(
-            f"{underlying}: {len(rows)} contracts, {len(on_index)} on an index, naming {named}"
-        )
+        evidence(f"{underlying}: {len(rows)} contracts, {len(on_index)} on an index: {named}")
         off_list += [n for n in named if n.removeprefix("I:") not in listed]
-    market = _page(live_rest, _OPEN_INTEREST, {"limit": 50000})
-    roots = {str(r.get("root")): str(r.get("underlying_ticker")) for r in market}
+        for root in sorted({str(r["OptionRoot"]) for r in on_index} & roots.keys()):
+            evidence(f"open interest of root {root} names {roots[root]!r}")
+            if roots[root] not in listed:
+                off_list.append(f"open interest root {root}: {roots[root]!r}")
     index_named = sorted(root for root, under in roots.items() if under in listed)
     evidence(
         f"one whole-market page of open interest: {len(market)} rows, {len(roots)} roots, "

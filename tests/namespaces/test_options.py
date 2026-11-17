@@ -1319,6 +1319,7 @@ def test_open_interest_sends_its_filters_and_reads_each_contract_s_day(
         ),
         # SPY is no listed index, so its root is a stock's, with no further request.
         (INDEX_LIST, {"market": "indices", "active": "true", "limit": "1000"}),
+        (INDEX_LIST, {"market": "indices", "active": "false", "limit": "1000"}),
     ]
     picked = ("Symbol", "OptionRoot", "Date", "ContractType", "OpenInterest")
     assert [tuple(r[c] for c in picked) for r in out] == [
@@ -1405,6 +1406,7 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
     # its trade's New York trading day.
     assert references == [
         (INDEX_LIST, {"market": "indices", "active": "true", "limit": "1000"}),
+        (INDEX_LIST, {"market": "indices", "active": "false", "limit": "1000"}),
         (spxw, {"as_of": "2025-10-29"}),
     ]
     assert sent["ticker.any_of"] == "O:SPY260123C00687000"

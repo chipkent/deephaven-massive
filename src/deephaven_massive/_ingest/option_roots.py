@@ -7,12 +7,13 @@ is an index (`I:SPX`) or a stock. Massive's contracts reference can: a contract'
 so one contract of a root answers for every contract of that root. Most roots are on stocks, so
 `OptionRootKinds` first reads Massive's list of index tickers, once per session
 (`/v3/reference/tickers?market=indices`): a root whose bare underlying is not a listed index
-(`AAPL`) is a stock's, with no further request. Only a root whose bare underlying is a listed
-index's ticker (`SPX`, and `DJT`, which a stock shares) gets the reference of its first contract
+(`AAPL`) is a stock's or a fund's, with no further request. Only a root whose bare underlying
+is a listed index's ticker (`SPX`) gets the reference of its first contract
 (`/v3/reference/options/contracts/{options_ticker}`, as of that row's trading day). Every
 answer is kept for the session and shared between every caller, so a stock and an index that
 share a bare ticker each get their own root's answer. The pre-filter assumes the underlying of
-every option on an index is a ticker on Massive's index list, which a live test checks.
+every option on an index is a ticker on Massive's index list, active or retired, which a live
+test checks; an index missing from it would keep its bare ticker with no warning.
 
 The REST transport (`_ingest/rest.py`) holds the session's kinds in its `RestState` and reads
 them through a `RestReader`, whose patience and error conversion the lookups use. The
@@ -164,9 +165,23 @@ class OptionRootKinds:
             known = None
         if known is not None:
             return known
-        if underlying not in self._index_names(
-            root, reader=reader, patience=patience, cancel=cancel
-        ):
+        try:
+            indices = self._index_names(reader=reader, patience=patience, cancel=cancel)
+        except MassiveError as public:
+            named = copy_error(
+                public,
+                f"option root {root!r} cannot be classified as an index or not: reading "
+                f"Massive's index ticker list failed: {public}",
+            )
+            raise named from public
+        if underlying not in indices:
+            logger.debug(
+                "%s: option root %s names %s, which is not on Massive's index ticker list, so "
+                "its contracts are not options on an index; no request",
+                self._label,
+                root,
+                underlying,
+            )
             return RootKind.OTHER
         try:
             return self._ask(
@@ -186,17 +201,19 @@ class OptionRootKinds:
             raise named from public
 
     def _index_names(
-        self, root: str, *, reader: TickerListReader, patience: Patience, cancel: Cancel | None
+        self, *, reader: TickerListReader, patience: Patience, cancel: Cancel | None
     ) -> frozenset[str]:
         """Return the bare tickers of Massive's indices, reading the list on first need.
 
-        The first caller reads every page of `/v3/reference/tickers?market=indices&active=true`
-        at the largest page the path documents; a caller that arrives meanwhile waits for that
-        read within its own patience. The list is kept for the session. A failed read is not
-        kept, so the next call reads it again.
+        The first caller reads every page of `/v3/reference/tickers?market=indices`, first the
+        active indices and then the inactive ones, so a past day's index that Massive has since
+        retired is still found, at the largest page the path documents; a caller that arrives
+        meanwhile waits for that read within its own patience. The list is kept for the whole
+        session and never read again: almost every root misses it, so a re-read on a miss, as
+        the crypto list has, would read it again for every stock. A failed read is not kept, so
+        the next call reads it again.
 
         Args:
-            root: The root being classified, for the error message.
             reader: The read the lookup serves, whose error conversion it uses.
             patience: The read's patience.
             cancel: The caller's stop token, or None.
@@ -204,7 +221,7 @@ class OptionRootKinds:
         Returns:
             Each listed index ticker without its `I:` prefix, such as `"SPX"`.
 
-        A failed read raises its public `MassiveError`, its message naming the root.
+        A failed read raises its public `MassiveError`; `kind` names the root.
         """
         known = self._indices.known(_INDEX_LIST_KEY)
         if known is not None:
@@ -234,12 +251,7 @@ class OptionRootKinds:
                 public,
             )
             self._indices.fail(claim, public, "the read failed", stopped=stopped)
-            named = copy_error(
-                public,
-                f"option root {root!r} cannot be classified as an index or not: reading "
-                f"Massive's index ticker list failed: {public}",
-            )
-            raise named from error
+            raise public from error
         except BaseException as error:
             self._indices.fail(claim, error, "the read failed")
             if source_of(error) is ErrorSource.LIBRARY:
@@ -253,7 +265,7 @@ class OptionRootKinds:
     def _read_indices(
         self, reader: TickerListReader, *, patience: Patience, cancel: Cancel | None
     ) -> frozenset[str]:
-        """Read every page of Massive's list of listed indices.
+        """Read every page of Massive's lists of active and inactive indices.
 
         Args:
             reader: The read the lookup serves.
@@ -266,23 +278,33 @@ class OptionRootKinds:
         A failed request raises its `WireError`.
         """
         path = reader.rest_path(_TICKERS_PATH)
-        query = {"market": "indices", "active": True, "limit": largest_page(path)}
         names: set[str] = set()
         pages = 0
-        for page in self._client.pages(
-            path, {}, query, bucket=OTHER, cancel=cancel, patience=patience
-        ):
-            pages += 1
-            for row in page.rows:
-                ticker = row.get("ticker")
-                if isinstance(ticker, str) and ticker.startswith(_INDEX_PREFIX):
-                    names.add(ticker.removeprefix(_INDEX_PREFIX))
-        logger.debug(
-            "%s: read Massive's index ticker list: %d indices in %d pages",
-            self._label,
-            len(names),
-            pages,
-        )
+        for active in (True, False):
+            query = {"market": "indices", "active": active, "limit": largest_page(path)}
+            for page in self._client.pages(
+                path, {}, query, bucket=OTHER, cancel=cancel, patience=patience
+            ):
+                pages += 1
+                for row in page.rows:
+                    ticker = row.get("ticker")
+                    # A row without a ticker names no index; Massive marks every row's optional.
+                    if isinstance(ticker, str):
+                        names.add(ticker.removeprefix(_INDEX_PREFIX))
+        if names:
+            logger.debug(
+                "%s: read Massive's index ticker list: %d indices in %d pages",
+                self._label,
+                len(names),
+                pages,
+            )
+        else:
+            logger.warning(
+                "%s: Massive's index ticker list (%s?market=indices) holds no index, so no "
+                "option underlying in this session gets the I: prefix of an index",
+                self._label,
+                _TICKERS_PATH,
+            )
         return frozenset(names)
 
     def _ask(

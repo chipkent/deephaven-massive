@@ -798,7 +798,6 @@ class RestReader:
         """
         if not spec.underlying_by_root:
             return rows
-
         return canonical_underlyings(
             rows,
             functools.partial(self.root_kind, patience=patience, cancel=stop),
