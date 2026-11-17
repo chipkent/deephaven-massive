@@ -754,6 +754,25 @@ def test_a_read_no_caller_waits_for_waits_out_max_outage_of_pauses(
     assert seconds.seen == [600.0 if stop is None else 300.0]
 
 
+def test_a_poll_cycle_waits_out_max_outage_of_pauses(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A poll() cycle feeds a live table: its pauses are limited by max_outage (300 s by
+    # default), not the ten minutes of a read its caller waits for.
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
+    seconds = _Seconds(monkeypatch)
+    q = query(session, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, FetchQuery)
+    table = q.poll(60)
+    pause = threading.Event()
+    for _ in range(3000):
+        if seconds.seen:
+            break
+        pause.wait(0.01)
+    session.release(table)
+    assert seconds.seen[:1] == [300.0]
+
+
 def test_a_stream_s_lookups_wait_out_max_outage_and_a_host_decision_ten_minutes(
     *,
     session: dm.MassiveSession,
