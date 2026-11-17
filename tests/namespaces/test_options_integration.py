@@ -339,14 +339,14 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
         if rows:
             ticker = str(rows[0]["ticker"])
             outcome = _library(
-                partial(live_session.options.contracts, symbols=ticker, as_of=listed), table_rows
+                partial(live_session.options.contract_details, ticker, as_of=listed), table_rows
             )
             shown = (
                 outcome
                 if isinstance(outcome, str)
                 else [{k: r.get(k) for k in _DELIVERABLE_COLUMNS} for r in outcome]
             )
-            evidence(f"    library contracts({ticker}): {shown}")
+            evidence(f"    library contract_details({ticker}): {shown}")
     assert found
     assert not listed_extra, f"standard contracts with further deliverables: {listed_extra[:5]}"
 
@@ -1085,7 +1085,7 @@ def test_massive_answers_contract_details_of_a_stock_ticker(
 ) -> None:
     """What the contract overview answers for `AAPL`, a stock rather than a contract.
 
-    `m.options.contracts` refuses an underlying passed as `symbols` and names
-    `underlying=`. DATA counts the rows describing a contract named `AAPL`.
+    `m.options.contract_details` refuses an underlying passed as `symbols` and names
+    `m.options.contracts`. DATA counts the rows describing a contract named `AAPL`.
     """
     assert bad_values.ask_all(live_rest, bad_values.CONTRACT_SYMBOL, evidence)

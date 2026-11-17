@@ -2086,13 +2086,12 @@ class RestReader:
 
         A `poll()` over a reactive symbol table cannot plan its paths until it reads the
         table, but the parameters are known now, and the table may come to hold a symbol of
-        any path `fetch_paths` routes a symbol to: the `detail_path` when the dataset has one,
-        else `fetch_path` and the per-class paths. So a parameter any of them lacks fails now,
-        as it would for the same symbols passed in code, rather than leaving that path's
-        symbols out of every cycle. A `fetch()` that follows the table checks the same. A poll
-        with a value table and static symbols, or none, reads the paths `fetch_paths` gives
-        those symbols, and only those are checked, with the parameter each value is sent as
-        (`Request.for_value`).
+        any path `fetch_paths` routes a symbol to: `fetch_path` and the per-class paths. So a
+        parameter any of them lacks fails now, as it would for the same symbols passed in code,
+        rather than leaving that path's symbols out of every cycle. A `fetch()` that follows the
+        table checks the same. A poll with a value table and static symbols, or none, reads the
+        paths `fetch_paths` gives those symbols, and only those are checked, with the parameter
+        each value is sent as (`Request.for_value`).
 
         Args:
             spec: The dataset, with a fetch path.
@@ -2104,14 +2103,9 @@ class RestReader:
         symbols = request.symbols
         sent = request if request.value_table is None else request.for_value(_ANY_VALUE)
         if isinstance(symbols, SymbolTable):
-            # Every path a symbol of the table could be read on (`fetch_paths`): a dataset with
-            # a detail path reads every named symbol there, and an empty table reads nothing.
+            # Every path a symbol of the table could be read on (`fetch_paths`).
             default = required(spec.fetch_path, f"{spec.name}'s fetch path")
-            templates = (
-                [spec.detail_path]
-                if spec.detail_path is not None
-                else [default, *spec.fetch_paths_by_class.values()]
-            )
+            templates = [default, *spec.fetch_paths_by_class.values()]
         else:
             templates = [template for template, _ in fetch_paths(spec, symbols)]
         for template in templates:
@@ -2936,7 +2930,7 @@ class RestEndpoints:
         if isinstance(request.symbols, SymbolTable) or request.value_table is not None:
             reader.check_parameters(spec, request)
             # The table's symbols choose among every fetch path at each cycle.
-            candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
+            candidates = (spec.fetch_path, *spec.fetch_paths_by_class.values())
             used = [path for path in candidates if path is not None]
         else:
             # Crypto pairs are split by each cycle's read (`_plan_cycle`), not here.

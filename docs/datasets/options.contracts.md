@@ -7,7 +7,7 @@ Reference data on options contracts: type, exercise style, expiration, and strik
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.options.contracts(symbols=None, *, underlying=None, contract_type=None, as_of=None, expired=False, sort=None, order=None, limit=None, filters=None, on_error=None)
+m.options.contracts(underlying=None, *, contract_type=None, as_of=None, expired=False, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -22,14 +22,13 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 | Argument | Description |
 | --- | --- |
-| [`symbols`](README.md#symbols) | Option contracts to describe; leave it out to list contracts. `dm.ALL` is refused; leave `symbols` out instead. |
-| `underlying` | Only contracts of this underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A table of them in a `Symbol` column is read value by value. A live table is followed. In a static table, one failed value fails the call. |
+| `underlying` | Only contracts of this underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`; leave it out for every underlying. A table of them in a `Symbol` column is read value by value. A live table is followed. In a static table, one failed value fails the call. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`as_of`](README.md#as_of) | The day whose contracts to list; leave it out for today. |
 | `expired` | True lists only expired contracts; False, the default, those still trading. |
 | [`sort`](README.md#sort) | `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`. |
 | [`order`](README.md#order) | The direction of `sort`. |
-| [`limit`](README.md#limit) | The most rows in total without `symbols`. With them, it counts per contract, so it has no effect. |
+| [`limit`](README.md#limit) | The most rows in total. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"strike_price_gte": 100}`. Keys: `expiration_date`, `expiration_date_gt`, `expiration_date_gte`, `expiration_date_lt`, `expiration_date_lte`, `strike_price`, `strike_price_gt`, `strike_price_gte`, `strike_price_lt`, `strike_price_lte`. |
 | [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
@@ -37,13 +36,13 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 How recent the data is on each of Massive's plans, and how far back its history goes, as Massive's pages state them.
 
-| Plan | All Contracts (REST) | Contract Overview (REST) |
-| --- | --- | --- |
-| Options Basic | Updated daily, 2 years | Updated daily, 2 years |
-| Options Starter | Updated daily, All history | Updated daily, All history |
-| Options Developer | Updated daily, All history | Updated daily, All history |
-| Options Advanced | Updated daily, All history | Updated daily, All history |
-| Options Business | Updated daily, All history | Updated daily, All history |
+| Plan | All Contracts (REST) |
+| --- | --- |
+| Options Basic | Updated daily, 2 years |
+| Options Starter | Updated daily, All history |
+| Options Developer | Updated daily, All history |
+| Options Advanced | Updated daily, All history |
+| Options Business | Updated daily, All history |
 
 ## Columns
 
@@ -104,7 +103,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 ## Massive's documentation
 
 - [All Contracts (REST)](https://massive.com/docs/rest/options/contracts/all-contracts)
-- [Contract Overview (REST)](https://massive.com/docs/rest/options/contracts/contract-overview)
 
 ---
 

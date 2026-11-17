@@ -3,8 +3,8 @@
 Datasets: `trades`, `last_trade` (each contract's latest trade), `quotes`, `bars`,
 `previous_day_bar` (each contract's bar of the previous session), `fmv` (fair market value),
 `admin_messages` (OPRA's administrative messages and FLEX trade notices), `chain` (one underlying's
-option chain), `snapshots` (the current state of chosen contracts), `contracts` (contract
-reference data), and `daily_open_close`.
+option chain), `snapshots` (the current state of chosen contracts), `contracts` (the contracts
+list), `contract_details` (named contracts' reference data), and `daily_open_close`.
 
 Each dataset is one factory method on `OptionsNamespace`. The method validates its arguments and
 returns a query; nothing touches the network until a verb is called on the query. This module owns
@@ -297,13 +297,19 @@ CONTRACTS: Final = DatasetSpec(
     summary="Reference data on options contracts: type, exercise style, expiration, and strike.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CONTRACTS,
-    detail_path=_CONTRACT,
-    keys={
-        (_REST, _CONTRACTS): _keys("Ticker", fanout="UnderlyingTicker"),
-        # The per-contract rows carry their ticker, although the request names it too.
-        (_REST, _CONTRACT): _keys("Ticker", fanout="UnderlyingTicker"),
-    },
-    symbol_param="ticker",
+    keys={(_REST, _CONTRACTS): _keys("Ticker", fanout="UnderlyingTicker")},
+    # Massive's page marks `ticker` deprecated here and points to the per-contract endpoint.
+    symbol_params_elsewhere={"ticker": "read named contracts with m.options.contract_details()"},
+)
+CONTRACT_DETAILS: Final = DatasetSpec(
+    name="options.contract_details",
+    summary="Reference data on named options contracts: type, exercise style, expiration, and "
+    "strike.",
+    asset_class=AssetClass.OPTIONS,
+    fetch_path=_CONTRACT,
+    # The rows carry their ticker, although the request names it too.
+    keys={(_REST, _CONTRACT): _keys("Ticker", fanout="UnderlyingTicker")},
+    per_symbol=True,
 )
 
 DAILY_OPEN_CLOSE: Final = DatasetSpec(
@@ -331,6 +337,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
     CHAIN,
     SNAPSHOTS,
     CONTRACTS,
+    CONTRACT_DETAILS,
     DAILY_OPEN_CLOSE,
 )
 """Every dataset of `m.options`, one `DatasetSpec` each, in the order of the namespace's methods."""
@@ -906,9 +913,8 @@ class OptionsNamespace(Namespace):
     )
     def contracts(
         self,
-        symbols: SymbolsLike | None = None,
-        *,
         underlying: str | Table | None = None,
+        *,
         contract_type: ContractType | None = None,
         as_of: DateLike | None = None,
         expired: bool = False,
@@ -920,27 +926,24 @@ class OptionsNamespace(Namespace):
     ) -> FetchQuery:
         """Reference data on options contracts: type, exercise style, expiration, and strike.
 
-        Each row holds one contract's underlying, shares per contract, primary exchange, and CFI
-        code. Leave out `symbols` to list contracts, narrowed by the other arguments. Name contracts
-        in `symbols` to read just those; then only `as_of` applies, and any other argument raises
-        `ValueError` when a method reads the query.
+        Lists contracts, such as every contract of one underlying, to find their tickers; each row
+        holds one contract's underlying, shares per contract, primary exchange, and CFI code.
+        `contract_details()` reads contracts you can already name.
 
         A standard contract has `SharesPerContract` of 100. An adjusted contract keeps its own root,
         such as `AAPL1`, and lists its further deliverables in `AdditionalUnderlyings`.
 
         Args:
-            symbols: Option contracts to describe; leave it out to list contracts. `dm.ALL` is
-                refused; leave `symbols` out instead.
             underlying: Only contracts of this underlying's exact Massive ticker, such as `"AAPL"`
-                or `"I:SPX"`. A table of them in a `Symbol` column is read value by value. A live
-                table is followed. In a static table, one failed value fails the call.
+                or `"I:SPX"`; leave it out for every underlying. A table of them in a `Symbol`
+                column is read value by value. A live table is followed. In a static table, one
+                failed value fails the call.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
             expired: True lists only expired contracts; False, the default, those still trading.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
-            limit: The most rows in total without `symbols`. With them, it counts per contract, so
-                it has no effect.
+            limit: The most rows in total.
             filters: Further endpoint parameters, such as `{"strike_price_gte": 100}`.
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
                 the default, takes each cause from the session's `MassiveConfig.on_error`.
@@ -952,11 +955,8 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `symbols` is `dm.ALL` or empty;
-                - a ticker in `symbols` isn't Massive's exact ticker of an option contract; a stock
-                  or index ticker's message says to pass it as `underlying=`;
-                - a table has no `Symbol` column;
                 - `underlying` isn't Massive's exact ticker, or is a currency or crypto pair;
+                - a table has no `Symbol` column;
                 - `as_of` is a `datetime` or isn't a date;
                 - `limit` isn't positive;
                 - a filter isn't one the dataset takes, or its value doesn't fit.
@@ -964,19 +964,8 @@ class OptionsNamespace(Namespace):
         Example:
             ::
 
-                listed = m.options.contracts(underlying="NVDA", expired=True).fetch()
+                listed = m.options.contracts("NVDA", expired=True).fetch()
         """
-        if (
-            isinstance(symbols, str)
-            and symbol_class(symbols) in UNDERLYING_CLASSES
-            and is_canonical(ClassFromPrefix.ANY, symbols)
-        ):
-            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
-            logger.debug("options.contracts refused: symbols=%r is an underlying", symbols)
-            raise ValueError(
-                f"{symbols!r} is an underlying, not an options contract: list its contracts "
-                f"with m.options.contracts(underlying={symbols!r})"
-            )
         values = (
             value_table(
                 underlying, argument="underlying", parameter="underlying_ticker", underlying=True
@@ -997,13 +986,73 @@ class OptionsNamespace(Namespace):
             self._core,
             CONTRACTS,
             query_type=FetchQuery,
-            symbols=symbols,
-            symbols_optional=True,
-            all_alternative="use m.options.contracts() without symbols",
             params=params,
             filters=filters,
             limit=limit,
             values=values,
+            on_error=on_error,
+        )
+
+    @raises_through(build_query, day_argument)
+    def contract_details(
+        self,
+        symbols: SymbolsLike,
+        *,
+        as_of: DateLike | None = None,
+        on_error: ErrorPolicy | None = None,
+    ) -> FetchQuery:
+        """Reference data on named options contracts: type, exercise style, expiration, and strike.
+
+        Reads the contracts you name, one request each; each row holds one contract's underlying,
+        shares per contract, primary exchange, and CFI code, the columns `contracts()` lists. A
+        contract Massive doesn't know gets no row, and the library logs a WARNING.
+
+        Args:
+            symbols: Option contracts to describe. `dm.ALL` is refused; `contracts()` lists
+                contracts.
+            as_of: The day the details are as of; leave it out for today.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.contract_details.md.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If:
+                - `symbols` is None, empty, or `dm.ALL`;
+                - a ticker isn't Massive's exact ticker of an option contract; a stock or index
+                  ticker passed alone gets a message that says to list its contracts with
+                  `contracts()`;
+                - a table has no `Symbol` column;
+                - `as_of` is a `datetime` or isn't a date.
+
+        Example:
+            ::
+
+                details = m.options.contract_details("O:AAPL250117C00150000").fetch()
+        """
+        if (
+            isinstance(symbols, str)
+            and symbol_class(symbols) in UNDERLYING_CLASSES
+            and is_canonical(ClassFromPrefix.ANY, symbols)
+        ):
+            # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
+            logger.debug("options.contract_details refused: symbols=%r is an underlying", symbols)
+            raise ValueError(
+                f"{symbols!r} is an underlying, not an options contract: list its contracts "
+                f"with m.options.contracts({symbols!r})"
+            )
+        return build_query(
+            self._core,
+            CONTRACT_DETAILS,
+            query_type=FetchQuery,
+            symbols=symbols,
+            all_alternative="use m.options.contracts() to list contracts",
+            params={
+                "as_of": None if as_of is None else day_argument(CONTRACT_DETAILS, as_of, "as_of")
+            },
             on_error=on_error,
         )
 
