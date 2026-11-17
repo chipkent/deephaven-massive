@@ -107,31 +107,37 @@ applied. Under `raise`, the error that fails the call names the problem.
 
 The library never publishes a row of Massive's data it can't read whole: it leaves the row
 out. Three causes cover such rows: `unreadable_keys`, `unreadable_symbols`, and
-`unconvertible_values`. Their setting decides only whether the table fails and how loudly the
-log reports the row.
+`unconvertible_values`. So a result can be partial. Say Massive answers a `fetch()` with 5
+rows, and the library can't read one of them. The table gets 4 rows, `m.problems()` lists the
+fifth, and under `log` the log warns once.
 
-Whatever the setting, a read or stream fails when the library can read none of the rows it
+When you need complete data, set every cause to `raise` for the call, such as
+`m.stocks.trades("AAPL", on_error=dm.ErrorPolicy(dm.OnError.RAISE))`. The call then fails at
+the first row it leaves out. To do the same for every call, pass that policy to
+`MassiveConfig(on_error=...)`.
+
+Whatever the setting, a call or live table fails when the library can read none of the rows it
 would receive, since Massive's format has most likely changed. Rows outside the call's symbols
 or range are ignored for this rule:
 
-| Read or stream | Fails when the library can read none of |
+| Call or table | Fails when the library can read none of |
 |---|---|
 | A `fetch()` or `history()` from REST | The rows of all its pages. |
 | A `history()` from flat files | The rows of all its files. |
-| A `fetch()` or `history()` that follows a symbol table | The rows of one of its reads. The symbols of that read fail, and the table goes on. |
-| A `poll()` table | The rows of one cycle's read. |
+| A `fetch()` or `history()` that follows a symbol table | The rows of one batch of its symbols. Those symbols fail, and the table goes on. |
+| A `poll()` table | The rows of one cycle. |
 | A `dm.ALL` stream | 100 consecutive rows of its channel. |
 | A stream of named symbols | 100 consecutive rows whose symbol the library can't read. |
 
 A stream of named symbols keeps running when one symbol's last 100 rows were all left out.
 `m.problems()` lists that symbol under `stale_symbol` until one of its rows is published.
 
-Two reads are still judged in parts
+Two kinds of call are still judged in parts
 ([#704](https://github.com/chipkent/deephaven-massive/issues/704)). An `AUTO` `history()` that
-fills days from REST judges its files and each REST read apart: one read per filled day, or
-one for all the filled days of bars a day or longer. So a REST read whose rows are all
-unreadable fails the call. And a `fetch()` or `poll()` with a value table judges each value's
-read apart, so one value whose rows are all unreadable fails the call or the table.
+fills days from REST judges its files and each REST fill apart: one fill per day, or one for
+all the filled days of bars a day or longer. So a REST fill whose rows are all unreadable fails
+the call. And a `fetch()` or `poll()` with a value table judges each value apart, so one value
+whose rows are all unreadable fails the call or the table.
 
 Under `raise`:
 
