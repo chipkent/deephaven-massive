@@ -127,7 +127,8 @@ def test_session_change_is_the_chain_s_day_change(
 
     Runs `same_field.session_change` on up to 20 traded contracts of SPY's chain. The last
     evidence line is the verdict; each contract's line gives both reads, with the session's
-    early, regular, and late trading changes. A run after the regular session ends also shows
-    whether `session.change` counts late trades that `day.change` does not.
+    early, regular, and late trading changes. The line before the verdict gives the verdict for
+    the contracts that traded late, or says none did: a run after the regular session ends
+    shows whether `session.change` counts late trades that `day.change` does not.
     """
     assert all(same_field.session_change(live_rest, evidence).rows)

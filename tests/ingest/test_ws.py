@@ -2387,6 +2387,23 @@ def test_an_unread_pair_list_fails_the_stream_after_max_outage(
     assert len(lookups(ws_session)) > 2  # read again on the backoff until then
 
 
+def test_the_wait_for_an_unread_pair_list_stops_doubling_at_max_reconnect_backoff(
+    ws_session: WsSession,
+) -> None:
+    # However many reads of the list fail, the next waits max_reconnect_backoff (120 s, within
+    # the default max_outage): the doubling stops there instead of overflowing a float.
+    connections = ws_session.connections
+    result = ws_session.query(CRYPTO, ["X:BTCUSD"]).append_only()
+    ws_session.subscribed("XT.BTC-USD")
+    (stream_id,) = connections._mine
+    busy = dm.MassiveError("HTTP 503: busy", status=503, is_retryable=True)
+    state = ws._PairState("crypto.trades", DEFAULT_POLICY, since=time.monotonic(), tries=1100)
+    delay = connections._wait(stream_id, state, waiting=["X:DOTUSD"], failure=busy)
+    assert state.tries == 1101
+    assert delay == ws_session.config.max_reconnect_backoff
+    ws_session.session.release(result)
+
+
 def test_a_max_outage_of_zero_fails_at_the_first_unread_list(
     make_ws_session: Callable[..., WsSession],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],

@@ -220,7 +220,9 @@ def session_change(client: RestClient, evidence: Callable[[str], None]) -> Outco
     `_PERCENT_TOLERANCE`; DIFFERENT when one does not; INCONCLUSIVE when fewer compare.
     Massive describes both as the price change from the previous trading day, but the session
     also has early, regular, and late trading changes, so `session.change` may count trades
-    `day.change` does not: a run after the regular session ends tests that.
+    `day.change` does not. The compared contracts with a `late_trading_change` get a verdict
+    line of their own, before the last, or a line that says none traded late: a run after the
+    regular session ends tests them.
 
     Args:
         client: The wire REST client.
@@ -244,6 +246,7 @@ def session_change(client: RestClient, evidence: Callable[[str], None]) -> Outco
     unified = _rows(client, _UNIFIED, names={}, query=query, bucket="options") if days else []
     sessions = {row.get("ticker"): row.get("session") or {} for row in unified}
     compared = differing = 0
+    late: list[bool] = []  # whether each compared contract that traded late differs
     for ticker, day in days.items():
         session = sessions.get(ticker, {})
         fields = {key: session.get(key) for key in SESSION_FIELDS}
@@ -258,11 +261,15 @@ def session_change(client: RestClient, evidence: Callable[[str], None]) -> Outco
         if day.get("close") != session.get("close"):
             evidence("  closes differ, so a trade came between the requests: not compared")
             continue
-        compared += 1
-        differing += (
+        differs = (
             abs(change - day["change"]) > _CHANGE_TOLERANCE
             or abs(percent - day["change_percent"]) > _PERCENT_TOLERANCE
         )
+        compared += 1
+        differing += differs
+        if session.get("late_trading_change") is not None:
+            late.append(differs)
+    _late_verdict(late, evidence)
     verdict = _verdict(compared=compared, differing=differing, wanted=SESSION_WANTED)
     evidence(
         f"unified session.change is the chain day.change: {verdict} "
@@ -444,6 +451,23 @@ def _rows(
         The rows as Massive sent them. A refusal raises the wire error.
     """
     return client.get(source(Transport.REST, path), names, query, bucket=bucket).rows
+
+
+def _late_verdict(late: list[bool], evidence: Callable[[str], None]) -> None:
+    """Record the session-change verdict of the compared contracts that traded late.
+
+    Args:
+        late: Whether each compared contract with a `late_trading_change` differed.
+        evidence: Records one line of what Massive sent.
+    """
+    if not late:
+        evidence("no compared contract has a late_trading_change, so late trades are untested")
+        return
+    verdict = _verdict(compared=len(late), differing=sum(late))
+    evidence(
+        f"for contracts that traded late, session.change is the chain day.change: {verdict} "
+        f"({len(late)} compared)"
+    )
 
 
 def _verdict(*, compared: int, differing: int, wanted: int = 1) -> str:

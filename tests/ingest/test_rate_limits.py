@@ -15,16 +15,17 @@ from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.rate_limits import (
-    BACKGROUND_ADVICE,
     BUCKETS,
     CONSOLE_PATIENCE,
     LEARN_ONLY,
+    LIVE_TABLE_ADVICE,
     OTHER,
     READ_PATIENCE,
     GovernorRegistry,
     PaceCheck,
     RateLimitNotices,
     ReadShape,
+    Waiter,
     announce,
     bucket_of,
     console_advice,
@@ -510,31 +511,58 @@ def test_the_default_registry_names_the_other_buckets_requests() -> None:
     lease.release()
 
 
-def test_a_waited_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_the_lock(
+CONSOLE_ADVICE = (
+    "this read ran inside a Deephaven console command, which waits out only 90 s of pauses; "
+    "leave out wait=True to let fetch() or history() read in the background, which waits out "
+    "MassiveConfig.max_outage (300 s)"
+)
+"""The give-up advice of a `fetch()` or `history()` call in a console command."""
+
+
+@pytest.mark.parametrize(
+    ("waiter", "free", "console"),
+    [
+        (Waiter.CALL, (READ_PATIENCE, ""), (CONSOLE_PATIENCE, CONSOLE_ADVICE)),
+        (Waiter.STREAM_OPEN, (READ_PATIENCE, ""), (CONSOLE_PATIENCE, "")),
+        (Waiter.LIVE_TABLE, (300.0, LIVE_TABLE_ADVICE), (CONSOLE_PATIENCE, "")),
+    ],
+)
+def test_each_waiter_gets_its_patience_and_advice_with_and_without_the_lock(
+    dh_exec_ctx: ExecutionContext,
+    *,
+    waiter: Waiter,
+    free: tuple[float, str],
+    console: tuple[float, str],
+) -> None:
+    # A caller waits ten minutes, a live table max_outage (300 s here). A console command holds
+    # the update graph's exclusive lock, so every read gives up after 90 s; only a fetch() or
+    # history() call takes wait=True, so only its error advises leaving it out.
+    patience = read_patience(dh_exec_ctx, max_outage=300.0, waiter=waiter)
+    assert (patience.seconds, patience.advice) == free
+    with exclusive_lock(dh_exec_ctx.update_graph):
+        held = read_patience(dh_exec_ctx, max_outage=300.0, waiter=waiter)
+    assert (held.seconds, held.advice) == console
+
+
+def test_a_waiter_no_case_names_is_refused(dh_exec_ctx: ExecutionContext) -> None:
+    with pytest.raises(AssertionError):
+        read_patience(
+            dh_exec_ctx,
+            max_outage=300.0,
+            waiter="someone",  # type: ignore[arg-type]  # the point: a waiter no case names is refused
+        )
+
+
+def test_the_patience_constants_and_advice_read_as_documented() -> None:
+    assert (READ_PATIENCE, CONSOLE_PATIENCE) == (600.0, 90.0)
+    assert LIVE_TABLE_ADVICE == "raise MassiveConfig.max_outage to wait longer"
+    assert console_advice(300.0) == CONSOLE_ADVICE
+
+
+def test_a_read_that_feeds_a_live_table_fails_at_its_first_pause_with_no_max_outage(
     dh_exec_ctx: ExecutionContext,
 ) -> None:
-    patience = read_patience(dh_exec_ctx, max_outage=300.0, background=False)
-    assert (patience.seconds, patience.advice) == (READ_PATIENCE, "")
-    assert READ_PATIENCE == 600.0
-    # A console command holds the update graph's exclusive lock: the read gives up sooner, and
-    # its give-up error says how to read without the lock.
-    with exclusive_lock(dh_exec_ctx.update_graph):
-        console = read_patience(dh_exec_ctx, max_outage=300.0, background=False)
-    assert console.seconds == CONSOLE_PATIENCE == 90.0
-    assert console.advice == (
-        "this read ran inside a Deephaven console command, which waits out only 90 s of "
-        "pauses; leave out wait=True to let fetch() or history() read in the background, "
-        "which waits out MassiveConfig.max_outage (300 s)"
-    )
-
-
-def test_a_read_no_caller_waits_for_waits_out_max_outage(dh_exec_ctx: ExecutionContext) -> None:
-    patience = read_patience(dh_exec_ctx, max_outage=300.0, background=True)
-    assert (patience.seconds, patience.advice) == (300.0, BACKGROUND_ADVICE)
-    assert BACKGROUND_ADVICE == (
-        "raise MassiveConfig.max_outage to let a background read wait longer"
-    )
-    assert read_patience(dh_exec_ctx, max_outage=0.0, background=True).seconds == 0.0
+    assert read_patience(dh_exec_ctx, max_outage=0.0, waiter=Waiter.LIVE_TABLE).seconds == 0.0
 
 
 @pytest.mark.parametrize("max_outage", [0.0, 90.0])
@@ -543,13 +571,13 @@ def test_the_console_advises_no_background_read_that_would_wait_no_longer(
 ) -> None:
     assert console_advice(max_outage) == ""
     with exclusive_lock(dh_exec_ctx.update_graph):
-        console = read_patience(dh_exec_ctx, max_outage=max_outage, background=False)
+        console = read_patience(dh_exec_ctx, max_outage=max_outage, waiter=Waiter.CALL)
     assert (console.seconds, console.advice) == (CONSOLE_PATIENCE, "")
 
 
 def test_each_read_gets_a_patience_of_its_own(dh_exec_ctx: ExecutionContext) -> None:
-    first = read_patience(dh_exec_ctx, max_outage=300.0, background=False)
-    assert first is not read_patience(dh_exec_ctx, max_outage=300.0, background=False)
+    first = read_patience(dh_exec_ctx, max_outage=300.0, waiter=Waiter.CALL)
+    assert first is not read_patience(dh_exec_ctx, max_outage=300.0, waiter=Waiter.CALL)
 
 
 def test_the_pace_warning_counts_each_slot_for_61_seconds(

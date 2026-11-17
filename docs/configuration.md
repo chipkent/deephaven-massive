@@ -293,7 +293,9 @@ When sessions list different limits, the lowest applies.
 Set `0` to fail at the first outage. Each kind of table counts its own time:
 
 - A stream counts the time its connection is down.
-- A `poll()` table counts the time its polls keep failing or stop arriving.
+- A `poll()` table counts the time its polls keep failing or stop arriving. A poll
+  that would wait longer than `max_outage` for Massive's rate limits gives up, and
+  counts as a failed poll.
 - A watchlist's `fetch()` or `history()` counts the time each symbol's reads keep
   failing with a temporary error. Then `m.symbol_reads()` shows that symbol
   `FAILED`. Delete its row and add it back to read it again.

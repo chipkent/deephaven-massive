@@ -95,6 +95,43 @@ def test_the_settings_refusal_of_delayed_data_is_matched_by_its_text(*, streams:
     assert not refusals.is_not_listed_text(None)
 
 
+_REFUSED = "HTTP 403 from GET /v3/trades/AAPL on api.massive.com: not entitled"
+"""A watchlist symbol's `Error` once Massive refuses it."""
+
+
+@pytest.mark.parametrize(
+    ("rows", "reason"),
+    [
+        ([{"State": "FAILED", "Error": _REFUSED}], f"refused: {_REFUSED}"),
+        (
+            [
+                {
+                    "State": "FAILED",
+                    "Error": "read failed: AAPL is not in\nMassiveConfig.delayed_subscriptions",
+                },
+                {"State": "FAILED", "Error": _REFUSED},
+            ],
+            f"refused: {_REFUSED}",
+        ),
+        (
+            [{"State": "FAILED", "Error": "AAPL is not in MassiveConfig.delayed_subscriptions"}],
+            "not listed as delayed: AAPL is not in MassiveConfig.delayed_subscriptions",
+        ),
+        ([{"State": "RETRYING", "Error": _REFUSED}], None),
+        ([{"State": "FAILED", "Error": "HTTP 503 from GET /v3/trades/AAPL: busy"}], None),
+        ([{"State": "DONE", "Error": None}], None),
+        ([], None),
+    ],
+    ids=["refused", "massive-first", "not-listed", "not-failed", "outage", "done", "none"],
+)
+def test_a_failed_rows_refusal_is_the_skip_reason(
+    rows: list[dict[str, object]], *, reason: str | None
+) -> None:
+    # A symbol Massive refuses after its watchlist's table opens fails only its row: the test
+    # skips, quoting Massive's refusal before the settings' and on one line.
+    assert refusals.failed_row_refusal(rows) == reason
+
+
 @pytest.mark.parametrize(
     ("text", "refusal"),
     [

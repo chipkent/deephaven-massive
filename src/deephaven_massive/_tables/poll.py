@@ -95,7 +95,9 @@ late cycle that has received
 no page for more than `max_outage` seconds (from its start, or from the start of the run of
 failing cycles it continues, and never less than `WATCH_INTERVAL`) fails the table the same
 way; one that keeps receiving pages, however slowly, never does, and with a `max_outage` of
-zero only a cycle that ends in a failure fails the table.
+zero only a cycle that ends in a failure fails the table. A cycle's reads wait out at most
+`max_outage` of rate-limit pauses (`rate_limits.read_patience`), so with zero a cycle fails at
+its first pause.
 
 **Lifetime.** A poll keeps polling while its table is in use, by the result or by anything
 derived from it. Releasing the result (`m.release`, or garbage collection through the reaper)
