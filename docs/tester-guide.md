@@ -448,8 +448,8 @@ diagnostics tables:
 #### 7. Exceed a request limit
 
 Poll six stocks every 30 seconds, and watch the session learn your Stocks request limit from
-Massive's first rate-limit error, as a session with no `rest_requests_per_minute` does
-([MassiveConfig](../README.md#massive-config)). Then release the table:
+Massive's first rate-limit error. A session learns it this way when
+[`rest_requests_per_minute`](../README.md#massive-config) doesn't give it:
 
 ```python
 import deephaven_massive as dm
@@ -477,7 +477,6 @@ Watch the `stocks` row of `rate_limits`:
 `paced` gets its six rows in every case.
 
 Then close the `paced` panel. The table stops, and the `stocks` row returns to `READY`.
-`m.release()` lets the library stop a table once no panel or other table uses it.
 
 #### 8. Read history in the background
 
