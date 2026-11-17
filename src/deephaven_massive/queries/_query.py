@@ -154,8 +154,8 @@ def _read_symbol_table(
             null, is named as such, since `dm.canonicalize_symbols` nulls what it cannot
             convert.
 
-    Under `RAISE`, a bad row raises the `ValueError` of `read_symbols`, which names
-    `dm.canonicalize_symbols`.
+    Under `RAISE`, a bad row raises the `ValueError` of `read_symbols`, which names the row
+    and how to fix it.
     """
     rule = SymbolRowRule.of(spec, noncanonical)
     with entered(core.exec_ctx):
