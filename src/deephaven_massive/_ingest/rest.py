@@ -255,6 +255,10 @@ _FACTS_LIMIT: Final = 10_000
 forgets them all and starts over, so a long `poll()` over many symbols keeps its memory bounded,
 at the cost of warning about an old fact once more."""
 
+_ANY_VALUE: Final = "VALUE"
+"""The value a value-table poll's parameters are checked with (`RestReader.check_parameters`):
+the check reads only which parameters a request carries, never their values."""
+
 _ANSWER_SHOWN: Final = 200
 """The most characters of one error row's answer a WARNING shows (`_cut`); the row's DEBUG
 line shows it whole."""
@@ -2030,12 +2034,12 @@ class RestReader:
     ) -> tuple[list[tuple[RestPath, list[Call]]], list[str]]:
         """Plan a `poll()` cycle path by path (`fetch_paths`, `_plan_path`).
 
-        Every path a symbol can be read on takes the request's parameters: `check_parameters`
-        checked each when a reactive table's poll was made, and static symbols were planned
-        then. A crypto pair Massive's crypto ticker list gives no split for is planned as a
-        call that is never sent (`Call.unsplit`): the read reports a pair Massive has no data
-        for as it reports HTTP 404, and the cycle leaves out one whose currencies cannot be
-        read, named with why.
+        Every path a symbol can be read on takes the request's parameters: when the poll was
+        made, static symbols were planned (`plan_fetch`), or, with a reactive table or a value
+        table, `check_parameters` checked each path. A crypto pair Massive's crypto ticker
+        list gives no split for is planned as a call that is never sent (`Call.unsplit`): the
+        read reports a pair Massive has no data for as it reports HTTP 404, and the cycle
+        leaves out one whose currencies cannot be read, named with why.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -2066,13 +2070,16 @@ class RestReader:
         return planned, left_out
 
     def check_parameters(self, spec: DatasetSpec, request: Request) -> None:
-        """Check, before any symbol is known, that every fetch path takes the parameters.
+        """Check, before the first cycle, that every path the poll can read takes the parameters.
 
         A `poll()` over a reactive symbol table cannot plan its paths until it reads the
         table, but the parameters are known now, and the table may come to hold a symbol of
         any of the dataset's fetch paths (`fetch_path`, `detail_path`, and the per-class
         paths). So a parameter any of them lacks fails now, as it would for the same symbols
-        passed in code, rather than leaving that path's symbols out of every cycle.
+        passed in code, rather than leaving that path's symbols out of every cycle. A poll
+        with a value table and static symbols, or none, reads the paths `fetch_paths` gives
+        those symbols, and only those are checked, with the parameter each value is sent as
+        (`Request.for_value`).
 
         Args:
             spec: The dataset, with a fetch path.
@@ -2081,15 +2088,17 @@ class RestReader:
         The first refusing path's `ValueError` (from `shared_params` or `axis_query`) is
         raised.
         """
-        candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
-        for template in candidates:
-            if template is None:
-                continue
+        symbols = request.symbols
+        sent = request if request.value_table is None else request.for_value(_ANY_VALUE)
+        if isinstance(symbols, SymbolTable):
+            candidates = (spec.fetch_path, spec.detail_path, *spec.fetch_paths_by_class.values())
+            templates = [template for template in candidates if template is not None]
+        else:
+            templates = [template for template, _ in fetch_paths(spec, symbols)]
+        for template in templates:
             rest_path = self.rest_path(template)
-            shared_params(spec, rest_path, request, fixed={})
-            axis_query(
-                spec, rest_path, dates=(request.start, request.end), asset_class=spec.asset_class
-            )
+            shared_params(spec, rest_path, sent, fixed={})
+            axis_query(spec, rest_path, dates=(sent.start, sent.end), asset_class=spec.asset_class)
 
     def plan_fetch(
         self,
@@ -2883,10 +2892,10 @@ class RestEndpoints:
             The live table, tracked by the session.
 
         A parameter the caller set that a path of the call does not take raises `ValueError`
-        before the table exists. With static symbols every path is planned now; with a reactive
+        before the table exists. With static symbols and no value table every path is planned
+        now; otherwise `RestReader.check_parameters` checks the paths now: with a reactive
         table, whose symbols choose the paths at each cycle, a parameter that any fetch path
-        lacks fails here (`RestReader.check_parameters`), since the table may come to hold a
-        symbol of that path.
+        lacks fails here, since the table may come to hold a symbol of that path.
         """
         reader = self._reader("poll", request.on_error)
         if isinstance(request.symbols, SymbolTable) or request.value_table is not None:

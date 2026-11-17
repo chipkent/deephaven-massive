@@ -2004,7 +2004,7 @@ SMA_VALUE = Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 1.0
 """One indicator value, as Massive answers a symbol's indicator path."""
 
 
-def test_a_parameter_one_fetch_path_lacks_fails_a_watchlist_poll_at_the_call(
+def test_a_parameter_one_fetch_path_lacks_fails_a_watchlist_poll_as_a_list_at_the_call(
     *,
     routed_session: dm.MassiveSession,
     fake_rest: FakeRestServer,

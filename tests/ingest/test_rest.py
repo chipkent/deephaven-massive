@@ -3113,6 +3113,28 @@ def test_a_parameter_a_named_contract_lacks_fails_a_watchlist_poll_at_the_call(
     assert fake_rest.requests == []
 
 
+def test_a_poll_checks_only_the_paths_its_symbols_can_reach(*, session: dm.MassiveSession) -> None:
+    # A poll of contracts by a table of underlyings names no contract: it reads only the list
+    # path, so a filter the per-contract path lacks is fine. A watchlist may name contracts.
+    reader = _endpoints(session)._reader("poll", session._core.policy)
+    listed = Request(filters=(("strike_price_gte", 1),))
+    reader.check_parameters(CONTRACTS, listed)
+    watch = SymbolTable(new_table([string_col("Symbol", ["O:SPY250117C00600000"])]))
+    with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
+        reader.check_parameters(CONTRACTS, dataclasses.replace(listed, symbols=watch))
+    # Each value of a table of underlyings is sent as `underlying_ticker`, which the list path
+    # takes and a named contract's path doesn't.
+    with entered(session._core.exec_ctx):
+        table = new_table([string_col("Underlying", ["SPY"])])
+    underlyings = ValueTable(
+        "underlying", "underlying_ticker", "Underlying", underlying=True, table=table
+    )
+    reader.check_parameters(CONTRACTS, Request(value_table=underlyings))
+    named = Request(symbols=("O:SPY250117C00600000",), value_table=underlyings)
+    with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
+        reader.check_parameters(CONTRACTS, named)
+
+
 def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

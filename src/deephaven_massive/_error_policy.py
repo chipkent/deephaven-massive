@@ -99,9 +99,10 @@ class ErrorPolicy:
             answers HTTP 404, or its crypto ticker list doesn't hold the pair. Defaults to
             `LOG`.
 
-            Set `dm.OnError.RAISE` when a missing symbol means your list is wrong. Under the
-            other values, the call skips the symbol and reads the others, and a stream or
-            `poll()` table names it in its `Error` in `m.streams()`.
+            Set `dm.OnError.RAISE` when a missing symbol means your list is wrong. Under
+            `dm.OnError.LOG` and `dm.OnError.IGNORE`, the call skips the symbol and reads the
+            others. A stream or `poll()` table also names it in its row's `Error` in
+            `m.streams()`.
 
             A symbol Massive answers with no rows and no error has no rows, whatever this
             setting says.

@@ -335,9 +335,10 @@ watchlist read by `fetch()` names it in `Error` in `m.symbol_reads()`.
 
 #### on_error.unavailable_symbols
 
-Set `raise` when a missing symbol means your list is wrong. Under the
-other values, the call skips the symbol and reads the others, and a stream or
-`poll()` table names it in its `Error` in `m.streams()`.
+Set `raise` when a missing symbol means your list is wrong. Under
+`log` and `ignore`, the call skips the symbol and reads the
+others. A stream or `poll()` table also names it in its row's `Error` in
+`m.streams()`.
 
 A symbol Massive answers with no rows and no error has no rows, whatever this
 setting says.

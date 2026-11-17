@@ -762,10 +762,9 @@ class UnavailableSymbolError(PermanentError):
     """A symbol Massive has no data for, under `unavailable_symbols=RAISE`.
 
     Massive answered HTTP 404 for it, or its crypto ticker list gives no split for the pair
-    (`ErrorSource.MASSIVE`). Under `LOG` and `IGNORE` the symbol gets no rows
-    instead. Under `RAISE` it fails whatever met it: a `fetch()` or `history()` table, which
-    `wait=True` raises; one symbol of a followed read, marked `FAILED`; a `poll()` table; or a
-    stream.
+    (`ErrorSource.MASSIVE`). Under `LOG` and `IGNORE` the symbol gets no rows instead. Under
+    `RAISE` it fails whatever met it: a `fetch()` or `history()` table, which `wait=True`
+    raises; one symbol of a followed read, marked `FAILED`; a `poll()` table; or a stream.
     """
 
 
