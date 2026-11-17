@@ -22,7 +22,6 @@ from deephaven_massive._enums import AssetClass
 from deephaven_massive._massive import (
     RestClient,
     Transport,
-    WireEntitlementError,
     source,
 )
 from deephaven_massive._tables.problem_events import ProblemCause
@@ -239,17 +238,14 @@ def test_partner_rows_spell_share_classes_canonically(
     `/benzinga/v1/consensus-ratings/{ticker}`, charged to the Stocks bucket as the library
     charges them) and records each row's `ticker`; then the same through the library, and
     every published `Symbol` and withheld spelling. Preferreds have no analyst consensus, so
-    they are left out. Without the Benzinga add-on the test skips, quoting Massive's refusal.
+    they are left out. When Massive refuses a request, the test skips, quoting it.
 
     Reading it: canonical published symbols mean the partner writes Massive's spelling; a
     withheld row names the raw text (`BRK/B`, say) to report to Massive.
     """
     rest_path = source(Transport.REST, _CONSENSUS)
     for ticker in _SHARE_CLASSES:
-        try:
-            rows = live_rest.get(rest_path, {"ticker": ticker}, {}, bucket="stocks").rows
-        except WireEntitlementError as error:
-            pytest.skip(f"not entitled to Benzinga's consensus ratings ({error})")
+        rows = live_rest.get(rest_path, {"ticker": ticker}, {}, bucket="stocks").rows
         evidence(f"raw consensus of {ticker}: {len(rows)} rows, tickers {_spelled(rows, 'ticker')}")
     withheld = _withheld(live_session, monkeypatch)
     table = live_session.partners.benzinga.consensus_ratings(list(_SHARE_CLASSES)).fetch(wait=True)
