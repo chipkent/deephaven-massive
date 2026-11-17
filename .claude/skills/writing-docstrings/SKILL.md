@@ -49,9 +49,9 @@ exception, goes through the `writing-user-docs` review before it is pushed:
   twenty-second hook and job-level pains; class and method docstrings are graded as reference
   text. Apply only the fixes both graders agree on, plus any false claim either finds.
 - **Ship only at a passing grade.** Every grade uses fresh graders. When patching leaves a
-  docstring short of the bar, rewrite it from what the caller needs and grade it again. If a few
-  rewrite-and-grade rounds still can't pass it, ask the owner for help with the specific
-  obstacle (`writing-to-the-owner`), with the graders' sheets; never ask for sign-off on failing
+  docstring short of the bar, rewrite it from what the caller needs and grade it again, with at
+  most three fresh grades. If the third doesn't pass, send the owner the failing docstring and
+  the graders' sheets as a request for help (`writing-to-the-owner`), never as finished
   text. Never call a failing docstring done.
 
 Private and internal docstrings keep the lighter rules on this page, with no review round.

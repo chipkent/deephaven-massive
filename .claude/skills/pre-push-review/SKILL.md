@@ -207,7 +207,8 @@ breaks fails in CI, after the push.
 ## 4. The PR description
 
 Write or rewrite it to the branch's final state with the `writing-a-pr-description` skill,
-and push no new or changed description until a fresh grader passes it (that skill, section 4). An
+and push no new or changed description until a fresh grader passes it or the third grade has run
+(that skill, section 4). An
 open question in it ("should this return X?") is a finding: answer it from `AGENTS.md`,
 `docs/dev/decisions/`, and the code and record the answer under Decisions. If it is the owner's
 call, the work is not ready for a PR or for CI: ask the owner directly with

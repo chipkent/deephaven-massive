@@ -1,6 +1,6 @@
 ---
 name: writing-a-pr-description
-description: "Use this skill whenever you write or rewrite a pull request description, an issue body, a bug report to Massive or Deephaven (wrong data, a defect), or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, runs that page's self-edit checklist, and has a fresh editor grade it until it passes. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write or rewrite a pull request description, an issue body, a bug report to Massive or Deephaven (wrong data, a defect), or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, runs that page's self-edit checklist, and has a fresh editor grade it, at most three times. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing a PR description
@@ -88,9 +88,9 @@ section "Grading a PR description". Grade <worktree>/.git-pr-body.md against the
 `git diff <base>...HEAD` in <worktree>. Return the score sheet.
 ```
 
-Rewrite from its sheet and grade again with a fresh grader until the description passes. If a
-few rounds can't pass it, ask the owner for help with the specific obstacle
-(`writing-to-the-owner`), with the sheets; never ask for sign-off on failing text.
+Rewrite from its sheet and grade again with a fresh grader until the description passes, with
+at most three fresh grades. If the third doesn't pass, push the description anyway and send the
+grader's remaining objections to the owner verbatim (`writing-to-the-owner`).
 
 ## 5. Publish
 

@@ -31,9 +31,10 @@ lands, so neither can merge. Never plan a step you already know is bad, such as 
 verbatim to be rewritten later, to make a diff easier to review: fix the content as you move
 it. Docs that share a file, a
 generated page, or a generator go on one branch, never on parallel branches. Each user doc ships
-only at a passing grade: one that fails is rewritten from its outline and graded again, and
-only an obstacle a few rounds can't clear goes to the owner, as a request for help, never for
-sign-off. A doc that passes is pushed at once, never held back for others.
+only at a passing grade: one that fails is rewritten from its outline and graded again, with at
+most three fresh grades. If the third doesn't pass, the failing passage and the graders' sheets
+go to the owner as a request for help, never as finished text. A doc that passes is pushed at
+once, never held back for others.
 
 ## 3. Set the merge order
 
