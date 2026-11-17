@@ -12,26 +12,27 @@ columns. No human reads anything:
   dataset served by REST alone is already called by its `fetch()` case, the same request.
 - `append_only()`: it must reach Massive's acknowledgement (up to 15 s), then rows, whenever
   rows must flow: while the stream's market is open for its kind of rows (stock trades and
-  quotes in the extended hours too) and has been open longer than the plan's feed delay
-  (`streams`). A minute bar stream waits until just past the next minute boundary. When rows
-  need not flow, the case skips after the acknowledgement, "not exercised: market closed
-  (acknowledged)" or the like, so a pass always means rows reached the table. A stock's trades
-  or quotes that send no row in the extended hours skip too: one stock can go a minute
-  without a tick then. In the regular session, no row fails the case.
+  quotes in the extended hours too), by the market's clock (`streams`). A minute bar stream
+  waits until just past the next minute boundary. When rows need not flow, the case skips
+  after the acknowledgement, "not exercised: market closed (acknowledged)" or the like, so a
+  pass always means rows reached the table. A stock's trades or quotes that send no row in
+  the extended hours skip too: one stock can go a minute without a tick then. A stream of a
+  subscription the owner's settings list in `delayed_subscriptions` that sends no row skips,
+  since the delayed feed lags by an amount the tests do not know. Otherwise, in the regular
+  session, no row fails the case.
 
-A dataset the key's plan does not include is a skip, "not entitled: needs <plan>", never a
-failure. Each case also notes every WARNING the library logged and every row of the session's
-`problems()`; a pass with any of them is counted "passed with
-drift" in the coverage that ends the terminal summary (passed, not entitled, otherwise skipped,
-failed), which lists each one and groups the skips by the plan or the reason.
+A dataset Massive refuses the key is a skip that quotes Massive's refusal, never a failure.
+Each case also notes every WARNING the library logged and every row of the session's
+`problems()`; a pass with any of them is counted "passed with drift"
+in the coverage that ends the terminal summary (passed, not entitled, otherwise skipped,
+failed), which lists each one and groups the refusals by the subscription and verb refused,
+and the other skips by their reason.
 
-The cases run round-robin across the classes, so a class on Basic waits for its pace while the
-next class's case runs. The tier is marked `integration_smoke` (and `integration`) and runs only
-with `uv run pytest -m integration_smoke`. On a free key it stays within Massive's rate limits:
-every REST request to a class on Basic waits for a place in that class's 5 a minute, each case's
-time limit grows with its request count, and the streams of a Basic class (Basic has no
-WebSocket access) skip before any call, naming the Starter plan they need. How to run it is in
-`docs/live-tests.md`.
+The cases run round-robin across the classes, so a class Massive limits waits for its pace
+while the next class's case runs. The tier is marked `integration_smoke` (and `integration`)
+and runs only with `uv run pytest -m integration_smoke`. Every REST request of a subscription
+Massive limits waits for its pace, and each case's time limit grows with its request count.
+How to run it is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -65,7 +66,6 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive.queries import Query
-    from tests._live.plans import LivePlans
 
 pytestmark = [pytest.mark.integration, pytest.mark.integration_smoke]
 
@@ -73,12 +73,13 @@ pytestmark = [pytest.mark.integration, pytest.mark.integration_smoke]
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
-SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession, str], None]"
+SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
 RowsDue: TypeAlias = "Callable[[str, str], tuple[str, bool]]"
 
 _NEW_YORK = ZoneInfo("America/New_York")
 _POLL_DATASET: Final = "reference.market_status"
-"""The one dataset the tier polls: it belongs to no subscription, so no plan paces it."""
+"""The one dataset the tier polls: it belongs to no subscription, so no subscription's limit
+paces it."""
 
 _POLL_INTERVAL = 5.0
 """Seconds between the poll case's cycles."""
@@ -156,18 +157,14 @@ _MARKETS = {
 }
 """The market whose status says whether a class's stream must deliver rows."""
 
-_PLAN_NAMES = {
-    "stocks": "a Stocks plan",
-    "options": "an Options plan",
-    "indices": "an Indices plan",
-    "currencies": "a Currencies plan",
-    "futures": "a Futures plan",
-}
 _SYMBOLS: dict[dm.AssetClass | ClassFromPrefix, str] = {
     dm.AssetClass.STOCKS: "AAPL",
     dm.AssetClass.FOREX: "C:EURUSD",
     dm.AssetClass.CRYPTO: "X:BTCUSD",
+    dm.AssetClass.INDICES: "I:NDX",
 }
+"""The symbol of each class with a fixed one; any index serves, so indices read the
+Nasdaq-100."""
 _ETF = "SPY"
 """The symbol of the ETF Global datasets, which describe funds."""
 
@@ -222,7 +219,7 @@ def _cases() -> list[tuple[str, str]]:
 
     Every dataset runs `fetch()`, `history()`, and its stream where it offers them; only
     `_POLL_DATASET` runs `poll()`. The pairs of each class keep the catalog's order, and the
-    classes take turns, so a class on Basic, paced at 5 requests a minute, never runs two
+    classes take turns, so a class Massive limits to a few requests a minute never runs two
     cases in a row while another class has cases left.
 
     Returns:
@@ -246,14 +243,12 @@ def _cases() -> list[tuple[str, str]]:
 
 
 def _params() -> list[Any]:
-    """Return every (dataset, verb) pair as a test case with its plan and request count.
+    """Return every (dataset, verb) pair as a test case with its request count and timeout.
 
-    A dataset of one class needs that class's Basic plan for REST and its Starter plan for a
-    stream (Basic has no WebSocket access), and its Business plan for a fair-market-value (FMV)
-    stream, which only Business serves; the `needs` marker skips it before any call when
-    the key lacks the plan, and lets the timeout grow with the `requests` marker on a class
-    left on Basic, whose five requests a minute pace it. A fetch or poll case gets
-    `_CASE_TIMEOUT` before that growth, a history case `_HISTORY_TIMEOUT` (`_DAY_FILE_TIMEOUT`
+    Every case sends its request whatever the key holds; Massive's refusal skips it. The
+    timeout grows with the `requests` marker, since a subscription Massive limits paces each
+    request. A fetch or poll case gets `_CASE_TIMEOUT` before that growth, a history case
+    `_HISTORY_TIMEOUT` (`_DAY_FILE_TIMEOUT`
     for `indices.values`, whose read downloads a whole day's flat file), and a stream case
     `_STREAM_TIMEOUT`, which covers its designed waits. The timeout is set here alone: a
     `timeout` mark on the test function would win over these, since pytest finds the
@@ -264,15 +259,8 @@ def _params() -> list[Any]:
     """
     params = []
     for name, verb in _cases():
-        spec = CATALOG.by_name[name]
-        subscription = _subscription(spec)
         timeout = _CASE_TIMEOUTS.get((name, verb), _TIMEOUTS.get(verb, _CASE_TIMEOUT))
         marks = [pytest.mark.requests(_REQUESTS[verb]), pytest.mark.timeout(timeout)]
-        if subscription is not None:
-            plan = "starter" if verb == "stream" else "basic"
-            if name.endswith(".fmv") and verb == "stream":
-                plan = "business"
-            marks.append(pytest.mark.needs(f"{subscription}:{plan}"))
         params.append(pytest.param(name, verb, marks=marks, id=f"{name}-{verb}"))
     return params
 
@@ -286,31 +274,20 @@ def _subscription(spec: DatasetSpec) -> str | None:
     return None if spec.asset_class is ClassFromPrefix.ANY else _SUBSCRIPTIONS[spec.asset_class]
 
 
-def _plan(name: str, spec: DatasetSpec, verb: str, *, flat_files: bool = False) -> str:
-    """Name the plan a dataset's verb needs, for the "not entitled" skip and its group.
+def _refused_group(spec: DatasetSpec, verb: str, *, flat_files: bool = False) -> str:
+    """Name what a refusal of a case refused, for the coverage's group of refusals.
 
     Args:
-        name: The dataset.
-        spec: Its catalog entry.
+        spec: The dataset's catalog entry.
         verb: The verb.
         flat_files: Whether the refusal came from the S3 flat files rather than REST.
 
     Returns:
-        Such as `"a Stocks plan with WebSocket access"`, `"a Stocks plan with flat-file
-        access"` for a `history()` the flat files refused, or `"the Imbalances Expansion
-        add-on"` for the imbalances stream, which no Stocks plan includes without it.
+        The subscription and the verb, such as `"stocks stream"`, `"other fetch"` for data of
+        no single class, or `"stocks history (flat files)"`.
     """
-    if name.startswith("partners."):
-        return f"the {name.split('.')[1]} partner add-on"
-    if name.endswith(".fmv"):
-        return "a Business plan (FMV)"
-    if name == "stocks.imbalances":
-        return "the Imbalances Expansion add-on"
-    subscription = _subscription(spec)
-    plan = "a plan" if subscription is None else _PLAN_NAMES[subscription]
-    if verb == "stream":
-        return f"{plan} with WebSocket access"
-    return f"{plan} with flat-file access" if flat_files else f"{plan} with REST access"
+    group = f"{_subscription(spec) or 'other'} {verb}"
+    return f"{group} (flat files)" if flat_files else group
 
 
 def _option(client: RestClient) -> str:
@@ -319,8 +296,8 @@ def _option(client: RestClient) -> str:
     Reads AAPL's previous close (its `previous_day_bar`), then the chain snapshot of the
     contracts expiring after today with a strike within 5% of that close, and takes, at the
     nearest of those expirations, the contract with the most volume today: the one most
-    likely to trade while a stream case listens. A key whose Options plan has no snapshot
-    (Basic) gets the listed call at that expiration with the strike nearest the close instead.
+    likely to trade while a stream case listens. A key Massive refuses the chain snapshot
+    gets the listed call at that expiration with the strike nearest the close instead.
 
     Returns:
         Its OCC symbol, such as `"O:AAPL261106C00270000"`.
@@ -486,19 +463,17 @@ class _Case:
         session: The live session.
         name: The dataset.
         spec: Its catalog entry.
-        plan: The plan it needs (`_plan`), named when the plan refuses it.
         table_rows: Reads a table's rows.
         caplog: The captured log records, for the library's warnings.
         skip_if_not_entitled: Skips the case when a stream of the session was refused.
         evidence: Records a line of evidence.
-        record_property: Records a property of the case's report, for the coverage: its
-            `plan` and its `drift`.
+        record_property: Records a property of the case's report, for the coverage: what a
+            refusal refused (`refused`) and its `drift`.
     """
 
     session: dm.MassiveSession
     name: str
     spec: DatasetSpec
-    plan: str
     table_rows: TableRows
     caplog: pytest.LogCaptureFixture
     skip_if_not_entitled: SkipIfNotEntitled
@@ -549,6 +524,8 @@ def _call(case: _Case, query: Query, verb: str, *, day: date) -> tuple[list[str]
         The result's columns and what the case saw drift.
 
     Raises:
+        EntitlementError: When the call is refused; the live tests' hook skips the case,
+            quoting the refusal, after this records what was refused.
         ValueError: When the verb refuses its arguments for any reason but missing S3
             credentials.
     """
@@ -556,9 +533,9 @@ def _call(case: _Case, query: Query, verb: str, *, day: date) -> tuple[list[str]
     try:
         table = _run(query, verb, bars=case.spec.is_bars, day=day)
     except dm.EntitlementError as error:
-        plan = _plan(case.name, case.spec, verb, flat_files="flat files" in str(error))
-        case.record_property("plan", plan)
-        pytest.skip(f"not entitled: needs {plan} ({case.name}: {error})")
+        flat_files = "flat files" in str(error)
+        case.record_property("refused", _refused_group(case.spec, verb, flat_files=flat_files))
+        raise
     except ValueError as error:
         if "s3" not in str(error).lower():
             raise
@@ -588,7 +565,7 @@ def _poll_case(case: _Case, query: Query) -> tuple[list[str], list[str]]:
     failure, drift, columns = case.failure(), case.drift(), list(table.column_names)
     case.session.release(table)
     case.evidence(f"{case.name} poll: {len(cycles)} cycles of rows; columns {columns}")
-    case.skip_if_not_entitled(case.session, case.plan)
+    case.skip_if_not_entitled(case.session)
     assert failure is None, f"{case.name} poll failed: {failure}"
     assert len(cycles) >= 2, f"{case.name}: {len(cycles)} poll cycles in {_POLL_WAIT:.0f} s"
     return columns, drift
@@ -668,15 +645,14 @@ def _record_bar_lag(case: _Case, row: dict[str, Any]) -> None:
     )
 
 
-def _may_go_quiet(asset_class: dm.AssetClass, family: str, live_plans: LivePlans) -> bool:
+def _may_go_quiet(asset_class: dm.AssetClass, family: str) -> bool:
     """Tell whether a stream of one symbol may send no row in its wait, though rows are due.
 
     Returns:
-        True for a stock's trades or quotes while the plan's feed is in the extended hours
+        True for a stock's trades or quotes while the market is in the extended hours
         (`streams.may_go_quiet`).
     """
-    delay = streams.feed_delay(live_plans, _SUBSCRIPTIONS[asset_class])
-    return streams.may_go_quiet(_MARKETS[asset_class], family, now=datetime.now(UTC), delay=delay)
+    return streams.may_go_quiet(_MARKETS[asset_class], family, now=datetime.now(UTC))
 
 
 def _stream_case(
@@ -686,19 +662,20 @@ def _stream_case(
     wait_acked: Callable[[dm.MassiveSession, int, float], int],
     wait_rows: WaitRows,
     rows_due: RowsDue,
-    live_plans: LivePlans,
+    delayed: bool,
 ) -> tuple[list[str], list[str]]:
     """Run a stream case: Massive must acknowledge it, and rows must arrive when they are due.
 
-    Rows are due while the stream's market is open for its kind of rows, before the regular
-    session's close for a stream that needs it, and has been open longer than the plan's feed
-    delay (`rows_due`), unless the stream is one of `_RARE`. A
-    minute bar stream waits until just past the next minute boundary, any other for
-    `_TICK_WAIT`. When no rows are due, the case skips after the acknowledgement. A stock
-    trade or quote stream that gets no row while the plan's feed is in the extended hours skips
-    too, since one stock can go that long without a tick then (`streams.may_go_quiet`), when
-    the feed is in the extended hours both as the wait starts and as it ends; a wait that
-    reaches the regular session fails.
+    Rows are due while the stream's market is open for its kind of rows, by the market's clock,
+    and before the regular session's close for a stream that needs it (`rows_due`), unless
+    the stream is one of `_RARE`. A minute bar stream waits until just past the next minute
+    boundary, any other for `_TICK_WAIT`. When no rows are due, the case skips after the
+    acknowledgement. A stock trade or quote stream that gets no row while the market is in
+    the extended hours skips too, since one stock can go that long without a tick then
+    (`streams.may_go_quiet`), when the market is in the extended hours both as the wait
+    starts and as it ends; a wait that reaches the regular session fails. A stream of a
+    subscription listed in `delayed_subscriptions` (`delayed`) that gets no row skips: the
+    delayed feed lags by an amount the tests do not know.
 
     Another client on the key can take the class's connection slot during the wait: the
     connection then waits for the slot (`WAITING_SLOT`) or reconnects. When no row came and
@@ -720,14 +697,14 @@ def _stream_case(
     asset_class = case.spec.single_class
     status, due = rows_due(_MARKETS[asset_class], family)
     due = due and case.name not in _RARE
-    quiet = due and _may_go_quiet(asset_class, family, live_plans)
+    quiet = due and _may_go_quiet(asset_class, family)
     wait = _row_wait(family)
     rows = wait_rows(case.session, table, time.monotonic() + wait) if due else []
     taken = due and not rows and _slot_taken(case, before)
     if taken:
         wait = _row_wait(family)
         rows = wait_rows(case.session, table, time.monotonic() + wait)
-    quiet = quiet and _may_go_quiet(asset_class, family, live_plans)  # and still, at the end
+    quiet = quiet and _may_go_quiet(asset_class, family)  # and still, at the end
     failure, drift, columns = case.failure(), case.drift(), list(table.column_names)
     case.session.release(table)
     _STREAM_CLOSED[0] = time.monotonic()
@@ -737,13 +714,17 @@ def _stream_case(
     )
     if family == "bars" and rows:
         _record_bar_lag(case, rows[0])
-    case.skip_if_not_entitled(case.session, case.plan)
+    case.skip_if_not_entitled(case.session)
     assert failure is None, f"{case.name} stream failed: {failure}"
     assert acked >= 1, f"{case.name}: Massive acknowledged no topic"
     if not due:
-        why = _RARE.get(case.name, f"market {status}, past the close, or in the feed delay")
+        why = _RARE.get(case.name, f"market {status}, or past the close")
         pytest.skip(f"not exercised: {why} (acknowledged)")
     assert rows or not taken, f"{case.name}: {_SLOT_TAKEN}"
+    if not rows and delayed:
+        pytest.skip(
+            f"no row on the delayed feed in {wait:.0f} s; the market is {status} (acknowledged)"
+        )
     if not rows and quiet:
         pytest.skip(
             f"not exercised: no row in {wait:.0f} s of the extended-hours session (acknowledged)"
@@ -758,15 +739,14 @@ def test_every_dataset_and_verb_returns_its_columns(
     name: str,
     verb: str,
     *,
+    live_config: dm.MassiveConfig,
     live_rest: RestClient,
-    index_symbol: str,
     previous_trading_day: date,
     front_contract: Callable[[str, date], str],
     table_rows: TableRows,
     wait_acked: Callable[[dm.MassiveSession, int, float], int],
     wait_rows: WaitRows,
     rows_due: RowsDue,
-    live_plans: LivePlans,
     skip_if_not_entitled: SkipIfNotEntitled,
     record_property: Callable[[str, object], None],
     caplog: pytest.LogCaptureFixture,
@@ -779,33 +759,85 @@ def test_every_dataset_and_verb_returns_its_columns(
     included. The poll passes when two cycles published rows. A stream passes only when
     Massive acknowledged its topic and rows reached its table; it skips after the
     acknowledgement when rows need not flow (a closed market, a stock, option, or index stream
-    after the regular session's close, the feed delay of a delayed plan, a stream of rare
-    events), and when a stock's trades or quotes sent no row in the extended hours. "Not
-    entitled: needs <plan>" is a skip, and so is a history the request cannot be served
-    without S3 credentials; anything else fails. Every library
-    WARNING and every problem the case saw is recorded, and counted in the coverage.
+    after the regular session's close, a stream of rare events), when a stock's trades or
+    quotes sent no row in the extended hours, and when a stream of a subscription listed in
+    `delayed_subscriptions` sent no row. Massive's refusal is a skip that quotes it, and so is
+    a history the request cannot be served without S3 credentials; anything else fails.
+    Every library WARNING and every problem the case saw is recorded, and counted in the
+    coverage.
     """
     spec = CATALOG.by_name[name]
-    plan = _plan(name, spec, verb)
+    record_property("refused", _refused_group(spec, verb))  # read only when Massive refuses
+    subscription = _subscription(spec)
+    listed = live_config.delayed_subscriptions
+    _run_case(
+        live_session,
+        name,
+        verb,
+        delayed=subscription is not None and dm.Subscription(subscription) in listed,
+        live_rest=live_rest,
+        previous_trading_day=previous_trading_day,
+        front_contract=front_contract,
+        table_rows=table_rows,
+        wait_acked=wait_acked,
+        wait_rows=wait_rows,
+        rows_due=rows_due,
+        skip_if_not_entitled=skip_if_not_entitled,
+        record_property=record_property,
+        caplog=caplog,
+        evidence=evidence,
+    )
+
+
+def _run_case(
+    session: dm.MassiveSession,
+    name: str,
+    verb: str,
+    *,
+    delayed: bool,
+    live_rest: RestClient,
+    previous_trading_day: date,
+    front_contract: Callable[[str, date], str],
+    table_rows: TableRows,
+    wait_acked: Callable[[dm.MassiveSession, int, float], int],
+    wait_rows: WaitRows,
+    rows_due: RowsDue,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    record_property: Callable[[str, object], None],
+    caplog: pytest.LogCaptureFixture,
+    evidence: Evidence,
+) -> None:
+    """Run one smoke case in a session, and assert it returns exactly the dataset's columns.
+
+    Args:
+        session: The session the case runs in.
+        name: The dataset.
+        verb: The verb.
+        delayed: Whether the session lists the dataset's subscription as delayed.
+        live_rest: Looks up an option contract.
+        previous_trading_day: The day a history reads.
+        front_contract: Names the front ES contract.
+        table_rows: Reads a table's rows.
+        wait_acked: Waits for a stream's acknowledgement.
+        wait_rows: Waits for a stream's rows.
+        rows_due: Tells whether a stream's rows are due.
+        skip_if_not_entitled: Skips the case when a stream of the session was refused.
+        record_property: Records a property of the case's report, for the coverage.
+        caplog: The captured log records, for the library's warnings.
+        evidence: Records a line of evidence.
+    """
+    spec = CATALOG.by_name[name]
     if verb == "stream":
         since = time.monotonic() - _STREAM_CLOSED[0]
         if since < _STREAM_GAP:
             threading.Event().wait(_STREAM_GAP - since)
-    symbols = {
-        **_SYMBOLS,
-        dm.AssetClass.INDICES: index_symbol,
-        dm.AssetClass.FUTURES: front_contract("ES", datetime.now(UTC).date()),
-    }
-    query = _query(
-        live_session, name, verb, client=live_rest, symbols=symbols, day=previous_trading_day
-    )
+    symbols = {**_SYMBOLS, dm.AssetClass.FUTURES: front_contract("ES", datetime.now(UTC).date())}
+    query = _query(session, name, verb, client=live_rest, symbols=symbols, day=previous_trading_day)
     expected = [row["Name"] for row in table_rows(query.columns())]
-    record_property("plan", plan)  # a refusal of the flat files records its own, later
     case = _Case(
-        live_session,
+        session,
         name,
         spec,
-        plan,
         table_rows,
         caplog,
         skip_if_not_entitled,
@@ -823,7 +855,7 @@ def test_every_dataset_and_verb_returns_its_columns(
             wait_acked=wait_acked,
             wait_rows=wait_rows,
             rows_due=rows_due,
-            live_plans=live_plans,
+            delayed=delayed,
         )
     if drift:
         record_property("drift", "; ".join(drift))

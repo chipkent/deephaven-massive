@@ -436,17 +436,25 @@ def test_every_example_but_the_diagnostics_opens_its_own_session() -> None:
     assert "m = dm.MassiveSession()\n" in (EXAMPLES / "01_start_a_session.py").read_text()
 
 
-def test_settings_text_fits_the_keys_plans() -> None:
-    # Starter and Developer stream delayed data, except currencies, which have no delayed feed.
-    paid = {
-        "stocks": "developer",
-        "options": "advanced",
-        "indices": "basic",
-        "currencies": "starter",
-        "futures": "starter",
-    }
-    assert examples.settings_text(paid) == "delayed_subscriptions: [futures, stocks]\n"
-    assert examples.settings_text({}) == "delayed_subscriptions: []\n"
+def test_settings_text_lists_the_delayed_subscriptions_sorted() -> None:
+    assert examples.settings_text(("stocks", "futures")) == (
+        "delayed_subscriptions: [futures, stocks]\n"
+    )
+    assert examples.settings_text(()) == "delayed_subscriptions: []\n"
+
+
+def test_the_testers_own_settings_file_names_the_delayed_subscriptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Which subscriptions Massive serves delayed is the tester's to say, in their own file."""
+    monkeypatch.setenv("MASSIVE_API_KEY", "PLANTED-examples-key")
+    settings = tmp_path / "settings.yaml"
+    variable = {"DEEPHAVEN_MASSIVE_CONFIG_FILE": str(settings)}
+    assert examples.listed_delayed(variable) is None
+    settings.write_text("delayed_subscriptions: [stocks, futures]\n", encoding="utf-8")
+    assert examples.listed_delayed(variable) == ("futures", "stocks")
+    monkeypatch.setenv("HOME", str(tmp_path))  # SETTINGS_PATH is under the home folder
+    assert examples.listed_delayed({}) is None
 
 
 def test_fitted_runs_a_copy_only_when_the_example_names_a_path_of_the_run(tmp_path: Path) -> None:
@@ -477,12 +485,13 @@ def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() ->
     assert examples.stream_verdict(already, [refusal]) is already
 
 
-def test_stream_verdict_counts_a_refused_background_read_as_refused() -> None:
+def test_stream_verdict_tells_a_refused_read_from_an_unlisted_delay() -> None:
     passed = examples.Outcome("18_a.py", examples.PASSED, 1.0, "")
     plan = "stocks.bars: the Stocks subscription of your plan does not include this data"
     delayed = "AAPL would be delayed, and ... MassiveConfig.delayed_subscriptions, so ..."
-    for read in (plan, delayed):
-        assert examples.stream_verdict(passed, [read]).status == examples.REFUSED
+    assert examples.stream_verdict(passed, [plan]).status == examples.REFUSED
+    assert examples.stream_verdict(passed, [delayed]).status == examples.NOT_LISTED
+    assert examples.stream_verdict(passed, [plan, delayed]).status == examples.NOT_LISTED
     assert examples.stream_verdict(passed, [plan, "HTTP 500"]).status == examples.FAILED
 
 
@@ -509,15 +518,28 @@ def test_run_example_shares_variables_and_captures_prints(tmp_path: Path) -> Non
     assert namespace["y"] == 6
 
 
-def test_run_example_tells_a_plan_refusal_from_a_failure_under_the_console_lock(
+def test_run_example_tells_a_refusal_from_a_failure_under_the_console_lock(
     tmp_path: Path,
 ) -> None:
-    code = "import deephaven_massive as dm\nraise dm.EntitlementError('no plan')\n"
+    code = "import deephaven_massive as dm\nraise dm.EntitlementError('no plan', status=403)\n"
+    unlisted = (
+        "import deephaven_massive as dm\n"
+        "raise dm.EntitlementError('delayed', source=dm.ErrorSource.USER)\n"
+    )
+    built = "import deephaven_massive as dm\nraise dm.EntitlementError('not entitled')\n"
     refused = _write(tmp_path, "01_a.py", code)
     failed = _write(tmp_path, "02_b.py", "print('before')\n1 / 0\n")
+    delayed = _write(tmp_path, "03_c.py", unlisted)
+    library = _write(tmp_path, "04_d.py", built)
     namespace: dict[str, Any] = {"kept": 1}
     outcome, _ = examples.run_example(refused, namespace)
     assert (outcome.status, outcome.error) == (examples.REFUSED, "EntitlementError: no plan")
+    outcome, _ = examples.run_example(delayed, namespace)
+    assert (outcome.status, outcome.error) == (examples.NOT_LISTED, "EntitlementError: delayed")
+    # The library's own refusal, with no status of Massive's, is a finding, not Massive's.
+    outcome, _ = examples.run_example(library, namespace)
+    assert outcome.status == examples.FAILED
+    assert outcome.error.startswith("EntitlementError: not entitled\nTraceback")
     outcome, printed = examples.run_example(failed, namespace)
     assert outcome.status == examples.FAILED
     assert outcome.error.startswith("ZeroDivisionError: division by zero\nTraceback")

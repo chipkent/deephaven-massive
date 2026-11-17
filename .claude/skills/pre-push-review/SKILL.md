@@ -79,6 +79,12 @@ look for:
   it, or retried forever. State written before an operation that can still fail. For a new rule
   or check, write down the case that would defeat it (the value it was not written for, the
   spelling that passes it and still means something else) and try it before the push.
+- **State across events.** For code that holds state across events (retries, reloads, holds,
+  outages, rate learning), write the table of states and events and test each cell.
+- **Row counts.** For a change to how rows are counted (read, withheld, failed, reported), test
+  each kind of row against each outcome.
+- **Failure docs.** Grep every doc and docstring that describes a failure the diff changes, and
+  make each one true.
 - **A value the library didn't read.** For each column the diff fills, say whether the value
   comes from Massive's payload as sent or from the library. A null, default, rounded,
   re-stamped, or guessed library value in a data table is a blocker (`AGENTS.md`, **A data

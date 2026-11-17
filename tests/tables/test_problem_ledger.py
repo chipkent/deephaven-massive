@@ -215,3 +215,9 @@ def test_a_row_is_frozen_and_slotted() -> None:
     )
     assert not hasattr(row, "__dict__")
     assert row.key == (None, ProblemCause.RATE_LIMITED, None, None, None)
+
+
+def test_an_earlier_event_that_arrives_later_moves_first_seen(ledger: ProblemLedger) -> None:
+    ledger.apply([event(at=200)])
+    [row] = ledger.apply([event(at=100)])
+    assert (row.first_seen, row.last_seen, row.occurrences) == (100, 200, 2)

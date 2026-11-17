@@ -103,6 +103,9 @@ class ProblemCause(StrEnum):
     UNCONVERTIBLE_VALUES = "unconvertible_values"
     MALFORMED_ROWS = "malformed_rows"
     REFUSED_VENUES = "refused_venues"
+    UNLISTED_CONTRACTS = "unlisted_contracts"
+    UNSCHEDULED_PRODUCTS = "unscheduled_products"
+    UNDATED_ROWS = "undated_rows"
     STALE_SYMBOL = "stale_symbol"
     SCHEMA_DRIFT = "schema_drift"
     OUTAGE = "outage"
@@ -211,6 +214,37 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             summary="Massive refused the flat files of a futures exchange the call named "
             "(HTTP 403).",
             fix="Name in `venues` only the exchanges your plan includes.",
+        ),
+        _C.UNLISTED_CONTRACTS: CauseTraits(
+            policy="unlisted_contracts",
+            source=_MASSIVE,
+            action=ProblemAction.WITHHELD,
+            span=False,
+            summary="Massive streamed rows of a futures contract that neither its futures "
+            "snapshot nor its contracts list has held for 30 minutes, so the library can't "
+            "date them. The rows are left out.",
+            fix="Look the contract up with `m.futures.contracts()`. If Massive lists it, report "
+            "a [bug](#report-a-bug) with the row's `Detail`.",
+        ),
+        _C.UNSCHEDULED_PRODUCTS: CauseTraits(
+            policy="unscheduled_products",
+            source=_MASSIVE,
+            action=ProblemAction.WITHHELD,
+            span=False,
+            summary="Massive's futures schedules give no trading session for rows it streamed, "
+            "so the library can't date them. The rows are left out.",
+            fix="Report it as a [bug](#report-a-bug) with the row's `Detail`, so it can go to "
+            "Massive.",
+        ),
+        _C.UNDATED_ROWS: CauseTraits(
+            policy=None,
+            source=_LIBRARY,
+            action=ProblemAction.DELAYED,
+            span=True,
+            summary="A futures contract's rows have waited over 15 seconds for its trading "
+            "session from Massive's schedules. They publish, dated, once it loads.",
+            fix="Nothing, unless it lasts. The table fails once the wait passes "
+            "[`max_outage`](configuration.md#settings-reference).",
         ),
         _C.STALE_SYMBOL: CauseTraits(
             policy=None,

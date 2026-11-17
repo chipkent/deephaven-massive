@@ -277,8 +277,10 @@ class ProblemLedger:
             )
         else:
             overflow = action is ProblemAction.OVERFLOW
+            # Threads queue events out of time order: the row keeps the earliest and the latest.
             row = replace(
                 found,
+                first_seen=min(found.first_seen, event.at),
                 last_seen=max(found.last_seen, event.at),
                 rows=found.rows + event.rows,
                 occurrences=found.occurrences + 1,

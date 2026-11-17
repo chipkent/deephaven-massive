@@ -81,17 +81,5 @@ def test_first_common_keeps_common_stocks_and_stops_at_five() -> None:
     assert asked == ["ETF1", "A", "B", "ETF2", "C", "D", "E"]
 
 
-def test_first_common_keeps_as_many_as_asked() -> None:
-    asked: list[str] = []
-
-    def is_common(symbol: str) -> bool:
-        asked.append(symbol)
-        return symbol != "ETF"
-
-    kept = events.first_common(["ETF", "A", "B"], lambda s: s, is_common, keep=1)
-    assert kept == ["A"]
-    assert asked == ["ETF", "A"]
-
-
 def test_first_common_keeps_fewer_when_the_events_run_out() -> None:
     assert events.first_common(["A", "ETF", "B"], lambda s: s, lambda s: s != "ETF") == ["A", "B"]

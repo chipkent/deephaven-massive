@@ -16,6 +16,7 @@ from deephaven_massive._datasets.symbols import strict_converter
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._on_error import effect_of
+from deephaven_massive._tables import symbols as symbols_module
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.symbols import _row_converter
 
@@ -163,10 +164,22 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
 
 
 def test_a_failing_input_fails_the_converted_table_and_nothing_else(
-    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture, dh_input_table: Callable[..., InputTable]
+    dh_exec_ctx: object,
+    *,
+    caplog: pytest.LogCaptureFixture,
+    dh_input_table: Callable[..., InputTable],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The watch of the refused values ignores its input's failure: the converted table fails
     # with its input on its own, and the watch's listener raises nothing.
+    ignored = threading.Event()
+    no_failure = symbols_module._no_failure
+
+    def seen(message: str) -> None:  # the watch's own handler, then a mark for the wait
+        no_failure(message)
+        ignored.set()
+
+    monkeypatch.setattr(symbols_module, "_no_failure", seen)
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
@@ -175,6 +188,7 @@ def test_a_failing_input_fails_the_converted_table_and_nothing_else(
     with caplog.at_level(logging.ERROR):
         source.add(new_table([string_col("Symbol", ["no pe!"])]))  # fails `strict`
         wait_for(lambda: bool(result.j_table.isFailed()))
+        assert ignored.wait(10)
     assert not [r for r in caplog.records if r.name.startswith("deephaven_massive")]
     scope.release()
 

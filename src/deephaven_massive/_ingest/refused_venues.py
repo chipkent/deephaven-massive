@@ -118,7 +118,8 @@ class RefusedVenues:
 
         One `refused_venues` problem names the venues new to the call, with Massive's status
         and text, for `m.problems()`, whose first per table the session's reporter logs; the
-        record here is at DEBUG. Called after the read; reports nothing when S3 refused no
+        record here is at DEBUG. Called after each look at the call's files, before a call whose
+        every venue is refused raises; reports nothing when S3 refused no
         venue, or only venues an earlier read of the call reported.
 
         Args:

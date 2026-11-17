@@ -2,48 +2,45 @@
 
 The live-run program (`live_run`) runs the live suites in child pytest processes, loading this
 module as a plugin (`-p tests._live.live_run.outcomes`). For every phase of every test (setup, call,
-teardown) the plugin appends one JSON line to the file `MASSIVE_LIVE_OUTCOMES` names, and
-flushes it, so the record survives a child that is killed, crashes, or ends the JVM: pytest's
+teardown) the plugin appends one JSON line to the file its option `--live-outcomes` names,
+and flushes it, so the record survives a child that is killed, crashes, or ends the JVM: pytest's
 own reports would be lost with the process. Each line holds:
 
 - `nodeid`, `phase` (`setup`, `call`, or `teardown`), and `outcome` (`passed`, `failed`, or
   `skipped`);
 - `reason`, a skip's reason without pytest's `Skipped: ` prefix, else `""`;
-- `error_type`, the class name of a failure's exception (such as `EntitlementError`), else `""`;
+- `error_type`, the class name of a failure's exception (such as `AssertionError`), else `""`;
 - `items`, the open verification items the test answers (its `settles` and `verifies`
   markers), collected once per run, since a report carries no markers.
 
-At collection, with `MASSIVE_LIVE_COLLECTION` set, the plugin also writes that file: a JSON
-object of every collected test's items and declared REST requests (its `requests` marker, 10
-when absent), from which the program lists a group's checks and estimates its duration. The
+At collection, with its option `--live-collection` given, the plugin also writes that file: a
+JSON object of every collected test's items, from which the program lists a group's checks. The
 plugin adds the option `--live-run-token`, which only marks the child's command line so the
 program can tell it from another process (`children.is_alive`).
 
-Without either variable the plugin writes nothing. `read_outcomes` reads the file back
+Without either file option the plugin writes nothing. `read_outcomes` reads the file back
 for the program, which turns each test's phases into one check status (`check_outcome`).
 """
 
 from __future__ import annotations
 
 import json
-import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
+from tests._live.summary import REFUSED
+
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable
 
-OUTCOMES_VARIABLE: Final = "MASSIVE_LIVE_OUTCOMES"
-"""The environment variable that names the file the plugin appends to."""
+OUTCOMES_OPTION: Final = "--live-outcomes"
+"""The option that names the file the plugin appends to."""
 
-COLLECTION_VARIABLE: Final = "MASSIVE_LIVE_COLLECTION"
-"""The environment variable that names the file the plugin writes the collected tests to."""
-
-DEFAULT_REQUESTS: Final = 10
-"""The REST requests a test is assumed to make when it declares none."""
+COLLECTION_OPTION: Final = "--live-collection"
+"""The option that names the file the plugin writes the collected tests to."""
 
 _ITEMS: dict[str, list[str]] = {}
 """Each collected test's open-question items, by node id."""
@@ -51,13 +48,9 @@ _ITEMS: dict[str, list[str]] = {}
 _LOCK = threading.Lock()
 """Serializes the appends, since a report may come from a timeout thread."""
 
-REFUSALS: Final = frozenset({"EntitlementError", "WireEntitlementError"})
-"""The exception types of a refusal by Massive: a failure with one is a refusal of an allowed
-test, which the program re-probes before it calls it a failure."""
-
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Add `--live-run-token`, which marks a live-run child's command line.
+    """Add `--live-run-token`, which marks a live-run child's command line, and the file options.
 
     Args:
         parser: pytest's option parser.
@@ -68,15 +61,28 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="a random token the live-run program puts on its child's command line, to "
         "recognize the child later; it changes nothing in the run",
     )
+    parser.addoption(
+        OUTCOMES_OPTION,
+        default="",
+        metavar="PATH",
+        help="append one JSON line per phase of every test to this file, as it runs",
+    )
+    parser.addoption(
+        COLLECTION_OPTION,
+        default="",
+        metavar="PATH",
+        help="write every collected test's open verification items to this file",
+    )
 
 
 @pytest.hookimpl(trylast=True)
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Keep each test's items, and write the collection when the program asks for it.
 
-    Runs last, after `tests/conftest.py` has deselected the tiers the run leaves out.
+    Runs last, after `tests/conftest.py` has deselected the tests the run leaves out.
 
     Args:
+        config: The pytest configuration, which holds `--live-collection`.
         items: The collected tests.
     """
     collection: dict[str, dict[str, Any]] = {}
@@ -87,12 +93,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             for marker in item.iter_markers(name)
             for arg in marker.args
         ]
-        requests = item.get_closest_marker("requests")
-        collection[item.nodeid] = {
-            "items": _ITEMS[item.nodeid],
-            "requests": int(requests.args[0]) if requests is not None else DEFAULT_REQUESTS,
-        }
-    target = os.environ.get(COLLECTION_VARIABLE, "")
+        collection[item.nodeid] = {"items": _ITEMS[item.nodeid]}
+    target = str(config.getoption(COLLECTION_OPTION))
     if target:
         Path(target).write_text(json.dumps(collection, indent=1) + "\n", encoding="utf-8")
 
@@ -114,7 +116,7 @@ def pytest_runtest_makereport(
         The report, unchanged.
     """
     report = yield
-    target = os.environ.get(OUTCOMES_VARIABLE, "")
+    target = str(item.config.getoption(OUTCOMES_OPTION))
     if target:
         error_type = call.excinfo.typename if report.failed and call.excinfo is not None else ""
         line = {
@@ -178,27 +180,26 @@ def read_outcomes(path: Path) -> list[dict[str, Any]]:
 def check_outcome(phases: Iterable[dict[str, Any]]) -> tuple[str, str]:
     """Turn one test's phase records into its check status and reason.
 
-    A test passed when its call passed and no phase failed; it was skipped when a phase was
-    skipped and none failed; it failed when any phase failed, and was refused when that failure
-    was Massive's refusal (`REFUSALS`). A test with no call record and no failure did not
-    finish: its child was stopped or died.
+    A test passed when its call passed and no phase failed; it failed when any phase failed;
+    it was refused when a phase skipped with Massive's refusal (its reason starts `REFUSED`),
+    and skipped when a phase skipped otherwise. A test with no call record and no failure did
+    not finish: its child was stopped or died.
 
     Args:
         phases: The test's records, in order.
 
     Returns:
-        `(status, reason)`: `passed`, `failed`, `refused`, `skipped` (with its reason), or
+        `(status, reason)`: `passed`, `failed`, `refused` or `skipped` (with its reason), or
         `error` (`"did not finish"`).
     """
     records = list(phases)
     failed = [r for r in records if r["outcome"] == "failed"]
     if failed:
-        refused = all(r["error_type"] in REFUSALS for r in failed)
-        kinds = ", ".join(f"{r['phase']}: {r['error_type'] or 'failed'}" for r in failed)
-        return ("refused" if refused else "failed"), kinds
+        return "failed", ", ".join(f"{r['phase']}: {r['error_type'] or 'failed'}" for r in failed)
     skipped = [r for r in records if r["outcome"] == "skipped"]
     if skipped:
-        return "skipped", str(skipped[0]["reason"])
+        reason = str(skipped[0]["reason"])
+        return ("refused" if reason.startswith(REFUSED) else "skipped"), reason
     if any(r["phase"] == "call" and r["outcome"] == "passed" for r in records):
         return "passed", ""
     return "error", "did not finish"

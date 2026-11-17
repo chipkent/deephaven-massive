@@ -13,31 +13,24 @@ from typing import TYPE_CHECKING
 
 from tests._live.live_run import results
 from tests._live.live_run.secret_scrub import SecretFilter
-from tests._live.live_run.state import Attempt, RunState, check_of, entitlement_id, record
+from tests._live.live_run.state import Attempt, RunState, check_of, record
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-BASIC = dict.fromkeys(("stocks", "options", "indices", "currencies", "futures"), "basic")
-
 PLANTED_KEY = "PLANTED-results-key-31f0"
+
+REFUSAL = "refused: HTTP 403 from GET /v3/quotes/AAPL on h (request_id 1): not entitled"
 
 
 def _state() -> RunState:
     state = RunState(commit="abc123")
-    state.current = entitlement_id(state, BASIC, [])
     passed = check_of(state, "evidence", "t.py::test_a")
     passed.items = ["21", "verified thing"]
     record(state, passed, status="passed", reason="", day="2026-11-04")
-    skipped = check_of(state, "evidence", "t.py::test_b")
-    skipped.items = ["22"]
-    record(
-        state,
-        skipped,
-        status="skipped",
-        reason="needs Stocks Starter ($29/month)",
-        day="2026-11-04",
-    )
+    refused = check_of(state, "evidence", "t.py::test_b")
+    refused.items = ["22"]
+    record(state, refused, status="refused", reason=REFUSAL, day="2026-11-04")
     failed = check_of(state, "smoke", "t.py::test_c")
     failed.items = ["23", "13"]
     record(state, failed, status="failed", reason="call: AssertionError", day="2026-11-04")
@@ -46,14 +39,18 @@ def _state() -> RunState:
     return state
 
 
-def test_a_reason_loses_the_plans_prices() -> None:
-    assert results.shown_reason(
-        "needs Stocks Starter ($29/month); Options Business (price on request)"
-    ) == ("needs Stocks Starter; Options Business")
-    assert (
-        results.shown_reason("needs at least one class on Basic (free)")
-        == "needs at least one class on Basic"
+def test_why_a_check_is_unverified() -> None:
+    state = _state()
+    unlisted = check_of(state, "smoke", "t.py::test_d")
+    record(state, unlisted, status="skipped", reason="not listed as delayed: x", day="2026-11-04")
+    unnamed = check_of(state, "smoke", "t.py::test_e")
+    record(state, unnamed, status="refused", reason="refused: NOT_AUTHORIZED", day="2026-11-04")
+    assert results.why_unverified(state.checks["evidence t.py::test_b"]) == (
+        "refused by Massive (stocks)"
     )
+    assert results.why_unverified(unlisted) == "not listed as delayed"
+    assert results.why_unverified(unnamed) == "refused by Massive"
+    assert results.why_unverified(state.checks["smoke t.py::test_c"]) == "failed"
 
 
 def test_the_status_view_lists_the_probe_every_check_and_a_summary() -> None:
@@ -64,16 +61,12 @@ def test_the_status_view_lists_the_probe_every_check_and_a_summary() -> None:
         next_start=lambda group: f"soon ({group})",
     )
     assert lines[0] == "latest probe: 2026-11-04T13:00:00Z"
-    assert lines[1].startswith("  subscriptions: stocks=basic")
     assert "next stream day: none planned" in lines
     assert "evidence (next: soon (evidence))" in lines
-    assert any(
-        line.startswith("  t.py::test_b: skipped: needs Stocks Starter [stocks=basic")
-        for line in lines
-    )
+    assert f"  t.py::test_b: {REFUSAL}" in lines  # Massive's refusal, its word said once
     assert "  stocks: not started (optional)" in lines
     assert "group | passed | failed | error | refused | skipped | not run" in lines
-    assert "evidence | 1 | 0 | 0 | 0 | 1 | 0" in lines
+    assert "evidence | 1 | 0 | 0 | 1 | 0 | 0" in lines
     assert "upgrade-check | 0 | 0 | 0 | 0 | 0 | 1" in lines
 
 
@@ -93,20 +86,20 @@ def test_checks_csv_has_one_line_per_check(tmp_path: Path) -> None:
         "market-status",
         "stocks",
     ]
-    assert rows[1]["reason"] == "needs Stocks Starter"
-    assert rows[1]["subscriptions"].startswith("stocks=basic, options=basic")
-    assert rows[3]["subscriptions"] == ""
+    assert rows[1]["reason"] == REFUSAL
+    assert rows[1]["refused_subscription"] == "stocks"
+    assert rows[3]["refused_subscription"] == ""
 
 
 def test_an_items_status_follows_its_checks() -> None:
     state = _state()
     checks = state.checks
-    passed, skipped = checks["evidence t.py::test_a"], checks["evidence t.py::test_b"]
+    passed, refused = checks["evidence t.py::test_a"], checks["evidence t.py::test_b"]
     failed, never = checks["smoke t.py::test_c"], checks["responses market-status"]
     assert results.item_status([passed]) == "evidence recorded"
     assert results.item_status([passed, never]) == "partly run"
-    assert results.item_status([passed, skipped]) == "needs Stocks Starter"
-    assert results.item_status([skipped, failed]) == "failed"
+    assert results.item_status([passed, refused]) == "refused by Massive (stocks)"
+    assert results.item_status([refused, failed]) == "failed"
 
 
 def test_the_report_has_every_section(tmp_path: Path) -> None:
@@ -114,19 +107,21 @@ def test_the_report_has_every_section(tmp_path: Path) -> None:
     environment = {"items": [{"name": "java", "verdict": "OK", "detail": "Java 21"}]}
     (tmp_path / "preflight" / "environment.json").write_text(json.dumps(environment))
     (tmp_path / "probes").mkdir()
-    (tmp_path / "probes" / "entitlements.csv").write_text(
-        "when,entitlement\n2026-11-04T13:00:00Z,e1\n"
+    (tmp_path / "probes" / "probes.csv").write_text(
+        "when,clock_offset_s\n2026-11-04T13:00:00Z,0.2\n"
     )
     results.write_report(tmp_path, _state())
     report = (tmp_path / "REPORT.md").read_text()
     assert "Commit: `abc123`" in report
     assert "| java | OK | Java 21 |" in report
-    assert "| 2026-11-04T13:00:00Z | e1 |" in report
+    assert "| 2026-11-04T13:00:00Z | 0.2 |" in report
+    assert "## What Massive refused, by day" in report
+    assert f"| 2026-11-04 | stocks | evidence: t.py::test_b | {REFUSAL} |" in report
     assert "## smoke" in report
     assert "| 21 | evidence recorded |" in report
-    assert "| 22 | needs Stocks Starter |" in report
+    assert "| 22 | refused by Massive (stocks) |" in report
     assert "| 13 |" not in report  # checked by CI, not by a live test
-    assert "- **needs Stocks Starter**: evidence: t.py::test_b" in report
+    assert "- **refused by Massive (stocks)**: evidence: t.py::test_b" in report
     assert "- **failed**: smoke: t.py::test_c" in report
 
 
@@ -135,6 +130,7 @@ def test_the_report_without_an_environment_or_a_probe(tmp_path: Path) -> None:
     report = (tmp_path / "REPORT.md").read_text()
     assert "No environment was recorded." in report
     assert "No probe was recorded." in report
+    assert "Massive refused nothing." in report
 
 
 def test_pack_zips_every_file_but_the_lock_and_earlier_zips(tmp_path: Path) -> None:
@@ -194,7 +190,7 @@ def test_the_report_gives_each_nights_findings(tmp_path: Path) -> None:
     ]
     (tmp_path / night).mkdir(parents=True)
     boundary = {
-        "unit": "futures delayed",
+        "unit": "futures",
         "stream": "futures-minute-bars",
         "boundary": "16:00 Chicago close",
         "at": "2026-11-04T23:00:00+00:00",
@@ -207,17 +203,17 @@ def test_the_report_gives_each_nights_findings(tmp_path: Path) -> None:
     summary = {
         "night": "2026-11-04",
         "gaps_minutes": 3,
-        "reconnects": {"futures delayed": 1},
-        "quiet_hours": {"futures delayed": [], "crypto real-time": ["2026-11-05T03:00:00+00:00"]},
+        "reconnects": {"futures": 1},
+        "quiet_hours": {"futures": [], "crypto": ["2026-11-05T03:00:00+00:00"]},
         "boundaries": [boundary],
     }
     (tmp_path / night / "summary.json").write_text(json.dumps(summary))
     results.write_report(tmp_path, state)
     report = (tmp_path / "REPORT.md").read_text()
     assert report.count("### 2026-11-04") == 1
-    assert "- Gaps: 3 minutes. Reconnects: futures delayed 1." in report
-    assert "- futures delayed: quiet hours (UTC): none." in report
-    assert "- crypto real-time: quiet hours (UTC): 2026-11-05T03:00:00+00:00." in report
+    assert "- Gaps: 3 minutes. Reconnects: futures 1." in report
+    assert "- futures: quiet hours (UTC): none." in report
+    assert "- crypto: quiet hours (UTC): 2026-11-05T03:00:00+00:00." in report
     assert (
         "| futures-minute-bars | 16:00 Chicago close | after | 90 | 2026-11-04=1 2026-11-05=89 "
         "| 2026-11-05 | 1 |" in report

@@ -131,18 +131,13 @@ def test_a_command_output_or_nothing() -> None:
 
 def test_the_child_environment() -> None:
     base = {"CI": "true", "MASSIVE_S3_ACCESS_KEY_ID": "a", "MASSIVE_S3_SECRET_ACCESS_KEY": "b"}
-    env = children.child_environment(
-        base, plans="stocks=starter", debug_log=Path("debug.log"), extra={"X": "1"}
-    )
+    env = children.child_environment(base, debug_log=Path("debug.log"))
     assert "CI" not in env
     assert env["MASSIVE_S3_ACCESS_KEY_ID"] == "a"
-    assert env["MASSIVE_LIVE_PLANS"] == "stocks=starter"
+    assert not any(name.startswith("MASSIVE_LIVE") for name in env)
     assert env["DEEPHAVEN_MASSIVE_LOG"] == "DEBUG"
     assert env["DEEPHAVEN_MASSIVE_LOG_FILE"].startswith("/")
-    assert env["X"] == "1"
-    bare = children.child_environment(
-        base, plans="", debug_log=Path("debug.log"), extra={}, with_s3=False
-    )
+    bare = children.child_environment(base, debug_log=Path("debug.log"), with_s3=False)
     assert not set(children.S3_VARIABLES) & set(bare)
 
 

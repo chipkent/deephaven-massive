@@ -47,7 +47,6 @@ _LOGGED_BY_SOURCE: Final = frozenset(
         ProblemCause.RATE_LIMITED,
         ProblemCause.POLL_CYCLE_FAILED,
         ProblemCause.POLL_CYCLE_LATE,
-        ProblemCause.SYMBOL_READ_RETRYING,
         ProblemCause.SYMBOL_READ_FAILED,
         ProblemCause.STREAM_FAILED,
     }

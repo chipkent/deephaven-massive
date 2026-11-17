@@ -66,7 +66,7 @@ def test_the_bundle_holds_the_collected_text_files_cleaned_and_the_environment(
 def test_a_secret_the_cleaning_misses_blocks_the_zip(tmp_path: Path) -> None:
     folder = _folder(tmp_path)
     hidden = base64.b64encode(f"user:{KEY}".encode()).decode()
-    (folder / "server.log").write_text(f"Basic {hidden}\n", encoding="utf-8")
+    (folder / "server.log").write_text(f"token {hidden}\n", encoding="utf-8")
     target, finds = bug_report.build_bundle(
         folder, environment={}, secrets=SecretFilter((KEY,)), stamp="T2"
     )

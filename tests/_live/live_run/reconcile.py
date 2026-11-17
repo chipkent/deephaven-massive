@@ -196,7 +196,7 @@ def run_reconcile(
     summary: dict[str, Any] = {"day": day.isoformat(), "streams": {}, "unreadable": unreadable}
     for unit in units:
         compared = 0
-        for stream in UNIT_STREAMS[unit.split()[0]]:
+        for stream in UNIT_STREAMS[unit]:
             streamed = streamed_bars(stream_folder, stream, unreadable=unreadable)
             symbols = sorted({symbol for symbol, _ in streamed})
             fetched: dict[tuple[str, int], tuple[Any, ...]] = {}
@@ -223,7 +223,7 @@ def run_reconcile(
 
 
 NIGHT_STREAMS: Final = {"crypto": "crypto-minute-bars", "futures": "futures-minute-bars"}
-"""The minute-bar stream of each night unit, by the unit's first word."""
+"""The minute-bar stream of each night unit."""
 
 DATED: Final = (*FIELDS, "Date")
 """The fields read of a night's bars: the compared values, then the `Date`."""
@@ -242,7 +242,7 @@ def run_night_reconcile(
 
     Args:
         m: The session.
-        units: The due units, such as `["crypto real-time"]`.
+        units: The due units, such as `["crypto"]`.
         stream_folder: The night's attempt folder.
         night: The night's evening.
         folder: This attempt's folder.
@@ -254,7 +254,7 @@ def run_night_reconcile(
     unreadable: list[str] = []
     summary: dict[str, Any] = {"night": night.isoformat(), "streams": {}, "unreadable": unreadable}
     for unit in units:
-        stream = NIGHT_STREAMS[unit.split()[0]]
+        stream = NIGHT_STREAMS[unit]
         utc_dated = stream == NIGHT_STREAMS["crypto"]
         bars = streamed_bars(stream_folder, stream, unreadable=unreadable, fields=DATED)
         streamed = _within(bars, start, end)

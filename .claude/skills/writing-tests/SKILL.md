@@ -64,4 +64,7 @@ it costs, and what its result settles.
   fails on a number no file there has.
 - A new open question gets a new item file, with the next free number, in the format of that
   folder's README; a settled item gets its one-line settlement on its `Status:` line.
+- Every live test that opens a stream checks it with the shared refusal helper
+  (`skip_if_not_entitled` in `tests/conftest.py`), including a refusal Massive sends after the
+  table opens: a refusal skips the test, quoting Massive, and never fails it.
 - Each test's docstring says what its evidence means.

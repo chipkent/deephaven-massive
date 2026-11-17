@@ -7,8 +7,9 @@ Every child first watches the parent the script saw before its server started
 (`start_parent_watch`), so it ends soon after that parent does.
 
 - `_group --out OUT --attempt FOLDER --token T`: a built-in group's child (`attempts`). It
-  opens sessions on the key (declaring its Basic subscriptions, except for
-  the upgrade check, whose sessions declare nothing), and runs the group (`group_child`).
+  opens sessions on the key with the owner's settings, as the live tests do
+  (`session_config`; the upgrade check's sessions declare no request limit), and runs the
+  group (`group_child`).
 - `_probe --result FILE`: one probe of the key (`run_probe.probe_key`), its result written to
   `FILE` for the parent to read (`probe_result.probe_in_child`).
 """
@@ -24,15 +25,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import deephaven_massive as dm
+from deephaven_massive._config import CONFIG_FILE_VARIABLE
 from tests._live.live_run import group_child
 from tests._live.live_run.probe_result import write_result
 from tests._live.live_run.run_probe import credentials, probe_key
-from tests._live.live_run.stream_units import DELAYED, RECENCY
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from deephaven_massive import MassiveSession
+    from deephaven_massive import MassiveConfig
 
 PARENT_CHECK: Final = 5.0
 """Seconds between a built-in child's checks that its parent still runs."""
@@ -55,34 +56,51 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
-def run_group_child(
-    out: Path,
-    attempt: str,
-    *,
-    environ: Mapping[str, str],
-) -> None:
+def session_config(environ: Mapping[str, str], *, declare_limits: bool) -> MassiveConfig:
+    """Build a child's session configuration from the owner's settings file, as the live tests do.
+
+    When `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the owner's settings file, its
+    `delayed_subscriptions`, `rest_basic_subscriptions`, and `websocket_hosts` are passed
+    through, and every other setting keeps its default; the key comes from the environment.
+
+    Args:
+        environ: The environment, which names the settings file.
+        declare_limits: Whether the file's `rest_basic_subscriptions` are passed through; False
+            for the upgrade check, whose sessions must learn the limit from Massive.
+
+    Returns:
+        The configuration; the defaults alone without the file.
+    """
+    path = environ.get(CONFIG_FILE_VARIABLE, "").strip()
+    if not path:
+        bare: MassiveConfig = dm.MassiveConfig()
+        return bare
+    settings = dm.MassiveConfig.from_file(path)
+    limited = settings.rest_basic_subscriptions if declare_limits else frozenset()
+    configured: MassiveConfig = dm.MassiveConfig(
+        delayed_subscriptions=settings.delayed_subscriptions,
+        rest_basic_subscriptions=limited,
+        websocket_hosts=settings.websocket_hosts,
+    )
+    return configured
+
+
+def run_group_child(out: Path, attempt: str, *, environ: Mapping[str, str]) -> None:
     """Be a built-in group's child: run the group.
 
     Args:
         out: The results folder.
         attempt: The attempt's folder, relative to `out`.
-        environ: The environment, for the probe of the upgrade check.
+        environ: The environment, which names the owner's settings file.
     """
     request = json.loads((out / attempt / "request.json").read_text(encoding="utf-8"))
-    tiers = request["tiers"].items()
-    basic = frozenset(dm.Subscription(n) for n, t in tiers if t == "basic")
-    # The library serves delayed data only when asked: a delayed plan's streams ask for it.
-    delayed = frozenset(dm.Subscription(n) for n, t in tiers if RECENCY.get((n, t)) == DELAYED)
-
-    def open_session() -> MassiveSession:
-        config = dm.MassiveConfig(rest_basic_subscriptions=basic, delayed_subscriptions=delayed)
-        return dm.MassiveSession(config)
-
-    def tier_of(subscription: str) -> str | None:
-        probe = probe_key(credentials(environ), now=datetime.now(UTC))
-        return None if probe.tiers is None else probe.tiers[subscription]
-
-    group_child.run_group(out, attempt, open_session=open_session, tier_of=tier_of)
+    config = session_config(environ, declare_limits=request["group"] != "upgrade-check")
+    group_child.run_group(
+        out,
+        attempt,
+        open_session=lambda: dm.MassiveSession(config),
+        delayed=frozenset(s.value for s in config.delayed_subscriptions),
+    )
 
 
 def run_probe_child(result: Path, *, environ: Mapping[str, str]) -> None:

@@ -13,7 +13,6 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from types import SimpleNamespace
 from typing import Any, TypeAlias
 
 import pytest
@@ -24,7 +23,7 @@ from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
-from deephaven_massive._ingest import futures_calendar, ws, ws_connection
+from deephaven_massive._ingest import futures_calendar, ws, ws_connection, ws_silence
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.host_decision import recency_of
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
@@ -919,11 +918,11 @@ def test_closing_a_session_closes_a_retired_connection_it_alone_leases(
 
 
 def looked_up(ws_session: WsSession, *tickers: str) -> None:
-    # Wait until the calendar has asked Massive's contracts for every ticker.
+    # Wait until the calendar has asked Massive's snapshot for every ticker.
     def asked() -> bool:
         sent: set[str] = set()
         for path, query in ws_session.fetched:
-            if path == "/futures/v1/contracts":
+            if path == "/futures/v1/snapshot":
                 asked_for = query["ticker.any_of"]
                 assert isinstance(asked_for, tuple)
                 sent.update(asked_for)
@@ -948,13 +947,18 @@ def test_one_calendar_wins_a_race_and_closes_with_the_connections(
     def racing(
         fetch: Callable[..., list[dict[str, object]]],
         *,
+        snapshot_path: str,
         contracts_path: str,
         schedules_path: str,
         label: str,
     ) -> futures_calendar.FuturesCalendar:
         def make() -> futures_calendar.FuturesCalendar:
             return real(
-                fetch, contracts_path=contracts_path, schedules_path=schedules_path, label=label
+                fetch,
+                snapshot_path=snapshot_path,
+                contracts_path=contracts_path,
+                schedules_path=schedules_path,
+                label=label,
             )
 
         calendar = make()
@@ -983,13 +987,18 @@ def test_no_calendar_outlives_a_closed_transport(
     def closing(
         fetch: Callable[..., list[dict[str, object]]],
         *,
+        snapshot_path: str,
         contracts_path: str,
         schedules_path: str,
         label: str,
     ) -> futures_calendar.FuturesCalendar:
         def make() -> futures_calendar.FuturesCalendar:
             return real(
-                fetch, contracts_path=contracts_path, schedules_path=schedules_path, label=label
+                fetch,
+                snapshot_path=snapshot_path,
+                contracts_path=contracts_path,
+                schedules_path=schedules_path,
+                label=label,
             )
 
         calendar = make()
@@ -1050,7 +1059,8 @@ def test_the_calendar_outlives_the_session_that_made_it(ws_session: WsSession) -
     del mine
     assert calendar._thread.is_alive()
     group = ws_session.connections.group
-    assert group.futures_calendar(contracts_path="x", schedules_path="y") is calendar
+    found = group.futures_calendar(snapshot_path="w", contracts_path="x", schedules_path="y")
+    assert found is calendar
     looked_up(ws_session, "NQZ5")  # read through the open session
     other.close()
     assert not calendar._thread.is_alive()  # the group's last session closed it
@@ -1869,73 +1879,6 @@ def test_an_outage_without_live_tables_logs_nothing(
     assert not [m for m in messages if "is down" in m or "reconnected after" in m]
 
 
-def _quiet_connection(
-    acknowledged: frozenset[str], last: int, notes: list[str | None] | None = None
-) -> ws_connection.Connection:
-    # The state `Connection._check_frames` reads, without a socket: a live connection's status
-    # frames would move its last-frame time while the test owns it. Each note the streams
-    # would show goes to `notes`.
-    state: ws_connection.Connection = SimpleNamespace(  # type: ignore[assignment]  # a fake: only what _check_frames reads
-        url=_URL,
-        asset_class=AssetClass.STOCKS,
-        _state=ConnectionState.CONNECTED,
-        subscriptions=SimpleNamespace(acknowledged=acknowledged),
-        _episodes=ws_connection._Episodes(last_frame_at=last),
-        _last_message_at=None,
-        _set_quiet_note=(notes if notes is not None else []).append,
-    )
-    for name in ("_check_frames", "_heard"):
-        method = getattr(ws_connection.Connection, name)
-        setattr(state, name, functools.partial(method, state))
-    return state
-
-
-def test_a_silent_connection_warns_once_while_its_market_trades(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    trading = [False]
-    monkeypatch.setattr(ws_connection, "in_trading_hours", lambda _asset_class, _moment: trading[0])
-    last = 1_800_000_000 * 10**9
-    notes: list[str | None] = []
-    connection = _quiet_connection(frozenset({"T.AAPL"}), last, notes)
-    quiet = last + int(ws_connection.NO_FRAMES_WARNING * 1e9)
-    with (
-        caplog.at_level(logging.INFO, logger=ws.__name__),
-        caplog.at_level(logging.INFO, logger=ws_connection.__name__),
-    ):
-        connection._check_frames(quiet)  # silent long enough, but the market is closed
-        trading[0] = True
-        connection._check_frames(quiet - 10**9)  # not silent long enough yet
-        connection._check_frames(quiet)
-        connection._check_frames(quiet + 60 * 10**9)  # the same episode: logged once
-        connection._heard()  # a frame arrives: the recovery is logged at once
-        connection._heard()  # and only once
-    assert [
-        (r.levelno, r.getMessage())
-        for r in caplog.records
-        if r.name in {ws.__name__, ws_connection.__name__}
-    ] == [
-        (
-            logging.WARNING,
-            (
-                f"{_URL}: no frame for 300 s during stocks trading hours, though 1 topics are "
-                "acknowledged, so its live tables may be stale; a market holiday or symbols "
-                "that are not trading explain it, and m.connections() shows the connection's "
-                "state"
-            ),
-        ),
-        (logging.INFO, f"{_URL}: frames arrive again"),
-    ]
-    # The streams show the silence while it lasts, but keep running: nothing fails them.
-    assert notes == [
-        (
-            "no data since 2027-01-15T08:00:00Z during stocks trading hours; quiet symbols or "
-            "a market holiday may explain it"
-        ),
-        None,
-    ]
-
-
 def test_any_frame_ends_the_quiet_feed_span_and_the_stream_keeps_running(
     *,
     ws_session: WsSession,
@@ -1943,12 +1886,12 @@ def test_any_frame_ends_the_quiet_feed_span_and_the_stream_keeps_running(
     monkeypatch: pytest.MonkeyPatch,
     dh_to_pylist: ToPylist,
 ) -> None:
-    monkeypatch.setattr(ws_connection, "in_trading_hours", lambda _asset_class, _moment: True)
+    monkeypatch.setattr(ws_silence, "in_trading_hours", lambda _asset_class, _moment: True)
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     ws_session.wait(lambda s: any(status.kind is StatusKind.ACK for status in s.statuses))
     connection = ws_session.connection()
-    later = int(2 * ws_connection.NO_FRAMES_WARNING * 1e9)
+    later = int(2 * ws_silence.NO_FRAMES_WARNING * 1e9)
 
     def quiet() -> str | None:
         [row] = streams_of(ws_session, dh_to_pylist)
@@ -1968,6 +1911,17 @@ def test_any_frame_ends_the_quiet_feed_span_and_the_stream_keeps_running(
     ws_session.session.release(result)
 
 
+def _go_quiet(connection: ws_connection.Connection, note: str) -> None:
+    # Each stream's quiet_feed span as the silence check would show it. Straight to the spans:
+    # a status frame the fake server sends would end a real episode meanwhile.
+    connection._report_spans(
+        {
+            stream_id: {ProblemCause.QUIET_FEED: ({"quiet": (None, None, note, 0)}, None)}
+            for stream_id in connection._streams
+        }
+    )
+
+
 def test_a_span_reaches_only_the_streams_whose_session_lives(
     *, ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, dh_to_pylist: ToPylist
 ) -> None:
@@ -1983,7 +1937,7 @@ def test_a_span_reaches_only_the_streams_whose_session_lives(
         return None if sink.stream_id == 2 else core_of(sink)
 
     monkeypatch.setattr(StreamSink, "core", freed)
-    ws_session.on_loop(connection, lambda: connection._set_quiet_note("quiet"))
+    ws_session.on_loop(connection, lambda: _go_quiet(connection, "quiet"))
     assert spans_of(ws_session, dh_to_pylist) == {(1, QUIET): "quiet"}
     assert ws_session.on_loop(connection, lambda: sorted(connection._spans)) == [1]
     monkeypatch.undo()
@@ -2007,25 +1961,12 @@ def test_a_span_that_did_not_change_is_not_reported_again(
 
     monkeypatch.setattr(core, "problems", recording)
     for _ in range(2):  # the same note twice: its span holds on, unchanged
-        ws_session.on_loop(connection, lambda: connection._set_quiet_note("quiet"))
+        ws_session.on_loop(connection, lambda: _go_quiet(connection, "quiet"))
     assert [(p.cause, p.stream_id) for p in reported if p.cause is ProblemCause.QUIET_FEED] == [
         (ProblemCause.QUIET_FEED, 1)
     ]
     assert spans_of(ws_session, dh_to_pylist) == {(1, QUIET): "quiet"}
     ws_session.session.release(result)
-
-
-def test_a_connection_with_nothing_acknowledged_is_never_silent(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    monkeypatch.setattr(ws_connection, "in_trading_hours", lambda _asset_class, _moment: True)
-    connection = _quiet_connection(frozenset(), 0)
-    with (
-        caplog.at_level(logging.INFO, logger=ws.__name__),
-        caplog.at_level(logging.INFO, logger=ws_connection.__name__),
-    ):
-        connection._check_frames(int(2 * ws_connection.NO_FRAMES_WARNING * 1e9))
-    assert not caplog.records
 
 
 def test_the_summary_checks_for_silence(

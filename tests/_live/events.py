@@ -1,8 +1,8 @@
 """The recent splits and special dividends the corporate-action checks read.
 
-A fixed split or dividend ages out of a Basic plan's two years of history, so the checks find
-recent ones through the library's own `stocks.splits` and `stocks.dividends`, once per run.
-This module chooses among the rows those return; the `recent_splits` and `special_dividends`
+A fixed split or dividend ages out of the history a key may read, so the checks find recent
+ones through the library's own `stocks.splits` and `stocks.dividends`, once per run. This
+module chooses among the rows those return; the `recent_splits` and `special_dividends`
 fixtures in `tests/conftest.py` fetch them and check each candidate's ticker type.
 
 An event is kept only when no split of any kind follows it: adjusted bars restate the prices
@@ -29,14 +29,6 @@ EVENT_SETTLED: Final = 3
 
 EVENT_CANDIDATES: Final = 5
 """How many recent events are kept, newest first; a test takes the first one that has bars."""
-
-BASIC_EVENT_CANDIDATES: Final = 1
-"""How many recent events are kept when stocks are on Basic: each candidate a test tries costs
-two bar requests, and a test sends a class on Basic at most 5 requests."""
-
-BASIC_EVENT_CHECKS: Final = 2
-"""How many candidates' tickers are checked when stocks are on Basic, each check a request to the
-reference data, which Massive paces as a class of its own on a Basic key."""
 
 PLAIN_TICKER: Final = re.compile(r"[A-Z]{1,5}")
 """A plain listed ticker: no class suffix, warrant, or unit, which may lack bars. ETFs,
@@ -178,28 +170,24 @@ def first_common(
     events: Iterable[E],
     symbol: Callable[[E], str],
     is_common: Callable[[str], bool],
-    *,
-    keep: int = EVENT_CANDIDATES,
 ) -> list[E]:
-    """Keep the events of common stocks, in order, up to `keep` of them.
+    """Keep the events of common stocks, in order, up to `EVENT_CANDIDATES` of them.
 
     Each candidate's ticker is checked only until enough are kept, since each check is a
-    request; a caller that must bound the checks passes fewer candidates.
+    request.
 
     Args:
         events: The candidate events.
         symbol: Returns an event's ticker.
         is_common: Tells whether a ticker is a common stock (an ETF, leveraged or not, a fund,
             or a warrant is not).
-        keep: The most events kept: `EVENT_CANDIDATES` by default, `BASIC_EVENT_CANDIDATES`
-            when stocks are on Basic.
 
     Returns:
         The first events whose ticker is a common stock.
     """
     kept: list[E] = []
     for event in events:
-        if len(kept) == keep:
+        if len(kept) == EVENT_CANDIDATES:
             break
         if is_common(symbol(event)):
             kept.append(event)

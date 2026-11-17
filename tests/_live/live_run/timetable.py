@@ -5,8 +5,6 @@ of scheduling them, so a reader can check the plan by eye. Each trading day is o
 kinds, decided from the run's state:
 
 1. **A stream day**: a probe at 03:15, then `stream-day` from 03:45 to 20:30, and nothing else.
-   The probe runs before 03:30, when Massive starts clearing and refilling its snapshots, during
-   which the probe cannot tell the plans (`probe.SNAPSHOT_RESET`).
 2. **The day after a stream day**: a probe at 08:00, `throughput` from 09:15 to 11:00, then the
    ordinary sequence from 11:30.
 3. **An ordinary day**: a probe at 08:00, `luld` at 09:28, then the ordinary sequence from
@@ -71,7 +69,7 @@ class Slot:
 
 
 STREAM_PROBE: Final = time(3, 15)
-"""The probe of a stream day, before Massive's snapshot reset."""
+"""The probe of a stream day, half an hour before its streams start."""
 
 DAY_PROBE: Final = time(8, 0)
 """The probe of every other trading day."""

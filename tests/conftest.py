@@ -9,20 +9,19 @@ Test modules never import from this file; they request its fixtures by name. Fak
 `tests/_fakes/` are handed to tests through thin fixtures defined here.
 
 The live integration tests (`tests/**/test_*_integration.py`) get their own fixtures here too:
-the marker checks, the key skip, the Basic plan's pacing (the skip of a test that would wait
-more than a minute, and a terminal line for each wait), live sessions and wire clients, raw
-flat-file and REST readers, the run's source of plans, dates, and corporate actions, and the
-`evidence` recorder, which writes each run's own `live-evidence-<time>.log` as it goes and
-closes the terminal summary. The `live_plans` fixture itself, with the key check that comes
-before it, is in the plugin `tests/_live/key_check.py`, which this module registers. The
-logic behind the plans, pacing, dates, contracts, and corporate actions lives in
-`tests/_live/`, where it is unit-tested against the fakes; the fixtures here only call it.
+the marker checks, the key skip, the owner's settings file (`live_config`), the pacing (a
+timeout scaled to a test's declared requests, and a terminal line for each wait), the skip
+that quotes Massive's refusal, live sessions and wire clients, raw flat-file and REST readers,
+dates, and corporate actions, and the `evidence` recorder, which writes each run's own
+`live-evidence-<time>.log` as it goes and closes the terminal summary. The logic behind the
+refusals, pacing, dates, contracts, and corporate actions lives in `tests/_live/`, where it is
+unit-tested against the fakes; the fixtures here only call it.
 
-The soak tests (marker `soak`) run the library against the fakes for `MASSIVE_SOAK_SECONDS`
-each, under load: a fast fake feed, many streams, and churn. Here they get a time limit scaled
-to that run instead of the suite's 60 s and faulthandler's 120 s, and the `soak` fixture, which
-paces their rounds and fails one whose memory or threads keep growing. `docs/dev/soak-tests.md`
-says how to run them, overnight included.
+The soak tests (marker `soak`) run the library against the fakes for `--soak-seconds` each,
+under load: a fast fake feed, many streams, and churn. Here they get a time limit scaled to that
+run instead of the suite's 60 s and faulthandler's 120 s, and the `soak` fixture, which paces
+their rounds and fails one whose memory or threads keep growing. `docs/dev/soak-tests.md` says
+how to run them, overnight included.
 """
 
 from __future__ import annotations
@@ -65,8 +64,9 @@ from deephaven.stream.table_publisher import table_publisher
 
 import deephaven_massive as dm
 from deephaven_massive import _massive, _session
-from deephaven_massive._errors import EntitlementError, MassiveError
-from deephaven_massive._ingest import rate_limits, ws_connection
+from deephaven_massive._config import CONFIG_FILE_VARIABLE
+from deephaven_massive._errors import EntitlementError, ErrorSource, MassiveError
+from deephaven_massive._ingest import host_decision, rate_limits, ws_connection
 from deephaven_massive._massive import (
     FlatFileClient,
     ReadColumn,
@@ -95,14 +95,14 @@ from tests._live import (
     key_check,
     pacing,
     parallel,
-    plans,
-    probe,
+    recency,
+    refusals,
     streams,
     summary,
     ticker_lists,
     week_windows,
 )
-from tests._live.live_run import stream_units, upgrade_check
+from tests._live.live_run import upgrade_check
 from tests.embedded_server import CYCLE_MILLIS
 
 if TYPE_CHECKING:
@@ -128,22 +128,18 @@ def pytest_configure(config: pytest.Config) -> None:
 
     The `-p` plugin `tests/embedded_server.py` has already started the server, in every
     process of the run. This registers `tests/_live/parallel.py` as a plugin, whose hook
-    refuses a parallel run that selects a live test, and `tests/_live/key_check.py`, whose
-    `live_plans` fixture learns the run's plans from `_plans_of_key` past its key check, then
-    checks that the update graph runs the cycle the tests are written for, then records
-    Deephaven's fatal errors (`_record_jvm_fatal_errors`) and the library's liveness-scope
-    releases made without the update graph's lock (`_record_unlocked_library_releases`).
+    refuses a parallel run that selects a live test, then checks that the update graph runs
+    the cycle the tests are written for, then records Deephaven's fatal errors
+    (`_record_jvm_fatal_errors`) and the library's liveness-scope releases made without the
+    update graph's lock (`_record_unlocked_library_releases`).
 
     Args:
-        config: The pytest configuration, whose plugin manager takes the two plugins and whose
-            stash takes the source of plans.
+        config: The pytest configuration, whose plugin manager takes the plugin.
 
     Raises:
         pytest.UsageError: If the JVM did not apply the cycle property.
     """
     config.pluginmanager.register(parallel, parallel.PLUGIN_NAME)
-    config.stash[key_check.PLANS_SOURCE] = _plans_of_key
-    config.pluginmanager.register(key_check, key_check.PLUGIN_NAME)
     atexit.register(_final_jvm_exit)
     periodic = jpy.get_type("io.deephaven.engine.updategraph.impl.PeriodicUpdateGraph")
     j_update_graph = dh_execution_context.get_exec_ctx().update_graph.j_update_graph
@@ -518,7 +514,8 @@ def console_command(
     Returns:
         The function; it takes the command and returns once the command has returned. Its
         keyword `timeout` replaces the 30 seconds for a command that may wait longer by
-        design, such as a live read paced at Basic's 5 requests a minute.
+        design, such as a live read of a subscription Massive limits to a few requests a
+        minute.
     """
     java_thread = jpy.get_type("java.lang.Thread")
 
@@ -1330,12 +1327,12 @@ def _client_threads() -> list[str]:
 
 # --- Soak tests ------------------------------------------------------------------------------
 
-SOAK_SECONDS_VARIABLE: Final = "MASSIVE_SOAK_SECONDS"
-"""The environment variable that sets how long each soak test runs, in seconds."""
+SOAK_SECONDS_OPTION: Final = "--soak-seconds"
+"""The command-line option that sets how long each soak test runs, in seconds."""
 
 _SOAK_DEFAULT_SECONDS: Final = 20.0
-"""How long each soak test runs when `MASSIVE_SOAK_SECONDS` is not set: long enough for a few
-rounds, short enough that `-m soak` finishes in a few minutes."""
+"""How long each soak test runs without `--soak-seconds`: long enough for a few rounds, short
+enough that `-m soak` finishes in a few minutes."""
 
 _SOAK = "soak"
 """The marker of the soak tests."""
@@ -1367,25 +1364,37 @@ streams come and go has a steady count; a thread left per stream, call, or sessi
 without limit."""
 
 
-def soak_seconds() -> float:
-    """Return how long each soak test runs: `MASSIVE_SOAK_SECONDS`, or 20 s when it is not set.
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add `--soak-seconds`, how long each soak test runs.
+
+    Args:
+        parser: pytest's option parser.
+    """
+    parser.addoption(
+        SOAK_SECONDS_OPTION,
+        type=float,
+        default=_SOAK_DEFAULT_SECONDS,
+        help="how long each soak test (-m soak) runs, in seconds; 20 by default",
+    )
+
+
+def soak_seconds(config: pytest.Config) -> float:
+    """Return how long each soak test runs: `--soak-seconds`, or 20 s without it.
+
+    Args:
+        config: The pytest configuration, which holds the option.
 
     Returns:
         The seconds, a positive number.
 
     Raises:
-        pytest.UsageError: If the variable is set to anything but a positive number.
+        pytest.UsageError: If the option is not a positive number (pytest itself refuses one
+            that is not a number).
     """
-    text = os.environ.get(SOAK_SECONDS_VARIABLE, "")
-    if not text:
-        return _SOAK_DEFAULT_SECONDS
-    try:
-        seconds = float(text)
-    except ValueError:
-        seconds = 0.0
+    seconds = float(config.getoption(SOAK_SECONDS_OPTION))
     if not seconds > 0:
         raise pytest.UsageError(
-            f"{SOAK_SECONDS_VARIABLE} must be a positive number of seconds, not {text!r}"
+            f"{SOAK_SECONDS_OPTION} must be a positive number of seconds, not {seconds}"
         )
     return seconds
 
@@ -1517,7 +1526,7 @@ def make_trade_feed(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[...,
 
 @pytest.fixture
 def soak(request: pytest.FixtureRequest, capsys: pytest.CaptureFixture[str]) -> Soak:
-    """Return the run of a soak test, which lasts `MASSIVE_SOAK_SECONDS` (20 s by default).
+    """Return the run of a soak test, which lasts `--soak-seconds` (20 s by default).
 
     Args:
         request: The test, named in the summary.
@@ -1531,7 +1540,7 @@ def soak(request: pytest.FixtureRequest, capsys: pytest.CaptureFixture[str]) -> 
         with capsys.disabled():
             sys.stderr.write(f"\n{line}\n")
 
-    return Soak(soak_seconds(), request.node.nodeid, report)
+    return Soak(soak_seconds(request.config), request.node.nodeid, report)
 
 
 @pytest.fixture
@@ -1703,144 +1712,14 @@ _EVIDENCE_LOCK = threading.Lock()
 
 
 _REQUEST_SECONDS = 13.0
-"""Seconds of timeout a live test gets for each REST request it makes to a Basic class."""
+"""Seconds of timeout a live test gets for each REST request it declares (`requests`): a
+request of a subscription Massive limits may wait for a later minute."""
 
-_SETTLED: Final = pytest.StashKey[
-    dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]
-]()
-"""Each live test's `settles` items, `verifies` items, and `needs` requirements, by test id, for
-the summary."""
+_SETTLED: Final = pytest.StashKey[dict[str, tuple[tuple[str, ...], tuple[str, ...]]]]()
+"""Each live test's `settles` items and `verifies` items, by test id, for the summary."""
 
 _TITLES: Final = pytest.StashKey[dict[str, str]]()
 """Each open question's one-line title, by item, for the summary."""
-
-_PLANS_KEY: Final = pytest.StashKey["plans.LivePlans"]()
-"""The run's plans, once the first live test has asked for them, for the summary."""
-
-
-def _probe_plans(config: MassiveConfig, today: date) -> plans.LivePlans:
-    """Find the key's plans by asking Massive, a few requests per class and one per prefix.
-
-    The requests take their permits from the run's governor of the key, every class paced as
-    Basic, since none is known yet: no class gets more than five requests, so none waits, and
-    the later tests' pacing counts them. The flat files are opened only with both S3
-    credentials.
-
-    Args:
-        config: The live configuration.
-        today: The run's New York day.
-
-    Returns:
-        The probed plans. A `PlanProbeError` of a probe that cannot tell them
-        (`probe.probe_tiers`) propagates.
-    """
-    lease = _live_governors().lease(
-        api_key=config.api_key,
-        base_url=config.rest_base_url,
-        basic=frozenset(dm.Subscription),
-        label="live plan probe",
-        listener=_ignore,
-    )
-    client = RestClient(
-        config.api_key, base_url=config.rest_base_url, max_concurrency=1, governor=lease.governor
-    )
-    try:
-        tiers = probe.probe_tiers(client, now=datetime.now(_NEW_YORK).time())
-    finally:
-        client.close()
-        lease.release()
-    prefixes: tuple[str, ...] = ()
-    if config.s3_access_key_id is not None and config.s3_secret_access_key is not None:
-        flat_files = FlatFileClient(
-            access_key_id=config.s3_access_key_id,
-            secret_access_key=config.s3_secret_access_key,
-            endpoint_url=config.s3_endpoint_url,
-            bucket=config.s3_bucket,
-            max_pool=1,
-        )
-        try:
-            prefixes = probe.reached_prefixes(flat_files, calendar.recent_monday(today))
-        finally:
-            flat_files.close()
-    return plans.LivePlans(
-        tiers=tiers,
-        s3=bool(prefixes),
-        flat_files=prefixes,
-        source=f"probed {datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}",
-    )
-
-
-def _plans_of_key(pytestconfig: pytest.Config, api_key: str) -> plans.LivePlans:
-    """Return the plans of the run's key: declared, cached within the hour, or probed now.
-
-    This is the run's source of plans (`key_check.PLANS_SOURCE`), which the `live_plans` fixture
-    (`tests/_live/key_check.py`) asks only past its key check. `MASSIVE_LIVE_PLANS`, when set,
-    overrides everything and nothing is probed. Otherwise the plans come from `.live-plans.json` in
-    the repository root when it was probed less than `probe.CACHE_LIFETIME` ago, in this layout, for
-    the same API key and S3 access key id (a line on the terminal then says so, when, and how to
-    probe again), and else from a probe: per class, a snapshot of one liquid ticker (Starter), its
-    trades (Developer) and quotes (Advanced), and the snapshot's `fmv` field (Business, for stocks,
-    options, and currencies); then one file of every flat-file prefix. The probe writes the cache,
-    which holds digests, never the credentials. The plans are recorded as evidence under "live
-    plans".
-
-    Args:
-        pytestconfig: The pytest configuration, for the repository root and the stash.
-        api_key: The key `key_check.live_key` returned.
-
-    Returns:
-        The plans.
-
-    Raises:
-        pytest.UsageError: When a probe's answer proves nothing (`probe.PlanProbeError`):
-            the run cannot tell the plans and asks for `MASSIVE_LIVE_PLANS`.
-    """
-    declared = os.environ.get(plans.PLANS_VARIABLE, "").strip()
-    if declared:
-        run_plans = plans.declared_plans(declared)
-    else:
-        config: MassiveConfig = dm.MassiveConfig(api_key=api_key)
-        today = calendar.today()
-        owner = {
-            "api_key": probe.digest(config.api_key),
-            "s3": probe.digest(config.s3_access_key_id),
-        }
-        path = pytestconfig.rootpath / probe.PLANS_CACHE
-        cached = probe.cached_plans(path, owner=owner, now=datetime.now(UTC))
-        if cached is None:
-            try:
-                run_plans = _probe_plans(config, today)
-            except probe.PlanProbeError as error:
-                msg = (
-                    f"the plan probe cannot tell the key's plans ({error}); declare them in "
-                    f"{plans.PLANS_VARIABLE}, such as stocks=starter,currencies=starter,s3"
-                )
-                raise pytest.UsageError(msg) from error
-            probe.store_plans(path, run_plans, owner=owner)
-        else:
-            run_plans = cached
-            _write_live_line(
-                pytestconfig,
-                "live plans: ",
-                f"{cached.source}, reused for up to {probe.CACHE_LIFETIME}; delete {path} to "
-                "probe again now, as a plan bought or cancelled since needs",
-            )
-    pytestconfig.stash[_PLANS_KEY] = run_plans
-    _record(pytestconfig, "live plans", plans.plans_text(run_plans))
-    return run_plans
-
-
-def _requirements(item: pytest.Item) -> tuple[str, ...]:
-    """Return every requirement a test's `needs` markers declare.
-
-    Args:
-        item: The test.
-
-    Returns:
-        The requirements, in marker order.
-    """
-    return tuple(str(arg) for marker in item.iter_markers("needs") for arg in marker.args)
-
 
 _LIVE_GOVERNORS: list[GovernorRegistry] = []
 """The run's one registry of live rate governors, on the real clock, created by the first live
@@ -1859,39 +1738,6 @@ def _live_governors() -> GovernorRegistry:
         if not _LIVE_GOVERNORS:
             _LIVE_GOVERNORS.append(rate_limits.GovernorRegistry())
         return _LIVE_GOVERNORS[0]
-
-
-def _basic_subscriptions(run_plans: plans.LivePlans) -> frozenset[Subscription]:
-    """Return the subscriptions on Basic, for the live sessions.
-
-    Args:
-        run_plans: The run's plans.
-
-    Returns:
-        Each class on Basic, as a `dm.Subscription`.
-    """
-    return frozenset(
-        dm.Subscription(name) for name, tier in run_plans.tiers.items() if tier == "basic"
-    )
-
-
-def _delayed_subscriptions(run_plans: plans.LivePlans) -> frozenset[Subscription]:
-    """Return the subscriptions on a delayed plan, for the live sessions.
-
-    The library serves delayed data only for the subscriptions a session lists, so the live
-    sessions list those whose plan streams delayed data (`stream_units.RECENCY`).
-
-    Args:
-        run_plans: The run's plans.
-
-    Returns:
-        Each class on a delayed plan, as a `dm.Subscription`.
-    """
-    return frozenset(
-        dm.Subscription(name)
-        for name, tier in run_plans.tiers.items()
-        if stream_units.RECENCY.get((name, tier)) == stream_units.DELAYED
-    )
 
 
 _FLAT_FILE_BLOCK = 1 << 20
@@ -1927,7 +1773,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     apart: `integration_limits` (tests that deliberately exceed Massive's subscription and
     connection limits), `integration_smoke` (the unattended check that every dataset and
     verb works), `integration_rate_limits` (the checks that draw Massive's per-minute
-    refusals of a class on Basic on purpose), and `integration_all_symbols` (the checks that
+    refusals of a subscription on purpose), and `integration_all_symbols` (the checks that
     stream every symbol of a class for minutes, taking over the key's connection). A test of
     any of them must also be a live test, and it is deselected unless the `-m` expression
     names its tier: `-m integration` runs every live test but those, and
@@ -1976,41 +1822,35 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             config.hook.pytest_deselected(items=tiered)
             items[:] = [item for item in items if item.get_closest_marker(tier) is None]
     _arrange_live_tests(config, items)
-    limit = soak_seconds() + _SOAK_MARGIN
+    limit = soak_seconds(config) + _SOAK_MARGIN
     for item in items:
         if item.get_closest_marker(_SOAK) is not None:
             item.add_marker(pytest.mark.timeout(limit))
 
 
 def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Order, time, and register the live tests for the run's summary.
+    """Time and register the live tests for the run's summary.
 
-    The tests that need a class left on Basic (the rate-limit checks) run first, while their
-    class's minute is unspent. A test that may read a class on Basic (`pacing.basic_reads`)
-    gets a timeout scaled to its REST requests (`pacing.declared_requests`), since each may
-    wait for a place in the class's 5 a minute; on a paid plan the longer limit is only unused.
-    A test that would send a class on Basic more than 5 requests is skipped once the run knows
-    its plans (`_live_tests_need_a_key`), since the plans are probed only when the first live
-    test runs. Each test's `settles` and `verifies` items and its `needs` are kept for the
-    summary, and each item's title (`summary.question_titles`).
+    Every live test gets a timeout scaled to the REST requests it declares
+    (`pacing.declared_requests`), since a request of a subscription Massive limits may wait for
+    a later minute; where nothing is paced the longer limit is only unused. Each test's
+    `settles` and `verifies` items are kept for the summary, and each item's title
+    (`summary.question_titles`).
 
     Args:
         config: The pytest configuration, whose stash keeps the items.
-        items: The selected tests; reordered in place.
+        items: The selected tests.
     """
     live = [item for item in items if item.get_closest_marker(_INTEGRATION) is not None]
     if not live:
         return
-    items.sort(key=lambda item: plans.SOME_BASIC not in _requirements(item))
     settled = config.stash.setdefault(_SETTLED, {})
     docs: list[tuple[tuple[str, ...], str]] = []
     for item in live:
         settles = tuple(str(a) for m in item.iter_markers("settles") for a in m.args)
         verifies = tuple(str(a) for m in item.iter_markers("verifies") for a in m.args)
-        settled[item.nodeid] = (settles, verifies, _requirements(item))
+        settled[item.nodeid] = (settles, verifies)
         docs.append(((*settles, *verifies), inspect.getdoc(getattr(item, "function", None)) or ""))
-        if not pacing.basic_reads(_requirements(item)):
-            continue
         count = pacing.declared_requests(item.get_closest_marker("requests"))
         current = item.get_closest_marker("timeout")
         base = float(current.args[0]) if current is not None and current.args else 100.0
@@ -2020,35 +1860,17 @@ def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None
 
 @pytest.fixture(autouse=True)
 def _live_tests_need_a_key(request: pytest.FixtureRequest) -> None:
-    """Skip a live test under CI, without a key, short of its plans, or too slow on Basic.
+    """Skip a live test under CI or without a key, before anything reaches Massive.
 
-    It runs before the test's own function-scoped fixtures. The session-scoped `live_plans` fixture
-    (`tests/_live/key_check.py`), which learns the key's plans for the first live test of a run, is
-    set up before it, and so makes the same check (`key_check.live_key`) first. A test's `needs`
-    markers name the plans it needs; one the run's plans do not meet skips, naming the plan and its
-    monthly price. A test that reads a class the key holds on Basic and declares more than 5
-    requests skips too (`pacing.skip_reason`), since every request after the fifth would wait for a
-    later minute. That check needs the plans, which the run learns only when its first live test
-    starts, so it sits here rather than in the collection hook.
+    It runs before the test's own function-scoped fixtures, and every live fixture is
+    function-scoped, so the check (`key_check.live_key`) comes before any request.
 
     Args:
-        request: The requesting test, for its markers and the `live_plans` fixture.
+        request: The requesting test, for its markers.
     """
     if request.node.get_closest_marker(_INTEGRATION) is None:
         return
     key_check.live_key()
-    run_plans: plans.LivePlans = request.getfixturevalue("live_plans")
-    requirements = _requirements(request.node)
-    unmet = plans.unmet(requirements, run_plans)
-    if unmet:
-        pytest.skip("needs " + "; ".join(plans.plan_text(r) for r in unmet))
-    on_basic = pacing.classes_on_basic(run_plans.tiers)
-    reason = pacing.skip_reason(
-        [name for name in pacing.basic_reads(requirements) if name in on_basic],
-        pacing.declared_requests(request.node.get_closest_marker("requests")),
-    )
-    if reason is not None:
-        pytest.skip(reason)
 
 
 @pytest.fixture(autouse=True)
@@ -2063,7 +1885,7 @@ def _live_wait_progress(request: pytest.FixtureRequest, rest_clock: FakeClock) -
     sees it released.
 
     Args:
-        request: The requesting test, for its markers, the `live_plans` fixture, and the
+        request: The requesting test, for its markers, the `live_config` fixture, and the
             terminal.
         rest_clock: Installs the run's live governors for a live test; its clock is unused.
 
@@ -2074,7 +1896,7 @@ def _live_wait_progress(request: pytest.FixtureRequest, rest_clock: FakeClock) -
     if request.node.get_closest_marker(_INTEGRATION) is None:
         yield
         return
-    config = _live_massive_config(request.getfixturevalue("live_plans"))
+    config: MassiveConfig = request.getfixturevalue("live_config")
     lease = _live_governors().lease(
         api_key=config.api_key,
         base_url=config.rest_base_url,
@@ -2115,61 +1937,6 @@ def _write_live_line(config: pytest.Config, prefix: str, line: str) -> None:
         reporter.write_line(f"{prefix}{line}")
 
 
-_PLANS: Final = {
-    "test_crypto_integration.py": "a Currencies plan that includes this data",
-    "test_forex_integration.py": "a Currencies plan that includes this data",
-    "test_timestamps_integration.py": "a Currencies plan that includes this data",
-    "test_stocks_integration.py": "a Stocks plan that includes this data",
-    "test_stock_filings_integration.py": "a Stocks plan that includes this data",
-    "test_options_integration.py": "an Options plan that includes this data",
-    "test_indices_integration.py": "an Indices plan that includes this data",
-    "test_futures_integration.py": "a Futures plan that includes this data",
-    "test_futures_calendar_integration.py": "a Futures plan that includes this data",
-    "test_reference_integration.py": "a plan that includes this reference data",
-    "test_flatfiles_integration.py": "flat-file access to this dataset",
-    "test_host_decision_integration.py": "the plan this check names in its docstring",
-    "test_ws_integration.py": "the plan this check names in its docstring",
-}
-"""The plan a live test module's data needs, named in a skip when the key lacks it."""
-
-
-_ENTITLEMENT_MARKS: Final = (
-    "HTTP 403",
-    "NOT_AUTHORIZED",
-    "not entitled",
-    "may not include this data",
-    "needs a Business plan",
-)
-"""Text that marks a stream's or a poll's error as a missing entitlement: an HTTP 403, a
-`NOT_AUTHORIZED` envelope, and the library's wording of a refused topic, including a
-fair-market-value (FMV) topic, which only a Business plan serves."""
-
-
-def not_entitled_reason(plan: str, error: object) -> str:
-    """Return the skip reason, and evidence line, of a request the key's plan does not cover.
-
-    Args:
-        plan: The plan the data needs, such as `"a Stocks plan that includes this data"`.
-        error: The refusal, as Massive or the library worded it.
-
-    Returns:
-        `"not entitled: needs <plan> (<error>)"`.
-    """
-    return f"not entitled: needs {plan} ({error})"
-
-
-def is_entitlement_text(text: object) -> bool:
-    """Return whether an error's text (a failed stream's or poll's `Error`) is a refusal.
-
-    Args:
-        text: The error text, or None.
-
-    Returns:
-        True when it holds one of `_ENTITLEMENT_MARKS`.
-    """
-    return isinstance(text, str) and any(mark in text for mark in _ENTITLEMENT_MARKS)
-
-
 _CALL_FAILED: Final = pytest.StashKey[bool]()
 """Whether a test's call failed, so the leak check does not wait on what its traceback holds."""
 
@@ -2202,22 +1969,29 @@ def pytest_runtest_makereport(
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
-    """Lift the faulthandler limit from a live or soak test, and decide what a refusal means.
+    """Lift the faulthandler limit from a live or soak test, and skip a live test Massive refused.
 
     The 120 s faulthandler limit is cancelled for the call of a live test, whose own timeout,
-    scaled to its paced requests, bounds it instead; and for a soak test's, whose timeout is
+    scaled to its declared requests, bounds it instead; and for a soak test's, whose timeout is
     scaled to its run (`pytest_collection_modifyitems`).
 
-    A refusal is an `EntitlementError`, or the wire's `WireEntitlementError` (an HTTP 403 or a
-    `NOT_AUTHORIZED` envelope). One that names the timeframe ("Your plan doesn't include this
-    data timeframe") skips the test, "outside the plan's history", when the day it asked for
-    is before the first day the plan keeps by the documented history windows; refused for a
-    day inside the window, it fails, since that may be a library bug (`plans.history_verdict`).
-    Any other refusal of a test that declares its
-    plans (`needs`) contradicts them, since it runs only when the plans hold them: it is
-    recorded as evidence and fails the test. A live test without `needs` (the smoke tier
-    handles its own) skips with "not entitled: needs <plan>", the plan taken from the test
-    module. Other tests are untouched.
+    A live test sends its requests whatever the key holds, so an error that escapes it is one
+    of three:
+
+    - Massive's refusal: the wire's `WireEntitlementError` (an HTTP 403, a `NOT_AUTHORIZED`
+      envelope, an S3 403), or an `EntitlementError` whose `source` is `ErrorSource.MASSIVE`
+      and that carries Massive's `status`. The test skips with `refused: <the refusal on one
+      line>` (`refusals.refusal_line`: the status, the request, Massive's text, and for a
+      timeframe refusal the earliest day asked), and the same line is recorded as evidence.
+    - The owner's settings refusing delayed data: an `EntitlementError` whose `source` is
+      `ErrorSource.USER` (Massive labels the data delayed and `delayed_subscriptions` does not
+      list its subscription). The test skips with `not listed as delayed: <the library's
+      message>`, which names the setting to add.
+    - Anything else fails the test, as does any error of a test that is not live. That includes
+      an `EntitlementError` the library built with no status: Massive refused nothing.
+
+    The summary groups the two skips by their prefixes (`summary.REFUSED`,
+    `summary.NOT_LISTED`).
 
     Args:
         item: The test being run.
@@ -2229,143 +2003,174 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
         The call's result, unchanged.
 
     Raises:
-        EntitlementError: When it escapes a test that is not a live test, or one whose
-            declared plans should have covered the request.
-        WireEntitlementError: In the same cases.
+        EntitlementError: When it escapes a test that is not a live test, its source is
+            neither Massive nor the user, or its source is Massive but it carries no status.
+        WireEntitlementError: When it escapes a test that is not a live test.
     """
     if item.get_closest_marker(_INTEGRATION) is not None or item.get_closest_marker(_SOAK):
         # A live test waits on Massive's rate limits and streams, and a soak test runs for
-        # `MASSIVE_SOAK_SECONDS`, either longer than the 120 s after which faulthandler would
-        # end the process; each one's own (scaled) timeout bounds it.
+        # `--soak-seconds`, either longer than the 120 s after which faulthandler would end
+        # the process; each one's own (scaled) timeout bounds it.
         faulthandler.cancel_dump_traceback_later()
     try:
         return (yield)
     except (EntitlementError, WireEntitlementError) as error:
         if item.get_closest_marker(_INTEGRATION) is None:
             raise
-        if plans.is_timeframe_refusal(error):
-            reason = plans.history_verdict(
-                error, item.config.stash.get(_PLANS_KEY, None), calendar.today()
-            )
-            if reason is not None:
-                _record(item.config, item.nodeid, f"{reason} ({error})")
-                pytest.skip(f"{reason} ({error})")
-            _record(item.config, item.nodeid, f"refused inside the plan's history: {error}")
+        if isinstance(error, EntitlementError) and error.source is ErrorSource.USER:
+            reason = f"{summary.NOT_LISTED}{' '.join(str(error).split())}"
+        elif isinstance(error, WireEntitlementError) or (
+            error.source is ErrorSource.MASSIVE and error.status is not None
+        ):
+            reason = f"{summary.REFUSED}{refusals.refusal_line(error)}"
+        else:
             raise
-        requirements = _requirements(item)
-        if requirements:
-            held = ", ".join(plans.plan_text(r) for r in requirements)
-            _record(item.config, item.nodeid, f"refused although the plans hold {held}: {error}")
-            raise
-        plan = _PLANS.get(item.path.name, "a plan that includes this data")
-        pytest.skip(not_entitled_reason(plan, error))
+        _record(item.config, item.nodeid, reason)
+        pytest.skip(reason)
 
 
 @pytest.fixture
 def skip_if_not_entitled(
     table_rows: Callable[[Table], list[dict[str, Any]]],
-) -> Callable[[MassiveSession, str], None]:
-    """Return a function that skips a stream or poll test whose stream was refused.
+    evidence: Callable[[str], None],
+) -> Callable[[MassiveSession], None]:
+    """Return a function that skips a test whose stream, poll, or background read was refused.
 
-    A refused stream does not raise: its row in `m.streams()` turns `FAILED` with the refusal
-    as its `Error`. Call this after recording the evidence.
+    A refused stream or background read does not raise: its row in `m.streams()` turns
+    `FAILED` with the refusal as its `Error`. Two refusals skip, as `pytest_runtest_call` skips
+    them when they raise: Massive's (`refusals.is_entitlement_text`), and the owner's settings
+    refusing delayed data their `delayed_subscriptions` do not list
+    (`refusals.is_not_listed_text`).
+    Call this after recording the evidence.
+
+    Args:
+        table_rows: Snapshots a table into rows.
+        evidence: Records the refusal.
 
     Returns:
-        A function `(session, plan)`: it skips the test, naming the plan, when one of the
-        session's streams failed with a refusal.
+        A function of the session: it skips the test, `refused: <Error>`, quoting the first
+        of the session's streams Massive refused, or else `not listed as delayed: <Error>`,
+        quoting the first the settings refused.
     """
 
-    def check(session: MassiveSession, plan: str) -> None:
-        for row in table_rows(session.streams()):
-            if row["State"] == "FAILED" and is_entitlement_text(row["Error"]):
-                pytest.skip(not_entitled_reason(plan, row["Error"]))
+    def check(session: MassiveSession) -> None:
+        errors = [
+            " ".join(str(row["Error"]).split())
+            for row in table_rows(session.streams())
+            if row["State"] == "FAILED"
+        ]
+        reasons = [f"{summary.REFUSED}{e}" for e in errors if refusals.is_entitlement_text(e)]
+        reasons += [f"{summary.NOT_LISTED}{e}" for e in errors if refusals.is_not_listed_text(e)]
+        if reasons:
+            evidence(reasons[0])
+            pytest.skip(reasons[0])
 
     return check
 
 
-def _index_symbol(run_plans: plans.LivePlans) -> str:
-    """Return the index a live request reads: `I:SPX`, or `I:NDX` when Indices is on Basic.
-
-    Indices Basic excludes SPX, DJI, RUT, and VIX
-    (https://massive.com/knowledge-base/article/are-all-indices-available-through-the-basic-subscription-tier).
-
-    Args:
-        run_plans: The run's plans.
-
-    Returns:
-        The index's ticker.
-    """
-    return "I:NDX" if run_plans.tiers["indices"] == "basic" else "I:SPX"
+_LIMITED_ORDER: Final = ("indices", "futures", "options", "stocks", "currencies")
+"""The order in which `limited_subscription` prefers a subscription: the one a run needs least
+first, since the rate-limit tests spend its minute."""
 
 
 @pytest.fixture
-def index_symbol(live_plans: plans.LivePlans) -> str:
-    """Return the index a live test reads: `I:SPX`, or `I:NDX` when Indices is on Basic.
+def limited_subscription(live_config: MassiveConfig) -> Subscription:
+    """Return the subscription the rate-limit tests spend: one the owner says Massive limits.
+
+    The owner's settings file names the subscriptions Massive limits to a few requests a
+    minute (`rest_basic_subscriptions`); the first of them in `_LIMITED_ORDER` is returned.
+    Nothing is asked of Massive to choose it.
 
     Args:
-        live_plans: The run's plans.
+        live_config: The live configuration, with the owner's settings.
 
     Returns:
-        The index's ticker (see `_index_symbol`).
+        The subscription; the test is skipped when the settings list none.
     """
-    return _index_symbol(live_plans)
+    listed = live_config.rest_basic_subscriptions
+    for name in _LIMITED_ORDER:
+        if dm.Subscription(name) in listed:
+            return dm.Subscription(name)
+    pytest.skip(
+        "list the subscription Massive limits in rest_basic_subscriptions of your settings "
+        f"file ({CONFIG_FILE_VARIABLE}); these tests spend its minute"
+    )
 
 
 @pytest.fixture
-def basic_class(live_plans: plans.LivePlans) -> str:
-    """Return a class on Basic, preferring the one a run is least likely to need.
-
-    Args:
-        live_plans: The run's plans.
-
-    Returns:
-        `"indices"`, `"futures"`, `"options"`, `"stocks"`, or `"currencies"`, the first of those
-        on Basic; the test is skipped when none is.
-    """
-    order = ("indices", "futures", "options", "stocks", "currencies")
-    basic = [name for name in order if live_plans.tiers[name] == "basic"]
-    if not basic:
-        pytest.skip("needs at least one class left on Basic")
-    return basic[0]
-
-
-@pytest.fixture
-def market_lookup(live_plans: plans.LivePlans) -> classes.MarketLookup:
-    """Return the class on Basic whose market-filtered ticker lookups a rate-limit check tests.
-
-    `/v3/reference/tickers` filters by market only the tickers of indices, currencies (forex
-    and crypto), and stocks, so the check needs one of those on Basic (`classes.market_lookup`
-    prefers them in that order).
-
-    Args:
-        live_plans: The run's plans.
-
-    Returns:
-        The class, its markets, and a market of another class; the test is skipped when none
-        of the three classes is on Basic.
-    """
-    lookup = classes.market_lookup(live_plans.tiers)
-    if lookup is None:
-        pytest.skip("needs Indices, Currencies, or Stocks left on Basic")
-    return lookup
-
-
-@pytest.fixture
-def one_request_call(basic_class: str) -> Callable[[MassiveSession], object]:
-    """Return a library call of the Basic class that sends exactly one REST request.
+def one_request_call(limited_subscription: Subscription) -> Callable[[MassiveSession], object]:
+    """Return a library call of the limited subscription that sends exactly one REST request.
 
     The calls are the live-run upgrade check's (`upgrade_check.CALLS`): the previous day's bar
-    of AAPL, of an option contract, of `I:NDX` (which Indices Basic includes), and of
-    `C:EURUSD`, and the market status of ES.
+    of AAPL, of an option contract, of `I:NDX`, and of `C:EURUSD`, and the market status of ES.
 
     Args:
-        basic_class: The class on Basic, such as `"indices"`.
+        limited_subscription: The subscription the owner says Massive limits.
 
     Returns:
         A function that makes the call in a session and returns its result.
     """
-    call: Callable[[MassiveSession], object] = upgrade_check.CALLS[basic_class]
+    call: Callable[[MassiveSession], object] = upgrade_check.CALLS[limited_subscription]
     return call
+
+
+_RECENCY: Final = pytest.StashKey[dict[str, recency.RecencyAnswer]]()
+"""Massive's recency answer of each subscription the run has asked about, kept in memory."""
+
+
+@pytest.fixture
+def recency_label(
+    request: pytest.FixtureRequest, live_rest: RestClient, evidence: Callable[[str], None]
+) -> Callable[[Subscription], recency.RecencyAnswer]:
+    """Return a function that asks Massive how it labels a subscription's current data.
+
+    Only a test whose question is about the label itself uses it, and the answer decides only
+    that test's outcome, such as a skip when the key is not the kind its question is about:
+    nothing else of the run depends on it. It sends the snapshot the library's
+    own host decision reads (`host_decision.SNAPSHOT_PROBES`), and reads its labels as the
+    library does (`recency.answered`): the envelope `status`, and each row's `timeframe`.
+    Massive's refusal is an answer too (`recency.refused`). The answer of each subscription is
+    kept in memory for the pytest session, so a run asks once per subscription, and recorded
+    as evidence each time it is used.
+
+    Args:
+        request: The test, for the run's configuration, which keeps the answers.
+        live_rest: The live REST client, which sends the snapshot.
+        evidence: Records the answer.
+
+    Returns:
+        A function of a subscription that has a snapshot (stocks, options, indices, or
+        futures), returning Massive's answer. It raises `ValueError` naming the subscription
+        and the four it covers when given another, such as currencies, which has no snapshot.
+    """
+    answers = request.config.stash.setdefault(_RECENCY, {})
+    probes = {c.value: probe for c, probe in host_decision.SNAPSHOT_PROBES.items()}
+
+    def label(subscription: Subscription) -> recency.RecencyAnswer:
+        if subscription.value not in probes:
+            message = (
+                f"recency_label: {subscription} has no snapshot to read its label from; "
+                f"pass one of {', '.join(sorted(probes))}"
+            )
+            raise ValueError(message)
+        if subscription not in answers:
+            snapshot = probes[subscription.value]
+            try:
+                page = live_rest.get(
+                    source(Transport.REST, snapshot.path),
+                    snapshot.path_params,
+                    snapshot.query,
+                    bucket=subscription.value,
+                )
+            except WireEntitlementError as error:
+                answer = recency.refused(subscription.value, refusals.refusal_line(error))
+            else:
+                answer = recency.answered(subscription.value, page.status, page.rows)
+            answers[subscription] = answer
+        evidence(f"recency label: {answers[subscription].text()}")
+        return answers[subscription]
+
+    return label
 
 
 @pytest.fixture
@@ -2391,22 +2196,16 @@ def own_governors(rest_clock: FakeClock, monkeypatch: pytest.MonkeyPatch) -> Gov
 
 
 @pytest.fixture
-def futures_spread_reads(
-    classes_on_basic: frozenset[str],
-) -> Callable[[Sequence[Mapping[str, Any]]], tuple[list[ticker_lists.SpreadRead], list[str]]]:
+def futures_spread_reads() -> Callable[
+    [Sequence[Mapping[str, Any]]], list[ticker_lists.SpreadRead]
+]:
     """Return a function that chooses the reads of futures combo contracts, one per venue.
 
-    With Futures on Basic it keeps 4 reads, the four exchanges' (CME, CBOT, NYMEX, COMEX), so
-    the products read and the contracts reads make 5 requests (`ticker_lists.spread_reads`).
-
-    Args:
-        classes_on_basic: The classes on Basic.
-
     Returns:
-        A function taking the combo products and returning the reads and the venues left out.
+        `ticker_lists.spread_reads`: a function taking the combo products and returning one
+        read per venue.
     """
-    reads = 4 if "futures" in classes_on_basic else None
-    return functools.partial(ticker_lists.spread_reads, reads=reads)
+    return ticker_lists.spread_reads
 
 
 @pytest.fixture
@@ -2431,27 +2230,6 @@ def crypto_report() -> Callable[..., list[str]]:
         `ticker_lists.crypto_report`.
     """
     return ticker_lists.crypto_report
-
-
-@pytest.fixture
-def delayed_key(live_config: MassiveConfig, live_plans: plans.LivePlans) -> str:
-    """Return a key with delayed stocks data: `MASSIVE_DELAYED_API_KEY`, or the main key.
-
-    The main key serves when Stocks is on Starter or Developer, the delayed plans.
-
-    Args:
-        live_config: The live configuration, for the main key.
-        live_plans: The run's plans.
-
-    Returns:
-        The key; the test is skipped when there is none.
-    """
-    key = os.environ.get("MASSIVE_DELAYED_API_KEY", "").strip()
-    if key:
-        return key
-    if live_plans.tiers["stocks"] not in {"starter", "developer"}:
-        pytest.skip("needs a delayed Stocks key: MASSIVE_DELAYED_API_KEY, or Stocks Starter")
-    return live_config.api_key
 
 
 @pytest.fixture
@@ -2547,11 +2325,12 @@ def _case(report: pytest.TestReport) -> str:
 
 
 def _smoke_groups(reports: list[pytest.TestReport]) -> dict[str, list[pytest.TestReport]]:
-    """Group skipped smoke cases by what they lacked: the plan they need, or the reason.
+    """Group skipped smoke cases by what stopped them: the refused call, or the reason.
 
-    A case the plan refused ("not entitled") is grouped by the last `plan` property it
-    recorded, such as "a Stocks plan with REST access"; any other skip by its reason, less
-    the details in its first parentheses, such as "not exercised: market closed".
+    A case Massive refused (its reason starts with `summary.REFUSED`) is grouped by the last
+    `refused` property it recorded, its subscription and verb, such as `"stocks history"`; any
+    other skip by its reason, less the details in its first parentheses, such as "not
+    exercised: market closed".
 
     Args:
         reports: The skipped cases' reports.
@@ -2562,9 +2341,11 @@ def _smoke_groups(reports: list[pytest.TestReport]) -> dict[str, list[pytest.Tes
     groups: dict[str, list[pytest.TestReport]] = {}
     for report in reports:
         reason = _skip_reason(report)
-        plan = dict(report.user_properties).get("plan")
-        refused = reason.startswith("not entitled") and plan
-        key = str(plan) if refused else reason.partition(" (")[0]
+        refused = dict(report.user_properties).get("refused")
+        if reason.startswith(summary.REFUSED) and refused:
+            key = str(refused)
+        else:
+            key = reason.partition(" (")[0]
         groups.setdefault(key, []).append(report)
     return groups
 
@@ -2574,9 +2355,10 @@ def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
 
     A pass means rows reached the case's table, or, for a call that may return none (a
     `fetch()` or `history()`), that the call succeeded with the dataset's columns. A pass that
-    logged a library warning or showed a problem in `m.problems()` is counted apart, "passed
-    with drift", and each one is listed with what it saw. The skips are grouped: the refusals by
-    the plan they need, the other skips by their reason, each group with its count and its cases.
+    logged a library warning or showed a row of `m.problems()` is counted apart, "passed with
+    drift", and each one is listed with what it saw. The skips are grouped: the refusals by the
+    subscription and verb Massive refused, with the first refusal's text once, the other skips
+    by their reason, each group with its count and its cases.
 
     Args:
         terminalreporter: The terminal reporter, whose statistics hold the reports.
@@ -2594,7 +2376,7 @@ def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
     failed = smoke("failed") + smoke("error")
     if not (passed or skipped or failed):
         return
-    refused = [r for r in skipped if _skip_reason(r).startswith("not entitled")]
+    refused = [r for r in skipped if _skip_reason(r).startswith(summary.REFUSED)]
     other = [r for r in skipped if r not in refused]
     drifted = [r for r in passed if dict(r.user_properties).get("drift")]
     terminalreporter.write_sep("=", "smoke coverage")
@@ -2605,25 +2387,27 @@ def _smoke_coverage(terminalreporter: pytest.TerminalReporter) -> None:
     for report in drifted:
         drift = str(dict(report.user_properties)["drift"])
         terminalreporter.write_line(f"passed with drift: {_case(report)}: {drift[:300]}")
-    for title, reports in (("not entitled, needs", refused), ("skipped", other)):
-        for key, grouped in _smoke_groups(reports).items():
-            cases = ", ".join(_case(r) for r in grouped)
-            terminalreporter.write_line(f"{title} {key}: {len(grouped)}: {cases}")
+    for key, grouped in _smoke_groups(refused).items():
+        cases = ", ".join(_case(r) for r in grouped)
+        terminalreporter.write_line(f"refused {key}: {len(grouped)}: {cases}")
+        terminalreporter.write_line(f"    {_skip_reason(grouped[0])[:300]}")
+    for key, grouped in _smoke_groups(other).items():
+        cases = ", ".join(_case(r) for r in grouped)
+        terminalreporter.write_line(f"skipped {key}: {len(grouped)}: {cases}")
     for report in failed:
         terminalreporter.write_line(f"failed: {_case(report)}: {(report.head_line or '')[:200]}")
 
 
 def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.Config) -> None:
-    """Print which open questions the run verified or ran, and the plans the rest need.
+    """Print which open questions the run verified or ran, and why the rest were not.
 
-    Gathers each live test's outcome and hands the sorting to `summary.question_lines`, which
-    explains the groups. Nothing is printed for a run without a key or without a live test
-    that answers a question.
+    Gathers each live test's outcome and skip reason and hands the sorting to
+    `summary.question_lines`, which explains the groups. Nothing is printed for a run without
+    a key or without a live test that answers a question.
 
     Args:
         terminalreporter: The terminal reporter, whose statistics hold the outcomes.
-        config: The pytest configuration, whose stash holds each test's items and needs and
-            the run's plans.
+        config: The pytest configuration, whose stash holds each test's items.
     """
     settled = config.stash.setdefault(_SETTLED, {})
     ran = any(terminalreporter.stats.get(kind) for kind in ("passed", "failed", "skipped"))
@@ -2631,19 +2415,18 @@ def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.C
     if not (ran and keyed):
         return
     outcome: dict[str, str] = {}
+    reasons: dict[str, str] = {}
     for kind in ("passed", "failed", "skipped", "error"):
         for report in terminalreporter.stats.get(kind, []):
             if isinstance(report, pytest.TestReport) and (
                 report.when == "call" or kind != "passed"
             ):
                 outcome[report.nodeid] = kind
+                if kind == "skipped":
+                    reasons[report.nodeid] = _skip_reason(report)
     titles: dict[str, str] = config.stash.setdefault(_TITLES, {})
     lines = summary.question_lines(
-        settled,
-        outcome,
-        config.stash.get(_PLANS_KEY, None),
-        titles=titles,
-        narrowed=_narrowed(config),
+        settled, outcome, reasons, titles=titles, narrowed=_narrowed(config)
     )
     if not lines:
         return
@@ -2697,55 +2480,68 @@ def pytest_terminal_summary(
         terminalreporter.write_line(f"    {line}")
 
 
+_OWNER_SETTINGS: Final = pytest.StashKey["MassiveConfig | None"]()
+"""The owner's settings file, read once per run (None when `DEEPHAVEN_MASSIVE_CONFIG_FILE` is
+unset)."""
+
+
+def _owner_settings(config: pytest.Config) -> MassiveConfig | None:
+    """Read the owner's settings file named by `DEEPHAVEN_MASSIVE_CONFIG_FILE`, once per run.
+
+    A file the library refuses ends the run with a usage error, since every live test would
+    run on settings the owner did not mean.
+
+    Args:
+        config: The pytest configuration, whose stash keeps the settings.
+
+    Returns:
+        The settings, or None when the variable is unset or blank.
+    """
+    if _OWNER_SETTINGS not in config.stash:
+        settings: MassiveConfig | None = None
+        if os.environ.get(CONFIG_FILE_VARIABLE, "").strip():
+            try:
+                settings = dm.MassiveConfig.from_file()
+            except (ValueError, OSError) as error:
+                pytest.exit(
+                    f"{CONFIG_FILE_VARIABLE}: the settings file is refused: {error}",
+                    returncode=pytest.ExitCode.USAGE_ERROR,
+                )
+        config.stash[_OWNER_SETTINGS] = settings
+    return config.stash[_OWNER_SETTINGS]
+
+
 @pytest.fixture
-def live_config(live_plans: plans.LivePlans) -> MassiveConfig:
-    """Return a `MassiveConfig` with `MASSIVE_API_KEY`, and the S3 credentials when set.
+def live_config(pytestconfig: pytest.Config) -> MassiveConfig:
+    """Return the live configuration: the key, the S3 credentials, and the owner's settings.
 
-    The classes on Basic are its `rest_basic_subscriptions`, so the library paces their
-    requests at 5 a minute from the first one, and the classes on a delayed plan its
-    `delayed_subscriptions`, so their streams use Massive's delayed feed.
-
-    Args:
-        live_plans: The run's plans.
-
-    Returns:
-        The configuration; the test is skipped when `MASSIVE_API_KEY` is not set.
-    """
-    return _live_massive_config(live_plans)
-
-
-def _live_massive_config(run_plans: plans.LivePlans) -> MassiveConfig:
-    """Build the live configuration: the key, the S3 credentials, the Basic and delayed classes.
+    The key is `MASSIVE_API_KEY`, and the S3 credentials come from their variables when set.
+    When `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the owner's settings file, its
+    `delayed_subscriptions` (the subscriptions Massive serves this key delayed, so their
+    streams use the delayed feed), `rest_basic_subscriptions` (the subscriptions Massive limits
+    to a few requests a minute, paced from the first request), and `websocket_hosts` are
+    passed through, as the owner's own sessions would read them; every other setting keeps its
+    default, so a test's assertions about defaults hold. Without the file, nothing is listed.
 
     Args:
-        run_plans: The run's plans; its classes on Basic are paced from the first request.
+        pytestconfig: The pytest configuration, which keeps the settings file once read.
 
     Returns:
-        The configuration; the test is skipped when `MASSIVE_API_KEY` is not set.
+        The configuration; the test is skipped when `MASSIVE_API_KEY` is not set, and the run
+        ends with a usage error when the settings file is refused.
     """
-    config: MassiveConfig = dm.MassiveConfig(
-        api_key=key_check.required_env("MASSIVE_API_KEY"),
-        rest_basic_subscriptions=_basic_subscriptions(run_plans),
-        delayed_subscriptions=_delayed_subscriptions(run_plans),
+    api_key = key_check.required_env("MASSIVE_API_KEY")
+    settings = _owner_settings(pytestconfig)
+    if settings is None:
+        bare: MassiveConfig = dm.MassiveConfig(api_key=api_key)
+        return bare
+    configured: MassiveConfig = dm.MassiveConfig(
+        api_key=api_key,
+        delayed_subscriptions=settings.delayed_subscriptions,
+        rest_basic_subscriptions=settings.rest_basic_subscriptions,
+        websocket_hosts=settings.websocket_hosts,
     )
-    return config
-
-
-@pytest.fixture
-def classes_on_basic(live_plans: plans.LivePlans) -> frozenset[str]:
-    """Return the classes the key holds on Basic, so a live test can read less of them.
-
-    A test that may read a class on Basic sends that class at most 5 requests when it is on
-    Basic, and reads more (more underlyings, symbols, or pages) only on a paid plan, which is
-    not paced.
-
-    Args:
-        live_plans: The run's plans.
-
-    Returns:
-        The name of each class on Basic, such as `"options"`.
-    """
-    return pacing.classes_on_basic(live_plans.tiers)
+    return configured
 
 
 @pytest.fixture
@@ -2786,12 +2582,13 @@ def live_rest(live_config: MassiveConfig) -> Iterator[RestClient]:
 
     Live tests read raw rows through it where the evidence is the wire form itself (a stamp
     before the library moves it, a key the library renames). It takes its permits from the
-    run's governor of the live key, as the live sessions do, declaring the same Basic
-    classes, so a raw request waits its turn like the library's; each call names the bucket
-    of its data.
+    run's governor of the live key, as the live sessions do, declaring the same limited
+    subscriptions, so a raw request waits its turn like the library's; each call names the
+    bucket of its data.
 
     Args:
-        live_config: The live configuration, for the key, the base URL, and the Basic classes.
+        live_config: The live configuration, for the key, the base URL, and the limited
+            subscriptions.
 
     Yields:
         A `RestClient` with one connection.
@@ -2812,42 +2609,6 @@ def live_rest(live_config: MassiveConfig) -> Iterator[RestClient]:
     yield client
     client.close()
     lease.release()
-
-
-@pytest.fixture
-def rest_for_key(live_config: MassiveConfig) -> Iterator[Callable[[str], RestClient]]:
-    """Yield a function that opens a wire REST client on another key; each closed at teardown.
-
-    For a test that reads raw answers with a second key, such as `MASSIVE_DELAYED_API_KEY`.
-    Nothing tells that key's plans, so every class of it is paced as Basic, through the run's
-    governor of that key.
-
-    Args:
-        live_config: The live configuration, for the base URL.
-
-    Yields:
-        A function taking an API key and returning a `RestClient` with one connection.
-    """
-    opened: list[tuple[RestClient, Any]] = []
-
-    def open_client(api_key: str) -> RestClient:
-        lease = _live_governors().lease(
-            api_key=api_key,
-            base_url=live_config.rest_base_url,
-            basic=frozenset(dm.Subscription),
-            label="live tests, another key",
-            listener=_ignore,
-        )
-        client = RestClient(
-            api_key, base_url=live_config.rest_base_url, max_concurrency=1, governor=lease.governor
-        )
-        opened.append((client, lease))
-        return client
-
-    yield open_client
-    for client, lease in opened:
-        client.close()
-        lease.release()
 
 
 def _ignore() -> None:
@@ -2946,54 +2707,13 @@ def _read_flat_file(
     return (rows if max_rows is None else rows[:max_rows]), extra
 
 
-def _require_prefix(run_plans: plans.LivePlans, prefix: str) -> None:
-    """Skip the test unless the S3 credentials reach a flat-file prefix (`plans.reaches`).
-
-    Args:
-        run_plans: The run's plans.
-        prefix: The generated prefix.
-    """
-    if not plans.reaches(run_plans, prefix):
-        pytest.skip(f"needs the {prefix} flat files: the S3 credentials do not reach them")
-
-
-@pytest.fixture
-def flat_files_reached(live_plans: plans.LivePlans) -> Callable[[str], bool]:
-    """Return a function that tells whether the S3 credentials reach a flat-file prefix.
-
-    For a test that reads several prefixes and records each one it cannot reach, instead of
-    skipping at the first (`flat_file_head` and its kin skip).
-
-    Args:
-        live_plans: The run's plans.
-
-    Returns:
-        A function of a generated prefix (see `plans.reaches`).
-    """
-    return functools.partial(plans.reaches, live_plans)
-
-
-@pytest.fixture
-def plan_history_start(live_plans: plans.LivePlans) -> Callable[[str], date | None]:
-    """Return a function that names the first day a class's plan keeps.
-
-    Args:
-        live_plans: The run's plans.
-
-    Returns:
-        A function of a class (`"options"`, ...) returning the day, or None for a plan that
-        keeps all history (see `plans.history_start`).
-    """
-    return lambda name: plans.history_start(live_plans, name, calendar.today())
-
-
 _HEAD_ROWS = 1000
 """How many rows `flat_file_head` keeps from the start of a file."""
 
 
 @pytest.fixture
 def flat_file_head(
-    live_flat_files: FlatFileClient, live_plans: plans.LivePlans
+    live_flat_files: FlatFileClient,
 ) -> Callable[[str, date, str | None], FlatFileRows | None]:
     """Return a function that reads the first rows of one flat file, as raw text.
 
@@ -3001,19 +2721,16 @@ def flat_file_head(
 
     Args:
         live_flat_files: The live flat-file client.
-        live_plans: The run's plans, for the prefixes the credentials reach.
 
     Returns:
         A function `(prefix, day, venue)`: the generated prefix (such as
         `"global_forex/quotes_v1"`), the file's day, and the venue that fills a futures
         prefix (`"cme"`; None for every other prefix). It returns the first 1,000 rows, every
         value as the file's text, and the file's undocumented headers, or None when the file
-        does not exist; a refusal raises the wire error. It skips the test for a prefix the
-        plans probe did not reach (`_require_prefix`).
+        does not exist; a refusal raises the wire error.
     """
 
     def read(prefix: str, day: date, venue: str | None) -> FlatFileRows | None:
-        _require_prefix(live_plans, prefix)
         key = object_key(prefix, day, venue)
         return _read_flat_file(live_flat_files, key, prefix, max_rows=_HEAD_ROWS, tickers=None)
 
@@ -3022,25 +2739,22 @@ def flat_file_head(
 
 @pytest.fixture
 def flat_file_tickers(
-    live_flat_files: FlatFileClient, live_plans: plans.LivePlans
+    live_flat_files: FlatFileClient,
 ) -> Callable[[str, date, Collection[str] | None], FlatFileRows | None]:
     """Return a function that reads every row of some tickers from one flat file, as raw text.
 
-    It skips the test for a prefix the plans probe did not reach (`_require_prefix`).
-
     Args:
         live_flat_files: The live flat-file client.
-        live_plans: The run's plans, for the prefixes the credentials reach.
 
     Returns:
         A function `(prefix, day, tickers)`: the generated prefix of a file without a venue
         (such as `"global_crypto/minute_aggs_v1"`), the file's day, and the `ticker` values to
         keep, or None for every row. It returns the rows, every value as the file's text, and
-        the file's undocumented headers, or None when the file does not exist.
+        the file's undocumented headers, or None when the file does not exist; a refusal
+        raises the wire error.
     """
 
     def read(prefix: str, day: date, tickers: Collection[str] | None) -> FlatFileRows | None:
-        _require_prefix(live_plans, prefix)
         wanted = None if tickers is None else sorted(tickers)
         key = object_key(prefix, day)
         return _read_flat_file(live_flat_files, key, prefix, max_rows=None, tickers=wanted)
@@ -3050,17 +2764,15 @@ def flat_file_tickers(
 
 @pytest.fixture
 def flat_file_sessions(
-    live_flat_files: FlatFileClient, live_plans: plans.LivePlans
+    live_flat_files: FlatFileClient,
 ) -> Callable[[str, date, str], Counter[str | None] | None]:
     """Return a function that counts the `session_end_date` values of a whole futures file.
 
     The whole file is read, block by block, and only the counts are kept, so a large minute
-    file costs no memory. It skips the test for a prefix the plans probe did not reach
-    (`_require_prefix`).
+    file costs no memory.
 
     Args:
         live_flat_files: The live flat-file client.
-        live_plans: The run's plans, for the prefixes the credentials reach.
 
     Returns:
         A function `(prefix, day, venue)`: a futures prefix such as
@@ -3070,7 +2782,6 @@ def flat_file_sessions(
     """
 
     def count(prefix: str, day: date, venue: str) -> Counter[str | None] | None:
-        _require_prefix(live_plans, prefix)
         file = live_flat_files.open(object_key(prefix, day, venue))
         if file is None:
             return None
@@ -3228,7 +2939,7 @@ _MS = 1_000_000
 _NEW_YORK = ZoneInfo("America/New_York")
 
 # --- Live test dates ------------------------------------------------------------------------
-# Fixed dates age out of a Basic plan's history and land on holidays, so the live tests compute
+# Fixed dates age out of the history a key may read and land on holidays, so the live tests compute
 # theirs from the run's New York day with the US stock exchanges' fixed holiday rules. A closure
 # no rule predicts (a national day of mourning) is not known; a test that reads one finds no
 # rows there and says so.
@@ -4064,8 +3775,8 @@ def library_stamps(
 
 
 # --- Corporate actions the live tests read ----------------------------------------------------
-# A fixed split or dividend ages out of a Basic plan's two years of history, so the tests find
-# recent ones through the library, once per run.
+# A fixed split or dividend ages out of the history a key may read, so the tests find recent
+# ones through the library, once per run.
 
 
 _EVENTS: dict[str, list[Any]] = {}
@@ -4075,7 +3786,6 @@ _EVENTS: dict[str, list[Any]] = {}
 @pytest.fixture
 def recent_splits(
     table_rows: Callable[[Table], list[dict[str, Any]]],
-    live_plans: plans.LivePlans,
     evidence: Callable[[str], None],
 ) -> Callable[[MassiveSession], list[events.Split]]:
     """Return a function that finds the year's most recent forward splits of common stocks.
@@ -4083,12 +3793,10 @@ def recent_splits(
     The first call of a run reads every split of the year and after it (one REST request,
     `_all_splits`), chooses the candidates (`events.forward_splits`), then checks the newest
     ones against the reference tickers until five common stocks are found (a request each,
-    `events.first_common`), or, with stocks on Basic, until one is found among the first two
-    (`_common_events`); later calls reuse them. Each call records them as evidence.
+    `events.first_common`); later calls reuse them. Each call records them as evidence.
 
     Args:
         table_rows: Snapshots a table into rows.
-        live_plans: The run's plans, whose Stocks plan sets how many splits are checked.
         evidence: Records the splits found.
 
     Returns:
@@ -4101,9 +3809,7 @@ def recent_splits(
             window = events.event_window(calendar.today())
             found = events.forward_splits(_all_splits(session, table_rows), window)
             common = _is_common_stock(session, table_rows)
-            _EVENTS["splits"] = _common_events(
-                found, lambda s: s.symbol, common, run_plans=live_plans
-            )
+            _EVENTS["splits"] = events.first_common(found, lambda s: s.symbol, common)
         evidence(f"recent forward splits: {_EVENTS['splits']}")
         return list(_EVENTS["splits"])
 
@@ -4113,7 +3819,6 @@ def recent_splits(
 @pytest.fixture
 def special_dividends(
     table_rows: Callable[[Table], list[dict[str, Any]]],
-    live_plans: plans.LivePlans,
     evidence: Callable[[str], None],
 ) -> Callable[[MassiveSession], list[events.Dividend]]:
     """Return a function that finds the year's most recent special cash dividends.
@@ -4121,13 +3826,11 @@ def special_dividends(
     The first call of a run reads up to 50 dividends of the last year classed `special`, newest
     first, through the session's `stocks.dividends` (one REST request), chooses the candidates
     without a later split (`events.special_dividends`, with `_all_splits`), then checks them
-    against the reference tickers until five common stocks are found (`events.first_common`),
-    or, with stocks on Basic, until one is found among the first two (`_common_events`); later
-    calls reuse them. Each call records them as evidence.
+    against the reference tickers until five common stocks are found (`events.first_common`);
+    later calls reuse them. Each call records them as evidence.
 
     Args:
         table_rows: Snapshots a table into rows.
-        live_plans: The run's plans, whose Stocks plan sets how many dividends are checked.
         evidence: Records the dividends found.
 
     Returns:
@@ -4149,46 +3852,11 @@ def special_dividends(
             rows = table_rows(query.fetch(wait=True))
             found = events.special_dividends(rows, _all_splits(session, table_rows))
             common = _is_common_stock(session, table_rows)
-            _EVENTS["dividends"] = _common_events(
-                found, lambda d: d.symbol, common, run_plans=live_plans
-            )
+            _EVENTS["dividends"] = events.first_common(found, lambda d: d.symbol, common)
         evidence(f"recent special cash dividends: {_EVENTS['dividends']}")
         return list(_EVENTS["dividends"])
 
     return find
-
-
-def _common_events(
-    found: Sequence[Any],
-    symbol: Callable[[Any], str],
-    is_common: Callable[[str], bool],
-    *,
-    run_plans: plans.LivePlans,
-) -> list[Any]:
-    """Keep the candidate events of common stocks, fewer with stocks on Basic.
-
-    A test sends a class on Basic at most 5 requests, and each candidate it tries costs two bar
-    requests, so with stocks on Basic only the first `events.BASIC_EVENT_CHECKS` candidates are
-    checked and `events.BASIC_EVENT_CANDIDATES` kept; on a paid plan, the first
-    `events.EVENT_CANDIDATES` common stocks.
-
-    Args:
-        found: The candidate events, newest first.
-        symbol: Returns an event's ticker.
-        is_common: Tells whether a ticker is a common stock (a request each).
-        run_plans: The run's plans.
-
-    Returns:
-        The events kept, newest first.
-    """
-    if run_plans.tiers["stocks"] == "basic":
-        return events.first_common(
-            found[: events.BASIC_EVENT_CHECKS],
-            symbol,
-            is_common,
-            keep=events.BASIC_EVENT_CANDIDATES,
-        )
-    return events.first_common(found, symbol, is_common)
 
 
 def _all_splits(
@@ -4235,13 +3903,9 @@ def _is_common_stock(
     return check
 
 
-_MARKET_CLASSES: Final = {"fx": "currencies", "crypto": "currencies"}
-"""The class of each market whose name is not its class's, for the feed delay of its plan."""
-
-
 @pytest.fixture
 def rows_due(
-    live_rest: RestClient, live_plans: plans.LivePlans, evidence: Callable[[str], None]
+    live_rest: RestClient, evidence: Callable[[str], None]
 ) -> Callable[..., tuple[str, bool]]:
     """Return a function that tells whether a stream must have delivered rows by now.
 
@@ -4249,14 +3913,15 @@ def rows_due(
     `/futures/v1/market-status`; for every other market its status from
     `/v1/marketstatus/now` (`_MARKETS`). The session the stream's rows come from opens as
     `streams.opened_at` says (stock trades and quotes in the extended hours from 04:00 New York
-    time, the regular session at 09:30), and rows are due once it has been open longer than
-    the plan's feed delay (`streams.rows_due`). A stock, option, or index stream that needs the
-    regular session has no rows due from its close (`streams.regular_close`: 16:00, 13:00 on a
-    half trading day), even while Massive's status still says `open`.
+    time, the regular session at 09:30), and rows are due while it is open: by the market's
+    clock alone, since Massive's delayed feed lags by an amount the tests do not know (a test
+    of a subscription listed in `delayed_subscriptions` skips when no row comes). A stock,
+    option, or index stream that needs the regular session has no rows due from its close
+    (`streams.regular_close`: 16:00, 13:00 on a half trading day), even while Massive's status
+    still says `open`.
 
     Args:
         live_rest: The live REST client.
-        live_plans: The run's plans, whose class plan sets the delay.
         evidence: Records the status, the open, and the verdict.
 
     Returns:
@@ -4288,8 +3953,7 @@ def rows_due(
                 body = body.get(step) if isinstance(body, dict) else None
             status = str(body)
         opened = streams.opened_at(market, status, family=family, now=now, since=since)
-        name = _MARKET_CLASSES.get(market, market)
-        verdict = streams.rows_due(live_plans, name, opened=opened, now=now)
+        verdict = opened is not None
         evidence(f"{market} {family} status {status}, open since {opened}, rows due: {verdict}")
         return status, verdict
 

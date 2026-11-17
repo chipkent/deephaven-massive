@@ -15,7 +15,7 @@ import os
 import signal
 import sys
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,7 +28,9 @@ from tests._live.live_run.context import RunContext, RunMemory, RunRefusedError
 from tests._live.live_run.machine_checks import FAIL, OK, Item
 from tests._live.live_run.probe_result import ProbeResult
 from tests._live.live_run.secret_scrub import SecretFilter, fingerprints
-from tests._live.live_run.state import RunState, check_of, entitlement_id, record
+from tests._live.live_run.state import RunState, check_of, record
+from tests._live.live_run.stream_units import night_units, stream_units
+from tests._live.summary import NOT_LISTED
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -36,12 +38,9 @@ if TYPE_CHECKING:
 ROOT = Path(__file__).resolve().parents[3]
 
 KEY = "PLANTED-run-key-4c1d"
-DELAYED_KEY = "PLANTED-delayed-key-8e2a"
 S3_PAIR = ("PLANTEDACCESSID7Q", "PLANTED/s3+value=91")
 
 NOW = datetime(2026, 11, 4, 12, tzinfo=NEW_YORK)
-
-BASIC = dict.fromkeys(("stocks", "options", "indices", "currencies", "futures"), "basic")
 
 NODE = "tests/x_integration.py::test_a"
 
@@ -74,7 +73,6 @@ class Harness:
         self.probes: list[ProbeResult] = []
         self.environ = {
             "MASSIVE_API_KEY": KEY,
-            "MASSIVE_DELAYED_API_KEY": DELAYED_KEY,
             "MASSIVE_S3_ACCESS_KEY_ID": S3_PAIR[0],
             "MASSIVE_S3_SECRET_ACCESS_KEY": S3_PAIR[1],
             "FAKE_LIVE_CHILD": "{}",
@@ -106,7 +104,7 @@ class Harness:
 
     def probe(self) -> ProbeResult:
         if not self.probes:
-            return probed(BASIC)
+            return probed()
         return self.probes.pop(0)
 
     def machine(self, folder: Path, offset: float | None) -> tuple[list[Item], dict[str, object]]:
@@ -127,21 +125,18 @@ class Harness:
 
 
 def probed(
-    tiers: dict[str, str] | None,
     *,
-    flat_files: list[str] | None = None,
     error: str = "",
     key_rejected: bool = False,
     clock_offset: float | None = None,
+    closures: dict[str, str] | None = None,
 ) -> ProbeResult:
     return ProbeResult(
         when="2026-11-04T17:00:00Z",
-        tiers=tiers,
-        flat_files=flat_files or [],
-        history_start=dict.fromkeys(tiers or {}, "2024-11-04"),
         clock_offset=clock_offset,
         key_rejected=key_rejected,
         error=error,
+        closures=closures,
     )
 
 
@@ -171,31 +166,37 @@ def test_the_lock_refuses_a_second_holder(tmp_path: Path) -> None:
 # --- probing ----------------------------------------------------------------------------------
 
 
-def test_a_probe_is_recorded_and_its_subscriptions_adopted(harness: Harness) -> None:
+def test_a_probe_is_recorded_and_plans_a_stream_day_for_every_subscription(
+    harness: Harness,
+) -> None:
+    """Every subscription's unit is due before anything is known: the probe asks nothing.
+
+    The probe's record is cleaned of the key, its line goes to `probes/probes.csv`, and a
+    stream day is planned at once, with no pause before the next group.
+    """
     state, memory = RunState(commit="c1"), RunMemory()
     harness.ctx.out.mkdir()
-    result = probed(
-        BASIC | {"stocks": "starter"}, flat_files=["us_stocks_sip/day_aggs_v1"], error=f"echo {KEY}"
-    )
+    result = probed(clock_offset=0.25, closures={"2026-11-26": "closed"})
+    result.requests = [{"path": "/v1/marketstatus/now", "echo": KEY}]
     commands.apply_probe(harness.ctx, state, memory, result=result)
-    assert state.current == "e1"
     assert state.stream_day == "2026-11-05"
-    assert memory.not_before == NOW + commands.BASIC_PAUSE
     assert memory.latest_probe is not None
+    assert memory.retries == 0
     [stored] = (harness.ctx.out / "probes").glob("*.json")
     assert KEY not in stored.read_text()
-    csv_text = (harness.ctx.out / "probes" / "entitlements.csv").read_text()
-    assert "stocks=starter" in csv_text
-    assert "us_stocks_sip/day_aggs_v1" in csv_text
+    csv_text = (harness.ctx.out / "probes" / "probes.csv").read_text()
+    assert csv_text.splitlines() == [
+        "when,clock_offset_s,closures",
+        "2026-11-04T17:00:00Z,0.25,2026-11-26=closed",
+    ]
     assert any("stream day planned for 2026-11-05" in line for line in harness.lines)
 
 
 def test_a_probe_plans_a_stream_night_around_massives_closures(harness: Harness) -> None:
     state, memory = RunState(commit="c1"), RunMemory()
-    tiers = BASIC | {"currencies": "starter", "futures": "starter"}
-    result = probed(tiers)
-    result.closures = {"2026-11-05": "closed"}  # Thursday, unlike the fixed rules, closed
-    commands.apply_probe(harness.ctx, state, memory, result=result)
+    commands.apply_probe(
+        harness.ctx, state, memory, result=probed(closures={"2026-11-05": "closed"})
+    )  # Thursday, unlike the fixed rules, closed
     assert state.closures == {"2026-11-05": "closed"}
     assert state.stream_day == "2026-11-05"
     # Wednesday's morning is the stream day; Thursday is closed; Friday and Saturday cannot be.
@@ -206,12 +207,12 @@ def test_a_probe_plans_a_stream_night_around_massives_closures(harness: Harness)
     )
     # A probe during the night, its closures unread, moves neither the night nor the closures.
     harness.clock.now = datetime(2026, 11, 9, 2, tzinfo=NEW_YORK)
-    commands.apply_probe(harness.ctx, state, memory, result=probed(tiers))
+    commands.apply_probe(harness.ctx, state, memory, result=probed())
     assert (state.stream_night, state.closures) == ("2026-11-08", {"2026-11-05": "closed"})
     # Once it ended with its units still due, the next probe plans another, clear of the stream
     # day it plans for Tuesday.
     harness.clock.now = datetime(2026, 11, 9, 10, tzinfo=NEW_YORK)
-    commands.apply_probe(harness.ctx, state, memory, result=probed(tiers))
+    commands.apply_probe(harness.ctx, state, memory, result=probed())
     assert (state.stream_day, state.stream_night) == ("2026-11-10", "2026-11-11")
 
 
@@ -220,60 +221,88 @@ def test_a_probe_inside_a_night_that_gave_up_plans_the_next(harness: Harness) ->
     state.stream_day, state.stream_night = "2026-11-12", "2026-11-05"  # Thursday's night
     for _ in range(schedule.MAX_STREAM_STARTS):
         state.attempts.append(run_state.Attempt("stream-night", "n", "2026-11-05", ""))
-    tiers = BASIC | {"currencies": "starter"}
     harness.clock.now = datetime(2026, 11, 6, 8, tzinfo=NEW_YORK)  # Friday's probe, before 09:30
-    commands.apply_probe(harness.ctx, state, memory, result=probed(tiers))
+    commands.apply_probe(harness.ctx, state, memory, result=probed())
     assert state.stream_night == "2026-11-08"  # Sunday's, not lost to the weekend
 
 
-def test_a_key_that_streams_neither_crypto_nor_futures_plans_no_night(harness: Harness) -> None:
+def test_units_massive_refused_plan_nothing_until_a_refusal_of_theirs_clears(
+    harness: Harness,
+) -> None:
+    """A key without a subscription must not plan a stream day or night every day.
+
+    Its refused units still stream on the next planned day or night; one asks for another only
+    once a check of its subscription stops being refused.
+    """
     state = RunState(commit="c1")
-    commands.apply_probe(
-        harness.ctx, state, RunMemory(), result=probed(BASIC | {"stocks": "starter"})
-    )
-    assert (state.stream_night, state.closures) == ("", {})
+    for group, units in (("stream-day", stream_units()), ("stream-night", night_units())):
+        for unit in units:
+            record(
+                state,
+                check_of(state, group, unit),
+                status="refused",
+                reason="refused: x",
+                day="2026-11-03",
+            )
+    commands.apply_probe(harness.ctx, state, RunMemory(), result=probed())
+    assert (state.stream_day, state.stream_night) == ("", "")
+    check_of(state, "stream-night", "futures").rerun = True
+    commands.apply_probe(harness.ctx, state, RunMemory(), result=probed())
+    assert (state.stream_day, state.stream_night) == ("", "2026-11-05")
 
 
-def test_a_probe_that_cannot_tell_keeps_basic_and_counts_a_retry(harness: Harness) -> None:
-    state, memory = RunState(commit="c1"), RunMemory()
-    commands.apply_probe(harness.ctx, state, memory, result=probed(None, error="HTTP 503"))
-    assert state.entitlements[state.current]["tiers"] == BASIC
-    assert memory.retries == 1
+def test_a_unit_the_settings_did_not_list_plans_a_stream_day_once_they_list_its_subscription(
+    harness: Harness,
+) -> None:
+    """Listing a subscription as delayed schedules its stream unit again, without `--redo`.
+
+    The other units passed, so only the unlisted one can ask for a stream day; it asks once a
+    check of its subscription that skipped for the same listing passes.
+    """
+    state = RunState(commit="c1")
+    for unit in stream_units():
+        check = check_of(state, "stream-day", unit)
+        if unit == "stocks":
+            record(state, check, status="skipped", reason=f"{NOT_LISTED}AM.*: x", day="2026-11-03")
+        else:
+            record(state, check, status="passed", reason="", day="2026-11-03")
+    listed = check_of(state, "evidence", "a.py::test_stocks_snapshot")
+    record(state, listed, status="skipped", reason=f"{NOT_LISTED}x", day="2026-11-03")
+    commands.apply_probe(harness.ctx, state, RunMemory(), result=probed())
     assert state.stream_day == ""
-    commands.apply_probe(harness.ctx, state, memory, result=probed(None, error="HTTP 503"))
-    assert (state.current, memory.retries) == ("e1", 2)
+    record(state, listed, status="passed", reason="", day="2026-11-04")
+    commands.apply_probe(harness.ctx, state, RunMemory(), result=probed())
+    assert state.stream_day
+    assert any(f"stream day planned for {state.stream_day}" in line for line in harness.lines)
+
+
+def test_a_probe_that_fails_counts_a_retry(harness: Harness) -> None:
+    state, memory = RunState(commit="c1"), RunMemory()
+    commands.apply_probe(harness.ctx, state, memory, result=probed(error="HTTP 503"))
+    assert (memory.retries, memory.latest_probe) == (1, None)
+    assert any(
+        "could not read Massive's market status (HTTP 503)" in line for line in harness.lines
+    )
+    commands.apply_probe(harness.ctx, state, memory, result=probed(error="HTTP 503"))
+    assert memory.retries == 2
+    assert not (harness.ctx.out / "probes" / "probes.csv").exists()
 
 
 def test_a_rejected_key_stops_the_program(harness: Harness) -> None:
     with pytest.raises(RunRefusedError, match="the API key was rejected"):
         commands.apply_probe(
-            harness.ctx, RunState(commit="c1"), RunMemory(), result=probed(None, key_rejected=True)
+            harness.ctx, RunState(commit="c1"), RunMemory(), result=probed(key_rejected=True)
         )
-
-
-def test_flat_files_without_the_s3_pair_are_reminded_once_a_day(harness: Harness) -> None:
-    del harness.environ["MASSIVE_S3_ACCESS_KEY_ID"]
-    del harness.environ["MASSIVE_S3_SECRET_ACCESS_KEY"]
-    state, memory = RunState(commit="c1"), RunMemory()
-    for _ in range(2):
-        commands.apply_probe(
-            harness.ctx, state, memory, result=probed(BASIC | {"options": "starter"})
-        )
-    reminders = [line for line in harness.lines if "the S3 pair is not set" in line]
-    assert len(reminders) == 1
-    assert "Options starter includes flat files" in reminders[0]
-    commands.apply_probe(harness.ctx, state, RunMemory(), result=probed(BASIC))
-    assert len([line for line in harness.lines if "the S3 pair is not set" in line]) == 1
 
 
 # --- check ------------------------------------------------------------------------------------
 
 
 def test_check_prints_the_machine_and_the_probe_and_writes_nothing(harness: Harness) -> None:
-    harness.probes = [probed(BASIC, clock_offset=0.4)]
+    harness.probes = [probed(clock_offset=0.4, closures={"2026-11-26": "closed"})]
     assert commands.command_check(harness.ctx) == 0
     assert harness.lines[0] == "OK   clock: 0.4 s"
-    assert "     stocks: basic, history from 2024-11-04" in harness.lines
+    assert "     market closures Massive lists: 2026-11-26 closed" in harness.lines
     assert harness.lines[-1] == "ready: yes"
     assert not harness.ctx.out.exists()
 
@@ -283,11 +312,11 @@ def test_check_says_not_ready_for_a_failed_item_or_a_rejected_key(harness: Harne
         return [Item("java", FAIL, "missing")], {}
 
     harness.ctx.machine = failing
-    harness.probes = [probed(None, error="HTTP 429")]
+    harness.probes = [probed(error="HTTP 429")]
     assert commands.command_check(harness.ctx) == 1
-    assert "WARN probe: could not tell the subscriptions (HTTP 429)" in harness.lines
+    assert "WARN probe: could not read Massive's market status (HTTP 429)" in harness.lines
     harness.lines.clear()
-    harness.probes = [probed(None, key_rejected=True)]
+    harness.probes = [probed(key_rejected=True)]
     assert commands.command_check(harness.ctx) == 1
     assert "FAIL key: the API key was rejected: copy it again from Massive's dashboard" in (
         harness.lines
@@ -302,10 +331,10 @@ PASS = [{"phase": "setup", "outcome": "passed"}, {"phase": "call", "outcome": "p
 def test_a_run_any_time_runs_every_group_it_can_then_idles_and_packs(harness: Harness) -> None:
     harness.script(
         print=[
-            f"key {KEY} delayed {DELAYED_KEY} id {S3_PAIR[0]} secret {S3_PAIR[1]}",
+            f"key {KEY} id {S3_PAIR[0]} secret {S3_PAIR[1]}",
             f"GET /v3?apiKey={KEY}",
         ],
-        collection={NODE: {"items": ["21"], "requests": 3}},
+        collection={NODE: {"items": ["21"]}},
         outcomes={NODE: PASS},
         results=[{"name": "market-status", "status": "passed", "reason": ""}],
     )
@@ -332,7 +361,6 @@ def test_a_run_any_time_runs_every_group_it_can_then_idles_and_packs(harness: Ha
     assert state.any_time_used
     assert set(state.fingerprints) == {
         "MASSIVE_API_KEY",
-        "MASSIVE_DELAYED_API_KEY",
         "MASSIVE_S3_ACCESS_KEY_ID",
         "MASSIVE_S3_SECRET_ACCESS_KEY",
     }
@@ -340,7 +368,7 @@ def test_a_run_any_time_runs_every_group_it_can_then_idles_and_packs(harness: Ha
         "idle: nothing more to run until Wed 16:15 EST (limits-ws)" in line
         for line in harness.lines
     )
-    secrets = [s.encode() for s in (KEY, DELAYED_KEY, *S3_PAIR)]
+    secrets = [s.encode() for s in (KEY, *S3_PAIR)]
     for path, data in _every_file(harness.ctx.out):
         assert not any(secret in data for secret in secrets), path
     printed = "\n".join(harness.lines)
@@ -363,7 +391,6 @@ def test_a_run_resumes_and_refuses_another_commit(harness: Harness) -> None:
 def test_redo_makes_a_groups_checks_due_again(harness: Harness) -> None:
     harness.ctx.out.mkdir()
     state = RunState(commit="c1")
-    state.current = entitlement_id(state, BASIC, [])
     check = check_of(state, "smoke", NODE)
     for _ in range(2):
         record(state, check, status="failed", reason="call: AssertionError", day="2026-11-03")
@@ -376,16 +403,20 @@ def test_redo_makes_a_groups_checks_due_again(harness: Harness) -> None:
 def test_a_probe_step_reprobes_during_a_run(harness: Harness) -> None:
     harness.clock = Clock(3)
     harness.clock.now = datetime(2026, 11, 7, 12, tzinfo=NEW_YORK)  # a Saturday: nothing runs
-    harness.probes = [probed(BASIC), probed(BASIC)]
+    harness.probes = [probed(), probed()]
     commands.command_run(harness.ctx)
-    assert harness.clock.sleeps[1] == datetime(2026, 11, 9, 8, tzinfo=NEW_YORK)
+    # Every unit is due, so Monday is a stream day: its probe at 03:15, then its streams.
+    assert harness.clock.sleeps[:2] == [
+        datetime(2026, 11, 9, 3, 15, tzinfo=NEW_YORK),
+        datetime(2026, 11, 9, 3, 45, tzinfo=NEW_YORK),
+    ]
     assert not harness.probes  # the Monday probe ran after the first sleep
 
 
 def test_an_idle_pack_that_finds_a_secret_says_so(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    harness.script(collection={NODE: {"items": [], "requests": 1}}, outcomes={NODE: PASS})
+    harness.script(collection={NODE: {"items": []}}, outcomes={NODE: PASS})
     harness.clock = Clock(2)
 
     def refuse(*_args: object, **_options: object) -> tuple[None, list[str]]:
@@ -404,15 +435,15 @@ def test_status_without_a_run(harness: Harness) -> None:
     assert harness.lines == [f"no run in {harness.ctx.out}"]
 
 
-def test_status_shows_the_latest_probe_that_told_the_tiers(harness: Harness) -> None:
+def test_status_shows_the_latest_probe_that_read_the_market_status(harness: Harness) -> None:
     state, memory = RunState(commit="c1"), RunMemory()
-    commands.apply_probe(harness.ctx, state, memory, result=probed(BASIC))
-    unknown = probed(None, error="503")
+    commands.apply_probe(harness.ctx, state, memory, result=probed())
+    unknown = probed(error="503")
     unknown.when = "2026-11-04T18:00:00Z"
     commands.apply_probe(harness.ctx, state, memory, result=unknown)
     harness.lines.clear()
     assert commands.command_status(harness.ctx) == 0
-    assert harness.lines[0] == f"latest probe: {probed(BASIC).when}"
+    assert harness.lines[0] == f"latest probe: {probed().when}"
 
 
 def test_status_before_any_probe_says_so(harness: Harness) -> None:
@@ -455,8 +486,8 @@ def test_pack_writes_the_zip_or_names_every_secret_found(harness: Harness) -> No
     [
         ({"MASSIVE_API_KEY": ""}, "not set: MASSIVE_API_KEY"),
         (
-            {"MASSIVE_DELAYED_API_KEY": "PLANTED-another-delayed"},
-            "a different value: MASSIVE_DELAYED_API_KEY",
+            {"MASSIVE_S3_ACCESS_KEY_ID": "PLANTED-another-id"},
+            "a different value: MASSIVE_S3_ACCESS_KEY_ID",
         ),
     ],
 )
@@ -473,10 +504,10 @@ def test_pack_needs_exactly_the_secrets_the_run_used(
 
 def test_pack_refuses_a_secret_the_run_did_not_have(harness: Harness) -> None:
     state = _saved_run(harness)
-    del state.fingerprints["MASSIVE_DELAYED_API_KEY"]
+    del state.fingerprints["MASSIVE_S3_SECRET_ACCESS_KEY"]
     run_state.save(harness.ctx.out, state)
     assert commands.command_pack(harness.ctx) == 1
-    assert "not used by the run: MASSIVE_DELAYED_API_KEY" in harness.lines[-1]
+    assert "not used by the run: MASSIVE_S3_SECRET_ACCESS_KEY" in harness.lines[-1]
 
 
 def test_pack_refuses_a_folder_whose_run_recorded_no_secrets(harness: Harness) -> None:
@@ -494,7 +525,7 @@ def test_pack_waits_for_disk_space(harness: Harness) -> None:
 
 
 def test_an_idle_pack_waits_for_disk_space(harness: Harness) -> None:
-    harness.script(collection={NODE: {"items": [], "requests": 1}}, outcomes={NODE: PASS})
+    harness.script(collection={NODE: {"items": []}}, outcomes={NODE: PASS})
     harness.clock = Clock(2)
     harness.ctx.free_disk = lambda _folder: 0
     commands.command_run(harness.ctx, any_time=True)
@@ -524,10 +555,7 @@ def test_a_probe_that_raises_is_an_unknown_answer(harness: Harness) -> None:
 
     harness.ctx.probe = broken
     result = commands.safe_probe(harness.ctx)
-    assert (result.tiers, result.error) == (
-        None,
-        "the probe failed: RuntimeError: the network is down",
-    )
+    assert result.error == "the probe failed: RuntimeError: the network is down"
 
 
 def test_a_step_that_raises_is_logged_and_retried(
@@ -589,12 +617,6 @@ def test_any_time_is_used_once_per_folder(harness: Harness) -> None:
 
 
 # --- the upgrade check ------------------------------------------------------------------------
-
-
-def test_the_upgrade_check_refuses_a_subscription_not_on_basic(harness: Harness) -> None:
-    harness.probes = [probed(BASIC | {"stocks": "starter"})]
-    with pytest.raises(RunRefusedError, match="stocks is on starter, not Basic"):
-        commands.command_upgrade_check(harness.ctx, "stocks")
 
 
 @pytest.mark.parametrize(
@@ -681,17 +703,3 @@ def test_control_c_while_the_upgrade_checks_pid_is_saved_stops_the_child(
     assert harness.state().attempts[-1].status == "interrupted"
     with pytest.raises(ProcessLookupError):  # stopped and reaped, not left running
         os.kill(interrupted[0], 0)
-
-
-def test_the_pause_after_a_basic_probe_holds_the_first_group(harness: Harness) -> None:
-    harness.clock = Clock(1)
-    commands.command_run(harness.ctx)
-    assert harness.clock.sleeps == [NOW + commands.BASIC_PAUSE]
-    assert NOW + timedelta(seconds=65) == harness.clock.sleeps[0]
-
-
-def test_no_pause_follows_a_probe_when_nothing_is_on_basic(harness: Harness) -> None:
-    memory = RunMemory()
-    paid = dict.fromkeys(BASIC, "starter")
-    commands.apply_probe(harness.ctx, RunState(commit="c1"), memory, result=probed(paid))
-    assert memory.not_before is None

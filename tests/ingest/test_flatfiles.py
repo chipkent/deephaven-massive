@@ -72,6 +72,7 @@ from deephaven_massive._tables import columns, problem_reporter
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.problem_events import ProblemCause, ProblemEvent
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import (
     SymbolFailure,
     SymbolOutcome,
@@ -80,6 +81,7 @@ from deephaven_massive._tables.transports import (
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import HistoryQuery
 from tests._fakes.clock import FakeClock
+from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 TIMEOUT = 30.0
 RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]
@@ -627,6 +629,7 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
         window=window,
         warnings=WARNINGS,
         call=1,
+        tally=ReadTally(),
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -663,6 +666,7 @@ def test_a_bar_outside_the_whole_bar_window_is_neither_withheld_nor_counted(
         window=window,
         warnings=WARNINGS,
         call=1,
+        tally=ReadTally(),
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -707,6 +711,7 @@ def test_an_unreadable_spelling_is_withheld_beside_a_readable_row() -> None:
         window=whole_days(SYNTHETIC, "2025-03-03"),
         warnings=WARNINGS,
         call=1,
+        tally=ReadTally(),
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -738,6 +743,7 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
         window=window,
         warnings=WARNINGS,
         call=1,
+        tally=ReadTally(),
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -774,6 +780,7 @@ def test_a_size_beyond_2_53_widened_to_a_double_is_withheld_and_reported() -> No
         window=whole_days(SYNTHETIC, "2025-03-03"),
         warnings=WARNINGS,
         call=1,
+        tally=ReadTally(),
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -1005,8 +1012,14 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
 
 
 def test_a_file_whose_every_line_is_malformed_fails_the_call(
-    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The reader fails the file after its last block; its lines are still listed.
+    events = capture_problems(session, monkeypatch)
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + "AAPL,1\nAAPL,2\n"))
     with pytest.raises(
         dm.MassiveError,
@@ -1015,6 +1028,32 @@ def test_a_file_whose_every_line_is_malformed_fails_the_call(
         r"header has 2 fields where the header has 13\. " + re.escape(LIBRARY_BUG) + "$",
     ):
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert problems(events) == [
+        (ProblemCause.MALFORMED_ROWS, None, LOCATION.format(TRADES_0303), 2)
+    ]
+
+
+def test_rows_withheld_before_a_malformed_line_under_raise_are_listed_too(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An earlier block withheld a row under LOG; the malformed line fails the read, and both
+    # problems are listed first.
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)
+    monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 1)
+    good = "".join(trade(n, 1741012200000000000 + n) for n in range(2, 21))
+    odd = unfit_price(1, 1741012200000000001)
+    bad = trade(30, 1741012200000000030).replace(",AAPL,", ",AAPL,x,")
+    fake_s3.put(TRADES_0303, gzip.compress((TRADE_HEADER + odd + good + bad).encode()))
+    strict = dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)
+    with dm.MassiveSession(dataclasses.replace(CONFIG, on_error=strict)) as m:
+        events = capture_problems(m, monkeypatch)
+        q = query(m, STOCK_TRADES, symbols=dm.ALL)
+        with pytest.raises(dm.MassiveError, match="holds a malformed line"):
+            q.history("2025-03-03", "2025-03-03", wait=True)
+    assert [e.cause for e in events] == [
+        ProblemCause.UNCONVERTIBLE_VALUES,
+        ProblemCause.MALFORMED_ROWS,
+    ]
 
 
 def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
@@ -1649,6 +1688,44 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     )
 
 
+REST_0304 = int(datetime(2025, 3, 4, 15, tzinfo=UTC).timestamp()) * 1_000_000_000
+"""An instant of 2025-03-04, the day the files lack, which REST reads."""
+
+
+@pytest.mark.parametrize("files_whole", [True, False], ids=["files-whole", "files-unreadable"])
+def test_auto_judges_its_files_and_rest_fills_as_one_read(
+    *,
+    fake_s3: FakeS3,
+    fake_rest: FakeRestServer,
+    clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    files_whole: bool,
+) -> None:
+    # The file of 03-03 holds AAPL's trade, and REST fills 03-04, whose only row has a price
+    # that is no number. The call is one read: it fails only when no row of its files and
+    # REST pages could be read whole.
+    del clock
+    row = trade(1, INSIDE) if files_whole else unfit_price(1, INSIDE)
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row))
+    fake_rest.reply(
+        "/v3/trades/AAPL",
+        Reply(envelope([{"sip_timestamp": REST_0304, "price": "x", "size": 10}])),
+    )
+    with dm.MassiveSession(dataclasses.replace(CONFIG, rest_base_url=fake_rest.url)) as m:
+        events = capture_problems(m, monkeypatch)
+        q = query(m, STOCK_TRADES, symbols=MANY)
+        if not files_whole:
+            with pytest.raises(RowDataError, match="could read none of the 2 rows"):
+                q.history("2025-03-03", "2025-03-04", wait=True)
+            return
+        t = q.history("2025-03-03", "2025-03-04", wait=True)
+        assert pick(t, "Symbol", "Id") == [("AAPL", "1")]
+    # The other symbols' 404s are unavailable_symbols problems of their own.
+    withheld = [p for p in problems(events) if p[0] is not ProblemCause.UNAVAILABLE_SYMBOLS]
+    assert withheld == [(ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)]
+
+
 def test_auto_reads_a_missing_weekday_mid_range_from_rest_in_date_order(
     *,
     session: dm.MassiveSession,
@@ -1780,8 +1857,10 @@ class RestRecorder:
         window: HistoryWindow,
         *,
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> Table:
+        del tally
         assert call > 0
         assert stop is None  # a blocking read has no stop token
         self.calls.append((spec, request, window))
@@ -1992,6 +2071,7 @@ def test_a_stopped_read_stops_its_roll_forward(
             q._request,
             window,
             dates=dates,
+            tally=ReadTally(),
             call=1,
             infer_holidays=True,
             logged=LoggedKeys(),
@@ -2072,6 +2152,7 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
             q._request,
             window,
             dates=dates,
+            tally=ReadTally(),
             call=1,
             infer_holidays=True,
             logged=LoggedKeys(),
@@ -2139,10 +2220,11 @@ class DayBars:
         window: HistoryWindow,
         *,
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
         days: Sequence[date] | None = None,
     ) -> Table:
-        del call, stop
+        del call, stop, tally
         self.calls.append((request, window))
         self.days.append(days)
         rows = [
@@ -2893,12 +2975,17 @@ def test_a_refused_venue_is_not_requested_again_in_the_call(
 
 
 def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
-    *, fake_s3: FakeS3, two_days_of_venues: Callable[[], None]
+    *,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The refusals are listed in m.problems() before the call raises.
     m = dm.MassiveSession(
         dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(refused_venues=OnError.IGNORE))
     )
     try:
+        events = capture_problems(m, monkeypatch)
         two_days_of_venues()
         for venue in ("cme", "nymex"):
             fake_s3.refuse(f"us_futures_{venue}/", status=403, code="AccessDenied", message="No")
@@ -2915,6 +3002,10 @@ def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
         ) as info:
             q.history("2025-03-04", "2025-03-04", wait=True)
         assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
+        [refused] = events
+        assert (refused.cause, refused.policy) == (ProblemCause.REFUSED_VENUES, OnError.IGNORE)
+        assert "CME" in refused.detail
+        assert "NYMEX" in refused.detail
     finally:
         m.close()
 
@@ -3565,6 +3656,7 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         window=window,
         warnings=WARNINGS,
         call=1,
+        tally=ReadTally(),
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = _massive.Cancel()
@@ -3595,6 +3687,7 @@ def test_a_read_stopped_while_it_waits_for_a_connection_is_cancelled_not_missing
             window=whole_days(STOCK_TRADES, "2025-03-03"),
             warnings=WARNINGS,
             call=1,
+            tally=ReadTally(),
         )
         key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
         client = flat_file_client(m)
@@ -4446,6 +4539,7 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
             request,
             window,
             dates=[day],
+            tally=ReadTally(),
             call=1,
             infer_holidays=True,
             logged=LoggedKeys(),

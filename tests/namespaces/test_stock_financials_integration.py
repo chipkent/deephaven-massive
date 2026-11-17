@@ -29,7 +29,6 @@ pytestmark = pytest.mark.integration
 Evidence: TypeAlias = "Callable[[str], None]"
 
 
-@pytest.mark.needs("stocks:advanced")
 @pytest.mark.settles("99")
 @pytest.mark.requests(1)
 def test_massive_answers_trailing_twelve_month_balance_sheets(
@@ -38,6 +37,8 @@ def test_massive_answers_trailing_twelve_month_balance_sheets(
     """What the balance sheets answer to `timeframe=trailing_twelve_months` for AAPL.
 
     `m.stocks.financials.balance_sheets` refuses that timeframe, which the other statements
-    take. DATA counts the rows of that timeframe.
+    take. DATA counts the rows of that timeframe. Massive's refusal of the request, which may
+    refuse the key the balance sheets rather than the timeframe, gives no verdict on the value:
+    the test skips, quoting Massive.
     """
     assert bad_values.ask_all(live_rest, bad_values.TRAILING_BALANCE_SHEET, evidence)

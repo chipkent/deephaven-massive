@@ -369,9 +369,10 @@ class DatasetSpec:
             default), which its tests check is unique per row.
         nullable_poll_keys: The `poll_keys` columns whose null is a value rather than a data
             failure, each mapped to the reason the vendor leaves it empty, such as
-            `{"PutCall": "empty for common stock"}`. A null in any other poll-key column fails
-            the `poll()` table; a catalog gate requires at least one poll-key column outside
-            this map, so a row is never identified by nulls alone. Empty by default.
+            `{"PutCall": "empty for common stock"}`. A row with a null in any other poll-key
+            column is withheld under `unreadable_keys`; a catalog gate requires at least one
+            poll-key column outside this map, so a row is never identified by nulls alone.
+            Empty by default.
         revision_keys: Further columns of a row's identity in an `APPEND` table only, after
             `poll_keys`: a current-state dataset's update time, such as `("Updated",)` on a
             snapshot, so that an explicit `mode=APPEND` appends each new state of a symbol
@@ -407,6 +408,9 @@ class DatasetSpec:
             argument of their own. Every REST path of the dataset must take each one (the catalog's
             `wire parameters` gate), so a request never carries a parameter its path lacks.
             Each is reserved, with its whole family, from `filters`.
+        library_params: Query parameters the library sets itself on some requests only, by wire
+            name, such as the options snapshot's `type`, which only `dm.ALL` sends; they have no
+            argument of their own. Each is reserved, with its whole family, from `filters`.
         row_times: Which of the library's time columns the rows carry (`RowTimes`);
             `RowTimes.BY_KIND`, the default, derives it (`times`): `BAR` for a `bars` dataset,
             `TICK` for any other dataset in a kind, `NONE` otherwise. The indicators declare
@@ -485,6 +489,7 @@ class DatasetSpec:
     symbols_per_request: int | None = None
     page_size: int | None = None
     fixed_params: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+    library_params: frozenset[str] = frozenset()
     row_times: RowTimes = RowTimes.BY_KIND
     column_notes: Mapping[str, str] = field(default_factory=dict)
     symbols_as_written: bool = False
@@ -834,7 +839,7 @@ class DatasetSpec:
         if optional and "Symbol" in self.poll_keys:
             raise ValueError(
                 f"{self.name}: poll_keys cannot hold Symbol when the symbol is optional: a row "
-                "without one would have a null poll key, which fails the poll() table; declare "
+                "without one would have a null poll key, which withholds the row; declare "
                 "other poll_keys"
             )
         if INSERT in self.poll_keys:

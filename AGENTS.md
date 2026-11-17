@@ -214,9 +214,8 @@ These protect the owner's repository, money, and secrets.
   - **Only a problem that affects every row a table would receive fails it, whatever the
     setting:**
     authentication, a closed session, a plan without the dataset, a refusal of everything a
-    call asked for, a read or stream whose rows it would receive are all withheld (until #704,
-    an `AUTO` `history()` judges its files and each REST read apart, and a read with a value
-    table each value), and a library defect.
+    call asked for, a read or stream whose rows it would receive are all withheld, and a library
+    defect.
     `docs/configuration.md` says how each read and stream judges that.
 - **Dates are ISO strings**: every calendar-date column, vendor dates included, stores
   `yyyy-MM-dd` text, never a `LocalDate` or a value computed on read; instants stay

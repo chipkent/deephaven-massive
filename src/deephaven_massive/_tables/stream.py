@@ -28,11 +28,12 @@ per distinct symbol, every epoch run through the timestamp routine as a vectoriz
 widened to the dataset schema, and the library's time columns filled (`row_times.TimeRule`): `Date`,
 a bar's end, and `TimestampInsert`, the instant each row's frame arrived. Futures messages carry no
 session date, so a futures row's `Date` is the 17:00 Chicago rule's, corrected by the connection's
-`FuturesSessionDates` (the WebSocket transport's schedule calendar), which never waits; a row its
-schedules cannot place gets a null `Date` (the calendar logs it), since the rule's date can be wrong
-there, and the stream keeps running. A row the library cannot read whole (its time column, a
-value, or its symbol) is withheld from the batch and reported as a problem of each stream that
-would have received it; it fails no stream. The batch becomes one static
+`FuturesSessionDates` (the WebSocket transport's schedule calendar), which never waits. A futures
+row it cannot date yet is held, not published, until it can (`HeldRows`), and then published
+before its ticker's newer rows; one Massive's lists or schedules can't date is withheld
+(`futures_problems`). A row the library cannot read whole (its time column, a value, or its
+symbol) is withheld from the batch and reported as a problem of each stream that would have
+received it; it fails no stream. The batch becomes one static
 Deephaven table (`deephaven.arrow.to_table`), shared by the dataset's streams on the channel
 (`SharedBatch`). Each `dm.ALL` stream, and each symbol stream that holds every symbol of the batch,
 gets the whole batch; a symbol stream that holds none of them gets nothing. A symbol stream that
@@ -85,7 +86,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Final, TypeAlias, TypeVar
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -118,9 +119,11 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
 from deephaven_massive._massive import DriftReport, RowFault, Transport, WireType
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.futures_problems import DISCARDS, futures_events
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker, drift_events
 from deephaven_massive._tables.publisher import blink_publisher
@@ -152,7 +155,9 @@ if TYPE_CHECKING:
     from deephaven_massive._enums import AssetClass, Recency
     from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._massive import RowMarks
-    from deephaven_massive._tables.problem_events import Problem
+    from deephaven_massive._tables.futures_dates import DateCorrector, FuturesSessionDates
+    from deephaven_massive._tables.held_rows import HeldRows, Settled
+    from deephaven_massive._tables.problem_events import Problem, ProblemSpans
     from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
@@ -164,7 +169,6 @@ __all__ = [
     "SYMBOL_CACHE_LIMIT",
     "ChannelPlan",
     "Flusher",
-    "FuturesSessionDates",
     "OpenedStream",
     "SharedBatch",
     "StreamSink",
@@ -252,30 +256,6 @@ _WIRE_ARROW: Final[Mapping[WireType, pa.DataType]] = {
 """The Arrow type of each wire type as the WebSocket client delivers its values: an epoch as its
 raw integer count (converted by its unit afterwards), an ISO-8601 instant as integer
 nanoseconds, a date as a `datetime.date`, and a list as a list of integers or of text."""
-
-
-class FuturesSessionDates(Protocol):
-    """The schedule calendar that corrects streamed futures rows' session dates.
-
-    The WebSocket transport gives a futures connection's flusher one
-    (`_ingest/futures_calendar.py`); `ChannelPlan.convert` hands it the rule's dates of every
-    futures row. It never waits on the network.
-    """
-
-    def correct(self, symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
-        """Return the rows' session dates, corrected by the schedules.
-
-        Args:
-            symbols: The rows' canonical symbols, `string`.
-            instants: The rows' instants (a tick's time, a bar's start), epoch nanoseconds,
-                `int64`.
-            dates: The 17:00 Chicago rule's session dates, ISO text.
-
-        Returns:
-            The dates to keep, ISO text, one per row; null for a row the schedules cannot
-            place, whose rule date may be wrong.
-        """
-        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,7 +481,7 @@ class ChannelPlan:
         symbols: dict[str, str | None],
         *,
         arrived: Sequence[int],
-        sessions: FuturesSessionDates | None = None,
+        sessions: DateCorrector | None = None,
     ) -> Converted:
         """Turn one flush's rows of the channel into a batch of the dataset's schema.
 
@@ -1145,6 +1125,7 @@ class Flusher:
         "_exec_ctx",
         "_final",
         "_flush_lock",
+        "_held",
         "_interval",
         "_new_generation",
         "_on_new_generation",
@@ -1155,6 +1136,7 @@ class Flusher:
         "_symbol_runs",
         "_symbols",
         "_thread",
+        "_undated",
         "_unrouted",
         "routes",
     )
@@ -1166,6 +1148,7 @@ class Flusher:
         *,
         interval: float,
         sessions: FuturesSessionDates | None = None,
+        held: HeldRows[ChannelPlan] | None = None,
         on_new_generation: Callable[[], object] = _do_nothing,
     ) -> None:
         """Create the flusher; nothing runs until `start()`.
@@ -1177,6 +1160,8 @@ class Flusher:
             interval: Seconds between flushes (`MassiveConfig.flush_interval`).
             sessions: For a futures connection, the schedule calendar that corrects its rows'
                 session dates; None otherwise.
+            held: For a futures connection, where its rows wait for their session dates
+                (`HeldRows`, over `sessions`); None otherwise.
             on_new_generation: Called after a flush in which a stream got its first rows of a
                 newer socket generation (`StreamSink.rows_generation`), on the flush thread
                 with no lock held; it must not block. The connection posts its recovery check
@@ -1187,6 +1172,7 @@ class Flusher:
         self._on_new_generation = on_new_generation
         self._interval = interval
         self._sessions = sessions
+        self._held = held
         self.routes: Final = _Routes()
         self._control: queue.SimpleQueue[_Fail | _Drift] = queue.SimpleQueue()
         self._flush_lock = threading.Lock()
@@ -1213,6 +1199,9 @@ class Flusher:
         self._events: list[tuple[StreamSink, Sequence[Problem]]] = []
         # Flush-lock state: whether this flush gave a stream rows of a newer socket generation.
         self._new_generation = False
+        # Flush-lock state: the (stream, futures cause) pairs already warned about.
+        # Per futures stream, its tickers whose rows wait for their date, with its spans.
+        self._undated: dict[int, tuple[dict[str, tuple[int, str]], SpanTracker]] = {}
         # Guarded by the backlog lock, a leaf lock.
         self._backlog_lock = threading.Lock()
         self._backlog = 0
@@ -1384,11 +1373,13 @@ class Flusher:
                     failing = [s for s in self.routes.sinks() if s.stream_id in item.stream_ids]
                     self._fail_each(failing, item.error)
             updates: dict[StreamSink, StreamUpdate] = {}
+            settled: set[ChannelPlan] = set()
             for channel, frames in drained.items():
                 sinks = routes.get(channel, ())
                 if sinks and frames:
                     for batch in _batches(frames):
-                        self._publish(batch, sinks, updates=updates)
+                        settled |= self._publish(batch, sinks, updates=updates)
+            self._release_held(routes, settled, updates=updates)
             for item in controls:
                 if isinstance(item, _Drift):
                     self._found(routes.get(item.channel, ()), item.drift, where=item.where)
@@ -1457,6 +1448,10 @@ class Flusher:
             self._unrouted = {p: run for p, run in self._unrouted.items() if p in plans}
         if self._symbol_runs:
             self._symbol_runs = {p: r for p, r in self._symbol_runs.items() if p in plans}
+        if self._held is not None:
+            self._held.keep(plans)
+        if self._undated:
+            self._undated = {i: u for i, u in self._undated.items() if i in live}
 
     def _fail_each(self, sinks: Iterable[StreamSink], error: MassiveError) -> None:
         """Fail streams one by one; a stream whose failure raises costs the others nothing.
@@ -1497,13 +1492,16 @@ class Flusher:
         sinks: tuple[StreamSink, ...],
         *,
         updates: dict[StreamSink, StreamUpdate],
-    ) -> None:
+    ) -> set[ChannelPlan]:
         """Convert a channel's rows once per dataset and add them to each of its streams.
 
         Args:
             batch: The channel's rows of this flush, and the rows the client dropped.
             sinks: The channel's streams.
-            updates: Receives each stream's new published-row total and `Error` notes.
+            updates: Receives each stream's new published-row total.
+
+        Returns:
+            The datasets whose rows the flush published or tried to.
         """
         by_plan: dict[ChannelPlan, list[StreamSink]] = {}
         for sink in sinks:
@@ -1523,6 +1521,7 @@ class Flusher:
                 mark_failure_logged(failure)
                 logger.exception("%s", failure)
                 self._fail_each(readers, failure)
+        return set(by_plan)
 
     def _publish_plan(
         self,
@@ -1534,8 +1533,9 @@ class Flusher:
     ) -> None:
         """Convert a channel's rows for one dataset once and add them to its streams.
 
-        A futures row the schedules cannot place has a null `Date` (the calendar logs it). The
-        rows the library cannot read whole are
+        A futures dataset's rows go through its held rows (`HeldRows.settle`): the rows that
+        cannot be dated yet wait there, and the ones held before that can be now publish first
+        (`_apply_settled`). The rows the library cannot read whole are
         withheld (`ChannelPlan.convert`), and each stream applies its own policy to them
         (`_withheld`); they count toward the plan's and their symbols' runs (`_counted`,
         `_counted_symbols`).
@@ -1552,14 +1552,254 @@ class Flusher:
             readers = self._withheld(plan, withheld, readers)
             if not readers:
                 return
+        # The runs count the rows read whole; held ones are no more dropped than published ones.
         # The dataset's run first: when it fails every stream, no symbol is named stale.
         if self._counted(plan, converted, readers=readers):
             return
         self._counted_symbols(plan, converted, readers=readers)
+        if self._held is not None and plan.symbol_field is not None:
+            self._held.prune(plan, functools.partial(_received, readers))
+            settled = self._held.settle(
+                plan, converted.batch, generation=batch.generation, times=plan.times
+            )
+            readers = self._apply_settled(plan, settled, readers, held=self._held)
+            if not readers:
+                return
+            self._publish_released(plan, settled, readers=readers, updates=updates)
+            converted = _with_rows(converted, settled.rows)
+        self._publish_converted(
+            plan, converted, readers=readers, updates=updates, generation=batch.generation
+        )
+
+    def _publish_released(
+        self,
+        plan: ChannelPlan,
+        settled: Settled,
+        *,
+        readers: list[StreamSink],
+        updates: dict[StreamSink, StreamUpdate],
+    ) -> None:
+        """Publish a dataset's released held rows, one table per socket generation, oldest first.
+
+        Each table carries its own generation, so a stream that receives only rows of the
+        dropped socket never counts as recovered. Held rows were counted toward the runs when
+        they arrived, so they are not counted again.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            readers: The dataset's streams on the channel.
+            updates: Receives each stream's new published-row total.
+        """
+        for rows, generation in settled.released:
+            converted = Converted(rows, Withheld(rows))
+            self._publish_converted(
+                plan,
+                _with_rows(converted, rows),
+                readers=readers,
+                updates=updates,
+                generation=generation,
+            )
+
+    def _publish_converted(
+        self,
+        plan: ChannelPlan,
+        converted: Converted,
+        *,
+        readers: list[StreamSink],
+        updates: dict[StreamSink, StreamUpdate],
+        generation: int,
+    ) -> None:
+        """Add a dataset's converted rows to its streams, and write their notes.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            converted: The rows to publish.
+            readers: The dataset's streams on the channel.
+            updates: Receives each stream's new published-row total.
+            generation: The newest socket generation of the rows.
+        """
         if converted.batch.num_rows:
             self._publish_batch(
-                plan, converted, readers=readers, updates=updates, generation=batch.generation
+                plan, converted, readers=readers, updates=updates, generation=generation
             )
+
+    def _release_held(
+        self,
+        routes: Mapping[str, tuple[StreamSink, ...]],
+        settled: set[ChannelPlan],
+        *,
+        updates: dict[StreamSink, StreamUpdate],
+    ) -> None:
+        """Settle the held rows of the datasets this flush brought no rows.
+
+        A dataset no stream reads any more drops its held rows. A calendar whose worker died
+        fails every stream that holds rows, as a defect: nothing would ever date them. A
+        dataset whose settling raises fails its streams as a defect too, and the others go on.
+
+        Args:
+            routes: The streams by channel.
+            settled: The datasets the flush already settled with its rows.
+            updates: Receives each stream's new published-row total.
+        """
+        held = self._held
+        if held is None:
+            return
+        for plan in held.holding():
+            readers = [s for s in routes.get(plan.channel, ()) if s.plan is plan and not s.failed]
+            if not readers:
+                held.drop(plan, why=f"no stream of {plan.dataset} reads them any more")
+                continue
+            if self._sessions is not None and not self._sessions.alive():
+                held.drop(plan, why="the futures schedule worker stopped")
+                self._fail_each(readers, _defect(plan, "the futures schedule worker stopped"))
+                continue
+            if plan in settled:
+                continue
+            try:
+                held.prune(plan, functools.partial(_received, readers))
+                result = held.settle(plan, None, generation=0, times=plan.times)
+                readers = self._apply_settled(plan, result, readers, held=held)
+                if readers:
+                    self._publish_released(plan, result, readers=readers, updates=updates)
+            except Exception as error:  # one dataset's failure never costs the others their rows
+                failure = _defect(plan, f"could not publish its held rows: {error}")
+                mark_failure_logged(failure)
+                logger.exception("%s", failure)
+                held.drop(plan, why=str(failure))
+                self._fail_each(readers, failure)
+
+    def _apply_settled(
+        self,
+        plan: ChannelPlan,
+        settled: Settled,
+        readers: list[StreamSink],
+        *,
+        held: HeldRows[ChannelPlan],
+    ) -> list[StreamSink]:
+        """Apply what settling a dataset's held rows decided to each of its streams.
+
+        A stream that receives a ticker whose lookup Massive refused, or that failed past
+        `max_outage`, fails; so do all of them when the dataset holds the most rows past the
+        connection's limit. Every other stream gets the problems of its tickers
+        (`_report_futures`), and fails when its setting of a discard's cause is `RAISE`.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            readers: The dataset's streams on the channel.
+            held: The hold that settled them.
+
+        Returns:
+            The streams that go on.
+        """
+        if settled.overflow:
+            failure = MassiveError(f"{plan.dataset}: {settled.overflow}")
+            held.drop(plan, why=str(failure))
+            self._fail_each(readers, failure)
+            return []
+        kept: list[StreamSink] = []
+        for sink in readers:
+            refused = next(
+                (e for t, e in settled.failed.items() if sink.receives_all or sink.holds(t)),
+                None,
+            )
+            if refused is not None:
+                self._fail_each([sink], refused)
+                continue
+            if self._report_futures(plan, settled, sink):
+                kept.append(sink)
+        return kept
+
+    def _report_futures(self, plan: ChannelPlan, settled: Settled, sink: StreamSink) -> bool:
+        """Hand one stream its discarded tickers' events and its waiting tickers' spans.
+
+        Rows discarded (`futures_problems.DISCARDS`) are events of their cause; under `RAISE`
+        of that cause the stream then fails. A ticker whose rows waited
+        `held_rows.DELAYED_AFTER` is an `undated_rows` span of the stream until its rows
+        publish, are discarded, or fail (`_undated_spans`). The session's reporter logs the
+        first problem of each cause.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            sink: The stream.
+
+        Returns:
+            False when the stream failed: its setting of a discard's cause is `RAISE`.
+        """
+
+        def receives(ticker: str) -> bool:
+            return sink.receives_all or sink.holds(ticker)
+
+        where = f"{self._thread.name} channel {plan.channel}"
+        discarded = {
+            readiness: mine
+            for readiness, tickers in settled.discarded.items()
+            if (mine := {t: found for t, found in tickers.items() if receives(t)})
+        }
+        problems: list[Problem] = list(
+            futures_events(
+                plan.dataset, sink.stream_id, where, discarded=discarded, policy=sink.policy
+            )
+        )
+        spans = self._undated_spans(plan, settled, sink, where=where, receives=receives)
+        if spans is not None:
+            problems.append(spans)
+        if problems:
+            self._events.append((sink, tuple(problems)))
+        for readiness, tickers in discarded.items():
+            rule = DISCARDS[readiness]
+            if effect_of(rule.setting(sink.policy)).fails:
+                failure = (
+                    f"{rule.message(plan.dataset, tickers)} (ErrorPolicy.{rule.cause.value}=RAISE)"
+                )
+                self._fail_each([sink], MassiveError(failure))
+                return False
+        return True
+
+    def _undated_spans(
+        self,
+        plan: ChannelPlan,
+        settled: Settled,
+        sink: StreamSink,
+        *,
+        where: str,
+        receives: Callable[[str], bool],
+    ) -> ProblemSpans | None:
+        """Update one stream's tickers whose rows wait for their date; return its new spans.
+
+        A ticker joins when its wait passes `held_rows.DELAYED_AFTER` (`Settled.delayed`), and
+        leaves when its rows publish (`Settled.resumed`), are discarded, or fail.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            sink: The stream.
+            where: The flush thread and channel.
+            receives: Whether the stream receives a ticker.
+
+        Returns:
+            The stream's `undated_rows` spans, or None when they did not change.
+        """
+        delays = {t: found for t, found in settled.delayed.items() if receives(t)}
+        found = self._undated.get(sink.stream_id)
+        if found is None:
+            if not delays:
+                return None
+            tracker = SpanTracker(
+                ProblemCause.UNDATED_ROWS,
+                dataset=plan.dataset,
+                stream_id=sink.stream_id,
+                where=where,
+            )
+            found = self._undated[sink.stream_id] = ({}, tracker)
+        waiting, tracker = found
+        ended = settled.resumed.union(settled.failed, *settled.discarded.values())
+        for ticker in ended & waiting.keys():
+            del waiting[ticker]
+        waiting.update({t: (delay.rows, delay.reason) for t, delay in delays.items()})
+        return tracker.update({t: (t, None, why, rows) for t, (rows, why) in waiting.items()})
 
     def _withheld(
         self, plan: ChannelPlan, withheld: Withheld, readers: list[StreamSink]
@@ -1913,6 +2153,50 @@ class Flusher:
                         drift, dataset=sink.plan.dataset, stream_id=sink.stream_id, where=where
                     )
                 )
+
+
+def _received(readers: list[StreamSink], ticker: str) -> bool:
+    """Tell whether some stream of a dataset still receives a ticker.
+
+    Args:
+        readers: The dataset's streams on the channel.
+        ticker: The ticker.
+
+    Returns:
+        True when a `dm.ALL` stream reads the dataset, or a symbol stream holds the ticker.
+    """
+    return any(sink.receives_all or sink.holds(ticker) for sink in readers)
+
+
+def _defect(plan: ChannelPlan, what: str) -> MassiveError:
+    """Return the failure of a dataset's streams whose held rows the library cannot settle.
+
+    Args:
+        plan: The dataset's plan for the channel.
+        what: What went wrong.
+
+    Returns:
+        A `MassiveError` of the library.
+    """
+    return MassiveError(
+        f"{plan.dataset}: {what}, so its held futures rows would never be dated",
+        source=ErrorSource.LIBRARY,
+    )
+
+
+def _with_rows(converted: Converted, rows: pa.Table | None) -> Converted:
+    """Return a conversion that publishes other rows: those its held rows settled to.
+
+    Args:
+        converted: The flush's conversion.
+        rows: The rows to publish instead, or None for none.
+
+    Returns:
+        The conversion with those rows and their distinct symbols.
+    """
+    batch = converted.batch.schema.empty_table() if rows is None else rows
+    distinct = pc.call_function("unique", [batch.column(_SYMBOL)]).to_pylist()
+    return replace(converted, batch=batch, symbols=frozenset(s for s in distinct if s is not None))
 
 
 def _report_updates(updates: Mapping[StreamSink, StreamUpdate]) -> None:

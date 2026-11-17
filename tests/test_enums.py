@@ -337,6 +337,8 @@ ENUM_PARAMETERS = {
     "ErrorPolicy.__init__.unreadable_keys": _POLICY_CAUSES,
     "ErrorPolicy.__init__.unconvertible_values": _POLICY_CAUSES,
     "ErrorPolicy.__init__.malformed_rows": _POLICY_CAUSES,
+    "ErrorPolicy.__init__.unlisted_contracts": _POLICY_CAUSES,
+    "ErrorPolicy.__init__.unscheduled_products": _POLICY_CAUSES,
     "ErrorPolicy.__init__.refused_venues": _POLICY_CAUSES,
     "MassiveConfig.__init__.connection_taken": "test_config.py::test_connection_taken_is_the_enum",
     "canonical_symbol.asset_class": _CONVERTER_ENUMS,

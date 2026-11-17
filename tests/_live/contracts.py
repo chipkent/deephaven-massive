@@ -25,9 +25,9 @@ def roll_day(product: str, year: int, month: int) -> date:
 
     An E-mini S&P 500 contract expires on its month's third Friday, and the market rolls to
     the next contract eight days before, on the Thursday of the week before. A corn contract's
-    holders must take delivery from its first notice day, the last business day of the month
+    holders must take delivery from its first notice day, the last working day of the month
     before its month, so trading leaves it by then. A live cattle contract is delivered during
-    its own month, so trading leaves it by the last business day before that month too. A
+    its own month, so trading leaves it by the last working day before that month too. A
     Micro Bitcoin contract is listed for every month and settles on its month's last Friday,
     where trading moves to the next month's contract.
 

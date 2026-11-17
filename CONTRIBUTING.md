@@ -30,7 +30,8 @@ title wording, and the pull request description follow [`AGENTS.md`](AGENTS.md) 
 pull request, and it must pass with 100% coverage of statements and branches. The pre-push hook
 runs only lint, type checks, and the tests of the files you changed, so a push stays quick; run
 `./scripts/check.sh full --all` for the whole suite locally. The local check runs pytest on as
-many workers as the machine has room for, and `CHECK_WORKERS` sets the count outright.
+many workers as the machine has room for, and `./scripts/check.sh full --workers=N` sets the
+count outright.
 
 A release is one manual run of the Release workflow on `main`;
 [`docs/dev/releasing.md`](docs/dev/releasing.md) gives the steps.
@@ -94,4 +95,4 @@ outside it.
 
 The tests in `tests/**/test_*_integration.py` call Massive itself with a real key, so
 neither `./scripts/check.sh` nor CI ever runs them. [`docs/live-tests.md`](docs/live-tests.md)
-says how to run them and what each plan can verify.
+says how to run them and how to read what Massive answered.

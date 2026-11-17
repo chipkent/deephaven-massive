@@ -45,6 +45,7 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._tables import problem_reporter
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive.namespaces import _futures as futures
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -182,7 +183,7 @@ def _history(
 ) -> Mapping[str, SymbolOutcome]:
     rest = m._core.rest_transport()
     asked = Request(start=MONDAY, end=MONDAY, adjusted=adjusted, on_error=m._core.policy)
-    return rest.history_by_symbol(TRADES, asked, window, symbols=symbols, call=7)
+    return rest.history_by_symbol(TRADES, asked, window, symbols=symbols, call=7, tally=ReadTally())
 
 
 def _monday() -> HistoryWindow:
@@ -520,7 +521,7 @@ def test_a_history_read_made_after_the_clock_moved_keeps_the_call_s_rows(
     before, after = int(call.timestamp()) * NS - 1, int(call.timestamp()) * NS + 1
     fake_rest.reply("/v3/trades/AAPL", Reply(envelope([_trade(before), _trade(after)])))
     rest = session._core.rest_transport()
-    out = rest.history_by_symbol(TRADES, asked, window, symbols=["AAPL"], call=7)
+    out = rest.history_by_symbol(TRADES, asked, window, symbols=["AAPL"], call=7, tally=ReadTally())
     assert len(_rows(out["AAPL"])) == 1
     [(_, query)] = fake_rest.get_queries(one_value=True)
     assert query["timestamp.lt"] == str(int(call.timestamp()) * NS)
@@ -533,7 +534,9 @@ def test_an_empty_window_reads_nothing(
     window = history_window(TRADES, asked, start=MIDNIGHT, end=MIDNIGHT, now=MIDNIGHT)
     assert window.empty
     rest = session._core.rest_transport()
-    out = rest.history_by_symbol(TRADES, asked, window, symbols=["AAPL", "MSFT"], call=7)
+    out = rest.history_by_symbol(
+        TRADES, asked, window, symbols=["AAPL", "MSFT"], call=7, tally=ReadTally()
+    )
     assert [_rows(outcome) for outcome in out.values()] == [[], []]
     assert fake_rest.get_queries() == []
 
@@ -662,6 +665,33 @@ def test_each_value_is_read_alone_and_fails_alone(
     assert [query["product_code"] for _, query in fake_rest.get_queries()] == [["NQ"], ["ES"]]
     assert [r["ProductCode"] for r in _rows(out["ES"])] == ["ES"]
     assert isinstance(_failure(out["NQ"]).error, EntitlementError)
+
+
+UNREADABLE_NQ = Reply(envelope([{"product_code": "NQ", "last_updated": "no time"}]))
+"""NQ's product, whose only row has an update time the library cannot read."""
+
+
+def test_a_value_whose_rows_are_all_unreadable_beside_one_read_whole_gets_no_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The values are one read: NQ's row is withheld, and the read goes on with ES's.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    fake_rest.reply(PRODUCTS_PATH, es, UNREADABLE_NQ)
+    out = _by_value(rest_session, ["ES", "NQ"])
+    assert [r["ProductCode"] for r in _rows(out["ES"])] == ["ES"]
+    assert _rows(out["NQ"]) == []
+
+
+def test_a_read_by_value_whose_rows_are_all_unreadable_fails_each_value(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    es = Reply(envelope([{"product_code": "ES", "last_updated": "no time"}]))
+    fake_rest.reply(PRODUCTS_PATH, es, UNREADABLE_NQ)
+    out = _by_value(rest_session, ["ES", "NQ"])
+    for value in ("ES", "NQ"):
+        error = _failure(out[value]).error
+        assert isinstance(error, RowDataError)
+        assert "could read none of the 2 rows" in str(error)
 
 
 def test_a_rejected_key_stops_a_read_by_value(

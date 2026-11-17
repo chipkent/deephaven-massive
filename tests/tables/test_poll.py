@@ -2731,32 +2731,29 @@ NULL_CURRENCY = {"id": "b", "ticker": "AAPL", "currency": None}
 
 @pytest.mark.parametrize("mode", list(PollMode))
 @pytest.mark.parametrize(
-    ("poll_keys", "bad", "message"),
+    ("poll_keys", "bad", "field"),
     [
-        (
-            ("Id",),
-            NULL_ID,
-            "row 1 of the cycle has a null poll key 'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}",
-        ),
+        (("Id",), NULL_ID, "Id"),
         # Every key column is checked, not only the first.
-        (
-            ("Id", "Currency"),
-            NULL_CURRENCY,
-            "row 1 of the cycle has a null poll key 'Currency': {'Symbol': 'AAPL', 'Id': 'b'}",
-        ),
+        (("Id", "Currency"), NULL_CURRENCY, "Currency"),
     ],
     ids=["first column", "second column"],
 )
-def test_a_null_poll_key_fails_the_table_in_every_mode(
+def test_a_row_with_a_null_poll_key_is_withheld_in_every_mode(
     *,
     feed_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
     mode: PollMode,
     poll_keys: tuple[str, ...],
     bad: dict[str, object],
-    message: str,
+    field: str,
 ) -> None:
+    # The row the table cannot key is withheld and reported; the good row is published, and
+    # the table goes on.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(feed_session._core, "problems", events.extend)
     rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, bad]
     fake_rest.reply(PATH, Reply(envelope(rows)))
     spec = dataclasses.replace(FEED, poll_keys=poll_keys)
@@ -2764,13 +2761,89 @@ def test_a_null_poll_key_fails_the_table_in_every_mode(
         feed_session._core, spec, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02"
     )
     table = q.poll(60, mode=mode)
+    until(lambda: [row["Id"] for row in dh_to_pylist(table)] == ["a"])
+    until(lambda: len(events) == 1)
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
+    ((cause, symbol, column, count, reason),) = [
+        (e.cause, e.symbol, e.field, e.rows, e.detail) for e in events
+    ]
+    assert (cause, symbol, column, count) == (ProblemCause.UNREADABLE_KEYS, "AAPL", field, 1)
+    assert reason.startswith(f"row 1 of the cycle has a null poll key {field!r}: ")
+    (row,) = streams_of(feed_session, dh_to_pylist)
+    assert (row["State"], row["RowsPublished"]) == ("RUNNING", 1)
+
+
+def test_a_row_with_a_null_poll_key_fails_the_table_under_raise(
+    *, feed_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToPylist
+) -> None:
+    rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, NULL_ID]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(
+        feed_session._core,
+        FEED,
+        query_type=FetchQuery,
+        symbols=["AAPL"],
+        start="2025-01-02",
+        on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.RAISE),
+    )
+    table = q.poll(60, mode=PollMode.APPEND)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(feed_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == (
-        "FAILED",
-        f"stocks.dividends poll(): {message}. {LIBRARY_BUG}",
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith(
+        "stocks.dividends poll(): Massive sent rows the library cannot read whole, which it "
+        "withheld (1 under unreadable_keys); the first: row 1 of the cycle has a null poll key "
+        "'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}"
     )
     assert row["RowsPublished"] == 0  # nothing of the cycle was published
+
+
+def test_a_row_with_a_null_poll_key_is_withheld_quietly_under_ignore(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, NULL_ID]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(
+        feed_session._core,
+        FEED,
+        query_type=FetchQuery,
+        symbols=["AAPL"],
+        start="2025-01-02",
+        on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.IGNORE),
+    )
+    with caplog.at_level(logging.WARNING):
+        table = q.poll(60, mode=PollMode.APPEND)
+        until(lambda: [row["Id"] for row in dh_to_pylist(table)] == ["a"])
+        (row,) = streams_of(feed_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
+    [listed] = problems_of(feed_session, dh_to_pylist, ProblemCause.UNREADABLE_KEYS)
+    assert (listed["Rows"], listed["Policy"]) == (1, "ignore")
+    assert not [m for m in caplog.messages if "withheld" in m or "null poll key" in m]
+
+
+def test_a_cycle_whose_every_row_has_a_null_poll_key_fails_the_table(
+    *, feed_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToPylist
+) -> None:
+    # A problem of every row the cycle read fails the table, whatever the policy.
+    fake_rest.reply(PATH, Reply(envelope([NULL_ID, {**NULL_ID, "ticker": "MSFT"}])))
+    q = build_query(
+        feed_session._core, FEED, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02"
+    )
+    table = q.poll(60, mode=PollMode.APPEND)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = streams_of(feed_session, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"].startswith(
+        "stocks.dividends poll(): every one of the cycle's 2 rows has a null poll key, so "
+        "Massive's format may have changed; the first: row 0 of the cycle has a null poll key "
+        "'Id': "
+    )
+    assert row["RowsPublished"] == 0
 
 
 @pytest.mark.parametrize("mode", list(PollMode))
@@ -2781,7 +2854,7 @@ def test_a_null_in_a_nullable_poll_key_is_a_value(
     dh_to_pylist: ToPylist,
     mode: PollMode,
 ) -> None:
-    # `Currency` may be null; `Id` may not, so its null still fails the table.
+    # `Currency` may be null: the row is published.
     spec = dataclasses.replace(
         FEED, poll_keys=("Id", "Currency"), nullable_poll_keys={"Currency": "for the tests"}
     )
@@ -2798,16 +2871,18 @@ def test_a_null_in_a_nullable_poll_key_is_a_value(
     assert (found["State"], found["RowsPublished"]) == ("RUNNING", 2)
 
 
-def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
+def test_a_nan_poll_key_is_withheld_and_a_long_row_is_truncated(
     *,
     massive_session: dm.MassiveSession,
     script: Script,
     pollers: Pollers,
     clock: FakeClock,
-    stream_rows: Callable[[], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A NaN never equals itself, so as a key it would append its row again every cycle.
-    script.rows(("x" * 400, float("nan")))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(massive_session._core, "problems", events.extend)
+    script.rows(("x" * 400, float("nan")), ("AAPL", 1.0))
     table = open_poll(
         massive_session._core,
         spec=dataclasses.replace(DIVIDENDS, poll_keys=("CashAmount",)),
@@ -2823,11 +2898,12 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
         clock=clock,
         stop=threading.Event(),
     )
-    until(lambda: bool(table.j_table.isFailed()))
-    (row,) = stream_rows()
-    prefix = "stocks.dividends poll(): row 0 of the cycle has a null poll key 'CashAmount': "
-    assert row["Error"].startswith(prefix + "{'Symbol': 'xxx")
-    rendered = row["Error"].removeprefix(prefix).removesuffix(f" {LIBRARY_BUG}")
+    until(lambda: table.size == 1)
+    until(lambda: len(events) == 1)
+    (event,) = events
+    prefix = "row 0 of the cycle has a null poll key 'CashAmount': "
+    assert event.detail.startswith(prefix + "{'Symbol': 'xxx")
+    rendered = event.detail.removeprefix(prefix)
     assert len(rendered) == 300
     assert rendered.endswith("xxx...")
 

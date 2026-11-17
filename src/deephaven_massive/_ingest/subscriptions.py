@@ -16,6 +16,7 @@ timer queue.
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
@@ -107,6 +108,34 @@ def stream_topics(
     A crypto symbol not in `pairs` raises the `KeyError` of `ws_symbol`.
     """
     return frozenset(f"{channel}.{ws_symbol(asset_class, s, pairs)}" for s in symbols)
+
+
+def _named(message: str, topics: Iterable[str]) -> list[str]:
+    """Return the topics a server message names whole, not as part of a longer one.
+
+    Args:
+        message: The server's message.
+        topics: The candidate topics, such as `T.1Y:SA 03M` and `T.1Y:SA 03M F6`.
+
+    Returns:
+        The topics, sorted, that appear with no ticker character (a letter, a digit, `.`,
+        `:`, or `-`) on either side, a sentence's closing `.` after one still counting, at a
+        place no longer candidate covers: a topic may hold a space, so `T.1Y:SA 03M F6`
+        names itself, not `T.1Y:SA 03M`, and `T.CL:BF Q6-U6-V6` does not name `T.CL:BF Q6-U6`.
+    """
+    before, after = r"[A-Za-z0-9:.\-]", r"[A-Za-z0-9:\-]|\.\w"
+    found = [
+        (match.span(), topic)
+        for topic in sorted(topics)
+        for match in re.finditer(rf"(?<!{before}){re.escape(topic)}(?!{after})", message)
+    ]
+    return sorted(
+        {
+            topic
+            for (start, end), topic in found
+            if not any(s <= start and end <= e and e - s > end - start for (s, e), _ in found)
+        }
+    )
 
 
 class Sender(Protocol):
@@ -232,6 +261,7 @@ class Subscriptions:
         self._deferred: frozenset[str] = frozenset()
         self._admission_stale = False
         self._sent: set[str] = set()
+        self._spaced: set[str] = set()  # every topic with a space this connection subscribed
         self._acked: set[str] = set()
         self._noack: set[str] = set()
         self._unreported: list[str] = []  # `NO_ACK` topics of the step not logged yet
@@ -410,6 +440,7 @@ class Subscriptions:
             ordered = sorted(adds)
             self._sender.subscribe(generation, ordered)
             self._sent |= adds
+            self._spaced.update(t for t in adds if " " in t)
             self._pending = set(adds)
             self._step = frozenset(adds)
             for topic in ordered:
@@ -492,11 +523,20 @@ class Subscriptions:
         and a stream with rows still fails at `max_outage` after a reconnect, so nothing stale
         goes unmarked.
 
+        A wanted topic with a space, such as a futures combo's `T.CL:BF Q6-U6-V6`, is never one
+        word of the message, so it counts as named when the message holds it whole and no
+        longer topic holds that place. The longer topics checked include every topic with a
+        space this connection ever subscribed, also one no stream wants any more: a late
+        refusal of `T.1Y:SA 03M F6`, removed meanwhile, must not fail `T.1Y:SA 03M`.
+
         Args:
             status: A `REFUSED` status.
         """
-        if status.topics:
-            self._refuse(tuple(t for t in status.topics if t in self._refs), status.message)
+        known = self._spaced.union(t for t in self._refs if " " in t)
+        spaced = [t for t in _named(status.message, known) if t in self._refs]
+        if status.topics or spaced:
+            named = [t for t in status.topics if t in self._refs]
+            self._refuse(tuple(dict.fromkeys([*named, *spaced])), status.message)
             return
         awaiting = len(self._pending) + len(self._noack) + len(self._resend)
         if len(self._pending) != 1 or awaiting != 1:

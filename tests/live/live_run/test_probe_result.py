@@ -14,11 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from tests._live import plans
 from tests._live.live_run import probe_result
 from tests._live.live_run.probe_result import ProbeChildError, ProbeResult
 from tests._live.live_run.secret_scrub import SecretFilter
-from tests._live.plans import TIERS
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -26,9 +24,6 @@ KEY = "PLANTED-probe-child-key-3f9d"
 
 RESULT = ProbeResult(
     when="2026-11-04T17:00:00Z",
-    tiers={"stocks": "starter"},
-    flat_files=["us_stocks_sip/day_aggs_v1"],
-    history_start={"stocks": "2021-11-04"},
     clock_offset=-0.25,
     closures={"2026-11-26": "closed"},
     requests=[{"path": "/v1/marketstatus/now", "query": {}, "status": 200, "request_id": "r"}],
@@ -84,19 +79,3 @@ def test_a_child_that_does_not_end_in_time_is_stopped_showing_its_output(
     message = str(raised.value)
     assert message.startswith("the probe's child did not end within 0:00:05: starting the server")
     assert KEY not in message
-
-
-def test_plans_take_the_live_tests_grammar() -> None:
-    tiers = dict.fromkeys(TIERS, "basic") | {"stocks": "starter", "currencies": "business"}
-    text = "stocks=starter,options=basic,indices=basic,currencies=business,futures=basic"
-    assert probe_result.plans_variable(tiers, []) == text
-    with_files = probe_result.plans_variable(tiers, ["us_stocks_sip/day_aggs_v1", "a/b"])
-    assert with_files == text + ",s3=a/b,s3=us_stocks_sip/day_aggs_v1"
-    read = plans.declared_plans(with_files)  # the live tests read it back exactly
-    assert (read.tiers, read.s3, read.flat_files) == (
-        tiers,
-        True,
-        ("a/b", "us_stocks_sip/day_aggs_v1"),
-    )
-    assert plans.reaches(read, "a/b")
-    assert not plans.reaches(read, "global_crypto/day_aggs_v1")
