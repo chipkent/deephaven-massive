@@ -14,6 +14,7 @@ import random
 import socket
 import ssl
 import struct
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -52,7 +53,7 @@ from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._massive.net.slots import ConnectionSlots
 from tests._fakes.clock import FakeClock
-from tests._fakes.rest import REFUSED_PORT, FakeRestServer, Reply
+from tests._fakes.rest import REFUSED_PORT, FakeRestServer, LoopbackHTTPServer, Reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -1332,6 +1333,45 @@ def test_a_certificate_for_another_name_fails_at_once_over_the_network(
         client.close()
     assert info.value.kind is WireFailure.LOCAL
     assert (tls_server.requests, clock.waits) == ([], [])
+
+
+@pytest.mark.parametrize("linger", [False, True], ids=["close", "reset"])
+def test_the_tls_fake_ends_a_connection_the_client_drops_before_its_request(
+    *, linger: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # urllib3 checks the certificate's name after the TLS handshake, and on a mismatch drops
+    # the connection before sending a request: a close, which macOS turns into a reset because
+    # the server's session tickets lie unread. The fake must end that connection as a close.
+    # An error that reached the server's `handle_error` would be printed to a stream an xdist
+    # worker may have closed, failing whichever test was tearing down.
+    errors: list[BaseException | None] = []
+    served = threading.Event()
+    shutdown_request = LoopbackHTTPServer.shutdown_request
+
+    def handle_error(server: LoopbackHTTPServer, request: object, address: object) -> None:
+        errors.append(sys.exception())
+
+    def signal_served(server: LoopbackHTTPServer, request: socket.socket) -> None:
+        shutdown_request(server, request)
+        served.set()
+
+    monkeypatch.setattr(LoopbackHTTPServer, "handle_error", handle_error)
+    monkeypatch.setattr(LoopbackHTTPServer, "shutdown_request", signal_served)
+    server = FakeRestServer(tls=(DATA / "tls_cert.pem", DATA / "tls_key.pem"))
+    server.start()
+    try:
+        host, _, port = server.url.removeprefix("https://").rpartition(":")
+        context = ssl.create_default_context(cafile=DATA / "tls_cert.pem")
+        context.check_hostname = False  # as urllib3, which checks the name itself
+        raw = socket.create_connection((host, int(port)), timeout=10)
+        with context.wrap_socket(raw) as connection:
+            if linger:
+                connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        assert served.wait(10)
+    finally:
+        server.close()
+    assert errors == []
+    assert server.requests == []
 
 
 def test_ssl_cert_file_is_trusted_and_the_shared_schedule_retries_over_the_network(
