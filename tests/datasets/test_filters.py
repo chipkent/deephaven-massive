@@ -150,6 +150,17 @@ def test_the_symbol_parameter_reserves_only_its_equality_forms() -> None:
     assert "date.all_of" in filters.param_family("date.gte")
 
 
+def test_a_symbol_parameter_another_method_takes_reserves_only_its_equality_forms() -> None:
+    listed = dataclasses.replace(
+        CONTRACTS, symbol_param=None, symbol_params_elsewhere={"ticker": "use another method"}
+    )
+    for key in ("ticker", "ticker_any_of", "ticker_all_of"):
+        with pytest.raises(ValueError, match=rf"has no filter '{key}'"):
+            check(listed, {key: "O:AAPL250117C00150000"})
+    assert "ticker" in filters.filter_keys(Catalog((OPTION_CONTRACTS,)), OPTION_CONTRACTS)
+    assert "ticker" not in filters.filter_keys(Catalog((listed,)), listed)
+
+
 def test_filter_values_must_fit_their_kind() -> None:
     with pytest.raises(
         ValueError, match=r"^stocks\.dividends filter 'frequency' takes integer values, not '4'$"
