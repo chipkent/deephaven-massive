@@ -62,7 +62,10 @@ Each live table has a row in `m.streams()`, whose `Error` column says what's wro
 | A row of a table you converted never appears | `dm.canonicalize_symbols` couldn't convert it, so its `Symbol` is null, and every dataset skips the row. The log names the value. | Run `.where("isNull(Symbol)")` on the converted table to list such rows, and fix them in the table you started from. [Symbols from another source](../README.md#convert-symbols) shows the conversion. |
 | A symbol gets no rows, and the log says Massive has no data for it | Massive doesn't serve that ticker. | Look it up in Massive's lists: `m.reference.tickers()`, `m.options.contracts()`, or `m.futures.contracts()`. |
 | `... another connection with this API key took the WebSocket connection ...` | A newer connection with your key took this one's place: another program, or a session on this server with different streaming settings. Massive allows your account one connection per asset class. | Stop the other program, give both sessions the same `MassiveConfig`, or set `connection_taken=dm.ConnectionTaken.RECONNECT` in [`MassiveConfig`](configuration.md#settings-reference) to take the connection back. Then run the line that made the table again. Under `RECONNECT`, if the other program also reconnects, the two take turns, and each loses data while the other holds the connection. |
-| `... longer than MassiveConfig.max_outage ...` | The table got no data for longer than `max_outage`, which defaults to 300 seconds. | To allow longer outages, raise `max_outage` in [`MassiveConfig`](../README.md#massive-config). |
+| `... longer than MassiveConfig.max_outage ...` | The table got no data for longer than `max_outage`, which defaults to 300 seconds. | To allow longer outages, raise [`max_outage`](configuration.md#setting-details). |
+| `... as long as MassiveConfig.max_outage allows ...` in `Error` of `m.symbol_reads()` | A watchlist symbol's reads kept failing with a temporary error, such as a rate limit. They failed for `max_outage` seconds, 300 by default. | Delete the symbol's row from the watchlist and add it back to read it again. To keep trying longer, raise [`max_outage`](configuration.md#setting-details). |
+| `... MB the library keeps for one connection ...` | Deephaven couldn't add a stream's rows as fast as they arrived. A console command causes this, since no table updates while it runs. So does a stream busier than the server can keep up with. The waiting rows reached the library's limit of 1,024 MB for one connection, so it stopped every live table on that connection. | Keep console commands short, and stream fewer symbols. Then run the line that made the table again. |
+| `Massive is refusing ... with HTTP 429 ...` from a `fetch()` or `history()` without `wait=True` | Waiting out Massive's rate limits would have taken the read past `max_outage`, 300 seconds by default. The usual cause is another program using the same Massive account. | Stop the other program, then call the method again. To wait longer, raise [`max_outage`](configuration.md#setting-details). |
 | `over capacity: <n>/1000; <k> deferred` in `Error` | Massive allows 1,000 option contracts on one connection, and the library counts a contract's trades and its quotes as two. | Watch fewer contracts. The waiting ones subscribe as others leave. |
 | `... Can not listen to failed table ...` | You built a table on a live table that failed or whose session was closed. | Make the live table again, or build on a static copy from `table.snapshot()`. |
 | `'HistoryQuery' object has no attribute ...`, such as `'last_by'` | Massive streams only 1-second and 1-minute bars at `multiplier=1`. For any other bars, `bars()` returns a `HistoryQuery`, which has no stream methods. | Pass `dm.Timespan.SECOND` or `dm.Timespan.MINUTE` with `multiplier` at 1. To read any other bars, call `history(start, end)`. |
@@ -107,7 +110,7 @@ for attempt in range(3):
         time.sleep(60)
 ```
 
-Before it raises a rate limit, a server failure, or a connection that kept failing, the library
+Before it raises a rate-limit error, a server failure, or a connection that kept failing, the library
 has already retried, so wait before you call again.
 
 `fetch()` and every other query method raise `dm.SessionClosedError` once you call
@@ -150,6 +153,7 @@ Act on these states:
 | Table | `State` | Why | What to do |
 |---|---|---|---|
 | `m.streams()` | `FAILED` | The table stopped, and `Error` says why. | Fix what `Error` names, then run the line that made the table again. |
+| `m.connections()` | `WAITING` | The library hasn't connected: no live table on this connection has a symbol to stream yet. | Add a symbol to your watchlist; the connection opens at the first one. If the watchlist has symbols, they were skipped, and `Error` in `m.streams()` names each one. |
 | `m.connections()` | `WAITING_SLOT` | Massive refused this connection at login: your account has no free connection for this asset class. | Stop any other program that uses your key. The library keeps trying, and its live tables fail after `max_outage`. |
 | `m.symbol_reads()` | `FAILED` | The symbol's read failed, and `Error` says why. | Fix what `Error` names, then delete the symbol's row from the watchlist and add it back. |
 

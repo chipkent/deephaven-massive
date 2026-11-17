@@ -199,6 +199,7 @@ def test_frames_after_authentication_reach_the_sink_and_the_handshake_never_does
         clock=FakeClock(),
     )
     client.start()
+    client.connect()
     try:
         fake_ws_server.wait_for(lambda server: len(server.connections) == 1)
         fake_ws_server.wait_for(lambda server: server.connections[0].auth is not None)

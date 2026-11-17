@@ -121,7 +121,8 @@ says only what the agent cannot know:
 - the reserved decision or verification-item numbers, or "none";
 - the files other agents are changing at the same time, and any rename in flight;
 - every other owner decision it must follow, as its decision number or, before a file
-  records it, the question and the owner's answer as written, with its date and where (a
+  records it, the question in plain words and the owner's answer as written, with its date
+  and where, so the agent can quote both in its PR (a
   brief relays decisions; it never grants an approval `AGENTS.md` reserves for the owner's
   own message),
   and anything only this task has learned;

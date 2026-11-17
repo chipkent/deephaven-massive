@@ -3009,8 +3009,7 @@ def market_status(live_rest: RestClient, evidence: Callable[[str], None]) -> Cal
     rows only while their market is open: it skips only when this status says the market is
     not open. The stocks, options, indices, forex, and crypto statuses come from
     `/v1/marketstatus/now`, which belongs to no subscription; the futures status is the E-mini
-    S&P 500's `market_event` from `/futures/v1/market-status?product_code=ES`, which every
-    Futures plan includes.
+    S&P 500's `market_event` from `/futures/v1/market-status?product_code=ES`.
 
     Args:
         live_rest: The live REST client.

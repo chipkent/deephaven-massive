@@ -458,6 +458,7 @@ def test_an_unadjusted_poll_of_a_watchlist_reads_its_crypto_pair_too(
     queries = dict(fake_rest.get_queries())
     assert queries["/v1/indicators/sma/AAPL"]["adjusted"] == ["false"]
     assert "adjusted" not in queries["/v1/indicators/sma/X:BTCUSD"]
+    until(lambda: len(dh_to_pylist(rest_session.streams())) == 1)  # the row is shown async
     (row,) = dh_to_pylist(rest_session.streams())
     assert row["Error"] is None
 

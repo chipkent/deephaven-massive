@@ -495,6 +495,61 @@ def test_a_crypto_stream_follows_its_watchlist(
     assert rows, f"no new {eth} trade arrived in {_FOLLOW_WAIT:.0f} s after re-adding it"
 
 
+@pytest.mark.timeout(180)
+def test_an_empty_watchlist_waits_and_its_first_pair_connects(
+    live_session: dm.MassiveSession,
+    *,
+    dh_exec_ctx: ExecutionContext,
+    table_rows: TableRows,
+    stream_report: Report,
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
+    evidence: Evidence,
+) -> None:
+    """Whether a stream with nothing to subscribe opens no socket until its first pair arrives.
+
+    Streams `m.crypto.trades(watchlist).last_by()` from an empty keyed input table, in a fresh
+    session, so no other stream holds a crypto connection. Passes when the session's crypto
+    WebSocket row in `m.connections()` reads `WAITING` with no message received and no
+    reconnect, and, once `X:BTCUSD` is added, reads `CONNECTED` and a `X:BTCUSD` trade arrives;
+    Bitcoin trades every few seconds at any hour. A failure means a connection opened a socket
+    with nothing to stream, or a watchlist's first row did not connect it. A stream Massive
+    refuses once connected skips, quoting Massive.
+    """
+    btc = "X:BTCUSD"
+    with dh_update_graph.shared_lock(dh_exec_ctx.update_graph):
+        watchlist = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    board = live_session.crypto.trades(watchlist).last_by()
+
+    def crypto_rows() -> list[dict[str, Any]]:
+        return [
+            r
+            for r in table_rows(live_session.connections())
+            if r["Transport"] == "WebSocket" and r["AssetClass"] == "crypto"
+        ]
+
+    waiting = _wait_until(crypto_rows, lambda rows: [r["State"] for r in rows] == ["WAITING"])
+    evidence(f"before the first pair: {[(r['State'], r['LastMessageAt']) for r in waiting]}")
+    assert [r["State"] for r in waiting] == ["WAITING"], waiting
+    (row,) = waiting
+    assert row["LastMessageAt"] is None, "a waiting connection received a message"
+    assert row["Reconnects"] == 0
+
+    def board_rows() -> list[dict[str, Any]]:
+        return table_rows(board)
+
+    watchlist.add(new_table([string_col("Symbol", [btc])]))
+    traded = _wait_until(board_rows, bool)
+    for line in stream_report(live_session):
+        evidence(line)
+    states = [r["State"] for r in crypto_rows()]
+    evidence(f"after adding {btc}: connection {states}; {len(traded)} rows")
+    if not traded:
+        skip_if_not_entitled(live_session)
+    live_session.release(board)
+    assert states == ["CONNECTED"], states
+    assert traded, f"no {btc} trade arrived in {_FOLLOW_WAIT:.0f} s after adding it"
+
+
 _HOLD = 90.0
 """Seconds the real-time-only checks keep their streams open: long enough for Massive to answer
 every subscription, and to take an older connection of the key if a newer one counts against it."""

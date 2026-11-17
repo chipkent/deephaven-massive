@@ -20,21 +20,20 @@ For each example it writes, under the output folder:
   the progress lines also name;
 - `summary.txt`: one line per example, with its outcome and how long it took.
 
-Every text it writes passes through the secret filter (`SecretFilter.clean`). An example
-ends `passed`; `refused by Massive` when it raised Massive's `EntitlementError`, one whose
-`source` is `ErrorSource.MASSIVE` and that carries Massive's `status`, which is expected on a
-free key; `not listed as delayed` when it raised the `EntitlementError` of the
-library's settings (its `source` is `ErrorSource.USER`: Massive labels the data delayed and the
-settings file does not list its subscription in `delayed_subscriptions`); or `failed` with any
-other error, which is a finding to report. A stream that Massive refuses fails after its
-example returns, and so does a `fetch()` or `history()` that reads in the background, so after
-the last example the run waits `REFUSAL_WAIT` seconds and gives a passed example the verdict
-of its sessions' failed streams and reads (`stream_verdict`). Every table the
-examples make belongs to one liveness scope; at the end the runner closes every session the
-examples opened, forgets their variables, and releases that scope, so nothing they started
-outlives the run.
+Every text it writes passes through the secret filter (`SecretFilter.clean`). An example ends
+`passed`; `refused by Massive` when it raised Massive's `EntitlementError`, one whose `source` is
+`ErrorSource.MASSIVE` and that carries Massive's `status`, which Massive sends for data the key may
+not read; `not listed as delayed` when it raised the `EntitlementError` of the library's settings
+(its `source` is `ErrorSource.USER`: Massive labels the data delayed and the settings file does not
+list its subscription in `delayed_subscriptions`); or `failed` with any other error, which is a
+finding to report. A stream that Massive refuses fails after its example returns, and so does a
+`fetch()` or `history()` that reads in the background, so after the last example the run waits
+`REFUSAL_WAIT` seconds and gives a passed example the verdict of its sessions' failed streams and
+reads (`stream_verdict`). Every table the examples make belongs to one liveness scope; at the end
+the runner closes every session the examples opened, forgets their variables, and releases that
+scope, so nothing they started outlives the run.
 
-Most examples open their session with `dm.MassiveSession()`, as the README's do. The paid
+Most examples open their session with `dm.MassiveSession()`, as the README's do. The live
 Stocks examples load the settings file the README's settings example saves, `SETTINGS_PATH`;
 `run_examples` writes a settings file listing the subscriptions the tester's own settings list
 as delayed (`listed_delayed`, `settings_text`) and runs a copy of each such example that reads
@@ -90,8 +89,8 @@ TABLE_ROWS: Final = 1000
 """How many rows of each table an example made are saved."""
 
 DOWNLOAD_TIMEOUT: Final = 900.0
-"""Seconds to wait for background downloads before the next example runs anyway: their 10
-minutes of rate-limit pauses, and some time to read."""
+"""Seconds to wait for background downloads before the next example runs anyway: their
+rate-limit pauses, at most `MassiveConfig.max_outage`, and time to read."""
 
 POLL_INTERVAL: Final = 1.0
 """Seconds between looks at the sessions' downloads."""
@@ -114,7 +113,7 @@ DELAYED_REFUSAL: Final = "MassiveConfig.delayed_subscriptions"
 library's refusal names the setting that accepts it (`recency_labels.delayed_refusal`)."""
 
 SETTINGS_PATH: Final = "~/massive/settings.yaml"
-"""The settings file the paid examples read, where the README's settings example saves it."""
+"""The settings file the live examples read, where the README's settings example saves it."""
 
 TEST_FOLDER: Final = "~/massive-test"
 """The tester's folder, where the examples write their debug log and the diagnostics."""
@@ -144,7 +143,7 @@ def listed_delayed(environ: Mapping[str, str]) -> tuple[str, ...] | None:
 
 
 def settings_text(delayed: Collection[str]) -> str:
-    """Write the settings file the paid examples read.
+    """Write the settings file the live examples read.
 
     Args:
         delayed: The subscriptions to list in `delayed_subscriptions`, so their live examples

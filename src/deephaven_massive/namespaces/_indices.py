@@ -340,9 +340,7 @@ class IndicesNamespace(Namespace):
 
         Each row holds one index's level and its session's open, high, low, close, and change. It
         also holds the market status and the index's name. An index Massive doesn't know, or your
-        plan lacks, keeps its row, and its `Error` and `Message` give the reason. Indices Basic
-        doesn't include this dataset; on that plan, use `previous_day_bar()` or
-        `daily_open_close()`.
+        plan lacks, keeps its row, and its `Error` and `Message` give the reason.
 
         Args:
             symbols: Indices with the `I:` prefix, or `dm.ALL` for every index.

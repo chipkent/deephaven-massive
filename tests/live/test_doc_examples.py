@@ -225,10 +225,10 @@ def test_the_live_run_covers_every_readme_example() -> None:
         for anchor in re.findall(r'<a id="([a-z0-9-]+)"></a>', text)
         if doc_examples.section_blocks(_README, anchor)
     }
-    assert doc_examples.intro_blocks(_README)  # the hook, which the free examples' test runs
+    assert doc_examples.intro_blocks(_README)  # the hook, which the history examples' test runs
     covered = {
-        *doc_examples.FREE_SECTIONS,
-        *doc_examples.PAID_SECTIONS,
+        *doc_examples.HISTORY_SECTIONS,
+        *doc_examples.LIVE_SECTIONS,
         *doc_examples.UNRUN_SECTIONS,
     }
     assert with_code == covered

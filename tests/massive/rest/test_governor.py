@@ -1329,7 +1329,7 @@ def test_slots_of_an_unpaced_bucket_change_nothing_with_time() -> None:
     governor = _governor()
     _requests(governor, "stocks", 3)
     assert _state(governor).recent == 3
-    assert governor.next_change() is None  # a paid plan's diagnostics do not churn
+    assert governor.next_change() is None  # an unpaced bucket's diagnostics do not churn
     governor.declare({"stocks": 5})
     assert governor.next_change() == RATE_WINDOW
 
