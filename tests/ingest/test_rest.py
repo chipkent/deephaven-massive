@@ -1279,7 +1279,7 @@ def test_a_stopped_history_splits_its_pairs_with_its_stop_token(
     stop = Cancel()
     stop.set()
     with pytest.raises(KeyboardInterrupt):
-        transport.history(CRYPTO_BARS, request, window, call=1, stop=stop)
+        transport.history(CRYPTO_BARS, request, window, call=1, tally=ReadTally(), stop=stop)
     (split,) = splits
     with pytest.raises(dm.MassiveError, match="cancelled"):
         split("X:DOTUSD")
@@ -2368,16 +2368,22 @@ def test_a_read_of_many_pages_whose_rows_are_all_unreadable_fails(
 def read_aapl_and_msft_by_symbol(
     session: dm.MassiveSession, fake_rest: FakeRestServer, *, msft_price: object
 ) -> Mapping[str, SymbolOutcome]:
-    # Read AAPL, whose only row is withheld, and MSFT, by symbol, as a followed table does.
+    # Read AAPL, whose only row is withheld, and MSFT, by symbol, as a followed table does;
+    # a `msft_price` of None has Massive answer HTTP 404 for MSFT: it has no data.
     aapl = TRADES_PATH.format(stockTicker="AAPL")
     fake_rest.reply(aapl, Reply(envelope([window_trade(1, "x")])))
     msft = TRADES_PATH.format(stockTicker="MSFT")
-    fake_rest.reply(msft, Reply(envelope([window_trade(1, msft_price)])))
+    rows = None if msft_price is None else [window_trade(1, msft_price)]
+    fake_rest.reply(msft, Reply(status=404) if rows is None else Reply(envelope(rows)))
     day = date(2025, 3, 3)
     asked = Request(start=day, end=day, on_error=session._core.policy)
     window = history_window(TRADES, asked, start=day, end=day, classes=())
     transport = session._core.rest_transport()
-    return transport.history_by_symbol(TRADES, asked, window, symbols=["AAPL", "MSFT"], call=1)
+    tally = ReadTally()
+    out = transport.history_by_symbol(
+        TRADES, asked, window, symbols=["AAPL", "MSFT"], call=1, tally=tally
+    )
+    return tally.judge(TRADES.name, out)
 
 
 def test_a_symbol_whose_rows_are_all_unreadable_beside_one_read_whole_gets_no_rows(
@@ -2401,6 +2407,18 @@ def test_a_read_by_symbol_whose_rows_are_all_unreadable_fails_each_symbol_alone(
         assert isinstance(failed, SymbolFailure)
         assert isinstance(failed.error, RowDataError)
         assert "could read none of the 2 rows of the read's symbols" in str(failed.error)
+
+
+def test_a_symbol_massive_has_no_data_for_keeps_its_rows_when_the_read_fails(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # MSFT had no rows to read: its empty rows stand, and only AAPL fails.
+    out = read_aapl_and_msft_by_symbol(session, fake_rest, msft_price=None)
+    aapl, msft = out["AAPL"], out["MSFT"]
+    assert isinstance(aapl, SymbolFailure)
+    assert isinstance(aapl.error, RowDataError)
+    assert isinstance(msft, SymbolRows)
+    assert (msft.table.size, msft.no_data) == (0, True)
 
 
 def test_unreadable_rows_outside_the_window_are_neither_published_nor_reported(
@@ -2487,7 +2505,7 @@ def test_all_daily_bars_request_only_the_days_asked_for(
     request = dataclasses.replace(q._request, start=first, end=last)
     window = history_window(BARS, request, start=first, end=last, classes=())
     table = session._core.rest_transport().history(
-        BARS, request, window, call=1, days=[date(2025, 3, 4)]
+        BARS, request, window, call=1, tally=ReadTally(), days=[date(2025, 3, 4)]
     )
     assert [(r["Symbol"], r["Close"]) for r in rows(table)] == [("MSFT", 3.0)]
     assert [path for path, _ in fake_rest.get_queries()] == [GROUPED_PATH.format(date="2025-03-04")]
@@ -3034,7 +3052,9 @@ def test_an_error_row_needs_only_its_symbol(
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
     reader = _endpoints(session)._reader("call-1", session._core.policy)
-    table, _ = reader.read_fetch(timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",))
+    table, _ = reader.read_fetch(
+        timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",), tally=ReadTally()
+    )
     assert table.column("Symbol").to_pylist() == ["I:VIX"]
     assert table.column("Timestamp").to_pylist() == [None]
 
@@ -3125,7 +3145,7 @@ def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> N
     reader = _endpoints(session)._reader("call-1", session._core.policy)
     request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
     assert reader.plan_fetch(DIVIDENDS, request, ()) == []
-    table, requests = reader.read_fetch(DIVIDENDS, request, symbols=())
+    table, requests = reader.read_fetch(DIVIDENDS, request, symbols=(), tally=ReadTally())
     assert (table.num_rows, requests) == (0, 0)
     assert table.schema.names[0] == "Symbol"
 
@@ -4724,7 +4744,9 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
         asked = Request(start=day, end=day, on_error=m._core.policy)
         window = history_window(TRADES, asked, start=day, end=day, classes=())
         transport = m._core.rest_transport()
-        out = transport.history_by_symbol(TRADES, asked, window, symbols=["MSFT", "ZZZZ"], call=1)
+        out = transport.history_by_symbol(
+            TRADES, asked, window, symbols=["MSFT", "ZZZZ"], call=1, tally=ReadTally()
+        )
     assert isinstance(out["MSFT"], SymbolRows)
     failed = out["ZZZZ"]
     assert isinstance(failed, SymbolFailure)
@@ -5021,6 +5043,19 @@ def test_a_poll_cycle_raises_a_value_s_failure_other_than_no_data(
     fake_rest.reply("/futures/v1/products", refusal)
     with pytest.raises(dm.EntitlementError):
         _value_cycle(rest_session, ("ES",))
+
+
+def test_a_poll_cycle_judges_its_values_as_one_read(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # NQ's only row is unreadable: beside ES's, it is withheld; alone, the cycle fails.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    nq = Reply(envelope([{"product_code": "NQ", "last_updated": "no time"}]))
+    fake_rest.reply("/futures/v1/products", es, nq, nq, nq)
+    read = _value_cycle(rest_session, ("ES", "NQ"))
+    assert read.rows.column("ProductCode").to_pylist() == ["ES"]
+    with pytest.raises(RowDataError, match="could read none of the 2 rows"):
+        _value_cycle(rest_session, ("NQ", "YM"))
 
 
 def test_a_poll_cycle_of_an_empty_table_of_values_reads_nothing(

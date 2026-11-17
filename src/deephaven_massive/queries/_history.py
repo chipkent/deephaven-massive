@@ -45,6 +45,7 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._tables.diagnostics import utc_text
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.followed_read import FollowPlan, open_followed_read
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.time_text import deephaven_time_text
 from deephaven_massive._tables.transports import (
@@ -58,6 +59,7 @@ from deephaven_massive.queries._query import Query, _read_symbol_table, _verb, _
 from deephaven_massive.queries._stream import StreamQuery
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Iterable, Sequence
 
     from deephaven.table import Table
@@ -65,6 +67,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = ["HistoryQuery", "StreamHistoryQuery"]
 
@@ -468,8 +471,8 @@ class HistoryQuery(Query):
             Transport.REST,
             one_scan=False,
             symbols_per_read=1,
-            read=lambda names, stop: rest.history_by_symbol(
-                spec, request, window, symbols=names, call=call, stop=stop
+            read=lambda names, stop: self._read_rest_by_symbol(
+                request, window, symbols=names, call=call, stop=stop
             ),
         )
 
@@ -567,9 +570,71 @@ class HistoryQuery(Query):
             run=lambda stop: (
                 self._empty_rows()
                 if window.empty
-                else rest.history(spec, request, window, call=call, stop=stop)
+                else self._read_rest(request, window, call=call, stop=stop)
             ),
         )
+
+    def _read_rest(
+        self,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        call: int,
+        stop: threading.Event | None,
+    ) -> Table:
+        """Read a `history()` call from REST, failing it if no row of it could be read whole.
+
+        Args:
+            request: The request with static symbols and the parsed bounds.
+            window: The call's window, which holds rows.
+            call: The call id.
+            stop: A background read's stop token, or None.
+
+        Returns:
+            The static table (`RestTransport.history`).
+
+        Raises:
+            RowDataError: If the library could read none of the rows of the call's symbols
+                and window whole (`ReadTally.check`), whatever its policy.
+
+        Other errors are those of `RestTransport.history`.
+        """
+        spec = self._spec
+        tally = ReadTally()
+        rest = self._core.rest_transport()
+        rows = rest.history(spec, request, window, call=call, tally=tally, stop=stop)
+        tally.check(spec.name)
+        return rows
+
+    def _read_rest_by_symbol(
+        self,
+        request: Request,
+        window: HistoryWindow,
+        *,
+        symbols: Sequence[str],
+        call: int,
+        stop: threading.Event | None,
+    ) -> dict[str, SymbolOutcome]:
+        """Read a followed `history()`'s symbols from REST as one read, judged once.
+
+        Args:
+            request: The request with the parsed bounds.
+            window: The call's window.
+            symbols: The symbols of this read.
+            call: The call id.
+            stop: A read's stop token, or None.
+
+        Returns:
+            Each symbol's outcome (`RestTransport.history_by_symbol`); when the library could
+            read none of the read's rows whole, each symbol it gave rows fails
+            (`ReadTally.judge`).
+        """
+        spec = self._spec
+        tally = ReadTally()
+        outcomes = self._core.rest_transport().history_by_symbol(
+            spec, request, window, symbols=symbols, call=call, tally=tally, stop=stop
+        )
+        return tally.judge(spec.name, outcomes)
 
     def _empty_rows(self) -> Table:
         """Return the static rows of a range no row can lie in, without any request.
