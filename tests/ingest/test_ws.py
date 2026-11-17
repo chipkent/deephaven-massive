@@ -1044,6 +1044,41 @@ def test_reactive_options_beyond_the_cap_are_deferred(
     del result
 
 
+def test_an_options_cap_span_whose_deferred_count_changes_keeps_its_start(
+    ws_session: WsSession,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    monkeypatch.setattr(ws, "OPTIONS_CAP", 1)
+    monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 1)
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    contracts = ["O:SPY251219C00610000", "O:SPY251219C00600000"]
+    watchlist.add(new_table([string_col("Symbol", contracts)]))
+    result = ws_session.query(OPTIONS, watchlist).blink()
+    ws_session.subscribed("T.O:SPY251219C00600000")
+    connection = ws_session.connection("wss://socket.test/options")
+    ws_session.on_loop(connection, lambda: None)
+
+    def cap_rows() -> list[dict[str, Any]]:
+        settle(ws_session)
+        assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
+        return [r for r in dh_to_pylist(ws_session.session.problems()) if r["Cause"] == CAP]
+
+    [before] = cap_rows()
+    assert (before["Detail"], before["Rows"]) == ("over capacity: 2/1; 1 deferred", 1)
+    watchlist.add(new_table([string_col("Symbol", ["O:SPY251219C00620000"])]))
+    wait_for(lambda: [r["Rows"] for r in cap_rows()] == [2])
+    # One span still: its detail and count follow the change, and it began when it first held.
+    [after] = cap_rows()
+    assert (after["Detail"], after["EndedAt"]) == ("over capacity: 3/1; 2 deferred", None)
+    assert after["SpanStart"] == before["SpanStart"]
+    [row] = streams_of(ws_session, dh_to_pylist)
+    assert (row["State"], row["Deferred"], row["Error"]) == ("RUNNING", 2, None)
+    del result
+
+
 def test_a_failed_open_returns_its_lease(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2411,6 +2446,35 @@ def test_a_pair_removed_while_it_waits_is_never_subscribed(
     time.sleep(0.2)  # longer than any retry the removal left scheduled
     assert len(lookups(ws_session)) == seen
     assert not any("DOT" in json.loads(f)["params"] for f in ws_session.server.frames())
+    ws_session.session.release(result)
+
+
+def test_a_waiting_pair_removed_ends_only_its_own_span(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    quick_retries: Callable[[WsSession], None],
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # Each waiting pair is its own span: removing one pair ends its span, and the pair that
+    # still waits keeps its span open.
+    quick_retries(ws_session)
+    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    ws_session.pair_answers["X:DOTUSD"] = busy
+    ws_session.pair_answers["X:ADAUSD"] = busy
+    watchlist = crypto_watchlist(["X:BTCUSD"], source="reactive", dh_input_table=dh_input_table)
+    assert isinstance(watchlist, InputTable)
+    result = ws_session.query(CRYPTO, watchlist).append_only()
+    ws_session.subscribed("XT.BTC-USD")
+    watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD", "X:ADAUSD"])]))
+    wait_for(lambda: waiting_pairs(ws_session, dh_to_pylist, 1) == ["X:ADAUSD", "X:DOTUSD"])
+    watchlist.delete(new_table([string_col("Symbol", ["X:DOTUSD"])]))
+
+    def spans() -> list[tuple[object, ...]]:
+        return [(s[2], s[5]) for s in spans_of(ws_session, dh_to_pylist, RETRYING)]
+
+    wait_for(lambda: spans() == [("X:ADAUSD", False), ("X:DOTUSD", True)])
+    assert running(ws_session, dh_to_pylist)
     ws_session.session.release(result)
 
 

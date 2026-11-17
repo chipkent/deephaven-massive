@@ -29,7 +29,7 @@ from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.host_decision import recency_of
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, utc_text
-from deephaven_massive._tables.problem_events import Problem, ProblemCause
+from deephaven_massive._tables.problem_events import Problem, ProblemCause, ProblemSpans
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.stream import StreamSink
 from deephaven_massive._tables.transports import HostDecision
@@ -1892,6 +1892,45 @@ def test_a_stream_opened_during_an_outage_recovers_with_the_feed(
     assert _down_since(ws_session, connection) is None
     assert streams_of(ws_session, dh_to_pylist)[1]["State"] == "RUNNING"
     ws_session.session.release(late)
+
+
+def test_a_stream_released_during_an_outage_ends_only_its_own_outage_span(
+    *,
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = ws_session.query(TRADES, ["AAPL"]).blink()
+    second = ws_session.query(TRADES, ["MSFT"]).blink()
+    ws_session.subscribed("T.AAPL", "T.MSFT")
+    connection = ws_session.connection()
+    fake_ws_server.silent = {"T.AAPL", "T.MSFT"}  # the outage outlasts the reconnect
+    fake_ws_server.close(1011)
+    ws_session.wait(lambda s: s.opens == 2)
+    wait_for(lambda: _down(ws_session, connection) == {1, 2})
+    wait_for(lambda: ended(ws_session, dh_to_pylist, OUTAGE) == [(1, False), (2, False)])
+    core = ws_session.session._core
+    reported: list[Problem] = []
+    report = core.problems
+
+    def recording(problems: Sequence[Problem]) -> None:
+        reported.extend(problems)
+        report(problems)
+
+    monkeypatch.setattr(core, "problems", recording)
+    ws_session.session.release(first)
+    del first
+    wait_for(lambda: not ws_session.on_loop(connection, lambda: 1 in connection._streams))
+    # The connection ends the released stream's span itself, as it leaves.
+    assert [
+        (p.cause, p.spans) for p in reported if isinstance(p, ProblemSpans) and p.stream_id == 1
+    ] == [(ProblemCause.OUTAGE, {})]
+    # The other stream is still down, its span open.
+    assert ended(ws_session, dh_to_pylist, OUTAGE) == [(1, True), (2, False)]
+    assert re.fullmatch(_DOWN, spans_of(ws_session, dh_to_pylist)[(2, OUTAGE)])
+    assert _down(ws_session, connection) == {2}
+    ws_session.session.release(second)
 
 
 def test_an_outage_without_live_tables_logs_nothing(
