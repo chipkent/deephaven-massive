@@ -8,6 +8,7 @@ virtual: every client gets a `FakeClock`, so retry waits are recorded, never sle
 
 from __future__ import annotations
 
+import http.server
 import io
 import logging
 import random
@@ -1335,28 +1336,50 @@ def test_a_certificate_for_another_name_fails_at_once_over_the_network(
     assert (tls_server.requests, clock.waits) == ([], [])
 
 
-@pytest.mark.parametrize("linger", [False, True], ids=["close", "reset"])
+@pytest.mark.parametrize(
+    ("sent", "linger", "raised"),
+    [(b"", False, False), (b"", True, False), (b"GET /x HTTP/1.1\r\n", True, True)],
+    ids=["close", "reset", "reset after the request line"],
+)
 def test_the_tls_fake_ends_a_connection_the_client_drops_before_its_request(
-    *, linger: bool, monkeypatch: pytest.MonkeyPatch
+    *, sent: bytes, linger: bool, raised: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # urllib3 checks the certificate's name after the TLS handshake, and on a mismatch drops
     # the connection before sending a request: a close, which becomes a reset when the server's
-    # session tickets lie unread. The fake must end that connection as a close.
-    # An error that reached the server's `handle_error` would be printed to a stream an xdist
-    # worker may have closed, failing whichever test was tearing down.
+    # session tickets lie unread. The fake must end that connection as a close: an error that
+    # reached the server's `handle_error` would be printed to a stream an xdist worker may have
+    # closed, failing whichever test was tearing down. A drop after the request line is still
+    # an error. The client drops only once the server reached the point under test: its
+    # handshake done, or the request line read.
     errors: list[BaseException | None] = []
+    reached = threading.Event()
     served = threading.Event()
+    process_request = LoopbackHTTPServer.process_request
     shutdown_request = LoopbackHTTPServer.shutdown_request
+    parse_request = http.server.BaseHTTPRequestHandler.parse_request
 
     def handle_error(server: LoopbackHTTPServer, request: object, address: object) -> None:
         errors.append(sys.exception())
+
+    def handshake_done(
+        server: LoopbackHTTPServer, request: socket.socket, address: tuple[str, int]
+    ) -> None:
+        if not sent:
+            reached.set()
+        process_request(server, request, address)
+
+    def request_line_read(handler: http.server.BaseHTTPRequestHandler) -> bool:
+        reached.set()
+        return parse_request(handler)
 
     def signal_served(server: LoopbackHTTPServer, request: socket.socket) -> None:
         shutdown_request(server, request)
         served.set()
 
     monkeypatch.setattr(LoopbackHTTPServer, "handle_error", handle_error)
+    monkeypatch.setattr(LoopbackHTTPServer, "process_request", handshake_done)
     monkeypatch.setattr(LoopbackHTTPServer, "shutdown_request", signal_served)
+    monkeypatch.setattr(http.server.BaseHTTPRequestHandler, "parse_request", request_line_read)
     server = FakeRestServer(tls=(DATA / "tls_cert.pem", DATA / "tls_key.pem"))
     server.start()
     try:
@@ -1365,12 +1388,18 @@ def test_the_tls_fake_ends_a_connection_the_client_drops_before_its_request(
         context.check_hostname = False  # as urllib3, which checks the name itself
         raw = socket.create_connection((host, int(port)), timeout=10)
         with context.wrap_socket(raw) as connection:
+            connection.sendall(sent)
+            assert reached.wait(10)
             if linger:
                 connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         assert served.wait(10)
     finally:
         server.close()
-    assert errors == []
+    if raised:
+        [error] = errors
+        assert isinstance(error, ConnectionResetError | BrokenPipeError)
+    else:
+        assert errors == []
     assert server.requests == []
 
 
