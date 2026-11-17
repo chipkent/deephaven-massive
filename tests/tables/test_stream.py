@@ -1320,6 +1320,19 @@ def test_a_stream_that_receives_a_waiting_ticker_later_shows_its_wait(
     assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"]]
 
 
+def test_a_waiting_ticker_s_rows_grow_on_its_span(futures_flush: FuturesFlush) -> None:
+    # More rows of a ticker whose wait was reported join the hold: its span counts them and
+    # keeps its start.
+    flush = futures_flush
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    flush.flusher.flush()
+    flush.send("NQM5", "NQM5")
+    first, later = undated_snapshots(flush, 1)
+    assert (first.spans["NQM5"].rows, later.spans["NQM5"].rows) == (1, 3)
+    assert later.spans["NQM5"].since == first.spans["NQM5"].since
+
+
 def test_a_later_report_of_a_waiting_ticker_updates_its_rows_and_keeps_its_start(
     futures_flush: FuturesFlush,
 ) -> None:

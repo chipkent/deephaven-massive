@@ -1834,25 +1834,26 @@ class Flusher:
         return kept
 
     def _open_waits(
-        self, plan: ChannelPlan, settled: Settled, held: frozenset[str]
+        self, plan: ChannelPlan, settled: Settled, held: dict[str, int]
     ) -> dict[str, tuple[int, str]]:
         """Update a dataset's reported waits that still hold; return them.
 
         A wait joins when settling reports it (`Settled.delayed`), and leaves when its rows
         publish (`Settled.resumed`) or are discarded, or once the hold no longer has the
-        ticker's rows (a watchlist dropped it, or its lookup failed).
+        ticker's rows (a watchlist dropped it, or its lookup failed). Each wait counts the
+        rows the hold has of its ticker now.
 
         Args:
             plan: The dataset's plan for the channel.
             settled: What settling decided.
-            held: The tickers whose rows the dataset still holds.
+            held: The tickers whose rows the dataset still holds, with how many each holds.
 
         Returns:
             Each ticker whose reported wait holds, with its rows and reason.
         """
         ended = settled.resumed.union(*settled.discarded.values())
         found = self._waits.get(plan, {})
-        waits = {t: wait for t, wait in found.items() if t in held and t not in ended}
+        waits = {t: (held[t], why) for t, (_, why) in found.items() if t in held and t not in ended}
         waits.update({t: (delay.rows, delay.reason) for t, delay in settled.delayed.items()})
         if waits:
             self._waits[plan] = waits
