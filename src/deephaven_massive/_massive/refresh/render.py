@@ -1,14 +1,16 @@
 """Render the generated files (`spec/*.json`) as canonical text.
 
-The generators produce `RestPath` and `Source` values; this module turns them into the text of
-the committed files the runtime loads (`spec.sources()`, `spec.provenance()`), and nothing
-else; `generate` writes them. The text is deterministic, so a refresh that changes nothing
-leaves each file byte for byte as it was, and the parity test can compare the committed files
-with a fresh rendering. All are JSON with one line per field, parameter, and membership, so a
-refresh diff shows each changed field as one changed line. `rest.json` holds the REST paths
-with their result keys and parameters; `ws.json` the WebSocket channels and `flatfiles.json`
-the flat-file prefixes, each with only its key, fields, and memberships. A source whose
-undeclared keys the decoders drop without reporting (`Source.ignored_keys`) also lists them.
+The generators produce `RestPath`, `WsChannel`, and `Source` values; this module turns them
+into the text of the committed files the runtime loads (`spec.sources()`,
+`spec.provenance()`), and nothing else; `generate` writes them. The text is deterministic, so
+a refresh that changes nothing leaves each file byte for byte as it was, and the parity test
+can compare the committed files with a fresh rendering. All are JSON with one line per field,
+parameter, and membership, so a refresh diff shows each changed field as one changed line.
+`rest.json` holds the REST paths with their result keys and parameters; `ws.json` the
+WebSocket channels, each with the hosts its documentation page lists (`WsChannel.hosts`); and
+`flatfiles.json` the flat-file prefixes, each with only its key, fields, and memberships. A
+source whose undeclared keys the decoders drop without reporting (`Source.ignored_keys`) also
+lists them.
 
 The field descriptions go in `descriptions.json` alone, never in a schema file: they change
 far more often than the schema, and a refresh that only rewords them must leave the schema
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
         RestPath,
         Source,
         Transport,
+        WsChannel,
     )
 
 __all__ = [
@@ -47,6 +50,7 @@ __all__ = [
     "REST_FILE",
     "SPEC_DIRECTORY",
     "WS_FILE",
+    "render_channels",
     "render_descriptions",
     "render_rest",
     "render_sources",
@@ -264,8 +268,34 @@ def render_rest(paths: Sequence[RestPath]) -> str:
     )
 
 
+def render_channels(channels: Sequence[WsChannel]) -> str:
+    """Return the canonical text of `ws.json`.
+
+    Channels keep their order; each channel's hosts sit on one line, in its own order (by
+    feed), so a host Massive moves shows as one changed line.
+
+    Args:
+        channels: The generated channels.
+
+    Returns:
+        The file's text, as `render_sources` writes it with each channel's `"hosts"`
+        (`[{"feed", "host"}, ...]`) after its key, ending in a newline.
+    """
+    return _render(
+        [
+            [
+                '   "hosts": '
+                + json.dumps([{"feed": h.feed.value, "host": h.host} for h in channel.hosts])
+                + ","
+            ]
+            for channel in channels
+        ],
+        channels,
+    )
+
+
 def render_sources(sources: Sequence[Source]) -> str:
-    """Return the canonical text of `ws.json` or `flatfiles.json`.
+    """Return the canonical text of `flatfiles.json`.
 
     Sources keep their order; within a field or membership, keys are sorted. Like
     `rest.json`, the file records nothing about the snapshot it came from.

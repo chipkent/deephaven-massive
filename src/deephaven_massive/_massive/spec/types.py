@@ -5,7 +5,9 @@ a WebSocket channel of one cluster (`stocks/T`), or a flat-file prefix
 (`us_stocks_sip/trades_v1`). Each is described by
 its ordered **fields**: the key on the wire, the long-form column the library names it, the
 field's `WireType`, its timestamp `WireUnit` when it is an epoch, and whether the vendor marks
-it required. A REST source is a `RestPath`, which adds its result key and its parameters.
+it required. A REST source is a `RestPath`, which adds its result key and its parameters; a
+WebSocket channel is a `WsChannel`, which adds the hosts its documentation page lists for it
+(`FeedHost`: one per `Feed`, such as `Real-Time` on `socket.massive.com`).
 
 A source may belong to dataset **kinds** (trades, quotes, bars, ...): the sources whose rows
 merge into one table schema. Each `Membership` names the kind, the asset-class group within
@@ -60,6 +62,8 @@ __all__ = [
     "Conversion",
     "DriftReport",
     "DriftSample",
+    "Feed",
+    "FeedHost",
     "Field",
     "Membership",
     "Param",
@@ -76,6 +80,7 @@ __all__ = [
     "Transport",
     "WireType",
     "WireUnit",
+    "WsChannel",
 ]
 
 
@@ -103,6 +108,34 @@ class Transport(StrEnum):
     WS = "WS"
     REST = "REST"
     FLAT_FILES = "FLAT_FILES"
+
+
+class Feed(StrEnum):
+    """A feed Massive's WebSocket documentation lists for a channel, by the page's own label.
+
+    Each channel's page has a "Connection" table with one row per feed that serves it: the
+    label (these values, exactly as Massive writes them) and the feed's URL. A label the refresh
+    does not know stops it, so a new feed is a change a person looks at. A label names where a
+    channel is served, not how recent its data is: a plan may get delayed data on any feed
+    (Massive's index value page lists only `Business`, and a plan that gets it 15 minutes late).
+    """
+
+    REAL_TIME = "Real-Time"
+    DELAYED = "Delayed"
+    BUSINESS = "Business"
+
+
+@dataclass(frozen=True, kw_only=True)
+class FeedHost:
+    """One row of a channel's "Connection" table: a feed and the host that serves it.
+
+    Attributes:
+        feed: The feed's label.
+        host: The hostname of the feed's URL, such as `"socket.massive.com"`.
+    """
+
+    feed: Feed
+    host: str
 
 
 class WireType(StrEnum):
@@ -675,6 +708,52 @@ class RestPath(Source):
     def template(self) -> str:
         """The path template, with `{name}` placeholders; the same text as `key`."""
         return self.key
+
+
+@dataclass(frozen=True, kw_only=True)
+class WsChannel(Source):
+    """A WebSocket source: a channel of one cluster, with the hosts its page documents.
+
+    `transport` is always `Transport.WS` and cannot be passed.
+
+    Attributes:
+        hosts: The feeds that serve the channel and their hosts, from the "Connection" table
+            of the channel's documentation page, sorted by feed. No feed appears twice.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.spec.types import Feed, FeedHost, WsChannel
+
+            fmv = WsChannel(
+                key="stocks/FMV",
+                fields=(),
+                hosts=(FeedHost(feed=Feed.BUSINESS, host="business.massive.com"),),
+            )
+            assert fmv.only_host == "business.massive.com"
+    """
+
+    transport: Transport = dataclasses.field(default=Transport.WS, init=False)
+    hosts: tuple[FeedHost, ...] = ()
+
+    @override
+    def __post_init__(self) -> None:
+        """Check the source's invariants, then that no feed is listed twice.
+
+        Raises:
+            ValueError: If the source's invariants fail (see `Source`), or two hosts share a
+                feed; the message names the channel and the feeds.
+        """
+        super().__post_init__()
+        repeated = _duplicates(h.feed.value for h in self.hosts)
+        if repeated:
+            raise ValueError(f"source {self.key!r}: repeated feeds {repeated}")
+
+    @property
+    def only_host(self) -> str | None:
+        """The one host the channel's page lists, or None when it lists several or none."""
+        found = {h.host for h in self.hosts}
+        return found.pop() if len(found) == 1 else None
 
 
 @dataclass(frozen=True, kw_only=True)

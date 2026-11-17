@@ -249,7 +249,6 @@ FMV: Final = DatasetSpec(
     channels={NotBars.ANY: "FMV"},
     channel_family=ChannelFamily.FMV,
     keys={(_WS, "options/FMV"): _keys("Ticker", "FmvLastUpdated")},
-    real_time_only=True,
 )
 
 ADMIN_MESSAGES: Final = DatasetSpec(
@@ -263,7 +262,6 @@ ADMIN_MESSAGES: Final = DatasetSpec(
     # contract outside its free text, which the library never parses.
     names_symbols=False,
     # Massive's page documents only the real-time feed for the channel.
-    real_time_only=True,
 )
 
 _SNAPSHOT_REVISION: Final = ("LastQuoteLastUpdated", "LastTradeSipTimestamp")
@@ -688,8 +686,8 @@ class OptionsNamespace(Namespace):
     def fmv(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Massive's fair market value of US-listed options contracts, streamed in real time.
 
-        Each row holds a contract's fair market value and when Massive computed it. It streams only
-        on Options Business, and it has no history. One connection carries at most 1,000 contracts.
+        Each row holds a contract's fair market value and when Massive computed it. It streams
+        only, with no history. One connection carries at most 1,000 contracts.
 
         Args:
             symbols: Option contracts, or `dm.ALL` for every contract.

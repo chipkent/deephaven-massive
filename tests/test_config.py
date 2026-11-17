@@ -17,7 +17,9 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive import _config, _session
 from deephaven_massive._config import CONFIG_FILE_VARIABLE, MassiveConfig
+from deephaven_massive._datasets.feeds import channel_only_host, fmv_host
 from deephaven_massive._enums import AssetClass, OnError, Subscription
+from deephaven_massive._massive import Transport, sources
 from deephaven_massive.queries import _call, _choice, _fetch, _history, _query, _stream
 
 ENV = (
@@ -1470,3 +1472,22 @@ def test_every_url_setting_is_shown_without_its_credentials() -> None:
     # A URL may hold a user and password; a new URL setting must say how it is shown.
     urls = {f.name for f in dataclasses.fields(MassiveConfig) if f.name.endswith("_url")}
     assert urls == set(_config._URL_SETTINGS)
+
+
+def test_the_hosts_the_settings_name_are_the_ones_massive_s_pages_document() -> None:
+    # The settings' documentation names a channel's host in prose; a host Massive moves on its
+    # pages reaches the generated channels with the next refresh, and this then fails until
+    # the prose follows.
+    doc = re.sub(r"\s+", " ", inspect.getdoc(MassiveConfig) or "")
+    fmv = re.search(r"Fair market value \(FMV\) streams always use `([a-z.]+)`", doc)
+    index_values = re.search(r"Set `indices` to `([a-z.]+)` to stream index values", doc)
+    assert fmv is not None
+    assert index_values is not None
+    classes = (AssetClass.STOCKS, AssetClass.OPTIONS, AssetClass.FOREX, AssetClass.CRYPTO)
+    assert {fmv_host(asset_class) for asset_class in classes} == {fmv[1]}
+    assert channel_only_host(AssetClass.INDICES, "V") == index_values[1]
+    page = (Path(__file__).parents[1] / "docs" / "configuration.md").read_text(encoding="utf-8")
+    assert set(re.findall(r"^ *indices: ([a-z.]+)$", page, re.MULTILINE)) == {index_values[1]}
+    named = set(re.findall(r"\b[a-z]+\.massive\.com\b", f"{doc} {page}"))
+    documented = {h.host for channel in sources(Transport.WS).values() for h in channel.hosts}
+    assert named - {"api.massive.com", "files.massive.com"} <= documented

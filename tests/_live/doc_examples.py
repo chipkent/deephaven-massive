@@ -15,7 +15,7 @@ could drift from what a reader pastes:
   read and then drop the names they defined; `Console` runs them in one reader's console,
   where a later example rebinds the names of an earlier one.
 - `recorded_sessions` closes every session the examples opened, once they are done.
-- `FREE_SECTIONS`, `PAID_SECTIONS`, and `UNRUN_SECTIONS` name the README's examples the live run
+- `HISTORY_SECTIONS`, `LIVE_SECTIONS`, and `UNRUN_SECTIONS` name the README's examples the live run
   runs, and those it leaves out.
 - `dashboard_panels` reads the titles and contents of a `deephaven.ui` dashboard's panels.
 - `snapshots_cleared` and `seam_gaps` are the pure rules the live checks apply to Example 7's
@@ -52,9 +52,9 @@ _BASH: Final = re.compile(r"^```bash\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _ANCHOR: Final = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 
 SETTINGS_ANCHOR: Final = "what-your-plan-allows"
-"""The README section whose shell commands save the settings file the paid examples load."""
+"""The README section whose shell commands save the settings file the live examples load."""
 
-FREE_SECTIONS: Final = (
+HISTORY_SECTIONS: Final = (
     "read-daily-bars",
     "whole-market-day",
     "compare-stocks",
@@ -67,7 +67,7 @@ FREE_SECTIONS: Final = (
 """The README's examples that read stock history with no setting, which follow its hook:
 Examples 1 to 6, the conversion of Yahoo tickers that ends Example 6, and Example 13."""
 
-PAID_SECTIONS: Final = (
+LIVE_SECTIONS: Final = (
     "what-your-plan-allows",
     "stream-minute-bars",
     "change-since-close",

@@ -8,7 +8,9 @@ not endpoints, channels, or files; the pages say what each one documents:
 - a **REST page** names its endpoint on one line, `**Endpoint:**` followed by `GET <path>` in
   backticks, in the template syntax the OpenAPI specification uses;
 - a **WebSocket page** names its feed: the connection URLs (`wss://socket.massive.com/stocks`,
-  whose path is the cluster) and the sentence "The channel prefix for this feed is `T`";
+  whose path is the cluster) and the sentence "The channel prefix for this feed is `T`"; its
+  "Connection" table lists, one row each, the feeds that serve the channel (`Delayed`,
+  `Real-Time`, `Business`) and each feed's URL;
 - a **flat-file overview page** lists its class's datasets in a table, one row per dataset
   page with the dataset's bucket prefix (`S3 us_stocks_sip/trades_v1`), and a **flat-file
   dataset page** lists the file's columns in a "Columns" table (name, type, description) and
@@ -22,8 +24,9 @@ This module turns those documents into plain values and nothing else:
 - `page_urls(index, area)` lists the pages of one area (`REST`, `WEBSOCKET`, `FLAT_FILES`)
   that `fetch` downloads, after checking each URL;
 - `page_file(url, area)` maps a page URL to its file below the area's snapshot directory;
-- `title(page)`, `endpoint(page)`, `feed(page)`, `datasets(page)`, `columns(page)`,
-  `example_header(page)`, and `example_rows(page)` read what one page documents.
+- `title(page)`, `endpoint(page)`, `feed(page)`, `connections(page)`, `datasets(page)`,
+  `columns(page)`, `example_header(page)`, and `example_rows(page)` read what one page
+  documents.
 
 `fetch` and `snapshot` use them to store and find the pages; `rest_sources`, `ws_sources`, and
 `flat_file_sources` to decide what is documented. Every input is untrusted vendor text: it is parsed
@@ -35,6 +38,7 @@ This module imports only the standard library.
 
 from __future__ import annotations
 
+import itertools
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -46,9 +50,11 @@ __all__ = [
     "WEBSOCKET",
     "Area",
     "DocColumn",
+    "DocConnection",
     "DocLink",
     "DocsError",
     "columns",
+    "connections",
     "datasets",
     "endpoint",
     "example_header",
@@ -91,9 +97,13 @@ _LINK = re.compile(r"^- \[(?P<title>[^\]]+)\]\((?P<url>[^)\s]+)\)")
 _TITLE = re.compile(r"^### (?P<title>\S.*?)\s*$", re.MULTILINE)
 # A REST page's endpoint line.
 _ENDPOINT = re.compile(r"^\*\*Endpoint:\*\* `GET (?P<path>/[^`\s]*)`\s*$", re.MULTILINE)
-# A WebSocket page's channel sentence and connection URLs.
+# A WebSocket page's channel sentence.
 _CHANNEL = re.compile(r"The channel prefix for this feed is `(?P<channel>[A-Z0-9]+)`")
-_FEED_URL = re.compile(r"`wss://[a-z0-9.-]+/(?P<cluster>[a-z]+)`")
+# A "Connection" table row: the feed's label, then its URL in backticks.
+_CONNECTION_ROW = re.compile(
+    r"^\| (?P<label>[A-Za-z][A-Za-z -]*?) "
+    r"\| `wss://(?P<host>[a-z0-9.-]+)/(?P<cluster>[a-z]+)` \|\s*$"
+)
 # A page's path below its area's prefix, without and with the Markdown suffix.
 _PAGE = re.compile(r"(?P<file>(?P<relative>[^?#]+)\.md)")
 # One path segment of a page URL below the prefix: lower-case words joined by hyphens.
@@ -134,6 +144,21 @@ class DocLink:
     section: str
     title: str
     url: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class DocConnection:
+    """One row of a WebSocket page's "Connection" table: a feed that serves the channel.
+
+    Attributes:
+        label: The feed's label as the page writes it, such as `"Real-Time"`.
+        host: The hostname of the feed's URL, such as `"socket.massive.com"`.
+        cluster: The path of the feed's URL, such as `"stocks"`.
+    """
+
+    label: str
+    host: str
+    cluster: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -274,21 +299,58 @@ def feed(page: str) -> tuple[str, str] | None:
         page: The Markdown text of a WebSocket page.
 
     Returns:
-        `(cluster, channel)`, such as `("stocks", "T")`: the path of the page's connection
-        URLs and its channel prefix; `None` for a page that names no channel prefix (an
-        overview or the quickstart).
+        `(cluster, channel)`, such as `("stocks", "T")`: the path of the URLs in the page's
+        "Connection" table (`connections`) and its channel prefix; `None` for a page that
+        names no channel prefix (an overview or the quickstart).
 
     Raises:
-        DocsError: If the page names more than one channel prefix, or its connection URLs do
-            not name exactly one cluster.
+        DocsError: If the page names more than one channel prefix, its "Connection" table
+            cannot be read, or the table's URLs do not name exactly one cluster.
     """
     channels = sorted(set(_CHANNEL.findall(page)))
     if not channels:
         return None
-    clusters = sorted(set(_FEED_URL.findall(page)))
+    clusters = sorted({row.cluster for row in connections(page)})
     if len(channels) > 1 or len(clusters) != 1:
         raise DocsError(f"a feed page must name one channel and one cluster: {channels} {clusters}")
     return clusters[0], channels[0]
+
+
+def connections(page: str) -> list[DocConnection]:
+    """Return the rows of a WebSocket page's "Connection" table, in table order.
+
+    Args:
+        page: The Markdown text of a WebSocket page.
+
+    Returns:
+        One `DocConnection` per row; empty for a page with no "Connection" heading (an
+        overview or the quickstart).
+
+    Raises:
+        DocsError: If the page has more than one "Connection" heading, a row of its table is
+            indented (which the table reader would skip), the table's second line is not a
+            header separator, or a row is not a feed and its URL
+            (`` | Real-Time | `wss://socket.massive.com/stocks` | ``).
+    """
+    lines = page.splitlines()
+    headings = lines.count("## Connection")
+    if headings > 1:
+        raise DocsError(f"a page has {headings} Connection tables")
+    if headings:
+        section = itertools.takewhile(
+            lambda line: not _HEADING.match(line), lines[lines.index("## Connection") + 1 :]
+        )
+        indented = [line for line in section if line[:1].isspace() and line.lstrip()[:1] == "|"]
+        if indented:
+            raise DocsError(f"an indented Connection row: {indented[0][:120]!r}")
+    table = _table(page, "Connection")
+    found: list[DocConnection] = []
+    for line in _rows(table, "Connection") if table else []:
+        row = _CONNECTION_ROW.match(line)
+        if row is None:
+            raise DocsError(f"unreadable Connection row: {line[:120]!r}")
+        found.append(DocConnection(label=row["label"], host=row["host"], cluster=row["cluster"]))
+    return found
 
 
 def datasets(page: str) -> list[tuple[str, str]]:

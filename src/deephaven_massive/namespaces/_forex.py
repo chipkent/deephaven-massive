@@ -160,9 +160,8 @@ FMV: Final = DatasetSpec(
     channels={NotBars.ANY: "FMV"},
     channel_family=ChannelFamily.FMV,
     keys={(_WS, "forex/FMV"): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("FmvLastUpdated"))},
-    real_time_only=True,
 )
-"""`m.forex.fmv`: the `FMV` stream of the Business feed."""
+"""`m.forex.fmv`: the `FMV` stream of Massive's fair market values."""
 
 _SNAPSHOTS: Final = "/v2/snapshot/locale/global/markets/forex/tickers"
 
@@ -318,7 +317,7 @@ class ForexNamespace(Namespace):
 
         Each row holds one pair's latest quote. A pair with no quote gets no row, and the library
         logs a WARNING. Each poll sees only the quote that is latest at that moment; `quotes()`
-        streams every quote. Currencies Basic doesn't include this dataset.
+        streams every quote.
 
         Args:
             symbols: Currency pairs, such as `C:EURUSD`. `dm.ALL` is refused; for every pair, use
@@ -456,8 +455,8 @@ class ForexNamespace(Namespace):
     def fmv(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Massive's fair market value of each currency pair, streamed as it updates.
 
-        Each row holds one update of Massive's own real-time price estimate. Only Currencies
-        Business includes it. It streams only, with no history.
+        Each row holds one update of Massive's own real-time price estimate. It streams only, with
+        no history.
 
         Args:
             symbols: Currency pairs, such as `C:EURUSD`, or `dm.ALL` for every pair.

@@ -18,6 +18,8 @@ EXPECTED_INTERFACE = [
     "CapturedReply",
     "DriftReport",
     "DriftSample",
+    "Feed",
+    "FeedHost",
     "Field",
     "FlatFile",
     "FlatFileClient",
@@ -45,6 +47,7 @@ EXPECTED_INTERFACE = [
     "WireFailure",
     "WireType",
     "WireUnit",
+    "WsChannel",
     "WsClient",
     "WsState",
     "check_api_key",
@@ -80,6 +83,8 @@ def test_every_name_resolves_to_its_defining_object() -> None:
     shared = (
         "DriftReport",
         "DriftSample",
+        "Feed",
+        "FeedHost",
         "Field",
         "ParamKind",
         "Provenance",
@@ -87,7 +92,7 @@ def test_every_name_resolves_to_its_defining_object() -> None:
         "RowFault",
         "RowMark",
     )
-    for name in (*shared, "Source"):
+    for name in (*shared, "Source", "WsChannel"):
         assert getattr(_massive, name) is getattr(types, name)
     assert _massive.Transport is types.Transport
     assert _massive.WireType is types.WireType

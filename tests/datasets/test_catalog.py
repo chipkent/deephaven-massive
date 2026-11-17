@@ -1322,7 +1322,18 @@ class Deferral:
     issue: int
 
 
-DEFERRED: Mapping[tuple[Transport, str], Deferral] = {}
+DEFERRED: Mapping[tuple[Transport, str], Deferral] = {
+    (Transport.REST, path): Deferral(
+        "Massive documented it on 2026-11-16; its dataset needs a public design: the call, its "
+        "arguments, and its columns.",
+        729,
+    )
+    for path in (
+        "/options/v1/open-interest",
+        "/options/v1/unusual-trades",
+        "/options/v1/admin-messages",
+    )
+}
 """Generated sources no dataset reads yet, by `(transport, source key)`.
 
 A source key is the generated key the catalog uses: a REST path template, a WebSocket
@@ -1683,7 +1694,6 @@ ADMIN = DatasetSpec(
     channels={NotBars.ANY: "AD"},
     keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
     names_symbols=False,
-    real_time_only=True,
 )
 
 
@@ -1704,7 +1714,7 @@ def test_a_stream_without_symbols_needs_its_time_key() -> None:
     "changed",
     [
         lambda: dataclasses.replace(
-            ADMIN, channels={}, fetch_path="/v3/snapshot", kind=None, keys={}, real_time_only=False
+            ADMIN, channels={}, fetch_path="/v3/snapshot", kind=None, keys={}
         ),
         lambda: dataclasses.replace(
             ADMIN, flat_file_prefixes={NotBars.ANY: "us_options_opra/trades_v1"}
@@ -1721,11 +1731,6 @@ def test_a_dataset_without_symbols_is_a_stream_alone(changed: Callable[[], Datas
 def test_a_stream_without_symbols_declares_no_symbol_key() -> None:
     with pytest.raises(ValueError, match="rows name no symbol has no symbol key"):
         dataclasses.replace(ADMIN, keys={(W, "options/AD"): keys("MessageId", "SipTimestamp")})
-
-
-def test_only_a_stream_is_real_time_only() -> None:
-    with pytest.raises(ValueError, match="only a stream"):
-        dataclasses.replace(DIVIDENDS, real_time_only=True)
 
 
 def test_the_poll_keys_gate_reads_only_a_dataset_with_poll() -> None:

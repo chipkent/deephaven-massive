@@ -12,6 +12,8 @@ from deephaven_massive._massive.spec.types import (
     Conversion,
     DriftReport,
     DriftSample,
+    Feed,
+    FeedHost,
     Field,
     Membership,
     Param,
@@ -27,6 +29,7 @@ from deephaven_massive._massive.spec.types import (
     Transport,
     WireType,
     WireUnit,
+    WsChannel,
 )
 
 if TYPE_CHECKING:
@@ -352,6 +355,45 @@ def test_a_rest_path_transport_cannot_be_passed() -> None:
     kwargs: dict[str, Any] = {"key": "/x", "fields": (), "transport": Transport.WS}
     with pytest.raises(TypeError, match="transport"):
         RestPath(**kwargs)
+
+
+_SOCKET = FeedHost(feed=Feed.REAL_TIME, host="socket.massive.com")
+_DELAYED = FeedHost(feed=Feed.DELAYED, host="delayed.massive.com")
+
+
+def test_a_channel_is_a_websocket_source_with_its_hosts() -> None:
+    channel = WsChannel(key="stocks/T", fields=(_price(),), hosts=(_DELAYED, _SOCKET))
+    assert isinstance(channel, Source)
+    assert channel.transport is Transport.WS
+    assert channel.hosts == (_DELAYED, _SOCKET)
+
+
+def test_a_channel_transport_cannot_be_passed() -> None:
+    kwargs: dict[str, Any] = {"key": "stocks/T", "fields": (), "transport": Transport.REST}
+    with pytest.raises(TypeError, match="transport"):
+        WsChannel(**kwargs)
+
+
+def test_a_channel_lists_each_feed_once() -> None:
+    other = FeedHost(feed=Feed.REAL_TIME, host="other.massive.com")
+    with pytest.raises(ValueError, match=r"'stocks/T': repeated feeds \['Real-Time'\]"):
+        WsChannel(key="stocks/T", fields=(), hosts=(_SOCKET, other))
+    with pytest.raises(ValueError, match=r"repeated wire keys \[.p.\]"):
+        WsChannel(key="stocks/T", fields=(_price(), _price()))
+
+
+@pytest.mark.parametrize(
+    ("hosts", "only"),
+    [
+        ((_SOCKET,), "socket.massive.com"),
+        ((_DELAYED, _SOCKET), None),
+        ((_SOCKET, FeedHost(feed=Feed.BUSINESS, host="socket.massive.com")), "socket.massive.com"),
+        ((), None),
+    ],
+    ids=["one", "two hosts", "one host for two feeds", "none"],
+)
+def test_a_channel_s_only_host(hosts: tuple[FeedHost, ...], only: str | None) -> None:
+    assert WsChannel(key="stocks/T", fields=(), hosts=hosts).only_host == only
 
 
 def test_a_rest_path_checks_the_source_invariants() -> None:

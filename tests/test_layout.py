@@ -1544,10 +1544,13 @@ _WIRE_VOCABULARY = frozenset(
         "WireFailure",
         "DriftReport",
         "DriftSample",
+        "Feed",
+        "FeedHost",
         "Field",
         "ParamKind",
         "Provenance",
         "RestPath",
+        "WsChannel",
         "RowFault",
         "RowMark",
         "RowMarks",
@@ -2556,6 +2559,22 @@ def _python_prose(source: str) -> dict[int, str]:
         Each line number that holds a comment, part of a string, or a name, mapped to that
         text on the line.
     """
+    return {number: " ".join(parts) for number, parts in _prose_parts(source).items()}
+
+
+def _prose_parts(source: str) -> dict[int, list[str]]:
+    """Return the words a reader reads in Python source, by line, one part per token.
+
+    Each comment, each line of a string, and each name (split on `_`) is its own part, so a
+    check can read a name apart from the name or string beside it.
+
+    Args:
+        source: The source.
+
+    Returns:
+        Each line number that holds a comment, part of a string, or a name, mapped to its
+        parts in source order.
+    """
     prose: dict[int, list[str]] = {}
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
         if token.type in _CODE_TOKENS:
@@ -2565,7 +2584,7 @@ def _python_prose(source: str) -> dict[int, str]:
             text = " ".join(text.split("_"))
         for offset, line in enumerate(text.splitlines()):
             prose.setdefault(token.start[0] + offset, []).append(line)
-    return {number: " ".join(texts) for number, texts in prose.items()}
+    return prose
 
 
 def test_the_live_tests_name_no_plan() -> None:
@@ -2624,6 +2643,164 @@ def test_the_live_harness_files_leave_out_the_spec_refresh(tmp_path: Path) -> No
         "tests/conftest.py",
         "tests/live/test_pacing.py",
         "tests/namespaces/test_stocks_integration.py",
+    ]
+
+
+# The library and its tests name no plan. Massive decides what a key may read and changes its
+# plans over time, so the library learns that only from Massive's answers, and each dataset's
+# generated page lists the plans Massive's spec gives it; its docstring links that page. Every
+# module under `src/` is checked, less the spec refresh, which parses Massive's plan tables, and
+# so are the live harness's Python files and the other tests that say what Massive serves a key. A
+# plan is caught when named by its tier: with its asset class (`Currencies Basic`), as a plan,
+# tier, or key (`a Business plan`, `a Basic key`, `Business-only`), two tiers together (`Starter
+# and Developer`), a class's plans (`every Futures plan`), or a free or paid plan, tier, key, or
+# example. Each comment, string line, and name is read on its own, a name as the words its `_`
+# separates (`test_a_business_key`), and a reference wrapped onto the next line counts.
+
+_TIER = r"(?:basic|starter|developer|advanced|business)"
+_CLASS = r"(?:stocks|options|indices|currencies|futures)"
+_PLAN_REFERENCE = re.compile(
+    rf"\b{_CLASS}\s+{_TIER}\b"
+    rf"|\b{_TIER}(?:-only|\s+(?:plans?|tiers?|keys?))\b"
+    rf"|\b{_TIER}\s+(?:and|or)\s+{_TIER}\b"
+    rf"|\b{_CLASS}\s+plans?\b"
+    rf"|\b(?:free|paid)\s+(?:{_TIER}\s+)?(?:plans?|tiers?|keys?|examples?)\b",
+    re.IGNORECASE,
+)
+"""Words that name a Massive plan by its tier, or a plan's contents by its asset class."""
+
+_TIER_CHECKED_TESTS = ("tests/ingest/test_host_decision.py", "tests/test_docs.py")
+"""The tests outside the live harness that say what Massive serves a key."""
+
+
+def _tier_checked_files(root: Path) -> list[Path]:
+    """Return the files checked for a plan named by its tier.
+
+    Args:
+        root: The repository root.
+
+    Returns:
+        Every module under `src/`, less `_massive/refresh/` and `_massive/spec/`, the Python
+        files of the live harness (`_live_harness_files`), and the tests of
+        `_TIER_CHECKED_TESTS`; sorted.
+    """
+    package = root / "src" / "deephaven_massive"
+    refresh, spec = package / "_massive" / "refresh", package / "_massive" / "spec"
+    library = [
+        path
+        for path in (root / "src").rglob("*.py")
+        if not path.is_relative_to(refresh) and not path.is_relative_to(spec)
+    ]
+    harness = [path for path in _live_harness_files(root) if path.suffix == ".py"]
+    return sorted({*library, *harness, *(root / path for path in _TIER_CHECKED_TESTS)})
+
+
+def _plan_references(root: Path, files: Iterable[Path]) -> list[str]:
+    """Return each line of the Python files that names a plan by its tier, as `path:line: text`.
+
+    A reference wrapped onto the next line (`Only Currencies` then `Business includes it.`) is
+    reported at the line it starts on.
+
+    Args:
+        root: The repository root, which the paths are shown from.
+        files: The Python files to read.
+
+    Returns:
+        The lines, in file order.
+    """
+    found = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        prose = _prose_parts(text)
+        for number, parts in sorted(prose.items()):
+            # The last line has no next line to wrap onto.
+            following = prose.get(number + 1, [""])[0]
+            wrapped = _PLAN_REFERENCE.search(f"{parts[-1]} {following}") and not (
+                _PLAN_REFERENCE.search(following)
+            )
+            if any(_PLAN_REFERENCE.search(part) for part in parts) or wrapped:
+                found.append(f"{path.relative_to(root)}:{number}: {lines[number - 1].strip()}")
+    return found
+
+
+def test_the_library_and_its_tests_name_no_plan() -> None:
+    found = _plan_references(_ROOT, _tier_checked_files(_ROOT))
+    assert not found, (
+        "these lines name a Massive plan; link the dataset's generated page, which lists its "
+        "plans, or say what Massive serves or refuses, instead:\n" + "\n".join(found)
+    )
+
+
+@pytest.mark.parametrize(
+    ("line", "names_a_plan"),
+    [
+        ('"""Currencies Basic doesn\'t include this dataset."""', True),
+        ("# It streams only on a Business plan.", True),
+        ("# Massive can refuse a Basic key's snapshot.", True),
+        ('"""The `Business-only` stream."""', True),
+        ("# the setting Starter and Developer need", True),
+        ("# which every Futures plan includes", True),
+        ("# a free Basic plan's requests", True),
+        ("# the examples that need a paid plan's streams", True),
+        ("# the settings file the paid examples read", True),
+        ("def _run_free_examples():", True),
+        ("def test_a_business_key_streams():", True),
+        ('filters = {"section": "business"}  # the business description', False),
+        ("# ISO-8601's basic form", False),
+        ("# your plan lacks this dataset", False),
+        ("# Massive's spec lists the plans", False),
+        ("if self._report_futures(plan, settled):", False),
+    ],
+)
+def test_a_plan_reference_is_found_by_its_tier(
+    tmp_path: Path, line: str, *, names_a_plan: bool
+) -> None:
+    path = tmp_path / "src" / "x.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"{line}\n", encoding="utf-8")
+    expected = [f"src/x.py:1: {line}"] if names_a_plan else []
+    assert _plan_references(tmp_path, [path]) == expected
+
+
+def test_a_plan_reference_wrapped_onto_the_next_line_is_found_where_it_starts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "src" / "x.py"
+    path.parent.mkdir(parents=True)
+    lines = ['"""Only Currencies', "Business includes it.", "A Basic key.", 'Done."""']
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert _plan_references(tmp_path, [path]) == [
+        'src/x.py:1: """Only Currencies',
+        "src/x.py:3: A Basic key.",
+    ]
+
+
+def test_the_tier_checked_files_are_the_library_and_the_listed_tests(tmp_path: Path) -> None:
+    for relative in [
+        "src/deephaven_massive/namespaces/_stocks.py",
+        "src/deephaven_massive/_config.py",
+        "src/deephaven_massive/_massive/refresh/render.py",
+        "src/deephaven_massive/_massive/spec/types.py",
+        "src/deephaven_massive/_massive/rest/governor.py",
+        "tests/ingest/test_rest.py",
+        "tests/_live/pacing.py",
+        "tests/conftest.py",
+        "scripts/live_run.py",
+        *_TIER_CHECKED_TESTS,
+    ]:
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text("")
+    found = [str(path.relative_to(tmp_path)) for path in _tier_checked_files(tmp_path)]
+    assert found == [
+        "scripts/live_run.py",
+        "src/deephaven_massive/_config.py",
+        "src/deephaven_massive/_massive/rest/governor.py",
+        "src/deephaven_massive/namespaces/_stocks.py",
+        "tests/_live/pacing.py",
+        "tests/conftest.py",
+        "tests/ingest/test_host_decision.py",
+        "tests/test_docs.py",
     ]
 
 

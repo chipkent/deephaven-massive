@@ -27,9 +27,10 @@ Interface:
     - `provenance`, `Provenance`: the day the vendor sources were fetched, the vendor URL
       of each source, and what each vendor page says about Massive's plans
       (`Provenance.plans`), for documents that cite them.
-    - `Transport`, `Source`, `RestPath`, `Field`, `ParamKind`, `WireType`, `WireUnit`,
-      `DriftReport`, `DriftSample`: the value types of that description, and a drift report
-      with the first row that showed each drifted key.
+    - `Transport`, `Source`, `RestPath`, `WsChannel`, `Feed`, `FeedHost`, `Field`,
+      `ParamKind`, `WireType`, `WireUnit`, `DriftReport`, `DriftSample`: the value types of
+      that description (a channel's documented hosts among them), and a drift report with the
+      first row that showed each drifted key.
     - `RowFault`, `RowMark`, `RowMarks`: the rows a decoder could not read whole, by fault,
       which every decoder returns beside its batch and drift. A `RestPath`'s parameters are
       `Param`s, reached through `RestPath.params`.
@@ -118,6 +119,8 @@ from deephaven_massive._massive.spec import provenance, source, sources
 from deephaven_massive._massive.spec.types import (
     DriftReport,
     DriftSample,
+    Feed,
+    FeedHost,
     Field,
     ParamKind,
     Provenance,
@@ -129,6 +132,7 @@ from deephaven_massive._massive.spec.types import (
     Transport,
     WireType,
     WireUnit,
+    WsChannel,
 )
 from deephaven_massive._massive.spec.values import encode_value
 from deephaven_massive._massive.ws import Status, StatusKind, WsClient, WsState
@@ -141,6 +145,8 @@ __all__ = [
     "CapturedReply",
     "DriftReport",
     "DriftSample",
+    "Feed",
+    "FeedHost",
     "Field",
     "FlatFile",
     "FlatFileClient",
@@ -166,6 +172,7 @@ __all__ = [
     "WireFailure",
     "WireType",
     "WireUnit",
+    "WsChannel",
     "WsClient",
     "WsState",
     "check_api_key",

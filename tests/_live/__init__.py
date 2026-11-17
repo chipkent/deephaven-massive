@@ -7,8 +7,6 @@ fixtures that call it, so it can be unit-tested against the fakes:
 
 - `refusals`: Massive's refusal on one line (status, text, request), and the earliest day a
   request refused for its timeframe asked for;
-- `plans` and `probe`: the live-run program's model of the key's plans and its probe, which
-  no fixture of the live tests uses;
 - `classes`: which asset class, and so which rate-limit bucket, a REST request reads, and
   which markets list each class's tickers;
 - `pacing`: the requests a test declares, and the terminal line printed while a request waits

@@ -194,6 +194,7 @@ def test_a_plan_of_rows_without_symbols_reads_none(massive_session: dm.MassiveSe
         "Exchange",
         "Message",
         "SequenceNumber",
+        "Retransmission",
         "TimestampInsert",
     ]
 

@@ -188,9 +188,8 @@ FMV: Final = DatasetSpec(
     channels={NotBars.ANY: "FMV"},
     channel_family=ChannelFamily.FMV,
     keys={(_W, "crypto/FMV"): ticker_key("FmvLastUpdated")},
-    real_time_only=True,
 )
-"""`m.crypto.fmv`: the Business-only `FMV` stream."""
+"""`m.crypto.fmv`: the `FMV` stream of Massive's fair market values."""
 
 SNAPSHOTS: Final = DatasetSpec(
     name="crypto.snapshots",
@@ -313,7 +312,7 @@ class CryptoNamespace(Namespace):
 
         Each row holds one pair's latest trade. A pair with no trade gets no row, and the library
         logs a WARNING. Each poll sees only the trade that is latest at that moment; `trades()`
-        streams every trade. Currencies Basic doesn't include this dataset.
+        streams every trade.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`. `dm.ALL` is refused; for every pair, use
@@ -482,9 +481,8 @@ class CryptoNamespace(Namespace):
     def fmv(self, symbols: SymbolsLike, *, on_error: ErrorPolicy | None = None) -> StreamQuery:
         """Massive's fair market value of crypto pairs, streamed as it updates.
 
-        Each row holds one update of Massive's own price estimate. Only Currencies Business includes
-        it; on another plan, the table fails with `EntitlementError`. It streams only, with no
-        history.
+        Each row holds one update of Massive's own price estimate. If Massive refuses the
+        subscription, the table fails with `EntitlementError`. It streams only, with no history.
 
         Args:
             symbols: Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair.

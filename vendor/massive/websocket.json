@@ -1848,6 +1848,10 @@
           "q": {
            "type": "integer",
            "description": "The sequence number represents the sequence in which admin events happened. These are increasing and unique, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11)."
+          },
+          "rt": {
+           "type": "boolean",
+           "description": "Whether this message is a retransmission (a replay of a previously sent message, e.g., during gap recovery), rather than an original real-time message. Only present, and set to true, when it is a retransmission; it is omitted otherwise."
           }
          }
         },
@@ -5427,6 +5431,10 @@
      "q": {
       "type": "integer",
       "description": "The sequence number represents the sequence in which admin events happened. These are increasing and unique, but will not always be sequential (e.g., 1, 2, 6, 9, 10, 11)."
+     },
+     "rt": {
+      "type": "boolean",
+      "description": "Whether this message is a retransmission (a replay of a previously sent message, e.g., during gap recovery), rather than an original real-time message. Only present, and set to true, when it is a retransmission; it is omitted otherwise."
      }
     }
    },

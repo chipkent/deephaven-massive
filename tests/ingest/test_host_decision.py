@@ -8,24 +8,35 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive import _log_limits
-from deephaven_massive._config import DELAYED_HOST, FMV_HOST, REALTIME_HOST
+from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
+from deephaven_massive._datasets.catalog import DatasetSpec
+from deephaven_massive._datasets.column_reference import page_url
+from deephaven_massive._datasets.feeds import channel_hosts, fmv_host
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Subscription
 from deephaven_massive._ingest.host_decision import (
+    FEED_RECENCY,
     FUTURES_PROBE_CONTRACTS,
+    ONE_FEED_NOTES,
     SNAPSHOT_PROBES,
     SnapshotAnswer,
     SnapshotProbe,
     decide,
-    real_time_note,
     recency_of,
+    refusal_note,
     refused_snapshot,
     unlabelled,
 )
-from deephaven_massive._massive import Transport, source
+from deephaven_massive._massive import Feed, Transport, source
 from deephaven_massive._tables.transports import HostDecision
+from deephaven_massive.namespaces._indices import VALUES as INDEX_VALUES
 from deephaven_massive.namespaces._options import ADMIN_MESSAGES as ADMIN
+from deephaven_massive.namespaces._stocks import FMV as STOCKS_FMV
+from deephaven_massive.namespaces._stocks import TRADES as STOCKS_TRADES
 
 TICK, FMV = ChannelFamily.TICK, ChannelFamily.FMV
+# The host the stocks FMV page documents, as the generated channel carries it.
+FMV_HOST = fmv_host(AssetClass.STOCKS)
+PAGES = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
 LOGGER = "deephaven_massive._ingest.host_decision"
 
 Load = Callable[[str, str], bytes]
@@ -78,7 +89,11 @@ def test_every_probe_is_a_generated_path_with_its_parameters() -> None:
         assert set(probe.path_params) | set(probe.query) <= names
 
 
-def test_recency_follows_the_host() -> None:
+def test_every_feed_has_a_recency() -> None:
+    assert set(FEED_RECENCY) == set(Feed)
+
+
+def test_recency_follows_the_feed_the_pages_give_the_host() -> None:
     assert recency_of(REALTIME_HOST) is Recency.REALTIME
     assert recency_of(FMV_HOST) is Recency.REALTIME
     assert recency_of(DELAYED_HOST) is Recency.DELAYED
@@ -116,12 +131,30 @@ def test_fmv_of_a_delayed_subscription_streams_from_its_documented_host() -> Non
     assert fetch.probes == []
 
 
-def test_the_real_time_note_names_the_dataset_page() -> None:
-    assert real_time_note(ADMIN) == (
+def test_a_dataset_documented_only_in_real_time_streams_only_in_real_time() -> None:
+    assert refusal_note(ADMIN) == (
         "options.admin_messages streams only in real time, on the plans listed at "
-        "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
-        "options.admin_messages.md"
+        f"{PAGES}options.admin_messages.md"
     )
+
+
+@pytest.mark.parametrize("spec", [STOCKS_FMV, INDEX_VALUES], ids=["fmv", "index values"])
+def test_a_dataset_documented_on_another_feed_alone_names_that_feed(spec: DatasetSpec) -> None:
+    # The page names where the channel is served, not how recent its data is.
+    (only,) = {h for c in spec.channels.values() for h in channel_hosts(spec.single_class, c)}
+    assert only.feed is Feed.BUSINESS
+    assert refusal_note(spec) == (
+        f"Massive documents {spec.name} only on its Business feed, {only.host}; its plans are "
+        f"listed at {page_url(spec)}"
+    )
+
+
+def test_a_dataset_documented_on_two_feeds_adds_no_note() -> None:
+    assert refusal_note(STOCKS_TRADES) == ""
+
+
+def test_every_feed_has_a_note() -> None:
+    assert set(ONE_FEED_NOTES) == set(Feed)
 
 
 def test_a_pinned_tick_host_needs_no_request() -> None:
@@ -236,7 +269,7 @@ def test_real_time_beside_an_undocumented_timeframe_is_unconfirmed() -> None:
 
 
 @pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.OPTIONS])
-def test_a_business_key_without_trades_streams_real_time(
+def test_a_snapshot_with_only_fmv_streams_real_time(
     snapshot: Callable[[str], Snapshot], asset_class: AssetClass
 ) -> None:
     # No host is guessed from the fmv field: no timeframe means the real-time host.
@@ -322,7 +355,7 @@ def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixt
 
 
 def test_a_snapshot_whose_every_row_is_refused_is_a_refused_snapshot() -> None:
-    # Massive can refuse a Basic key's snapshot with HTTP 200 and an error on every row.
+    # Massive can refuse a key's snapshot with HTTP 200 and an error on every row.
     rows = [
         {"ticker": ticker, "error": "NOT_ENTITLED", "message": "Not entitled to this ticker."}
         for ticker in ("AAPL", "MSFT")
