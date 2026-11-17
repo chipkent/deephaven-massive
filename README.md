@@ -606,9 +606,9 @@ Next, options on the stocks you follow.
 
 **Plan:** Options Starter or higher
 
-Read Apple's calls of the nearest expiry, with their quotes, implied volatility, and open
-interest. If the plans table shows your options plan delayed, list `options` in your settings
-file too, as `delayed_subscriptions: [stocks, options]`.
+If the plans table shows your options plan delayed, list `options` in your settings file too,
+as `delayed_subscriptions: [stocks, options]`. Then read Apple's calls of the nearest expiry,
+with their quotes, implied volatility, and open interest:
 
 ```python
 import deephaven_massive as dm
