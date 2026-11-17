@@ -798,6 +798,7 @@ class RestReader:
         """
         if not spec.underlying_by_root:
             return rows
+
         return canonical_underlyings(
             rows,
             functools.partial(self.root_kind, patience=patience, cancel=stop),
@@ -807,20 +808,23 @@ class RestReader:
     def root_kind(
         self,
         root: str,
+        *,
+        underlying: str,
         contract: str,
         day: str,
-        *,
         patience: Patience | None = None,
         cancel: Cancel | None = None,
     ) -> RootKind:
         """Return whether an option root's contracts are options on an index.
 
         The session's `OptionRootKinds.kind` (`_ingest/option_roots.py`), read through this
-        reader: the first call for a root reads Massive's contracts reference of `contract` as
-        of `day`, once per session, blocking the calling thread meanwhile.
+        reader: the first call reads Massive's index ticker list, once per session, and the
+        first call for a root whose underlying is on it reads Massive's contracts reference of
+        `contract` as of `day`, blocking the calling thread meanwhile.
 
         Args:
             root: The OCC root, such as `"SPXW"`.
+            underlying: The bare underlying the row names, such as `"SPX"`.
             contract: A canonical options ticker of that root.
             day: The trading day of the row that names it, as ISO text.
             patience: The read's patience; None takes it now, on the calling thread
@@ -834,6 +838,7 @@ class RestReader:
         """
         return self.state.option_roots.kind(
             root,
+            underlying=underlying,
             contract=contract,
             day=day,
             reader=self,

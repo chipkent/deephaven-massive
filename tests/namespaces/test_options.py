@@ -1290,8 +1290,7 @@ def test_open_interest_sends_its_filters_and_reads_each_contract_s_day(
 ) -> None:
     path = "/options/v1/open-interest"
     fake_rest.reply(path, Reply(body(load_fixture, "open_interest.json")))
-    reference = "/v3/reference/options/contracts/O:SPY260123P00687000"
-    fake_rest.reply(wire(reference), contract_reference("OCASPS"))
+    serve_indices(fake_rest, "SPX")
     out = rows(
         rest_session.options.open_interest(
             ["O:SPY260123P00687000", "O:SPY260123C00687000"],
@@ -1318,8 +1317,8 @@ def test_open_interest_sends_its_filters_and_reads_each_contract_s_day(
                 "limit": "50000",
             },
         ),
-        # The root's first contract tells a stock from an index, once for both rows.
-        (reference, {"as_of": "2026-01-22"}),
+        # SPY is no listed index, so its root is a stock's, with no further request.
+        (INDEX_LIST, {"market": "indices", "active": "true", "limit": "1000"}),
     ]
     picked = ("Symbol", "OptionRoot", "Date", "ContractType", "OpenInterest")
     assert [tuple(r[c] for c in picked) for r in out] == [
@@ -1331,6 +1330,15 @@ def test_open_interest_sends_its_filters_and_reads_each_contract_s_day(
         687.0,
         "SPY",
     )
+
+
+INDEX_LIST = "/v3/reference/tickers"
+
+
+def serve_indices(server: FakeRestServer, *names: str) -> None:
+    # Massive's index ticker list, one page, which the library reads once per session.
+    rows = [{"ticker": f"I:{name}", "market": "indices"} for name in names]
+    server.reply(INDEX_LIST, Reply({"status": "OK", "results": rows}))
 
 
 def contract_reference(cfi: str) -> Reply:
@@ -1382,9 +1390,8 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
 ) -> None:
     path = "/options/v1/unusual-trades"
     fake_rest.reply(path, Reply(body(load_fixture, "unusual_trades.json")))
-    spy = "/v3/reference/options/contracts/O:SPY260123C00687000"
     spxw = "/v3/reference/options/contracts/O:SPXW261218C06000000"
-    fake_rest.reply(wire(spy), contract_reference("OCASPS"))
+    serve_indices(fake_rest, "SPX")
     fake_rest.reply(wire(spxw), contract_reference("OCEICS"))
     start = datetime(2025, 10, 29, 15, tzinfo=UTC)
     out = rows(
@@ -1394,8 +1401,12 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
     )
     [(sent_path, sent), *references] = fake_rest.get_queries(one_value=True)
     assert sent_path == path
-    # Each root is asked about once, as of its trade's New York trading day.
-    assert references == [(spy, {"as_of": "2025-10-29"}), (spxw, {"as_of": "2025-10-29"})]
+    # The index list once; then only SPXW, whose SPX is a listed index, is asked about, as of
+    # its trade's New York trading day.
+    assert references == [
+        (INDEX_LIST, {"market": "indices", "active": "true", "limit": "1000"}),
+        (spxw, {"as_of": "2025-10-29"}),
+    ]
     assert sent["ticker.any_of"] == "O:SPY260123C00687000"
     assert {"sip_timestamp.gte", "sip_timestamp.lt", "limit"} <= sent.keys()
     picked = ("Symbol", "Date", "Timestamp", "OptionRoot", "Price", "Size", "Flags")
@@ -1439,6 +1450,7 @@ def test_one_bare_underlying_is_a_stock_or_an_index_by_each_root(
         {"ticker": index, "root": "DJTW", "date": "2026-11-13", "underlying_ticker": "DJT"},
     ]
     fake_rest.reply("/options/v1/open-interest", Reply({"status": "OK", "results": page}))
+    serve_indices(fake_rest, "DJT")
     fake_rest.reply(wire(f"/v3/reference/options/contracts/{stock}"), contract_reference("OCASPS"))
     fake_rest.reply(wire(f"/v3/reference/options/contracts/{index}"), contract_reference("OCEICS"))
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.option_roots"):
@@ -1456,6 +1468,7 @@ def test_a_poll_of_unusual_trades_names_an_index_underlying_from_its_first_cycle
         Reply({"status": "OK", "results": [{**trade, "underlying_ticker": "SPX"}]}),
     )
     reference = "/v3/reference/options/contracts/O:SPXW261218C06000000"
+    serve_indices(fake_rest, "SPX")
     fake_rest.reply(wire(reference), contract_reference("OCEICS"))
     table = rest_session.options.unusual_trades(limit=10).poll(60)
     pace = threading.Event()  # never set; only paces the bounded wait for the first cycle
@@ -1473,16 +1486,22 @@ def test_a_poll_of_unusual_trades_names_an_index_underlying_from_its_first_cycle
     ]
 
 
+@pytest.mark.parametrize("refused", ["index list", "contract"])
 def test_a_refused_root_lookup_fails_the_read_with_massive_s_refusal(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, refused: str
 ) -> None:
     fake_rest.reply(
         "/options/v1/open-interest",
         Reply({"status": "OK", "results": [{**LIST_ROW, "underlying_ticker": "SPY"}]}),
     )
-    refusal = {"status": "NOT_AUTHORIZED", "message": "You are not entitled to this data."}
-    reference = f"/v3/reference/options/contracts/{LIST_ROW['ticker']}"
-    fake_rest.reply(wire(reference), Reply(refusal, status=403))
+    refusal = Reply(
+        {"status": "NOT_AUTHORIZED", "message": "You are not entitled to this data."}, status=403
+    )
+    if refused == "index list":
+        fake_rest.reply(INDEX_LIST, refusal)
+    else:
+        serve_indices(fake_rest, "SPY")  # as if SPY named an index, so its root is asked about
+        fake_rest.reply(wire(f"/v3/reference/options/contracts/{LIST_ROW['ticker']}"), refusal)
     with pytest.raises(dm.EntitlementError, match="option root 'SPY' cannot be classified"):
         rest_session.options.open_interest().fetch(wait=True)
 

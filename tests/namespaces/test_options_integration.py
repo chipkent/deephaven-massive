@@ -24,6 +24,8 @@ from deephaven import dtypes, new_table
 from deephaven.column import string_col
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.wire_symbols import is_index_option
+from deephaven_massive._ingest.rate_limits import OTHER
 from deephaven_massive._massive import (
     RestClient,
     Transport,
@@ -1325,3 +1327,60 @@ def test_admin_message_history_reads_a_day_of_every_exchange(
     )
     assert list(table.column_names) == [str(r["Name"]) for r in table_rows(query.columns())]
     assert all(r["Date"] == previous_trading_day.isoformat() for r in found)
+
+
+_INDEX_UNDERLYINGS = ("I:SPX", "I:NDX", "I:VIX", "I:RUT", "I:XSP", "I:DJX", "I:OEX")
+"""Indices with listed options, whose contracts' underlyings must be on Massive's index list."""
+
+
+@pytest.mark.verifies("143")
+@pytest.mark.requests(40)
+@pytest.mark.timeout(600)
+def test_index_option_underlyings_are_on_the_index_list(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Every sampled option on an index names an index on Massive's index list.
+
+    Reads Massive's whole list of listed indices, then up to 20 contracts each of `I:SPX`,
+    `I:NDX`, `I:VIX`, `I:RUT`, `I:XSP`, `I:DJX`, and `I:OEX` from `m.options.contracts()`. For
+    every contract whose CFI code marks an option on an index, its bare underlying must be on
+    the list, as the open interest's and unusual trades' pre-filter assumes. An underlying
+    Massive lists no contract for is recorded, not failed. Also records the list's pages and
+    how many distinct roots of one whole-market page of open interest name a listed index: the
+    Contract Overview requests a first whole-market read sends. A refusal skips the test,
+    quoting Massive.
+    """
+    tickers = source(Transport.REST, "/v3/reference/tickers")
+    query = {"market": "indices", "active": "true", "limit": 1000}
+    listed: set[str] = set()
+    pages = 0
+    for found in live_rest.pages(tickers, {}, query, bucket=OTHER):
+        pages += 1
+        listed |= {str(r["ticker"]).removeprefix("I:") for r in found.rows if r.get("ticker")}
+    evidence(f"index list: {len(listed)} indices in {pages} pages")
+    off_list: list[str] = []
+    compared = 0
+    for underlying in _INDEX_UNDERLYINGS:
+        rows = table_rows(
+            live_session.options.contracts(underlying=underlying, limit=20).fetch(wait=True)
+        )
+        on_index = [r for r in rows if is_index_option(str(r.get("Cfi") or ""))]
+        compared += len(on_index)
+        named = sorted({str(r["Underlying"]) for r in on_index})
+        evidence(
+            f"{underlying}: {len(rows)} contracts, {len(on_index)} on an index, naming {named}"
+        )
+        off_list += [n for n in named if n.removeprefix("I:") not in listed]
+    market = _page(live_rest, _OPEN_INTEREST, {"limit": 50000})
+    roots = {str(r.get("root")): str(r.get("underlying_ticker")) for r in market}
+    index_named = sorted(root for root, under in roots.items() if under in listed)
+    evidence(
+        f"one whole-market page of open interest: {len(market)} rows, {len(roots)} roots, "
+        f"{len(index_named)} naming a listed index {index_named[:40]}"
+    )
+    assert compared
+    assert not off_list, off_list

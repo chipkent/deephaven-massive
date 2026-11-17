@@ -23,7 +23,11 @@ if TYPE_CHECKING:
 
 LOGGER = "deephaven_massive._ingest.option_roots"
 SPXW = "O:SPXW261218C06000000"
-PATH = f"/v3/reference/options/contracts/{SPXW.replace(':', '%3A')}"
+AAPL = "O:AAPL261218C00200000"
+CONTRACT = f"/v3/reference/options/contracts/{SPXW}"
+TICKERS = "/v3/reference/tickers"
+INDEX_QUERY = {"market": ["indices"], "active": ["true"], "limit": ["1000"]}
+"""The query of the first page of Massive's list of listed indices."""
 
 
 @pytest.fixture
@@ -39,6 +43,12 @@ def reader_of(m: dm.MassiveSession) -> rest.RestReader:
     return transport._reader("call-1", m._core.policy, waiter=Waiter.CALL)
 
 
+def indices(*names: str) -> Reply:
+    # One page of Massive's index ticker list, with a row without a ticker, which is skipped.
+    rows: list[dict[str, object]] = [{"ticker": f"I:{n}", "market": "indices"} for n in names]
+    return Reply({"status": "OK", "results": [*rows, {"ticker": None}]})
+
+
 def contract(cfi: str | None) -> Reply:
     # The contracts reference of one contract, with the CFI code Massive gives it.
     row: dict[str, object] = {"ticker": SPXW, "underlying_ticker": "SPX"}
@@ -47,19 +57,44 @@ def contract(cfi: str | None) -> Reply:
     return Reply({"status": "OK", "results": row})
 
 
+def spxw(reader: rest.RestReader, day: str = "2026-11-13") -> RootKind:
+    return reader.root_kind("SPXW", underlying="SPX", contract=SPXW, day=day)
+
+
+def wired(path: str) -> str:
+    # A path as the client sends it: the colon of an `O:` symbol is percent-encoded.
+    return path.replace(":", "%3A")
+
+
 @pytest.mark.parametrize(
     ("cfi", "kind"),
     [("OCEICS", RootKind.INDEX), ("OCASPS", RootKind.OTHER), (None, RootKind.UNKNOWN)],
 )
-def test_a_root_s_kind_is_its_contract_s_cfi_code_asked_once(
+def test_an_index_named_root_s_kind_is_its_contract_s_cfi_code_asked_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, cfi: str | None, kind: RootKind
 ) -> None:
-    fake_rest.reply(PATH, contract(cfi))
+    fake_rest.reply(TICKERS, indices("SPX", "DJT"))
+    fake_rest.reply(wired(CONTRACT), contract(cfi))
     reader = reader_of(session)
-    assert reader.root_kind("SPXW", SPXW, "2026-11-13") is kind
-    assert reader.root_kind("SPXW", "O:SPXW261219C06000000", "2026-11-14") is kind
-    # One request per root and session, as of the first row's day.
-    assert fake_rest.get_queries() == [(PATH.replace("%3A", ":"), {"as_of": ["2026-11-13"]})]
+    assert spxw(reader) is kind
+    assert spxw(reader, "2026-11-14") is kind
+    # The index list once, then one Contract Overview request per root, as of the first day.
+    assert fake_rest.get_queries() == [
+        (TICKERS, INDEX_QUERY),
+        (CONTRACT, {"as_of": ["2026-11-13"]}),
+    ]
+
+
+def test_a_root_whose_underlying_is_no_listed_index_is_a_stock_s_with_no_lookup(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(TICKERS, indices("SPX"))
+    reader = reader_of(session)
+    for root, underlying in (("AAPL", "AAPL"), ("AAPL1", "AAPL"), ("SPY", "SPY")):
+        kind = reader.root_kind(root, underlying=underlying, contract=AAPL, day="2026-11-13")
+        assert kind is RootKind.OTHER
+    # The list is read once, and no root's contract is asked about.
+    assert fake_rest.get_queries() == [(TICKERS, INDEX_QUERY)]
 
 
 def test_a_contract_the_reference_lacks_is_unknown_and_asked_again_after_an_hour(
@@ -67,60 +102,163 @@ def test_a_contract_the_reference_lacks_is_unknown_and_asked_again_after_an_hour
 ) -> None:
     clock = [1000.0]
     monkeypatch.setattr(shared_lookup, "_monotonic", lambda: clock[0])
-    fake_rest.reply(PATH, Reply({"status": "NOT_FOUND"}, status=404), contract("OCEICS"))
+    fake_rest.reply(TICKERS, indices("SPX"))
+    fake_rest.reply(wired(CONTRACT), Reply({"status": "NOT_FOUND"}, status=404), contract("OCEICS"))
     reader = reader_of(session)
-    assert reader.root_kind("SPXW", SPXW, "2026-11-13") is RootKind.UNKNOWN
+    assert spxw(reader) is RootKind.UNKNOWN
     clock[0] += REREAD_AFTER - 1
-    assert reader.root_kind("SPXW", SPXW, "2026-11-13") is RootKind.UNKNOWN  # not an hour old
-    assert len(fake_rest.get_queries()) == 1
+    assert spxw(reader) is RootKind.UNKNOWN  # not an hour old
+    assert len(fake_rest.get_queries()) == 2
     clock[0] += 1
-    assert reader.root_kind("SPXW", SPXW, "2026-11-13") is RootKind.INDEX  # asked again
-    assert len(fake_rest.get_queries()) == 2
+    assert spxw(reader) is RootKind.INDEX  # asked again
+    assert len(fake_rest.get_queries()) == 3
     clock[0] += REREAD_AFTER
-    assert reader.root_kind("SPXW", SPXW, "2026-11-13") is RootKind.INDEX  # a kind is kept
-    assert len(fake_rest.get_queries()) == 2
+    assert spxw(reader) is RootKind.INDEX  # a kind is kept
+    assert len(fake_rest.get_queries()) == 3
 
 
 def test_a_failed_lookup_raises_massive_s_error_naming_the_root_and_is_retried(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    fake_rest.reply(PATH, Reply({"status": "ERROR"}, status=403), contract("OCASPS"))
+    fake_rest.reply(TICKERS, indices("SPX"))
+    fake_rest.reply(wired(CONTRACT), Reply({"status": "ERROR"}, status=403), contract("OCASPS"))
     reader = reader_of(session)
     with pytest.raises(
         dm.EntitlementError,
         match=rf"^option root 'SPXW' cannot be classified as an index or not: reading Massive's "
         rf"Contract Overview of {SPXW} failed",
     ) as raised:
-        reader.root_kind("SPXW", SPXW, "2026-11-13")
+        spxw(reader)
     assert raised.value.status == 403
-    assert reader.root_kind("SPXW", SPXW, "2026-11-13") is RootKind.OTHER  # not kept
+    assert spxw(reader) is RootKind.OTHER  # not kept
+    assert len(fake_rest.get_queries()) == 3
+
+
+def test_a_failed_index_list_raises_massive_s_error_naming_the_root_and_is_retried(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(TICKERS, Reply({"status": "ERROR"}, status=403), indices())
+    reader = reader_of(session)
+    with pytest.raises(
+        dm.EntitlementError,
+        match=r"^option root 'SPXW' cannot be classified as an index or not: reading Massive's "
+        r"index ticker list failed",
+    ) as raised:
+        spxw(reader)
+    assert raised.value.status == 403
+    assert spxw(reader) is RootKind.OTHER  # read again, and SPX is not listed
     assert len(fake_rest.get_queries()) == 2
 
 
+@pytest.mark.parametrize("failing", ["list", "contract"])
 def test_an_unexpected_failure_of_a_lookup_is_a_library_bug_its_waiters_see(
-    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failing: str,
 ) -> None:
+    fake_rest.reply(TICKERS, indices("SPX"))
     reader = reader_of(session)
-    claimed: list[Future[RootKind]] = []
+    kinds = reader.state.option_roots
+    claimed: list[Future[object]] = []
 
-    def get(*_: object, **__: object) -> NoReturn:
-        future, created = reader.state.option_roots._lookup._claim("SPXW")  # a waiter's view
-        assert not created
+    def broken(*_: object, **__: object) -> NoReturn:
+        # What a waiter sees, while the failing read holds the claim.
+        if failing == "list":
+            future: Future[object] = kinds._indices._claim("index tickers")[0]  # type: ignore[assignment]  # either lookup's future
+        else:
+            future = kinds._lookup._claim("SPXW")[0]  # type: ignore[assignment]  # either lookup's future
         claimed.append(future)
         raise RuntimeError("the reader broke")
 
-    monkeypatch.setattr(reader.state.client, "get", get)
+    monkeypatch.setattr(reader.state.client, "pages" if failing == "list" else "get", broken)
     with (
         caplog.at_level(logging.WARNING, LOGGER),
         pytest.raises(RuntimeError, match="the reader broke"),
     ):
-        reader.root_kind("SPXW", SPXW, "2026-11-13")
+        spxw(reader)
     [record] = caplog.records
     assert record.levelno == logging.ERROR
     assert record.getMessage().endswith(LIBRARY_BUG)
     (future,) = claimed
-    with pytest.raises(dm.MassiveError, match=r"^the request failed: RuntimeError"):
+    with pytest.raises(dm.MassiveError, match=r"failed: RuntimeError"):
         future.result()
+
+
+@pytest.mark.parametrize("interrupted", ["list", "contract"])
+def test_an_interrupted_lookup_is_forgotten_and_logs_no_bug(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    interrupted: str,
+) -> None:
+    fake_rest.reply(TICKERS, indices("SPX"))
+    reader = reader_of(session)
+
+    def interrupt(*_: object, **__: object) -> NoReturn:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(reader.state.client, "pages" if interrupted == "list" else "get", interrupt)
+    with caplog.at_level(logging.WARNING, LOGGER), pytest.raises(KeyboardInterrupt):
+        spxw(reader)
+    assert caplog.records == []  # the caller's interrupt is no defect
+    kinds = reader.state.option_roots
+    # Each claim the interrupt ended is forgotten, so the next call makes the lookup again.
+    assert kinds._indices._claim("index tickers")[1] == (interrupted == "list")
+    assert kinds._lookup._claim("SPXW")[1]
+
+
+class WatchedFuture(Future[object]):
+    # A future that says when a caller starts waiting on it.
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = threading.Event()
+
+    @override
+    def add_done_callback(self, fn: Callable[[Future[object]], object]) -> None:
+        # A caller that joins a lookup asks to hear when it completes, then waits.
+        super().add_done_callback(fn)
+        self.waiting.set()
+
+
+def test_a_caller_waiting_on_another_s_index_list_takes_it(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    reader = reader_of(session)
+    lookup = reader.state.option_roots._indices
+    future = WatchedFuture()
+    lookup._futures["index tickers"] = future  # type: ignore[assignment]  # another thread reads
+    lookup._claimed["index tickers"] = 0.0
+    results: list[RootKind] = []
+    waiter = threading.Thread(target=lambda: results.append(spxw(reader)))
+    waiter.start()
+    assert future.waiting.wait(30)
+    future.set_result(frozenset({"NDX"}))
+    waiter.join(30)
+    assert results == [RootKind.OTHER]  # SPX is not on the list it took
+    assert fake_rest.get_queries() == []
+
+
+def test_a_caller_waiting_on_another_s_root_lookup_takes_its_answer(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(TICKERS, indices("SPX"))
+    reader = reader_of(session)
+    lookup = reader.state.option_roots._lookup
+    future = WatchedFuture()
+    lookup._futures["SPXW"] = future  # type: ignore[assignment]  # another thread asks
+    lookup._claimed["SPXW"] = 0.0
+    results: list[RootKind] = []
+    waiter = threading.Thread(target=lambda: results.append(spxw(reader)))
+    waiter.start()
+    assert future.waiting.wait(30)
+    future.set_result(RootKind.INDEX)
+    waiter.join(30)
+    assert results == [RootKind.INDEX]
 
 
 def page(
@@ -137,12 +275,21 @@ def page(
     )
 
 
+def fixed(kind: RootKind) -> option_roots.KindOf:
+    # A lookup that gives every root one kind.
+    def answer(root: str, *, underlying: str, contract: str, day: str) -> RootKind:
+        del root, underlying, contract, day
+        return kind
+
+    return answer
+
+
 def test_rows_of_an_index_root_get_the_prefix_and_each_root_is_asked_once() -> None:
     kinds = {"SPXW": RootKind.INDEX, "SPX": RootKind.INDEX, "DJT": RootKind.OTHER}
-    asked: list[tuple[str, str, str]] = []
+    asked: list[tuple[str, str, str, str]] = []
 
-    def kind(root: str, contract: str, day: str) -> RootKind:
-        asked.append((root, contract, day))
+    def kind(root: str, *, underlying: str, contract: str, day: str) -> RootKind:
+        asked.append((root, underlying, contract, day))
         return kinds[root]
 
     batch = page(
@@ -154,22 +301,23 @@ def test_rows_of_an_index_root_get_the_prefix_and_each_root_is_asked_once() -> N
     assert out.column("Underlying").to_pylist() == ["I:SPX", "I:SPX", "DJT", "I:SPX", None]
     # A row without Massive's root is keyed by its symbol's; a null underlying asks nothing.
     assert asked == [
-        ("SPXW", SPXW, "2026-11-13"),
-        ("DJT", "O:DJT261218C00030000", "2026-11-13"),
-        ("SPX", "O:SPX261218C06000000", "2026-11-13"),
+        ("SPXW", "SPX", SPXW, "2026-11-13"),
+        ("DJT", "DJT", "O:DJT261218C00030000", "2026-11-13"),
+        ("SPX", "SPX", "O:SPX261218C06000000", "2026-11-13"),
     ]
 
 
 def test_a_page_already_canonical_or_of_stocks_alone_is_unchanged() -> None:
-    def kind(root: str, contract: str, day: str) -> RootKind:
-        del contract, day
-        assert root == "AAPL"
-        return RootKind.OTHER
-
     prefixed = page([SPXW], ["SPXW"], ["I:SPX"])
-    assert canonical_underlyings([prefixed], kind, dataset="d") == [prefixed]
-    stocks = page(["O:AAPL261218C00200000"], ["AAPL"], ["AAPL"])
-    assert canonical_underlyings([stocks], kind, dataset="d") == [stocks]
+    assert canonical_underlyings([prefixed], fixed(RootKind.OTHER), dataset="d") == [prefixed]
+    stocks = page([AAPL], ["AAPL"], ["AAPL"])
+    assert canonical_underlyings([stocks], fixed(RootKind.OTHER), dataset="d") == [stocks]
+
+
+def test_a_row_already_prefixed_beside_a_bare_one_is_not_prefixed_twice() -> None:
+    batch = page([SPXW, "O:SPXW261218P06000000"], ["SPXW", "SPXW"], ["I:SPX", "SPX"])
+    [out] = canonical_underlyings([batch], fixed(RootKind.INDEX), dataset="d")
+    assert out.column("Underlying").to_pylist() == ["I:SPX", "I:SPX"]
 
 
 def test_an_unclassified_root_keeps_the_bare_ticker_with_one_warning(
@@ -181,7 +329,7 @@ def test_an_unclassified_root_keeps_the_bare_ticker_with_one_warning(
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
             [out] = canonical_underlyings(
-                [batch], lambda *_: RootKind.UNKNOWN, dataset="options.open_interest"
+                [batch], fixed(RootKind.UNKNOWN), dataset="options.open_interest"
             )
             assert out.column("Underlying").to_pylist() == ["SPX"]
     [record] = caplog.records
@@ -191,64 +339,11 @@ def test_an_unclassified_root_keeps_the_bare_ticker_with_one_warning(
     )
 
 
-def test_an_interrupted_lookup_is_forgotten_and_logs_no_bug(
-    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    reader = reader_of(session)
-
-    def get(*_: object, **__: object) -> NoReturn:
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(reader.state.client, "get", get)
-    with caplog.at_level(logging.WARNING, LOGGER), pytest.raises(KeyboardInterrupt):
-        reader.root_kind("SPXW", SPXW, "2026-11-13")
-    assert caplog.records == []  # the caller's interrupt is no defect
-    assert reader.state.option_roots._lookup._claim("SPXW")[1]  # and the claim is forgotten
-
-
-class WatchedFuture(Future[RootKind]):
-    # A future that says when a caller starts waiting on it.
-    def __init__(self) -> None:
-        super().__init__()
-        self.waiting = threading.Event()
-
-    @override
-    def add_done_callback(self, fn: Callable[[Future[RootKind]], object]) -> None:
-        # A caller that joins a lookup asks to hear when it completes, then waits.
-        super().add_done_callback(fn)
-        self.waiting.set()
-
-
-def test_a_caller_waiting_on_another_s_lookup_takes_its_answer(
-    session: dm.MassiveSession,
-) -> None:
-    reader = reader_of(session)
-    future = WatchedFuture()
-    lookup = reader.state.option_roots._lookup
-    lookup._futures["SPXW"] = future  # another thread is asking about the root
-    lookup._claimed["SPXW"] = 0.0
-    results: list[RootKind] = []
-    waiter = threading.Thread(
-        target=lambda: results.append(reader.root_kind("SPXW", SPXW, "2026-11-13"))
-    )
-    waiter.start()
-    assert future.waiting.wait(30)
-    future.set_result(RootKind.INDEX)
-    waiter.join(30)
-    assert results == [RootKind.INDEX]
-
-
 def test_a_kind_no_case_handles_is_refused() -> None:
+    def text(root: str, *, underlying: str, contract: str, day: str) -> str:
+        del root, underlying, contract, day
+        return "index"
+
     batch = page([SPXW], ["SPXW"], ["SPX"])
     with pytest.raises(AssertionError):
-        canonical_underlyings(
-            [batch],
-            lambda *_: "index",  # type: ignore[arg-type]  # the point: refused at run time
-            dataset="d",
-        )
-
-
-def test_a_row_already_prefixed_beside_a_bare_one_is_not_prefixed_twice() -> None:
-    batch = page([SPXW, "O:SPXW261218P06000000"], ["SPXW", "SPXW"], ["I:SPX", "SPX"])
-    [out] = canonical_underlyings([batch], lambda *_: RootKind.INDEX, dataset="d")
-    assert out.column("Underlying").to_pylist() == ["I:SPX", "I:SPX"]
+        canonical_underlyings([batch], text, dataset="d")  # type: ignore[arg-type]  # the point
