@@ -1708,14 +1708,14 @@ class RestReader:
     ) -> None:
         """Warn about rows of an index's contracts that do not read as that index's.
 
-        The contracts list takes an index bare (`SPX` for `I:SPX`), and a row gets its `I:`
-        back only when its CFI code marks an option on an index
-        (`rest_rows.RowConverter`). A bare ticker can also name a stock (`DJT` is a stock;
-        `I:DJT` is not one of Massive's indices), so a row whose code marks another kind of
-        option is Massive's answer about another instrument: it keeps the underlying Massive
-        wrote, and one WARNING per dataset and index per session names the request and the
-        rows. A row without a CFI code keeps the bare ticker, since nothing says it is an
-        index: one WARNING per dataset per session says so. Neither drops a row.
+        The contracts list takes an index bare (`SPX` for `I:SPX`), and a row gets its `I:` back
+        only when its CFI code marks an option on an index (`rest_rows.RowConverter`). A bare
+        ticker can also name a stock (`DJT` is both a stock and the index `I:DJT`, the Dow Jones
+        Transportation Average), so a row whose code marks another kind of option is Massive's
+        answer about another instrument: it keeps the underlying Massive wrote, and one WARNING
+        per dataset and index per session names the request and the rows. A row without a CFI
+        code keeps the bare ticker, since nothing says it is an index: one WARNING per dataset
+        per session says so. Neither drops a row.
 
         Args:
             spec: The dataset.

@@ -1174,9 +1174,10 @@ def test_root_is_the_ticker_s_occ_root(
 
 _UNDERLYING_ROOTS = ("SPX", "SPXW", "NDX", "VIX", "RUT", "DJT", "AMCR1", "AAPL")
 """Roots whose underlying the two new datasets must name as the contracts reference does: index
-roots and their weeklies, the stock `DJT`, an adjusted root, and a plain stock. `I:DJT` is not
-on Massive's index list, so `DJT`'s rows are judged by the index-list pre-filter alone. An option
-on a stock or fund whose ticker is also on the list is looked for and compared by
+roots and their weeklies, the stock `DJT`, an adjusted root, and a plain stock. `DJT` is also on
+Massive's index list (`I:DJT`, the Dow Jones Transportation Average), so its rows go through the
+per-root lookup, whose CFI code (`OPASPS`) puts its options on the stock. Shared tickers found in
+Massive's data are compared by
 `test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_reference`."""
 
 _PER_ROOT = 2
@@ -1565,20 +1566,33 @@ def _compare_collision(
 
     Reads the contract's `Underlying` and `Cfi` from `m.options.contract_details()` as of the
     row's day, and the library's `Underlying` of the same contract and day from the row's
-    dataset, and records all of them.
+    dataset, and records all of them. A contract the reference has no row for can't be
+    classified, so the library withholds its rows and the read of it alone fails with a
+    `RowDataError`: that is recorded, and the contract is not compared.
 
     Returns:
         The side the reference puts the contract on ("index", "other", "no CFI", or "not
-        compared" when the reference or the library has no row), and each mismatch found.
+        compared" when the reference or the library has no row), and each mismatch found,
+        including a library read that fails for a contract the reference classifies.
     """
     source_name, row = sample
     ticker = str(row["ticker"])
     day = _row_day(row)
     found = table_rows(session.options.contract_details(ticker, as_of=day).fetch(wait=True))
     sent = row.get("underlying_ticker")
-    published = _published_underlyings(session, source_name, ticker, day=day, table_rows=table_rows)
     reference = str(found[0]["Underlying"]) if found else None
     cfi = found[0]["Cfi"] if found else None
+    try:
+        published = _published_underlyings(
+            session, source_name, ticker, day=day, table_rows=table_rows
+        )
+    except dm.MassiveError as error:
+        evidence(
+            f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r} "
+            f"(CFI {cfi!r}), library read failed: {type(error).__name__}: {error}"
+        )
+        failed = [] if reference is None else [f"{source_name} {ticker}: library read failed"]
+        return "not compared", failed
     evidence(
         f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r} (CFI {cfi!r}), "
         f"library {sorted(set(published))}"
