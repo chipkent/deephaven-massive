@@ -36,7 +36,11 @@ standard library:
         --changed-file AGENTS.md
 
 The first form is the pre-push hook (`.pre-commit-config.yaml`); with no `.git-pr-body.md`
-in the worktree it passes and says so, since CI checks the published description. The third
+in the worktree it passes and says so, since CI checks the published description. It diffs the
+branch against its base, so a stacked branch is not charged with the edits of the pull request
+below it: the base of the branch's pull request; before that exists, the branch the draft's
+first line names, `<!-- base: feat/problems-table -->`; else the open pull request's branch
+this one was cut from; else `origin/main`. The third
 is the `Conventional PR` workflow (`.github/workflows/conventional-pr-check.yml`), which runs
 it whenever a pull request opens, its description changes, or a push changes its diff.
 
@@ -108,6 +112,14 @@ DIFF_HEADER: Final = re.compile(
 )
 RULE_FILES: Final = ("AGENTS.md", ".claude/skills/")
 BODY_FILE: Final = pathlib.Path(".git-pr-body.md")
+MAIN: Final = "origin/main"
+#: A first line of the draft naming the branch this one is stacked on.
+DECLARED_BASE: Final = re.compile(r"\A\s*<!--\s*base:\s*(?P<branch>[^\s>]+)\s*-->")
+STACKED_HINT: Final = (
+    f"The branch was compared with {MAIN}. If it is stacked on another branch whose pull "
+    f"request is not found, make the first line of {BODY_FILE} '<!-- base: <that branch> -->' "
+    f"so its edits are not counted as this branch's; never move the draft aside.\n"
+)
 STANDARD: Final = "docs/dev/pull-requests.md"
 
 
@@ -402,26 +414,92 @@ def _from_gh(number: int) -> tuple[str, list[str], str, list[str]]:
     return str(view["body"]), [str(f["path"]) for f in view["files"]], diff, decisions
 
 
-def _base() -> str:
-    """The branch this one is measured against: its pull request's base, or `origin/main`.
+def _base(body: str) -> tuple[str, str]:
+    """The branch this one is measured against, and how it was found.
+
+    Args:
+        body: The draft description; its first line may declare the base.
 
     Returns:
-        `origin/<base branch>` from `gh pr view` when the branch has a pull request (a
-        stacked one is diffed against the PR below it, not `main`), else `origin/main`.
+        `origin/<branch>` and a phrase saying where it came from, the first that applies: the
+        base of the branch's pull request; the branch the draft's first line declares,
+        `<!-- base: <branch> -->`; the open pull request's branch this one was cut from; else
+        `origin/main`. A stacked branch is diffed against the branch below it, so the edits of
+        that branch's own pull request are not counted as this one's.
     """
     try:
         view = _run(["gh", "pr", "view", "--json", "baseRefName"])
     except subprocess.CalledProcessError:
-        return "origin/main"
-    return "origin/" + str(json.loads(view)["baseRefName"])
+        pass  # no pull request yet: look for the base below
+    else:
+        return "origin/" + str(json.loads(view)["baseRefName"]), "its pull request's base"
+    declared = DECLARED_BASE.match(body)
+    if declared:
+        return "origin/" + declared.group("branch"), f"declared in {BODY_FILE}"
+    return _nearest_upstream()
 
 
-def _from_branch() -> tuple[str, list[str], str]:
+def _commits_ahead(ref: str) -> int:
+    """Count the commits HEAD holds that a branch does not.
+
+    Args:
+        ref: The branch, `origin/<name>`.
+
+    Returns:
+        The commits since the two parted: 0 when HEAD is already in the branch.
+    """
+    return int(_run(["git", "rev-list", "--count", f"{ref}..HEAD"]))
+
+
+def _nearest_upstream() -> tuple[str, str]:
+    """The open pull request's branch this one was cut from, or `origin/main`.
+
+    Returns:
+        The `origin/` branch of an open pull request that shares the most history with HEAD
+        while HEAD still has commits of its own beyond it, and is closer than `origin/main`;
+        else `origin/main`. A pull request based on this branch is stacked on it, not below
+        it, and is passed over.
+    """
+    nearest, distance = MAIN, _commits_ahead(MAIN)
+    current = _run(["git", "branch", "--show-current"]).strip()
+    try:
+        listing = _run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--limit",
+                "200",
+                "--json",
+                "headRefName,baseRefName",
+            ]
+        )
+    except subprocess.CalledProcessError:
+        return nearest, "no open pull request could be listed"
+    for pull in json.loads(listing):
+        if current in (pull["headRefName"], pull["baseRefName"]):
+            continue  # this branch's own pull request, or one stacked on it
+        ref = "origin/" + str(pull["headRefName"])
+        try:
+            ahead = _commits_ahead(ref)
+        except subprocess.CalledProcessError:
+            continue  # a fork's branch, or one not fetched: it cannot be this one's base
+        if 0 < ahead < distance:
+            nearest, distance = ref, ahead
+    if nearest == MAIN:
+        return nearest, "no open pull request's branch is closer"
+    return nearest, "the open pull request's branch it was cut from"
+
+
+def _from_branch() -> tuple[str, list[str], str, str]:
     body = BODY_FILE.read_text()
-    base = _base()
+    base, how = _base(body)
+    sys.stdout.write(f"Comparing the branch with {base} ({how}).\n")
     diff = _run(["git", "diff", f"{base}...HEAD"])
     names = _run(["git", "diff", "--name-only", f"{base}...HEAD"])
-    return body, [line for line in names.splitlines() if line], diff
+    return body, [line for line in names.splitlines() if line], diff, base
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -445,13 +523,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     decisions: list[str] | None = None
+    base = ""
     if args.pr is not None:
         body, changed, diff, decisions = _from_gh(args.pr)
     elif args.body_file is not None:
         body, changed = args.body_file.read_text(), args.changed_file
         diff = args.diff_file.read_text() if args.diff_file else ""
     elif BODY_FILE.exists():
-        body, changed, diff = _from_branch()
+        body, changed, diff, base = _from_branch()
     else:
         sys.stdout.write(
             f"No {BODY_FILE} in this worktree; the Conventional PR workflow checks the "
@@ -460,6 +539,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     problems = find_problems(body, changed, diff, decisions=decisions)
     sys.stdout.writelines(f"{problem}\n" for problem in problems)
+    if problems and base == MAIN:
+        sys.stdout.write(STACKED_HINT)
     output = os.environ.get("GITHUB_OUTPUT")
     if problems and output:
         delimiter = uuid.uuid4().hex
