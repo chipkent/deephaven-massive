@@ -445,9 +445,9 @@ class Admission:
         Raises:
             WireError: Without a status when `cancel` is set (the message says the wait was
                 cancelled), and with status 429 when the bucket is paused for longer than the
-                read's patience can still wait out (the message names the bucket's requests,
-                says when its next request, a probe, goes, gives the patience and what it has
-                spent, the usual cause and the remedies, and quotes the latest refusal).
+                read's patience can still wait out (the message quotes the latest refusal,
+                says when the next request goes, gives how long the read waits and has waited,
+                the usual cause, and the remedies).
         """
         permit = self._governor.admit(self, cancel)
         if isinstance(permit, WireError):
@@ -946,10 +946,12 @@ class RequestGovernor:
         """
         names = tuple(buckets)
         if not names or len(set(names)) != len(names):
-            raise ValueError(f"buckets must be distinct names, at least one: {names!r}")
+            raise ValueError(f"buckets={names!r} is not one or more distinct names.")
         fixed = frozenset(learn_only)
         if not fixed <= set(names):
-            raise ValueError(f"learn-only buckets {sorted(fixed - set(names))} are not buckets")
+            raise ValueError(
+                f"learn_only names {sorted(fixed - set(names))}, which are not buckets."
+            )
         self._clock = clock
         self._lock = threading.Lock()
         self._buckets = {
@@ -971,6 +973,23 @@ class RequestGovernor:
         """The bucket names, in construction order."""
         return tuple(self._buckets)
 
+    def _unknown(self, names: list[str]) -> ValueError:
+        """Return the error of a call that names buckets this governor lacks.
+
+        Args:
+            names: The unknown names, such as `["bonds"]`.
+
+        Returns:
+            A `ValueError` such as `Unknown bucket 'bonds'. The buckets are stocks, options,
+            and other.`
+        """
+        shown = ", ".join(repr(name) for name in names)
+        *others, last = self._buckets
+        comma = "," if len(others) > 1 else ""
+        listed = f"{', '.join(others)}{comma} and {last}" if others else last
+        noun = "bucket" if len(names) == 1 else "buckets"
+        return ValueError(f"Unknown {noun} {shown}. The buckets are {listed}.")
+
     def declare(self, limits: Mapping[str, int]) -> None:
         """Set each bucket's declared limit, which paces it from its first request.
 
@@ -987,16 +1006,18 @@ class RequestGovernor:
         limits = dict(limits)
         unknown = limits.keys() - self._buckets.keys()
         if unknown:
-            raise ValueError(f"unknown buckets {sorted(unknown)}; known: {list(self._buckets)}")
+            raise self._unknown(sorted(unknown))
         fixed = sorted(name for name in limits if not self._buckets[name].declarable)
         if fixed:
             raise ValueError(
-                f"buckets {fixed} cannot be declared; they are paced once they learn a limit "
-                "from Massive's refusal"
+                f"The buckets {fixed} cannot take a declared limit. They are paced at the limit "
+                "they learn from Massive's refusals."
             )
         low = {name: limit for name, limit in limits.items() if limit < 1}
         if low:
-            raise ValueError(f"declared limits must be at least 1 request per minute: {low}")
+            raise ValueError(
+                f"A declared limit is at least 1 request per minute, and {low} is not."
+            )
         with self._lock:
             for name, bucket in self._buckets.items():
                 bucket.declared = limits.get(name)
@@ -1028,7 +1049,7 @@ class RequestGovernor:
             ValueError: If `bucket` is not a bucket.
         """
         if bucket not in self._buckets:
-            raise ValueError(f"unknown bucket {bucket!r}; known: {list(self._buckets)}")
+            raise self._unknown([bucket])
         return Admission(self, bucket, lane=lane, patience=patience)
 
     def charge_pause(self, bucket: str, patience: Patience) -> WireError | None:
@@ -1056,7 +1077,7 @@ class RequestGovernor:
         """
         state = self._buckets.get(bucket)
         if state is None:
-            raise ValueError(f"unknown bucket {bucket!r}; known: {list(self._buckets)}")
+            raise self._unknown([bucket])
         with self._lock:
             now = self._clock.monotonic()
             state.settle(now)
@@ -1414,7 +1435,7 @@ class RequestGovernor:
         """
         state = self._buckets.get(bucket)
         if state is None:
-            raise ValueError(f"unknown bucket {bucket!r}; known: {list(self._buckets)}")
+            raise self._unknown([bucket])
         with self._lock:
             limit = state.limit
             if limit is None or requests < 1:
@@ -1471,7 +1492,7 @@ class RequestGovernor:
             ValueError: If `bucket` is not a bucket.
         """
         if bucket not in self._buckets:
-            raise ValueError(f"unknown bucket {bucket!r}; known: {list(self._buckets)}")
+            raise self._unknown([bucket])
         with self._lock:
             self._listeners = (*self._listeners, (listener, frozenset((bucket,))))
 
@@ -1598,7 +1619,7 @@ class RequestGovernor:
                 try:
                     listener(notice)
                 except Exception:  # a library bug: the listeners only enqueue
-                    logger.exception("a rate-limit pause listener failed. %s", LIBRARY_BUG_REPORT)
+                    logger.exception("A rate-limit pause listener failed. %s", LIBRARY_BUG_REPORT)
 
     def unsubscribe(self, listener: Callable[[], None]) -> None:
         """Stop calling a listener, for every bucket it hears; an unknown one is ignored.
@@ -1665,7 +1686,7 @@ class RequestGovernor:
         bucket = admission.bucket
         if cancel.is_set():
             return WireError(
-                f"{bucket}: the wait for a request slot was cancelled",
+                f"The wait of a {bucket} request for its turn was cancelled.",
                 kind=WireFailure.STOPPED,
             )
         state = self._buckets[bucket]
@@ -1697,7 +1718,9 @@ class RequestGovernor:
     def _give_up_text(self, state: _Bucket, patience: Patience, now: float) -> str:
         """Return the message of a request whose read will not wait out its bucket's pause.
 
-        Called with the lock held, while the bucket is paused.
+        Called with the lock held, while the bucket is paused. A read gives up when the pause
+        still to come is longer than what its patience has left, so it may give up before it
+        has waited at all.
 
         Args:
             state: The bucket.
@@ -1705,29 +1728,28 @@ class RequestGovernor:
             now: The monotonic time.
 
         Returns:
-            The message: the bucket's requests and the latest refusal; when the next request
-            goes, in UTC and in local time; the read's patience and what it has spent; the
-            usual cause; and the remedies, declaring the limit only for a bucket that can be
-            declared, then the patience's `advice`, when it has one.
+            The message: Massive's latest refusal; when the next request goes, in UTC; how long
+            the read waits for pauses and how long it has waited; the usual cause; and the
+            remedies, declaring the limit only for a bucket that can be declared, then the
+            patience's `advice`, a sentence of its own, when it has one.
         """
         goes = datetime.fromtimestamp(self._clock.time() + state.pause_until - now, UTC)
-        remedies = "retry after that time, or stop the other program"
-        if state.declarable:
-            remedies = (
-                "retry after that time; stop the other program; or declare the limit Massive "
-                "gives this subscription (rest_requests_per_minute), or upgrade it"
-            )
-        if patience.advice:
-            remedies = f"{remedies}; {patience.advice}"
+        waited = (
+            f", and it has waited {patience.spent:.0f} s already" if round(patience.spent) else ""
+        )
+        remedies = (
+            "Retry after that time, stop the other program, or set rest_requests_per_minute in "
+            "dm.MassiveConfig to pace requests."
+            if state.declarable
+            else "Retry after that time, or stop the other program."
+        )
+        advice = f" {patience.advice}" if patience.advice else ""
         return (
-            f"Massive is refusing {state.label} with HTTP 429 (latest refusal: "
-            f"{state.last_refusal}). Its next request, a probe, goes at "
-            f"{goes.isoformat(timespec='seconds')} "
-            f"({goes.astimezone().isoformat(timespec='seconds')} local time), but this read "
-            f"waits out at most {patience.seconds:.0f} s of pauses and has spent "
-            f"{patience.spent:.0f} s of its patience. The usual cause is another program or "
-            f"process using the same Massive account, whose limit they share. To go on: "
-            f"{remedies}"
+            f"{state.last_refusal} The next request goes at "
+            f"{goes.strftime('%Y-%m-%d %H:%M:%S')} UTC, later than this read waits: it waits at "
+            f"most {patience.seconds:.0f} s for Massive's pauses{waited}. The usual cause is "
+            "another program using the same Massive account, which shares its limit. "
+            f"{remedies}{advice}"
         )
 
     def _notify(self, *changed: str) -> None:
@@ -1744,4 +1766,4 @@ class RequestGovernor:
             try:
                 listener()
             except Exception:
-                logger.exception("a rate-limit listener failed. %s", LIBRARY_BUG_REPORT)
+                logger.exception("A rate-limit listener failed. %s", LIBRARY_BUG_REPORT)

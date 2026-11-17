@@ -68,7 +68,9 @@ def test_setting_the_token_ends_the_wait_without_a_slot() -> None:
         stop.set()
         assert taken.result(_TIMEOUT) is False
     slots.release()  # the one slot taken above; the stopped caller took none
-    with pytest.raises(RuntimeError, match="never taken"):
+    with pytest.raises(
+        RuntimeError, match=r"^A connection slot was given back that was never taken\.$"
+    ):
         slots.release()
 
 
@@ -112,5 +114,5 @@ def test_no_more_callers_than_slots_hold_one_at_once() -> None:
 
 
 def test_a_client_needs_a_slot() -> None:
-    with pytest.raises(ValueError, match="at least one connection slot, not 0"):
+    with pytest.raises(ValueError, match=r"^size=0 is not at least 1 connection slot\.$"):
         ConnectionSlots(0)

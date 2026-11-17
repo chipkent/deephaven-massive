@@ -339,7 +339,10 @@ def test_the_websocket_client_never_shows_the_api_key(
     assert client.join(10.0)  # a rejected key is fatal, so the client ends by itself
     [(state, failure)] = [(s, d) for s, d in states if s is WsState.FAILED]
     assert isinstance(failure, WireAuthError)
-    assert failure.message.endswith(f"no such key: {REDACTED}")
+    assert failure.message == (
+        f'Massive answered the API key at 127.0.0.1/stocks with the status auth_failed: "no such '
+        f'key: {REDACTED}".'
+    )
     _assert_no_secret(every_logger_at_debug, failure)
     # The frame log that would show the authentication frame stays off.
     assert not [r for r in every_logger_at_debug.records if r.name.endswith(".ws.client.wire")]
@@ -505,7 +508,11 @@ def test_an_s3_message_echoing_the_secret_is_cleaned(
             client.open(_FILE)
     finally:
         client.close()
-    assert info.value.message.endswith(f"({code}: denied {REDACTED})")
+    assert info.value.message == (
+        "Massive answered the read of s3://flatfiles/us_stocks_sip/trades_v1/2025/03/"
+        f"2025-03-03.csv.gz at https://files.massive.com with HTTP {status} (request_id "
+        f'4442587FB7D0A2F9): "{code}: denied {REDACTED}".'
+    )
     assert info.value.__cause__ is None  # botocore's error quotes the secret: not chained
     _assert_no_secret(every_logger_at_debug, info.value)
 

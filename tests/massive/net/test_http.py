@@ -452,10 +452,14 @@ def test_a_cert_directory_that_cannot_be_listed_logs_a_warning(
         http.ssl_context()  # the same directory and error: logged once
     [record] = caplog.records
     assert record.levelno == logging.WARNING
-    assert repr(str(missing)) in record.getMessage()
-    assert "may still find certificates there by their hashed names" in record.getMessage()
     assert isinstance(record.args, tuple)
     assert isinstance(record.args[1], FileNotFoundError)  # the error is named, not swallowed
+    assert record.getMessage() == (
+        f"The certificate directory {str(missing)!r} in SSL_CERT_DIR cannot be listed: "
+        f"{record.args[1]}. OpenSSL may still find certificates there by their hashed names, but "
+        "the library cannot see a change to them, so a client created later may keep trusting a "
+        "removed certificate. Make the directory listable, or remove it from SSL_CERT_DIR."
+    )
 
 
 def test_an_entry_that_cannot_be_examined_logs_a_warning_once(
@@ -471,9 +475,13 @@ def test_an_entry_that_cannot_be_examined_logs_a_warning_once(
         http.ssl_context()  # the same entry and error: logged once
     [record] = caplog.records
     assert record.levelno == logging.WARNING
-    assert repr(str(dangling)) in record.getMessage()
     assert isinstance(record.args, tuple)
     assert isinstance(record.args[1], FileNotFoundError)
+    assert record.getMessage() == (
+        f"The entry {str(dangling)!r} of a certificate directory in SSL_CERT_DIR cannot be "
+        f"examined: {record.args[1]}. OpenSSL cannot load it either. Fix or remove the entry, and "
+        "the library uses it once it can be examined."
+    )
 
 
 def test_checking_the_cert_directories_warns_as_the_shared_context_does(
