@@ -929,11 +929,12 @@ class OptionsNamespace(Namespace):
         Lists the contracts of one underlying, or of every underlying, so you can find their
         tickers. To read contracts you can already name, use `contract_details()`.
 
-        Pass a table of underlyings to list each one's contracts:
+        A table of underlyings is read in one of two ways:
 
         - A live table is followed. Add an underlying and its contracts appear. Remove it and
           they leave.
-        - A static table is read once. An error from Massive on one underlying fails `fetch()`.
+        - A static table is read once. An error from Massive on one underlying fails the whole
+          table.
 
         A row that isn't Massive's exact stock or index ticker is skipped and logged. To fail
         instead, pass `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
@@ -947,8 +948,8 @@ class OptionsNamespace(Namespace):
             expired: True asks Massive for expired contracts. False is the default.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total. A table of underlyings caps the rows of
-                every underlying separately instead.
+            limit: The most rows to return, in total. A table of underlyings caps every
+                underlying's rows separately instead.
             filters: Further endpoint parameters, such as `{"strike_price_gte": 100}`.
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
                 the default, takes each cause from the session's `MassiveConfig.on_error`.
@@ -1015,7 +1016,7 @@ class OptionsNamespace(Namespace):
 
         By default, a contract Massive has no data for gets no row and is logged at `WARNING`. To
         fail the table instead, pass
-        `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`; `fetch(wait=True)` then
+        `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`. `fetch(wait=True)` then
         raises `MassiveError`.
 
         Args:
