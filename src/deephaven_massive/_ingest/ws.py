@@ -1058,7 +1058,8 @@ class WsConnections:
             state.tries += 1
             left = since + self._max_outage - now
             first, most = self._backoff
-            delay = min(first * 2 ** (state.tries - 1), most, max(left, 0.0))
+            # Doubling stops at the cap; the exponent is bounded so it never overflows a float.
+            delay = min(first * 2.0 ** min(state.tries - 1, 64), most, max(left, 0.0))
             due = state.retry_due
             state.retry_due = True
             outage = self._outage_error(stream_id, state, now)
