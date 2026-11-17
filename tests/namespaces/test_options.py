@@ -2089,7 +2089,7 @@ def test_admin_messages_on_delayed_options_data_raise_the_delayed_data_error(
     with pytest.raises(dm.EntitlementError) as info:
         session.session.options.admin_messages().append_only()
     assert str(info.value).startswith(
-        "options streams would be delayed (Massive reports last_trade.timeframe=DELAYED)"
+        "options streams would be delayed, since Massive reports last_trade.timeframe=DELAYED,"
     )
     assert "plan" not in str(info.value)
     assert session.urls == []

@@ -168,7 +168,6 @@ from deephaven_massive._datasets.wire_symbols import (
 from deephaven_massive._enums import AssetClass, FuturesVenue, OnError
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
-    NEW_SESSION,
     READ_STOPPED,
     AuthenticationError,
     BrokenGuaranteeError,
@@ -180,6 +179,7 @@ from deephaven_massive._errors import (
     from_wire,
     library_bug,
     required,
+    session_closed,
     unmatched_form,
 )
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
@@ -1530,7 +1530,7 @@ class FlatFileHistory:
             SessionClosedError: `"MassiveSession #1 is closed; ..."` once the session has closed.
         """
         if self._client.closed:
-            raise SessionClosedError(f"{self._core.label} is closed; {NEW_SESSION}")
+            raise SessionClosedError(session_closed())
 
     def _check(self, cancel: threading.Event) -> None:
         """Stop a read if the session was closed or another read of the call failed.
@@ -1975,8 +1975,12 @@ def _malformed_message(dataset: str, file: FlatFile) -> str:
     reason = file.malformed_reason
     return (
         f"{dataset}: Massive's flat file {file.location} has a malformed line. "
-        f"{reason[:1].upper()}{reason[1:]}. To skip such lines and keep the rest of the file, "
-        f"{policy_hint('malformed_rows', OnError.LOG)}."
+        f"{reason[:1].upper()}{reason[1:]}. "
+        + policy_hint(
+            OnError.LOG,
+            "malformed_rows",
+            purpose="To skip such lines and keep the rest of the file",
+        )
     )
 
 
@@ -2061,8 +2065,8 @@ def _public(error: WireError, key: _Key) -> MassiveError:
         return EntitlementError(
             f"the plan does not include {key.venue.name} futures flat files: {error.message}; "
             "pass venues={dm.FuturesVenue.<VENUE>, ...} with only the venues the plan includes, "
-            "or leave venues out; to skip the venues S3 refuses, "
-            f"{policy_hint('refused_venues', OnError.LOG)}",
+            "or leave venues out; "
+            + policy_hint(OnError.LOG, "refused_venues", purpose="to skip the venues S3 refuses"),
             status=error.status,
             request_id=error.request_id,
         )

@@ -23,17 +23,23 @@ ALL_ERRORS: list[Callable[..., WireError]] = [
 ]
 """What makes each wire error class, as a client answered with a refusal would."""
 
+REFUSED = (
+    "Massive answered GET /v3/quotes/AAPL on api.massive.com with HTTP 403 (request_id r1): "
+    '"You are not entitled to this data".'
+)
+"""A refusal's message, as the REST response module words it."""
+
 
 @pytest.mark.parametrize("make", ALL_ERRORS)
 def test_every_attribute_is_kept(make: Callable[..., WireError]) -> None:
     error = make(
-        "HTTP 403 from GET /v3/quotes/AAPL (request_id r1): not entitled",
+        REFUSED,
         status=403,
         host="api.massive.com",
         path="/v3/quotes/AAPL",
         request_id="r1",
     )
-    assert error.message == "HTTP 403 from GET /v3/quotes/AAPL (request_id r1): not entitled"
+    assert error.message == REFUSED
     assert str(error) == error.message
     assert error.status == 403
     assert error.host == "api.massive.com"
@@ -74,9 +80,9 @@ def test_attributes_are_read_only(attribute: str) -> None:
 
 
 def test_the_message_survives_a_change_to_args() -> None:
-    error = WireError("HTTP 503 from GET /v3/trades/AAPL", status=503, kind=WireFailure.REFUSED)
+    error = WireError(REFUSED, status=503, kind=WireFailure.REFUSED)
     error.args = ("rewritten",)
-    assert error.message == "HTTP 503 from GET /v3/trades/AAPL"
+    assert error.message == REFUSED
 
 
 def test_the_hierarchy() -> None:

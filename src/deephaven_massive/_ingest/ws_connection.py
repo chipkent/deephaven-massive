@@ -1301,8 +1301,9 @@ class Connection:
                 f"the {subscription} snapshot carried no recency label, so the library used the "
                 "real-time host; if Massive serves this data on another host, pin it with "
                 f"MassiveConfig(websocket_hosts={pin}); "
-                f"if Massive serves your {subscription} data delayed, use its delayed feed: "
-                f"{delayed_fix(subscription)}"
+                + delayed_fix(
+                    subscription, purpose=f"if Massive serves your {subscription} data delayed"
+                )
             )
         elif self.decision.host == REALTIME_HOST and refused_snapshot(evidence):
             hint = (
@@ -1311,10 +1312,8 @@ class Connection:
                 "fetch(), poll(), or history() instead"
             )
         elif self.decision.host == REALTIME_HOST:
-            hint = (
-                "the key's plan may not include this data in real time; if Massive serves your "
-                f"{subscription} data delayed, use its delayed feed: "
-                f"{delayed_fix(subscription)}"
+            hint = "the key's plan may not include this data in real time; " + delayed_fix(
+                subscription, purpose=f"if Massive serves your {subscription} data delayed"
             )
         elif any(channel_of(t) == FMV_CHANNEL for t in refused):
             hint = (
@@ -2136,7 +2135,7 @@ class ConnectionGroup:
             candidate.close()
         if found is None:
             raise SessionClosedError(
-                f"every session of the WebSocket connection group has closed; {NEW_SESSION}"
+                f"every session of the WebSocket connection group has closed. {NEW_SESSION}"
             )
         return found
 
@@ -2166,7 +2165,7 @@ class ConnectionGroup:
             open_ = [o for o in self.sessions if not o.closed and o.core() is not None]
         if not open_:
             raise SessionClosedError(
-                f"every session of the WebSocket connection group has closed; {NEW_SESSION}"
+                f"every session of the WebSocket connection group has closed. {NEW_SESSION}"
             )
         return open_[0].fetch_rows(template, query, bucket=bucket, cancel=cancel)
 

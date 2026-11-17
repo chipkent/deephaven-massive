@@ -628,7 +628,7 @@ def test_a_converter_logs_each_value_once_per_process_up_to_a_limit(
         "canonical_symbol: cannot read ",  # b1
         "canonical_symbol: cannot read ",  # b2
         "canonical_symbol: cannot read ",  # b3
-        "3 values were reported; furthe",  # the limit: b4 is not logged
+        "3 values were reported. Furthe",  # the limit: b4 is not logged
     ]
 
 

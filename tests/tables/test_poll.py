@@ -1665,7 +1665,7 @@ def test_close_stops_every_poller_and_marks_the_rows(
     (row,) = dh_to_pylist(streams)  # a view taken before the close keeps the final rows
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates; " + NEW_SESSION,
+        f"{massive_session._core.label} was closed; this table no longer updates. " + NEW_SESSION,
     )
     del streams
     with pytest.raises(dm.MassiveError, match="is closed"):
@@ -1708,7 +1708,7 @@ def test_a_poll_racing_close_never_starts(
 ) -> None:
     pollers = Pollers("label")
     pollers.close()
-    with pytest.raises(dm.MassiveError, match="label is closed"):
+    with pytest.raises(dm.MassiveError, match=r"^This session is closed"):
         start(massive_session, script=script, pollers=pollers, clock=clock)
     assert massive_session._core.workers._workers == {}
     # A session closed before the row is registered refuses it too.
@@ -1920,7 +1920,7 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
     poller = poller_of(pollers)
     clock.wait_for_sleepers(1)
     core = massive_session._core
-    closed = f"{core.label} was closed; this table no longer updates; " + NEW_SESSION
+    closed = f"{core.label} was closed; this table no longer updates. " + NEW_SESSION
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
     failures: list[Exception] = []
     publisher = poller._publisher
@@ -2495,8 +2495,8 @@ def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
     assert row["Error"] == (
         f"indicators.sma: Massive has no data for 1 [MSFT (HTTP 404 from {SMA_STOCK})]. "
         "Remove the symbol; to leave it out and read the others, pass "
-        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset method or "
-        "to MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the settings file"
+        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
     )
 
 
@@ -2878,11 +2878,11 @@ def test_a_row_with_a_null_poll_key_fails_the_table_under_raise(
     (row,) = streams_of(feed_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert row["Error"] == (
-        "stocks.dividends poll(): Massive sent rows the library cannot read whole, so it "
-        "withheld them: 1 under unreadable_keys. Row 1 of the cycle has a null poll key 'Id': "
+        "stocks.dividends poll(): Massive sent 1 row the library cannot read whole, so it "
+        "withheld it: 1 under unreadable_keys. Row 1 of the cycle has a null poll key 'Id': "
         "{'Symbol': 'AAPL', 'Currency': 'USD'}. To go on without such rows, pass "
-        "on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the dataset method or to "
-        "MassiveConfig, or write 'on_error: {unreadable_keys: log}' in the settings file."
+        "on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
     )
     assert row["RowsPublished"] == 0  # nothing of the cycle was published
 
@@ -3509,11 +3509,11 @@ def test_a_poll_failed_by_a_withheld_row_still_shows_its_count(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(rest_session, dh_to_pylist)
     assert row["Error"] == (
-        "stocks.dividends: Massive sent rows the library cannot read whole, so it withheld them: "
+        "stocks.dividends: Massive sent 1 row the library cannot read whole, so it withheld it: "
         "1 under unconvertible_values. /stocks/v1/dividends: row 0: Frequency (wire key "
         "'frequency') expects long, got 4.5. To go on without such rows, pass "
-        "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the dataset method or "
-        "to MassiveConfig, or write 'on_error: {unconvertible_values: log}' in the settings file."
+        "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
     )
     (withheld,) = problems_of(rest_session, dh_to_pylist, ProblemCause.UNCONVERTIBLE_VALUES)
     assert (withheld["StreamId"], withheld["Field"], withheld["Rows"], withheld["Policy"]) == (

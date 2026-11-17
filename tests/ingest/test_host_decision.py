@@ -424,10 +424,10 @@ def test_a_delayed_plan_refuses_a_real_time_stream(
         run(asset_class, fetch)
     text = str(info.value)
     name = asset_class.value
-    assert text.startswith(f"{name} streams would be delayed (Massive reports {evidence})")
+    assert text.startswith(f"{name} streams would be delayed, since Massive reports {evidence},")
     assert text.endswith(
-        f"To use Massive's delayed {name} feed: "
-        f"dm.MassiveConfig(delayed_subscriptions={{dm.Subscription.{asset_class.name}}})"
+        f"To use Massive's delayed {name} feed, pass "
+        f"delayed_subscriptions={{dm.Subscription.{asset_class.name}}} to dm.MassiveConfig."
     )
     assert "minutes" not in text  # the delay differs by class: none is quoted
     assert fetch.probes == [SNAPSHOT_PROBES[asset_class]]

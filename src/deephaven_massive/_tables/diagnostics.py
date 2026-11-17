@@ -1492,7 +1492,7 @@ def thread_died(label: str, thread: str, death: BaseException) -> MassiveError:
     """
     source = source_of(death)
     text = f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
-    message = library_bug(text) if source is ErrorSource.LIBRARY else f"{text}; {NEW_SESSION}"
+    message = library_bug(text) if source is ErrorSource.LIBRARY else f"{text}. {NEW_SESSION}"
     return MassiveError(message, source=source)
 
 

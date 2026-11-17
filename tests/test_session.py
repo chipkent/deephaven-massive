@@ -28,7 +28,7 @@ from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
-from deephaven_massive._errors import NEW_SESSION
+from deephaven_massive._errors import NEW_SESSION, session_closed
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._tables import session_core as _core
@@ -477,7 +477,7 @@ def test_close_marks_streams_closed_and_warns_once(
     ]
     # Only the stream still in the registry is closed; the shut-down one keeps its last row.
     rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
-    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
+    closed = f"{label(massive_session)} was closed; this table no longer updates. " + NEW_SESSION
     assert [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed), ("RELEASED", None)]
     assert fake_streams.failed == {1: closed}
     assert isinstance(fake_streams.errors[1], dm.SessionClosedError)
@@ -616,7 +616,7 @@ def test_close_fails_derived_tables_and_marks_their_stream_closed(
     streams = massive_session.streams()
     massive_session.close()
     rows = dh_arrow.to_arrow(streams).to_pylist()
-    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
+    closed = f"{label(massive_session)} was closed; this table no longer updates. " + NEW_SESSION
     assert [(r["State"], r["HeldResults"], r["Error"]) for r in rows] == [("CLOSED", 0, closed)]
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # the failure shut the stream down
     wait_until(lambda: bool(derived.j_table.isFailed()))
@@ -640,7 +640,7 @@ def test_close_with_no_live_tables_logs_info(
 def test_after_close(massive_session: dm.MassiveSession) -> None:
     q = stream_query(massive_session)
     massive_session.close()
-    message = f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$"
+    message = "^" + re.escape(session_closed()) + "$"
     with pytest.raises(dm.MassiveError, match=message):
         massive_session.connections()
     with pytest.raises(dm.MassiveError, match=message):
@@ -871,7 +871,7 @@ def test_close_in_a_console_command_returns_without_waiting_for_a_cycle(
     rows_when(view, lambda rows: [r["State"] for r in rows] == ["RUNNING"])
     writer = massive_session._core.diagnostics.thread
     console_command(massive_session.close)
-    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
+    closed = f"{label(massive_session)} was closed; this table no longer updates. " + NEW_SESSION
     rows_when(view, lambda rows: [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed)])
     writer.join(TIMEOUT)
     assert not writer.is_alive()

@@ -1,6 +1,7 @@
 """Tests for `_error_policy.py`: the error policy, its defaults, and how a call's resolves."""
 
 import dataclasses
+from dataclasses import fields
 
 import pytest
 
@@ -139,8 +140,33 @@ def test_check_policy_refuses_anything_else(value: object) -> None:
         check_policy(value)
 
 
-def test_the_hint_names_the_argument_and_the_settings_file_form() -> None:
-    assert policy_hint("malformed_rows", dm.OnError.LOG) == (
-        "pass on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the dataset method or "
-        "to MassiveConfig, or write 'on_error: {malformed_rows: log}' in the settings file"
+def test_the_hint_is_a_sentence_naming_the_policy_to_pass() -> None:
+    assert policy_hint(dm.OnError.LOG, "malformed_rows") == (
+        "Pass on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
     )
+
+
+def test_the_hint_names_every_cause_it_is_given_in_order() -> None:
+    assert policy_hint(dm.OnError.LOG, "unreadable_keys", "unconvertible_values") == (
+        "Pass on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG, "
+        "unconvertible_values=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+    )
+
+
+def test_the_hint_starts_with_its_purpose_when_given_one() -> None:
+    hint = policy_hint(
+        dm.OnError.LOG, "malformed_rows", purpose="To skip such lines and keep the rest of the file"
+    )
+    assert hint == (
+        "To skip such lines and keep the rest of the file, pass "
+        "on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+    )
+
+
+@pytest.mark.parametrize("name", [field.name for field in fields(ErrorPolicy)])
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_the_policy_the_hint_names_sets_the_cause(name: str, setting: dm.OnError) -> None:
+    # The advice works for every cause: the keyword the hint names is one the policy takes.
+    assert f"dm.ErrorPolicy({name}=dm.OnError.{setting.name})" in policy_hint(setting, name)
+    assert getattr(dm.ErrorPolicy(**{name: setting}), name) is setting

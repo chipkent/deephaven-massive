@@ -128,7 +128,8 @@ class WireError(Exception):
             from deephaven_massive._massive import WireError, WireFailure
 
             error = WireError(
-                "HTTP 429 from GET /v3/trades/AAPL (request_id abc123): rate limited",
+                "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 429 "
+                '(request_id abc123): "rate limited".',
                 status=429,
                 host="api.massive.com",
                 path="/v3/trades/AAPL",
@@ -224,7 +225,11 @@ class WireAuthError(WireError):
 
             from deephaven_massive._massive import WireAuthError, WireError
 
-            error = WireAuthError("HTTP 401 from GET /v3/trades/AAPL: unknown API key", status=401)
+            error = WireAuthError(
+                "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 401: "
+                '"Unknown API Key".',
+                status=401,
+            )
             assert isinstance(error, WireError)
     """
 
@@ -268,7 +273,9 @@ class WireEntitlementError(WireError):
             from deephaven_massive._massive import WireEntitlementError
 
             error = WireEntitlementError(
-                "HTTP 403 from GET /v3/quotes/AAPL: not entitled", status=403
+                "Massive answered GET /v3/quotes/AAPL on api.massive.com with HTTP 403: "
+                '"You are not entitled to this data".',
+                status=403,
             )
             assert error.status == 403
     """

@@ -27,13 +27,13 @@ from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    NEW_SESSION,
     CutShortError,
     EntitlementError,
     ErrorSource,
     MassiveError,
     RowDataError,
     UnavailableSymbolError,
+    session_closed,
 )
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.symbol_reads import (
@@ -439,9 +439,7 @@ def test_a_rejected_key_while_splitting_a_pair_fails_the_whole_read(
 def test_a_session_closed_during_the_read_fails_it(session: dm.MassiveSession) -> None:
     rest = session._core.rest_transport()
     session.close()
-    with pytest.raises(
-        dm.MassiveError, match=r"^MassiveSession #\d+ is closed; " + re.escape(NEW_SESSION) + "$"
-    ):
+    with pytest.raises(dm.MassiveError, match="^" + re.escape(session_closed()) + "$"):
         rest.fetch_by_symbol(DIVIDENDS, Request(), symbols=["AAPL"], call=7)
 
 

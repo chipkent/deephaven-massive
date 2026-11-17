@@ -108,7 +108,7 @@ READ_REFUSAL: Final = "does not include"
 the REST and flat-file refusals say what the key "does not include"
 (`RestReader._dataset_error`, `_ingest/flatfiles.py`)."""
 
-DELAYED_REFUSAL: Final = "MassiveConfig.delayed_subscriptions"
+DELAYED_REFUSAL: Final = "is not in delayed_subscriptions"
 """The words of a stream's or read's `Error` when the settings refused delayed data: the
 library's refusal names the setting that accepts it (`recency_labels.delayed_refusal`)."""
 

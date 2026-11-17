@@ -23,11 +23,11 @@ from typing_extensions import override
 
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    NEW_SESSION,
     AuthenticationError,
     EntitlementError,
     ErrorSource,
     MassiveError,
+    session_closed,
 )
 from deephaven_massive._ingest import futures_calendar
 from deephaven_massive._ingest.futures_calendar import (
@@ -912,7 +912,7 @@ def test_a_close_that_does_not_wait_leaves_the_worker_to_end_on_its_own(
 @pytest.mark.parametrize(
     "failure",
     [
-        MassiveError("MassiveSession #1 is closed; " + NEW_SESSION),
+        MassiveError(session_closed()),
         RuntimeError("cannot schedule new futures"),
     ],
     ids=["closed-client", "unexpected"],

@@ -77,12 +77,12 @@ A message passes when all seven hold.
 
 Call the builder that makes a form instead of writing its sentences by hand, so one fix to the
 builder reaches every site: `library_bug`, `unmatched_form`, `required`, and
-`required_instance` for a library defect, `user_defect` for the user's, `NEW_SESSION` for a
-closed session (`_errors.py`), and the REST response's `context` for Massive's answer. One test
-pins each builder's whole output. Where a builder's output still breaks the rubric, call it
-anyway, so its rewrite reaches your message too. `user_defect` is one: it still joins the
-problem and the fix with a semicolon, a known defect that the rewrite of the builders under
-#758 fixes.
+`required_instance` for a library defect, `user_defect` for the user's, `session_closed` for a
+call on a closed session and `NEW_SESSION` after a sentence of your own (`_errors.py`),
+`policy_hint` for the `on_error` setting of every failing cause (`_error_policy.py`),
+`prose_list` for a list (`_log_limits.py`), and the REST response's `RequestTarget.answered`
+for Massive's answer and `RequestTarget.unreadable` for one the library could not read. One
+test pins each builder's whole output.
 
 **Exempt** from the whole rubric, the advice test of item 7 included: a developer or contract
 check that fails at import or in `scripts/refresh.py`. Its reader is a contributor holding the

@@ -105,7 +105,7 @@ def test_a_bad_value_of_a_static_table_is_nulled_and_logged(
         "canonicalize_symbols: cannot read 'b00' as a forex pair of two three-letter codes; "
         "write it as BASE/QUOTE, such as 'EUR/USD'; its rows get a null Symbol"
     )
-    assert messages[-1] == "20 values were reported; further ones are not logged"
+    assert messages[-1] == "20 values were reported. Further ones are not logged."
 
 
 def test_a_bad_value_under_ignore_is_nulled_and_logged_only_at_debug(

@@ -93,7 +93,6 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, OnError
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    NEW_SESSION,
     BrokenGuaranteeError,
     ErrorSource,
     MassiveError,
@@ -103,6 +102,7 @@ from deephaven_massive._errors import (
     failure_text,
     library_bug,
     required,
+    session_closed,
     unmatched_form,
 )
 from deephaven_massive._ingest.host_decision import refusal_note
@@ -610,7 +610,7 @@ class WsConnections:
             SessionClosedError: If `close()` has run.
         """
         if self._closed:
-            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
+            raise SessionClosedError(session_closed())
 
     @staticmethod
     def _check_cap(
@@ -1076,8 +1076,12 @@ class WsConnections:
             self._fail(
                 stream_id,
                 UnavailableSymbolError(
-                    f"{reader}: Massive has no data for {described}. Remove the pair; to skip it "
-                    f"and stream the others, {policy_hint('unavailable_symbols', OnError.LOG)}",
+                    f"{reader}: Massive has no data for {described}. Remove the pair; "
+                    + policy_hint(
+                        OnError.LOG,
+                        "unavailable_symbols",
+                        purpose="to skip it and stream the others",
+                    ),
                     source=ErrorSource.MASSIVE,
                 ),
             )

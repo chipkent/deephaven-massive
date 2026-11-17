@@ -31,6 +31,7 @@ from deephaven_massive._tables.withheld import (
     with_marks,
     withhold_rows,
 )
+from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 FAULT, FIELD, _, SENT = MARK_COLUMNS
 KEYS, SYMBOLS, VALUES = (
@@ -327,10 +328,9 @@ def test_failure_of_fails_only_a_cause_set_to_raise(fault: RowFault, setting: dm
         assert failure is None
         return
     assert failure == (
-        "stocks.trades: Massive sent rows the library cannot read whole, so it withheld them: "
+        "stocks.trades: Massive sent 2 rows the library cannot read whole, so it withheld them: "
         f"2 under {fault.value}. The first. To go on without such rows, pass "
-        f"on_error=dm.ErrorPolicy({fault.value}=dm.OnError.LOG) to the dataset method or to "
-        f"MassiveConfig, or write 'on_error: {{{fault.value}: log}}' in the settings file."
+        f"on_error=dm.ErrorPolicy({fault.value}=dm.OnError.LOG) to the call or to dm.MassiveConfig."
     )
 
 
@@ -341,12 +341,80 @@ def test_failure_of_names_every_failing_cause() -> None:
         dataset="d",
         first_reason="r",
     )
+    # The rows of a cause that logs are neither counted nor named: the message is about why the
+    # read fails, and the policy it names sets every cause that fails it.
     assert failure == (
-        "d: Massive sent rows the library cannot read whole, so it withheld them: 1 under "
+        "d: Massive sent 4 rows the library cannot read whole, so it withheld them: 1 under "
         "unreadable_keys and 3 under unconvertible_values. R. To go on without such rows, pass "
-        "on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the dataset method or to "
-        "MassiveConfig, or write 'on_error: {unreadable_keys: log}' in the settings file."
+        "on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG, "
+        "unconvertible_values=dm.OnError.LOG) to the call or to dm.MassiveConfig."
     )
+    every = failure_of(
+        {KEYS: 1, SYMBOLS: 2, VALUES: 3},
+        resolve_policy(dm.ErrorPolicy(dm.OnError.RAISE), dm.ErrorPolicy()),
+        dataset="d",
+        first_reason="r",
+    )
+    assert every is not None
+    assert every.startswith(
+        "d: Massive sent 6 rows the library cannot read whole, so it withheld them: 1 under "
+        "unreadable_keys, 2 under unreadable_symbols, and 3 under unconvertible_values. R. "
+    )
+
+
+def test_failure_of_names_one_row_and_where_it_came_from() -> None:
+    failure = failure_of(
+        {KEYS: 1},
+        policy(unreadable_keys=dm.OnError.RAISE),
+        dataset="stocks.trades",
+        first_reason="the required column sip_timestamp is absent or null",
+        where="s3://flatfiles/us_stocks_sip/trades_v1/2025/06/2025-06-06.csv.gz",
+    )
+    assert failure == (
+        "stocks.trades: Massive sent 1 row the library cannot read whole, so it withheld it: 1 "
+        "under unreadable_keys, from s3://flatfiles/us_stocks_sip/trades_v1/2025/06/"
+        "2025-06-06.csv.gz. The required column sip_timestamp is absent or null. To go on "
+        "without such rows, pass on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the "
+        "call or to dm.MassiveConfig."
+    )
+
+
+AAPL_DIVIDEND = {
+    "ticker": "AAPL",
+    "cash_amount": 0.25,
+    "distribution_type": "recurring",
+    "ex_dividend_date": "2025-02-10",
+    "frequency": 4,
+    "id": "E1",
+}
+"""One dividend row as Massive sends it."""
+
+
+def test_the_policy_the_failure_names_reads_the_rows_beside_the_withheld_ones(
+    fake_rest: FakeRestServer,
+) -> None:
+    # The advice works: a read that fails under two causes set to RAISE, read again with the
+    # policy its message names, gives the rows the library could read whole.
+    unreadable_key = {k: v for k, v in AAPL_DIVIDEND.items() if k != "ticker"}
+    unconvertible_value = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
+    page = Reply(envelope([unreadable_key, unconvertible_value, AAPL_DIVIDEND]))
+    fake_rest.reply("/stocks/v1/dividends", page, page)
+    config = dm.MassiveConfig(
+        api_key="test-key", rest_base_url=fake_rest.url, on_error=dm.ErrorPolicy(dm.OnError.RAISE)
+    )
+    with dm.MassiveSession(config) as m:
+        with pytest.raises(dm.MassiveError) as info:
+            m.stocks.dividends("AAPL").fetch(wait=True)
+        assert str(info.value) == (
+            "stocks.dividends: Massive sent 2 rows the library cannot read whole, so it withheld "
+            "them: 1 under unreadable_keys and 1 under unconvertible_values. /stocks/v1/dividends: "
+            "row 0: no Ticker (wire key 'ticker'), which the dataset needs. To go on "
+            "without such rows, pass on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG, "
+            "unconvertible_values=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+        )
+        named = dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG, unconvertible_values=dm.OnError.LOG)
+        table = m.stocks.dividends("AAPL", on_error=named).fetch(wait=True)
+        assert table.size == 1
 
 
 @pytest.mark.parametrize("setting", list(dm.OnError))

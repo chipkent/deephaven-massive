@@ -464,7 +464,7 @@ def test_a_numeric_request_id_never_fails_a_call(
     with pytest.raises(WireError) as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert caught.value.request_id == "7"
-    assert "(request_id 7): bad ticker" in str(caught.value)
+    assert '(request_id 7): "bad ticker".' in str(caught.value)
 
 
 def test_parameters_that_do_not_fit_raise_before_any_request(
@@ -769,7 +769,7 @@ def test_a_persistent_transient_status_fails_after_four_attempts(
     with pytest.raises(WireError) as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert str(caught.value) == (
-        "HTTP 503 from GET /v3/trades/AAPL on 127.0.0.1 (request_id r): busy"
+        'Massive answered GET /v3/trades/AAPL on 127.0.0.1 with HTTP 503 (request_id r): "busy".'
     )
     assert caught.value.status == 503
     assert len(fake_rest.requests) == 4
@@ -864,8 +864,8 @@ def test_a_429_logs_once_at_info_and_the_retry_logs_its_wait(
     infos = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
     assert infos == [
         (
-            "stocks: paused 7.0 s (Retry-After 7 s) after HTTP 429; the refusal: HTTP 429 from GET "
-            "/v3/trades/AAPL on 127.0.0.1: slow down"
+            "stocks: paused 7.0 s (Retry-After 7 s) after HTTP 429; the refusal: Massive answered "
+            'GET /v3/trades/AAPL on 127.0.0.1 with HTTP 429: "slow down".'
         )
     ]
     url = f"{fake_rest.url}/v3/trades/AAPL"
@@ -956,8 +956,9 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
     with pytest.raises(WireError) as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks", patience=Patience(300.0))
     assert str(caught.value).startswith(
-        "Massive is refusing stocks requests with HTTP 429 (latest refusal: HTTP 429 from GET "
-        "/v3/trades/AAPL on 127.0.0.1 (request_id r): quota). Its next request, a probe, goes at "
+        "Massive is refusing stocks requests with HTTP 429 (latest refusal: Massive answered GET "
+        '/v3/trades/AAPL on 127.0.0.1 with HTTP 429 (request_id r): "quota".). Its next request, '
+        "a probe, goes at "
         "2027-01-15T08:05:01+00:00 ("
     )
     assert "waits out at most 300 s of pauses and has spent 0 s of its patience" in str(
@@ -994,12 +995,16 @@ def test_a_refusal_naming_the_per_minute_maximum_pauses_a_window_and_tells_the_h
         (
             "stocks",
             (
-                "HTTP 429 from GET /v3/trades/AAPL on 127.0.0.1: You've exceeded the maximum "
-                "requests per minute."
+                "Massive answered GET /v3/trades/AAPL on 127.0.0.1 with HTTP 429: \"You've "
+                'exceeded the maximum requests per minute.".'
             ),
             True,
         ),
-        ("options", "HTTP 429 from GET /v3/trades/MSFT on 127.0.0.1: busy", False),
+        (
+            "options",
+            'Massive answered GET /v3/trades/MSFT on 127.0.0.1 with HTTP 429: "busy".',
+            False,
+        ),
     ]
     # A per-minute refusal pauses a whole window; any other 15 s. Massive answered nothing in
     # the refused minute, so the retry's answer teaches no limit.
@@ -1579,8 +1584,8 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     assert (
         logging.INFO,
         (
-            "HTTP 503 from GET /v3/trades/AAPL?limit=1 on 127.0.0.1: an empty body; "
-            "retry 1 of 3 in 0.55 s"
+            "Massive answered GET /v3/trades/AAPL?limit=1 on 127.0.0.1 with HTTP 503 and no "
+            "message.; retry 1 of 3 in 0.55 s"
         ),
     ) in messages
     assert (
@@ -1593,7 +1598,10 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     # The error quotes only the envelope's message, cut to 200 characters.
     assert (
         logging.DEBUG,
-        f"HTTP 502 from GET /v3/trades/MSFT on 127.0.0.1: {'e' * 200}; giving up after 4 attempts",
+        (
+            "Massive answered GET /v3/trades/MSFT on 127.0.0.1 with HTTP 502: "
+            f'"{"e" * 200}".; giving up after 4 attempts'
+        ),
     ) in messages
     every = [r.getMessage() + repr(r.args) for r in caplog.records]
     assert every

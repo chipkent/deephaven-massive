@@ -421,6 +421,31 @@ def test_every_page_and_section_a_docstring_cites_exists() -> None:
     assert missing == []
 
 
+_MESSAGE_LINK = re.compile(r"troubleshooting\.md#([A-Za-z0-9_-]+)")
+"""A link to a section of the troubleshooting page, as a message or a docstring writes it."""
+
+
+def _message_links() -> list[tuple[str, int, str]]:
+    """Return each link to a troubleshooting section in the library, by file, line, and anchor."""
+    return [
+        (path, number, anchor)
+        for path, text in _sources().items()
+        for number, line in enumerate(text.splitlines(), start=1)
+        for anchor in _MESSAGE_LINK.findall(line)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "line", "anchor"),
+    _message_links(),
+    ids=[f"{path}:{line}#{anchor}" for path, line, anchor in _message_links()],
+)
+def test_every_docs_link_in_a_message_has_its_anchor(path: str, line: int, anchor: str) -> None:
+    # A message links a troubleshooting section only when no call can be named as the fix, so
+    # the section must exist: a renamed anchor would send the user to the top of the page.
+    assert anchor in _anchors(TROUBLESHOOTING), f"{path}:{line}: no section #{anchor}"
+
+
 def test_the_citations_are_found() -> None:
     # A guard on the patterns above: a typo in either would find nothing and pass.
     text = (
@@ -960,7 +985,7 @@ def test_the_stopping_example_runs_alone_releases_a_table_and_closes_the_session
             break
         pace.wait(0.02)
     # Closing fails the session's live tables, which keep their rows; `kept` is a static copy.
-    assert "was closed; this table no longer updates; " + NEW_SESSION in str(closed.text())
+    assert "was closed; this table no longer updates. " + NEW_SESSION in str(closed.text())
     assert dh_to_pylist(live["headlines"]) == rows
     assert dh_to_pylist(stopped["kept"]) == rows
     assert stopped["m"]._core.closed

@@ -210,8 +210,12 @@ class CryptoTickerList:
         if isinstance(entry, str):
             effect = effect_of(unreadable)
             if effect.fails:
-                hint = policy_hint("unreadable_symbols", OnError.LOG)
-                raise RowDataError(f"{where}: {entry}. To give the pair no rows and go on, {hint}.")
+                hint = policy_hint(
+                    OnError.LOG,
+                    "unreadable_symbols",
+                    purpose="To give the pair no rows and go on",
+                )
+                raise RowDataError(f"{where}: {entry}. {hint}")
             unjoined = _logged_unjoined if effect.level > logging.DEBUG else _ignored_unjoined
             unjoined.log(symbol, "%s: %s. The pair gets no rows.", where, entry)
             return Unsplit(entry, no_data=False)

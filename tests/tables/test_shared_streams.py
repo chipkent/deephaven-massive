@@ -34,7 +34,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._errors import NEW_SESSION, BrokenGuaranteeError
+from deephaven_massive._errors import BrokenGuaranteeError, session_closed
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import shared_streams as _streams
 from deephaven_massive._tables.columns import describe
@@ -393,7 +393,7 @@ def test_close_during_an_open_wakes_the_waiters(
         opener = pool.submit(q.blink)
         assert gated.entered.wait(TIMEOUT)
         helper = _when_waiting(core, monkeypatch, close_then_open)
-        with pytest.raises(dm.MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
+        with pytest.raises(dm.MassiveError, match="^" + re.escape(session_closed()) + "$"):
             q.append_only()
         error = opener.exception(TIMEOUT)
     helper.join(TIMEOUT)
@@ -975,7 +975,7 @@ def test_a_verb_racing_close_does_not_reuse_the_closed_stream(
     monkeypatch.setattr(core, "run_verb", guard_then_close)
     with pytest.raises(
         dm.MassiveError,
-        match=f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$",
+        match="^" + re.escape(session_closed()) + "$",
     ):
         q.append_only()
     assert len(fake_streams.opened) == 1
@@ -1144,7 +1144,7 @@ def test_a_close_while_the_shape_is_derived_raises_the_closed_session(
 
     with pytest.raises(
         dm.MassiveError,
-        match=rf"^{re.escape(core.label)} is closed; " + re.escape(NEW_SESSION) + "$",
+        match="^" + re.escape(session_closed()) + "$",
     ) as raised:
         core.streams.result(
             SPEC,
@@ -1177,7 +1177,7 @@ def test_a_close_the_streams_row_does_not_show_yet_raises_the_closed_session(
 
     with pytest.raises(
         dm.MassiveError,
-        match=rf"^{re.escape(core.label)} is closed; " + re.escape(NEW_SESSION) + "$",
+        match="^" + re.escape(session_closed()) + "$",
     ) as raised:
         core.streams.result(
             SPEC,
@@ -1350,7 +1350,7 @@ def test_a_verb_that_races_close_never_returns_its_table(
 
     with pytest.raises(
         dm.MassiveError,
-        match=f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$",
+        match="^" + re.escape(session_closed()) + "$",
     ):
         core.streams.result(
             spec,

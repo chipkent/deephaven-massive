@@ -282,7 +282,7 @@ def test_every_example_runs_against_the_fake_market(
     assert printed["11_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
     assert "0 copies of the key" in printed["12_check_the_log"]
     assert re.search(r"<MassiveSession #\d+ closed>", printed["25_finish"])
-    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["25_finish"])
+    assert re.search(r"MassiveError: This session is closed\.", printed["25_finish"])
     assert (out / "tables" / "03_daily_bars" / "daily.csv").exists()
     assert (out / "tables" / "20_watchlist_poll" / "watched_bars.csv").exists()
     assert (out / "tables" / "20_watchlist_poll" / "watched_contracts.csv").exists()
@@ -498,7 +498,7 @@ def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() ->
 def test_stream_verdict_tells_a_refused_read_from_an_unlisted_delay() -> None:
     passed = examples.Outcome("18_a.py", examples.PASSED, 1.0, "")
     plan = "stocks.bars: the Stocks subscription of your plan does not include this data"
-    delayed = "AAPL would be delayed, and ... MassiveConfig.delayed_subscriptions, so ..."
+    delayed = "AAPL would be delayed, and ... is not in delayed_subscriptions, so ..."
     assert examples.stream_verdict(passed, [plan]).status == examples.REFUSED
     assert examples.stream_verdict(passed, [delayed]).status == examples.NOT_LISTED
     assert examples.stream_verdict(passed, [plan, delayed]).status == examples.NOT_LISTED

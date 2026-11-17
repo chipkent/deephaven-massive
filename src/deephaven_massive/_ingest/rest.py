@@ -145,7 +145,6 @@ from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
-    NEW_SESSION,
     AuthenticationError,
     BrokenGuaranteeError,
     CutShortError,
@@ -159,6 +158,7 @@ from deephaven_massive._errors import (
     from_wire,
     library_bug,
     required,
+    session_closed,
 )
 from deephaven_massive._ingest import host_decision
 from deephaven_massive._ingest.crypto_tickers import CryptoTickerList
@@ -324,8 +324,10 @@ def _missing_error(spec: DatasetSpec, missing: Sequence[_Missing]) -> Unavailabl
     names = bounded_list(str(one) for one in missing)
     logger.debug("%s: Massive has no data for %s; raising", spec.name, names)
     return UnavailableSymbolError(
-        f"{spec.name}: Massive has no data for {names}. Remove the symbol; to leave it out and "
-        f"read the others, {policy_hint('unavailable_symbols', OnError.LOG)}",
+        f"{spec.name}: Massive has no data for {names}. Remove the symbol; "
+        + policy_hint(
+            OnError.LOG, "unavailable_symbols", purpose="to leave it out and read the others"
+        ),
         source=ErrorSource.MASSIVE,
     )
 
@@ -2043,7 +2045,7 @@ class RestReader:
             The public error, with the wire error's status and request id.
         """
         if self.state.closed:
-            return SessionClosedError(f"{self.state.label} is closed; {NEW_SESSION}")
+            return SessionClosedError(session_closed())
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
             return MassiveError(
                 f"rate limited: {error.message}. m.rate_limits() shows each subscription's state",
@@ -2079,7 +2081,7 @@ class RestReader:
         holder = (
             "your account" if bucket == OTHER else f"the {bucket.title()} subscription of your plan"
         )
-        message = f"{spec.name}: {holder} does not include this data; Massive answered {public}"
+        message = f"{spec.name}: {holder} does not include this data; {public}"
         if spec.refused_alternative is not None:
             message += f"; try m.{spec.refused_alternative}(...), which carries the same values"
         return EntitlementError(

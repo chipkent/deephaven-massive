@@ -788,7 +788,7 @@ def _check_delayed_subscriptions(
             raise ValueError(
                 f"websocket_hosts pins {asset_class} to the delayed feed {host}, but "
                 f"delayed_subscriptions does not list dm.Subscription.{subscription.name}; "
-                f"to use the delayed feed write {delayed_fix(subscription)}"
+                f"{delayed_fix(subscription, purpose='to use the delayed feed')}"
             )
         if listed and not pins_delayed:
             raise ValueError(
@@ -798,18 +798,28 @@ def _check_delayed_subscriptions(
             )
 
 
-def delayed_fix(subscription: Subscription) -> str:
-    """Return the configuration that asks for a subscription's delayed data, for messages.
+def delayed_fix(subscription: Subscription, *, purpose: str | None = None) -> str:
+    """Return the sentence that tells the user how to ask for a subscription's delayed data.
 
     The one place the setting's spelling appears in the library's messages.
 
     Args:
         subscription: The subscription.
+        purpose: What the setting achieves, as a clause that starts the sentence, such as
+            `"To use Massive's delayed options feed"`; None (absent) for a sentence that
+            starts with the imperative.
 
     Returns:
-        For example `dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})`.
+        `"Pass delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."`, or,
+        with a purpose, `"To use Massive's delayed options feed, pass
+        delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."`.
     """
-    return f"dm.MassiveConfig(delayed_subscriptions={{dm.Subscription.{subscription.name}}})"
+    advice = (
+        f"pass delayed_subscriptions={{dm.Subscription.{subscription.name}}} to dm.MassiveConfig."
+    )
+    if purpose is None:
+        return f"{advice[:1].upper()}{advice[1:]}"
+    return f"{purpose}, {advice}"
 
 
 def _check_max_outage(value: object) -> float:

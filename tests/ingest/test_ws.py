@@ -37,7 +37,12 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._error_policy import DEFAULT_POLICY, ResolvedPolicy
-from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, BrokenGuaranteeError, RowDataError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    BrokenGuaranteeError,
+    RowDataError,
+    session_closed,
+)
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.rest import RestReader
@@ -759,11 +764,11 @@ def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
 
 
 UNREADABLE_BRKB = (
-    "test.trades: Massive sent rows the library cannot read whole, so it withheld them: 1 under "
+    "test.trades: Massive sent 1 row the library cannot read whole, so it withheld it: 1 under "
     "unreadable_symbols. Massive sent the symbol 'BRK/B', a spelling the library cannot read as "
     "Massive's ticker. To go on without such rows, pass "
-    "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the dataset method or to "
-    "MassiveConfig, or write 'on_error: {unreadable_symbols: log}' in the settings file."
+    "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
+    "dm.MassiveConfig."
 )
 """The failure of a stream under `unreadable_symbols=RAISE` that met the symbol BRK/B."""
 
@@ -1835,9 +1840,7 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
             future.result(TIMEOUT)
     # A verb that races the close finds the session closed, or its stream failed by the close.
     name = other._core.label
-    assert all(
-        f"{name} is closed; " + NEW_SESSION in t or f"{name} was closed" in t for t in closed_errors
-    )
+    assert all(session_closed() == t or f"{name} was closed" in t for t in closed_errors)
     core = ws_session.session._core
     drained = threading.Event()
     core.defer(drained.set)
@@ -2020,14 +2023,14 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
     (stream_id,) = ws_session.connections.group.streams
 
     def closed() -> futures_calendar.FuturesCalendar:
-        raise dm.SessionClosedError("MassiveSession #1 is closed; " + NEW_SESSION)
+        raise dm.SessionClosedError(session_closed())
 
     monkeypatch.setattr(ws_session.connections, "futures_calendar", closed)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
         ws_session.connections._symbols_changed(stream_id, frozenset({"NQZ5"}), frozenset())
     assert (
         f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
-        f"is closing (MassiveSession #1 is closed; {NEW_SESSION})"
+        f"is closing ({session_closed()})"
     ) in caplog.text
     ws_session.session.release(result)
 
@@ -2257,8 +2260,8 @@ def test_a_pair_massive_has_no_data_for_fails_the_stream_under_raise_from_every_
     assert row["Error"] == (
         "crypto stream 1: Massive has no data for 1 [X:ETHTUSD (Massive's crypto ticker list "
         "does not hold it)]. Remove the pair; to skip it and stream the others, pass "
-        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset method or to "
-        "MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the settings file"
+        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
     )
     # The stream failed before it subscribed any pair, so its connection never opened a socket.
     assert ws_session.opens == 0
@@ -3638,9 +3641,7 @@ def close_under_load(harness: WsSession, round_: int) -> float:
                 result = harness.query(TRADES, [SOAK_SYMBOLS[(worker * 3 + step) % 40]], other)
                 other.release(result.blink())
             except dm.MassiveError as error:  # a verb that races the close may find it closed
-                if " is closed; " + NEW_SESSION not in str(error) and " was closed" not in str(
-                    error
-                ):
+                if session_closed() != str(error) and " was closed" not in str(error):
                     errors.append(str(error))
                 return
 

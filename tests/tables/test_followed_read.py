@@ -29,7 +29,7 @@ from deephaven.update_graph import exclusive_lock, shared_lock
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
-from deephaven_massive._errors import NEW_SESSION, AuthenticationError, MassiveError
+from deephaven_massive._errors import AuthenticationError, MassiveError, session_closed
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator, followed_read
 from deephaven_massive._tables.execution_context import entered
@@ -707,7 +707,7 @@ def test_a_closed_session_refuses_to_follow(
     watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession
 ) -> None:
     massive_session.close()
-    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
+    with pytest.raises(MassiveError, match="^" + re.escape(session_closed()) + "$"):
         follow(massive_session, watchlist("AAPL"), Script(massive_session))
 
 
@@ -727,7 +727,7 @@ def test_a_close_racing_the_registration_releases_the_result(
         return record
 
     monkeypatch.setattr(ResultRegistry, "track", track_then_close)
-    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
+    with pytest.raises(MassiveError, match="^" + re.escape(session_closed()) + "$"):
         follow(massive_session, watchlist("AAPL"), Script(massive_session))
     assert core.follows.thread is None
 

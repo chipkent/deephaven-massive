@@ -21,7 +21,9 @@ _TIMEFRAME = (
 
 def _refusal(target: str, detail: str = _TIMEFRAME) -> WireEntitlementError:
     return WireEntitlementError(
-        f"HTTP 403 from GET {target} on api.massive.com (request_id 1): {detail}", status=403
+        f"Massive answered GET {target} on api.massive.com with HTTP 403 (request_id 1): "
+        f'"{detail}".',
+        status=403,
     )
 
 
@@ -49,7 +51,8 @@ def test_the_refused_request() -> None:
 def test_a_refusal_line_keeps_the_message_on_one_line() -> None:
     error = _refusal("/v3/quotes/AAPL", "not\n  entitled")
     assert refusals.refusal_line(error) == (
-        "HTTP 403 from GET /v3/quotes/AAPL on api.massive.com (request_id 1): not entitled"
+        "Massive answered GET /v3/quotes/AAPL on api.massive.com with HTTP 403 (request_id 1): "
+        '"not entitled".'
     )
 
 
@@ -91,11 +94,13 @@ def test_the_settings_refusal_of_delayed_data_is_matched_by_its_text(*, streams:
         Subscription.STOCKS, "stocks.snapshots data", "timeframe=DELAYED", streams=streams
     )
     assert refusals.is_not_listed_text(f"read failed: {error}")
-    assert not refusals.is_not_listed_text("HTTP 403 from GET /v3/x on api.massive.com: no")
+    assert not refusals.is_not_listed_text(
+        'Massive answered GET /v3/x on api.massive.com with HTTP 403: "no".'
+    )
     assert not refusals.is_not_listed_text(None)
 
 
-_REFUSED = "HTTP 403 from GET /v3/trades/AAPL on api.massive.com: not entitled"
+_REFUSED = 'Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 403: "not entitled".'
 """A watchlist symbol's `Error` once Massive refuses it."""
 
 
@@ -107,15 +112,15 @@ _REFUSED = "HTTP 403 from GET /v3/trades/AAPL on api.massive.com: not entitled"
             [
                 {
                     "State": "FAILED",
-                    "Error": "read failed: AAPL is not in\nMassiveConfig.delayed_subscriptions",
+                    "Error": "read failed: AAPL is not in\ndelayed_subscriptions",
                 },
                 {"State": "FAILED", "Error": _REFUSED},
             ],
             f"refused: {_REFUSED}",
         ),
         (
-            [{"State": "FAILED", "Error": "AAPL is not in MassiveConfig.delayed_subscriptions"}],
-            "not listed as delayed: AAPL is not in MassiveConfig.delayed_subscriptions",
+            [{"State": "FAILED", "Error": "AAPL is not in delayed_subscriptions"}],
+            "not listed as delayed: AAPL is not in delayed_subscriptions",
         ),
         ([{"State": "RETRYING", "Error": _REFUSED}], None),
         ([{"State": "FAILED", "Error": "HTTP 503 from GET /v3/trades/AAPL: busy"}], None),
@@ -142,7 +147,13 @@ def test_a_failed_rows_refusal_is_the_skip_reason(
             ),
             True,
         ),
-        ("HTTP 403 from GET /v2/aggs/ticker/AAPL/range on api.massive.com: not entitled", True),
+        (
+            (
+                "Massive answered GET /v2/aggs/ticker/AAPL/range on api.massive.com with HTTP "
+                '403: "not entitled".'
+            ),
+            True,
+        ),
         ("another connection with this API key took the connection at 2026-11-16T14:00:00Z", False),
         ("connection lost; reconnecting in 5 s", False),
         (None, False),

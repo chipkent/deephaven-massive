@@ -17,8 +17,11 @@ from flooding the log:
   its `is_bug` gives (`_errors.is_bug_of`): one connection failure that fails a hundred streams
   is one record, not a hundred.
 - `bounded_list` renders a list of any length as its count and its first `LIST_LIMIT` items,
-  for a record that names symbols, topics, or stream ids: a stream of 5,000 symbols logs one
-  short line, not 5,000 names.
+  for a DEBUG or INFO record that names symbols, topics, or stream ids: a stream of 5,000
+  symbols logs one short line, not 5,000 names.
+- `prose_list` renders a list as prose for a message a user reads (an error, a WARNING, a
+  table's `Error`): `X:FOOUSD and X:BARUSD`, or `12 symbols, the first 3: AAPL, MSFT, and
+  NVDA`.
 
 All are thread-safe. Each holds a leaf lock only while it updates the keys, values, or failures
 it has seen, never while it logs. The module imports only the standard library and `_errors`,
@@ -46,6 +49,7 @@ __all__ = [
     "log_failure",
     "log_once",
     "mark_failure_logged",
+    "prose_list",
 ]
 
 LIST_LIMIT: Final = 20
@@ -141,6 +145,43 @@ def bounded_list(items: Iterable[object], limit: int = LIST_LIMIT) -> str:
     return f"{len(listed)} [{', '.join(shown)}]"
 
 
+def prose_list(items: Iterable[object], noun: str, *, shown: int = 3) -> str:
+    """Render a list as prose for a message a user reads, counting what it leaves out.
+
+    Args:
+        items: The items, in the order to show them; each is shown by `str`.
+        noun: What the items are, in the plural, such as `"symbols"`, for the count when
+            items are left out and for an empty list.
+        shown: How many items to show before the rest are only counted; 3 by default.
+
+    Returns:
+        `"X:FOOUSD"`, `"X:FOOUSD and X:BARUSD"`, or `"AAPL, MSFT, and NVDA"` for a list of at
+        most `shown` items; `"12 symbols, the first 3: AAPL, MSFT, and NVDA"` for a longer
+        one; and `"no symbols"` for an empty one.
+
+    Example:
+        ::
+
+            raise ValueError(f"Massive has no data for {prose_list(missing, 'symbols')}.")
+    """
+    listed = [str(item) for item in items]
+    if not listed:
+        return f"no {noun}"
+    if len(listed) > shown:
+        return f"{len(listed)} {noun}, the first {shown}: {_joined(listed[:shown])}"
+    return _joined(listed)
+
+
+def _joined(items: list[str]) -> str:
+    """Return at least one item joined as prose: `A`, `A and B`, or `A, B, and C`."""
+    *first, last = items
+    if not first:
+        return last
+    if len(first) == 1:
+        return f"{first[0]} and {last}"
+    return f"{', '.join(first)}, and {last}"
+
+
 class BoundedLog:
     """Log a record the first time each value is seen, for at most `limit` distinct values.
 
@@ -159,7 +200,7 @@ class BoundedLog:
             from deephaven_massive._log_limits import BoundedLog
 
             bad = BoundedLog(logging.getLogger("example"), limit=10, level=logging.WARNING)
-            bad.log("BRK/B", "%r is not a ticker; its rows are null", "BRK/B")
+            bad.log("BRK/B", "%r is not a ticker. Its rows are null.", "BRK/B")
     """
 
     __slots__ = ("_level", "_limit", "_lock", "_log", "_seen")
@@ -193,7 +234,7 @@ class BoundedLog:
             last = len(self._seen) > self._limit
         if last:
             self._log.log(
-                self._level, "%d values were reported; further ones are not logged", self._limit
+                self._level, "%d values were reported. Further ones are not logged.", self._limit
             )
         else:
             self._log.log(self._level, message, *args)

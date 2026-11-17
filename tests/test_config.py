@@ -16,7 +16,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive import _config, _session
-from deephaven_massive._config import CONFIG_FILE_VARIABLE, MassiveConfig
+from deephaven_massive._config import CONFIG_FILE_VARIABLE, MassiveConfig, delayed_fix
 from deephaven_massive._datasets.feeds import channel_only_host, fmv_host
 from deephaven_massive._enums import AssetClass, OnError, Subscription
 from deephaven_massive._massive import Transport, sources
@@ -395,12 +395,23 @@ def test_currencies_cannot_be_delayed(base: MassiveConfig) -> None:
         dataclasses.replace(base, delayed_subscriptions={Subscription.CURRENCIES})
 
 
+def test_the_delayed_fix_is_a_sentence_naming_the_setting() -> None:
+    assert delayed_fix(Subscription.OPTIONS) == (
+        "Pass delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."
+    )
+    assert delayed_fix(Subscription.OPTIONS, purpose="To use Massive's delayed options feed") == (
+        "To use Massive's delayed options feed, pass delayed_subscriptions="
+        "{dm.Subscription.OPTIONS} to dm.MassiveConfig."
+    )
+
+
 def test_a_delayed_pin_needs_the_subscription_listed(base: MassiveConfig) -> None:
     with pytest.raises(
         ValueError,
         match=r"^websocket_hosts pins options to the delayed feed delayed\.massive\.com, but "
         r"delayed_subscriptions does not list dm\.Subscription\.OPTIONS; to use the delayed "
-        r"feed write dm\.MassiveConfig\(delayed_subscriptions=\{dm\.Subscription\.OPTIONS\}\)$",
+        r"feed, pass delayed_subscriptions=\{dm\.Subscription\.OPTIONS\} to "
+        r"dm\.MassiveConfig\.$",
     ):
         dataclasses.replace(base, websocket_hosts={AssetClass.OPTIONS: "delayed.massive.com"})
     # Any host named as a delayed feed asks for delayed data.

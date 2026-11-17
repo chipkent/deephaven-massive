@@ -150,7 +150,7 @@ def is_refusal(error: str) -> bool:
     return any(mark in error for mark in REFUSAL_MARKS)
 
 
-NOT_LISTED_MARK: Final = "is not in MassiveConfig.delayed_subscriptions"
+NOT_LISTED_MARK: Final = "is not in delayed_subscriptions"
 """Text that marks a failed stream's error as the settings' refusal of delayed data: the
 library's message names the setting that would accept it (`recency_labels.delayed_refusal`)."""
 

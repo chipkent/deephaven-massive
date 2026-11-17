@@ -379,8 +379,8 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
             on_host(REALTIME_HOST),
             (
                 "the key's plan may not include this data in real time; if Massive serves your "
-                "futures data delayed, use its delayed feed: "
-                "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.FUTURES})"
+                "futures data delayed, pass delayed_subscriptions={dm.Subscription.FUTURES} to "
+                "dm.MassiveConfig."
             ),
         ),
         (
@@ -391,8 +391,8 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
                 "the futures snapshot carried no recency label, so the library used the "
                 "real-time host; if Massive serves this data on another host, pin it with "
                 'MassiveConfig(websocket_hosts={dm.AssetClass.FUTURES: "<host>"}); if Massive '
-                "serves your futures data delayed, use its delayed feed: "
-                "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.FUTURES})"
+                "serves your futures data delayed, pass "
+                "delayed_subscriptions={dm.Subscription.FUTURES} to dm.MassiveConfig."
             ),
         ),
         (

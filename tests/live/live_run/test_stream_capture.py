@@ -1036,8 +1036,8 @@ def test_each_refusal_at_opening_absorbs_one_failed_row() -> None:
 def test_a_stream_the_settings_refused_later_is_not_listed_not_broken() -> None:
     """The settings' refusal of delayed data can fail a stream after it opened."""
     error = (
-        "stocks streams would be delayed (Massive reports timeframe=DELAYED), and "
-        "dm.Subscription.STOCKS is not in MassiveConfig.delayed_subscriptions"
+        "stocks streams would be delayed, since Massive reports timeframe=DELAYED, and "
+        "dm.Subscription.STOCKS is not in delayed_subscriptions"
     )
     opened = f"{NOT_LISTED}stocks-trades: {error}"
     refused, broken = stream_capture.split_failures([error, error], [opened])

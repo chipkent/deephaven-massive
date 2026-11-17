@@ -88,6 +88,7 @@ from deephaven_massive._errors import (
     MassiveError,
     SessionClosedError,
     library_bug,
+    session_closed,
     source_of,
 )
 from deephaven_massive._log_limits import BoundedLog, bounded_list
@@ -490,7 +491,7 @@ class SessionCore:
         """
         refuse_update_graph_thread(self.exec_ctx)
         if self.closed:
-            raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}")
+            raise SessionClosedError(session_closed())
         if not holds_update_graph_lock(self.exec_ctx):
             return body()
         began = time.monotonic()
@@ -777,7 +778,7 @@ class SessionCore:
         """
         with self.registry_lock:
             if self._closed:
-                raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}")
+                raise SessionClosedError(session_closed())
             self._views += 1
             live_set.sync(self)
         scope: LivenessScope | None = None
@@ -794,12 +795,12 @@ class SessionCore:
                 self._drop_view()
             died = self.diagnostics.died
             if isinstance(error, DHError) and self.closed:
-                raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}") from error
+                raise SessionClosedError(session_closed()) from error
             if isinstance(error, DHError) and died is not None:
                 logger.debug("%s: a diagnostics view of a failed table was refused", self.label)
                 raise MassiveError(
                     f"{self.label}: its diagnostics tables failed when their writer thread died "
-                    f"({died!r}); see the ERROR logged then; {NEW_SESSION}",
+                    f"({died!r}); see the ERROR logged then. {NEW_SESSION}",
                     source=source_of(died),
                 ) from error
             raise
@@ -933,7 +934,7 @@ class SessionCore:
         """
         refuse_update_graph_thread(self.exec_ctx)
         locked = holds_update_graph_lock(self.exec_ctx)
-        text = f"{self.label} was closed; this table no longer updates; {NEW_SESSION}"
+        text = f"{self.label} was closed; this table no longer updates. {NEW_SESSION}"
         with self.registry_lock:
             if self._closed:
                 return

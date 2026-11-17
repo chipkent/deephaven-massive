@@ -31,6 +31,7 @@ import pyarrow.compute as pc
 
 from deephaven_massive._enums import OnError
 from deephaven_massive._error_policy import ResolvedPolicy, policy_hint
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import DriftReport, RowFault
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.problem_events import (
@@ -512,9 +513,15 @@ def failure_of(
             needs to say; None when the dataset says enough.
 
     Returns:
-        The failure's message, naming the dataset, each failing cause with its count, where
-        the rows came from, the first reason, and the setting that would go on without the
-        rows; None when no cause with withheld rows is `RAISE`.
+        The failure's message, naming the dataset, the count of rows under the failing causes
+        and each cause's count, where the rows came from, the first reason, and the setting
+        of every failing cause that would go on without the rows; None when no cause with
+        withheld rows is `RAISE`. For example: `"stocks.trades: Massive sent 12 rows the
+        library cannot read whole, so it withheld them: 9 under unreadable_keys and 3 under
+        unconvertible_values, from s3://flatfiles/us_stocks_sip/trades_v1/2025/06/2025-06-06.csv.gz.
+        The required column sip_timestamp is absent or null. To go on without such rows, pass
+        on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG,
+        unconvertible_values=dm.OnError.LOG) to the call or to dm.MassiveConfig."`.
     """
     failing = [
         (fault, count)
@@ -523,13 +530,16 @@ def failure_of(
     ]
     if not failing:
         return None
-    named = [f"{count} under {fault.value}" for fault, count in failing]
-    listed = named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
-    came = "" if where is None else f" They came from {where}."
-    hint = policy_hint(failing[0][0].value, OnError.LOG)
+    total = sum(count for _, count in failing)
+    rows, them = ("1 row", "it") if total == 1 else (f"{total} rows", "them")
+    listed = prose_list((f"{count} under {fault.value}" for fault, count in failing), "causes")
+    came = "" if where is None else f", from {where}"
+    hint = policy_hint(
+        OnError.LOG, *(fault.value for fault, _ in failing), purpose="To go on without such rows"
+    )
     return (
-        f"{dataset}: Massive sent rows the library cannot read whole, so it withheld them: "
-        f"{listed}.{came} {reason_sentence(first_reason)} To go on without such rows, {hint}."
+        f"{dataset}: Massive sent {rows} the library cannot read whole, so it withheld {them}: "
+        f"{listed}{came}. {reason_sentence(first_reason)} {hint}"
     )
 
 

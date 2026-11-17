@@ -472,7 +472,7 @@ def test_closing_the_session_fails_a_loading_read(
     (row,) = [r for r in dh_to_pylist(view) if r["Kind"] == "read"]
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates; " + NEW_SESSION,
+        f"{massive_session._core.label} was closed; this table no longer updates. " + NEW_SESSION,
     )
     del view
 

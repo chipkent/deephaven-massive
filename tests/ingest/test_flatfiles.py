@@ -873,20 +873,18 @@ def test_a_wrong_unit_in_the_time_column_fails_the_read_under_raise(
             "2025-03-03", "2025-03-03", wait=True
         )
     assert str(info.value) == (
-        "stocks.trades: Massive sent rows the library cannot read whole, so it withheld them: "
-        f"1 under unreadable_keys. They came from {LOCATION.format(TRADES_0303)}. Timestamp unit "
+        "stocks.trades: Massive sent 1 row the library cannot read whole, so it withheld it: "
+        f"1 under unreadable_keys, from {LOCATION.format(TRADES_0303)}. Timestamp unit "
         "mismatch for stocks.trades.Timestamp: 1741012200000 ns is outside 1990 to 2100. To go on "
         "without such rows, pass on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the "
-        "dataset method or to MassiveConfig, or write 'on_error: {unreadable_keys: log}' in the "
-        "settings file."
+        "call or to dm.MassiveConfig."
     )
     assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
 
 
 MALFORMED_FIX = (
     "To skip such lines and keep the rest of the file, pass "
-    "on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the dataset method or to "
-    "MassiveConfig, or write 'on_error: {malformed_rows: log}' in the settings file."
+    "on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the call or to dm.MassiveConfig."
 )
 """The fix that ends the message of a malformed line under `malformed_rows=RAISE`."""
 
@@ -1275,12 +1273,12 @@ def test_a_ticker_the_library_cannot_read_fails_the_read_under_raise(
         with pytest.raises(RowDataError) as info:
             every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
         assert str(info.value) == (
-            "stocks.trades: Massive sent rows the library cannot read whole, so it withheld them: "
-            f"1 under unreadable_symbols. They came from {LOCATION.format(TRADES_0303)}. Massive "
+            "stocks.trades: Massive sent 1 row the library cannot read whole, so it withheld it: "
+            f"1 under unreadable_symbols, from {LOCATION.format(TRADES_0303)}. Massive "
             "sent the symbol 'BRK/B', a spelling the library cannot read as Massive's ticker. "
             "To go on without such rows, pass "
-            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the dataset method or "
-            "to MassiveConfig, or write 'on_error: {unreadable_symbols: log}' in the settings file."
+            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
         )
 
 
@@ -2143,7 +2141,7 @@ def test_a_stopped_read_stops_its_roll_forward(
     dates = history_source.partition_dates(FUTURES_TRADES, window)
     with pytest.raises(
         dm.MassiveError,
-        match=r"futures\.trades history: the read was stopped",
+        match=r"futures\.trades history: The read stopped",
     ) as cancelled:
         session._core.flat_file_transport().history(
             FUTURES_TRADES,
@@ -2224,7 +2222,7 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
     dates = history_source.partition_dates(FUTURES_TRADES, window)
     with pytest.raises(
         dm.MassiveError,
-        match=r"futures\.trades history: the read was stopped",
+        match=r"futures\.trades history: The read stopped",
     ):
         session._core.flat_file_transport().history(
             FUTURES_TRADES,
@@ -2721,9 +2719,8 @@ def test_a_refused_futures_venue_names_the_venue(
                 r"https://files\.massive\.com \(AccessDenied: Access Denied\); pass "
                 r"venues={dm\.FuturesVenue\.<VENUE>, \.\.\.} with only the venues the plan "
                 r"includes, or leave venues out; to skip the venues S3 refuses, pass "
-                r"on_error=dm\.ErrorPolicy\(refused_venues=dm\.OnError\.LOG\) to the dataset "
-                r"method or to MassiveConfig, or write 'on_error: \{refused_venues: log\}' in the "
-                "settings file$"
+                r"on_error=dm\.ErrorPolicy\(refused_venues=dm\.OnError\.LOG\) to the call or "
+                r"to dm\.MassiveConfig\.$"
             ),
         ):
             q.history("2025-03-04", "2025-03-04", wait=True)
@@ -3602,7 +3599,7 @@ def test_closing_the_session_ends_a_reread_wait(
     closer = threading.Thread(target=close_while_waiting)
     closer.start()
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
+    with pytest.raises(dm.MassiveError, match=r"^This session is closed"):
         q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     closer.join(TIMEOUT)
     assert manual_retry_clock.monotonic() == 0.0
@@ -3894,7 +3891,7 @@ def test_closing_the_session_stops_a_read_in_progress(
     closer = threading.Thread(target=close_when_reading)
     closer.start()
     try:
-        with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
+        with pytest.raises(dm.MassiveError, match=r"^This session is closed"):
             query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     finally:
         closer.join(TIMEOUT)
@@ -3930,7 +3927,7 @@ def test_a_close_during_a_request_reports_the_close(
     fake_s3.before_answer = lambda _key: flat_file_client(m).close()
     when = f"2025-03-{day:02d}"
     try:
-        with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
+        with pytest.raises(dm.MassiveError, match=r"^This session is closed"):
             query(m, STOCK_TRADES, symbols=dm.ALL).history(when, when, wait=True)
     finally:
         m.close()
@@ -4616,7 +4613,7 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
     stop.set()
     with pytest.raises(
         dm.MassiveError,
-        match=r"stocks\.trades history: the read was stopped",
+        match=r"stocks\.trades history: The read stopped",
     ):
         session._core.flat_file_transport().history(
             STOCK_TRADES,

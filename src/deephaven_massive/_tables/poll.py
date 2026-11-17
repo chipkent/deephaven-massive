@@ -134,7 +134,6 @@ from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import PollMode, Recency
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    NEW_SESSION,
     AuthenticationError,
     BrokenGuaranteeError,
     EntitlementError,
@@ -147,6 +146,7 @@ from deephaven_massive._errors import (
     is_bug_of,
     library_bug,
     required,
+    session_closed,
     source_of,
     unmatched_form,
 )
@@ -432,7 +432,7 @@ class Pollers:
         """
         with self._lock:
             if self._closed:
-                raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
+                raise SessionClosedError(session_closed())
             self._live.add(poller)
             watch = None
             if self._watch is None:

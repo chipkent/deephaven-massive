@@ -244,8 +244,7 @@ def test_a_listed_pair_whose_currencies_do_not_join_raises_under_raise(
             "'X:DOTUSD' cannot be split into its two currencies: Massive's reference data gives "
             "the currencies 'DOT' and 'USDT', which do not join to it. To give the pair no rows "
             "and go on, pass on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the "
-            "dataset method or to MassiveConfig, or write 'on_error: {unreadable_symbols: log}' "
-            "in the settings file."
+            "call or to dm.MassiveConfig."
         )
         assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
     finally:

@@ -44,6 +44,7 @@ from deephaven_massive._errors import (
     SessionClosedError,
     copy_error,
     required,
+    session_closed,
     unmatched_form,
 )
 from deephaven_massive._log_limits import bounded_list
@@ -293,7 +294,7 @@ class SharedStreams:
             # The close failed the stream's tables: its row may not read `CLOSED` yet, or may
             # be gone already, so the close is named whether or not a failure was recorded.
             if deephaven and core.closed:
-                raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}") from error
+                raise SessionClosedError(session_closed()) from error
             if failure is not None:
                 named = copy_error(
                     failure, f"{spec.name} stream {handle.stream_id} failed: {failure}"
@@ -302,7 +303,7 @@ class SharedStreams:
             raise
         if core.closed:  # close() ran while the result was built; it is released on the reaper
             self._results.release(result)
-            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
+            raise SessionClosedError(session_closed())
         return result
 
     def _require_unfailed(self, spec: DatasetSpec, stream_id: int) -> None:
@@ -336,9 +337,7 @@ class SharedStreams:
             if state is None or state.row.state not in {StreamState.FAILED, StreamState.CLOSED}:
                 return None
             if state.row.state is StreamState.CLOSED:
-                return SessionClosedError(
-                    state.row.error or f"{self._label} is closed; {NEW_SESSION}"
-                )
+                return SessionClosedError(state.row.error or session_closed())
             return state.failure
 
     def _acquire(
@@ -552,7 +551,7 @@ class SharedStreams:
         """
         with self._lock:
             if core.closed:
-                raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
+                raise SessionClosedError(session_closed())
             existing = self._stream_ids.get(key)
             if existing is not None:
                 state = self._streams[existing]
@@ -667,7 +666,7 @@ class SharedStreams:
         if closed:
             logger.debug("%s: releasing a stream opened during close()", self._label)
             raise SessionClosedError(
-                f"{self._label} was closed while a stream was opening; {NEW_SESSION}"
+                f"{self._label} was closed while a stream was opening. {NEW_SESSION}"
             )
         return opened
 

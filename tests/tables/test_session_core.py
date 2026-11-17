@@ -26,7 +26,13 @@ import deephaven_massive as dm
 from deephaven_massive._datasets import catalog as _catalog
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars
-from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, MassiveError, required
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    MassiveError,
+    required,
+    session_closed,
+)
 from deephaven_massive._massive import Redactor, Transport
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables import session_core as _core
@@ -585,7 +591,7 @@ def test_a_diagnostics_view_that_races_close_raises_the_closed_error(
     monkeypatch.setattr(_core, "make_result", close_first)
     with pytest.raises(
         dm.MassiveError,
-        match=f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$",
+        match="^" + re.escape(session_closed()) + "$",
     ) as caught:
         massive_session.streams()
     assert isinstance(caught.value.__cause__, DHError)
@@ -640,7 +646,7 @@ def test_a_dying_reaper_fails_the_sessions_live_tables(
     assert [args.exc_type for args in escaped] == [_Fatal]
     text = fake_streams.failed[1]
     assert text.startswith(f"{label(massive_session)}: its reaper thread died (_Fatal")
-    assert text.endswith(f"this table no longer updates; {NEW_SESSION}")
+    assert text.endswith(f"this table no longer updates. {NEW_SESSION}")
     assert core.diagnostics.wait_until_shown(TIMEOUT)
     (row,) = dh_to_pylist(core.diagnostics.streams)  # no view: nothing could release it
     assert (row["State"], row["Error"]) == ("FAILED", text)
@@ -688,7 +694,7 @@ def test_a_diagnostics_writer_dying_after_the_call_fails_the_returned_table(
     assert [args.exc_type for args in escaped] == [_Fatal]
     text = fake_streams.failed[1]
     assert text.startswith(f"{label(massive_session)}: its diagnostics writer thread died (_Fatal")
-    assert text.endswith(f"this table no longer updates; {NEW_SESSION}")
+    assert text.endswith(f"this table no longer updates. {NEW_SESSION}")
     massive_session.release(result)
     assert fake_streams.shutdown[1].wait(TIMEOUT)
 
@@ -716,7 +722,7 @@ def test_a_diagnostics_writer_dying_during_the_call_makes_it_raise(
     with pytest.raises(
         dm.MassiveError,
         match=rf"^test\.trades stream 1 failed: {re.escape(label(massive_session))}: its "
-        r"diagnostics writer thread died \(_Fatal\(\)\); this table no longer updates; "
+        r"diagnostics writer thread died \(_Fatal\(\)\); this table no longer updates. "
         + re.escape(NEW_SESSION)
         + "$",
     ):
@@ -761,7 +767,7 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
     text = f"{label(massive_session)}: its diagnostics writer thread died (_Fatal()); this table"
     assert fake_streams.failed[1].startswith(text)  # the live table fails as before
     assert [str(error) for error in publisher.failures] == [
-        f"{text} no longer updates; {NEW_SESSION}"
+        f"{text} no longer updates. {NEW_SESSION}"
     ]
     assert diagnostics._scope in handed
     assert "their scope is handed to the reaper" in caplog.text
@@ -770,7 +776,7 @@ def test_a_dying_diagnostics_writer_fails_the_diagnostics_tables(
     with pytest.raises(
         dm.MassiveError,
         match=rf"^{re.escape(label(massive_session))}: its diagnostics tables failed when their "
-        r"writer thread died \(_Fatal\(\)\); see the ERROR logged then; "
+        r"writer thread died \(_Fatal\(\)\); see the ERROR logged then. "
         + re.escape(NEW_SESSION)
         + "$",
     ):
@@ -883,7 +889,7 @@ def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(
     massive_session.close()
     with (
         caplog.at_level(logging.DEBUG, logger=_core.__name__),
-        pytest.raises(dm.MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"),
+        pytest.raises(dm.MassiveError, match="^" + re.escape(session_closed()) + "$"),
     ):
         core.run_verb("m.stocks.trades('AAPL').fetch()", refuse)
     # The guard's refusal too: every exception that escapes a verb.
@@ -894,8 +900,7 @@ def test_an_exception_escaping_a_verb_is_logged_at_debug_and_raised(
         ),
         (
             logging.DEBUG,
-            f"m.stocks.trades('AAPL').fetch() raised SessionClosedError: {core.label} is closed; "
-            + NEW_SESSION,
+            f"m.stocks.trades('AAPL').fetch() raised SessionClosedError: {session_closed()}",
         ),
     ]
 

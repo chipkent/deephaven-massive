@@ -48,12 +48,12 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    NEW_SESSION,
     READ_STOPPED,
     BrokenGuaranteeError,
     CutShortError,
     RowDataError,
     UnavailableSymbolError,
+    session_closed,
 )
 from deephaven_massive._ingest import (
     crypto_tickers,
@@ -1377,7 +1377,7 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
         stopped = joiner.join()
         assert isinstance(stopped, dm.MassiveError)
         assert str(stopped).endswith(
-            f"waiting for the crypto ticker list: cancelled; {READ_STOPPED}"
+            f"waiting for the crypto ticker list: cancelled. {READ_STOPPED}"
         )
         clock.advance(60.0)
         assert maker.join() == ("DOT", "USD")
@@ -2027,11 +2027,11 @@ def test_row_symbols_are_canonical(
         with pytest.raises(RowDataError) as info:
             fetch(strict, CONVERSION, params={"from": "AUD", "to": "XXX"})
         assert str(info.value) == (
-            "forex.conversion: Massive sent rows the library cannot read whole, so it withheld "
-            "them: 1 under unreadable_symbols. Massive sent the symbol 'not a pair', a spelling "
+            "forex.conversion: Massive sent 1 row the library cannot read whole, so it withheld "
+            "it: 1 under unreadable_symbols. Massive sent the symbol 'not a pair', a spelling "
             "the library cannot read as Massive's ticker. To go on without such rows, pass "
-            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the dataset method or "
-            "to MassiveConfig, or write 'on_error: {unreadable_symbols: log}' in the settings file."
+            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
         )
 
 
@@ -2087,12 +2087,11 @@ def test_a_withheld_rows_cause_under_raise_fails_the_read(
         fetch(m, DIVIDENDS, symbols=["AAPL"])
     hint = (
         f"To go on without such rows, pass on_error=dm.ErrorPolicy({cause}=dm.OnError.LOG) to the "
-        f"dataset method or to MassiveConfig, or write 'on_error: {{{cause}: log}}' in the "
-        "settings file."
+        "call or to dm.MassiveConfig."
     )
     assert re.fullmatch(
-        r"stocks\.dividends: Massive sent rows the library cannot read whole, so it withheld "
-        rf"them: 1 under {cause}\. \S.*\. {re.escape(hint)}",
+        r"stocks\.dividends: Massive sent 1 row the library cannot read whole, so it withheld "
+        rf"it: 1 under {cause}\. \S.*\. {re.escape(hint)}",
         str(info.value),
     )
     assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
@@ -2326,7 +2325,7 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
             ["AAPL"],
             (
                 "stocks.dividends: the Stocks subscription of your plan does not include this "
-                "data; Massive answered HTTP 403 from GET /stocks/v1/dividends?"
+                "data; Massive answered GET /stocks/v1/dividends?"
             ),
         ),
         (
@@ -2335,7 +2334,7 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
             None,
             (
                 "options.contracts: your account does not include this data; Massive answered "
-                "HTTP 403 from GET /v3/reference/options/contracts?"
+                "GET /v3/reference/options/contracts?"
             ),
         ),
     ],
@@ -2353,7 +2352,7 @@ def test_a_refusal_names_the_dataset_and_its_subscription(
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, spec, symbols=symbols)
     assert str(info.value).startswith(refusal)
-    assert str(info.value).endswith("upgrade")
+    assert str(info.value).endswith(' on 127.0.0.1 with HTTP 403: "upgrade".')
     assert (info.value.status, info.value.source) == (403, dm.ErrorSource.MASSIVE)
 
 
@@ -2368,7 +2367,7 @@ def test_a_refusal_names_the_alternative_where_one_exists(
         fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
     assert str(info.value).startswith(
         "crypto.last: the Currencies subscription of your plan does not include this data; "
-        "Massive answered HTTP 403 from GET /v1/last/crypto/BTC/USD"
+        'Massive answered GET /v1/last/crypto/BTC/USD on 127.0.0.1 with HTTP 403: "{}".'
     )
     assert str(info.value).endswith("; try m.crypto.snapshots(...), which carries the same values")
 
@@ -2433,11 +2432,12 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     warnings = [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.INFO and "with HTTP 429 (" in r.getMessage()
+        if r.levelno == logging.INFO and "request with HTTP 429 (" in r.getMessage()
     ]
     assert len(warnings) == 1
     assert warnings[0].startswith(
-        f"{session._core.label}: Massive refused a stocks request with HTTP 429 (HTTP 429 from GET "
+        f"{session._core.label}: Massive refused a stocks request with HTTP 429 (Massive answered "
+        "GET "
     )
     assert warnings[0].endswith("send the request id to Massive's support")
     assert "test-key" not in caplog.text
@@ -2455,9 +2455,7 @@ def test_a_failed_symbol_fails_the_whole_fan_out(
 def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
     transport = session._core.rest_transport()
     session.close()
-    with pytest.raises(
-        dm.MassiveError, match=r"^MassiveSession #\d+ is closed; " + re.escape(NEW_SESSION) + "$"
-    ):
+    with pytest.raises(dm.MassiveError, match="^" + re.escape(session_closed()) + "$"):
         transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1)
 
 
@@ -3253,7 +3251,7 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
         ThreadPoolExecutor(1) as pool,
         pytest.raises(
             dm.MassiveError,
-            match=r"^MassiveSession #\d+ is closed; " + re.escape(NEW_SESSION) + "$",
+            match="^" + re.escape(session_closed()) + "$",
         ),
     ):
         reader.read(
@@ -4589,12 +4587,11 @@ def test_a_delayed_row_fails_a_real_time_fetch(
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
     assert str(info.value) == (
-        "indices.snapshots data for I:SPX would be delayed (Massive reports timeframe=DELAYED), "
-        "and "
-        "dm.Subscription.INDICES is not in MassiveConfig.delayed_subscriptions, so the library "
-        "serves only real-time indices data. To accept delayed indices data (its streams then "
-        "use Massive's delayed feed too): "
-        "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.INDICES})"
+        "indices.snapshots data for I:SPX would be delayed, since Massive reports "
+        "timeframe=DELAYED, and dm.Subscription.INDICES is not in delayed_subscriptions, so the "
+        "library serves only real-time indices data. To accept delayed indices data, whose "
+        "streams then use Massive's delayed feed too, pass "
+        "delayed_subscriptions={dm.Subscription.INDICES} to dm.MassiveConfig."
     )
 
 
@@ -4694,7 +4691,9 @@ def test_a_delayed_label_fails_an_indicator_poll(
     table = q.poll(60)  # polled, so current whatever its window
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["Error"])
     assert row["State"] == "FAILED"
-    assert "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS})" in row["Error"]
+    assert row["Error"].endswith(
+        "pass delayed_subscriptions={dm.Subscription.STOCKS} to dm.MassiveConfig."
+    )
     session.release(table)
 
 
@@ -4754,9 +4753,9 @@ def test_a_delayed_refusal_names_five_refused_tickers_and_counts_the_rest(
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, INDEX_SNAPSHOTS, symbols=[*names, "I:COMP"])
     assert str(info.value).startswith(
-        "indices.snapshots data for I:SPX, I:NDX, I:DJI, I:VIX, I:RUT and 2 more would be delayed "
-        "(Massive reports last_quote.timeframe=DELAYED), and dm.Subscription.INDICES is not in "
-        "MassiveConfig.delayed_subscriptions"
+        "indices.snapshots data for I:SPX, I:NDX, I:DJI, I:VIX, I:RUT and 2 more would be delayed, "
+        "since Massive reports last_quote.timeframe=DELAYED, and dm.Subscription.INDICES is not in "
+        "delayed_subscriptions"
     )
 
 
@@ -4767,7 +4766,7 @@ def test_a_delayed_envelope_names_the_requested_tickers(
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
     assert str(info.value).startswith(
-        "indices.snapshots data for I:SPX would be delayed (Massive reports status=DELAYED)"
+        "indices.snapshots data for I:SPX would be delayed, since Massive reports status=DELAYED,"
     )
 
 
@@ -4786,7 +4785,9 @@ def test_a_delayed_label_fails_a_real_time_poll_table(
     )
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["Error"])
     assert (row["State"], row["Recency"]) == ("FAILED", "UNKNOWN")  # never real-time unproven
-    assert "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.INDICES})" in row["Error"]
+    assert row["Error"].endswith(
+        "pass delayed_subscriptions={dm.Subscription.INDICES} to dm.MassiveConfig."
+    )
     session.release(table)
 
 
@@ -4856,8 +4857,8 @@ def test_a_delayed_stock_row_fails_a_unified_snapshot(
     with pytest.raises(dm.EntitlementError) as info:
         _unified(session, "AAPL")
     assert str(info.value).startswith(
-        "snapshots data for AAPL would be delayed (Massive reports last_trade.timeframe=DELAYED), "
-        "and dm.Subscription.STOCKS is not in MassiveConfig.delayed_subscriptions"
+        "snapshots data for AAPL would be delayed, since Massive reports "
+        "last_trade.timeframe=DELAYED, and dm.Subscription.STOCKS is not in delayed_subscriptions"
     )
 
 
@@ -5137,11 +5138,11 @@ def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
         with pytest.raises(dm.MassiveError) as info:
             fetch(m, CONVERSION, params=params, on_error=strict)
         assert str(info.value) == (
-            "forex.conversion: Massive sent rows the library cannot read whole, so it withheld "
-            "them: 1 under unreadable_symbols. Massive sent the symbol 'not a pair', a spelling "
+            "forex.conversion: Massive sent 1 row the library cannot read whole, so it withheld "
+            "it: 1 under unreadable_symbols. Massive sent the symbol 'not a pair', a spelling "
             "the library cannot read as Massive's ticker. To go on without such rows, pass "
-            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the dataset method or "
-            "to MassiveConfig, or write 'on_error: {unreadable_symbols: log}' in the settings file."
+            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
         )
         with pytest.raises(dm.MassiveError, match=r"could read none of the 1 rows"):
             fetch(m, CONVERSION, params=params)
@@ -5600,12 +5601,11 @@ def test_ignored_withheld_rows_log_no_warning_but_still_reach_the_session(
         with pytest.raises(RowDataError) as info:
             fetch(m, DIVIDENDS, symbols=["AAPL"], on_error=strict)
         assert str(info.value) == (
-            "stocks.dividends: Massive sent rows the library cannot read whole, so it withheld "
-            "them: 1 under unconvertible_values. /stocks/v1/dividends: row 0: Frequency (wire key "
+            "stocks.dividends: Massive sent 1 row the library cannot read whole, so it withheld "
+            "it: 1 under unconvertible_values. /stocks/v1/dividends: row 0: Frequency (wire key "
             "'frequency') expects long, got 4.5. To go on without such rows, pass "
-            "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the dataset method "
-            "or to MassiveConfig, or write 'on_error: {unconvertible_values: log}' in the "
-            "settings file."
+            "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
         )
     assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
         (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Frequency", 1)

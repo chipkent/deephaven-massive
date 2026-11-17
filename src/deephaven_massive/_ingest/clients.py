@@ -26,7 +26,7 @@ import weakref
 from typing import TYPE_CHECKING
 
 from deephaven_massive import _massive
-from deephaven_massive._errors import NEW_SESSION, SessionClosedError
+from deephaven_massive._errors import SessionClosedError, session_closed
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import RestEndpoints, RestState
@@ -115,7 +115,7 @@ class SessionClients:
         """
         core = self._core()
         if core is None:
-            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
+            raise SessionClosedError(session_closed())
         return core
 
     def rest(self) -> RestEndpoints:

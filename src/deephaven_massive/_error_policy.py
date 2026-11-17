@@ -402,20 +402,31 @@ def check_policy(value: object, name: str = "on_error") -> ErrorPolicy:
     )
 
 
-def policy_hint(cause: str, setting: OnError) -> str:
-    """Say how to set one cause, for a message that tells the user what to change.
+def policy_hint(setting: OnError, cause: str, *causes: str, purpose: str | None = None) -> str:
+    """Return the sentence that tells the user how to set the causes a message is about.
+
+    It names every cause the message's failure needs set, so a user who follows it does not
+    fail again on the next cause. The settings-file form of the policy is in
+    https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error,
+    not here, so the sentence stays short.
 
     Args:
-        cause: The cause, an `ErrorPolicy` field, such as `"malformed_rows"`.
-        setting: The setting the message suggests.
+        setting: The setting the message suggests for each cause.
+        cause: The first cause, an `ErrorPolicy` field, such as `"malformed_rows"`.
+        *causes: The other causes, in the order to name them.
+        purpose: What the setting achieves, as a clause that starts the sentence, such as
+            `"To skip such lines and keep the rest of the file"`; None (absent) for a
+            sentence that starts with the imperative.
 
     Returns:
-        For example, "pass on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the
-        dataset method or to MassiveConfig, or write 'on_error: {malformed_rows: log}' in the
-        settings file".
+        `"Pass on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG,
+        unconvertible_values=dm.OnError.LOG) to the call or to dm.MassiveConfig."`, or, with a
+        purpose, `"To skip such lines and keep the rest of the file, pass
+        on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the call or to
+        dm.MassiveConfig."`.
     """
-    return (
-        f"pass on_error=dm.ErrorPolicy({cause}=dm.OnError.{setting.name}) to the dataset method "
-        f"or to MassiveConfig, or write 'on_error: {{{cause}: {setting.value}}}' in the "
-        "settings file"
-    )
+    named = ", ".join(f"{name}=dm.OnError.{setting.name}" for name in (cause, *causes))
+    advice = f"pass on_error=dm.ErrorPolicy({named}) to the call or to dm.MassiveConfig."
+    if purpose is None:
+        return f"{advice[:1].upper()}{advice[1:]}"
+    return f"{purpose}, {advice}"
