@@ -3055,8 +3055,10 @@ def market_status(live_rest: RestClient, evidence: Callable[[str], None]) -> Cal
 
     Returns:
         A function taking `"stocks"`, `"options"`, `"indices"`, `"fx"`, `"crypto"`, or
-        `"futures"`, and returning Massive's status: `"open"`, `"closed"`, `"extended-hours"`,
-        and so on, and for futures `"open"`, `"pause"`, `"close"`, and so on.
+        `"futures"`, and returning Massive's status as sent. For `/v1/marketstatus/now` that is
+        `"open"`, `"closed"`, `"extended-hours"`, or a value the tests do not know yet, which
+        `streams.market_state` refuses by name. For futures it is `"open"`, `"pause"`,
+        `"close"`, and so on.
     """
 
     def status(market: str) -> str:
@@ -3916,9 +3918,11 @@ def rows_due(
 
     For futures it reads the E-mini S&P 500's `market_event` and its `timestamp` from
     `/futures/v1/market-status`; for every other market its status from
-    `/v1/marketstatus/now` (`_MARKETS`). The session the stream's rows come from opens as
-    `streams.opened_at` says (stock trades and quotes in the extended hours from 04:00 New York
-    time, the regular session at 09:30), and rows are due while it is open: by the market's
+    `/v1/marketstatus/now` (`_MARKETS`), read by name (`streams.market_state`: a status the
+    tests do not know fails the test). The session the stream's rows come from opens as
+    `streams.opened_at` says (04:00 New York time for stock trades and quotes, or 21:00 in an
+    overnight session Massive says trades, and 09:30 for the rest), and rows are due while it
+    is open: by the market's
     clock alone, since Massive's delayed feed lags by an amount the tests do not know (a test
     of a subscription listed in `delayed_subscriptions` skips when no row comes). A stock,
     option, or index stream that needs the regular session has no rows due from its close
