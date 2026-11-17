@@ -14,7 +14,6 @@ from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.table import Table
 from deephaven.table_factory import InputTable
-from deephaven.time import dh_today, to_j_time_zone
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
@@ -87,10 +86,9 @@ def test_a_feed_without_start_refuses_to_poll(
     # Every cycle would re-read Massive's whole archive; the message names the fix.
     message = (
         "m.economy.inflation().poll() needs a start or a limit. Without one, every cycle "
-        "re-reads Massive's whole archive, and a fixed start such as '2025-01-02' widens the "
-        "window every day the poll runs. Pass m.economy.inflation() a start that moves with the "
-        "clock, such as start=dh_today(to_j_time_zone('America/New_York')) with both imported "
-        "from deephaven.time, or a limit with sort='date', order=dm.Order.DESC, then call poll()."
+        "re-reads Massive's whole archive. A start is fixed when the query is built, so the "
+        "window it bounds grows every day the poll runs. For the latest rows, pass "
+        "m.economy.inflation() a limit with sort='date', order=dm.Order.DESC, then call poll()."
     )
     with (
         pytest.raises(ValueError, match=f"^{re.escape(message)}$"),
@@ -127,17 +125,15 @@ def test_each_feed_polls_as_its_refusal_advises(
     method: Callable[..., FetchQuery],
     newest: dict[str, object],
 ) -> None:
-    # The two fixes the refusal of a poll without a start or a limit names, on every feed,
-    # with the import of deephaven.time it names.
+    # The fix the refusal of a poll without a start or a limit names, on every feed.
     named = ", ".join(
         f"{key}=dm.Order.DESC" if key == "order" else f"{key}={value!r}"
         for key, value in newest.items()
     )
-    with pytest.raises(ValueError, match=re.escape(f"or a limit with {named}, then call poll().")):
+    with pytest.raises(ValueError, match=re.escape(f"a limit with {named}, then call poll().")):
         method(massive_session).poll(60)
-    method(massive_session, start=dh_today(to_j_time_zone("America/New_York"))).poll(60)
     method(massive_session, limit=50, **newest).poll(60)
-    assert [c[0] for c in rest.calls] == ["poll", "poll"]
+    assert [c[0] for c in rest.calls] == ["poll"]
 
 
 def test_a_feed_with_a_limit_polls_its_latest_rows(
@@ -182,10 +178,7 @@ def test_poll_refuses_an_interval_under_one_second(
 ) -> None:
     # A typo such as poll(0.01) for poll(10) would send requests back to back on a plan
     # Massive does not pace; the error names the minimum and the value given.
-    message = (
-        f"interval={interval!r} is below the least 1 s, since each poll() cycle sends a "
-        "request. Pass 1 or more."
-    )
+    message = f"interval={interval!r} is below the least 1 s. Pass 1 or more."
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         feed(massive_session).poll(interval)
     assert rest.calls == []

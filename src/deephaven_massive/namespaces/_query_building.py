@@ -755,8 +755,8 @@ def _typed_params(
     typed = {k: v for k, v in params.items() if v is not None}
     if "order" in typed and "sort" not in typed and not core.catalog.takes_param(spec, "order"):
         raise ValueError(
-            f"{spec.name}: order needs sort, since this dataset takes the direction as a "
-            "suffix of the sort field. Pass sort= with the field to order by, or leave order out."
+            f"{spec.name}: order needs sort. Pass sort= with the field to order by, or leave "
+            "order out."
         )
     sort = typed.get("sort")
     if isinstance(sort, str):  # `list_params` refused any other type

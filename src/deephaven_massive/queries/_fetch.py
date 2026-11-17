@@ -103,8 +103,7 @@ def _interval(value: object) -> timedelta:
     if period < MINIMUM_POLL_INTERVAL:
         raise ValueError(
             f"interval={value!r} is below the least "
-            f"{MINIMUM_POLL_INTERVAL.total_seconds():g} s, since each poll() cycle sends a "
-            "request. Pass 1 or more."
+            f"{MINIMUM_POLL_INTERVAL.total_seconds():g} s. Pass 1 or more."
         )
     return period
 
@@ -605,11 +604,9 @@ class FetchQuery(Query):
             raise ValueError(
                 user_defect(
                     f"{self!r}.poll() needs a start or a limit. Without one, every cycle re-reads "
-                    "Massive's whole archive, and a fixed start such as '2025-01-02' widens the "
-                    "window every day the poll runs",
-                    f"Pass m.{name}() a start that moves with the clock, such as "
-                    "start=dh_today(to_j_time_zone('America/New_York')) with both imported from "
-                    f"deephaven.time, or a limit with {newest}, then call poll()",
+                    "Massive's whole archive. A start is fixed when the query is built, so the "
+                    "window it bounds grows every day the poll runs",
+                    f"For the latest rows, pass m.{name}() a limit with {newest}, then call poll()",
                 )
             )
         if isinstance(self._request.symbols, SymbolTable):

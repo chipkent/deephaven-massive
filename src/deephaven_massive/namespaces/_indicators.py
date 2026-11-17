@@ -178,7 +178,8 @@ def _check_window(name: str, value: object) -> int:
     if isinstance(value, Timespan):
         raise TypeError(
             f"{name} must be an int, not dm.Timespan.{value.name}. If you meant timespan, pass "
-            "it by name, since it is keyword-only: sma('AAPL', timespan=dm.Timespan.MINUTE)."
+            "it by name, since it is keyword-only: "
+            "m.indicators.sma('AAPL', timespan=dm.Timespan.MINUTE)."
         )
     return require_positive_int(name, value)
 

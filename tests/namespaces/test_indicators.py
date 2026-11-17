@@ -197,7 +197,7 @@ def test_a_timespan_passed_as_the_window_names_the_keyword(
     i = massive_session.indicators
     refusal = (
         "window must be an int, not dm.Timespan.MINUTE. If you meant timespan, pass it by name, "
-        "since it is keyword-only: sma('AAPL', timespan=dm.Timespan.MINUTE)."
+        "since it is keyword-only: m.indicators.sma('AAPL', timespan=dm.Timespan.MINUTE)."
     )
     assert i.sma("AAPL", timespan=dm.Timespan.MINUTE)._request is not None  # the advice
     with pytest.raises(TypeError, match=whole(refusal)):
@@ -206,7 +206,7 @@ def test_a_timespan_passed_as_the_window_names_the_keyword(
         i.rsi("AAPL", "hour")  # type: ignore[arg-type]  # the point: refused at run time
     short = (
         "short_window must be an int, not dm.Timespan.DAY. If you meant timespan, pass it by "
-        "name, since it is keyword-only: sma('AAPL', timespan=dm.Timespan.MINUTE)."
+        "name, since it is keyword-only: m.indicators.sma('AAPL', timespan=dm.Timespan.MINUTE)."
     )
     with pytest.raises(TypeError, match=whole(short)):
         i.macd("AAPL", short_window=dm.Timespan.DAY)  # type: ignore[arg-type]  # the point: refused at run time

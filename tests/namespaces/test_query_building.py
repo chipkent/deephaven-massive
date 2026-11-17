@@ -164,8 +164,8 @@ def test_order_without_sort_follows_the_dataset_paths(massive_session: dm.Massiv
         ("order", Order.DESC),
     )
     needs_sort = (
-        "stocks.dividends: order needs sort, since this dataset takes the direction as a suffix "
-        "of the sort field. Pass sort= with the field to order by, or leave order out."
+        "stocks.dividends: order needs sort. Pass sort= with the field to order by, or leave "
+        "order out."
     )
     with pytest.raises(ValueError, match=whole(needs_sort)):
         build(massive_session, DIVIDENDS, params={"order": Order.DESC, "sort": None})
