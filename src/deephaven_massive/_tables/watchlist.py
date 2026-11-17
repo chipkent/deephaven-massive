@@ -11,7 +11,7 @@ A row that is not canonical is never subscribed or requested; what else it does 
 call's `noncanonical_symbols` setting, which `SymbolRowRule` carries:
 
 - `OnError.RAISE`: a bad row present at the call raises `ValueError`, and one that arrives
-  later fails the result, with a message that names the row and `canonicalize_symbols`.
+  later fails the result, with a message that names the row and how to fix it.
 - `OnError.LOG` and `OnError.IGNORE`: the row is skipped and the result keeps following the
   others. Each skipped value is a `noncanonical_symbols` span of the result's problems in
   `m.problems()` until its rows are fixed or deleted (`SkippedValues`); the session's problem
@@ -132,7 +132,7 @@ _ignored_rows: Final = BoundedLog(logger, limit=_SKIPPED_LIMIT, level=logging.DE
 def invalid_row_message(
     asset_class: AssetClass | ClassFromPrefix, symbol: str, *, as_written: bool = False
 ) -> str:
-    """Say why a symbol table's row is refused, and how to convert such a table.
+    """Say why a symbol table's row is refused, and how to fix it.
 
     Args:
         asset_class: The dataset's class, or `ClassFromPrefix.ANY` for a dataset that spans
@@ -149,18 +149,32 @@ def invalid_row_message(
         the rows it cannot convert and, with `on_error=dm.OnError.RAISE`, fails on them, so a
         caller who chose to fail on a bad row keeps failing; for a dataset that spans classes,
         whose rows may mix them, it is `dm.canonical_symbol` per row with each row's class. For
-        stocks the remedy names `convention=`, since under the default, Massive's own spelling,
-        no ticker with another source's separators converts.
+        stocks, alone or among other classes, the remedy names `convention=`, since under the
+        default, Massive's own spelling, no ticker with another source's separators converts.
+        For values kept as Massive writes them (a third party's global tickers, futures product
+        codes) the remedy is only to fix the row: the converters follow a class's ticker
+        grammar, so they refuse a product code such as `ES`, and they refuse surrounding
+        whitespace and a class prefix, the faults such a row has, so they would null every one.
     """
-    reason = ""
+    refusal = ""
     try:
         check_symbol(asset_class, symbol, as_written=as_written)
     except ValueError as error:
-        reason = f" ({error})"
+        refusal = str(error)
+    if as_written:
+        return (
+            f"a symbol table holds {symbol!r}: {refusal}. Fix the row to the value Massive "
+            "writes, or delete it. Don't convert the table with dm.canonicalize_symbols: it "
+            "applies ticker rules these values don't follow, so it nulls correct ones too"
+        )
+    reason = f" ({refusal})" if refusal else ""
     if asset_class is ClassFromPrefix.ANY:
         remedy = (
-            "convert each row with dm.canonical_symbol(text, asset_class) and the row's own "
-            "class, since this dataset's rows may mix classes"
+            "convert each row with dm.canonical_symbol(text, asset_class) and that row's class "
+            "(dm.AssetClass.FOREX for 'EUR/USD'), since this table's rows may mix classes. A "
+            "stock in another source's spelling also needs that source's "
+            "convention: dm.canonical_symbol('BRK-B', dm.AssetClass.STOCKS, "
+            "convention=dm.SymbolConvention.YAHOO) gives 'BRK.B'"
         )
     else:
         convention = (
@@ -174,7 +188,7 @@ def invalid_row_message(
             "nulls the rest, or, given on_error=dm.OnError.RAISE, fails on the rest"
         )
     message = f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
-    if as_written or _converts(asset_class, symbol):
+    if _converts(asset_class, symbol):
         return message
     return (
         f"{message}. If Massive itself writes {symbol!r}, the library does not know its form "
@@ -202,6 +216,22 @@ def _converts(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+_UNDERLYING_CONVERSION: Final = (
+    "If your stock tickers use another source's spelling, such as Yahoo's 'BRK-B', convert "
+    "every row but the index rows: converting the whole table as stocks nulls index rows such "
+    "as 'I:SPX'. With t the table you passed as underlying=:\n"
+    "    from deephaven import merge\n"
+    "    stocks = dm.canonicalize_symbols("
+    't.where("isNull(Symbol) || !Symbol.startsWith(`I:`)"), '
+    "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)\n"
+    '    underlying = merge([stocks, t.where("!isNull(Symbol) && '
+    'Symbol.startsWith(`I:`)")])\n'
+    "Use YAHOO, NASDAQ, or CMS, whichever source the tickers come from"
+)
+"""How a table of underlyings in another source's stock spelling converts, one step per line:
+the stock rows only, since the stock converter nulls an index ticker."""
 
 
 _FAILED_TABLE: Final = (
@@ -432,14 +462,16 @@ class SymbolRowRule:
             symbol: The row's value, which `accepts` refuses.
 
         Returns:
-            For a rule of underlyings, that an underlying is a stock or index ticker; else
-            the reason of `invalid_row_message`.
+            For a rule of underlyings, that an underlying is a stock or index ticker, and the
+            one conversion that can turn a refused row into one: a stock ticker in another
+            source's spelling, converted with its `convention=` (an unprefixed row is read as
+            a stock, so an index spelling such as `spx` converts to nothing); else the reason
+            of `invalid_row_message`.
         """
         if self.underlying:
             return (
                 f"a table of underlyings holds {symbol!r}, which is not a stock or index ticker "
-                "such as 'AAPL' or 'I:SPX'. Fix the row, or convert it with "
-                "dm.canonical_symbol(text, asset_class)"
+                f"such as 'AAPL' or 'I:SPX'. Fix or delete the row. {_UNDERLYING_CONVERSION}"
             )
         return invalid_row_message(self.asset_class, symbol, as_written=self.as_written)
 
