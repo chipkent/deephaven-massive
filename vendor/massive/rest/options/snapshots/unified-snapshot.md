@@ -44,7 +44,7 @@ Use Cases: Cross-market analysis, diversified portfolio monitoring, global marke
 | `results[].implied_volatility` | number | The market's forecast for the volatility of the underlying asset, based on this option's current price. |
 | `results[].last_quote` | object | The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `results[].last_trade` | object | The most recent quote for this contract. This is only returned if your current plan includes trades. |
-| `results[].market_status` | string | The market status for the market that trades this ticker. Possible values for stocks, options, crypto, and forex snapshots are open, closed, early_trading, or late_trading. Possible values for indices snapshots are regular_trading, closed, early_trading, and late_trading. |
+| `results[].market_status` | string | The market status for the market that trades this ticker.  Possible values for Stocks are overnight_trading, open, closed, early_trading, and late_trading. Note that the overnight_trading session is new as of 2026-12-07 for SIP 23/5 extended hours.  Possible values for options, crypto, and forex snapshots are open, closed, early_trading, or late_trading.  Possible values for indices snapshots are regular_trading, closed, early_trading, and late_trading. |
 | `results[].message` | string | The error message while looking for this ticker. |
 | `results[].name` | string | The name of this contract. |
 | `results[].open_interest` | number | The quantity of this contract held at the end of the last trading day. |
