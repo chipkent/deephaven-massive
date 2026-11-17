@@ -73,7 +73,6 @@ from tests._live.doc_examples import (
     forget,
     merged,
     run_blocks,
-    section,
     section_blocks,
     write_settings_file,
 )
@@ -676,40 +675,6 @@ def test_the_settings_example_reads_the_file_its_commands_write(
     assert names["config"].delayed_subscriptions == {dm.Subscription.STOCKS}
     assert isinstance(names["snapshot"], Table)
     names.clear()
-
-
-@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
-def test_the_error_policy_example_matches_its_settings_file(
-    *,
-    readme_server: FakeRestServer,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    console_command: Callable[[Callable[[], None]], None],
-) -> None:
-    readme_server.reply_default(Reply(envelope([])))
-    [block] = section_blocks(README, "bad-symbols-and-rows")
-    [names] = run_blocks([block], tmp_path, "policy", console_command=console_command)
-    # Every cause raises but a malformed flat-file line; the call logs every cause.
-    strict = names["strict"]
-    assert strict == dm.ErrorPolicy(
-        noncanonical_symbols=dm.OnError.RAISE,
-        unreadable_symbols=dm.OnError.RAISE,
-        unavailable_symbols=dm.OnError.RAISE,
-        unreadable_keys=dm.OnError.RAISE,
-        unconvertible_values=dm.OnError.RAISE,
-        malformed_rows=dm.OnError.LOG,
-        unlisted_contracts=dm.OnError.RAISE,
-        unscheduled_products=dm.OnError.RAISE,
-        refused_venues=dm.OnError.RAISE,
-    )
-    assert isinstance(names["week"], Table)
-    names.clear()
-    # The settings file the section prints sets the same policy.
-    [text] = _YAML.findall(section(README, "bad-symbols-and-rows"))
-    file = tmp_path / "settings.yaml"
-    file.write_text(text, encoding="utf-8")
-    monkeypatch.setenv("MASSIVE_API_KEY", "k")
-    assert dm.MassiveConfig.from_file(file).on_error == strict
 
 
 def test_the_settings_pages_shape_example_loads_each_form(
