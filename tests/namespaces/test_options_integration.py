@@ -1184,12 +1184,12 @@ _PER_ROOT = 2
 def _contracts_underlying(
     session: dm.MassiveSession, ticker: str, *, day: str, table_rows: TableRows
 ) -> str | None:
-    """Read one contract's canonical `Underlying` from `m.options.contracts()` as of a day.
+    """Read one contract's canonical `Underlying` from `m.options.contract_details()` as of a day.
 
     Returns:
         The contract's `Underlying`, or None when the reference has no row for it.
     """
-    found = table_rows(session.options.contracts(ticker, as_of=day).fetch(wait=True))
+    found = table_rows(session.options.contract_details(ticker, as_of=day).fetch(wait=True))
     return str(found[0]["Underlying"]) if found else None
 
 
@@ -1203,12 +1203,12 @@ def test_underlying_matches_the_contracts_reference(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Both new datasets name each contract's underlying as `m.options.contracts()` does.
+    """Both new datasets name each contract's underlying as `m.options.contract_details()` does.
 
     For the roots `SPX`, `SPXW`, `NDX`, `VIX`, `RUT`, `DJT`, `AMCR1`, and `AAPL`, reads up to
     two contracts each from one page of open interest per root and from one page of the latest
     unusual trades, and two expired `SPXW` contracts from a year earlier. Then it reads each
-    contract's `Underlying` from `m.options.contracts()` as of the row's day. It checks two
+    contract's `Underlying` from `m.options.contract_details()` as of the row's day. It checks two
     things for every contract read:
 
     - Massive's own `underlying_ticker` equals the reference's `Underlying` apart from an
