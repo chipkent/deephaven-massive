@@ -13,10 +13,10 @@ Example:
 
         m = dm.MassiveSession()
 
-        # Apple's daily bars for one week, on any Stocks plan.
+        # Apple's daily bars for one week.
         apple = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")
 
-        # Each stock's latest minute bar, live and real-time on Stocks Advanced.
+        # Each stock's latest minute bar, kept live.
         latest = m.stocks.bars(["AAPL", "MSFT"], dm.Timespan.MINUTE).last_by()
 
 Datasets:
@@ -54,8 +54,9 @@ Settings:
     `dm.MassiveConfig` holds a session's settings. Pass it as `dm.MassiveSession(config)`. Two
     settings match a session to your plans:
 
-    - `delayed_subscriptions` lets live tables and snapshots read a plan's delayed data, as on
-      Stocks Starter.
+    - `delayed_subscriptions` lists the subscriptions whose data Massive serves you delayed.
+      Their streams use Massive's delayed feed, and their `fetch()` and `poll()` tables accept
+      delayed data.
     - `rest_requests_per_minute` keeps a subscription's requests within the limit Massive
       gives your plan from the first request.
 

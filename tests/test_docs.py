@@ -672,7 +672,7 @@ def test_the_settings_example_reads_the_file_its_commands_write(
     readme_server.reply_default(Reply(envelope([])))
     [block] = section_blocks(README, "what-your-plan-allows")
     [names] = run_blocks([block], tmp_path, "settings", console_command=console_command)
-    # The file accepts the delayed Stocks feed, the setting Starter and Developer need.
+    # The file lists stocks as a subscription Massive serves the key delayed.
     assert names["config"].delayed_subscriptions == {dm.Subscription.STOCKS}
     assert isinstance(names["snapshot"], Table)
     names.clear()

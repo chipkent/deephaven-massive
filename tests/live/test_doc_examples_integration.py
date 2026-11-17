@@ -202,7 +202,7 @@ def _console(tmp_path: Path, console_command: ConsoleCommand, evidence: Evidence
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
 @pytest.mark.timeout(1200)
-def test_the_free_examples_fill_with_no_setting(
+def test_the_history_examples_fill_with_no_setting(
     live_config: dm.MassiveConfig,
     *,
     tmp_path: Path,
@@ -222,14 +222,14 @@ def test_the_free_examples_fill_with_no_setting(
     send about 15 stock requests. Records from `m.rate_limits()` of a session on the same key
     whether the stocks governor learned a limit.
 
-    Asserts what `_run_free_examples` checks.
+    Asserts what `_run_history_examples` checks.
     """
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry())
     evidence("a governor of the test's own and no setting: a limit is learned from Massive")
     run = _console(tmp_path, console_command, evidence)
     try:
         with doc_examples.recorded_sessions():
-            _run_free_examples(
+            _run_history_examples(
                 run,
                 table_rows=table_rows,
                 skip_if_not_entitled=skip_if_not_entitled,
@@ -260,7 +260,7 @@ def _record_stocks_limit(
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
 @pytest.mark.timeout(900)
-def test_the_free_examples_fill_back_to_back_at_a_declared_pace(
+def test_the_history_examples_fill_back_to_back_at_a_declared_pace(
     live_config: dm.MassiveConfig,
     *,
     tmp_path: Path,
@@ -275,10 +275,10 @@ def test_the_free_examples_fill_back_to_back_at_a_declared_pace(
     (`rest_requests_per_minute`, a user setting: the owner's stocks limit, else 5) holds the
     key's rate governor, so every session's stock requests keep to it. The setting paces from
     the first request, so this test never exercises Massive's refusal of a request past its
-    limit and the pause after it; `test_the_free_examples_fill_with_no_setting` does, when
+    limit and the pause after it; `test_the_history_examples_fill_with_no_setting` does, when
     Massive limits stocks.
 
-    Asserts what `_run_free_examples` checks.
+    Asserts what `_run_history_examples` checks.
     """
     evidence("paced by the setting: Massive's refusal of a request past its limit is not exercised")
     limited = {dm.Subscription.STOCKS: 5, **live_config.rest_requests_per_minute}
@@ -286,7 +286,7 @@ def test_the_free_examples_fill_back_to_back_at_a_declared_pace(
     run = _console(tmp_path, console_command, evidence)
     try:
         with doc_examples.recorded_sessions():
-            _run_free_examples(
+            _run_history_examples(
                 run,
                 table_rows=table_rows,
                 skip_if_not_entitled=skip_if_not_entitled,
@@ -297,7 +297,7 @@ def test_the_free_examples_fill_back_to_back_at_a_declared_pace(
         pacer.close()
 
 
-def _run_free_examples(
+def _run_history_examples(
     run: _Run,
     *,
     table_rows: TableRows,
@@ -469,7 +469,7 @@ def _check_news(
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
 @pytest.mark.timeout(600)
-def test_the_paid_examples_fill_in_the_current_stock_session(
+def test_the_live_examples_fill_in_the_current_stock_session(
     live_config: dm.MassiveConfig,
     live_session: dm.MassiveSession,
     *,

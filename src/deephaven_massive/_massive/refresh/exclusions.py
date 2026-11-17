@@ -12,6 +12,8 @@ vendor source are not listed here; they are recorded below so nobody re-adds the
   documentation index.
 - `/benzinga/v1/news`: sunset, replaced by `/benzinga/v2/news`.
 - `/vX/reference/financials`: sunset, replaced by `/stocks/financials/v1/*`.
+- `/options/vX/open-interest`: absent from the OpenAPI specification of the 2026-11-16
+  snapshot, which documents `/options/v1/open-interest`.
 - WebSocket `/futures/{venue}`: not documented; the futures WebSocket pages list `/futures` only.
 
 Every generated source must be read by a dataset; the coverage test in
@@ -170,7 +172,7 @@ EXCLUSIONS: tuple[Exclusion, ...] = (
     _rest("/v1/reference/ipos", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/dev/trades/{ticker}", _UNDOCUMENTED, undocumented=True),
     _rest("/stocks/filings/10-K/vX_0/sections", _UNDOCUMENTED, undocumented=True),
-    _rest("/options/vX/open-interest", _UNDOCUMENTED, undocumented=True),
+    _rest("/options/v1/analytics", _UNDOCUMENTED, undocumented=True),
     _rest("/options/vX/open-interest/underlying", _UNDOCUMENTED, undocumented=True),
     _rest(
         "/v2/snapshot/locale/us/markets/stocks/tickers/{stocksTicker}",

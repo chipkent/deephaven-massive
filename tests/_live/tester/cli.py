@@ -12,7 +12,7 @@
   example of `docs/tester-examples/` in order (`examples.run_examples`), and saves what each
   did under `DIR/examples-output/`. The examples write their debug log and diagnostics to
   `DIR` too. It first reads which subscriptions the tester's own settings file lists as
-  delayed (`examples.listed_delayed`), and writes the settings file the paid examples read
+  delayed (`examples.listed_delayed`), and writes the settings file the live examples read
   with them. Exit 0 when no example failed (a refusal by Massive is not a failure), else 1. A
   settings file the library refuses raises its error.
 - `bug-report [--folder DIR]` writes `DIR/bug-report-<UTC time>.zip` (`bug_report`). Exit 0
@@ -201,7 +201,7 @@ def main(
         describe: Describes the machine for a bug report (`describe_machine`).
         now: Reads the time, which names a bug report's zip.
         delayed: Reads the subscriptions the tester's own settings file lists as delayed, for
-            the settings file the paid examples read; None without a file. Only `examples`
+            the settings file the live examples read; None without a file. Only `examples`
             calls it.
 
     Returns:
