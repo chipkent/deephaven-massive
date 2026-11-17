@@ -2299,12 +2299,18 @@ def test_a_client_state_with_no_rule_is_a_defect(ws_session: WsSession) -> None:
 
 # --- a connection with no topic: WAITING, no socket ------------------------------------------
 #
-# Each state and event, and the test that covers it:
+# What a connection does on each event, by state; each cell has a test below, except where
+# noted. A stream's open that fails leaves a waiting connection with no socket, which the next
+# stream reuses (`test_a_failed_open_returns_its_lease` in test_ws.py), and `connect()` after
+# the client ended does nothing (test_client.py).
 #
-# | state     | first topic | last topic goes | last stream released | session close | socket drop |
-# |-----------|-------------|-----------------|----------------------|---------------|-------------|
-# | WAITING   | connects    | (none to go)    | closes, no socket    | no socket     | (no socket) |
-# | CONNECTED | (open)      | stays connected | idle close (above)   | (above)       | reconnects  |
+# | state     | first topic       | last topic goes | last stream released | session close |
+# |-----------|-------------------|-----------------|----------------------|---------------|
+# | WAITING   | connects          | (none to go)    | closes, no socket    | no socket     |
+# | CONNECTED | (already open)    | stays connected | idle close (above)   | (above)       |
+#
+# A socket dropped after the first topic reconnects, and an outage is dated from the first
+# failed attempt, never from the wait before it.
 
 
 def empty_watchlist(dh_input_table: Callable[..., InputTable]) -> InputTable:
@@ -2429,19 +2435,26 @@ def test_a_socket_dropped_after_the_first_topic_reconnects(
     ws_session.session.release(result)
 
 
-def test_the_time_spent_waiting_is_no_outage(
-    make_ws_session: Callable[..., WsSession],
+def test_an_outage_starts_at_the_first_failed_attempt_not_while_waiting(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    *,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     dh_input_table: Callable[..., InputTable],
 ) -> None:
-    # With no outage allowed at all, a stream that waited for its first topic still runs.
-    ws_session = make_ws_session(max_outage=0)
+    # The time spent waiting for a topic is no outage: the outage, which max_outage limits,
+    # is dated from the first attempt that failed, after the first topic arrived.
     watchlist = empty_watchlist(dh_input_table)
     result = ws_session.query(TRADES, watchlist).blink()
     wait_for(lambda: state_of(ws_session, dh_to_pylist) == "WAITING")
+    connection = ws_session.connection()
+    assert ws_session.on_loop(connection, lambda: connection._episodes.down_since) is None
+    fake_ws_server.reject_next(503)
+    added_at = time.time()
     add_row(watchlist, "AAPL")
-    ws_session.subscribed("T.AAPL")
-    [row] = streams_of(ws_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == ("RUNNING", None)
-    assert not result.j_table.isFailed()
+    ws_session.wait(lambda s: WsState.RECONNECTING in s.states)
+    down_since = ws_session.on_loop(connection, lambda: connection._episodes.down_since)
+    assert isinstance(down_since, float)
+    assert down_since >= added_at
+    ws_session.subscribed("T.AAPL")  # the next attempt connects
     ws_session.session.release(result)

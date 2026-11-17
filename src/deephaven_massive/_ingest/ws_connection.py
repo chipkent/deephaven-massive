@@ -570,11 +570,10 @@ class Connection:
     # --- lifecycle (any thread) ----------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the flush thread and the client, and show the row; once only, never after close.
+        """Start the flush thread and the client. Does nothing once closed or started.
 
-        The client opens its socket once a stream wants a topic (`_after_change`). Until then
-        the row shows `WAITING`, written here, since the client reports no state before it
-        connects.
+        The client opens its socket once a stream wants a topic (`_after_change`); until then
+        the row shows `WAITING`.
         """
         with self._start_lock:
             if self._closing or self._started:
@@ -582,7 +581,6 @@ class Connection:
             self._started = True
             self.flusher.start()
             self._client.start()
-        self.post(self._write_row)
 
     def close(self, *, final_flush: bool = False) -> None:
         """Close the client and stop the flush thread. Any thread; never waits; idempotent.

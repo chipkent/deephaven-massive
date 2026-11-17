@@ -488,9 +488,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
               tell, and it never treats such data as real-time.
             - `Evidence`: what showed the library that recency.
             - `State`: `RESOLVING`, `WAITING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`,
-              `RECONNECTING`, `FAILED`, or `CLOSED`. `WAITING` means no live table on the
-              connection has a symbol to stream yet, such as an empty watchlist, so the library
-              has not connected; it connects when the first symbol arrives.
+              `RECONNECTING`, `FAILED`, or `CLOSED`. `WAITING` means the library hasn't connected,
+              because no live table on the connection has a symbol to stream yet. It connects at
+              the first symbol.
             - `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics`: the subscriptions sent,
               confirmed by Massive, waiting for confirmation, and never confirmed.
             - `BufferedRows`: rows waiting to reach their tables. Past 1,000,000, a WARNING is

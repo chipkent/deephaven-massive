@@ -970,6 +970,13 @@ def test_a_failed_open_returns_its_lease(
         ws_session.query(TRADES, ["AAPL"]).blink()
     assert ws_session.connection().leases == 0
     assert ws_session.connections.group.streams == {}
+    assert ws_session.opens == 0  # it never had a topic, so it opened no socket
+    # A later stream with a topic reuses the waiting connection and connects it.
+    monkeypatch.undo()
+    result = ws_session.query(TRADES, ["MSFT"]).blink()
+    ws_session.subscribed("T.MSFT")
+    assert (len(ws_session.urls), ws_session.opens) == (1, 1)
+    ws_session.session.release(result)
 
 
 def test_a_watch_that_cannot_start_releases_the_stream(

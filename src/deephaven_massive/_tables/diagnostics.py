@@ -185,8 +185,7 @@ class ConnectionState(StrEnum):
 
     RESOLVING = "RESOLVING"
     WAITING = "WAITING"
-    """No live table on the connection has a symbol to subscribe yet, such as an empty
-    watchlist, so it has opened no socket; it connects when the first symbol arrives."""
+    """No socket is open: no live table on the connection has a symbol to subscribe yet."""
     CONNECTING = "CONNECTING"
     CONNECTED = "CONNECTED"
     WAITING_SLOT = "WAITING_SLOT"
