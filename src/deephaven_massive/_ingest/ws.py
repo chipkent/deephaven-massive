@@ -928,18 +928,19 @@ class WsConnections:
     def _split(
         self, symbols: Iterable[str], policy: ResolvedPolicy
     ) -> tuple[set[str], dict[str, Unsplit], list[str], MassiveError | None]:
-        """Split crypto pairs by Massive's crypto ticker list, stopping at a failed read.
+        """Split crypto pairs by Massive's crypto ticker list, reading none after a failed read.
 
-        A split is kept for the group (`pairs`), so each pair is looked up once.
+        A split is kept for the group (`pairs`), so each pair is looked up once, and a pair
+        split before is split even while the list cannot be read.
 
         Args:
             symbols: Canonical crypto tickers, sorted.
             policy: The stream's resolved policy, for the lookup (`crypto_pair`).
 
         Returns:
-            The pairs split, those the list gives no split for with why (`Unsplit`), those left
-            unsplit by a failed read of the list, and that failure (None when the list was
-            read).
+            The pairs split, those the list gives no split for with why (`Unsplit`), those not
+            split before and left unread by a failed read of the list, and that failure (None
+            when the list was read).
 
         Raises:
             MassiveError: The lookup's own error, when its source is `ErrorSource.LIBRARY`: a
@@ -948,19 +949,25 @@ class WsConnections:
         """
         split: set[str] = set()
         unsplit: dict[str, Unsplit] = {}
-        pending = list(symbols)
-        for index, symbol in enumerate(pending):
+        waiting: list[str] = []
+        failure: MassiveError | None = None
+        for symbol in symbols:
             with self._lock:
                 known = symbol in self.group.pairs
             if known:
                 split.add(symbol)
+                continue
+            if failure is not None:  # the list just failed to read: wait with the failed pair
+                waiting.append(symbol)
                 continue
             try:
                 found = self._crypto_pair(symbol, policy)
             except MassiveError as error:
                 if error.source is ErrorSource.LIBRARY:
                     raise  # a defect is never retried or shown as a waiting pair
-                return split, unsplit, pending[index:], error
+                failure = error
+                waiting.append(symbol)
+                continue
             match found:
                 case Unsplit():
                     unsplit[symbol] = found
@@ -970,7 +977,7 @@ class WsConnections:
                     split.add(symbol)
                 case _:
                     raise BrokenGuaranteeError(unmatched_form("a crypto pair's lookup", found))
-        return split, unsplit, [], None
+        return split, unsplit, waiting, failure
 
     def _no_data(
         self, stream_id: int, no_data: Mapping[str, str], *, reader: str, setting: OnError

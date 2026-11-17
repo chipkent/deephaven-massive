@@ -2357,6 +2357,130 @@ def test_a_pair_removed_while_it_waits_is_never_subscribed(
     ws_session.session.release(result)
 
 
+def subscriptions_of(ws_session: WsSession, topic: str) -> int:
+    # How many subscribe frames named the topic, on any connection.
+    return sum(
+        topic in json.loads(f)["params"].split(",")
+        for f in ws_session.server.frames()
+        if json.loads(f)["action"] == "subscribe"
+    )
+
+
+def stream_row(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    stream_id: int,
+) -> dict[str, Any]:
+    # The m.streams() row of one of several streams.
+    (row,) = [r for r in streams_of(ws_session, dh_to_pylist) if r["StreamId"] == stream_id]
+    return row
+
+
+def split_once(ws_session: WsSession, pair: str, topic: str) -> None:
+    # Stream the pair once and release it: the session keeps its split, and the topic is
+    # unsubscribed. Its list answer is then a failed read, which a lookup would hit.
+    result = ws_session.query(CRYPTO, [pair]).append_only()
+    ws_session.subscribed(topic)
+    ws_session.session.release(result)
+    ws_session.unsubscribed(topic)
+    with ws_session.cond:
+        ws_session.pair_answers[pair] = dm.MassiveError("HTTP 503: busy", status=503)
+
+
+WAITING = "wait for Massive's crypto ticker list, which could not be read (HTTP 503: busy)"
+"""The end of a waiting pairs' `Error`, after their list."""
+
+
+@pytest.mark.parametrize("source", SOURCES)
+def test_a_pair_the_session_split_before_streams_while_the_list_cannot_be_read(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    quick_retries: Callable[[WsSession], None],
+    *,
+    source: str,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # X:ETHUSD's split is known, so it subscribes at once though it sorts after X:DOTUSD, whose
+    # list read fails. X:SOLUSD, after the failed read, is not looked up: it waits with
+    # X:DOTUSD, and both subscribe once the list reads.
+    ws_session = make_ws_session()
+    quick_retries(ws_session)
+    split_once(ws_session, "X:ETHUSD", "XT.ETH-USD")
+    with ws_session.cond:
+        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+    before = len(lookups(ws_session))
+    pairs = crypto_watchlist(
+        ["X:DOTUSD", "X:ETHUSD", "X:SOLUSD"], source=source, dh_input_table=dh_input_table
+    )
+    result = ws_session.query(CRYPTO, pairs).append_only()
+    wait_for(lambda: subscriptions_of(ws_session, "XT.ETH-USD") == 2)
+    wait_for(
+        lambda: (
+            f"crypto pairs 2 [X:DOTUSD, X:SOLUSD] {WAITING}"
+            in (stream_row(ws_session, dh_to_pylist, 2)["Error"] or "")
+        )
+    )
+    assert {symbol for symbol, _ in lookups(ws_session)[before:]} == {"X:DOTUSD"}
+    with ws_session.cond:
+        ws_session.pair_answers["X:DOTUSD"] = ("DOT", "USD")
+    ws_session.subscribed("XT.DOT-USD", "XT.SOL-USD")
+    wait_for(lambda: stream_row(ws_session, dh_to_pylist, 2)["Error"] is None)
+    assert "X:ETHUSD" not in {symbol for symbol, _ in lookups(ws_session)[before:]}
+    assert subscriptions_of(ws_session, "XT.ETH-USD") == 2
+    ws_session.session.release(result)
+
+
+def test_a_waiting_pair_another_stream_splits_stops_waiting(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    quick_retries: Callable[[WsSession], None],
+) -> None:
+    # Both pairs wait behind X:DOTUSD's failed read. Once another stream splits X:ETHUSD, the
+    # next retry subscribes it, though X:DOTUSD's read fails again.
+    quick_retries(ws_session)
+    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    with ws_session.cond:
+        ws_session.pair_answers["X:DOTUSD"] = busy
+        ws_session.pair_answers["X:ETHUSD"] = busy
+    waiting = ws_session.query(CRYPTO, ["X:DOTUSD", "X:ETHUSD"]).append_only()
+    wait_for(
+        lambda: (
+            f"crypto pairs 2 [X:DOTUSD, X:ETHUSD] {WAITING}"
+            in (stream_row(ws_session, dh_to_pylist, 1)["Error"] or "")
+        )
+    )
+    with ws_session.cond:
+        ws_session.pair_answers["X:ETHUSD"] = ("ETH", "USD")
+    other = ws_session.query(CRYPTO, ["X:ETHUSD"]).append_only()
+    ws_session.subscribed("XT.ETH-USD")
+    wait_for(
+        lambda: (
+            f"crypto pairs 1 [X:DOTUSD] {WAITING}"
+            in (stream_row(ws_session, dh_to_pylist, 1)["Error"] or "")
+        )
+    )
+    ws_session.session.release(other)
+    ws_session.session.release(waiting)
+
+
+def test_max_outage_fails_the_stream_naming_only_the_pairs_that_waited(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    quick_retries: Callable[[WsSession], None],
+) -> None:
+    # X:ETHUSD's split is known, so it never waited: the failure names X:DOTUSD alone.
+    ws_session = make_ws_session(max_outage=0.1)
+    quick_retries(ws_session)
+    split_once(ws_session, "X:ETHUSD", "XT.ETH-USD")
+    with ws_session.cond:
+        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+    result = ws_session.query(CRYPTO, ["X:DOTUSD", "X:ETHUSD"]).append_only()
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    row = stream_row(ws_session, dh_to_pylist, 2)
+    assert row["State"] == "FAILED"
+    assert "(0.1 s), so 1 [X:DOTUSD] cannot be streamed" in row["Error"]
+
+
 def test_pair_bookkeeping_of_a_stream_that_ended_changes_nothing(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
