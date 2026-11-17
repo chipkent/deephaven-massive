@@ -1583,7 +1583,7 @@ def _report_problems(
 def _follow_refused(request: Request, skipped: SkippedValues, *, column: str) -> None:
     """Join the values `canonicalize_symbols` refuses to a poll's own skipped values.
 
-    Only a live table `canonicalize_symbols` returned has refused values (`refused_values_of`):
+    Only a table `canonicalize_symbols` returned has refused values (`refused_values_of`):
     the poll's symbol table, its table of values (`Request.value_table`), or both.
 
     Args:
