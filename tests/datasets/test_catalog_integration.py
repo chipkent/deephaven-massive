@@ -55,7 +55,7 @@ from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._massive import RestClient, Transport, WireEntitlementError, source
 from deephaven_massive._session import CATALOG
 from deephaven_massive.queries import FetchQuery, HistoryQuery, NoSymbolStreamQuery, StreamQuery
-from tests._live import streams
+from tests._live import problems, streams
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -490,7 +490,7 @@ class _Case:
         Returns:
             One line per WARNING or worse a `deephaven_massive` logger emitted during the
             case, the source-choice notice excepted, and per row of the session's
-            `problems()`.
+            `problems()`, read once every problem the case queued shows.
         """
         found = []
         for record in self.caplog.records:
@@ -501,10 +501,7 @@ class _Case:
                 self.evidence(f"source choice: {message}")
                 continue
             found.append(f"{record.levelname} {record.name}: {message}")
-        found.extend(
-            f"problem {r['Cause']} {r['Symbol'] or ''} {r['Field'] or ''}: {r['Detail']}"
-            for r in self.table_rows(self.session.problems())
-        )
+        found.extend(problems.problem_lines(self.session, self.table_rows))
         return found
 
     def failure(self) -> str | None:
