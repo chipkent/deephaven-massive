@@ -14,6 +14,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 import threading
 from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING, Any
@@ -68,6 +69,12 @@ if TYPE_CHECKING:
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 R = Transport.REST
 OWNER = "namespaces/options"
@@ -442,7 +449,13 @@ def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
     watch = new_table([string_col("Symbol", [CONTRACT])])
     q = massive_session.options.trades(watch)
     assert isinstance(q._request.symbols, SymbolTable)
-    with pytest.raises(ValueError, match="must have a Symbol column"):
+    no_symbol = (
+        "The symbol table has no Symbol column. It has Ticker. Name the column of tickers Symbol, "
+        'as in t.view("Symbol = Ticker"). For tickers in another spelling, see '
+        "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
+        "#underlyings-in-another-spelling."
+    )
+    with pytest.raises(ValueError, match=whole(no_symbol)):
         massive_session.options.trades(new_table([string_col("Ticker", [CONTRACT])]))
 
 
@@ -516,13 +529,16 @@ def test_chain_and_contracts_take_a_table_of_underlyings(
         assert parameter not in request_of(query)["params"]  # each verb sends one at a time
     assert request_of(chain)["params"] == {"contract_type": dm.ContractType.PUT}
     tickers = new_table([string_col("Ticker", ["AAPL"])])
-    with pytest.raises(
-        ValueError,
-        match=r"^a table passed as underlying must have a Symbol column; this one has: Ticker\. ",
-    ):
+    refusal = (
+        "The table passed as underlying has no Symbol column. It has Ticker. Name the column of "
+        'values Symbol, as in t.view("Symbol = Value").'
+    )
+    with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.options.chain(tickers)
-    with pytest.raises(ValueError, match="must have a Symbol column"):
+    with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.options.contracts(underlying=tickers)
+    renamed = tickers.view("Symbol = Ticker")  # the advice
+    assert massive_session.options.chain(renamed)._request.value_table is not None
 
 
 def test_a_chain_of_a_pair_fails_with_massive_s_answer(
@@ -539,13 +555,14 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
     chain = massive_session.options.chain
     with pytest.raises(
         ValueError,
-        match=(
-            r"^options\.chain reads one underlying's chain and does not take dm\.ALL; "
-            r"m\.options\.snapshots\(dm\.ALL\) lists every contract$"
+        match=whole(
+            "options.chain reads one underlying's chain, so it does not take dm.ALL. For every "
+            "contract, call m.options.snapshots(dm.ALL).fetch()."
         ),
     ):
         chain(dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not int$"):
+    assert massive_session.options.snapshots(dm.ALL)._request.symbols is dm.ALL  # the advice
+    with pytest.raises(TypeError, match=whole("underlying must be one ticker as a str, not int")):
         chain(1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
         chain("  ")
@@ -563,7 +580,8 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
     assert request_of(chain("I:SPX"))["params"]["underlyingAsset"] == "I:SPX"
     with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
         chain("AAPL", contract_type="call")  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match=r"^contract_type is set through its own argument"):
+    own = "The filter 'contract_type' has its own argument. Pass contract_type= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         chain("AAPL", filters={"contract_type": "call"})
     with pytest.raises(ValueError, match=r"options\.chain has no filter 'ticker'"):
         chain("AAPL", filters={"ticker": "x"})
@@ -584,11 +602,17 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
     assert dict(snapshots(dm.ALL)._request.params) == {"type": "options"}
     # The library sets `type`, for dm.ALL only, so the page lists no `type` filter key.
     assert "type" not in filter_keys(CATALOG, options.SNAPSHOTS)
-    with pytest.raises(ValueError, match=r"^the library sets type itself; it is not a filter$"):
+    library = whole(
+        "The library sets 'type' itself, so it cannot be a filter. Remove it from filters."
+    )
+    with pytest.raises(ValueError, match=library):
         snapshots(dm.ALL, filters={"type": "stocks"})
-    with pytest.raises(ValueError, match=r"^the library sets type itself; it is not a filter$"):
+    with pytest.raises(ValueError, match=library):
         snapshots([CONTRACT], filters={"type": "options"})
-    with pytest.raises(ValueError, match=r"^ticker_any_of is set through symbols=, not"):
+    symbols = (
+        "The filter 'ticker_any_of' sets the symbols of options.snapshots. Pass symbols= instead."
+    )
+    with pytest.raises(ValueError, match=whole(symbols)):
         snapshots(dm.ALL, filters={"ticker_any_of": [CONTRACT]})
 
 
@@ -641,12 +665,18 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
     contracts = massive_session.options.contracts
     # Massive lists no contracts of a pair and answers with no rows, so a pair is refused.
     for pair in ("C:EURUSD", "X:BTCUSD"):
-        with pytest.raises(ValueError, match=rf"^underlying='{pair}' is a currency or crypto"):
+        refusal = (
+            f"underlying='{pair}' is a currency or crypto pair, which has no listed options. "
+            "Pass a stock or index ticker, such as 'AAPL' or 'I:SPX'."
+        )
+        with pytest.raises(ValueError, match=whole(refusal)):
             contracts(pair)
     # What Massive answers to a contract as the underlying is for it to judge.
     contract = "O:AAPL250117C00150000"
     assert request_of(contracts(contract))["params"]["underlying_ticker"] == contract
-    with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not dm\.ALL$"):
+    with pytest.raises(
+        TypeError, match=whole("underlying must be one ticker as a str, not dm.ALL")
+    ):
         contracts(dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
         contracts("aapl")
@@ -660,16 +690,16 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
         "as_of_gte",
         "expired",
     ):
-        with pytest.raises(ValueError, match=f"^{key} is set through its own argument"):
+        with pytest.raises(ValueError, match=rf"^The filter '{key}' has its own argument\. Pass "):
             contracts(filters={key: "x"})
     # Massive's list takes `ticker` too, but a contract is named through contract_details(),
     # where it gets the canonical check.
     for key in ("ticker", "ticker_any_of"):
         with pytest.raises(
             ValueError,
-            match=(
-                rf"^{key} is not a filter of options\.contracts; read named contracts with "
-                r"m\.options\.contract_details\(\)$"
+            match=whole(
+                f"options.contracts has no filter {key!r}. To read named contracts, call "
+                "m.options.contract_details(contracts).fetch()."
             ),
         ):
             contracts(filters={key: CONTRACT})
@@ -679,21 +709,30 @@ def test_contract_details_reject_bad_arguments(massive_session: dm.MassiveSessio
     details = massive_session.options.contract_details
     with pytest.raises(
         ValueError,
-        match=(
-            r"^'AAPL' is an underlying, not an options contract: list its contracts with "
-            r"m\.options\.contracts\('AAPL'\)$"
+        match=whole(
+            "'AAPL' is an underlying, not an options contract. To list its contracts, call "
+            "m.options.contracts('AAPL').fetch()."
         ),
     ):
         details("AAPL")
-    with pytest.raises(ValueError, match=r"^'I:SPX' is an underlying, .*contracts\('I:SPX'\)$"):
+    with pytest.raises(ValueError, match=r"^'I:SPX' is an underlying, .*contracts\('I:SPX'\)"):
         details("I:SPX")
-    with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) to list contracts"):
+    assert massive_session.options.contracts("I:SPX")._request is not None  # the advice
+    every = (
+        "options.contract_details does not take dm.ALL. To list contracts, call "
+        "m.options.contracts().fetch()."
+    )
+    with pytest.raises(ValueError, match=whole(every)):
         details(dm.ALL)
     with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
         details("aapl")  # not canonical: the symbol check explains it
     with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
         details([])
-    with pytest.raises(ValueError, match=r"^options\.contract_details needs symbols, got None"):
+    needs = (
+        "options.contract_details needs symbols, and symbols is None. Pass a ticker, a list of "
+        "tickers, or a table with a Symbol column."
+    )
+    with pytest.raises(ValueError, match=whole(needs)):
         details(None)  # type: ignore[arg-type]  # the point: refused at run time
     # In a list, an underlying meets the symbol check, which names it an underlying too.
     with pytest.raises(ValueError, match=r"^'AAPL' is an underlying, not an OCC option symbol"):
@@ -735,8 +774,11 @@ def test_daily_open_close_takes_explicit_contracts(massive_session: dm.MassiveSe
     # Massive has no grouped daily endpoint for options: the day's bars serve every contract.
     with pytest.raises(
         ValueError,
-        match=r"; use m\.options\.bars\(dm\.ALL, dm\.Timespan\.DAY, adjusted=False\)"
-        r"\.history\(day, day\), every contract's bar of that day$",
+        match=whole(
+            "options.daily_open_close does not take dm.ALL. For every contract's bar of one day, "
+            "call m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history('2025-01-02', "
+            "'2025-01-02')."
+        ),
     ):
         daily(dm.ALL, "2025-01-02")
     with pytest.raises(TypeError):
@@ -860,10 +902,15 @@ def test_previous_day_bar_is_one_adjusted_day_and_refuses_all(
         prev(CONTRACT, adjusted=None)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(
         ValueError,
-        match=r"use m\.options\.bars\(dm\.ALL, dm\.Timespan\.DAY, adjusted=False\)"
-        r"\.history\(day, day\)",
+        match=whole(
+            "options.previous_day_bar does not take dm.ALL. For every contract's bar of one day, "
+            "call m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history('2025-01-02', "
+            "'2025-01-02')."
+        ),
     ):
         prev(dm.ALL)
+    every = massive_session.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False)  # the advice
+    assert every._request.symbols is dm.ALL
 
 
 def test_last_trade_fetch_reads_the_last_trade(
@@ -881,7 +928,11 @@ def test_last_trade_fetch_reads_the_last_trade(
     assert row["OptionRoot"] == "TSLA"
     assert (row["Size"], row["Exchange"], row["Conditions"]) == (25.0, 312, [227])
     assert row["ParticipantTimestamp"] == 1617901342969834000
-    with pytest.raises(ValueError, match=r"use m\.options\.chain\(underlying\)\.fetch\(\)"):
+    every = (
+        "options.last_trade does not take dm.ALL. For every contract of one underlying, call "
+        "m.options.chain('AAPL').fetch()."
+    )
+    with pytest.raises(ValueError, match=whole(every)):
         rest_session.options.last_trade(dm.ALL)
     assert len(fake_rest.get_queries()) == 1
 
@@ -1751,17 +1802,33 @@ def test_the_list_datasets_take_only_option_contracts_and_refuse_all(
     m = massive_session
     for factory in (m.options.open_interest, m.options.unusual_trades):
         assert factory()._request.symbols is None
-        with pytest.raises(ValueError, match="leave symbols out, which returns every contract"):
+        every = (
+            f"{factory()._spec.name} does not take dm.ALL. Leave symbols out to read every "
+            "contract."
+        )
+        with pytest.raises(ValueError, match=whole(every)):
             factory(dm.ALL)
         with pytest.raises(ValueError, match="is an underlying, not an OCC option symbol"):
             factory("AAPL")
-    with pytest.raises(ValueError, match="root is empty; pass None for every root"):
+    with pytest.raises(
+        ValueError,
+        match=whole("root=[] is empty, so it would select nothing. Leave root out for every root."),
+    ):
         m.options.open_interest(root=[])
     with pytest.raises(TypeError, match="root must be a str, a sequence of str, or None"):
         m.options.open_interest(root=5)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="calendar date; pass dates"):
+    with pytest.raises(
+        ValueError,
+        match=whole(
+            "options.open_interest: date is a calendar date, so start and end take dates, not "
+            "times. Pass dates, such as start='2025-01-02'."
+        ),
+    ):
         m.options.open_interest(start=datetime(2026, 1, 20, tzinfo=UTC))
-    with pytest.raises(ValueError, match="root_any_of is set through its own argument, root="):
+    with pytest.raises(
+        ValueError,
+        match=whole("The filter 'root_any_of' has its own argument. Pass root= instead."),
+    ):
         m.options.open_interest(filters={"root_any_of": "SPY"})
 
 

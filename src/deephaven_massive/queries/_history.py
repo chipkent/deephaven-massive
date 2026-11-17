@@ -39,6 +39,7 @@ from deephaven_massive._errors import (
     BrokenGuaranteeError,
     raises_through,
     unmatched_form,
+    user_defect,
 )
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Transport
@@ -159,7 +160,7 @@ class HistoryQuery(Query):
         """
         problem = rest_history_problem(self._spec, self._request)
         if problem is not None:
-            raise ValueError(f"{problem}; use source=dm.HistorySource.FLAT_FILES")
+            raise ValueError(user_defect(problem, "Pass source=dm.HistorySource.FLAT_FILES"))
 
     @_verb
     @raises_through(

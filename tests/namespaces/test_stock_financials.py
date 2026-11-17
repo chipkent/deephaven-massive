@@ -5,12 +5,18 @@ arguments) are in `test_stocks.py`.
 """
 
 import functools
+import re
 from collections.abc import Callable
 
 import pytest
 
 import deephaven_massive as dm
 from deephaven_massive.queries import Query
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
 
 
 def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:
@@ -59,7 +65,14 @@ def test_flow_statements_offer_the_trailing_twelve_months(
 def test_balance_sheets_refuse_the_trailing_twelve_months(
     massive_session: dm.MassiveSession,
 ) -> None:
-    with pytest.raises(ValueError, match="balance sheets have no trailing twelve months"):
+    refusal = (
+        "Balance sheets have no timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS. Pass "
+        "timeframe=dm.Timeframe.ANNUAL or timeframe=dm.Timeframe.QUARTERLY."
+    )
+    sheets = massive_session.stocks.financials.balance_sheets
+    for advised in (dm.Timeframe.ANNUAL, dm.Timeframe.QUARTERLY):
+        assert dict(sheets(timeframe=advised)._request.params) == {"timeframe": advised}
+    with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.stocks.financials.balance_sheets(
             timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS
         )

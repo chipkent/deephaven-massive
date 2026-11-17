@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Final
 from deephaven import merge
 
 from deephaven_massive._config import require_positive_number
+from deephaven_massive._datasets.filters import param_base
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import (
     PollMode,
@@ -28,6 +29,8 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import (
     raises_through,
+    required,
+    user_defect,
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import (
@@ -93,13 +96,36 @@ def _interval(value: object) -> timedelta:
         try:
             period = timedelta(seconds=seconds)
         except OverflowError:  # beyond timedelta's range
-            raise ValueError(f"interval must be a positive, finite time, got {value!r}") from None
+            raise ValueError(
+                f"interval={value!r} is longer than a timedelta can hold. Pass a number of "
+                "seconds, such as 60."
+            ) from None
     if period < MINIMUM_POLL_INTERVAL:
         raise ValueError(
-            f"interval must be at least {MINIMUM_POLL_INTERVAL.total_seconds():g} second, got "
-            f"{value!r}: each poll() cycle sends a request; use a stream for faster updates"
+            f"interval={value!r} is below the least "
+            f"{MINIMUM_POLL_INTERVAL.total_seconds():g} s, since each poll() cycle sends a "
+            "request. Pass 1 or more."
         )
     return period
+
+
+def _newest_first(core: SessionCore, spec: DatasetSpec) -> str:
+    """Return the arguments that order a feed's rows newest first, as a user types them.
+
+    A feed whose paths take `order` takes it alone; any other sends the direction as a suffix
+    of `sort`, so it names its time axis's field there too.
+
+    Args:
+        core: The session core, whose catalog says whether the feed takes `order`.
+        spec: The feed, which declares a `time_axis`.
+
+    Returns:
+        Such as `"order=dm.Order.DESC"` or `"sort='published', order=dm.Order.DESC"`.
+    """
+    if core.catalog.takes_param(spec, "order"):
+        return "order=dm.Order.DESC"
+    axis = required(spec.time_axis, f"{spec.name}'s time axis")
+    return f"sort={param_base(axis[0])!r}, order=dm.Order.DESC"
 
 
 def _read_value_table(
@@ -157,11 +183,20 @@ def _read_value_table(
             core.problems(events)
     if rows.skipped and not rows.symbols:
         raise ValueError(
-            f"{query}: no row of the {values.argument} table is a value this dataset takes, so "
-            f"the result would read nothing: {skipped_rows_text(rows.skipped)}"
+            user_defect(
+                f"{query}: No row of the {values.argument} table is a value this dataset takes, "
+                "so the result would read nothing. The table holds "
+                f"{skipped_rows_text(rows.skipped)}",
+                "Fix or delete those rows",
+            )
         )
     if not rows.symbols and not live:
-        raise ValueError(f"{query}: the {values.argument} table holds no values")
+        raise ValueError(
+            user_defect(
+                f"{query}: The {values.argument} table holds no value",
+                f"Pass a table whose {rule.column} column holds at least one value",
+            )
+        )
     return rows.symbols
 
 
@@ -456,10 +491,12 @@ class FetchQuery(Query):
         if isinstance(symbols, SymbolTable) and symbols.table.is_refreshing:
             logger.debug("%r fetch() refused: two refreshing tables to follow", self)
             raise ValueError(
-                f"{self!r}.fetch() follows one refreshing table, and both symbols and "
-                f"{values.argument} are refreshing tables. Use poll(interval), which reads "
-                f"both at every cycle, or pass one of them as a static snapshot, such as "
-                f"{values.argument}=table.snapshot()"
+                user_defect(
+                    f"{self!r}.fetch() follows one refreshing table, and both symbols and "
+                    f"{values.argument} are refreshing tables",
+                    "Call poll(60) instead, which reads both every 60 s, or pass one of them as "
+                    f"a snapshot, such as {values.argument}=table.snapshot()",
+                )
             )
         call_time = _read_value_table(
             core,
@@ -563,13 +600,17 @@ class FetchQuery(Query):
         request = self._request
         if self._spec.is_feed and request.start is None and request.limit is None:
             name = self._spec.name
+            newest = _newest_first(self._core, self._spec)
             logger.debug("%r poll() refused: a feed's poll needs a start or a limit", self)
             raise ValueError(
-                f"{self!r}.poll() needs a start or a limit: without either, every cycle "
-                f"re-reads the whole archive Massive keeps. Build the query with a start, such as "
-                f"m.{name}(..., start=dh_today(to_j_time_zone('America/New_York'))), or with "
-                "a limit and a newest-first order, then call poll(). A fixed start keeps "
-                "widening the window on a poll that runs for days"
+                user_defect(
+                    f"{self!r}.poll() needs a start or a limit. Without one, every cycle re-reads "
+                    "Massive's whole archive, and a fixed start such as '2025-01-02' widens the "
+                    "window every day the poll runs",
+                    f"Pass m.{name}() a start that moves with the clock, such as "
+                    "start=dh_today(to_j_time_zone('America/New_York')) with both imported from "
+                    f"deephaven.time, or a limit with {newest}, then call poll()",
+                )
             )
         if isinstance(self._request.symbols, SymbolTable):
             _read_symbol_table(

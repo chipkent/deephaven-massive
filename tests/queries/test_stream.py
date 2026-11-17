@@ -1,5 +1,6 @@
 """Tests for `queries/_stream.py`: the stream verbs and `last_by()`."""
 
+import re
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -68,7 +69,11 @@ def test_last_by_takes_its_keys_positionally(
 def test_duplicate_last_by_keys_open_no_stream(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams
 ) -> None:
-    with pytest.raises(ValueError, match="more than once"):
+    with pytest.raises(
+        ValueError,
+        match=r"^by=\['Exchange', 'Exchange'\] names Exchange more than once\. Name each column "
+        r"once\.$",
+    ):
         trades(massive_session).last_by(["Exchange", "Exchange"])
     assert fake_streams.opened == []  # rejected synchronously, before any stream opens
 
@@ -76,21 +81,48 @@ def test_duplicate_last_by_keys_open_no_stream(
 @pytest.mark.parametrize(
     ("by", "expected"),
     [
-        ((), (ValueError, "at least one column")),
-        ("Nope", (ValueError, r"has no columns \['Nope'\]")),
-        (["Symbol", "Nope"], (ValueError, "Nope")),
-        ([1], (TypeError, "only column names")),
-        ({"Symbol"}, (TypeError, "by must be a str or a sequence of str")),
+        ((), (ValueError, "by=() names no column. Pass at least one column name.")),
+        (
+            "Nope",
+            (
+                ValueError,
+                (
+                    "stocks.trades has no column Nope. Pass column names that "
+                    "m.stocks.trades().columns() lists."
+                ),
+            ),
+        ),
+        (
+            ["Symbol", "Nope", "Gone"],
+            (
+                ValueError,
+                (
+                    "stocks.trades has no column Nope and Gone. Pass column names that "
+                    "m.stocks.trades().columns() lists."
+                ),
+            ),
+        ),
+        ([1], (TypeError, "by must hold only column names as str, not int")),
+        ({"Symbol"}, (TypeError, "by must be a str or a sequence of str, not set")),
         # None is no mode: the default is "Symbol", written out.
         (None, (TypeError, "by must be a str or a sequence of str, not NoneType")),
-        (["Symbol", "Exchange", "Symbol"], (ValueError, r"by names \['Symbol'\] more than once")),
+        (
+            ["Symbol", "Exchange", "Symbol", "Exchange"],
+            (
+                ValueError,
+                (
+                    "by=['Symbol', 'Exchange', 'Symbol', 'Exchange'] names Exchange and "
+                    "Symbol more than once. Name each column once."
+                ),
+            ),
+        ),
     ],
 )
 def test_last_by_keys(
     massive_session: dm.MassiveSession, by: object, expected: tuple[type[Exception], str]
 ) -> None:
     error, message = expected
-    with pytest.raises(error, match=message):
+    with pytest.raises(error, match=f"^{re.escape(message)}$"):
         trades(massive_session).last_by(by=by)  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -155,12 +187,25 @@ def test_a_static_symbol_table_without_symbols_opens_no_stream(
     massive_session: dm.MassiveSession, fake_streams: FakeStreams, verb: str
 ) -> None:
     for content, message in (
-        ([], r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"),
-        ([None], r"^m\.stocks\.trades\(\): every row's Symbol is null; a table from"),
+        (
+            [],
+            (
+                "m.stocks.trades(): The symbol table has no rows. Pass a table with at least one "
+                "ticker."
+            ),
+        ),
+        (
+            [None],
+            (
+                "m.stocks.trades(): Every row of the symbol table has a null Symbol. The usual "
+                "cause is dm.canonicalize_symbols, which nulls each value it cannot convert. Fix "
+                "the values that m.problems() lists for this call."
+            ),
+        ),
     ):
         q = trades(massive_session, new_table([string_col("Symbol", content)]))
         call = getattr(q, verb)
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             call(3) if verb == "ring" else call()
     assert fake_streams.opened == []
 
@@ -172,15 +217,13 @@ def test_a_static_symbol_table_row_that_is_not_canonical_opens_no_stream_under_r
     fake_streams: FakeStreams,
     verb: str,
     monkeypatch: pytest.MonkeyPatch,
+    refusal: Callable[..., str],
 ) -> None:
     # Refused, as the same text in a list always is: never canonicalized and never dropped.
     strict(massive_session, monkeypatch)
     q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft"])]))
     call = getattr(q, verb)
-    with pytest.raises(
-        ValueError,
-        match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
-    ):
+    with pytest.raises(ValueError, match=f"^{re.escape(msft_refused(refusal))}$"):
         call(3) if verb == "ring" else call()
     assert fake_streams.opened == []
 
@@ -193,9 +236,14 @@ def test_a_static_symbol_table_row_that_is_not_canonical_is_skipped(
     call = getattr(q, verb)
     massive_session.release(call(3) if verb == "ring" else call())
     assert len(fake_streams.opened) == 1
-    only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
+    expected = (
+        "m.stocks.trades(): No row of the symbol table is a ticker this dataset takes, so the "
+        "result would follow nothing. The table holds 'msft' and 'nvda'. Fix or delete those "
+        "rows."
+    )
+    only_bad = trades(massive_session, new_table([string_col("Symbol", ["nvda", "msft"])]))
     call = getattr(only_bad, verb)
-    with pytest.raises(ValueError, match=r"^m\.stocks\.trades\(\): no row of the symbol table is"):
+    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
         call(3) if verb == "ring" else call()
     assert len(fake_streams.opened) == 1
 
@@ -222,7 +270,7 @@ def test_a_static_symbol_tables_skipped_and_refused_values_are_problems_of_the_s
         for r in problem_rows()
     ]
     assert rows == [
-        ("noncanonical_symbols", "msft", None, None, "stocks.trades: a symb"),
+        ("noncanonical_symbols", "msft", None, None, "stocks.trades: A symb"),
         ("noncanonical_symbols", "no pe!", None, None, "canonicalize_symbols "),
     ]
     stream_ids = {r["StreamId"] for r in problem_rows()}
@@ -239,6 +287,18 @@ def test_bar_channels_follow_the_timespan(
     assert isinstance(second, StreamHistoryQuery)
     massive_session.release(second.blink())
     assert fake_streams.opened == [("forex.bars", "CAS")]
+
+
+def msft_refused(refusal: Callable[..., str]) -> str:
+    # The message of a stocks.trades symbol-table row 'msft'.
+    return (
+        f"stocks.trades: A symbol table holds 'msft'. {refusal(AssetClass.STOCKS, 'msft')} Fix "
+        "the row, or convert the table with dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, "
+        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from. If "
+        "Massive itself writes 'msft', report it at "
+        "https://github.com/chipkent/deephaven-massive/issues, since the library does not know "
+        "that form yet."
+    )
 
 
 FOREX_SPEC = DatasetSpec(
@@ -276,16 +336,23 @@ def test_last_by_matches_the_rows_of_a_reactive_table(
 
 
 def test_a_live_verb_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
-    massive_session: dm.MassiveSession, fake_streams: FakeStreams, monkeypatch: pytest.MonkeyPatch
+    *,
+    massive_session: dm.MassiveSession,
+    fake_streams: FakeStreams,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: Callable[..., str],
 ) -> None:
     strict(massive_session, monkeypatch)
     watchlist = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
     q = make(massive_session, FOREX_SPEC, symbols=watchlist)
     assert isinstance(q, StreamQuery)
+    expected = (
+        f"forex.quotes: A symbol table holds 'EUR/USD'. {refusal(AssetClass.FOREX, 'EUR/USD')} "
+        "Fix the row, or convert the table with dm.canonicalize_symbols(table, "
+        "dm.AssetClass.FOREX)."
+    )
     for verb in (q.blink, q.append_only, q.last_by):
-        with pytest.raises(
-            ValueError, match=r"^forex\.\w+: a symbol table holds 'EUR/USD' .*use 'C:EURUSD'"
-        ):
+        with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
             verb()
     assert fake_streams.publishers == {}
 
@@ -332,6 +399,7 @@ def test_a_stream_verb_refuses_a_bad_row_when_the_call_raises_and_the_session_lo
     live: Callable[..., InputTable],
     verb: str,
     refreshing: bool,
+    refusal: Callable[..., str],
 ) -> None:
     # The `dm.ErrorPolicy` docstring's example: the session skips such a row, this call fails.
     rows = ["AAPL", "msft"]
@@ -340,7 +408,7 @@ def test_a_stream_verb_refuses_a_bad_row_when_the_call_raises_and_the_session_lo
         watchlist, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
     )
     call = getattr(q, verb)
-    with pytest.raises(ValueError, match=r"^stocks\.trades: a symbol table holds 'msft'"):
+    with pytest.raises(ValueError, match=f"^{re.escape(msft_refused(refusal))}$"):
         call(3) if verb == "ring" else call()
     assert fake_streams.opened == []
 

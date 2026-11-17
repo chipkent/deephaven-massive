@@ -16,6 +16,7 @@ import io
 import itertools
 import json
 import logging
+import re
 import string
 import threading
 from collections.abc import Callable, Iterator
@@ -70,6 +71,13 @@ if TYPE_CHECKING:
 Fixture = Callable[[str, str], bytes]
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
+
 OWNER = "namespaces/crypto"
 CRYPTO = Catalog(crypto.DATASETS)
 
@@ -431,9 +439,9 @@ def test_daily_open_close_arguments_are_checked(massive_session: dm.MassiveSessi
     daily = massive_session.crypto.daily_open_close
     with pytest.raises(
         ValueError,
-        match=(
-            r"crypto\.daily_open_close does not accept dm\.ALL; "
-            r"use m\.crypto\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)"
+        match=whole(
+            "crypto.daily_open_close does not take dm.ALL. For every ticker's bar of one day, "
+            "call m.crypto.bars(dm.ALL, dm.Timespan.DAY).history('2025-01-02', '2025-01-02')."
         ),
     ):
         daily(dm.ALL, "2026-01-02")
@@ -491,11 +499,21 @@ def test_the_one_row_datasets_need_explicit_symbols(massive_session: dm.MassiveS
     prev = massive_session.crypto.previous_day_bar("X:BTCUSD")
     assert type(prev) is FetchQuery
     assert request_of(prev).timespan is dm.Timespan.DAY
-    with pytest.raises(ValueError, match=r"use m\.crypto\.snapshots\(dm\.ALL\)\.fetch\(\)"):
+    every_pair = (
+        "crypto.last_trade does not take dm.ALL. For every pair, call "
+        "m.crypto.snapshots(dm.ALL).fetch()."
+    )
+    with pytest.raises(ValueError, match=whole(every_pair)):
         massive_session.crypto.last_trade(dm.ALL)
-    every_bar = r"use m\.crypto\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)"
-    with pytest.raises(ValueError, match=every_bar):
+    every_bar = (
+        "crypto.previous_day_bar does not take dm.ALL. For every ticker's bar of one day, call "
+        "m.crypto.bars(dm.ALL, dm.Timespan.DAY).history('2025-01-02', '2025-01-02')."
+    )
+    with pytest.raises(ValueError, match=whole(every_bar)):
         massive_session.crypto.previous_day_bar(dm.ALL)
+    # The calls the refusals name take dm.ALL.
+    assert massive_session.crypto.snapshots(dm.ALL)._request.symbols is dm.ALL
+    assert massive_session.crypto.bars(dm.ALL, dm.Timespan.DAY)._request.symbols is dm.ALL
 
 
 def test_a_stream_has_no_fetch(massive_session: dm.MassiveSession) -> None:

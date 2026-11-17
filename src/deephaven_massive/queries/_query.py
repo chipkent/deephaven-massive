@@ -32,6 +32,7 @@ from deephaven_massive._errors import (
     every_symbol_failed,
     failure_text,
     raises_through,
+    user_defect,
 )
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
@@ -215,17 +216,26 @@ def _read_symbol_rows(
             core.problems(events)
     if rows.skipped and not rows.symbols:
         raise ValueError(
-            f"{query}: no row of the symbol table is a ticker this dataset takes, so the result "
-            f"would follow nothing: {skipped_rows_text(rows.skipped)}"
+            user_defect(
+                f"{query}: No row of the symbol table is a ticker this dataset takes, so the "
+                f"result would follow nothing. The table holds {skipped_rows_text(rows.skipped)}",
+                "Fix or delete those rows",
+            )
         )
     if not rows.symbols and not live:
         if has_rows:
             raise ValueError(
-                f"{query}: every row's {rule.column} is null; a table from "
-                "dm.canonicalize_symbols nulls the rows it cannot convert, and its log names "
-                "each value"
+                user_defect(
+                    f"{query}: Every row of the symbol table has a null {rule.column}. The usual "
+                    "cause is dm.canonicalize_symbols, which nulls each value it cannot convert",
+                    "Fix the values that m.problems() lists for this call",
+                )
             )
-        raise ValueError(f"{query}: the symbol table holds no symbols")
+        raise ValueError(
+            user_defect(
+                f"{query}: The symbol table has no rows", "Pass a table with at least one ticker"
+            )
+        )
     return rows
 
 
@@ -357,7 +367,10 @@ class Query:
         Raises:
             TypeError: Always. Call a dataset method instead, such as `m.stocks.trades("AAPL")`.
         """
-        raise TypeError("a query comes from a dataset method, such as m.stocks.trades('AAPL')")
+        raise TypeError(
+            f"{type(self).__name__}() cannot be called. Build a query with a dataset method, "
+            "such as m.stocks.trades('AAPL')."
+        )
 
     @raises_through(refuse_update_graph_thread)
     def columns(self) -> Table:
@@ -547,18 +560,33 @@ class Query:
             raise first from failed[call_time[0]].error
         if failed:
             logger.warning(
-                "%s %s: %d of the %d symbols of the call failed and are left out of the "
-                "result for now; m.symbol_reads() shows each one (retrying, or failed): %s",
+                "%s %s: %d of the %d symbols failed and are left out of the result for now. %s "
+                "Check m.symbol_reads() for whether each one is retrying or has failed.",
                 self._spec.name,
                 verb,
                 len(failed),
                 len(call_time),
-                "; ".join(
-                    f"{name}: {failure_text(outcome.error)}"
+                " ".join(
+                    _failure_sentence(name, outcome.error)
                     for name, outcome in list(failed.items())[:_FAILED_SHOWN]
                 ),
             )
         return FirstRead(outcomes, began_at, time.monotonic() - started)
+
+
+def _failure_sentence(symbol: str, error: BaseException) -> str:
+    """Return one symbol's failure as a sentence of a log record that lists several.
+
+    Args:
+        symbol: The symbol whose read failed.
+        error: Its failure.
+
+    Returns:
+        Such as `"MSFT: Massive answered GET /v3/trades/MSFT on api.massive.com with HTTP 403:
+        "not in the plan"."`, ended with a period when the failure's text has none.
+    """
+    text = failure_text(error)
+    return f"{symbol}: {text}" if text.endswith(".") else f"{symbol}: {text}."
 
 
 def made_query(

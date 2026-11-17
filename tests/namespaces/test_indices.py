@@ -13,6 +13,7 @@ import csv
 import io
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, date, datetime
@@ -47,6 +48,12 @@ if TYPE_CHECKING:
     from tests._fakes.ws_session import WsSession
 
 """The refusal of a stream of bars Massive doesn't stream."""
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 OWNER = "namespaces/indices"
 SNAPSHOT = "/v3/snapshot/indices"
@@ -375,9 +382,10 @@ def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:
     assert repr(q) == ("m.indices.previous_day_bar(['I:NDX', 'I:SPX'])")
     with pytest.raises(
         ValueError,
-        match=r"^indices\.previous_day_bar does not accept dm\.ALL; use "
-        r"m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\), "
-        r"every ticker's bar of that day$",
+        match=whole(
+            "indices.previous_day_bar does not take dm.ALL. For every ticker's bar of one day, "
+            "call m.indices.bars(dm.ALL, dm.Timespan.DAY).history('2025-01-02', '2025-01-02')."
+        ),
     ):
         m.indices.previous_day_bar(dm.ALL)
 
@@ -416,7 +424,10 @@ def test_snapshots_query(m: dm.MassiveSession) -> None:
 def test_snapshots_filters_are_the_snapshot_parameters(m: dm.MassiveSession) -> None:
     # The equality forms of the symbol parameter are set through symbols only.
     for key in ("ticker", "ticker_any_of", "ticker_all_of"):
-        with pytest.raises(ValueError, match=f"{key} is set through symbols=, not filters"):
+        refusal = (
+            f"The filter {key!r} sets the symbols of indices.snapshots. Pass symbols= instead."
+        )
+        with pytest.raises(ValueError, match=whole(refusal)):
             m.indices.snapshots("I:SPX", filters={key: "I:A"})
     with pytest.raises(ValueError, match=r"has no filter 'timestamp_gte'; valid filters: \["):
         m.indices.snapshots("I:SPX", filters={"timestamp_gte": "I:A"})
@@ -449,8 +460,10 @@ def test_daily_open_close_rejects_all(m: dm.MassiveSession) -> None:
     # Massive has no grouped daily endpoint for indices: the day's bars serve every index.
     with pytest.raises(
         ValueError,
-        match=r"; use m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\), "
-        r"every index's bar of that day$",
+        match=whole(
+            "indices.daily_open_close does not take dm.ALL. For every index's bar of one day, "
+            "call m.indices.bars(dm.ALL, dm.Timespan.DAY).history('2025-01-02', '2025-01-02')."
+        ),
     ):
         m.indices.daily_open_close(dm.ALL, "2025-06-02")
 

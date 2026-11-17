@@ -497,7 +497,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             LAST_TRADE,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
+            all_alternative="For every ticker, call m.stocks.snapshots(dm.ALL).fetch().",
             on_error=on_error,
         )
 
@@ -575,7 +575,7 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             LAST_QUOTE,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="use m.stocks.snapshots(dm.ALL).fetch()",
+            all_alternative="For every ticker, call m.stocks.snapshots(dm.ALL).fetch().",
             on_error=on_error,
         )
 
@@ -681,8 +681,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
-                "use m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
-                "every ticker's bar of that day"
+                "For every ticker's bar of one day, call m.stocks.bars(dm.ALL, dm.Timespan.DAY)"
+                ".history('2025-01-02', '2025-01-02')."
             ),
             timespan=Timespan.DAY,
             adjusted=require_bool("adjusted", adjusted),
@@ -925,8 +925,8 @@ class StocksNamespace(Namespace):  # noqa: PLR0904 - a facade: one delegating me
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
-                "use m.stocks.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
-                "every ticker's bar of that day"
+                "For every ticker's bar of one day, call m.stocks.bars(dm.ALL, dm.Timespan.DAY)"
+                ".history('2025-01-02', '2025-01-02')."
             ),
             adjusted=require_bool("adjusted", adjusted),
             params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},

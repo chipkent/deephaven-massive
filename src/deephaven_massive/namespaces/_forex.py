@@ -243,10 +243,7 @@ def _currency(name: str, value: object) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")
     if not value:
-        raise ValueError(
-            f"{name} is empty, and an empty code can't be sent: it is a segment of the "
-            "request's path"
-        )
+        raise ValueError(f"{name}='' is not a currency code. Pass one, such as 'USD'.")
     return value
 
 
@@ -347,7 +344,7 @@ class ForexNamespace(Namespace):
             LAST_QUOTE,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="use m.forex.snapshots(dm.ALL).fetch()",
+            all_alternative="For every pair, call m.forex.snapshots(dm.ALL).fetch().",
             on_error=on_error,
         )
 
@@ -444,8 +441,8 @@ class ForexNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
-                "use m.forex.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
-                "every ticker's bar of that day"
+                "For every ticker's bar of one day, call m.forex.bars(dm.ALL, dm.Timespan.DAY)"
+                ".history('2025-01-02', '2025-01-02')."
             ),
             timespan=Timespan.DAY,
             on_error=on_error,
@@ -596,7 +593,7 @@ class ForexNamespace(Namespace):
         # Massive converts any finite amount, 0 and negative ones included; a request cannot
         # carry NaN or an infinity as a number.
         if not isinstance(amount, int) and not math.isfinite(amount):
-            raise ValueError(f"amount must be finite, got {amount!r}")
+            raise ValueError(f"amount={amount!r} is not a finite number. Pass one, such as 100.")
         if isinstance(precision, bool) or not isinstance(precision, int):
             raise TypeError(f"precision must be an int, not {type(precision).__name__}")
         # The endpoint's `precision` is an enum of digit strings, so it is sent as text. Massive

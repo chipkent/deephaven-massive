@@ -7,6 +7,7 @@ arguments) are in `test_stocks.py`; the fixtures stay with them, under `namespac
 import functools
 import inspect
 import json
+import re
 import threading
 from collections.abc import Callable
 from datetime import date, timedelta
@@ -25,6 +26,12 @@ from deephaven_massive._session import CATALOG
 from deephaven_massive.namespaces import _stock_filings as stock_filings
 from deephaven_massive.queries import FetchQuery, Query
 from tests._fakes.rest import FakeRestServer, Reply
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 R = Transport.REST
 
@@ -109,9 +116,13 @@ def test_institutional_holdings_take_a_filer(massive_session: dm.MassiveSession)
     assert dict(several._request.params) == {"filer_cik.any_of": ("0001067983", "0000102909")}
     with pytest.raises(TypeError, match="filer_cik must be a str"):
         filings.institutional_holdings(filer_cik=1067983)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="filer_cik is empty; pass None for every filer"):
+    empty = (
+        "filer_cik=[] is empty, so it would select nothing. Leave filer_cik out for every filer."
+    )
+    with pytest.raises(ValueError, match=whole(empty)):
         filings.institutional_holdings(filer_cik=[])
-    with pytest.raises(ValueError, match=r"^filer_cik_any_of is set through its own argument"):
+    own = "The filter 'filer_cik_any_of' has its own argument. Pass filer_cik= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         filings.institutional_holdings(filters={"filer_cik_any_of": ["0001067983"]})
 
 
@@ -139,14 +150,21 @@ def test_insider_datasets_take_issuer_and_owner(
         make(issuer_cik=320193)
     with pytest.raises(TypeError, match="owner_cik must be a str, a sequence of str, or None"):
         make(owner_cik=1214156)
-    with pytest.raises(ValueError, match=r"issuer_cik is empty; pass None for every issuer$"):
+    issuer = (
+        "issuer_cik=[] is empty, so it would select nothing. Leave issuer_cik out for every issuer."
+    )
+    with pytest.raises(ValueError, match=whole(issuer)):
         make(issuer_cik=[])
-    with pytest.raises(ValueError, match=r"owner_cik is empty; pass None for every owner$"):
+    owner = (
+        "owner_cik=() is empty, so it would select nothing. Leave owner_cik out for every owner."
+    )
+    with pytest.raises(ValueError, match=whole(owner)):
         make(owner_cik=())
     with pytest.raises(TypeError):
         make(issuer_cik=[320193])
     # The list forms belong to the arguments, and the refusal names the argument to use.
-    with pytest.raises(ValueError, match="its own argument, owner_cik="):
+    own = "The filter 'owner_cik_any_of' has its own argument. Pass owner_cik= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         make(filters={"owner_cik_any_of": ["0001214156"]})
 
 
@@ -160,9 +178,13 @@ def test_insider_activity_takes_issuers_and_no_owner(massive_session: dm.Massive
     assert "owner_cik" not in inspect.signature(activity).parameters
     with pytest.raises(TypeError, match="issuer_cik must be a str"):
         activity(issuer_cik=1045810)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="issuer_cik is empty"):
+    issuer = (
+        "issuer_cik=[] is empty, so it would select nothing. Leave issuer_cik out for every issuer."
+    )
+    with pytest.raises(ValueError, match=whole(issuer)):
         activity(issuer_cik=[])
-    with pytest.raises(ValueError, match="its own argument, issuer_cik="):
+    own = "The filter 'issuer_cik_any_of' has its own argument. Pass issuer_cik= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         activity(filters={"issuer_cik_any_of": ["0001045810"]})
 
 

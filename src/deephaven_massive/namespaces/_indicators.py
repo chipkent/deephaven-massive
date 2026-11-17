@@ -41,6 +41,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, Order, SeriesType, Timespan, _require_enum
 from deephaven_massive._errors import raises_through
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import Transport
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.namespaces._query_building import (
@@ -143,8 +144,11 @@ def _check_timespan(core: SessionCore, spec: DatasetSpec, timespan: object) -> T
     span = _require_enum(timespan, Timespan, "timespan")
     accepted = accepted_values(core, spec, "timespan")
     if span.value not in accepted:
-        names = [member.name for member in Timespan if member.value in accepted]
-        raise ValueError(f"indicators do not accept Timespan.{span.name}; they accept {names}")
+        names = [f"dm.Timespan.{member.name}" for member in Timespan if member.value in accepted]
+        raise ValueError(
+            f"{spec.name} takes no timespan=dm.Timespan.{span.name}. Pass one of "
+            f"{prose_list(names, 'timespans', shown=len(names))}."
+        )
     return span
 
 
@@ -166,16 +170,15 @@ def _check_window(name: str, value: object) -> int:
         The window, a positive `int`.
 
     Raises:
-        TypeError: If `value` is text, a `dm.Timespan` among it; the message says that
-            `timespan` is keyword-only. If it is any other value that is not an `int`
+        TypeError: If `value` is a `dm.Timespan`; the message says that `timespan` is
+            keyword-only. If it is any other value that is not an `int`
             (`require_positive_int`).
         ValueError: If the window is not positive (`require_positive_int`).
     """
-    if isinstance(value, str):
-        shown = f"Timespan.{value.name}" if isinstance(value, Timespan) else repr(value)
+    if isinstance(value, Timespan):
         raise TypeError(
-            f"{name} must be an int, not {shown}: timespan is keyword-only, so pass it by "
-            "name, as in sma('AAPL', timespan=dm.Timespan.MINUTE)"
+            f"{name} must be an int, not dm.Timespan.{value.name}. If you meant timespan, pass "
+            "it by name, since it is keyword-only: sma('AAPL', timespan=dm.Timespan.MINUTE)."
         )
     return require_positive_int(name, value)
 
@@ -268,7 +271,7 @@ class IndicatorsNamespace(Namespace):
             spec,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="pass a list of symbols",
+            all_alternative="Pass a list of tickers.",
             timespan=span,
             adjusted=adjusted,
             start=start,

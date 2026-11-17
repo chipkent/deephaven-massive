@@ -688,7 +688,11 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
     [Query, FetchQuery, StreamQuery, NoSymbolStreamQuery, HistoryQuery, StreamHistoryQuery],
 )
 def test_a_user_cannot_construct_a_query(cls: type[Query]) -> None:
-    with pytest.raises(TypeError, match=r"^a query comes from a dataset method, such as "):
+    expected = (
+        f"{cls.__name__}() cannot be called. Build a query with a dataset method, such as "
+        "m.stocks.trades('AAPL')."
+    )
+    with pytest.raises(TypeError, match=f"^{re.escape(expected)}$"):
         cls()
 
 

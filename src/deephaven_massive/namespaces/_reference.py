@@ -30,6 +30,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._error_policy import ErrorPolicy, check_policy
 from deephaven_massive._errors import raises_through
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import Transport
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.namespaces._query_building import (
@@ -228,9 +229,10 @@ def _asset_class(core: SessionCore, spec: DatasetSpec, value: object) -> str | N
     member = _require_enum(value, AssetClass, "asset_class")
     accepted = accepted_values(core, spec, "asset_class")
     if _REST_ASSET_CLASS[member] not in accepted:
-        names = [m.name for m in AssetClass if _REST_ASSET_CLASS[m] in accepted]
+        names = [f"dm.AssetClass.{m.name}" for m in AssetClass if _REST_ASSET_CLASS[m] in accepted]
         raise ValueError(
-            f"{spec.name} does not accept AssetClass.{member.name}; it accepts {names}"
+            f"{spec.name} takes no asset_class=dm.AssetClass.{member.name}. Pass one of "
+            f"{prose_list(names, 'classes', shown=len(names))}."
         )
     return _REST_ASSET_CLASS[member]
 
@@ -254,10 +256,14 @@ def _event_types(types: object) -> str | None:
         raise TypeError(f"types must be a sequence of str, not {type(types).__name__}")
     items = tuple(types)
     if not items:
-        raise ValueError("types is empty; pass None for every event type")
+        raise ValueError(
+            f"types={types!r} is empty, so it would select nothing. Leave types out for every "
+            "event type."
+        )
     texts = [item for item in items if isinstance(item, str)]
-    if len(texts) != len(items):
-        raise TypeError("types must hold only str")
+    others = [item for item in items if not isinstance(item, str)]
+    if others:
+        raise TypeError(f"types must hold only str, not {type(others[0]).__name__}")
     return ",".join(texts)
 
 
@@ -366,7 +372,7 @@ class ReferenceNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             symbols_optional=True,
-            all_alternative="leave symbols out for every ticker",
+            all_alternative="Leave symbols out to read every ticker.",
             params=params,
             arguments={"type": "ticker_type", "date": "as_of"},
             filters=filters,
@@ -415,7 +421,7 @@ class ReferenceNamespace(Namespace):
             TICKER_DETAILS,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="use m.reference.tickers() for every ticker",
+            all_alternative="For every ticker, call m.reference.tickers().fetch().",
             params={
                 "date": None if as_of is None else day_argument(TICKER_DETAILS, as_of, "as_of")
             },
@@ -506,7 +512,7 @@ class ReferenceNamespace(Namespace):
             TICKER_EVENTS,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="pass a list of symbols",
+            all_alternative="Pass a list of tickers.",
             params={"types": _event_types(types)},
             on_error=on_error,
         )
@@ -544,7 +550,7 @@ class ReferenceNamespace(Namespace):
             RELATED_COMPANIES,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="pass a list of symbols",
+            all_alternative="Pass a list of tickers.",
             on_error=on_error,
         )
 
@@ -603,7 +609,7 @@ class ReferenceNamespace(Namespace):
             NEWS,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="leave symbols out for every article",
+            all_alternative="Leave symbols out to read every article.",
             start=start,
             end=end,
             params=list_params(sort=sort, order=order),

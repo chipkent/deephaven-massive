@@ -1,6 +1,7 @@
 """Tests for the `m.economy` namespace."""
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
@@ -21,6 +22,12 @@ from deephaven_massive.namespaces import _economy as economy
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import FetchQuery
 from tests._fakes.rest import FakeRestServer, Reply
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 OWNER = "namespaces/economy"
 
@@ -153,7 +160,13 @@ def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
 
 def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSession) -> None:
     e = massive_session.economy
-    with pytest.raises(ValueError, match="date_gte is set through start= and end="):
+    with pytest.raises(
+        ValueError,
+        match=whole(
+            "The filter 'date_gte' sets the time range of economy.labor_market. Pass start= and "
+            "end= instead."
+        ),
+    ):
         e.labor_market(filters={"date_gte": "2025-01-01"})
     with pytest.raises(ValueError, match="has no filter 'nope'"):
         e.labor_market(filters={"nope": 1})
