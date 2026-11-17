@@ -234,6 +234,11 @@ These protect the owner's repository, money, and secrets.
   is or does, in words a newcomer knows (no `base`, `core`, `common`, `helpers`, or `util`).
 - **Log every decision and failure with its values**, so a failing run's log is enough to fix
   it (rules: the `_debug_log.py` docstring).
+- **An error message says what happened with its values, whose answer it is, and what to do
+  next.** It names Massive's refusals as `Massive answered <call> with HTTP <n>: "<text>"`,
+  uses only words a user knows (public names, never internal ones), puts the fix last as an
+  imperative sentence, uses sentences rather than semicolon chains, and a test runs every call
+  it suggests and pins its full text (`writing-error-messages`).
 - **The library never opens a connection only to test whether one would work**: a second
   connection with the user's key can take their own stream (decision 97).
 - **No decision or planning references** in code, comments, docstrings, test names, error
@@ -364,8 +369,9 @@ These protect the owner's repository, money, and secrets.
   `scripts/check_pr_body.py` fails without the line and the answer.
 - Skills: `writing-tests` for any test, `writing-docstrings` for text in code,
   `writing-a-pr-description` for PR descriptions, issue bodies, and reports,
-  `writing-a-record` for a decision or verification item, and `writing-user-docs` for a user
-  page or any change to what one describes.
+  `writing-a-record` for a decision or verification item, `writing-error-messages` for the text
+  of an exception, a warning or error log, or a diagnostics table's error cell, and
+  `writing-user-docs` for a user page or any change to what one describes.
 
 ## Deephaven invariants
 

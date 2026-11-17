@@ -103,5 +103,7 @@ fails on a cited page or anchor that does not exist, and on a bare path instead 
   "worker"; "Deephaven IDE", never "web UI"; `last_by` is an aggregation).
 - Never cite a decision number or a planning document; state the behavior or the reason.
 - Describe the code as it is now, never how it used to be: a docstring is not a changelog.
+- The text of an exception or a warning or error log is not a docstring: `writing-error-messages`
+  covers it.
 - Configuration text is documentation too: config comments, pytest marker descriptions
   (`name(args): meaning`, in plain sentences), and CLI help text meet the same standard.
