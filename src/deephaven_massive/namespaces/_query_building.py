@@ -446,8 +446,9 @@ def _filters(
     """Normalize the `filters` mapping into a sorted tuple.
 
     Args:
-        spec: The dataset, for its time-axis parameter pair, its symbol parameter, and the
-            parameters it fixes (`DatasetSpec.fixed_params`).
+        spec: The dataset, for its time-axis parameter pair, its symbol parameters (its own and
+            `DatasetSpec.symbol_params_elsewhere`), and the parameters it fixes
+            (`DatasetSpec.fixed_params`).
         filters: The mapping as passed.
         typed: The wire names of the factory's typed parameters, set or not; a filter may not
             name one of them, nor any of its suffixed forms.
@@ -464,7 +465,9 @@ def _filters(
         ValueError: If a key is a parameter of the dataset's time axis (`DatasetSpec.axis_params`,
             the `start`/`end` pair's base name and every suffixed form), an equality form of
             its symbol parameter (`symbol_family`, such as `ticker_any_of`: symbols go through
-            `symbols=`), a parameter the library sets itself or a typed parameter of the
+            `symbols=`), an equality form of a symbol parameter another method takes
+            (`DatasetSpec.symbol_params_elsewhere`; the message gives its instruction), a
+            parameter the library sets itself or a typed parameter of the
             factory, or one of their suffixed forms (`param_family`), or `adjusted`, which
             has its own typed argument: a filter would reach REST but not the flat-file
             source choice, which reads only `Request.adjusted`.
@@ -484,6 +487,11 @@ def _filters(
         if spec.symbol_param is None
         else set(map(filter_key, symbol_family(spec.symbol_param)))
     )
+    elsewhere = {
+        filter_key(form): instruction
+        for name, instruction in spec.symbol_params_elsewhere.items()
+        for form in symbol_family(name)
+    }
     pairs: list[tuple[str, ParamValue]] = []
     for key, value in filters.items():
         if not isinstance(key, str):
@@ -494,6 +502,8 @@ def _filters(
             raise ValueError("adjusted is set through its own argument, adjusted=, not filters")
         if key in symbol_keys:
             raise ValueError(f"{key} is set through symbols=, not filters")
+        if key in elsewhere:
+            raise ValueError(f"{key} is not a filter of {spec.name}; {elsewhere[key]}")
         if key in library:
             raise ValueError(f"the library sets {key} itself; it is not a filter")
         if key in reserved:

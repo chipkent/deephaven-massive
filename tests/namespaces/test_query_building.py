@@ -931,7 +931,7 @@ def test_symbols_is_the_first_positional_parameter_of_every_factory() -> None:
             found.append(name)
             assert params[0].name == "symbols", name
             assert params[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD, name
-    assert {"reference.tickers", "reference.news", "options.contracts"} <= set(found)
+    assert {"reference.tickers", "reference.news", "options.contract_details"} <= set(found)
     assert "partners.benzinga.news" in found
 
 
