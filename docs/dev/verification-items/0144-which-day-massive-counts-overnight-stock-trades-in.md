@@ -1,14 +1,14 @@
-# 144. Which trading day holds a stock trade made between 21:00 and midnight?
+# 144. Which trading day counts a stock trade made between 21:00 and midnight?
 
 Date: 2026-11-17
 
 Status: open
 
-Unknown: whether Massive files a stock trade made between 21:00 and midnight New York time under
-its calendar date or under the next trading day. The overnight session that makes such trades
-starts on Sunday 2026-12-06. Massive's blog post of 2026-08-26 says trades "reported
-between 9pm ET and midnight will count under the next calendar date", but no page of Massive's
-API documentation says which day its day bars and daily flat files put them in.
+Unknown: whether Massive counts a stock trade made between 21:00 and midnight New York time in
+its calendar date or in the next trading day. The overnight session that makes such trades
+starts on Sunday 2026-12-06. Massive's blog post of 2026-08-26 says trades "reported between 9pm
+ET and midnight will count under the next calendar date". No page of Massive's API documentation
+says which day its day bars and daily flat files count them in.
 
 Meanwhile the library keeps the calendar date. Each row below changes if Massive counts those
 trades in the next trading day:
@@ -23,8 +23,6 @@ Changing the first two is a public change for the owner. All three wait on this 
 
 Settled by `test_which_day_massive_counts_overnight_stock_trades_in` in
 `tests/namespaces/test_stocks_integration.py`, run after 20:00 New York time on the trading day
-that follows an overnight session. It records the open of SPY's day bar beside the opens of the
-first minute bars from 21:00 the evening before, from midnight, and from 04:00. Massive's day
-begins at the minute whose open equals the day bar's open. It skips when Massive has no minute
-of the overnight session. `test_overnight_stock_trades_stream` in the same file records the
-`Date` the library gives the trades it streams in the session.
+that follows an overnight session. Massive's day begins at the first minute whose open equals
+SPY's day-bar open: 21:00, midnight, or 04:00. `test_overnight_stock_trades_stream` in the same
+file records the `Date` the library gives the trades it streams in the session.
