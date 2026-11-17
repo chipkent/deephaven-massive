@@ -1174,8 +1174,10 @@ def test_root_is_the_ticker_s_occ_root(
 
 _UNDERLYING_ROOTS = ("SPX", "SPXW", "NDX", "VIX", "RUT", "DJT", "AMCR1", "AAPL")
 """Roots whose underlying the two new datasets must name as the contracts reference does: index
-roots and their weeklies, the stock `DJT` (a bare ticker an index could share), an adjusted
-root, and a plain stock."""
+roots and their weeklies, the stock `DJT`, an adjusted root, and a plain stock. `I:DJT` is not
+on Massive's index list, so `DJT`'s rows are judged by the index-list pre-filter alone; roots
+whose bare underlying is on the list are compared by
+`test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_reference`."""
 
 _PER_ROOT = 2
 """Contracts compared per root and dataset."""
@@ -1191,6 +1193,43 @@ def _contracts_underlying(
     """
     found = table_rows(session.options.contract_details(ticker, as_of=day).fetch(wait=True))
     return str(found[0]["Underlying"]) if found else None
+
+
+def _row_day(row: Mapping[str, Any]) -> str:
+    """Return the trading day of a raw open interest or unusual trades row, as ISO text.
+
+    An open interest row has its `date`; an unusual trade has only its SIP timestamp, read in
+    New York time.
+
+    Returns:
+        The day.
+    """
+    return (
+        str(row.get("date") or "")
+        or datetime.fromtimestamp(int(row["sip_timestamp"]) / 1e9, _NEW_YORK).date().isoformat()
+    )
+
+
+def _published_underlyings(
+    session: dm.MassiveSession,
+    source_name: str,
+    ticker: str,
+    *,
+    day: str,
+    table_rows: TableRows,
+) -> list[str]:
+    """Read the library's `Underlying` of one contract on one day from the dataset named.
+
+    Returns:
+        The `Underlying` of each row, from `m.options.open_interest()` for "open interest" and
+        `m.options.unusual_trades()` for "unusual trades".
+    """
+    library = (
+        session.options.open_interest(ticker, start=day, end=day)
+        if source_name == "open interest"
+        else session.options.unusual_trades(ticker, start=day, end=day)
+    )
+    return [str(r["Underlying"]) for r in table_rows(library.fetch(wait=True))]
 
 
 @pytest.mark.verifies("141")
@@ -1239,21 +1278,15 @@ def test_underlying_matches_the_contracts_reference(
     wrong: list[str] = []
     for source_name, row in rows:
         ticker = str(row["ticker"])
-        day = (
-            str(row.get("date") or "")
-            or datetime.fromtimestamp(int(row["sip_timestamp"]) / 1e9, _NEW_YORK).date().isoformat()
-        )
+        day = _row_day(row)
         reference = _contracts_underlying(live_session, ticker, day=day, table_rows=table_rows)
         sent = row.get("underlying_ticker")
-        library = (
-            live_session.options.open_interest(ticker, start=day, end=day)
-            if source_name == "open interest"
-            else live_session.options.unusual_trades(ticker, start=day, end=day)
+        published = _published_underlyings(
+            live_session, source_name, ticker, day=day, table_rows=table_rows
         )
-        published = [r["Underlying"] for r in table_rows(library.fetch(wait=True))]
         evidence(
             f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r}, "
-            f"library {sorted(set(map(str, published)))}"
+            f"library {sorted(set(published))}"
         )
         if reference is None:
             continue
@@ -1331,6 +1364,43 @@ def test_admin_message_history_reads_a_day_of_every_exchange(
     assert all(r["Date"] == previous_trading_day.isoformat() for r in found)
 
 
+def _tickers(client: RestClient, request: option_requests.Request) -> tuple[set[str], int]:
+    """Read every page of a ticker list.
+
+    Returns:
+        The tickers, each without an index's `I:`, and the pages read.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key the list; the live-test hook skips,
+            quoting it.
+    """
+    path, query = request
+    tickers: set[str] = set()
+    pages = 0
+    for found in client.pages(source(Transport.REST, path), {}, query, bucket=OTHER):
+        pages += 1
+        tickers |= {str(r["ticker"]).removeprefix("I:") for r in found.rows if r.get("ticker")}
+    return tickers, pages
+
+
+def _index_list(client: RestClient, evidence: Evidence) -> set[str]:
+    """Read Massive's whole index list, active and retired, as the library's pre-filter does.
+
+    Records its size and pages.
+
+    Returns:
+        Each listed index's bare ticker, such as `SPX`.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key the list.
+    """
+    active, active_pages = _tickers(client, option_requests.index_list(active=True))
+    retired, retired_pages = _tickers(client, option_requests.index_list(active=False))
+    listed = active | retired
+    evidence(f"index list: {len(listed)} indices in {active_pages + retired_pages} pages")
+    return listed
+
+
 _INDEX_UNDERLYINGS = ("I:SPX", "I:NDX", "I:VIX", "I:RUT", "I:XSP", "I:DJX", "I:OEX")
 """Indices with listed options, whose contracts' underlyings must be on Massive's index list."""
 
@@ -1360,14 +1430,7 @@ def test_index_option_underlyings_are_on_the_index_list(
     requests a first whole-market read sends. The `requests` marker assumes the list fits in
     50 pages of 1,000. A refusal skips the test, quoting Massive.
     """
-    listed: set[str] = set()
-    pages = 0
-    for active in (True, False):
-        path, query = option_requests.index_list(active=active)
-        for found in live_rest.pages(source(Transport.REST, path), {}, query, bucket=OTHER):
-            pages += 1
-            listed |= {str(r["ticker"]).removeprefix("I:") for r in found.rows if r.get("ticker")}
-    evidence(f"index list: {len(listed)} indices in {pages} pages")
+    listed = _index_list(live_rest, evidence)
     market = _page(live_rest, option_requests.open_interest(limit=50000))
     roots = {str(r.get("root")): str(r.get("underlying_ticker")) for r in market}
     off_list: list[str] = []
@@ -1392,3 +1455,200 @@ def test_index_option_underlyings_are_on_the_index_list(
     )
     assert compared
     assert not off_list, off_list
+
+
+_CANDIDATES = 25
+"""Tickers on both the index list and the active stock list whose contracts are read in one run.
+The overlap is too long to read whole, so each day reads another window of it."""
+
+_PER_SEARCH = 8
+"""The most collision roots compared from each search: the whole-market pages, and the stock
+list."""
+
+Sample: TypeAlias = "tuple[str, dict[str, Any]]"
+"""A raw row to compare, with the name of the dataset it came from."""
+
+
+def _market_collisions(
+    client: RestClient, listed: Collection[str], evidence: Evidence
+) -> dict[str, Sample]:
+    """Find the collision roots of one whole-market page of open interest and of unusual trades.
+
+    A collision root is one whose bare underlying is on the index list. Records each page's
+    size and the collision roots with the underlying Massive wrote.
+
+    Returns:
+        One row of each collision root, by root.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key either dataset.
+    """
+    found: dict[str, Sample] = {}
+    for source_name, request in (
+        ("open interest", option_requests.open_interest(limit=50000)),
+        ("unusual trades", option_requests.unusual_trades(limit=1000)),
+    ):
+        rows = _page(client, request)
+        roots = {_root(str(r["ticker"])) for r in rows}
+        for row in rows:
+            if str(row.get("underlying_ticker")) in listed:
+                found.setdefault(_root(str(row["ticker"])), (source_name, row))
+        evidence(f"one whole-market page of {source_name}: {len(rows)} rows, {len(roots)} roots")
+    named = {root: row.get("underlying_ticker") for root, (_, row) in sorted(found.items())}
+    evidence(f"roots of those pages whose bare underlying is on the index list: {named}")
+    return found
+
+
+def _stock_side_roots(
+    client: RestClient, listed: Collection[str], evidence: Evidence
+) -> dict[str, str]:
+    """Search for options on a stock or fund whose ticker is also on the index list.
+
+    Reads Massive's active stock list, takes the tickers also on the index list, and reads one
+    page of today's contracts of `_CANDIDATES` of them, a window that moves each day. The
+    contracts list takes an index bare, so one ticker's page may hold an index's options and a
+    stock's: each root is sorted by its contracts' CFI codes. Records the overlap, the window,
+    and every root found with its kinds.
+
+    Returns:
+        A contract of each root whose CFI code marks an option on something other than an
+        index, by root.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key the stock list or the contracts.
+    """
+    stocks, pages = _tickers(client, option_requests.stock_list())
+    shared = sorted(set(stocks) & set(listed))
+    evidence(
+        f"active stock list: {len(stocks)} tickers in {pages} pages; {len(shared)} also on the "
+        f"index list: {shared[:100]}"
+    )
+    if not shared:
+        return {}
+    count = min(_CANDIDATES, len(shared))
+    start = datetime.now(_NEW_YORK).date().toordinal() * _CANDIDATES % len(shared)
+    window = (shared + shared)[start : start + count]
+    evidence(f"contracts read for {count} of them, from position {start}: {window}")
+    other: dict[str, str] = {}
+    for ticker in window:
+        path, query = option_requests.contracts(underlying=ticker, limit=_CONTRACT_PAGE)
+        rows = _raw(client, path, params=query, evidence=evidence)
+        kinds: dict[str, set[str]] = {}
+        for row in rows:
+            cfi = row.get("cfi")
+            # A contract without a CFI code says nothing about its underlying's kind.
+            kind = "no CFI" if not cfi else "index" if is_index_option(str(cfi)) else "other"
+            root = _root(str(row["ticker"]))
+            kinds.setdefault(root, set()).add(kind)
+            if kind == "other":
+                other.setdefault(root, str(row["ticker"]))
+        shown = {root: sorted(found) for root, found in sorted(kinds.items())}
+        evidence(f"    {ticker}: {len(rows)} contracts; roots by CFI kind {shown}")
+    return other
+
+
+def _compare_collision(
+    session: dm.MassiveSession,
+    sample: Sample,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> tuple[str, list[str]]:
+    """Compare one collision row's underlying: Massive's, the reference's, and the library's.
+
+    Reads the contract's `Underlying` and `Cfi` from `m.options.contract_details()` as of the
+    row's day, and the library's `Underlying` of the same contract and day from the row's
+    dataset, and records all of them.
+
+    Returns:
+        The side the reference puts the contract on ("index", "other", "no CFI", or "not
+        compared" when the reference or the library has no row), and each mismatch found.
+    """
+    source_name, row = sample
+    ticker = str(row["ticker"])
+    day = _row_day(row)
+    found = table_rows(session.options.contract_details(ticker, as_of=day).fetch(wait=True))
+    sent = row.get("underlying_ticker")
+    published = _published_underlyings(session, source_name, ticker, day=day, table_rows=table_rows)
+    reference = str(found[0]["Underlying"]) if found else None
+    cfi = found[0]["Cfi"] if found else None
+    evidence(
+        f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r} (CFI {cfi!r}), "
+        f"library {sorted(set(published))}"
+    )
+    if reference is None or not published:
+        return "not compared", []
+    # A contract the reference gives no CFI code keeps Massive's bare ticker in the library.
+    side = "no CFI" if not cfi else "index" if is_index_option(str(cfi)) else "other"
+    problems = [
+        f"{source_name} {ticker}: library {value!r} vs {reference!r}"
+        for value in sorted(set(published))
+        if value != reference
+    ]
+    if sent != reference.removeprefix("I:"):
+        problems.append(f"{ticker}: Massive {sent!r} vs {reference!r}")
+    return side, problems
+
+
+@pytest.mark.verifies("141")
+@pytest.mark.requests(150)
+@pytest.mark.timeout(900)
+def test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_reference(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Where a root's bare underlying is on the index list, both datasets name it as the reference.
+
+    Such a root is the one case the library's index-list pre-filter can't settle: its rows get
+    their `Underlying` from the Contract Overview of the root's first contract. It may be an
+    option on that index (expected `I:X`) or on a stock or fund that shares the index's ticker
+    (expected bare `X`). The test finds both from Massive's data rather than naming them:
+
+    - it reads Massive's whole index list, active and retired, as the library does;
+    - it takes the collision roots of one whole-market page each of open interest and unusual
+      trades: roots whose bare underlying is on the list;
+    - it reads the active stock list and one page of today's contracts of 25 of the tickers
+      on both lists (another window each day), and takes the roots whose CFI code marks an
+      option on something other than an index, each with one page of its open interest.
+
+    For up to eight roots of each search it compares one row: Massive's `underlying_ticker`
+    must equal `m.options.contract_details()`'s `Underlying` apart from `I:`, and the library's
+    `Underlying` of the same contract and day must equal it exactly. Records every collision
+    found, every comparison and the side its CFI code puts it on, and says plainly when no
+    option on a stock or fund sharing an index's ticker was found, so the stock side went
+    unchecked. Fails on any mismatch, or when no option on an index was compared.
+
+    Up to about 150 requests: the index list twice (about 16 pages each, once by the test and once
+    by the library's pre-filter), the stock list (the marker assumes up to 35 pages), two
+    whole-market pages, 25 contracts pages, up to eight root pages of open interest, and up to
+    three per compared root (the reference, the library's read, and its root lookup). A
+    refusal skips the test, quoting Massive.
+    """
+    listed = _index_list(live_rest, evidence)
+    market = _market_collisions(live_rest, listed, evidence)
+    stock_roots = _stock_side_roots(live_rest, listed, evidence)
+    samples = [market[root] for root in sorted(market)[:_PER_SEARCH]]
+    for root in sorted(stock_roots.keys() - market.keys())[:_PER_SEARCH]:
+        rows = _page(live_rest, option_requests.open_interest(root=root, limit=5))
+        evidence(f"open interest of root {root} ({stock_roots[root]}): {len(rows)} rows")
+        samples += [("open interest", row) for row in rows[:1]]
+    sides: dict[str, list[str]] = {}
+    problems: list[str] = []
+    for sample in samples:
+        side, found = _compare_collision(
+            live_session, sample, table_rows=table_rows, evidence=evidence
+        )
+        sides.setdefault(side, []).append(str(sample[1]["ticker"]))
+        problems += found
+    evidence(f"contracts compared by the side their CFI code puts them on: {sides}")
+    if not sides.get("other"):
+        evidence(
+            "STOCK SIDE NOT CHECKED: no option on a stock or fund whose ticker is on the index "
+            "list was found and compared in the pages read, so this run checked options on an "
+            "index only"
+        )
+    assert sides.get("index"), "no option on an index was compared"
+    assert not problems, problems

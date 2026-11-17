@@ -52,6 +52,14 @@ def client(fake_rest: FakeRestServer) -> Iterator[RestClient]:
             option_requests.index_list(active=False),
             {"market": "indices", "active": "false", "limit": "1000"},
         ),
+        (
+            option_requests.stock_list(),
+            {"market": "stocks", "active": "true", "limit": "1000"},
+        ),
+        (
+            option_requests.contracts(underlying="DJT", limit=1000),
+            {"underlying_ticker": "DJT", "limit": "1000"},
+        ),
     ],
 )
 def test_each_request_is_sent_as_built(

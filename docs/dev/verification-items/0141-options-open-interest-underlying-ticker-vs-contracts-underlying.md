@@ -27,3 +27,14 @@ Verified by `test_underlying_matches_the_contracts_reference` in
 expired `SPXW` contracts from a year earlier. It compares Massive's `underlying_ticker` with
 `m.options.contracts()`'s `Underlying` apart from `I:`, and the library's `Underlying` on both
 datasets with it exactly.
+
+`DJT` is not on Massive's index list, so that test's rows of it are judged by the pre-filter
+alone. The roots whose bare underlying is on the list, the only ones the reference lookup
+decides, are verified by
+`test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_reference` in the same
+file. It finds them in Massive's data: the collision roots of one whole-market page each of
+open interest and unusual trades, and the roots of options on a stock or fund among the
+contracts of 25 tickers on both the index list and the active stock list, a window that moves
+each day. It makes the same two comparisons for up to eight roots of each search, records the
+side each contract's CFI code puts it on, and says plainly when it found no option on a stock
+or fund sharing an index's ticker.
