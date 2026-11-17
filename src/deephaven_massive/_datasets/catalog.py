@@ -8,8 +8,8 @@ no namespace module and imports nothing above the dataset layer, so the catalog 
 that owns the namespaces and handed down.
 
 A spec names its sources, never its columns. Each source is a generated `Source` of the wire
-package: a REST path by role (`fetch_path`, `detail_path`, `history_path`,
-`grouped_daily_path`, `extra_paths`), a WebSocket channel, or a flat-file prefix. Its fields,
+package: a REST path by role (`fetch_path`, `history_path`, `grouped_daily_path`,
+`extra_paths`), a WebSocket channel, or a flat-file prefix. Its fields,
 their wire types, and their timestamp units come from the committed generated files; the spec
 adds only what the vendor's files cannot say: the dataset's kind, and, per source, which column
 holds each key (`KeySpec`, grouped per source in a `SourceKeys`). The catalog merges the rest
@@ -339,10 +339,6 @@ class DatasetSpec:
         history_path: The REST path behind `history(source=REST)`.
         grouped_daily_path: The REST path that serves `history()` for `dm.ALL` daily bars, one
             request per day.
-        detail_path: The REST path that serves `fetch()` and `poll()`, once per symbol, when the
-            call names symbols, such as one option contract's
-            `"/v3/reference/options/contracts/{options_ticker}"`; `fetch_path` serves calls
-            without symbols.
         extra_paths: Further REST paths the dataset reads.
         channels: The WebSocket channel per bar timespan, or under the key `NotBars.ANY` for
             datasets that are not bars, such as `{NotBars.ANY: "T"}` or
@@ -412,6 +408,13 @@ class DatasetSpec:
         library_params: Query parameters the library sets itself on some requests only, by wire
             name, such as the options snapshot's `type`, which only `dm.ALL` sends; they have no
             argument of their own. Each is reserved, with its whole family, from `filters`.
+        symbol_params_elsewhere: Query parameters of the primary path (the history path, else
+            the fetch path) that name a symbol which another dataset method takes, each mapped
+            to the instruction a refused filter gives, such as the options contracts list's
+            `ticker`, which `m.options.contract_details` reads instead. The equality forms of
+            each are reserved from `filters` (`symbol_family`), so a symbol is named only
+            through the other method's `symbols=`, with its canonical check; range forms such
+            as `ticker_gte` stay filters.
         row_times: Which of the library's time columns the rows carry (`RowTimes`);
             `RowTimes.BY_KIND`, the default, derives it (`times`): `BAR` for a `bars` dataset,
             `TICK` for any other dataset in a kind, `NONE` otherwise. The indicators declare
@@ -472,7 +475,6 @@ class DatasetSpec:
     fetch_path: str | None = None
     history_path: str | None = None
     grouped_daily_path: str | None = None
-    detail_path: str | None = None
     extra_paths: tuple[str, ...] = ()
     channels: Mapping[Timespan | NotBars, str] = field(default_factory=dict)
     channel_family: ChannelFamily = ChannelFamily.TICK
@@ -491,6 +493,7 @@ class DatasetSpec:
     page_size: int | None = None
     fixed_params: Mapping[str, str | int | float | bool] = field(default_factory=dict)
     library_params: frozenset[str] = frozenset()
+    symbol_params_elsewhere: Mapping[str, str] = field(default_factory=dict)
     row_times: RowTimes = RowTimes.BY_KIND
     column_notes: Mapping[str, str] = field(default_factory=dict)
     symbols_as_written: bool = False
@@ -674,12 +677,11 @@ class DatasetSpec:
         """The REST paths the dataset reads: the role paths, then `extra_paths`.
 
         The role paths are `fetch_path`, the per-class fetch paths (`fetch_paths_by_class`),
-        `detail_path`, `history_path`, and `grouped_daily_path`, without repeats.
+        `history_path`, and `grouped_daily_path`, without repeats.
         """
         roles = (
             self.fetch_path,
             *self.fetch_paths_by_class.values(),
-            self.detail_path,
             self.history_path,
             self.grouped_daily_path,
         )
@@ -1525,8 +1527,9 @@ class Catalog:
     def _parameter_problems(self, spec: DatasetSpec) -> list[str]:
         """Check that every wire name the dataset declares is a parameter of its path.
 
-        The `start`/`end` pair and the symbol parameter belong to the dataset's primary path,
-        its history path or, when it has none, its fetch path; a key filled from the request
+        The `start`/`end` pair, the symbol parameter, and each of `symbol_params_elsewhere`
+        belong to the dataset's primary path, its history path or, when it has none, its fetch
+        path; a key filled from the request
         belongs to its own path; and each of `fixed_params` belongs to every REST path, as a
         query parameter.
 
@@ -1537,9 +1540,11 @@ class Catalog:
             The `wire parameters` failures.
         """
         primary = spec.history_path or spec.fetch_path
-        declared = [("time axis", name) for name in spec.time_axis or ()] + [
-            ("symbol parameter", name) for name in (spec.symbol_param,) if name is not None
-        ]
+        declared = (
+            [("time axis", name) for name in spec.time_axis or ()]
+            + [("symbol parameter", name) for name in (spec.symbol_param,) if name is not None]
+            + [("symbol parameter", name) for name in spec.symbol_params_elsewhere]
+        )
         expected: list[tuple[str, str, str]] = []
         if primary is not None:
             expected = [(what, primary, name) for what, name in declared]
