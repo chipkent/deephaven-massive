@@ -1101,7 +1101,7 @@ def _last_trade(live_rest: RestClient, day: date) -> list[datetime]:
     return [datetime.fromtimestamp(int(str(t["sip_timestamp"])) / 1e9, _NEW_YORK) for t in trades]
 
 
-@pytest.mark.settles("145")
+@pytest.mark.settles("144")
 @pytest.mark.requests(3)
 @pytest.mark.timeout(100)
 def test_which_day_massive_counts_overnight_stock_trades_in(
@@ -1159,7 +1159,7 @@ def test_which_day_massive_counts_overnight_stock_trades_in(
     evidence(f"minute volume, calendar day {midnight} to {end}: {volume(midnight, end)}")
 
 
-@pytest.mark.settles("145")
+@pytest.mark.settles("144")
 @pytest.mark.timeout(200)
 def test_overnight_stock_trades_stream(
     live_session: dm.MassiveSession,
