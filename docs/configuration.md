@@ -251,8 +251,8 @@ Leave a delayed subscription out, and a call for its current data fails with
 `fetch(wait=True)` raise it at the call. A `fetch()` or `poll()` table fails with it.
 `history()` and other past data don't depend on this setting.
 
-A stream from a host you set in `websocket_hosts` still opens, and its `Recency` in
-`m.connections()` shows Massive's label. See `websocket_hosts`.
+A stream from a host you set in `websocket_hosts` still opens. Its recency follows
+Massive's label, as `websocket_hosts` describes.
 
 #### rest_requests_per_minute
 
@@ -458,16 +458,16 @@ An entry must agree with `delayed_subscriptions`. Give a class a host whose name
 starts with `delayed.` exactly when its subscription is listed there, and never give
 one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
 
-A stream from a host set here opens whatever label Massive gives its data, and its
-`Recency` in `m.connections()` shows that label:
+The library opens a stream from a host set here whatever Massive's label says. Its
+`Recency` in `m.connections()` shows the label:
 
 - `DELAYED`: Massive labels the data `DELAYED`, or `delayed_subscriptions` lists its
   subscription.
 - `REALTIME`: Massive labels the data `REAL-TIME`.
 - `UNKNOWN`: Massive gave no label the library knows.
 
-Unless `delayed_subscriptions` lists its subscription, the first stream of each asset
-class in a session makes one REST request to read the label.
+The first stream of each asset class in a session makes one REST request to read the
+label. A subscription listed in `delayed_subscriptions` makes none.
 
 #### subscription_confirmation_timeout
 

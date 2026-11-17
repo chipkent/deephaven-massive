@@ -536,7 +536,7 @@ def test_a_joined_dataset_table_is_flat(dh_exec_ctx: object) -> None:
         (
             Recency.UNKNOWN,
             (
-                "Live data from socket.massive.com. Massive hasn't said whether this data is "
+                "Live data from socket.massive.com. Massive hasn't said whether the data is "
                 "real-time or delayed."
             ),
         ),
