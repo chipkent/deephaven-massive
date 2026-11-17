@@ -79,12 +79,13 @@ would. Two passes help:
 ## 4. Grade
 
 The author reads its own text in the code's vocabulary, so a fresh editor grades it. Before
-the push that opens the PR or changes its description, spawn a grader with no other context:
+the push that opens the PR or changes its description, spawn a grader with no other context.
+`<base>` is the PR's base: `origin/main`, or the branch below it in a stack.
 
 ```text
 Read <repo>/.claude/skills/writing-user-docs/agents/editor.md and follow it exactly, with its
 section "Grading a PR description". Grade <worktree>/.git-pr-body.md against the diff from
-`git diff origin/main...HEAD` in <worktree>. Return the score sheet.
+`git diff <base>...HEAD` in <worktree>. Return the score sheet.
 ```
 
 Rewrite from its sheet and grade again with a fresh grader until the description passes. If a

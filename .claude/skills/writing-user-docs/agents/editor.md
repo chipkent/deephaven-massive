@@ -54,9 +54,9 @@ Count units by the docstrings' total length.
 A pull request description, issue body, or report (`writing-a-pr-description`) has one reader
 who decides: the owner, choosing whether to merge from this text alone. A reviewer with no
 context and a user reading the merged PR months later must follow it too. Its standard is
-`docs/dev/pull-requests.md`, read whole, on top of the method in `docs/dev/user-docs.md`. You
-get the description and its diff (`git diff origin/main...HEAD`) and nothing else about how it
-was written. Change the passes this way:
+`docs/dev/pull-requests.md`, read whole, on top of the method in `docs/dev/user-docs.md`. You get
+the description and its diff against the PR's base (`git diff <base>...HEAD`) and nothing
+else about how it was written. Change the passes this way:
 
 - Pass 1 reads the Summary as the opening and answers these four questions, each with quotes,
   instead of its usual ones. A no to any of the first three, or a yes to the fourth, fails the
