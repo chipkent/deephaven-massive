@@ -69,7 +69,7 @@ A message passes when all seven hold.
   logger, so the prefix is the thing the record is about (`wss://socket.massive.com/stocks:`). A
   fix may point to a diagnostics table or a docs section; a tutorial belongs in the docs.
 - **Table cell**: a failed table's `Error` in `m.streams()` and a connection's `LastError` in
-  `m.connections()` are the exception's text. A `Detail` in `m.problems()` (#736) is a label:
+  `m.connections()` are the exception's text. A `Detail` in `m.problems()` is a label:
   what happened and the values, ending in `(at <where>)`, with no fix, since the row's `Cause`
   leads to the fix in `docs/troubleshooting.md`.
 
