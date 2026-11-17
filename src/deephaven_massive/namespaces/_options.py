@@ -930,13 +930,15 @@ class OptionsNamespace(Namespace):
         exchange, and CFI code. To read contracts you can already name, use `contract_details()`.
 
         A list by underlying includes its adjusted contracts, such as those with root `AAPL1`. A
-        standard contract has `SharesPerContract` of 100; an adjusted one lists its further
+        standard contract has `SharesPerContract` of 100. An adjusted one may list its other
         deliverables in `AdditionalUnderlyings`.
 
-        A table of underlyings lists each one's contracts. A row that isn't a stock or index
-        ticker is skipped and logged, as `on_error`'s `noncanonical_symbols` sets. With a live
-        table, the result updates as its rows change. In a static table, an error from Massive
-        on one underlying fails the call.
+        A table of underlyings lists each one's contracts:
+
+        - With a live table, the result updates as its rows change.
+        - A row that isn't a stock or index ticker follows `on_error`'s `noncanonical_symbols`,
+          which by default skips and logs it.
+        - In a static table, an error from Massive on one underlying fails the call.
 
         Args:
             underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or a
@@ -946,8 +948,8 @@ class OptionsNamespace(Namespace):
             expired: True lists only expired contracts; False, the default, those still trading.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
-            limit: The most rows in total. A table of underlyings caps each underlying's rows
-                instead.
+            limit: The most rows to return, in total. A table of underlyings caps every
+                underlying's requests instead.
             filters: Further endpoint parameters, such as `{"strike_price_gte": 100}`.
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
                 the default, takes each cause from the session's `MassiveConfig.on_error`.
@@ -1007,11 +1009,12 @@ class OptionsNamespace(Namespace):
     ) -> FetchQuery:
         """Reference data on named options contracts: type, exercise style, expiration, and strike.
 
-        Reads each contract you name, one request per contract, into the same columns as
-        `contracts()`. To find a contract's ticker first, list its underlying's contracts with
-        `contracts()`. A contract Massive doesn't know gets no row, and the library logs a
-        `WARNING`. To fail the call instead, pass
-        `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`.
+        Reads each contract you name into the same columns as `contracts()`, with one request per
+        contract. To find a contract's ticker first, list its underlying's contracts with
+        `contracts()`.
+
+        By default, a contract Massive doesn't know gets no row and is logged as a `WARNING`. To
+        fail the call instead, pass `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`.
 
         Args:
             symbols: Option contracts to describe.
