@@ -33,7 +33,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
-from tests._live import bad_values, calendar, greeks, refusals
+from tests._live import bad_values, calendar, greeks, option_requests, refusals
 from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
@@ -1093,16 +1093,14 @@ def test_massive_answers_contract_details_of_a_stock_ticker(
     assert bad_values.ask_all(live_rest, bad_values.CONTRACT_SYMBOL, evidence)
 
 
-_OPEN_INTEREST = "/options/v1/open-interest"
-_UNUSUAL_TRADES = "/options/v1/unusual-trades"
 _CONTRACT = "/v3/reference/options/contracts/{options_ticker}"
 _SAMPLE_ROOTS = ("SPY", "SPXW", "AMCR1")
 """A standard, a weekly, and an adjusted root: Massive's own examples of roots that differ from
 their underlying."""
 
 
-def _page(client: RestClient, path: str, query: Mapping[str, object]) -> list[dict[str, Any]]:
-    """Read the raw rows of one page of a path that takes no path parameters.
+def _page(client: RestClient, request: option_requests.Request) -> list[dict[str, Any]]:
+    """Read the raw rows of the first page of an `option_requests` request.
 
     Returns:
         The rows.
@@ -1111,6 +1109,7 @@ def _page(client: RestClient, path: str, query: Mapping[str, object]) -> list[di
         WireEntitlementError: When Massive refuses the key access to the path; the live-test
             hook skips, quoting it.
     """
+    path, query = request
     return client.get(source(Transport.REST, path), {}, query, bucket="options").rows
 
 
@@ -1133,7 +1132,8 @@ def _root_samples(client: RestClient, evidence: Evidence) -> dict[str, list[dict
             live-test hook skips, quoting it.
     """
     samples = {
-        root: _page(client, _OPEN_INTEREST, {"root": root, "limit": 100}) for root in _SAMPLE_ROOTS
+        root: _page(client, option_requests.open_interest(root=root, limit=100))
+        for root in _SAMPLE_ROOTS
     }
     evidence(f"open interest rows per root: { {k: len(v) for k, v in samples.items()} }")
     return samples
@@ -1158,7 +1158,7 @@ def test_root_is_the_ticker_s_occ_root(
     skips the test, quoting Massive.
     """
     samples = _root_samples(live_rest, evidence)
-    trades = _page(live_rest, _UNUSUAL_TRADES, {"limit": 300})
+    trades = _page(live_rest, option_requests.unusual_trades(limit=300))
     rows = [row for found in samples.values() for row in found] + trades
     differ = [(r.get("ticker"), r.get("root")) for r in rows if r.get("root") != _root(r["ticker"])]
     roots = sorted({str(r.get("root")) for r in trades})
@@ -1222,13 +1222,15 @@ def test_underlying_matches_the_contracts_reference(
     """
     rows: list[tuple[str, dict[str, Any]]] = []
     for root in _UNDERLYING_ROOTS:
-        found = _page(live_rest, _OPEN_INTEREST, {"root": root, "limit": 50})
+        found = _page(live_rest, option_requests.open_interest(root=root, limit=50))
         rows += [("open interest", r) for r in found[:_PER_ROOT]]
     # Expired contracts, a year back, which the reference must find as of their day.
-    year_ago = (datetime.now(_NEW_YORK).date() - timedelta(days=365)).isoformat()
-    expired = _page(live_rest, _OPEN_INTEREST, {"root": "SPXW", "date.lte": year_ago, "limit": 2})
+    year_ago = datetime.now(_NEW_YORK).date() - timedelta(days=365)
+    expired = _page(
+        live_rest, option_requests.open_interest(root="SPXW", through=year_ago, limit=2)
+    )
     rows += [("open interest", r) for r in expired]
-    trades = _page(live_rest, _UNUSUAL_TRADES, {"limit": 1000})
+    trades = _page(live_rest, option_requests.unusual_trades(limit=1000))
     for root in _UNDERLYING_ROOTS:
         rows += [("unusual trades", r) for r in trades if r.get("root") == root][:_PER_ROOT]
     seen = {str(r.get("root")) for _, r in rows}
@@ -1276,7 +1278,7 @@ def test_unusual_trade_prices_are_per_share(live_rest: RestClient, *, evidence: 
     the price is not per share and the column's corrected description is wrong. A refusal
     skips the test, quoting Massive.
     """
-    rows = _page(live_rest, _UNUSUAL_TRADES, {"limit": 1000})
+    rows = _page(live_rest, option_requests.unusual_trades(limit=1000))
     # A trade without a price or size can't be checked; an adjusted root (`AAPL1`) may have
     # another multiplier than the 100 shares Massive's rule assumes, so only standard roots
     # are judged.
@@ -1358,16 +1360,15 @@ def test_index_option_underlyings_are_on_the_index_list(
     requests a first whole-market read sends. The `requests` marker assumes the list fits in
     50 pages of 1,000. A refusal skips the test, quoting Massive.
     """
-    tickers = source(Transport.REST, "/v3/reference/tickers")
     listed: set[str] = set()
     pages = 0
-    for active in ("true", "false"):
-        query = {"market": "indices", "active": active, "limit": 1000}
-        for found in live_rest.pages(tickers, {}, query, bucket=OTHER):
+    for active in (True, False):
+        path, query = option_requests.index_list(active=active)
+        for found in live_rest.pages(source(Transport.REST, path), {}, query, bucket=OTHER):
             pages += 1
             listed |= {str(r["ticker"]).removeprefix("I:") for r in found.rows if r.get("ticker")}
     evidence(f"index list: {len(listed)} indices in {pages} pages")
-    market = _page(live_rest, _OPEN_INTEREST, {"limit": 50000})
+    market = _page(live_rest, option_requests.open_interest(limit=50000))
     roots = {str(r.get("root")): str(r.get("underlying_ticker")) for r in market}
     off_list: list[str] = []
     compared = 0
