@@ -4985,6 +4985,66 @@ def test_the_missing_symbols_of_a_read_warn_once_and_each_is_a_problem(
     assert together == [f"{left_out} left out"] * 2
 
 
+def test_a_symbol_without_data_is_listed_when_another_request_fails_the_read(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ZZZZ answers HTTP 404 and its call completes; only then does AAPL's request fail. The
+    # read raises AAPL's failure, and m.problems() still lists ZZZZ.
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(b"oops", status=500))
+    events = record_problems(session, monkeypatch)
+    answered = threading.Event()
+
+    def gating(call: Callable[_P, object]) -> Callable[_P, object]:
+        def gated(*args: _P.args, **kwargs: _P.kwargs) -> object:
+            one = args[2]  # after the reader and the converter
+            assert isinstance(one, rest_requests.Call)
+            if one.symbol == "AAPL":
+                assert answered.wait(TIMEOUT)
+                return call(*args, **kwargs)
+            try:
+                return call(*args, **kwargs)
+            finally:
+                answered.set()
+
+        return gated
+
+    monkeypatch.setattr(rest.RestReader, "_call", gating(rest.RestReader._call))
+    with pytest.raises(dm.MassiveError, match="HTTP 500"):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "ZZZZ"])
+    why = "(HTTP 404 from /v3/trades/{stockTicker})"
+    assert [(e.cause, e.symbol, e.detail) for e in events] == [
+        (ProblemCause.UNAVAILABLE_SYMBOLS, "ZZZZ", f"Massive has no data for it {why}")
+    ]
+
+
+def test_a_symbol_without_data_is_listed_when_a_later_path_fails_a_poll_cycle(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cycle reads the stock path, where ZZZZ answers HTTP 404, then the crypto path, where
+    # X:BTCUSD's request fails. The cycle raises that failure, and m.problems() still lists ZZZZ.
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(b"oops", status=500))
+    events = record_problems(session, monkeypatch)
+    symbols = ("ZZZZ", "X:BTCUSD")
+    q = query(session, SMA, symbols=list(symbols))
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
+    with ThreadPoolExecutor(1) as pool, pytest.raises(dm.MassiveError, match="HTTP 500"):
+        reader.read_cycle(
+            SMA,
+            q._request,
+            symbols=symbols,
+            values=None,
+            record=lambda _: None,
+            on_recency=lambda _: None,
+            executor=pool,
+            cancel=Cancel(),
+            pace=rate_limits.PaceCheck("indicators.sma poll()", 60.0),
+        )
+    why = f"(HTTP 404 from {SMA_STOCK})"
+    assert [(e.cause, e.symbol, e.detail) for e in events] == [
+        (ProblemCause.UNAVAILABLE_SYMBOLS, "ZZZZ", f"Massive has no data for it {why}")
+    ]
+
+
 def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data(
     *, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

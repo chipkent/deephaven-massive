@@ -654,7 +654,7 @@ def test_stamp_rule() -> None:
     day = Request(timespan=Timespan.DAY)
     close, early, chicago = time(16), time(13), time(1)
     last_ms = time(23, 59, 59, 999_000)
-    stock_closes = frozenset({early, close})
+    stock_closes = frozenset({time(4), early, close})
     option_closes = frozenset({early, close, time(13, 15), time(16, 15)})
 
     def rule(spec: DatasetSpec, request: Request) -> StampRule | None:
@@ -749,12 +749,18 @@ def test_known_stamps_move_to_the_days_start_and_log_nothing(
 ) -> None:
     rule = stamp_rule(stocks.BARS, Request(timespan=Timespan.DAY), warnings=session_warnings())
     assert rule is not None
-    # The 16:00 close, and the 13:00 close of a short day (July 3), move to the day's start.
+    # The 16:00 close, the 13:00 close of a short day (July 3), and the stock `/prev`'s 04:00
+    # pre-market open move to the day's start.
     close = datetime(2025, 7, 1, 16, tzinfo=NEW_YORK)
     early = datetime(2025, 7, 3, 13, tzinfo=NEW_YORK)
+    premarket = datetime(2026, 11, 16, 4, tzinfo=NEW_YORK)
     with caplog.at_level(logging.DEBUG):
-        moved = stamped(rule, [close, early])
-    assert moved == [datetime(2025, 7, 1, tzinfo=NEW_YORK), datetime(2025, 7, 3, tzinfo=NEW_YORK)]
+        moved = stamped(rule, [close, early, premarket])
+    assert moved == [
+        datetime(2025, 7, 1, tzinfo=NEW_YORK),
+        datetime(2025, 7, 3, tzinfo=NEW_YORK),
+        datetime(2026, 11, 16, tzinfo=NEW_YORK),
+    ]
     assert not caplog.records
 
 
@@ -796,8 +802,8 @@ def test_an_unexpected_stamp_is_returned_to_withhold_with_one_warning_per_form(
     assert stamp_warnings(caplog) == [
         "stocks.bars: a 1-day bar of AAPL from s is stamped 2024-11-29T19:30:00+00:00 "
         "(2024-11-29T14:30:00-05:00 in America/New_York), which is not a stamp Massive is "
-        "known to use for such a bar (00:00:00.000, 13:00:00.000, 16:00:00.000 in "
-        "America/New_York). " + served.format(period="1 day"),
+        "known to use for such a bar (00:00:00.000, 04:00:00.000, 13:00:00.000, 16:00:00.000 "
+        "in America/New_York). " + served.format(period="1 day"),
         f"stocks.bars: {week_text}",
         f"options.bars: {week_text}",
     ]

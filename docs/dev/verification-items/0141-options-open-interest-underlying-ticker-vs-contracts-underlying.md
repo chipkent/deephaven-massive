@@ -27,3 +27,16 @@ Verified by `test_underlying_matches_the_contracts_reference` in
 expired `SPXW` contracts from a year earlier. It compares Massive's `underlying_ticker` with
 `m.options.contracts()`'s `Underlying` apart from `I:`, and the library's `Underlying` on both
 datasets with it exactly.
+
+`DJT` is on Massive's index list as well as a stock (`I:DJT`, the Dow Jones Transportation
+Average), so that test's rows of it go through the reference lookup, whose CFI code (`OPASPS`)
+puts them on the stock; the owner's run of 2026-11-17 found it among the tickers on both the
+index list and the active stock list. Shared tickers found in Massive's data are compared by
+`test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_reference` in the same
+file: the collision roots (roots whose bare underlying is on the list) of one whole-market page
+each of open interest and unusual trades, and the roots of options on a stock or fund among the
+contracts of 25 tickers on both the index list and the active stock list, a window that moves
+each day. It makes the same two comparisons for up to eight roots of each search, records the
+side each contract's CFI code puts it on, and says plainly when it found no option on a stock or
+fund sharing an index's ticker. A root the reference has no contract for, such as `XSPBW` on
+2026-11-17, is recorded and not compared, since the library withholds its rows.

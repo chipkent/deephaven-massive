@@ -1686,8 +1686,9 @@ class FlatFileHistory:
         Each block's rows the library cannot read whole are withheld (`_Transform.apply`):
         under a cause the call's policy sets to `RAISE` the read fails at that block
         (`withheld.failure_of`); otherwise, once the file is read, they are the session's
-        problem events (`_report_withheld`). Once the file is read, its drift (the blocks'
-        drift and their timestamps') becomes `schema_drift` events. A read that a dropped
+        problem events (`_report_withheld`). Once the file is read, or once a `RAISE` cause
+        fails it, its drift so far (the blocks' drift and their timestamps') becomes
+        `schema_drift` events (`_report_drift`). A read that a dropped
         connection ends reports nothing, so a file read again is counted once. A file with
         malformed lines (not UTF-8 text, or not the header's fields) follows the call's
         `malformed_rows`: under `LOG` and `IGNORE` it is one `malformed_rows` event with
@@ -1729,13 +1730,16 @@ class FlatFileHistory:
         setting = transform.policy.malformed_rows
         with entered(self._core.exec_ctx):
             for read, drift, marks in self._listing_malformed(batches, transform, file):
+                found = found.merge(drift)
                 if file.malformed_lines and effect_of(setting).fails:
-                    raise self._malformed_failure(transform, file, every)
+                    raise self._malformed_failure(transform, file, every, drift=found)
                 rows, odd, withheld = transform.apply(read, marks, received=time.time_ns(), key=key)
                 served += rows.num_rows
                 asked += withheld.rows.num_rows + withheld.total
-                found = found.merge(drift).merge(odd)
-                every = self._checked(withheld, transform, where=file.location, before=every)
+                found = found.merge(odd)
+                every = self._checked(
+                    withheld, transform, where=file.location, before=every, drift=found
+                )
                 if rows.num_rows:
                     pending.append(rows)
                     size += rows.nbytes
@@ -1754,15 +1758,7 @@ class FlatFileHistory:
         if every.groups:
             self._report_withheld(transform, every, where=file.location)
         transform.tally.add(asked, every, source=f"the flat files of {transform.prefix}")
-        if found.extra:
-            self._core.problems(
-                drift_events(
-                    found,
-                    dataset=transform.dataset,
-                    stream_id=transform.call,
-                    where=file.location,
-                )
-            )
+        self._report_drift(transform, found, where=file.location)
         if file.malformed_lines:
             self._core.problems([_malformed_event(transform, file, setting)])
         logger.debug(
@@ -1778,24 +1774,41 @@ class FlatFileHistory:
         )
         return tables
 
+    def _report_drift(self, transform: _Transform, found: DriftReport, *, where: str) -> None:
+        """Report a file's extra headers as `schema_drift` events, when it has any.
+
+        Args:
+            transform: The read's block transform, for its dataset and call.
+            found: The drift the file's blocks found.
+            where: The file's location.
+        """
+        if found.extra:
+            self._core.problems(
+                drift_events(
+                    found, dataset=transform.dataset, stream_id=transform.call, where=where
+                )
+            )
+
     def _malformed_failure(
-        self, transform: _Transform, file: FlatFile, withheld: Withheld
+        self, transform: _Transform, file: FlatFile, withheld: Withheld, *, drift: DriftReport
     ) -> RowDataError:
         """List a file's problems so far, then return its failure under `malformed_rows=RAISE`.
 
         Every cause is listed whatever its setting, so the rows the file's earlier blocks
-        withheld are listed too, before the malformed lines.
+        withheld, and the extra headers they found, are listed too, before the malformed lines.
 
         Args:
             transform: The request's block transform.
             file: The file, with its counts.
             withheld: The rows the file's blocks withheld so far.
+            drift: The drift the file's blocks found so far.
 
         Returns:
             The failure (`_malformed_message`), for the caller to raise.
         """
         if withheld.groups:
             self._report_withheld(transform, withheld, where=file.location)
+        self._report_drift(transform, drift, where=file.location)
         setting = transform.policy.malformed_rows
         self._core.problems([_malformed_event(transform, file, setting)])
         return RowDataError(_malformed_message(transform.dataset, file))
@@ -1864,17 +1877,19 @@ class FlatFileHistory:
         *,
         where: str,
         before: Withheld,
+        drift: DriftReport,
     ) -> Withheld:
         """Add a block's withheld rows to its file's, or fail the read on a `RAISE` cause.
 
-        The file's problem events so far, this block's included, reach the session first, so
-        the failure loses no record.
+        The file's problem events so far, this block's included, and its extra headers so far
+        reach the session first, so the failure loses no record.
 
         Args:
             withheld: The block's withheld rows.
             transform: The read's block transform, for its dataset and policy.
             where: The file's location, for the message.
             before: The withheld rows of the file's earlier blocks, as one (`withheld.merged`).
+            drift: The drift the file's blocks found so far, this block's included.
 
         Returns:
             The file's withheld rows so far, this block's added, with no published row: one
@@ -1902,6 +1917,7 @@ class FlatFileHistory:
                     policy=transform.policy,
                 )
             )
+            self._report_drift(transform, drift, where=where)
             raise RowDataError(failure)
         return merged((before, withheld))
 
