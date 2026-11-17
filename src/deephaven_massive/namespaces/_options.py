@@ -929,13 +929,13 @@ class OptionsNamespace(Namespace):
         tickers. Each row also holds the contract's underlying, shares per contract, primary
         exchange, and CFI code. To read contracts you can already name, use `contract_details()`.
 
-        A list by underlying includes its adjusted contracts, such as those with root `AAPL1`. A
-        standard contract has `SharesPerContract` of 100. An adjusted one may list its other
-        deliverables in `AdditionalUnderlyings`.
+        An adjusted contract has its own root, such as `AAPL1`, and may deliver something other
+        than 100 shares. A standard contract has `SharesPerContract` of 100 and lists nothing in
+        `AdditionalUnderlyings`, so check both columns before you treat a contract as standard.
 
         A table of underlyings lists each one's contracts:
 
-        - With a live table, the result updates as its rows change.
+        - In a live table, add an underlying and its contracts appear. Remove it and they leave.
         - A row that isn't a stock or index ticker follows `on_error`'s `noncanonical_symbols`,
           which by default skips and logs it.
         - In a static table, an error from Massive on one underlying fails the call.
@@ -945,11 +945,12 @@ class OptionsNamespace(Namespace):
                 table of them in a `Symbol` column. Leave it out for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
-            expired: True lists only expired contracts; False, the default, those still trading.
+            expired: True lists only expired contracts. False, the default, lists those still
+                trading.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
-            limit: The most rows to return, in total. A table of underlyings caps every
-                underlying's requests instead.
+            limit: The most rows to return, in total. A table of underlyings caps the rows of
+                every underlying separately instead.
             filters: Further endpoint parameters, such as `{"strike_price_gte": 100}`.
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
                 the default, takes each cause from the session's `MassiveConfig.on_error`.
@@ -1030,8 +1031,8 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None, empty, or `dm.ALL`;
-                - a ticker isn't Massive's exact ticker of an option contract, such as a stock
-                  ticker;
+                - a ticker isn't Massive's exact ticker of an option contract;
+                - a ticker is a stock or index ticker, such as `"AAPL"`;
                 - a table has no `Symbol` column;
                 - `as_of` is a `datetime` or isn't a date.
 
