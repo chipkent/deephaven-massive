@@ -891,11 +891,11 @@ class WsConnections:
         exception into the stream's failure), so a retry and a removal stay in order. Its only
         Deephaven call is the check, when a lookup starts or joins one already under way, of
         whether its thread holds the update graph's lock, which sets how long the lookup waits
-        out rate-limit pauses (`rate_limits.read_patience`; the worker never holds it, so 10
-        minutes). Each pair (`_split`) is subscribed, or skipped, or waits for the list
-        (`_wait`). A skipped pair Massive has no data for follows the stream's
-        `unavailable_symbols` (`_no_data`); one whose currencies the library cannot read was
-        reported under its `unreadable_symbols` by the lookup.
+        out rate-limit pauses (`rate_limits.read_patience`; the worker never holds it, and no
+        caller waits for it, so `MassiveConfig.max_outage`). Each pair (`_split`) is
+        subscribed, or skipped, or waits for the list (`_wait`). A skipped pair Massive has no
+        data for follows the stream's `unavailable_symbols` (`_no_data`); one whose currencies
+        the library cannot read was reported under its `unreadable_symbols` by the lookup.
 
         Args:
             stream_id: The stream.

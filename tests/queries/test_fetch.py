@@ -223,6 +223,9 @@ def test_fetch_follows_a_refreshing_table_and_reads_a_returning_symbol_again(
     wl.add(new_table([string_col("Symbol", ["MSFT"])]))
     until(lambda: len(rest.fetched) == 3)  # read again, with no reread option
     until(lambda: len(dh_to_pylist(result)) == 3)
+    # The call waited for its first read, so it waits out pauses as the caller's; the later
+    # reads, which no caller waits for, get a stop token and wait out max_outage.
+    assert rest.fetch_stopped == [False, True, True]
     massive_session.release(result)
     follows(massive_session)
 

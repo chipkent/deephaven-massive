@@ -55,6 +55,7 @@ from deephaven_massive._tables.futures_dates import LookupState, Readiness
 from deephaven_massive._tables.held_rows import DELAYED_AFTER, HeldRows
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
+from deephaven_massive._tables.row_memory import frame_bytes
 from deephaven_massive._tables.stream import (
     ChannelPlan,
     Flusher,
@@ -970,14 +971,15 @@ def test_every_row_takes_the_arrival_of_its_frame(
     flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)
     buffer = flusher.routes.buffer("T")
     assert buffer is not None
-    (stamped, generation, rows, marks) = buffer.get_nowait()  # the frame, arrival, socket
+    (stamped, generation, rows, marks, nbytes) = buffer.get_nowait()  # arrival, socket, rows
     assert before <= stamped <= time.time_ns()
     assert rows == frame([trade("AAPL")])
     assert generation == 1
     assert marks == {}
+    assert nbytes == frame_bytes(rows)
     # Two frames of one flush: each row takes its own frame's arrival.
-    buffer.put((111, 1, frame([trade("AAPL"), trade("MSFT")]), {}))
-    buffer.put((222, 1, frame([trade("IBM")]), {}))
+    buffer.put((111, 1, frame([trade("AAPL"), trade("MSFT")]), {}, 0))
+    buffer.put((222, 1, frame([trade("IBM")]), {}, 0))
     flusher.flush()
     wait_for(lambda: shown.size == 3)
     inserted = to_arrow_column(shown, "TimestampInsert")
@@ -2439,10 +2441,121 @@ def test_the_backlog_warning_waits_until_the_backlog_falls_below_half(
     flusher.routes.add("T", sink)
     flusher.rows("T", frame([trade("AAPL")] * 5), {}, generation=1)
     assert flusher._backlog_warned
-    flusher._drained(3)  # as a flush that took three of the five would
+    flusher._drained(3, 0)  # as a flush that took three of the five would
     assert flusher._backlog_warned  # two rows are not below half of four
-    flusher._drained(1)
+    flusher._drained(1, 0)
     assert not flusher._backlog_warned
+
+
+def test_rows_past_the_memory_limit_fail_every_stream_routed_while_they_were_dropped(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    rows_when: RowsWhen,
+) -> None:
+    # Two frames fit; the third would pass the limit, so it and every frame after it are
+    # dropped. The next flush fails each stream routed then, the one routed during the drops
+    # too, and frees the buffered rows; a stream routed after that flush gets its rows.
+    caplog.set_level(logging.WARNING, logger=stream.__name__)
+    two = frame([trade("AAPL")] * 2)
+    monkeypatch.setattr(stream, "HELD_BYTES_LIMIT", 2 * frame_bytes(two))
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T")
+    first, _ = make_sink(core, ("AAPL",), plan, stream_id=1)
+    flusher.routes.add("T", first)
+    flusher.rows("T", two, {}, generation=1)
+    flusher.rows("T", frame([trade("AAPL")] * 2), {}, generation=1)
+    assert (flusher.backlog, flusher._backlog_bytes) == (4, 2 * frame_bytes(two))
+    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # past the limit: dropped
+    during, _ = make_sink(core, ("AAPL",), plan, stream_id=2)
+    flusher.routes.add("T", during)
+    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # dropped: still over
+    assert flusher.backlog == 4
+    dropping = [r.getMessage() for r in caplog.records if "rows are dropped" in r.getMessage()]
+    assert len(dropping) == 1  # logged once, at the frame that passed the limit
+    flusher.flush()
+    assert first.failed
+    assert during.failed
+    assert (first.rows_published, during.rows_published) == (0, 0)
+    assert (flusher.backlog, flusher._backlog_bytes) == (0, 0)
+    failures = [r.getMessage() for r in caplog.records if "stream 1 failed" in r.getMessage()]
+    (failure,) = failures
+    # The two dropped frames held a row each.
+    assert "4 rows (about 0 MB) waited to be published, and 2 more would pass" in failure
+    assert "MB the library keeps for one connection" in failure
+    assert "call the method again for a new live table" in failure
+    after, shown = make_sink(core, ("AAPL",), plan, stream_id=3)
+    kept = blink_to_append_only(shown)  # before the flush, so no cycle's rows pass it by
+    flusher.routes.add("T", after)
+    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)
+    flusher.flush()
+    assert not after.failed
+    rows_when(kept, lambda rows: len(rows) == 1)
+
+
+def test_the_missing_rows_date_from_the_oldest_frame_the_flush_discards(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The frame buffered before the drops is discarded too, so the rows are missing from its
+    # arrival, not from the first dropped frame's.
+    caplog.set_level(logging.WARNING, logger=stream.__name__)
+    one = frame([trade("AAPL")])
+    monkeypatch.setattr(stream, "HELD_BYTES_LIMIT", frame_bytes(one))
+    sink, _ = make_sink(massive_session._core, ("AAPL",), stream_id=1)
+    flusher.routes.add("T", sink)
+    flusher.rows("T", one, {}, generation=1)
+    buffer = flusher.routes.buffer("T")
+    assert buffer is not None
+    (_, generation, rows, marks, nbytes) = buffer.get_nowait()
+    buffer.put((1_000_000_000, generation, rows, marks, nbytes))  # arrived at 1970-01-01T00:00:01Z
+    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # past the limit
+    flusher.flush()
+    assert sink.failed
+    (failure,) = [r.getMessage() for r in caplog.records if "stream 1 failed" in r.getMessage()]
+    assert "The rows from 1970-01-01T00:00:01Z on are missing" in failure
+
+
+def test_a_stream_routed_as_a_flush_takes_the_overflow_misses_no_row(
+    massive_session: dm.MassiveSession,
+    flusher: Flusher,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    rows_when: RowsWhen,
+) -> None:
+    # The flush lets frames be buffered again before it reads the routes to fail: a stream
+    # routed just after that read, whose frame comes at once, keeps running with its row.
+    one = frame([trade("AAPL")])
+    monkeypatch.setattr(stream, "HELD_BYTES_LIMIT", frame_bytes(one))
+    core = massive_session._core
+    plan = ChannelPlan.build(core.catalog, TRADES, "T")
+    early, _ = make_sink(core, ("AAPL",), plan, stream_id=1)
+    late, shown = make_sink(core, ("AAPL",), plan, stream_id=2)
+    kept = blink_to_append_only(shown)  # before the flush, so no cycle's rows pass it by
+    flusher.routes.add("T", early)
+    flusher.rows("T", one, {}, generation=1)
+    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # past the limit
+    routes_type = type(flusher.routes)
+    sinks = routes_type.sinks
+
+    def routing_after(routes: object) -> tuple[StreamSink, ...]:
+        found = sinks(flusher.routes)
+        monkeypatch.setattr(routes_type, "sinks", sinks)
+        flusher.routes.add("T", late)
+        flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)
+        return found
+
+    monkeypatch.setattr(routes_type, "sinks", routing_after)
+    flusher.flush()
+    assert early.failed
+    assert not late.failed
+    # The frame that came after the routing; the frames buffered before were discarded.
+    rows_when(kept, lambda rows: len(rows) == 1)
 
 
 @pytest.mark.benchmark
