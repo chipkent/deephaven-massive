@@ -199,7 +199,7 @@ Examples 17, 18, and 22 read the settings file of the README's
 [settings example](../README.md#what-your-plan-allows), `~/massive/settings.yaml`. Save it
 first, as that example shows:
 
-| Massive serves your key stocks | Save the file that lists |
+| Massive serves your key's stocks | Save the file that lists |
 |---|---|
 | Delayed, or not at all | `stocks` as delayed |
 | In real time | Nothing as delayed |
@@ -213,14 +213,20 @@ uv run python scripts/tester.py examples
 ```
 
 The runner gives examples 17, 18, and 22 a copy of your settings file's
-`delayed_subscriptions`, and prints it as `settings:`. It prints a line per example as it runs,
-then `no example failed`, or `failed:` and the examples' names. Each example's output is in
-`~/massive-test/examples-output/`, and `summary.txt` there gives each one's verdict:
+`delayed_subscriptions`. It prints, in order:
+
+1. `settings:` and that copy.
+2. Each example's name as it starts, then its verdict.
+3. A new verdict for any example whose stream failed after the example ended.
+4. `saved to` and the output folder, `~/massive-test/examples-output/`.
+5. `no example failed`, or `failed:` and the examples' names.
+
+In that folder, `summary.txt` gives each example's last verdict:
 
 | Verdict | What you do |
 |---|---|
 | `passed` | Nothing |
-| `refused by Massive` | Nothing, unless your plan includes that example's data |
+| `refused by Massive` | Nothing. If your plan includes that example's data, report it, as [Report a problem](#report-a-problem) shows |
 | `not listed as delayed` | List the subscription the error names in `delayed_subscriptions` of your settings file, and run the examples again |
 | `failed` | Report it, as [Report a problem](#report-a-problem) shows |
 
@@ -306,12 +312,9 @@ print(dm.__version__)
 print(m)
 ```
 
-You should see the library's version without its leading `v`, such as `0.1.0rc1`, then a line
-such as `<MassiveSession #12 open>`. The number counts the sessions this server has opened.
-
-The examples open their sessions as the README's do. When Massive limits a subscription's
-requests, a session slows to five requests a minute after Massive's first rate-limit error, as
-the README's [MassiveConfig](../README.md#massive-config) table says, and example 7 checks it.
+You should see the library's version, such as `0.1.0rc1`, with no leading `v`. The next line
+is like `<MassiveSession #12 open>`, where the number counts the sessions this server has
+opened.
 
 #### 2. Find datasets and their columns
 
@@ -445,30 +448,35 @@ diagnostics tables:
 
 #### 7. Exceed a request limit
 
-Poll six stocks every 30 seconds, more than a limited key may send, then release the table:
+Poll six stocks every 30 seconds, and watch the session learn your Stocks request limit from
+Massive's first rate-limit error. A session learns it this way when
+[`rest_requests_per_minute`](configuration.md#setting-details) doesn't give it:
 
 ```python
 import deephaven_massive as dm
 
 m = dm.MassiveSession()
 
-# 12 Stocks requests a minute: six stocks every 30 seconds, against a limit of 5.
+# 12 Stocks requests a minute: six stocks every 30 seconds.
 paced = m.stocks.previous_day_bar(["AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM"]).poll(30)
 rate_limits = m.rate_limits()
-streams = m.streams()
 
 # The table keeps updating while its panel is open, and stops once you close the panel.
 m.release(paced)
 ```
 
-Watch `rate_limits` and `paced` for two minutes. When Massive limits your Stocks requests, it
-refuses one. The `stocks` row of `rate_limits` then shows `RequestsPerMinute` 5 and
-`LimitSource` `LEARNED`: the library learned the limit from Massive's refusal. The row reads
-`PACED` while requests wait for a free slot. `paced` gets its six rows either way. When
-Massive doesn't limit your Stocks requests, nothing is refused.
+Watch the `stocks` row of `rate_limits`:
+
+| When | The `stocks` row shows |
+|---|---|
+| Massive answers with a rate-limit error | `State` `PAUSED`, until its `PausedUntil` |
+| The pause ends | `RequestsPerMinute` at the limit, and `LimitSource` `LEARNED` |
+| Requests wait their turn under that limit | `State` `PACED` |
+| Massive doesn't limit your Stocks requests | `State` `READY` throughout |
+
+`paced` gets its six rows in every case.
 
 Then close the `paced` panel. The table stops, and the `stocks` row returns to `READY`.
-`m.release()` lets the library stop a table once no panel or other table uses it.
 
 #### 8. Read history in the background
 
@@ -1029,7 +1037,7 @@ You should see three lines like these, with your own session numbers and a row c
 
 ```text
 <MassiveSession #7 closed>
-MassiveError: MassiveSession #7 is closed
+MassiveError: MassiveSession #7 is closed; open a new dm.MassiveSession() to read again
 <MassiveSession #8 closed> 5
 ```
 

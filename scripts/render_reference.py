@@ -1,4 +1,4 @@
-"""Regenerate the generated user docs: `docs/datasets/`, the settings, and the problem causes.
+"""Regenerate the generated docs: `docs/datasets/`, settings, problem causes, README plans.
 
 Run it from a source checkout:
 
@@ -17,8 +17,10 @@ what it does to each table.
 It also rewrites the generated part of `docs/configuration.md`, between its two marker lines,
 from `MassiveConfig`: each setting's settings-file key, docstring entry, values, and default.
 The rest of that page is written by hand and kept as it is. It rewrites the table of problem
-causes in `docs/troubleshooting.md` the same way, from `problem_events.CAUSES`.
-All the logic is in `deephaven_massive._datasets.column_reference` and
+causes in `docs/troubleshooting.md` the same way, from `problem_events.CAUSES`, and README.md's
+plans table, between its two marker lines, from the plan tables of Massive's pages.
+All the logic is in `deephaven_massive._datasets.column_reference`,
+`deephaven_massive._datasets.readme_plans`, `deephaven_massive._tables.cause_reference`, and
 `deephaven_massive._config`, where the unit tests and the coverage gate reach it; this script
 only wires it up.
 
@@ -65,6 +67,7 @@ from deephaven_massive._datasets.column_reference import (  # noqa: E402 - needs
     render,
     sync,
 )
+from deephaven_massive._datasets.readme_plans import with_plans_table  # noqa: E402 - needs the server above
 from deephaven_massive._tables.cause_reference import (  # noqa: E402 - needs the server above
     with_causes_reference,
 )
@@ -77,6 +80,8 @@ _CONFIGURATION_PAGE = _DIRECTORY.parent / "configuration.md"
 
 _TROUBLESHOOTING_PAGE = _DIRECTORY.parent / "troubleshooting.md"
 """The troubleshooting page, whose table of problem causes this script rewrites."""
+_README = _DIRECTORY.parent.parent / "README.md"
+"""The README, whose plans table this script rewrites."""
 
 
 def main() -> None:
@@ -100,6 +105,8 @@ def main() -> None:
         sys.stdout.write(f"{shown}/ is up to date\n")
     _rewrite(_CONFIGURATION_PAGE, _config.with_settings_reference)
     _rewrite(_TROUBLESHOOTING_PAGE, with_causes_reference)
+    provenance = _massive.provenance()
+    _rewrite(_README, lambda page: with_plans_table(page, _session.CATALOG, provenance))
 
 
 def _rewrite(path: Path, render_part: Callable[[str], str]) -> None:

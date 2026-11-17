@@ -101,9 +101,10 @@ These protect the owner's repository, money, and secrets.
   `dataset`; decision 21), so the key stays out of objects users leave in console globals.
 - **Regenerate generated and vendored files; never edit them by hand**, since the next run
   erases the edit: `_massive/spec/*.json` and `vendor/massive/` (`uv run python
-  scripts/refresh.py`, `--fetch` for the vendor snapshot), and `docs/datasets/`
-  and the settings of `docs/configuration.md` (`scripts/render_reference.py`). Hand input goes
-  only where `docs/dev/spec-refresh.md` says, each with its reason; commit output with its cause.
+  scripts/refresh.py`, `--fetch` for the vendor snapshot), and `docs/datasets/`, the settings
+  of `docs/configuration.md`, and the README's plans table (`scripts/render_reference.py`).
+  Hand input goes only where `docs/dev/spec-refresh.md` says, each with its reason; commit
+  output with its cause.
 
 ## The public API and the data
 
@@ -161,8 +162,8 @@ These protect the owner's repository, money, and secrets.
     answer) and from settings the user gives, never from a plan's name, a probe for a plan,
     or a built-in table of what a plan includes. They work for whatever plans a user holds.
     A live test sends its requests and, on an entitlement refusal, skips and quotes Massive.
-    User docs may still say which plans include a dataset, generated from Massive's spec so
-    they follow Massive's changes.
+    User docs may still say which plans include a dataset, generated from Massive's spec or
+    checked against it by a test, so they follow Massive's changes (decision 126).
   - **Massive's answer is the error.** The library reports Massive's refusal as Massive's: its
     status, its text, and the call that caused it. It never reinterprets or guesses.
   - **A ticker Massive has no data for gives no rows by default** (decision 104), because that

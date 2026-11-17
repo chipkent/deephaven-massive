@@ -231,7 +231,7 @@ Each symbol is Massive's ticker, spelled exactly:
 - Pass one symbol as text, several as a list, or a table with a `Symbol` column.
 - A live table works as a watchlist. Symbols you add are read, and symbols you delete stop being read.
 - A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.
-- In text or a list, any other spelling, such as `aapl`, raises `ValueError`, unless the dataset's page says it takes another source's tickers. In a table, that row is skipped and logged.
+- In text or a list, any other spelling, such as `aapl`, raises `ValueError`, unless the dataset's page says it takes another source's tickers. In a table, that row is skipped, and `m.problems()` lists it.
 - To convert another source's tickers, use `dm.canonicalize_symbols` for a table or `dm.canonical_symbol` for one value. A stock needs the source's convention: `convention=dm.SymbolConvention.YAHOO` converts Yahoo's `BRK-B` to `BRK.B`. A row that doesn't convert gets a null `Symbol`, which every dataset skips.
 
 <a id="start"></a>

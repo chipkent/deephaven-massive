@@ -277,8 +277,8 @@ class MassiveConfig:
             - `REALTIME`: Massive labels the data `REAL-TIME`.
             - `UNKNOWN`: Massive gave no label the library knows.
 
-            The first stream of each asset class in a session makes one REST request to read the
-            label. A subscription listed in `delayed_subscriptions` makes none.
+            Reading the label costs one REST request, when the first stream of a class set here
+            opens in a session. A subscription listed in `delayed_subscriptions` costs none.
         subscription_confirmation_timeout: Sets how many seconds Massive has to confirm a stream's
             channel before the library asks again. Defaults to 5 seconds.
 

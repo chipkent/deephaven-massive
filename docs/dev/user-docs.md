@@ -67,7 +67,7 @@ and keep numbers out of it unless you cite where they come from.
 | Reader | Pain | What the library changes |
 |---|---|---|
 | Quant researcher | Months go into data infrastructure before an idea is tested, and research code is rewritten for live trading | One query gives history and a live table with the same columns, and the same Deephaven code runs on both |
-| Quant researcher | Finding affordable data and making it usable | 112 datasets, listed by `dm.datasets()`, each with documented columns |
+| Quant researcher | Finding affordable data and making it usable | Over a hundred datasets, listed by `dm.datasets()`, each with documented columns |
 | Quantitative trader | A signal waits on live infrastructure before it trades; screeners don't compute their own signal, live | Their own signal on their own stocks is a live table, a few lines in a browser console |
 | Vibe coder | The assistant builds the prototype but not the real-time parts | Live tables, reconnects, and watchlist-driven subscriptions are already built; the assistant writes table logic |
 | Software engineer | A real-time stack is several systems and most of a year of work | The feed, the processing, and the UI are one Python process of Deephaven tables |
@@ -94,7 +94,7 @@ later date refines an earlier one:
 | Order | Don't bury the lead: the hook, then Install, then the tutorial. Install reaches the first result by the shortest path and sets every key in one step. Reference (environment variables, settings, configuration tables) comes after the tutorial. | 11-05 |
 | Install | Best practice: in order, scannable, every command working as written. Until the PyPI release, install from git at the newest release tag, looked up in the same step, never hard-coded. Offer `pip` and `uv` as a choice stated up front. Set every key in one step. | 11-03, 11-04 |
 | Configuration | Environment variables say what the reader gets from each. Settings made in code are documented with `MassiveConfig`, the object they belong to. Every configuration concept a page mentions links to its reference page, generated from the code: `docs/configuration.md` for `MassiveConfig` and the settings file. | 11-04, 11-05 |
-| Examples | Each is complete and runs as pasted, with its imports and session. Each says the plan it needs, any setting, and how to run it, then what you see. A free-plan example comes first. The examples form a visible teaching progression, written as a teacher writes. | 11-04 |
+| Examples | Each is complete and runs as pasted, with its imports and session. Under its heading, a `**Plan:**` line names the plans that run it, in Massive's names, and a test checks it against Massive's spec; its prose names no plan (decision 126). Each says any setting and how to run it, then what you see. A free-plan example comes first. The examples form a visible teaching progression, written as a teacher writes. | 11-04 |
 | Terms | Industry-standard words: Massive's for its data, Deephaven's for its operations, practitioners' for market concepts, Python's for Python. | 11-04 |
 | Deephaven and Massive | Describe Deephaven in its own terms, from deephaven.io. Keep Massive's names for its products, datasets, and columns. Dates in examples are ISO strings. | 10-27, 10-28, 11-03 |
 | Coverage | Live tables driven by a watchlist; which plans include each dataset, generated so it follows Massive's changes; split adjustment, documented with the `adjusted` argument; how to filter out a known problem in Massive's data; column meanings on the generated dataset pages. | 10-27, 10-28, 10-30, 11-02 |
@@ -111,7 +111,7 @@ Each fact has one home, and other pages link to it:
 
 | Page | Owns |
 |---|---|
-| `README.md` | The hook, Install, the teaching examples, Configuration (environment variables and the `MassiveConfig` settings a new user needs), next steps, contributing |
+| `README.md` | The hook, Install, the teaching examples and their plans table (generated), Configuration (environment variables and the `MassiveConfig` settings a new user needs), next steps, contributing |
 | `docs/configuration.md` | Every `MassiveConfig` setting, its settings-file key, values, and default, and how to write and load a settings file; the settings are generated from the code |
 | `docs/troubleshooting.md` | Every message and symptom with its fix, the diagnostics tables, the log, reporting a bug |
 | `docs/datasets/` | Each dataset's call, methods, arguments, plans, and columns; generated, never edited by hand |
@@ -156,48 +156,52 @@ Each of these has a source. Check it again before you write:
   IDE in the browser, signed in (`deephaven_server/cli.py`). `-Xmx4g` is the example on
   Deephaven's install page; no source gives a minimum memory or a startup time.
 - The `MassiveConfig` settings a new user needs are `rest_requests_per_minute` (each
-  subscription's request limit, when Massive limits it) and `delayed_subscriptions` (Starter
-  and Developer plans that stream late).
+  subscription's request limit, when Massive limits it) and `delayed_subscriptions` (each
+  subscription Massive serves delayed).
 
 <a id="teaching-plan"></a>
 
 ### Teaching plan
 
-Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13 and the problems
-table added before it on 2026-11-16. Each example adds one idea, in dependency order: the call
-pattern, static tables, charts, polling, watchlists, settings, streaming, problems, then
-stopping. Each title names the idea, then what the example does. Examples 1 to 6, 13, and 14
-run on Stocks Basic, the free plan, and 7 to 12 on Stocks Starter or higher.
+Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13, the problems
+table added before it on 2026-11-16, and the options example added on 2026-11-17. The Yahoo conversion became its own example on 2026-11-17, so that
+Example 6 keeps one idea. Each example adds one idea,
+in dependency order: the call pattern, static tables, charts, polling, watchlists, other sources'
+symbols, settings, streaming, options, problems, then stopping. Each title names the idea, then what the
+example does.
+Each example's Plan line follows from the data it reads, and
+`tests/datasets/test_readme_plans.py` checks it against Massive's spec.
 
-| # | Title | Builds on | Plan |
-|---|---|---|---|
-| 1 | Queries: read a week of Apple's daily bars | | Stocks Basic |
-| 2 | Symbol lists: rank every listed US stock by one day's dollar volume | 1 | Stocks Basic |
-| 3 | Date ranges: compare three stocks' price returns over a year | 1, 2 | Stocks Basic |
-| 4 | Charts: plot a stock's daily closes for a year | 3 | Stocks Basic |
-| 5 | Live tables: poll for the latest news headlines | 1 to 3 | Stocks Basic |
-| 6 | Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes | 5 | Stocks Basic |
-| 7 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 | Stocks Starter or higher |
-| 8 | Streaming: stream minute bars for the stocks on your list | 6, 7 | Stocks Starter or higher |
-| 9 | Live calculations: track each stock's change since the previous close | 6, 8 | Stocks Starter or higher |
-| 10 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 8 | Stocks Starter or higher |
-| 11 | Backfill: start with today's minute bars, then continue live | 3, 10 | Stocks Starter or higher |
-| 12 | Dashboards: show a live chart and table together with deephaven.ui | 4, 9 | Stocks Starter or higher |
-| 13 | Problems: see what went wrong in your tables | 1 | Stocks Basic |
-| 14 | Stopping live tables: release one table or close the session | 5 | Stocks Basic |
+| # | Title | Builds on |
+|---|---|---|
+| 1 | Queries: read a week of Apple's daily bars | |
+| 2 | Symbol lists: rank every listed US stock by one day's dollar volume | 1 |
+| 3 | Date ranges: compare three stocks' price returns over a year | 1, 2 |
+| 4 | Charts: plot a stock's daily closes for a year | 3 |
+| 5 | Live tables: poll for the latest news headlines | 1 to 3 |
+| 6 | Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes | 5 |
+| 7 | Symbols from another source: convert Yahoo tickers to Massive's | 6 |
+| 8 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 |
+| 9 | Streaming: stream minute bars for the stocks on your list | 6, 8 |
+| 10 | Live calculations: track each stock's change since the previous close | 6, 9 |
+| 11 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 9 |
+| 12 | Backfill: start with today's minute bars, then continue live | 3, 11 |
+| 13 | Dashboards: show a live chart and table together with deephaven.ui | 4, 10 |
+| 14 | Options: read one expiry of a stock's calls | 8 |
+| 15 | Problems: see what went wrong in your tables | 1 |
+| 16 | Stopping live tables: release one table or close the session | 5 |
 
 The owner's decisions behind it:
 
-- Example 6's title is the owner's wording. Examples 3 and 10 say "price returns" and "table
+- Example 6's title is the owner's wording. Examples 3 and 11 say "price returns" and "table
   types" (Deephaven's word), where the approved draft said "returns" and "live-table shapes".
-- Example 7 loads its settings with `dm.MassiveConfig.from_file`. `dm.MassiveConfig()` never
+- Example 8 loads its settings with `dm.MassiveConfig.from_file`. `dm.MassiveConfig()` never
   reads a file, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the file only for `from_file()` with
   no path; never imply that a session reads it.
-- Examples 4 and 12 use the Deephaven Express and deephaven.ui plugins, which
+- Examples 4 and 13 use the Deephaven Express and deephaven.ui plugins, which
   `deephaven-server` doesn't include, so the install command adds them.
 - Stock streams carry data only while stocks trade, so the streaming examples say so and
-  offer crypto, which trades around the clock. Free-plan examples stay under five requests a
-  minute where they poll.
+  offer crypto, which trades around the clock. Examples that poll stay under five requests a minute.
 - Install ends by starting the server and hands off to Example 1, without repeating its code.
 - Stopping comes last (owner, 2026-11-13: "Why not put the close example as the last one?
   Simple fix."), so no earlier example closes a session a later one needs. It runs on its own,
@@ -405,8 +409,9 @@ Readers scan the first two or three words of a heading (NN/g, *First 2 Words*).
 The examples teach the library, so there's no "How it works" section. They follow worked-example
 research (Sweller), Diátaxis tutorials, and the Rust book:
 
-- **Goal before code.** One to three sentences: the question a trader or researcher asks, the
-  plan it needs, and how to run it. Nothing about how the code works yet.
+- **Goal before code.** A Plan line under the title names the plans that run it. Then one to
+  three sentences: the question a trader or researcher asks, and how to run it. Nothing about
+  how the code works yet.
 - **One new idea per example.** The code is at most about 15 lines, complete, with realistic
   symbols and dates, and brings in one idea the reader hasn't met. Two or three comments label
   steps; they don't narrate.
@@ -559,7 +564,7 @@ guess. The page passes when every file is right and nothing is left to guess. Th
 
 ### Examples
 
-Each example has a goal-first title, the goal and plan in one to three sentences, one complete
+Each example has a goal-first title, a Plan line, the goal in one to three sentences, one complete
 block, then what to notice and the one idea, and a bridge to the next. See
 [Teaching with examples](#teaching).
 

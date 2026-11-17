@@ -2,7 +2,7 @@
 
 Date: 2026-11-15
 
-Status: accepted
+Status: partly superseded: where user docs may name plans, by [126](0126-readme-names-each-example-plan-checked-against-massive-spec.md)
 
 ## Question
 

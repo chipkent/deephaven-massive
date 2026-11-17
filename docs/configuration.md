@@ -1,15 +1,16 @@
 # Configuration
 
-Every `dm.MassiveConfig` setting is here: what it does, the values it takes, its default, and
-when to change it. Keep your choices in a settings file, and every console and script loads the
-same ones. [Every setting in one file](#example-settings-file) shows each setting in place.
+Every `dm.MassiveConfig` setting a settings file holds is here: what it does, the values it
+takes, its default, and when to change it. Keep your choices in a settings file, and every
+console and script loads the same ones. [Every setting in one file](#example-settings-file)
+shows each setting in place.
 
 <a id="write-a-settings-file"></a>
 
 ## Write a settings file
 
 A settings file is YAML. Each line names one setting at the left margin, then a colon and its
-value. Leave a setting out to keep its default, and start a comment with `#`. A value takes one
+value. Leave a setting out to keep its default. A comment starts with `#`. A value takes one
 of three forms:
 
 - A single value: a word, a number, or a URL, such as `raise`, `600`, or
@@ -19,8 +20,10 @@ of three forms:
   only list.
 - A mapping, one `key: value` line per entry, indented under the setting's name. A short
   mapping also fits in braces on one line, such as `{stocks: 5}`, or `{}` for none. The
-  mappings are `websocket_hosts` (asset class to hostname), `rest_requests_per_minute`
-  (subscription to requests a minute), and `on_error` (cause to `raise`, `log`, or `ignore`).
+  mappings are:
+  - `websocket_hosts`: an asset class to a hostname
+  - `rest_requests_per_minute`: a subscription to its requests a minute
+  - `on_error`: a cause to `raise`, `log`, or `ignore`
 
 This file uses all three forms:
 
@@ -51,8 +54,8 @@ m = dm.MassiveSession(config)
 `from_file()` with no path reads the file that the `DEEPHAVEN_MASSIVE_CONFIG_FILE` environment
 variable names. `dm.MassiveConfig()` never reads a settings file or that variable.
 
-A setting the file names replaces its default, and a setting you replace in code replaces the
-file's. To change one setting of a file in code, replace it in the result:
+A setting in code wins over the file, and the file wins over the default. To change one setting
+of a file in code, use `dataclasses.replace` on the result:
 
 ```python
 import dataclasses
@@ -67,10 +70,10 @@ m = dm.MassiveSession(dataclasses.replace(config, max_concurrency=4))
 
 ## Keep keys out of the file
 
-A settings file can't hold your keys: loading a file that names one fails. Set them as
-environment variables, or pass them in code as the `api_key`, `s3_access_key_id`, and
-`s3_secret_access_key` arguments of `dm.MassiveConfig`. A proxy is an environment variable
-too, `HTTPS_PROXY`, and so are your company's certificate authorities and the log.
+A settings file can't hold your keys: loading a file that names one fails. With a settings file,
+set your keys as environment variables, since `from_file()` reads the API key from
+`MASSIVE_API_KEY` and fails without it. Without a file, you can pass them in code as the
+`api_key`, `s3_access_key_id`, and `s3_secret_access_key` arguments of `dm.MassiveConfig`.
 [Environment variables](../README.md#environment-variables) names and describes each one.
 
 <a id="settings-reference"></a>
@@ -82,10 +85,13 @@ match the session to what you've bought. A file without `delayed_subscriptions` 
 subscription as real-time.
 
 Each setting is a name in the settings file and an argument of `dm.MassiveConfig`. In a file,
-write the values shown here. In code, pass the matching Python value: `{dm.Subscription.STOCKS}`
-for `[stocks]`, `dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)` for the `on_error` mapping
-`{malformed_rows: raise}`, and `{dm.AssetClass.INDICES: "business.massive.com"}` for the
-`websocket_hosts` mapping above.
+write the values shown here. In code, pass the matching Python value:
+
+| In the file | In code |
+|---|---|
+| `delayed_subscriptions: [stocks]` | `delayed_subscriptions={dm.Subscription.STOCKS}`, a set |
+| `on_error: {malformed_rows: raise}` | `on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)` |
+| `websocket_hosts: {indices: business.massive.com}` | `websocket_hosts={dm.AssetClass.INDICES: "business.massive.com"}` |
 
 <a id="on-error"></a>
 
@@ -100,14 +106,17 @@ of three values:
 |---|---|
 | `log` | Skips the symbol or row, keeps the rest, and logs a warning for the first problem of each cause on each table. |
 | `ignore` | Does the same, logging only at `DEBUG`. |
-| `raise` | Fails whatever met the problem. |
+| `raise` | Fails the call, or the live table, that met the problem. |
 
 `m.problems()` lists each problem a table met, with its cause and the setting that applied.
 
-By default, the library leaves out any row of Massive's data it can't read. A row it can read is one whose
-symbol, time, and values it can convert to the table's columns. So a result can be partial.
-Say `m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")` gets 5 rows from Massive, and the library can't read one
-of them. The table gets 4 rows. `m.problems()` lists the fifth, and the log warns once.
+Whatever the setting, the library never publishes a row of Massive's data it can't read: one
+whose symbol, time, or values don't convert to the table's columns.
+
+So under `log` a result can be partial. Suppose this call gets 5 rows from Massive, and the
+library can't read one of them:
+`m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")`. The table gets 4
+rows. `m.problems()` lists the fifth, and the log warns once.
 
 Set every cause to `raise` when a call must return complete data:
 
@@ -121,22 +130,26 @@ apple = bars.history("2026-10-26", "2026-10-30")
 
 To do the same for every call, pass that policy to `MassiveConfig(on_error=...)`.
 
+A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
+In a call's policy, a cause it leaves unset follows the session's. A cause the session's policy
+leaves unset follows the default.
+
 Under `raise`:
 
 - A problem found when you make the call raises at once.
 - A problem found later, as the rows arrive, raises from a call with `wait=True`. Without
   `wait=True`, it fails the table.
-- A watchlist read by `fetch()` or `history()` fails only the symbols with a problem, and
-  `m.symbol_reads()` shows them `FAILED`. A watchlist row whose value isn't Massive's exact
-  ticker fails the whole table.
+- A watchlist read by `fetch()` or `history()` fails only the symbols whose read met the
+  problem, and `m.symbol_reads()` shows them `FAILED`.
+- A malformed flat-file line fails every symbol of that file's read.
+- A watchlist row whose value isn't Massive's exact ticker fails the whole table.
 
-A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
-A cause it leaves unset follows the session's setting.
+A read or stream fails, whatever the setting, when Massive's rows stop being readable. Massive
+has most likely changed its format. Report it as a [bug](troubleshooting.md#report-a-bug).
 
-Whatever the setting, a table fails when Massive's rows stop being readable, since Massive has
-most likely changed its format. Report it as a [bug](troubleshooting.md#report-a-bug).
-
-- A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows.
+- A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows. For
+  a watchlist read, its symbols fail instead, and `m.symbol_reads()` shows them `FAILED`.
+- A watchlist read without `wait=True` fails its table when every symbol it started with fails.
 - A `dm.ALL` stream fails after 100 unreadable rows with none read between them.
 - A stream of the symbols you list fails after 100 rows whose symbol it can't read, with none
   read between them.
@@ -493,8 +506,8 @@ The library opens a stream from a host set here whatever Massive's label says. I
 - `REALTIME`: Massive labels the data `REAL-TIME`.
 - `UNKNOWN`: Massive gave no label the library knows.
 
-The first stream of each asset class in a session makes one REST request to read the
-label. A subscription listed in `delayed_subscriptions` makes none.
+Reading the label costs one REST request, when the first stream of a class set here
+opens in a session. A subscription listed in `delayed_subscriptions` costs none.
 
 #### subscription_confirmation_timeout
 
