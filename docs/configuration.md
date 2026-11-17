@@ -249,10 +249,10 @@ no delayed feed for it.
 Leave a delayed subscription out, and a call for its current data fails with
 `EntitlementError`. The message gives the line of Python to add. A stream and
 `fetch(wait=True)` raise it at the call. A `fetch()` or `poll()` table fails with it.
-`history()` and other past data don't depend on this setting.
+A stream from a host you set in `websocket_hosts` is the exception. It opens, and its
+`Recency` in `m.connections()` shows Massive's label, `DELAYED`.
 
-A stream from a host you set in `websocket_hosts` still opens. Its recency follows
-Massive's label, as `websocket_hosts` describes.
+`history()` and other past data don't depend on this setting.
 
 #### rest_requests_per_minute
 
