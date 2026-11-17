@@ -218,7 +218,7 @@ The runner gives examples 17, 18, and 22 a copy of your settings file's
 1. `settings:` and that copy.
 2. Each example's name as it starts, then its verdict.
 3. A new verdict for any example whose stream failed after the example ended.
-4. `saved to` and the folder of the output, `~/massive-test/examples-output/`.
+4. `saved to` and the output folder, `~/massive-test/examples-output/`.
 5. `no example failed`, or `failed:` and the examples' names.
 
 In that folder, `summary.txt` gives each example's last verdict:
@@ -226,7 +226,7 @@ In that folder, `summary.txt` gives each example's last verdict:
 | Verdict | What you do |
 |---|---|
 | `passed` | Nothing |
-| `refused by Massive` | Nothing, unless your plan includes that example's data |
+| `refused by Massive` | Nothing. If your plan includes that example's data, report it, as [Report a problem](#report-a-problem) shows |
 | `not listed as delayed` | List the subscription the error names in `delayed_subscriptions` of your settings file, and run the examples again |
 | `failed` | Report it, as [Report a problem](#report-a-problem) shows |
 
@@ -448,8 +448,8 @@ diagnostics tables:
 #### 7. Exceed a request limit
 
 Poll six stocks every 30 seconds, and watch the session learn your Stocks request limit from
-Massive's first rate-limit error. The examples' sessions declare no limit, as the README's
-[MassiveConfig](../README.md#massive-config) section explains. Then release the table:
+Massive's first rate-limit error, as a session with no `rest_requests_per_minute` does
+([MassiveConfig](../README.md#massive-config)). Then release the table:
 
 ```python
 import deephaven_massive as dm
