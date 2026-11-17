@@ -19,7 +19,11 @@ from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._enums import Timespan
 from deephaven_massive.queries._fetch import FetchQuery
-from deephaven_massive.queries._history import HistoryQuery, StreamHistoryQuery
+from deephaven_massive.queries._history import (
+    HistoryQuery,
+    NoSymbolStreamHistoryQuery,
+    StreamHistoryQuery,
+)
 from deephaven_massive.queries._stream import NoSymbolStreamQuery, StreamQuery
 
 if TYPE_CHECKING:
@@ -111,8 +115,8 @@ def query_class(spec: DatasetSpec) -> type[Query]:
     | no       | yes     | no    | `HistoryQuery`       |
     | yes      | yes     | no    | `StreamHistoryQuery` |
 
-    A stream whose rows name no symbol (`DatasetSpec.names_symbols` False) has channels alone and
-    gives `NoSymbolStreamQuery`, which has no `last_by()`.
+    A stream whose rows name no symbol (`DatasetSpec.names_symbols` False) has no `last_by()`: it
+    gives `NoSymbolStreamQuery`, or `NoSymbolStreamHistoryQuery` with a REST history path.
 
     `DatasetSpec` rejects every other combination when it is created: a fetch path is a
     dataset of its own, such as `stocks.last_trade` beside `stocks.trades`. A `bars` dataset
@@ -130,7 +134,7 @@ def query_class(spec: DatasetSpec) -> type[Query]:
     if not spec.has_channels:
         return FetchQuery if spec.has_fetch else HistoryQuery
     if not spec.names_symbols:
-        return NoSymbolStreamQuery
+        return NoSymbolStreamHistoryQuery if spec.has_history else NoSymbolStreamQuery
     return StreamHistoryQuery if spec.has_history else StreamQuery
 
 

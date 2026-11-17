@@ -503,17 +503,22 @@ def _column(
     )
 
 
-def _derived(spec: DatasetSpec, symbol: Column | None) -> list[Column]:
-    """Return a dataset's derived columns, which no source carries and the transports compute.
+def _derived(
+    spec: DatasetSpec, symbol: Column | None, *, carried: Mapping[str, Column]
+) -> list[Column]:
+    """Return a dataset's derived columns, which the transports compute from `Symbol`.
 
     Args:
         spec: The dataset.
         symbol: Its `Symbol` column, or None for a dataset without one.
+        carried: The columns the dataset's own sources carry, by name. A derived column among
+            them is Massive's value, which takes the derived column's place: the library
+            computes none beside it.
 
     Returns:
         `OptionRoot` for an options dataset, or one whose rows include options contracts
         (`DatasetSpec.option_rows`), with a `Symbol`: a `String` column with the transports
-        and wire keys of `Symbol`, from which it is computed.
+        and wire keys of `Symbol`, from which it is computed, or the carried column.
     """
     if symbol is None:
         return []
@@ -521,7 +526,9 @@ def _derived(spec: DatasetSpec, symbol: Column | None) -> list[Column]:
     names = [OPTION_ROOT] if options else []
     mixed = OTHER_ROWS if spec.option_rows else ""
     return [
-        Column(
+        carried[name]
+        if name in carried
+        else Column(
             name,
             ColumnType.STRING,
             with_sentence(DERIVED_SENTENCES[name], mixed if name == OPTION_ROOT else ""),
@@ -584,9 +591,12 @@ def dataset_schema(
     A dataset's note on a column (`DatasetSpec.column_notes`) follows its description. A column
     whose sources carry no description gets `""`, and nothing fails.
 
-    Derived columns, which no source carries and every transport computes from `Symbol`, follow
-    the leading key columns, with the library's own description: `OptionRoot` on every options
-    dataset with a `Symbol` (`symbols.option_roots`).
+    Derived columns, which every transport computes from `Symbol`, follow the leading key
+    columns, with the library's own description: `OptionRoot` on every options dataset with a
+    `Symbol` (`symbols.option_roots`). Where a REST source of the dataset carries the column
+    itself (Massive's `root`, spelled `OptionRoot`), that column takes the place, with
+    Massive's description, and the REST rows keep Massive's value; no WebSocket channel or flat
+    file carries the column.
 
     Args:
         spec: The dataset whose schema is built; it names the schema, decides the leading
@@ -662,5 +672,7 @@ def dataset_schema(
     derived = _derived(
         spec,
         next((c for c in columns if c.name == "Symbol" and "Symbol" in declared), None),
+        carried={c.name: c for c in columns if c.name in own},
     )
-    return Schema(spec.name, (*columns[: len(leading)], *derived, *columns[len(leading) :]))
+    others = [c for c in columns[len(leading) :] if c not in derived]
+    return Schema(spec.name, (*columns[: len(leading)], *derived, *others))

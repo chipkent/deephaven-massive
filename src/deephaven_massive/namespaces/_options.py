@@ -4,7 +4,8 @@ Datasets: `trades`, `last_trade` (each contract's latest trade), `quotes`, `bars
 `previous_day_bar` (each contract's bar of the previous session), `fmv` (fair market value),
 `admin_messages` (OPRA's administrative messages and FLEX trade notices), `chain` (one underlying's
 option chain), `snapshots` (the current state of chosen contracts), `contracts` (contract
-reference data), and `daily_open_close`.
+reference data), `daily_open_close`, `open_interest` (each contract's open interest by day), and
+`unusual_trades` (large trades and sweeps).
 
 Each dataset is one factory method on `OptionsNamespace`. The method validates its arguments and
 returns a query; nothing touches the network until a verb is called on the query. This module owns
@@ -16,9 +17,10 @@ Option symbols are Massive's exact tickers: `O:` and the OCC symbol (`O:AAPL2501
 Every method that takes contracts takes only that form (`check_symbol` in
 `_datasets/symbols.py`), and `dm.canonical_symbol_option` converts the bare or space-padded OCC
 forms. Every options dataset whose rows name a contract also has `OptionRoot`, the OCC root read
-from the symbol (`SPXW`, `AAPL1`). The admin messages name none: Massive sends them per exchange,
-so the stream subscribes every exchange (`AD.*`), its rows have no `Symbol`, and their text is
-kept as OPRA sends it. The rows of the
+from the symbol (`SPXW`, `AAPL1`), or Massive's own `root` where the rows carry one (the open
+interest and the unusual trades). The admin messages name none: Massive sends them per exchange,
+so the stream subscribes every exchange (`AD.*`) and `history()` reads every exchange's archive,
+the rows have no `Symbol`, and their text is kept as OPRA sends it. The rows of the
 chain, the snapshots, and the contract reference data carry the instrument Massive links the
 contract to as `Underlying`, a canonical ticker: it names the linked instrument, not the
 deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
@@ -56,6 +58,7 @@ from deephaven_massive._enums import (
     ContractType,
     NotBars,
     Order,
+    PollMode,
     Timespan,
     _require_enum,
 )
@@ -69,19 +72,21 @@ from deephaven_massive.namespaces._query_building import (
     build_query,
     day_argument,
     list_params,
+    list_query,
+    one_or_any_of,
     require_bool,
     value_table,
 )
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
-    NoSymbolStreamQuery,
+    NoSymbolStreamHistoryQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.filters import FilterValue
@@ -110,6 +115,9 @@ _SNAPSHOT: Final = "/v3/snapshot"
 _CONTRACTS: Final = "/v3/reference/options/contracts"
 _CONTRACT: Final = "/v3/reference/options/contracts/{options_ticker}"
 _OPEN_CLOSE: Final = "/v1/open-close/{optionsTicker}/{date}"
+_OPEN_INTEREST: Final = "/options/v1/open-interest"
+_UNUSUAL_TRADES: Final = "/options/v1/unusual-trades"
+_ADMIN_MESSAGES: Final = "/options/v1/admin-messages"
 
 _TRADE_FILES: Final = "us_options_opra/trades_v1"
 _QUOTE_FILES: Final = "us_options_opra/quotes_v1"
@@ -136,6 +144,25 @@ def _keys(symbol: str, time: str | None = None, *, fanout: str | None = None) ->
         symbol=KeySpec(symbol),
         time=None if time is None else KeySpec(time),
         fanout=None if fanout is None else KeySpec(fanout),
+    )
+
+
+def _list_keys(time: str | None = None) -> SourceKeys:
+    """Build the keys of the open interest or the unusual trades: contract, time, underlying.
+
+    Massive declares `underlying_ticker` optional on both, so a row without one keeps a null
+    `Underlying` rather than being withheld.
+
+    Args:
+        time: The column holding the row's time, renamed to `Timestamp`; None for none.
+
+    Returns:
+        The source's keys.
+    """
+    return SourceKeys(
+        symbol=KeySpec("Ticker"),
+        time=None if time is None else KeySpec(time),
+        fanout=KeySpec("UnderlyingTicker", required=False),
     )
 
 
@@ -253,15 +280,26 @@ FMV: Final = DatasetSpec(
 
 ADMIN_MESSAGES: Final = DatasetSpec(
     name="options.admin_messages",
-    summary="OPRA's administrative messages, including FLEX trade notices, streamed in real time.",
+    summary="OPRA's administrative messages, including FLEX trade notices, live and past.",
     asset_class=AssetClass.OPTIONS,
     kind="admin_messages",
+    history_path=_ADMIN_MESSAGES,
     channels={NotBars.ANY: "AD"},
-    keys={(_WS, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+    keys={
+        (_REST, _ADMIN_MESSAGES): SourceKeys(time=KeySpec("SipTimestamp")),
+        (_WS, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp")),
+    },
+    time_axis=("timestamp.gte", "timestamp.lt"),
     # Massive sends the messages per exchange (`AD.<exchange id>`), and no message names a
     # contract outside its free text, which the library never parses.
     names_symbols=False,
-    # Massive's page documents only the real-time feed for the channel.
+    # The archive's own texts, which describe these columns first, link nothing and describe
+    # the wire, so each note says what the column holds.
+    column_notes={
+        "Exchange": "Massive lists the exchange IDs at "
+        "https://massive.com/docs/rest/options/market-operations/exchanges.",
+        "Retransmission": "Null on an original message.",
+    },
 )
 
 _SNAPSHOT_REVISION: Final = ("LastQuoteLastUpdated", "LastTradeSipTimestamp")
@@ -320,6 +358,49 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
     ),
 )
 
+_ROOT_UNDERLYING_NOTE: Final = (
+    "Massive's `root` is the `OptionRoot` column. An index has its `I:` prefix (`I:SPX`), as "
+    "in `m.options.contracts()`. If Massive's Contract Overview can't say whether a root is an "
+    "index, its rows keep the bare ticker, and the log names the root at `WARNING`."
+)
+"""The note on `Underlying` of the datasets whose rows name it bare, with no CFI code."""
+
+OPEN_INTEREST: Final = DatasetSpec(
+    name="options.open_interest",
+    summary="The open interest of each US-listed options contract at the end of each trading day.",
+    asset_class=AssetClass.OPTIONS,
+    fetch_path=_OPEN_INTEREST,
+    keys={(_REST, _OPEN_INTEREST): _list_keys()},
+    time_axis=("date.gte", "date.lte"),
+    symbol_param="ticker.any_of",
+    # A chain's contracts can number thousands, so a table of them is sent 250 to a request,
+    # as the snapshots are, which keeps each request's URL short.
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
+    poll_keys=("Symbol", "Date"),
+    underlying_by_root=True,
+    column_notes={"Underlying": _ROOT_UNDERLYING_NOTE},
+)
+
+UNUSUAL_TRADES: Final = DatasetSpec(
+    name="options.unusual_trades",
+    summary="Large trades and sweeps of US-listed options contracts, flagged by Massive.",
+    asset_class=AssetClass.OPTIONS,
+    fetch_path=_UNUSUAL_TRADES,
+    keys={(_REST, _UNUSUAL_TRADES): _list_keys("SipTimestamp")},
+    time_axis=("sip_timestamp.gte", "sip_timestamp.lt"),
+    symbol_param="ticker.any_of",
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
+    # A trade is an event at one instant, so its rows carry `Date` as `options.trades` does.
+    row_times=RowTimes.TICK,
+    poll_mode=PollMode.APPEND,
+    poll_keys=("Symbol", "Timestamp", "SequenceNumber"),
+    # Massive serves the latest days from its real-time data, so a poll, or a fetch that
+    # reaches the present, reads current trades; a past range reads final ones.
+    latest_is_current=True,
+    underlying_by_root=True,
+    column_notes={"Underlying": _ROOT_UNDERLYING_NOTE},
+)
+
 DATASETS: Final[tuple[DatasetSpec, ...]] = (
     TRADES,
     LAST_TRADE,
@@ -332,6 +413,8 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
     SNAPSHOTS,
     CONTRACTS,
     DAILY_OPEN_CLOSE,
+    OPEN_INTEREST,
+    UNUSUAL_TRADES,
 )
 """Every dataset of `m.options`, one `DatasetSpec` each, in the order of the namespace's methods."""
 
@@ -432,12 +515,17 @@ def _expired(value: object) -> bool | None:
 class OptionsNamespace(Namespace):
     """The US options datasets, reached as `m.options`.
 
-    Each method returns a query of one dataset, and together they cover trades, quotes, bars, each
-    contract's last trade and previous day's bar, fair market value, OPRA's administrative messages,
-    option chains, snapshots, contract reference data, and each contract's daily open and close. A
-    contract's ticker is `O:` followed by its OCC symbol, such as `O:AAPL250117C00150000`. A
-    method reads nothing, so it never blocks, and you can call it from any thread.
-    You reach it through a session and never construct it. Import it as
+    Each method returns a query of one dataset. The datasets cover:
+
+    - market data: trades, quotes, bars, and fair market value;
+    - each contract's last trade, previous day's bar, and daily open and close;
+    - option chains, snapshots, and contract reference data;
+    - each contract's open interest by day, and the unusual trades Massive flags;
+    - OPRA's administrative messages.
+
+    A contract's ticker is `O:` followed by its OCC symbol, such as `O:AAPL250117C00150000`. A
+    method reads nothing, so it never blocks, and you can call it from any thread. You reach it
+    through a session and never construct it. Import it as
     `from deephaven_massive.namespaces import OptionsNamespace` to annotate your own code.
 
     Example:
@@ -716,19 +804,22 @@ class OptionsNamespace(Namespace):
         )
 
     @raises_through(check_policy)
-    def admin_messages(self, *, on_error: ErrorPolicy | None = None) -> NoSymbolStreamQuery:
-        """OPRA's administrative messages, including FLEX trade notices, streamed in real time.
+    def admin_messages(self, *, on_error: ErrorPolicy | None = None) -> NoSymbolStreamHistoryQuery:
+        """OPRA's administrative messages, including FLEX trade notices, live and past.
 
         Each row holds one message from one exchange: the text exactly as OPRA sends it in
         `Message`, the exchange's ID in `Exchange`, and its sequence number and SIP timestamp.
         The library never parses the text, so a FLEX trade's details stay in it, as in
-        Massive's sample `TEXT CFLEX SPY LST PM EUR 4 LEGS 1 @ 733.36`. The call takes no
-        symbols and streams every exchange's messages. The rows have no `Symbol` column, so the
-        query has no `last_by()`. There is no history.
+        Massive's sample `TEXT CFLEX SPY LST PM EUR 4 LEGS 1 @ 733.36`.
+
+        The call takes no symbols. The stream methods follow every exchange's messages live.
+        `history()` reads every exchange's past messages from Massive's archive. To keep one
+        exchange's messages, filter on `Exchange`. The rows have no `Symbol` column, so the
+        query has no `last_by()`.
 
         Args:
-            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
-                the default, takes each cause from the session's `MassiveConfig.on_error`.
+            on_error: What a bad row does in this call (`dm.ErrorPolicy`). None, the default,
+                takes each cause from the session's `MassiveConfig.on_error`.
 
         Returns:
             A query. Its columns, plans, and methods:
@@ -742,9 +833,10 @@ class OptionsNamespace(Namespace):
 
                 notices = m.options.admin_messages().append_only()
                 flex = notices.where("Message.contains(`FLEX`)")  # as in the CFLEX sample
+                past = m.options.admin_messages().history("2026-11-13", "2026-11-13")
         """
         return build_query(
-            self._core, ADMIN_MESSAGES, query_type=NoSymbolStreamQuery, on_error=on_error
+            self._core, ADMIN_MESSAGES, query_type=NoSymbolStreamHistoryQuery, on_error=on_error
         )
 
     @raises_through(build_query, list_params, _contract_type, _chain_underlying, value_table)
@@ -1059,5 +1151,171 @@ class OptionsNamespace(Namespace):
             ),
             adjusted=require_bool("adjusted", adjusted),
             params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
+            on_error=on_error,
+        )
+
+    @raises_through(list_query, one_or_any_of, _contract_type)
+    def open_interest(
+        self,
+        symbols: SymbolsLike | None = None,
+        *,
+        root: str | Sequence[str] | None = None,
+        contract_type: ContractType | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
+    ) -> FetchQuery:
+        """The open interest of each US-listed options contract at the end of each trading day.
+
+        Each row holds one contract's open interest on one trading day, as OPRA reports it, with
+        the contract's type, expiration, strike, OCC root, and underlying. Massive publishes a
+        day's figures the next morning, so the latest `Date` is the previous trading day. Leave
+        out `symbols` and narrow by `root`, `contract_type`, or `filters` to read many contracts.
+
+        `Underlying` is Massive's ticker, with `I:` for an index (`I:SPX`), as in
+        `m.options.contracts()`. To tell which roots are on an index, a session reads Massive's
+        list of index tickers once. A root whose underlying isn't on that list keeps its bare
+        ticker and costs nothing more. A root whose underlying is on it, such as `SPX`, costs one
+        request to Massive's Contract Overview the first time the session meets that root. If
+        Massive can't say, the root's rows keep the bare ticker (`SPX`), and the log names the
+        root at `WARNING`.
+
+        Args:
+            symbols: Option contracts; leave it out for every contract.
+            root: An OCC root, such as `"SPXW"`, or several; leave it out for every root.
+            contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
+            start: The first trading day.
+            end: The last trading day.
+            sort: Any of Massive's field names, such as `"open_interest"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
+            filters: Further endpoint parameters, such as `{"expiration_date": "2026-12-18"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.open_interest.md.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker of an option contract;
+                - `root` is an empty sequence;
+                - a bound isn't a date, or `end` is before `start`;
+                - `limit` isn't positive;
+                - `order` is given without `sort`, or with a `sort` that has its own `.asc` or
+                  `.desc`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
+
+        Example:
+            ::
+
+                weeklies = m.options.open_interest(root="SPXW", start="2026-11-13").fetch()
+        """
+        return list_query(
+            self._core,
+            OPEN_INTEREST,
+            all_alternative="leave symbols out, which returns every contract",
+            symbols=symbols,
+            start=start,
+            end=end,
+            params={
+                **one_or_any_of("root", root, every="every root"),
+                "contract_type": _contract_type(contract_type),
+            },
+            arguments={"root.any_of": "root"},
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+            on_error=on_error,
+        )
+
+    @raises_through(list_query)
+    def unusual_trades(
+        self,
+        symbols: SymbolsLike | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
+    ) -> FetchQuery:
+        """Large trades and sweeps of US-listed options contracts, flagged by Massive.
+
+        Each row is one trade that meets at least one of Massive's unusual-activity cases.
+        `Flags` names every case the trade meets:
+
+        - `block_premium`: a notional premium (price x size x 100) of $100,000 or more;
+        - `block_size`: 1,000 contracts or more;
+        - `iso`: an intermarket sweep.
+
+        Massive leaves out cancels, late reports, and compression trades. `poll()` appends each
+        new trade.
+
+        `Underlying` is Massive's ticker, with `I:` for an index (`I:SPX`), as in
+        `m.options.contracts()`. To tell which roots are on an index, a session reads Massive's
+        list of index tickers once. A root whose underlying isn't on that list keeps its bare
+        ticker and costs nothing more. A root whose underlying is on it, such as `SPX`, costs one
+        request to Massive's Contract Overview the first time the session meets that root. If
+        Massive can't say, the root's rows keep the bare ticker (`SPX`), and the log names the
+        root at `WARNING`.
+
+        Args:
+            symbols: Option contracts; leave it out for every contract.
+            start: The first instant, or the first day.
+            end: The instant after the last, or the last day.
+            sort: Any of Massive's field names, such as `"size"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
+            filters: Further endpoint parameters. The range
+                `{"ticker_gte": "O:SPY261218", "ticker_lt": "O:SPY261219"}` holds SPY's contracts
+                that expire on 2026-12-18.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.unusual_trades.md.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker of an option contract;
+                - a bound isn't a date or an aware datetime, the bounds mix the two, or `end` is
+                  before `start`;
+                - `limit` isn't positive;
+                - `order` is given without `sort`, or with a `sort` that has its own `.asc` or
+                  `.desc`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
+
+        Example:
+            ::
+
+                unusual = m.options.unusual_trades(limit=100).poll(60)
+        """
+        return list_query(
+            self._core,
+            UNUSUAL_TRADES,
+            all_alternative="leave symbols out, which returns every contract",
+            symbols=symbols,
+            start=start,
+            end=end,
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
             on_error=on_error,
         )
