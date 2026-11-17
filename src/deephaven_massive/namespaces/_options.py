@@ -934,8 +934,7 @@ class OptionsNamespace(Namespace):
                 it out for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
-            expired: True asks Massive for expired contracts (Massive: "Query for expired
-                contracts"). Defaults to False.
+            expired: True asks Massive for expired contracts.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A table of underlyings caps every
@@ -1020,7 +1019,8 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None, empty, or `dm.ALL`;
-                - a ticker isn't an exact option ticker like `"O:AAPL250117C00150000"`;
+                - a ticker isn't Massive's exact ticker of an option contract, such as
+                  `"O:AAPL250117C00150000"`;
                 - a table has no `Symbol` column;
                 - `as_of` is a `datetime` or isn't a date.
 

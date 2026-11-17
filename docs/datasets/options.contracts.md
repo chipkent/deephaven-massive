@@ -25,7 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | `underlying` | Massive's exact ticker of the underlying, such as `"AAPL"` or `"I:SPX"`. A table of stock or index tickers in a `Symbol` column lists each one's contracts. With a live table, add an underlying and its contracts appear. Leave it out for every underlying. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`as_of`](README.md#as_of) | The day whose contracts to list; leave it out for today. |
-| `expired` | True asks Massive for expired contracts (Massive: "Query for expired contracts"). Defaults to False. |
+| `expired` | True asks Massive for expired contracts. |
 | [`sort`](README.md#sort) | `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`. |
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A table of underlyings caps every underlying's rows separately instead. |
