@@ -168,6 +168,24 @@ SMA = DatasetSpec(
     },
     latest_is_current=True,
 )
+MACD_CRYPTO = "/v1/indicators/macd/{cryptoTicker}"
+WINDOWED = DatasetSpec(
+    summary="A dataset for the tests: its crypto path takes no `window`, its stock path does.",
+    name="indicators.windowed",
+    row_times=RowTimes.BAR,
+    fetch_path=SMA_STOCK,
+    fetch_paths_by_class={AssetClass.CRYPTO: MACD_CRYPTO},
+    time_axis=("timestamp.gte", "timestamp.lt"),
+    keys={
+        (R, SMA_STOCK): SourceKeys(
+            symbol=KeySpec("stockTicker", from_request=True), time=KeySpec("Timestamp")
+        ),
+        (R, MACD_CRYPTO): SourceKeys(
+            symbol=KeySpec("cryptoTicker", from_request=True), time=KeySpec("Timestamp")
+        ),
+    },
+    latest_is_current=True,
+)
 CONVERSION_PATH = "/v1/conversion/{from}/{to}"
 CONVERSION = DatasetSpec(
     summary="A dataset for the tests.",
@@ -371,6 +389,7 @@ SPECS = (
     LISTED,
     DIVIDENDS,
     MIXED,
+    WINDOWED,
     CRYPTO_LAST,
     MOVERS,
     CONTRACTS,
@@ -1796,17 +1815,31 @@ def test_symbols_route_to_their_class_path_and_send_only_its_parameters(
     assert [(r["Symbol"], r["Value"]) for r in out] == [("AAPL", 185.0), ("X:BTCUSD", 97000.0)]
 
 
-def test_an_explicit_adjusted_fails_on_a_path_without_it(
+@pytest.mark.parametrize("adjusted", [False, True])
+def test_a_crypto_pair_path_leaves_adjusted_out_whatever_its_value(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, adjusted: bool
+) -> None:
+    # `adjusted` is split adjustment and a crypto pair has no splits, so the crypto path,
+    # which doesn't declare it, gets the same request either way; the stock path gets it.
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": [_SMA_VALUE]})))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(envelope({"values": [_SMA_VALUE]})))
+    watch = new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])])
+    out = fetch(session, SMA, symbols=watch, adjusted=adjusted)
+    assert sorted(r["Symbol"] for r in out) == ["AAPL", "X:BTCUSD"]
+    requests = dict(fake_rest.get_queries())
+    assert requests["/v1/indicators/sma/AAPL"]["adjusted"] == [str(adjusted).lower()]
+    assert "adjusted" not in requests["/v1/indicators/sma/X:BTCUSD"]
+
+
+def test_an_explicit_adjusted_fails_on_another_path_without_it(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
+    # A path that isn't a crypto pair's and lacks `adjusted` would drop unadjusted prices.
+    q = query(session, DIVIDENDS, symbols=["AAPL"], adjusted=False)
     assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
+    with pytest.raises(ValueError, match=r"dividends does not take \['adjusted'\]"):
         q.fetch(wait=True)
     assert fake_rest.requests == []
-    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
-    fetch(session, SMA, symbols=["AAPL"], adjusted=False)
-    assert fake_rest.get_queries()[0][1]["adjusted"] == ["false"]
 
 
 def test_a_per_symbol_detail_path_serves_named_symbols(
@@ -2937,7 +2970,7 @@ class _RefusalError(ValueError):
 def test_a_parameter_one_path_refuses_leaves_no_cycle(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The crypto path refuses `adjusted` and the stock path takes it, so the check passes. The
+    # The crypto path refuses `window` and the stock path takes it, so the check passes. The
     # crypto path's error must be freed when the check returns, not left in a reference cycle
     # with the check's frame: that cycle holds the reader, and through it the session, until
     # the cyclic collector runs. The collector stays off, so only reference counting frees it.
@@ -2962,7 +2995,7 @@ def test_a_parameter_one_path_refuses_leaves_no_cycle(
     enabled = gc.isenabled()
     gc.disable()
     try:
-        reader.check_parameters(SMA, Request(adjusted=False))
+        reader.check_parameters(WINDOWED, Request(params=(("window", 20),)))
         assert len(refusals) == 1
         assert refusals[0]() is None
     finally:
@@ -4225,9 +4258,9 @@ def test_a_background_fetch_checks_its_parameters_with_no_request(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     rest = session._core.rest_transport()
-    q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
+    q = query(session, SMA, symbols=["X:BTCUSD"], params={"bogus": 1})
     assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
+    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['bogus'\]"):
         q.fetch(wait=False)
     # The check splits no crypto pair, which would read Massive's list.
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})

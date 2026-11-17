@@ -88,6 +88,10 @@ Massive's documentation lists no `day` unit, but it serves `1day` bars in the sh
 
 _ONE_DAY: Final = timedelta(days=1)
 
+_CRYPTO_PAIR_PLACEHOLDER: Final = "cryptoTicker"
+"""The path placeholder Massive names for one crypto pair, as in
+`/v1/indicators/sma/{cryptoTicker}`."""
+
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
 BARE_INDEX_PARAM: Final = "underlying_ticker"
@@ -565,6 +569,18 @@ def _sent_value(name: str, value: object) -> object:
     return value
 
 
+def _takes_crypto_pair(rest_path: RestPath) -> bool:
+    """Say whether a path serves one crypto pair: it has Massive's crypto pair placeholder.
+
+    Args:
+        rest_path: The path.
+
+    Returns:
+        True for a path such as `/v1/indicators/sma/{cryptoTicker}`.
+    """
+    return any(p.in_path and p.name == _CRYPTO_PAIR_PLACEHOLDER for p in rest_path.params)
+
+
 def shared_params(
     spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
 ) -> tuple[dict[str, object], dict[str, object]]:
@@ -573,9 +589,11 @@ def shared_params(
     Only parameters the path declares are sent: the caller's (`_caller_params`); `multiplier`
     in a path placeholder of that name; `timespan` wherever the path takes it (the aggregates'
     segment, the indicators' query parameter); `Request.adjusted` when it is set and the path
-    takes it (a path without it, the crypto indicators', serves prices no split changes, so
-    `True` is left out there); and the
-    futures `resolution` and the page size when the path takes them. The page size is
+    takes it; and the futures `resolution` and the page size when the path takes them.
+    `adjusted` chooses whether prices are adjusted for splits, and a crypto pair has no splits,
+    so on a path of one crypto pair (`_CRYPTO_PAIR_PLACEHOLDER`) that doesn't declare it, as
+    the crypto indicators' don't, both values give the same prices and `adjusted` is left
+    out. The page size is
     `DatasetSpec.page_size`, or else the path's documented maximum `limit`, or `Request.limit`
     when that is smaller; a path that documents no maximum, for a dataset without a
     `page_size`, gets only `Request.limit`.
@@ -591,8 +609,8 @@ def shared_params(
         `(path parameters, query parameters)`.
 
     Raises:
-        ValueError: If `Request.adjusted` is False and the path has no `adjusted` parameter
-            (the crypto indicators): unadjusted prices are never dropped silently.
+        ValueError: If `Request.adjusted` is False and the path, not one of a crypto pair, has
+            no `adjusted` parameter: unadjusted prices are never dropped silently.
 
     Any other parameter the caller set that the path does not take raises the `ValueError` of
     `_caller_params`.
@@ -605,7 +623,7 @@ def shared_params(
         (path if params["timespan"].in_path else query)["timespan"] = request.timespan
     if "adjusted" in params and request.adjusted is not None:
         query["adjusted"] = request.adjusted
-    elif request.adjusted is False:
+    elif request.adjusted is False and not _takes_crypto_pair(rest_path):
         raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"

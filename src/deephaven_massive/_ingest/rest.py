@@ -1969,8 +1969,8 @@ class RestReader:
         """Run one read of a `poll()` cycle: the planned requests of `read_fetch` for its symbols.
 
         By default one symbol never fails the table. A reactive symbol table can route a new
-        symbol to a path that lacks a parameter the caller set (`adjusted=False` on the crypto
-        indicators), and Massive can answer HTTP 404 for a symbol (no data).
+        symbol to a path that lacks a parameter the caller set, and Massive can answer HTTP 404
+        for a symbol (no data).
         `ErrorPolicy.unavailable_symbols` decides (`_unavailable`): under `LOG` and `IGNORE`
         such symbols are left out of the cycle and named in its `left_out`, which the table's
         `Error` lists; under `RAISE` the table fails.
@@ -2040,8 +2040,8 @@ class RestReader:
             spec: The dataset.
             template: The path that cannot serve them.
             symbols: The symbols.
-            reason: Why, for the log and the error, such as `"/v1/indicators/sma/{cryptoTicker}
-                does not take ['adjusted']"`.
+            reason: Why, for the log and the error, such as `"/v1/indicators/macd/{cryptoTicker}
+                does not take ['window']"`.
 
         Raises:
             UnavailableSymbolError: Under `RAISE`, naming the symbols, the path, the reason,
@@ -2093,8 +2093,8 @@ class RestReader:
 
         Returns:
             Each path the cycle reads with its calls (`plan_fetch`), and each symbol left out
-            with why, such as `"X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take
-            ['adjusted'])"`.
+            with why, such as `"X:BTCUSD (/v1/indicators/macd/{cryptoTicker} does not take
+            ['window'])"`.
 
         A failed read of the crypto ticker list raises the `MassiveError` of `crypto_pair`, and
         a refusing path under `RAISE` the `UnavailableSymbolError` of `_unavailable`.

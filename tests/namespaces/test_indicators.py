@@ -426,11 +426,12 @@ def test_adjusted_false_reaches_only_a_path_that_takes_it(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply("/v1/indicators/ema/AAPL", sample(load_fixture, "sma_stock"))
-    rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch(wait=True)
-    assert dict(fake_rest.get_queries())["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
-    # Unadjusted prices are never dropped silently on the crypto path, which has no basis.
-    with pytest.raises(ValueError, match=r"\{cryptoTicker\} does not take \['adjusted'\]"):
-        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=False).fetch(wait=True)
+    fake_rest.reply("/v1/indicators/ema/X%3ABTCUSD", sample(load_fixture, "sma_stock"))
+    rest_session.indicators.ema(["AAPL", "X:BTCUSD"], 20, adjusted=False).fetch(wait=True)
+    queries = dict(fake_rest.get_queries())
+    assert queries["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
+    # The crypto path declares no `adjusted`, and a pair has no splits to adjust for.
+    assert "adjusted" not in queries["/v1/indicators/ema/X:BTCUSD"]
 
 
 _SIGNATURE_PARAMS: Final = ("window", "short_window", "long_window", "signal_window")

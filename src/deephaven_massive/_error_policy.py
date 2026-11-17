@@ -103,10 +103,6 @@ class ErrorPolicy:
 
             A symbol Massive answers with no rows and no error has no rows, whatever this
             setting says.
-
-            This setting also covers a watchlist symbol a `poll()` can't request with your
-            arguments. For example, an indicator poll with `adjusted=False` can't request a
-            crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
         unreadable_keys: Decides whether a row of Massive's data whose key the library can't
             read fails the table; the row is left out either way. Defaults to `LOG`.
 
