@@ -155,7 +155,7 @@ class ReadPool:
                 task()
             except BaseException:  # a task handles its own errors: this is a defect
                 logger.exception(
-                    "%s read pool: a task failed. %s", self._thread_prefix, LIBRARY_BUG
+                    "A background read's task failed. The library goes on. %s", LIBRARY_BUG
                 )
             del task  # hold nothing while idle
             self._idle.release()

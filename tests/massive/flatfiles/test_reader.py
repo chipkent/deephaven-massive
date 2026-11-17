@@ -25,6 +25,10 @@ from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec.types import DriftReport, DriftSample, RowFault, RowMark
 
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
+UNREADABLE = (
+    "The library could not read Massive's file s3://flatfiles/us_stocks_sip/trades_v1/2025/03/"
+    "2025-03-03.csv.gz at https://files.massive.com: "
+)
 FUTURES_KEY = "us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz"
 OWNER = "massive/flatfiles"
 HOST = "files.massive.com"
@@ -438,24 +442,32 @@ def test_a_futures_row_without_a_session_is_marked(
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "problem"),
     [
-        pytest.param(b"not gzip", id="not-gzip"),
-        pytest.param(gzip.compress(b"ticker,price\n" * 1000)[:-200], id="truncated-gzip"),
+        pytest.param(b"not gzip", "Not a gzipped file (b'no')", id="not-gzip"),
         pytest.param(
-            gzip.compress(b"ticker,price\n")[:10] + b"\xff" * 40, id="corrupt-deflate-data"
+            gzip.compress(b"ticker,price\n" * 1000)[:-200],
+            "the file is empty and has no header line",
+            id="truncated-gzip",
         ),
-        pytest.param("ticker,price\nAAPL,1.0\n", id="missing-documented-headers"),
+        pytest.param(
+            gzip.compress(b"ticker,price\n")[:10] + b"\xff" * 40,
+            "Error -3 while decompressing data: invalid block type",
+            id="corrupt-deflate-data",
+        ),
+        pytest.param(
+            "ticker,price\nAAPL,1.0\n",
+            "its header lacks the key column sip_timestamp",
+            id="missing-documented-headers",
+        ),
     ],
 )
 def test_a_malformed_file_is_a_wire_error(
-    *, opened: Callable[[str, str | bytes], FlatFile], body: str | bytes
+    *, opened: Callable[[str, str | bytes], FlatFile], body: str | bytes, problem: str
 ) -> None:
     with pytest.raises(WireError) as info:
         table(opened(KEY, body), plan())
-    assert info.value.message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: "
-    )
+    assert info.value.message == f"{UNREADABLE}{problem}."
     assert (info.value.status, info.value.path) == (None, KEY)
 
 
@@ -475,8 +487,12 @@ def test_a_failed_read_of_the_stream_is_a_wire_error(
     data = make_csv_gz(load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode())
     location = f"s3://flatfiles/{KEY} at https://{HOST}"
     file = FlatFile(_BrokenStream(data[: len(data) // 2]), KEY, location=location, host=HOST)
-    with pytest.raises(WireError, match=f"cannot read s3://flatfiles/{KEY}") as info:
+    with pytest.raises(WireError) as info:
         table(file, plan())
+    assert info.value.message == (
+        f"The connection broke off while the library read Massive's file s3://flatfiles/{KEY} "
+        "at https://files.massive.com: Connection broken: IncompleteRead."
+    )
     assert isinstance(info.value.__cause__, OSError)
 
 
@@ -719,18 +735,18 @@ def test_a_missing_key_header_fails_before_the_first_block(
         batches = file.batches(plan())
         with pytest.raises(WireError) as info:
             next(batches)
-    assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: the header lacks the "
-        f"key column {key_header}"
-    )
+    assert info.value.message == f"{UNREADABLE}its header lacks the key column {key_header}."
     assert (info.value.path, info.value.host) == (KEY, HOST)
 
 
 def test_every_missing_key_header_is_named(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    with pytest.raises(WireError, match=r"lacks the key column sip_timestamp, ticker$") as info:
+    with pytest.raises(WireError) as info:
         table(opened(KEY, "price\n1.5\n"), plan())
+    assert (
+        info.value.message == f"{UNREADABLE}its header lacks the key column sip_timestamp, ticker."
+    )
     assert info.value.kind is WireFailure.UNREADABLE
 
 
@@ -741,10 +757,7 @@ def test_an_empty_file_is_a_wire_error(body: bytes) -> None:
     file, _ = flat_file(KEY, body)
     with pytest.raises(WireError) as info:
         table(file, plan())
-    assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: the file is empty: "
-        "no header line"
-    )
+    assert info.value.message == f"{UNREADABLE}the file is empty and has no header line."
 
 
 def test_a_header_without_rows_yields_one_empty_batch_with_its_drift(
@@ -768,7 +781,7 @@ def test_a_header_that_names_a_column_twice_is_a_wire_error(
     text = "ticker,price,sip_timestamp,price,id,id\nAAPL,1,1741012200000000000,2,a,b\n"
     with pytest.raises(WireError) as info:
         table(opened(KEY, text), plan())
-    assert info.value.message.endswith(": the header names id, price more than once")
+    assert info.value.message == f"{UNREADABLE}its header names id, price more than once."
 
 
 def test_a_quoted_header_with_crlf_line_ends_is_parsed(
@@ -811,8 +824,9 @@ def test_a_header_longer_than_a_block_is_a_wire_error(
 ) -> None:
     columns = TRADE_COLUMNS[:2]
     long = "ticker,sip_timestamp," + ",".join(f"h{n}" for n in range(200)) + "\n"
-    with pytest.raises(WireError, match=r"the header line is longer than 256 bytes$"):
+    with pytest.raises(WireError) as info:
         table(opened(KEY, long + "AAPL,5\n"), plan(columns=columns, block_size=256))
+    assert info.value.message == f"{UNREADABLE}its header line is longer than 256 bytes."
     # A header of exactly one block, line end included, still reads.
     exact = "ticker,sip_timestamp,x" + "x" * (256 - 23) + "\n"
     assert len(exact) == 256
@@ -822,8 +836,11 @@ def test_a_header_longer_than_a_block_is_a_wire_error(
 
 def test_a_header_that_is_not_utf8_is_a_wire_error() -> None:
     file, _ = flat_file(KEY, gzip.compress(b"ticker,\xffprice\nAAPL,1\n"))
-    with pytest.raises(WireError, match=r"^cannot read .*'utf-8' codec can't decode") as info:
+    with pytest.raises(WireError) as info:
         table(file, plan())
+    assert info.value.message == (
+        f"{UNREADABLE}'utf-8' codec can't decode byte 0xff in position 7: invalid start byte."
+    )
     assert isinstance(info.value.__cause__, UnicodeDecodeError)
 
 
@@ -885,8 +902,9 @@ def test_a_file_whose_every_line_is_malformed_fails_without_quoting_a_line(
     with pytest.raises(WireError) as info:
         table(opened(KEY, text), plan())
     assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of its 2 "
-        "lines is malformed; the first: row 1 after the header has 2 fields where the header has 13"
+        f"None of the 2 lines after the header of Massive's file s3://flatfiles/{KEY} at "
+        "https://files.massive.com can be read. In the first, row 1 after the header has 2 "
+        "fields where the header has 13."
     )
     assert info.value.kind is WireFailure.UNREADABLE_ROWS  # Massive's data, not the library's
 
@@ -976,13 +994,23 @@ def test_a_chunk_of_lines_that_are_not_utf8_is_skipped_and_numbered_in_the_file(
 
 
 @pytest.mark.parametrize(
-    "bad",
+    ("bad", "first"),
     [
-        pytest.param(lambda n: _trade_line(n, ticker=b"\xff"), id="not-utf8"),
-        pytest.param(lambda n: b"SECRET,%d,%s\n" % (n, b"x" * 40), id="wrong-field-count"),
+        pytest.param(
+            lambda n: _trade_line(n, ticker=b"\xff"),
+            "row 1 after the header is not UTF-8 text",
+            id="not-utf8",
+        ),
+        pytest.param(
+            lambda n: b"SECRET,%d,%s\n" % (n, b"x" * 40),
+            "row 1 after the header has 3 fields where the header has 13",
+            id="wrong-field-count",
+        ),
     ],
 )
-def test_a_chunk_without_a_row_still_hands_on_an_empty_batch(bad: Callable[[int], bytes]) -> None:
+def test_a_chunk_without_a_row_still_hands_on_an_empty_batch(
+    bad: Callable[[int], bytes], first: str
+) -> None:
     # The consumer checks for cancellation, and for a skipped line, after every batch: a run of
     # chunks with no row left must not leave it waiting for the file's end.
     lines = b"".join(bad(n) for n in range(40))
@@ -995,8 +1023,12 @@ def test_a_chunk_without_a_row_still_hands_on_an_empty_batch(bad: Callable[[int]
             for batch, _, _ in file.batches(read):
                 seen.append((batch.num_rows, file.malformed_lines))
 
-    with pytest.raises(WireError, match="every one of its 40 lines is malformed"):
+    with pytest.raises(WireError) as info:
         consume()
+    assert info.value.message == (
+        f"None of the 40 lines after the header of Massive's file s3://flatfiles/{KEY} at "
+        f"https://files.massive.com can be read. In the first, {first}."
+    )
     assert len(seen) > 1
     assert all(rows == 0 and skipped for rows, skipped in seen)
 
@@ -1008,8 +1040,9 @@ def test_a_file_whose_every_line_is_not_utf8_fails(
     with pytest.raises(WireError) as info:
         table(opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows)), plan())
     assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of its 2 "
-        "lines is malformed; the first: row 1 after the header is not UTF-8 text"
+        f"None of the 2 lines after the header of Massive's file s3://flatfiles/{KEY} at "
+        "https://files.massive.com can be read. In the first, row 1 after the header is not "
+        "UTF-8 text."
     )
     assert info.value.kind is WireFailure.UNREADABLE_ROWS
 
@@ -1017,8 +1050,13 @@ def test_a_file_whose_every_line_is_not_utf8_fails(
 def test_a_header_that_is_not_valid_csv_is_a_wire_error(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    with pytest.raises(WireError, match=r"^cannot read .*: new-line character seen") as info:
+    with pytest.raises(WireError) as info:
         table(opened(KEY, "ticker,a\rb,sip_timestamp\nAAPL,1,2\n"), plan())
+    # The csv module's own words, quoted as it wrote them.
+    assert info.value.message == (
+        f"{UNREADABLE}new-line character seen in unquoted field - do you need to open the file "
+        "with newline=''?"
+    )
     assert isinstance(info.value.__cause__, csv.Error)
 
 
@@ -1125,7 +1163,10 @@ def test_in_order_cancels_the_work_not_started_when_closed_early() -> None:
 
 def test_a_watched_body_refuses_to_seek() -> None:
     watched = reader._Watched(io.BytesIO(b"body"), threading.Event())
-    with pytest.raises(io.UnsupportedOperation, match=r"a response body cannot seek \(to 0\)"):
+    with pytest.raises(
+        io.UnsupportedOperation,
+        match=r"^A response body cannot seek, and the reader asked for position 0\.$",
+    ):
         watched.seek(0)
 
 

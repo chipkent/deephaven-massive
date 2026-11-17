@@ -120,7 +120,13 @@ def test_a_task_that_raises_is_logged_and_the_thread_carries_on(
         pool.submit(done.set)
         assert done.wait(TIMEOUT)
     [record] = caplog.records
-    assert record.getMessage().startswith("massive #1 read pool: a task failed.")
+    assert record.getMessage() == (
+        "A background read's task failed. The library goes on. This is a bug in "
+        "deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and report it with "
+        "the log and m.streams() at https://github.com/chipkent/deephaven-massive/issues."
+    )
+    assert record.threadName is not None
+    assert record.threadName.startswith("massive #1")
     assert record.exc_info is not None
     assert pool.threads == 1
     pool.stop()

@@ -57,16 +57,17 @@ def request_target(
     path_names = {name for name, param in params.items() if param.in_path}
     given = dict(path_params)
     if set(given) != path_names or any(value is None for value in given.values()):
+        named = sorted(name for name, value in given.items() if value is not None)
         raise ValueError(
-            f"{rest_path.template} takes path parameters {sorted(path_names)}, "
-            f"given {sorted(name for name, value in given.items() if value is not None)}"
+            f"The path {rest_path.template!r} takes the path parameters {sorted(path_names)}, "
+            f"and the call gave {named}."
         )
     texts = {name: encode_value(params[name], value) for name, value in given.items()}
     slashed = sorted(name for name, text in texts.items() if "/" in text)
     if slashed:
         raise ValueError(
-            f"{rest_path.template}: path parameters {slashed} contain '/', which Massive cannot "
-            "read inside a path segment"
+            f"The path parameters {slashed} of {rest_path.template!r} contain '/', which Massive "
+            "cannot read inside a path segment."
         )
     segments = {name: quote(text, safe="") for name, text in texts.items()}
     path = rest_path.template.format_map(segments)
@@ -74,7 +75,7 @@ def request_target(
     for name, value in dict(query_params).items():
         param = params.get(name)
         if param is None or param.in_path:
-            raise ValueError(f"{rest_path.template} has no query parameter {name!r}")
+            raise ValueError(f"The path {rest_path.template!r} has no query parameter {name!r}.")
         if value is not None:
             query.append((name, encode_value(param, value)))
     return f"{path}?{urlencode(query, quote_via=quote)}" if query else path
@@ -115,5 +116,8 @@ def next_target(next_url: str, origin: Origin) -> str:
         points_to = None
     if points_to != origin:
         shown = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}{target}"
-        raise ValueError(f"next_url {shown!r} leaves {origin[0]}://{origin[1]}:{origin[2]}")
+        raise ValueError(
+            f"next_url {shown!r} points to another server than "
+            f"{origin[0]}://{origin[1]}:{origin[2]}."
+        )
     return target

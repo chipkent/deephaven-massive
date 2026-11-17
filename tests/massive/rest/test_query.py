@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime, timedelta, timezone
 from enum import StrEnum
 
@@ -60,7 +61,11 @@ def test_path_values_are_percent_encoded_whole() -> None:
 
 def test_a_path_value_with_a_slash_is_refused() -> None:
     # Massive serves no data for a `%2F` segment (404, or a 307), so such a value never succeeds.
-    with pytest.raises(ValueError, match=r"path parameters \['stockTicker'\] contain '/'"):
+    expected = (
+        "The path parameters ['stockTicker'] of '/v1/open-close/{stockTicker}/{date}' contain "
+        "'/', which Massive cannot read inside a path segment."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         query.request_target(_PATH, {"stockTicker": "EUR/USD", "date": date(2026, 1, 2)}, {})
 
 
@@ -119,21 +124,33 @@ def test_the_generated_news_publication_bounds_send_an_instant_or_a_date(
 
 
 @pytest.mark.parametrize(
-    "path_params",
+    ("path_params", "given"),
     [
-        {"stockTicker": "AAPL"},
-        {"stockTicker": "AAPL", "date": None},
-        {"stockTicker": "AAPL", "date": date(2026, 1, 2), "extra": 1},
+        ({"stockTicker": "AAPL"}, "['stockTicker']"),
+        ({"stockTicker": "AAPL", "date": None}, "['stockTicker']"),
+        (
+            {"stockTicker": "AAPL", "date": date(2026, 1, 2), "extra": 1},
+            "['date', 'extra', 'stockTicker']",
+        ),
     ],
 )
-def test_path_parameters_must_be_exactly_the_placeholders(path_params: dict[str, object]) -> None:
-    with pytest.raises(ValueError, match=r"takes path parameters \['date', 'stockTicker'\]"):
+def test_path_parameters_must_be_exactly_the_placeholders(
+    path_params: dict[str, object], given: str
+) -> None:
+    expected = (
+        "The path '/v1/open-close/{stockTicker}/{date}' takes the path parameters "
+        f"['date', 'stockTicker'], and the call gave {given}."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         query.request_target(_PATH, path_params, {})
 
 
 @pytest.mark.parametrize("name", ["apiKey", "stockTicker"])
 def test_a_query_name_must_be_a_query_parameter(name: str) -> None:
-    with pytest.raises(ValueError, match=f"has no query parameter '{name}'"):
+    expected = (
+        f"The path '/v1/open-close/{{stockTicker}}/{{date}}' has no query parameter '{name}'."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         _target(**{name: "x"})
 
 
@@ -165,21 +182,26 @@ def test_next_url_with_only_an_api_key_has_no_question_mark() -> None:
     ],
 )
 def test_next_url_on_another_origin_is_refused(url: str) -> None:
-    with pytest.raises(ValueError, match=r"leaves https://api\.massive\.com:443"):
+    expected = f"next_url {url!r} points to another server than https://api.massive.com:443."
+    with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         query.next_target(url, _ORIGIN)
 
 
 @pytest.mark.parametrize(
-    "url",
+    ("url", "shown"),
     [
-        "https://user:pw@api.polygon.io/v3/x?cursor=c&apiKey=secret",
-        "https://api.massive.com:99999/v3/x?apiKey=secret",
-        "ftp://api.massive.com/v3/x?apiKey=secret",
-        "/v3/x?api%4Bey=secret",
+        (
+            "https://user:pw@api.polygon.io/v3/x?cursor=c&apiKey=secret",
+            "https://api.polygon.io/v3/x?cursor=c",
+        ),
+        ("https://api.massive.com:99999/v3/x?apiKey=secret", "https://api.massive.com:99999/v3/x"),
+        ("ftp://api.massive.com/v3/x?apiKey=secret", "ftp://api.massive.com/v3/x"),
+        ("/v3/x?api%4Bey=secret", ":///v3/x"),
     ],
 )
-def test_a_refused_next_url_is_quoted_without_credentials(url: str) -> None:
-    with pytest.raises(ValueError, match="leaves") as caught:
+def test_a_refused_next_url_is_quoted_without_credentials(url: str, shown: str) -> None:
+    expected = f"next_url '{shown}' points to another server than https://api.massive.com:443."
+    with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$") as caught:
         query.next_target(url, _ORIGIN)
     message = str(caught.value)
     assert "secret" not in message
@@ -188,11 +210,12 @@ def test_a_refused_next_url_is_quoted_without_credentials(url: str) -> None:
 
 def test_a_refused_next_url_keeps_the_rest_of_its_query() -> None:
     url = "https://user:pw@api.polygon.io/v3/x?cursor=c&apiKey=secret"
-    with pytest.raises(ValueError, match="leaves") as caught:
-        query.next_target(url, _ORIGIN)
-    assert str(caught.value) == (
-        "next_url 'https://api.polygon.io/v3/x?cursor=c' leaves https://api.massive.com:443"
+    expected = (
+        "next_url 'https://api.polygon.io/v3/x?cursor=c' points to another server than "
+        "https://api.massive.com:443."
     )
+    with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
+        query.next_target(url, _ORIGIN)
 
 
 def test_next_url_ignores_user_info_and_fragment() -> None:

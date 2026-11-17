@@ -197,7 +197,7 @@ class WorkerTables:
             The worker, not yet started.
 
         Raises:
-            SessionClosedError: If the session is closed (`"MassiveSession #1 is closed; ..."`),
+            SessionClosedError: If the session is closed (`session_closed`),
                 before the row was registered or after.
         """
         worker: _W | None = None
@@ -278,7 +278,7 @@ class WorkerTables:
                 leaves the caller a row to release.
 
         Raises:
-            SessionClosedError: If the session is closed (`"MassiveSession #1 is closed; ..."`): the
+            SessionClosedError: If the session is closed (`session_closed`): the
                 table must not start its thread then.
         """
         with self._lock:

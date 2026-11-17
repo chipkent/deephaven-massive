@@ -456,7 +456,7 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema, *, note: str | Non
         )
         described = described.withDescription(text)
     except RuntimeError as error:  # jpy's form of a Java exception
-        raise RuntimeError(f"describing a {spec.name} result failed: {error}") from error
+        raise RuntimeError(f"Describing a {spec.name} result failed: {error}") from error
     return Table(j_table=described)
 
 
@@ -515,12 +515,12 @@ COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "Name": "The column name.",
         "Type": (
             "The column's Deephaven type: long, int, double, Boolean, String, Instant, long[], or "
-            "String[]; a calendar date is ISO yyyy-MM-dd text, a String."
+            "String[]. A calendar date is ISO yyyy-MM-dd text, a String."
         ),
-        "Description": "What the column holds; empty when Massive gives no description.",
+        "Description": "What the column holds, or empty when Massive gives no description.",
         "SuppliedBy": (
             "The transports whose sources fill the column for this dataset, spelled REST, flat "
-            'files, and WebSocket, in that order, joined by ", "; a column the transport '
+            'files, and WebSocket, in that order, joined by ", ". A column the transport '
             "serving a call does not fill is null in its result."
         ),
     }

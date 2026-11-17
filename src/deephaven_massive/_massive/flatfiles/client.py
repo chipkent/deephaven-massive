@@ -243,13 +243,37 @@ class _Retryable:
     """An attempt that failed before the object's first byte, in a way a retry may fix.
 
     Attributes:
-        error: The error to raise if no retry is left.
+        error: The attempt's error, which `final` raises when no retry is left.
         cause: The botocore error behind it, chained as the raised error's cause; None when
             its message quotes the secret, so the chain never shows it.
+        no_answer: Why an attempt that got no answer failed, as a clause, or None for an
+            answer S3 gave.
     """
 
     error: WireError
     cause: Exception | None
+    no_answer: str | None = None
+
+    def final(self, tries: int, *, location: str, verb: str) -> WireError:
+        """Return the error to raise once the retries are spent.
+
+        Args:
+            tries: How many attempts the request made.
+            location: The object's or bucket's location, for the message.
+            verb: What the request did (`"read"`, `"list"`), for the message.
+
+        Returns:
+            The attempt's error for an answer S3 gave; for an attempt that got no answer, a
+            `NO_ANSWER` error that says how many attempts went unanswered.
+        """
+        if self.no_answer is None:
+            return self.error
+        return WireError(
+            f"No answer to the {verb} of {location} after {tries} tries: {self.no_answer}.",
+            host=self.error.host,
+            path=self.error.path,
+            kind=WireFailure.NO_ANSWER,
+        )
 
 
 class _Body:
@@ -451,13 +475,14 @@ class FlatFileClient:
         Errors: `WireError` when the client is closed (no request is made) or cannot be
         created, TLS fails (never retried), a retryable failure persists after the last retry,
         the endpoint answers a 404 that is not S3's `NoSuchKey` (for a wrong bucket, Massive's
-        front end serves an HTML page, which reads as `"cannot read s3://flatfile/<key> at
-        https://files.massive.com: HTTP 404 (404: Not Found)"`), or S3 answers any other
-        status but 200 and 404. On HTTP 403 it is the subclass `WireAuthError` when S3 rejects the
-        credentials themselves, and otherwise `WireEntitlementError`: the plan lacks the files.
-        The message names the object and quotes S3's error code and message, such as `"HTTP
-        403 for s3://flatfiles/<key> at https://files.massive.com (AccessDenied: Access
-        Denied)"`.
+        front end serves an HTML page, which reads as `"Massive answered the read of
+        s3://flatfile/<key> at https://files.massive.com with HTTP 404: "404: Not
+        Found"."`), or S3 answers any other status but 200 and 404. On HTTP 403 it is the
+        subclass `WireAuthError` when S3 rejects the credentials themselves, and otherwise
+        `WireEntitlementError`: the plan lacks the files.
+        The message names the object and quotes S3's error code and message, such as
+        `"Massive answered the read of s3://flatfiles/<key> at https://files.massive.com with
+        HTTP 403 (request_id R1): "AccessDenied: Access Denied"."`.
 
         Args:
             key: The object key (`object_key`).
@@ -539,7 +564,7 @@ class FlatFileClient:
             spent, after logging at DEBUG, without waiting: raise `error`.
         """
         if retry == MAX_RETRIES:
-            _log.debug("%s; giving up after %d reads", error, retry + 1)
+            _log.debug("%s Giving up after %d reads.", error, retry + 1)
             return False
         with self._lock:
             if self._closed.is_set() or cancel.is_set():
@@ -547,7 +572,7 @@ class FlatFileClient:
             self._rereads.append(cancel)
         wait = transient_wait(retry, _JITTER.random())
         _log.info(
-            "%s; reading it again from its start, reread %d of %d in %.2f s",
+            "%s Reading it again from its start, reread %d of %d in %.2f s.",
             error,
             retry + 1,
             MAX_RETRIES,
@@ -572,8 +597,9 @@ class FlatFileClient:
         request of either method creates the boto3 client.
 
         Errors: as for `open`, except that every HTTP 404 is a `WireError`, whatever its
-        code. A message names the bucket instead of an object, such as `"HTTP 403 for
-        s3://flatfiles/ at https://files.massive.com (AccessDenied: Access Denied)"`, and its
+        code. A message names the bucket instead of an object, such as `"Massive answered the
+        list of s3://flatfiles/ at https://files.massive.com with HTTP 403: "AccessDenied:
+        Access Denied"."`, and its
         `path` is `""`. A page that says the listing goes on but gives no continuation token,
         or repeats the one it was asked with, is a `WireError` too: following it would stop
         early or never end.
@@ -609,9 +635,14 @@ class FlatFileClient:
                 return found
             following = fields.get("NextContinuationToken")
             if not isinstance(following, str) or not following or following == token:
-                fault = "the same" if isinstance(following, str) and following else "no"
+                fault = (
+                    "the same continuation token as before"
+                    if isinstance(following, str) and following
+                    else "no continuation token"
+                )
                 raise WireError(
-                    f"cannot list {location}: a truncated page gave {fault} continuation token",
+                    f"Massive answered the list of {location} with a truncated page and {fault}, "
+                    "so the library could not list the rest.",
                     host=self._host,
                     kind=WireFailure.REFUSED,
                 )
@@ -663,10 +694,10 @@ class FlatFileClient:
             if not isinstance(outcome, _Retryable):
                 return outcome
             if retry == MAX_RETRIES:
-                _log.debug("%s; giving up after %d attempts", outcome.error, retry + 1)
-                raise outcome.error from outcome.cause
+                _log.debug("%s Giving up after %d attempts.", outcome.error, retry + 1)
+                raise outcome.final(retry + 1, location=location, verb=verb) from outcome.cause
             wait = transient_wait(retry, _JITTER.random())
-            _log.info("%s; retry %d of %d in %.2f s", outcome.error, retry + 1, MAX_RETRIES, wait)
+            _log.info("%s Retry %d of %d in %.2f s.", outcome.error, retry + 1, MAX_RETRIES, wait)
             # A close ends the wait at once; the next attempt then refuses to start.
             self._clock.wait(self._closed, wait)
             retry += 1
@@ -713,9 +744,9 @@ class FlatFileClient:
         except BotoCoreError as error:
             if is_certificate_failure(error):
                 raise WireError(
-                    f"cannot {verb} {location}: TLS certificate verification failed for "
-                    f"{self._host} ({self._clean(error)}); if a proxy or private CA signs it, set "
-                    "SSL_CERT_FILE to a bundle that trusts it",
+                    f"The TLS certificate of {self._host} did not verify for the {verb} of "
+                    f"{location}: {self._clean(error)}. If a proxy or a private CA signs it, set "
+                    "SSL_CERT_FILE to a bundle that trusts it.",
                     host=self._host,
                     path=key,
                     kind=WireFailure.LOCAL,
@@ -724,8 +755,8 @@ class FlatFileClient:
                 # The same credentials would be refused again, and a corporate proxy may lock
                 # the account after a few refusals.
                 raise WireError(
-                    f"cannot {verb} {location}: the proxy {proxy} refused its credentials "
-                    "(HTTP 407); check the user and password in HTTPS_PROXY",
+                    f"The proxy {proxy} refused its credentials with HTTP 407 for the {verb} of "
+                    f"{location}. Correct the user and password in HTTPS_PROXY.",
                     status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
                     host=self._host,
                     path=key,
@@ -735,28 +766,31 @@ class FlatFileClient:
                 # Not a certificate failure, so it got no answer, as every client counts it, and
                 # is retried like one. This branch only words the message: botocore's `SSLError`
                 # is a `ConnectionError`, which the next branch would retry anyway.
+                reason = f"the TLS connection to {self._host} failed: {self._clean(error)}"
                 return _Retryable(
                     WireError(
-                        f"cannot {verb} {location}: TLS failed for {self._host} "
-                        f"({self._clean(error)})",
+                        f"No answer to the {verb} of {location}: {reason}.",
                         host=self._host,
                         path=key,
                         kind=WireFailure.NO_ANSWER,
                     ),
                     error,
+                    reason,
                 )
             if isinstance(error, _CONNECTION_ERRORS):
+                reason = self._clean(_describe(error, proxy))
                 failure = WireError(
-                    f"cannot {verb} {location}: {self._clean(_describe(error, proxy))}",
+                    f"No answer to the {verb} of {location}: {reason}.",
                     host=self._host,
                     path=key,
                     kind=WireFailure.NO_ANSWER,
                 )
-                return _Retryable(failure, error)
+                return _Retryable(failure, error, reason)
             proxy_setting = isinstance(error, InvalidProxiesConfigError)
-            fix = "; check the proxy in HTTPS_PROXY" if proxy_setting else ""
+            fix = " Correct the proxy in HTTPS_PROXY." if proxy_setting else ""
             raise WireError(
-                f"cannot {verb} {location}: {self._clean(_describe(error, proxy))}{fix}",
+                f"The {verb} of {location} failed before it was sent: "
+                f"{self._clean(_describe(error, proxy))}.{fix}",
                 host=self._host,
                 path=key,
                 # A proxy setting botocore cannot use is this machine's to fix; any other
@@ -765,15 +799,16 @@ class FlatFileClient:
                 kind=WireFailure.LOCAL if proxy_setting else WireFailure.CLIENT_DEFECT,
             ) from error
         except _RESPONSE_CUT_SHORT as error:
+            reason = f"the error response was cut short: {self._clean(error)}"
             return _Retryable(
                 WireError(
-                    f"cannot {verb} {location}: the error response was cut short "
-                    f"({self._clean(error)})",
+                    f"No answer to the {verb} of {location}: {reason}.",
                     host=self._host,
                     path=key,
                     kind=WireFailure.NO_ANSWER,
                 ),
                 error,
+                reason,
             )
 
     def close(self) -> None:
@@ -885,8 +920,9 @@ class FlatFileClient:
                 built, proxy_shown = len(self._clients), self._proxy
         except BotoCoreError as error:
             raise WireError(
-                f"cannot create the S3 client for {self._endpoint_shown}: {self._clean(error)}; "
-                "check AWS_PROFILE and the proxy in HTTPS_PROXY",
+                f"The library could not create its S3 client for {self._endpoint_shown}: "
+                f"{self._clean(error)}. Set AWS_PROFILE to a profile that exists, or correct the "
+                "proxy in HTTPS_PROXY.",
                 host=self._host,
                 # botocore builds a client from this machine's settings alone, such as
                 # `AWS_PROFILE` or the proxy settings, before any request is sent.
@@ -911,9 +947,11 @@ class FlatFileClient:
             error: The error, or text, to describe.
 
         Returns:
-            Its text, each spelling of the endpoint's user information replaced by `***`.
+            Its text on one line, each spelling of the endpoint's user information replaced by
+            `***`.
         """
-        return redact(str(error), *self._userinfo)
+        # botocore breaks some messages over lines; a message is one line.
+        return redact(" ".join(str(error).split("\n")), *self._userinfo)
 
     def _refuse_if_closed(self, key: str) -> None:
         """Raise if `close()` has run; safe with or without the client's lock.
@@ -926,7 +964,8 @@ class FlatFileClient:
         """
         if self._closed.is_set():
             raise WireError(
-                f"the flat-file client for {self._endpoint_shown} is closed",
+                f"The library closed its connections to {self._endpoint_shown} before this "
+                "request was sent.",
                 host=self._host,
                 path=key,
                 kind=WireFailure.STOPPED,
@@ -1019,15 +1058,16 @@ class FlatFileClient:
             "path": key,
             "request_id": _request_id(error),
         }
+        rid = f" (request_id {context['request_id']})" if context["request_id"] else ""
+        refused = f'Massive answered the {verb} of {location} with HTTP {status}{rid}: "{server}".'
         if status != HTTPStatus.FORBIDDEN:
             return WireError(
-                f"cannot {verb} {location}: HTTP {status} ({server})",
+                refused,
                 kind=WireFailure.REFUSED,
                 # S3 documents a `RequestTimeout` as a connection that stalled: try again.
                 means_retry=code in _TRANSIENT_CODES,
                 **context,
             )
-        refused = f"HTTP 403 for {location} ({server})"
         if code in _CREDENTIAL_ERRORS:
             return WireAuthError(refused, **context)
         return WireEntitlementError(refused, **context)
@@ -1096,5 +1136,5 @@ def _describe(error: BotoCoreError, proxy: str | None) -> str:
         The description.
     """
     if isinstance(error, ProxyConnectionError):
-        return f"cannot connect through the proxy {proxy} ({error.kwargs.get('error')})"
+        return f"the proxy {proxy} could not be reached: {error.kwargs.get('error')}"
     return str(error)
