@@ -1473,14 +1473,16 @@
     {"default": "timestamp.asc", "in_path": false, "kind": "string", "maximum": null, "name": "sort", "unit": null, "values": []}
    ],
    "fields": [
-    {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "MessageId", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "id"},
+    {"column": "Exchange", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "exchange"},
     {"column": "Message", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "message"},
-    {"column": "Retransmission", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "retransmission"},
+    {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "timestamp"},
     {"column": "SequenceNumber", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "sequence_number"},
-    {"column": "SipTimestamp", "conversion": null, "required": true, "type": "epoch", "unit": "ns", "wire_key": "timestamp"}
+    {"column": "Retransmission", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "retransmission"}
    ],
-   "memberships": []
+   "memberships": [
+    {"group": "options", "kind": "admin_messages", "position": 0, "projection": null}
+   ]
   },
   {
    "key": "/options/v1/open-interest",

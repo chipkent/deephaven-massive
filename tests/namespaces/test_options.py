@@ -34,9 +34,10 @@ from deephaven_massive._datasets.filters import filter_keys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
+from deephaven_massive._errors import RowDataError
 from deephaven_massive._ingest.recency_labels import delayed_refusal
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import Transport, to_batch
+from deephaven_massive._massive import RowFault, Transport, to_batch
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces import _options as options
@@ -44,7 +45,7 @@ from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
-    NoSymbolStreamQuery,
+    NoSymbolStreamHistoryQuery,
     Query,
     StreamHistoryQuery,
     StreamQuery,
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
+    from deephaven_massive._tables.problem_events import ProblemEvent
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
@@ -183,7 +185,10 @@ def test_each_dataset_reads_its_sources() -> None:
     )
     assert options.FMV.sources == ((Transport.WS, "options/FMV"),)
     assert options.FMV.channel_family is dm._enums.ChannelFamily.FMV
-    assert options.ADMIN_MESSAGES.sources == ((Transport.WS, "options/AD"),)
+    assert options.ADMIN_MESSAGES.sources == (
+        (R, "/options/v1/admin-messages"),
+        (Transport.WS, "options/AD"),
+    )
     assert options.CHAIN.sources == ((R, "/v3/snapshot/options/{underlyingAsset}"),)
     assert options.SNAPSHOTS.sources == ((R, "/v3/snapshot"),)
     assert options.CONTRACTS.sources == (
@@ -204,7 +209,7 @@ def test_each_dataset_reads_its_sources() -> None:
         (options.BARS, HistoryQuery),
         (options.PREVIOUS_DAY_BAR, FetchQuery),
         (options.FMV, StreamQuery),
-        (options.ADMIN_MESSAGES, NoSymbolStreamQuery),
+        (options.ADMIN_MESSAGES, NoSymbolStreamHistoryQuery),
         (options.CHAIN, FetchQuery),
         (options.SNAPSHOTS, FetchQuery),
         (options.CONTRACTS, FetchQuery),
@@ -232,7 +237,7 @@ def test_page_sizes_are_the_largest_each_endpoint_returns() -> None:
         "options.bars": 50_000,
         "options.previous_day_bar": None,
         "options.fmv": None,
-        "options.admin_messages": None,
+        "options.admin_messages": 50_000,
         "options.chain": 250,
         "options.snapshots": 250,
         "options.contracts": 1_000,
@@ -704,6 +709,12 @@ def test_enum_arguments_reject_plain_strings(massive_session: dm.MassiveSession)
         m.options.snapshots(CONTRACT, order=desc)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         m.options.contracts(order=desc)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
+        m.options.open_interest(contract_type=call)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(TypeError, match=r"order must be dm\.Order"):
+        m.options.open_interest(order=desc)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(TypeError, match=r"order must be dm\.Order"):
+        m.options.unusual_trades(order=desc)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 # --- Docstrings ------------------------------------------------------------------------------
@@ -1412,8 +1423,6 @@ def test_the_list_datasets_take_only_option_contracts_and_refuse_all(
         m.options.open_interest(root=[])
     with pytest.raises(TypeError, match="root must be a str, a sequence of str, or None"):
         m.options.open_interest(root=5)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(TypeError, match="contract_type"):
-        m.options.open_interest(contract_type="call")  # type: ignore[arg-type]  # the point
     with pytest.raises(ValueError, match="calendar date; pass dates"):
         m.options.open_interest(start=datetime(2026, 1, 20, tzinfo=UTC))
     with pytest.raises(ValueError, match="root_any_of is set through its own argument, root="):
@@ -1571,7 +1580,7 @@ def test_admin_messages_take_no_symbols_and_have_no_last_by(
     massive_session: dm.MassiveSession,
 ) -> None:
     query = massive_session.options.admin_messages()
-    assert type(query) is NoSymbolStreamQuery
+    assert type(query) is NoSymbolStreamHistoryQuery
     assert query._request.symbols is None
     assert repr(query) == "m.options.admin_messages()"
     with pytest.raises(TypeError):
@@ -1748,6 +1757,130 @@ def test_admin_messages_on_delayed_options_data_raise_the_delayed_data_error(
     )
     assert "plan" not in str(info.value)
     assert session.urls == []
+
+
+ADMIN_ARCHIVE = "/options/v1/admin-messages"
+ADMIN_DAY = date(2026, 11, 5)  # the day of Massive's sample messages
+
+
+def test_admin_message_history_reads_every_exchange_s_archive_by_time(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(ADMIN_ARCHIVE, Reply(body(load_fixture, "admin_messages.json")))
+    query = rest_session.options.admin_messages()
+    out = rows(query.history(ADMIN_DAY, ADMIN_DAY, wait=True))
+    # One request, by time alone: no ticker and no exchange, ascending, at the largest page.
+    assert fake_rest.get_queries(one_value=True) == [
+        (
+            ADMIN_ARCHIVE,
+            {
+                "timestamp.gte": str(ny_midnight_ns(ADMIN_DAY)),
+                "timestamp.lt": str(ny_midnight_ns(date(2026, 11, 6))),
+                "sort": "timestamp.asc",
+                "limit": "50000",
+            },
+        )
+    ]
+    picked = ("Date", "Timestamp", "MessageId", "Exchange", "Message", "Retransmission")
+    assert [tuple(r[c] for c in picked) for r in out] == [
+        (
+            "2026-11-05",
+            1793911442930568200,
+            "1793911442930568079-4043826282",
+            302,
+            "FLEX AAPL 20270115 C 00200000 PRINT 150 @ 12.35",
+            None,  # Massive omits the flag on an original message
+        ),
+        (
+            "2026-11-05",
+            1793911460115302100,
+            "1793911460115302244-4043826283",
+            300,
+            "OPRA SYSTEM NORMAL",
+            True,
+        ),
+    ]
+    # The archive and the stream give one table shape.
+    live_columns = CATALOG.dataset_schema(options.ADMIN_MESSAGES).column_names
+    assert tuple(
+        dh_arrow.to_arrow(query.history(ADMIN_DAY, ADMIN_DAY, wait=True)).column_names
+    ) == (live_columns)
+
+
+def test_an_empty_admin_message_archive_is_no_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(ADMIN_ARCHIVE, Reply({"status": "OK", "results": []}))
+    out = rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
+    assert out.size == 0
+
+
+def test_admin_message_history_has_no_flat_files(rest_session: dm.MassiveSession) -> None:
+    with pytest.raises(ValueError, match="flat files"):
+        rest_session.options.admin_messages().history(
+            ADMIN_DAY, ADMIN_DAY, source=HistorySource.FLAT_FILES
+        )
+
+
+def unreadable_admin_messages(load_fixture: Callable[[str, str], bytes]) -> Reply:
+    # Massive's first sample message without its required SIP time, beside the second, whole.
+    sample = json.loads(load_fixture(OWNER, "admin_messages.json"))["results"]
+    page = [{k: v for k, v in sample[0].items() if k != "timestamp"}, sample[1]]
+    return Reply({"status": "OK", "results": page})
+
+
+def test_an_unreadable_admin_message_in_the_archive_is_withheld(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    fake_rest.reply(ADMIN_ARCHIVE, unreadable_admin_messages(load_fixture))
+    out = rows(rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True))
+    # No trace of the unreadable message; the whole one beside it lands.
+    assert [r["MessageId"] for r in out] == ["1793911460115302244-4043826283"]
+    assert [(e.cause, e.rows) for e in events] == [(RowFault.UNREADABLE_KEYS, 1)]
+
+
+def test_an_unreadable_admin_message_under_raise_fails_the_history(
+    fake_rest: FakeRestServer, load_fixture: Callable[[str, str], bytes]
+) -> None:
+    fake_rest.reply(ADMIN_ARCHIVE, unreadable_admin_messages(load_fixture))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.RAISE),
+    )
+    with (
+        dm.MassiveSession(config) as m,
+        pytest.raises(RowDataError, match="1 under unreadable_keys"),
+    ):
+        m.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
+
+
+def test_an_archive_read_with_no_readable_message_fails_as_a_format_change(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Under the default LOG, a read with rows but none whole fails rather than read empty.
+    page = [{"id": "1-1", "exchange": 300, "message": "OPRA SYSTEM NORMAL", "sequence_number": 1}]
+    fake_rest.reply(ADMIN_ARCHIVE, Reply({"status": "OK", "results": page}))
+    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+        rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
+
+
+def test_a_refused_admin_message_archive_raises_massive_s_refusal(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    refusal = {"status": "NOT_AUTHORIZED", "message": "You are not entitled to this data."}
+    fake_rest.reply(ADMIN_ARCHIVE, Reply(refusal, status=403))
+    with pytest.raises(dm.EntitlementError, match="You are not entitled to this data"):
+        rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
 
 
 # --- End to end: flat files ------------------------------------------------------------------

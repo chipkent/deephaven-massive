@@ -4,7 +4,8 @@ Datasets: `trades`, `last_trade` (each contract's latest trade), `quotes`, `bars
 `previous_day_bar` (each contract's bar of the previous session), `fmv` (fair market value),
 `admin_messages` (OPRA's administrative messages and FLEX trade notices), `chain` (one underlying's
 option chain), `snapshots` (the current state of chosen contracts), `contracts` (contract
-reference data), and `daily_open_close`.
+reference data), `daily_open_close`, `open_interest` (each contract's open interest by day), and
+`unusual_trades` (large trades and sweeps).
 
 Each dataset is one factory method on `OptionsNamespace`. The method validates its arguments and
 returns a query; nothing touches the network until a verb is called on the query. This module owns
@@ -16,9 +17,10 @@ Option symbols are Massive's exact tickers: `O:` and the OCC symbol (`O:AAPL2501
 Every method that takes contracts takes only that form (`check_symbol` in
 `_datasets/symbols.py`), and `dm.canonical_symbol_option` converts the bare or space-padded OCC
 forms. Every options dataset whose rows name a contract also has `OptionRoot`, the OCC root read
-from the symbol (`SPXW`, `AAPL1`). The admin messages name none: Massive sends them per exchange,
-so the stream subscribes every exchange (`AD.*`), its rows have no `Symbol`, and their text is
-kept as OPRA sends it. The rows of the
+from the symbol (`SPXW`, `AAPL1`), or Massive's own `root` where the rows carry one (the open
+interest and the unusual trades). The admin messages name none: Massive sends them per exchange,
+so the stream subscribes every exchange (`AD.*`) and `history()` reads every exchange's archive,
+the rows have no `Symbol`, and their text is kept as OPRA sends it. The rows of the
 chain, the snapshots, and the contract reference data carry the instrument Massive links the
 contract to as `Underlying`, a canonical ticker: it names the linked instrument, not the
 deliverable, so an adjusted contract (root `AAPL1`) may deliver more or less than 100 shares
@@ -78,7 +80,7 @@ from deephaven_massive.namespaces._query_building import (
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
-    NoSymbolStreamQuery,
+    NoSymbolStreamHistoryQuery,
     StreamHistoryQuery,
     StreamQuery,
 )
@@ -115,6 +117,7 @@ _CONTRACT: Final = "/v3/reference/options/contracts/{options_ticker}"
 _OPEN_CLOSE: Final = "/v1/open-close/{optionsTicker}/{date}"
 _OPEN_INTEREST: Final = "/options/v1/open-interest"
 _UNUSUAL_TRADES: Final = "/options/v1/unusual-trades"
+_ADMIN_MESSAGES: Final = "/options/v1/admin-messages"
 
 _TRADE_FILES: Final = "us_options_opra/trades_v1"
 _QUOTE_FILES: Final = "us_options_opra/quotes_v1"
@@ -258,15 +261,19 @@ FMV: Final = DatasetSpec(
 
 ADMIN_MESSAGES: Final = DatasetSpec(
     name="options.admin_messages",
-    summary="OPRA's administrative messages, including FLEX trade notices, streamed in real time.",
+    summary="OPRA's administrative messages, including FLEX trade notices, live and past.",
     asset_class=AssetClass.OPTIONS,
     kind="admin_messages",
+    history_path=_ADMIN_MESSAGES,
     channels={NotBars.ANY: "AD"},
-    keys={(_WS, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+    keys={
+        (_REST, _ADMIN_MESSAGES): SourceKeys(time=KeySpec("SipTimestamp")),
+        (_WS, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp")),
+    },
+    time_axis=("timestamp.gte", "timestamp.lt"),
     # Massive sends the messages per exchange (`AD.<exchange id>`), and no message names a
     # contract outside its free text, which the library never parses.
     names_symbols=False,
-    # Massive's page documents only the real-time feed for the channel.
 )
 
 _SNAPSHOT_REVISION: Final = ("LastQuoteLastUpdated", "LastTradeSipTimestamp")
@@ -482,11 +489,12 @@ class OptionsNamespace(Namespace):
 
     Each method returns a query of one dataset, and together they cover trades, quotes, bars, each
     contract's last trade and previous day's bar, fair market value, OPRA's administrative messages,
-    option chains, snapshots, contract reference data, and each contract's daily open and close. A
-    contract's ticker is `O:` followed by its OCC symbol, such as `O:AAPL250117C00150000`. A
-    method reads nothing, so it never blocks, and you can call it from any thread.
-    You reach it through a session and never construct it. Import it as
-    `from deephaven_massive.namespaces import OptionsNamespace` to annotate your own code.
+    option chains, snapshots, contract reference data, each contract's daily open and close, its
+    open interest by day, and the unusual trades Massive flags. A contract's ticker is `O:`
+    followed by its OCC symbol, such as `O:AAPL250117C00150000`. A method reads nothing, so it
+    never blocks, and you can call it from any thread. You reach it through a session and never
+    construct it. Import it as `from deephaven_massive.namespaces import OptionsNamespace` to
+    annotate your own code.
 
     Example:
         ::
@@ -764,15 +772,16 @@ class OptionsNamespace(Namespace):
         )
 
     @raises_through(check_policy)
-    def admin_messages(self, *, on_error: ErrorPolicy | None = None) -> NoSymbolStreamQuery:
-        """OPRA's administrative messages, including FLEX trade notices, streamed in real time.
+    def admin_messages(self, *, on_error: ErrorPolicy | None = None) -> NoSymbolStreamHistoryQuery:
+        """OPRA's administrative messages, including FLEX trade notices, live and past.
 
         Each row holds one message from one exchange: the text exactly as OPRA sends it in
         `Message`, the exchange's ID in `Exchange`, and its sequence number and SIP timestamp.
         The library never parses the text, so a FLEX trade's details stay in it, as in
         Massive's sample `TEXT CFLEX SPY LST PM EUR 4 LEGS 1 @ 733.36`. The call takes no
-        symbols and streams every exchange's messages. The rows have no `Symbol` column, so the
-        query has no `last_by()`. There is no history.
+        symbols: the stream methods follow every exchange's messages live, and `history()` reads
+        every exchange's past messages from Massive's archive. To keep one exchange's, filter
+        on `Exchange`. The rows have no `Symbol` column, so the query has no `last_by()`.
 
         Args:
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
@@ -790,9 +799,10 @@ class OptionsNamespace(Namespace):
 
                 notices = m.options.admin_messages().append_only()
                 flex = notices.where("Message.contains(`FLEX`)")  # as in the CFLEX sample
+                past = m.options.admin_messages().history("2026-11-13", "2026-11-13")
         """
         return build_query(
-            self._core, ADMIN_MESSAGES, query_type=NoSymbolStreamQuery, on_error=on_error
+            self._core, ADMIN_MESSAGES, query_type=NoSymbolStreamHistoryQuery, on_error=on_error
         )
 
     @raises_through(build_query, list_params, _contract_type, _chain_underlying, value_table)

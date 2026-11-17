@@ -170,8 +170,13 @@ def test_verbs_are_the_methods_every_query_of_a_dataset_has() -> None:
     by_name = CATALOG.by_name
     assert verbs(by_name["stocks.trades"]) == ("blink", "append_only", "ring", "last_by", "history")
     assert verbs(by_name["stocks.last_trade"]) == ("fetch", "poll")
-    # A stream whose rows name no symbol has no `last_by()`.
-    assert verbs(by_name["options.admin_messages"]) == ("blink", "append_only", "ring")
+    # A stream whose rows name no symbol has no `last_by()`; its archive gives `history()`.
+    assert verbs(by_name["options.admin_messages"]) == (
+        "blink",
+        "append_only",
+        "ring",
+        "history",
+    )
     # Only some bars stream, so no stream method is one every bars query has.
     assert verbs(STOCK_BARS) == ("history",)
 

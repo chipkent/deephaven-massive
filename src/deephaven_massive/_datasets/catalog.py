@@ -255,7 +255,8 @@ class DatasetSpec:
     With S meaning the spec has channels, H that it has a history source (a history path, a
     grouped-daily path, or flat-file prefixes), and F that it has a fetch path: F alone gives
     `FetchQuery`, S alone `StreamQuery` (`NoSymbolStreamQuery`, without `last_by()`, for a stream
-    whose rows name no symbol), H alone `HistoryQuery`, and S and H `StreamHistoryQuery`.
+    whose rows name no symbol), H alone `HistoryQuery`, and S and H `StreamHistoryQuery`
+    (`NoSymbolStreamHistoryQuery` for a stream whose rows name no symbol).
     A fetch path is never combined with channels or a history source, so `fetch()` always
     returns every row its endpoint returns: a REST endpoint that answers one row per symbol
     (the last trade, the previous day's bar) is a one-row dataset of its own, in the same kind
@@ -451,10 +452,10 @@ class DatasetSpec:
             each name an instrument. False for a stream whose rows name none, such as the
             options admin messages, which Massive sends per exchange: its call takes no
             symbols, it subscribes its channel's every topic (`<channel>.*`), its rows have no
-            `Symbol`, and its query has no `last_by()`. Only a dataset with channels and no
-            other transport, not bars, may set it False, and then no source declares a `symbol`
-            key; every source of such a dataset in a kind declares its `time` key (the
-            `declared keys` gate).
+            `Symbol`, and its query has no `last_by()`. Only a dataset with channels, not bars,
+            and no other transport but a REST history path, the archive of the same rows, may
+            set it False, and then no source declares a `symbol` key; every source of such a
+            dataset in a kind declares its `time` key (the `declared keys` gate).
     """
 
     name: str
@@ -794,22 +795,26 @@ class DatasetSpec:
                 spec.check(role, transport, where=where)
 
     def _check_symbol_free(self) -> None:
-        """Check that a dataset whose rows name no instrument is a plain stream.
+        """Check that a dataset whose rows name no instrument is a stream, with its archive.
 
         Such a stream subscribes its channel's every topic and routes no row by symbol, so it
-        reads nothing a symbol selects (a flat file, a REST path) and declares no symbol.
+        reads nothing a symbol selects (a flat file of every symbol, a fetch path) and declares
+        no symbol. Its REST history path is the archive of the same rows, which one request
+        reads whole, filtered by time alone.
 
         Raises:
             ValueError: If a dataset with `names_symbols` False has no channels, or has flat
-                files, a REST path, bars, or a `symbol` key on any source.
+                files, a REST path other than its history path, bars, or a `symbol` key on any
+                source.
         """
         if self.names_symbols:
             return
-        others = self.flat_file_prefixes or self.rest_paths or self.is_bars
+        paths = set(self.rest_paths) - {self.history_path}
+        others = self.flat_file_prefixes or paths or self.is_bars
         if not self.channels or others:
             raise ValueError(
-                f"{self.name}: a dataset whose rows name no symbol is a stream alone: channels, "
-                "and no flat files, REST path, or bars"
+                f"{self.name}: a dataset whose rows name no symbol is a stream, with at most a "
+                "REST history path: channels, and no flat files, other REST path, or bars"
             )
         if any(keys.symbol is not None for keys in self.keys.values()):
             raise ValueError(f"{self.name}: a dataset whose rows name no symbol has no symbol key")
@@ -1233,6 +1238,9 @@ class Catalog:
           `nullable_poll_keys`, so no row is identified by nulls alone.
         - **poll keys:** every `poll_keys` and `revision_keys` column of a dataset with
           `poll()` (a fetch path) is a column of the dataset's schema.
+        - **symbol-free archive:** the history path of a dataset whose rows name no symbol
+          (`names_symbols` False) takes no path parameter, such as a ticker: one request
+          reads its archive whole, filtered by time alone.
 
         Returns:
             The failures, in dataset order and then gate order, each once; empty when every
@@ -1263,6 +1271,7 @@ class Catalog:
                     f"feed axis: {spec.name}: an APPEND dataset declares a time_axis, since its "
                     "poll() needs start"
                 )
+            found.extend(self._archive_problems(spec))
             if spec.poll_keys and set(spec.poll_keys) <= set(spec.nullable_poll_keys):
                 found.append(
                     f"nullable keys: {spec.name}: every poll key may be null; at least one "
@@ -1280,6 +1289,26 @@ class Catalog:
             if lacking and spec.has_fetch:  # only `poll()` reads them
                 found.append(f"poll keys: {spec.name}: {lacking} are not columns")
         return tuple(dict.fromkeys(found))
+
+    def _archive_problems(self, spec: DatasetSpec) -> list[str]:
+        """Check that a dataset whose rows name no symbol reads its archive by time alone.
+
+        Args:
+            spec: The dataset; every source is generated.
+
+        Returns:
+            The `symbol-free archive` failure, or none.
+        """
+        if spec.names_symbols or spec.history_path is None:
+            return []
+        slots = [p.name for p in self.rest_path(spec.history_path).params if p.in_path]
+        if not slots:
+            return []
+        message = (
+            f"symbol-free archive: {spec.name}: its history path takes {slots}; a dataset whose "
+            "rows name no symbol reads its archive whole"
+        )
+        return [message]
 
     def _key_problems(self, spec: DatasetSpec) -> list[str]:
         """Check the declared keys of every source of one dataset.

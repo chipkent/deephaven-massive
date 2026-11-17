@@ -85,7 +85,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | [`m.options.bars`](options.bars.md) | Aggregate bars (open, high, low, close, volume) of US-listed options contracts. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.options.previous_day_bar`](options.previous_day_bar.md) | The previous trading day's open, high, low, close, and volume of options contracts. | `fetch()`, `poll()` |
 | [`m.options.fmv`](options.fmv.md) | Massive's fair market value of US-listed options contracts, streamed in real time. | `blink()`, `append_only()`, `ring()`, `last_by()` |
-| [`m.options.admin_messages`](options.admin_messages.md) | OPRA's administrative messages, including FLEX trade notices, streamed in real time. | `blink()`, `append_only()`, `ring()` |
+| [`m.options.admin_messages`](options.admin_messages.md) | OPRA's administrative messages, including FLEX trade notices, live and past. | `blink()`, `append_only()`, `ring()`, `history()` |
 | [`m.options.chain`](options.chain.md) | The snapshot of every contract in one underlying's option chain. | `fetch()`, `poll()` |
 | [`m.options.snapshots`](options.snapshots.md) | The current snapshot of each requested options contract, with its greeks. | `fetch()`, `poll()` |
 | [`m.options.contracts`](options.contracts.md) | Reference data on options contracts: type, exercise style, expiration, and strike. | `fetch()`, `poll()` |

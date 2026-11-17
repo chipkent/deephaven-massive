@@ -56,7 +56,7 @@ from deephaven_massive._tables.watchlist import (
     SymbolRowRule,
 )
 from deephaven_massive.queries._query import Query, _read_symbol_table, _verb, _wait
-from deephaven_massive.queries._stream import StreamQuery
+from deephaven_massive.queries._stream import NoSymbolStreamQuery, StreamQuery
 
 if TYPE_CHECKING:
     import threading
@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.request import Request
     from deephaven_massive._tables.transports import SymbolOutcome
 
-__all__ = ["HistoryQuery", "StreamHistoryQuery"]
+__all__ = ["HistoryQuery", "NoSymbolStreamHistoryQuery", "StreamHistoryQuery"]
 
 logger = logging.getLogger(__name__)
 
@@ -671,6 +671,30 @@ class StreamHistoryQuery(StreamQuery, HistoryQuery):
             q = m.stocks.trades(["AAPL", "MSFT"])
             live = q.append_only()
             day = q.history("2025-03-03", "2025-03-03")
+    """
+
+    __slots__ = ()
+
+
+class NoSymbolStreamHistoryQuery(NoSymbolStreamQuery, HistoryQuery):
+    """A query of a stream whose rows name no symbol, with its history: live and past rows.
+
+    Massive both streams and keeps a few datasets whose rows name no instrument, such as
+    `m.options.admin_messages()`, the notices of the options exchanges. Their dataset methods
+    return this class, which has every method of `NoSymbolStreamQuery` and `history(start, end)`
+    from `HistoryQuery`: the stream methods follow the live feed, and `history()` reads a past
+    range, with the same columns. Like `NoSymbolStreamQuery`, it has no `last_by()`, since the
+    rows have no `Symbol`.
+
+    Import it as `from deephaven_massive.queries import NoSymbolStreamHistoryQuery` to annotate
+    your own code. You get one from a dataset method and never construct one.
+
+    Example:
+        ::
+
+            q = m.options.admin_messages()
+            live = q.append_only()
+            day = q.history("2026-11-13", "2026-11-13")
     """
 
     __slots__ = ()

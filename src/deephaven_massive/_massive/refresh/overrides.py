@@ -1577,10 +1577,9 @@ KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType(
         },
         "luld": {"stocks": ["stocks/LULD"]},
         "imbalances": {"stocks": ["stocks/NOI"]},
-        # OPRA's administrative messages, read by `options.admin_messages` alone: every dataset
-        # with a WebSocket source has a kind, which orders its columns and is checked against
-        # the catalog, and no other source shares this channel's rows.
-        "admin_messages": {"options": ["options/AD"]},
+        # OPRA's administrative messages, read by `options.admin_messages` alone: the REST
+        # archive and the stream carry the same messages, so their columns merge as one kind.
+        "admin_messages": {"options": ["/options/v1/admin-messages", "options/AD"]},
         "fmv": {
             "stocks": ["stocks/FMV"],
             "options": ["options/FMV"],

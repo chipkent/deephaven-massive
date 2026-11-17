@@ -1100,12 +1100,12 @@
     "channel": "The CME multicast channel this event was sourced from."
    },
    "/options/v1/admin-messages": {
-    "exchange": "The exchange ID. See Exchanges mapping for details.",
     "id": "The unique identifier for this admin message, composed of the SIP timestamp and the sequence number.",
+    "exchange": "The exchange ID. See Exchanges mapping for details.",
     "message": "The administrative message text as distributed by OPRA.",
-    "retransmission": "True if this record was retransmitted. Omitted when false.",
+    "timestamp": "The SIP timestamp in Unix nanoseconds.",
     "sequence_number": "The sequence number represents the sequence in which admin events happened. These are increasing and unique, but will not always be sequential.",
-    "timestamp": "The SIP timestamp in Unix nanoseconds."
+    "retransmission": "True if this record was retransmitted. Omitted when false."
    },
    "/options/v1/open-interest": {
     "contract_type": "The contract type. Possible values: call, put.",

@@ -1203,3 +1203,30 @@ def test_unusual_trade_prices_are_per_share(live_rest: RestClient, *, evidence: 
     assert flagged
     assert not low
     assert not high
+
+
+@pytest.mark.requests(1)
+def test_admin_message_history_reads_a_day_of_every_exchange(
+    live_session: dm.MassiveSession,
+    *,
+    previous_trading_day: date,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """`history()` of the admin messages reads a past day's archive with the stream's columns.
+
+    Reads the last trading day before the run and records how many messages each exchange sent,
+    with one message's text. Fails when the call fails or its columns are not the stream's; a
+    day with no message passes, since OPRA sends admin messages only with FLEX activity or an
+    exchange's notice. A refusal skips the test, quoting Massive.
+    """
+    query = live_session.options.admin_messages()
+    table = query.history(previous_trading_day, previous_trading_day, wait=True)
+    found = table_rows(table)
+    exchanges = sorted({int(r["Exchange"]) for r in found})
+    first = repr(found[0]["Message"]) if found else "none"
+    evidence(
+        f"{previous_trading_day}: {len(found)} messages from exchanges {exchanges}; first {first}"
+    )
+    assert list(table.column_names) == [str(r["Name"]) for r in table_rows(query.columns())]
+    assert all(r["Date"] == previous_trading_day.isoformat() for r in found)

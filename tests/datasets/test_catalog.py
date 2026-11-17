@@ -1322,14 +1322,7 @@ class Deferral:
     issue: int
 
 
-DEFERRED: Mapping[tuple[Transport, str], Deferral] = {
-    (Transport.REST, path): Deferral(
-        "Massive documented it on 2026-11-16; its dataset needs a public design: the call, its "
-        "arguments, and its columns.",
-        729,
-    )
-    for path in ("/options/v1/admin-messages",)
-}
+DEFERRED: Mapping[tuple[Transport, str], Deferral] = {}
 """Generated sources no dataset reads yet, by `(transport, source key)`.
 
 A source key is the generated key the catalog uses: a REST path template, a WebSocket
@@ -1689,13 +1682,20 @@ def test_each_refused_alternative_is_a_dataset_that_fetches() -> None:
 
 # --- Streams whose rows name no symbol --------------------------------------------------------
 
+_ADMIN_ARCHIVE = "/options/v1/admin-messages"
+
 ADMIN = DatasetSpec(
     name="options.admin_messages",
     summary="A dataset for the tests.",
     asset_class=AssetClass.OPTIONS,
     kind="admin_messages",
+    history_path=_ADMIN_ARCHIVE,
     channels={NotBars.ANY: "AD"},
-    keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+    keys={
+        (R, _ADMIN_ARCHIVE): SourceKeys(time=KeySpec("SipTimestamp")),
+        (W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp")),
+    },
+    time_axis=("timestamp.gte", "timestamp.lt"),
     names_symbols=False,
 )
 
@@ -1709,6 +1709,10 @@ def test_a_stream_without_symbols_takes_none_and_passes_the_gates() -> None:
 
 def test_a_stream_without_symbols_needs_its_time_key() -> None:
     assert problems(dataclasses.replace(ADMIN, keys={})) == (
+        (
+            "declared keys: options.admin_messages: REST /options/v1/admin-messages declares no "
+            "time key"
+        ),
         "declared keys: options.admin_messages: WS options/AD declares no time key",
     )
 
@@ -1719,16 +1723,31 @@ def test_a_stream_without_symbols_needs_its_time_key() -> None:
         lambda: dataclasses.replace(
             ADMIN, channels={}, fetch_path="/v3/snapshot", kind=None, keys={}
         ),
+        lambda: dataclasses.replace(ADMIN, fetch_path="/v3/snapshot"),
         lambda: dataclasses.replace(
             ADMIN, flat_file_prefixes={NotBars.ANY: "us_options_opra/trades_v1"}
         ),
-        lambda: dataclasses.replace(ADMIN, history_path="/v3/trades/{optionsTicker}"),
     ],
-    ids=["fetch", "flat files", "history"],
+    ids=["no stream", "fetch", "flat files"],
 )
-def test_a_dataset_without_symbols_is_a_stream_alone(changed: Callable[[], DatasetSpec]) -> None:
-    with pytest.raises(ValueError, match="no symbol is a stream alone"):
+def test_a_dataset_without_symbols_is_a_stream_with_at_most_its_archive(
+    changed: Callable[[], DatasetSpec],
+) -> None:
+    with pytest.raises(ValueError, match="no symbol is a stream, with at most a REST history"):
         changed()
+
+
+def test_a_dataset_without_symbols_reads_its_archive_by_time_alone() -> None:
+    by_ticker = dataclasses.replace(
+        ADMIN,
+        history_path="/v3/trades/{optionsTicker}",
+        keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+        kind=None,
+    )
+    assert (
+        "symbol-free archive: options.admin_messages: its history path takes ['optionsTicker']; "
+        "a dataset whose rows name no symbol reads its archive whole"
+    ) in problems(by_ticker)
 
 
 def test_a_stream_without_symbols_declares_no_symbol_key() -> None:
