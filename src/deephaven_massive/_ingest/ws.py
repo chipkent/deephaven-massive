@@ -19,8 +19,8 @@ everything else belongs here:
   them. A row the library cannot read whole is withheld, counted, and reported, and fails only
   a stream whose policy is `RAISE` for its cause. A connection logs one WARNING per outage,
   and one when it goes silent during its market's trading hours (`NO_FRAMES_WARNING`), each
-  with its recovery at INFO. Drift is recorded on the connection's `SchemaDrift` here and
-  handed to the flush thread for the streams' rows.
+  with its recovery at INFO. A field Massive's documentation lacks is handed to the flush
+  thread, which reports it as a problem of each stream that receives it.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
   A static symbol list that would cross it raises `ValueError` when the verb is called; a
   reactive table's excess topics are deferred, in sorted order, and admitted as room frees.
@@ -54,8 +54,9 @@ everything else belongs here:
   key, a handshake error retrying cannot fix) fails every stream on it, a stream opening at
   that moment included. `m.close()` removes the session's streams from their connections,
   closes every connection no other session leases, and waits a bounded time for its threads.
-  While a connection is down (`RECONNECTING` or `WAITING_SLOT`), each of its streams says so
-  in its `Error`, and an outage longer than `MassiveConfig.max_outage` fails them
+  While a connection is down (`RECONNECTING` or `WAITING_SLOT`), each of its streams has an
+  `outage` span in `m.problems()`, and an outage longer than `MassiveConfig.max_outage`
+  fails them
   (`Connection`).
 
 **Threads and locks.** Each connection's subscription state is confined to its client's loop
@@ -112,11 +113,17 @@ from deephaven_massive._ingest.ws_connection import (
     ConnectionGroup,
     ConnectionStream,
 )
-from deephaven_massive._log_limits import BoundedLog, bounded_list, mark_failure_logged
+from deephaven_massive._log_limits import bounded_list, mark_failure_logged
 from deephaven_massive._on_error import effect_of
-from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
 from deephaven_massive._tables.execution_context import holds_update_graph_lock
 from deephaven_massive._tables.liveness import release_scope
+from deephaven_massive._tables.problem_events import (
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+    ProblemSpans,
+    SpanTracker,
+)
 from deephaven_massive._tables.stream import ChannelPlan, open_stream_tables
 from deephaven_massive._tables.transports import Unsplit
 
@@ -141,56 +148,56 @@ logger = logging.getLogger(__name__)
 JOIN_TIMEOUT: Final = 5.0
 """Seconds `m.close()` waits for each connection's threads before it logs a WARNING."""
 
-_SKIPPED_PAIR_LIMIT: Final = 100
-"""The most crypto pairs with no data logged per process under each of `LOG` and `IGNORE`."""
-_logged_pairs: Final = BoundedLog(logger, limit=_SKIPPED_PAIR_LIMIT, level=logging.WARNING)
-"""The pairs skipped under `unavailable_symbols=LOG`, logged at WARNING."""
-_ignored_pairs: Final = BoundedLog(logger, limit=_SKIPPED_PAIR_LIMIT, level=logging.DEBUG)
-"""The pairs skipped under `unavailable_symbols=IGNORE`: logged at DEBUG only."""
-
 
 @dataclass(slots=True)
 class _PairState:
     """A crypto stream's pairs that are not subscribed, and why; guarded by the group's lock.
 
     Attributes:
+        dataset: The stream's dataset, for its problems.
         policy: The stream's resolved policy (`Request.on_error`): what a pair Massive has no
             data for, and a listed pair whose currencies do not join, do.
-        skipped: Each pair the list gives no split for, with why, until the stream no longer
-            holds it.
         waiting: The pairs waiting for Massive's crypto ticker list to be read.
         since: When the pairs began to wait (`time.monotonic`), or None when none waits.
         tries: The failed reads of the list since then.
         failure: The last failed read of the list, while pairs wait.
         retry_due: Whether a retry is scheduled, so a change meanwhile schedules no second one.
+        waits: The waiting pairs as `symbol_read_retrying` spans of the stream's problems.
     """
 
+    dataset: str
     policy: ResolvedPolicy
-    skipped: dict[str, str] = field(default_factory=dict)
     waiting: set[str] = field(default_factory=set)
     since: float | None = None
     tries: int = 0
     failure: MassiveError | None = None
     retry_due: bool = False
+    waits: SpanTracker | None = None
 
-    def note(self) -> str | None:
-        """Say which pairs the stream does not subscribe and why, for its `Error`.
+    def waiting_spans(self, stream_id: int) -> ProblemSpans | None:
+        """Return the stream's waiting pairs as spans, when they changed.
+
+        Args:
+            stream_id: The stream.
 
         Returns:
-            The text, or None when every pair is subscribed.
+            The snapshot of the `symbol_read_retrying` spans, one per waiting pair, with the
+            failed read of the list; None when nothing changed.
         """
-        parts = []
-        if self.skipped:
-            parts.append(
-                "skipped "
-                + bounded_list([f"{pair} ({why})" for pair, why in sorted(self.skipped.items())])
+        if self.waits is None:
+            if not self.waiting:
+                return None
+            self.waits = SpanTracker(
+                ProblemCause.SYMBOL_READ_RETRYING,
+                dataset=self.dataset,
+                stream_id=stream_id,
+                where=f"crypto stream {stream_id}",
             )
-        if self.waiting:
-            parts.append(
-                f"crypto pairs {bounded_list(sorted(self.waiting))} wait for Massive's crypto "
-                f"ticker list, which could not be read ({self.failure}); retrying"
-            )
-        return "; ".join(parts) or None
+        why = (
+            f"waits for Massive's crypto ticker list, which could not be read ({self.failure}); "
+            "retrying"
+        )
+        return self.waits.update({pair: (pair, None, why, 0) for pair in self.waiting})
 
 
 def _weakly(owner_ref: Callable[[], WsConnections | None], method: str, *args: object) -> None:
@@ -492,7 +499,7 @@ class WsConnections:
             )
             if asset_class is AssetClass.CRYPTO:  # its pairs are split by the stream's policy
                 with self._lock:
-                    self._pair_states[stream_id] = _PairState(request.on_error)
+                    self._pair_states[stream_id] = _PairState(spec.name, request.on_error)
             self._attach(stream)
             if pairs:
                 self._submit_change(self._change_pairs, stream_id, added=pairs, removed=frozenset())
@@ -895,7 +902,8 @@ class WsConnections:
         caller waits for it, so `MassiveConfig.max_outage`). Each pair (`_split`) is
         subscribed, or skipped, or waits for the list (`_wait`). A skipped pair Massive has no
         data for follows the stream's `unavailable_symbols` (`_no_data`); one whose currencies
-        the library cannot read was reported under its `unreadable_symbols` by the lookup.
+        the library cannot read, which the lookup logged (or raised under `RAISE`), is an
+        `unreadable_symbols` problem of the stream (`_unreadable`).
 
         Args:
             stream_id: The stream.
@@ -907,23 +915,23 @@ class WsConnections:
             if state is None:  # the stream has ended
                 return
             for symbol in removed:
-                state.skipped.pop(symbol, None)
                 state.waiting.discard(symbol)
             asked = sorted(added | state.waiting)
         reader = f"crypto stream {stream_id}"
         split, unsplit, waiting, failure = self._split(asked, state.policy)
         no_data = {pair: why.why for pair, why in unsplit.items() if why.no_data}
-        unavailable = state.policy.unavailable_symbols
-        if no_data and not self._no_data(stream_id, no_data, reader=reader, setting=unavailable):
+        if no_data and not self._no_data(stream_id, no_data, reader=reader, state=state):
             return
+        unread = {pair: why.why for pair, why in unsplit.items() if not why.no_data}
+        if unread:
+            self._unreadable(stream_id, unread, reader=reader, state=state)
         if failure is not None and not failure.is_retryable:
             self._fail(stream_id, copy_error(failure, f"{reader}: {failure}"))
             return
-        skipped = {pair: why.why for pair, why in unsplit.items()}
-        delay = self._wait(stream_id, state, skipped=skipped, waiting=waiting, failure=failure)
+        delay = self._wait(stream_id, state, waiting=waiting, failure=failure)
         if delay is None:
             return
-        self._show_pairs(stream_id, state)
+        self._show_waiting(stream_id, state)
         if split or removed:
             self._post_change(stream_id, frozenset(split), removed)
         if delay > 0:
@@ -983,23 +991,84 @@ class WsConnections:
                     raise BrokenGuaranteeError(unmatched_form("a crypto pair's lookup", found))
         return split, unsplit, waiting, failure
 
+    def _unreadable(
+        self, stream_id: int, unread: Mapping[str, str], *, reader: str, state: _PairState
+    ) -> None:
+        """Report the pairs whose currencies the library cannot read as the stream's problems.
+
+        Massive's crypto ticker list gives such a pair's currencies, but they don't join to its
+        ticker, so the stream never subscribes it: a library bug, under the stream's
+        `unreadable_symbols`, which the lookup logged. Never under `RAISE`, where the lookup
+        raised and failed the stream.
+
+        Args:
+            stream_id: The stream.
+            unread: The pairs, with why.
+            reader: Who read them, for the problem's origin.
+            state: The stream's pairs, with its dataset and its `unreadable_symbols`.
+        """
+        core = self._core()
+        if core is None:  # a freed session shows no problem
+            return
+        at = time.time_ns()
+        core.problems(
+            [
+                ProblemEvent(
+                    cause=ProblemCause.UNREADABLE_SYMBOLS,
+                    action=ProblemAction.WITHHELD,
+                    dataset=state.dataset,
+                    stream_id=stream_id,
+                    where=reader,
+                    symbol=pair,
+                    field="Symbol",
+                    rows=0,
+                    detail=f"{why}; the pair is never subscribed",
+                    at=at,
+                    policy=state.policy.unreadable_symbols,
+                )
+                for pair, why in sorted(unread.items())
+            ]
+        )
+
     def _no_data(
-        self, stream_id: int, no_data: Mapping[str, str], *, reader: str, setting: OnError
+        self, stream_id: int, no_data: Mapping[str, str], *, reader: str, state: _PairState
     ) -> bool:
         """Apply the stream's `unavailable_symbols` to the pairs Massive has no data for.
 
-        Under `LOG` each pair is logged once per process at WARNING, under `IGNORE` at DEBUG,
-        a bounded number of pairs; under `RAISE` the stream fails.
+        Each pair is an `unavailable_symbols` problem of the stream, in `m.problems()`, whose
+        first the session's reporter logs; under `RAISE` the stream also fails.
 
         Args:
             stream_id: The stream.
             no_data: The pairs, with why.
             reader: Who read them, for the log.
-            setting: The stream's `unavailable_symbols`.
+            state: The stream's pairs, with its dataset and its `unavailable_symbols`.
 
         Returns:
             False when the stream failed.
         """
+        setting = state.policy.unavailable_symbols
+        core = self._core()
+        if core is not None:
+            at = time.time_ns()
+            core.problems(
+                [
+                    ProblemEvent(
+                        cause=ProblemCause.UNAVAILABLE_SYMBOLS,
+                        action=ProblemAction.SKIPPED,
+                        dataset=state.dataset,
+                        stream_id=stream_id,
+                        where=reader,
+                        symbol=pair,
+                        field=None,
+                        rows=0,
+                        detail=f"Massive has no data for it ({why}); it is skipped",
+                        at=at,
+                        policy=setting,
+                    )
+                    for pair, why in sorted(no_data.items())
+                ]
+            )
         described = bounded_list([f"{pair} ({why})" for pair, why in sorted(no_data.items())])
         effect = effect_of(setting)
         if effect.fails:
@@ -1012,9 +1081,7 @@ class WsConnections:
                 ),
             )
             return False
-        pairs = _logged_pairs if effect.level > logging.DEBUG else _ignored_pairs
-        for pair, why in sorted(no_data.items()):
-            pairs.log(pair, "%s: Massive has no data for %s (%s); it is skipped", reader, pair, why)
+        logger.debug("%s: Massive has no data for %s; skipped", reader, described)
         return True
 
     def _wait(
@@ -1022,11 +1089,10 @@ class WsConnections:
         stream_id: int,
         state: _PairState,
         *,
-        skipped: Mapping[str, str],
         waiting: Iterable[str],
         failure: MassiveError | None,
     ) -> float | None:
-        """Record a change's skipped pairs and those waiting, and when to try again.
+        """Record a change's pairs that wait for the list, and when to try again.
 
         Pairs wait while Massive's crypto ticker list cannot be read: an outage of those
         pairs, timed from the first failed read. The next try comes after the reconnect
@@ -1036,7 +1102,6 @@ class WsConnections:
         Args:
             stream_id: The stream.
             state: The stream's pairs not subscribed.
-            skipped: The pairs the list gives no split for, with why.
             waiting: The pairs left unsplit by `failure`.
             failure: The failed read of the list, or None.
 
@@ -1047,7 +1112,6 @@ class WsConnections:
         with self._lock:
             if stream_id not in self.group.streams:
                 return None
-            state.skipped.update(skipped)
             state.waiting = set(waiting)
             if failure is None or not state.waiting:
                 state.since, state.tries, state.failure = None, 0, None
@@ -1068,6 +1132,7 @@ class WsConnections:
             return None
         if began:  # the outage's limit holds even while a try still waits on its lookup
             self._schedule(stream_id, left, "_pairs_expired", stream_id, since)
+        # The stream's `symbol_read_retrying` span is its alarm (the problem reporter's).
         logger.info(
             "crypto stream %d: %s; %s wait, and the list is read again in %.0f s",
             stream_id,
@@ -1173,22 +1238,21 @@ class WsConnections:
         if connection is not None:
             connection.flusher.fail([stream_id], failure)
 
-    def _show_pairs(self, stream_id: int, state: _PairState) -> None:
-        """Show a crypto stream's pairs that are not subscribed in its `Error`.
+    def _show_waiting(self, stream_id: int, state: _PairState) -> None:
+        """Report a crypto stream's pairs that wait for the crypto ticker list, or their end.
 
-        The text is the stream's `NotePart.SKIPPED_PAIRS` warning (`_PairState.note`), cleared
-        once every pair is subscribed. `SessionCore.update_streams` takes only the leaf
-        `registry_lock`.
+        Each waiting pair is a `symbol_read_retrying` span of the stream's problems, with the
+        failed read of the list, until the list is read or the pair leaves the stream.
 
         Args:
             stream_id: The stream.
             state: Its pairs not subscribed.
         """
         with self._lock:
-            text = state.note()
+            spans = state.waiting_spans(stream_id)
         core = self._core()
-        if core is not None:
-            core.update_streams({stream_id: StreamUpdate(notes={NotePart.SKIPPED_PAIRS: text})})
+        if core is not None and spans is not None:
+            core.problems([spans])
 
     def pairs(self) -> Mapping[str, tuple[str, str]]:
         """Return a copy of the crypto splits looked up so far, for building topics.

@@ -11,8 +11,8 @@ default):
   whether both setups hold the same commit, and whether Massive accepted the key;
 - `massive-debug.log`, the library's debug log, and `server.log`, the Deephaven server's
   output;
-- `diagnostics/`, the CSV files of `m.streams()`, `m.connections()`, `m.rate_limits()`, and
-  `m.symbol_reads()`;
+- `diagnostics/`, the CSV files of `m.problems()`, `m.streams()`, `m.connections()`,
+  `m.rate_limits()`, and `m.symbol_reads()`;
 - `examples-output/`, what `scripts/tester.py examples` saved;
 - `environment.json`, which it writes: the operating system, Python, Java, the commit, the
   library's and its dependencies' versions, which secret variables are set (never their

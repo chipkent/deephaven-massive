@@ -1341,9 +1341,7 @@ def test_each_setting_has_its_detail_in_a_settings_files_spelling() -> None:
         expected += [name, *CAUSE_PATHS] if name == "on_error" else [name]
     assert headings == expected
     # A list in the docstring stays a list, its members spelled as a file writes them.
-    assert "\n- `log` skips the line, keeps the file's other rows, and logs one warning\n" in (
-        details
-    )
+    assert "\n- `log` skips the line, keeps the file's other rows, and logs one\n" in details
     assert "Never list\n`currencies`, the one subscription for forex and crypto" in details
     # A full link to another page under docs/ becomes a relative link.
     assert "see\n[Report a bug](troubleshooting.md#report-a-bug)." in details
@@ -1389,7 +1387,7 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
     assert details["s3_bucket"] == ["Change it only with `s3_endpoint_url`."]
     assert "EntitlementError" in details["delayed_subscriptions"][1]
     assert details["on_error.malformed_rows"][1].startswith(
-        "- `dm.OnError.LOG` skips the line, keeps the file's other rows, and logs one warning\n"
+        "- `dm.OnError.LOG` skips the line, keeps the file's other rows, and logs one\n"
     )
 
 

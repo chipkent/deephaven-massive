@@ -13,7 +13,7 @@ from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoo
 from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
 from types import MethodType
-from typing import TYPE_CHECKING, Any, NoReturn, ParamSpec, TypedDict
+from typing import Any, NoReturn, ParamSpec, TypedDict
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -27,7 +27,7 @@ from typing_extensions import Unpack, override
 
 import deephaven_massive as dm
 from deephaven_massive import _log_limits, _massive, _session
-from deephaven_massive._datasets import history_source, wire_symbols
+from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import history_window
@@ -67,12 +67,13 @@ from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, CryptoTickers
 from deephaven_massive._ingest.rate_limits import Waiter
 from deephaven_massive._ingest.shared_lookup import SharedLookup
-from deephaven_massive._log_limits import BoundedLog, LoggedKeys
-from deephaven_massive._massive import Cancel, RestPath, RowFault, Transport
-from deephaven_massive._tables import poll
+from deephaven_massive._log_limits import LoggedKeys
+from deephaven_massive._massive import Cancel, RestPath, Transport
+from deephaven_massive._tables import poll, problem_reporter
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.problem_events import ProblemCause, ProblemEvent
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import (
@@ -90,9 +91,6 @@ from deephaven_massive.queries import FetchQuery, HistoryQuery, Query
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 
-if TYPE_CHECKING:
-    from deephaven_massive._tables.problem_events import ProblemEvent
-
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
 
@@ -104,6 +102,39 @@ RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[s
 NS = 10**9
 TIMEOUT = 10.0
 """Seconds of real time a test waits for an event before it fails."""
+
+
+def alarms(caplog: pytest.LogCaptureFixture) -> list[str]:
+    # The problem reporter's WARNINGs: the first problem of each cause on each table or read.
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == problem_reporter.__name__ and r.levelno == logging.WARNING
+    ]
+
+
+def record_problems(m: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> list[ProblemEvent]:
+    # The problems the session's reads report, in order; they still reach its reporter, which
+    # logs the alarm, and m.problems().
+    events: list[ProblemEvent] = []
+    report = m._core.problems
+
+    def recorded(found: Sequence[ProblemEvent]) -> None:
+        events.extend(found)
+        report(found)
+
+    monkeypatch.setattr(m._core, "problems", recorded)
+    return events
+
+
+def no_data_alarm(dataset: str, read: int, symbol: str, *, why: str) -> str:
+    # The WARNING of a read's first symbol Massive has no data for.
+    return (
+        f"{dataset} table {read}: unavailable_symbols: {symbol}: Massive has no data for it "
+        f"{why} (at {dataset}); m.problems() lists it and every later unavailable_symbols "
+        "problem of this table, which the log shows at DEBUG only"
+    )
+
 
 DIVIDENDS_PATH = "/stocks/v1/dividends"
 DIVIDENDS = DatasetSpec(
@@ -768,7 +799,7 @@ def test_a_read_no_caller_waits_for_waits_out_max_outage_of_pauses(
     seconds = _Seconds(monkeypatch)
     q = query(session, RATINGS)
     assert isinstance(q, FetchQuery)
-    _endpoints(session).fetch(RATINGS, q._static_request(), call=1, stop=stop)
+    _endpoints(session).fetch(RATINGS, q._static_request(1), call=1, stop=stop)
     assert seconds.seen == [600.0 if stop is None else 300.0]
 
 
@@ -1691,14 +1722,13 @@ def test_a_fetch_reports_a_pair_massive_does_not_list_as_a_symbol_with_no_data(
     fake_rest.reply("/v1/last/crypto/BTC/USD", btc, btc, btc)
     serve_pairs(fake_rest)
     table = new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])])
-    with caplog.at_level(logging.WARNING, LOGGER):
+    with caplog.at_level(logging.WARNING):
         out = fetch(session, CRYPTO_LAST, symbols=table)  # LOG, the default
     assert [r["Symbol"] for r in out] == ["X:BTCUSD"]
     assert [path for path, _ in sent_data(fake_rest)] == ["/v1/last/crypto/BTC/USD"]
     assert caplog.messages == [
-        (
-            "crypto.last: Massive has no data for 1 [X:DOTUSD (Massive's crypto ticker list "
-            "does not hold it)], so they are left out"
+        no_data_alarm(
+            "crypto.last", 1, "X:DOTUSD", why="(Massive's crypto ticker list does not hold it)"
         )
     ]
     # A pair Massive has no data for gives no rows, passed in code or in a table, alone too.
@@ -1714,13 +1744,13 @@ def test_a_fetch_reports_a_pair_massive_does_not_list_as_a_symbol_with_no_data(
         with dm.MassiveSession(config) as other:
             serve_pairs(fake_rest)
             caplog.clear()
-            with caplog.at_level(logging.WARNING, LOGGER):
+            with caplog.at_level(logging.WARNING):
                 if setting is dm.OnError.RAISE:
                     with pytest.raises(UnavailableSymbolError, match="X:DOTUSD"):
                         fetch(other, CRYPTO_LAST, symbols=table)
                 else:
                     assert len(fetch(other, CRYPTO_LAST, symbols=table)) == 1
-            assert caplog.records == []  # IGNORE logs only at DEBUG
+            assert caplog.records == []  # IGNORE logs only at DEBUG, and RAISE fails
 
 
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
@@ -1871,7 +1901,7 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
         Reply({"status": "success", "request_id": "r1", "symbol": "BTC-USD", "last": last}),
     )
     serve_pairs(fake_rest)
-    with caplog.at_level(logging.WARNING, LOGGER):
+    with caplog.at_level(logging.WARNING):
         out = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD"])
     assert sorted(path for path, _ in sent_data(fake_rest)) == [
         "/v1/last/crypto/BTC/USD",
@@ -1882,9 +1912,8 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
         ("X:BTCUSD", 97000.5, 1704310200000 * 10**6)
     ]
     assert caplog.messages == [
-        (
-            "crypto.last: Massive has no data for 1 [X:ETHUSD (HTTP 404 from "
-            "/v1/last/crypto/{from}/{to})], so they are left out"
+        no_data_alarm(
+            "crypto.last", 1, "X:ETHUSD", why="(HTTP 404 from /v1/last/crypto/{from}/{to})"
         )
     ]
 
@@ -2016,22 +2045,19 @@ def test_an_unreadable_row_symbol_is_withheld_by_default(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    fresh = BoundedLog(logging.getLogger(wire_symbols.__name__), limit=5, level=logging.WARNING)
-    monkeypatch.setattr(wire_symbols, "_logged_spellings", fresh)
-    events: list[ProblemEvent] = []
-    monkeypatch.setattr(session._core, "problems", events.extend)
+    events = record_problems(session, monkeypatch)
     rows = [dividend("a b", "E9"), AAPL_DIVIDEND]
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(rows)))
-    with caplog.at_level(logging.WARNING, wire_symbols.__name__):
+    with caplog.at_level(logging.WARNING):
         out = fetch(session, DIVIDENDS, symbols=["AAPL"])
     assert [(r["Id"], r["Symbol"]) for r in out] == [("E1", "AAPL")]
     assert "RawSymbol" not in out[0]
     assert [(e.cause, e.symbol, e.field, e.rows, e.stream_id) for e in events] == [
-        (RowFault.UNREADABLE_SYMBOLS, "a b", "Symbol", 1, None)
+        (ProblemCause.UNREADABLE_SYMBOLS, "a b", "Symbol", 1, 1)  # of the read, call 1
     ]
-    (record,) = [r for r in caplog.records if r.name == wire_symbols.__name__]
-    assert record.levelno == logging.WARNING
-    assert record.getMessage().startswith("stocks.dividends: Massive sent the symbol 'a b'")
+    assert events[0].detail.startswith("Massive sent the symbol 'a b'")
+    (alarm,) = alarms(caplog)
+    assert alarm.startswith("stocks.dividends table 1: unreadable_symbols: 1 rows of a b, ")
 
 
 @pytest.mark.parametrize(
@@ -2124,37 +2150,51 @@ def test_error_rows_of_a_snapshot_are_kept_and_logged_once(
 
 
 def test_the_first_part_of_a_page_gives_a_drift_sample(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A snapshot page is read in two parts, its good rows and then its error rows; a field both
     # parts carry is sampled from the good rows, read first, whatever the rows' order.
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "x", "new": "from error"}
     spx = {"ticker": "I:SPX", "value": 1.0, "last_updated": 1704310200000000000, "new": "good"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused, spx])))
-    with caplog.at_level(logging.WARNING):
-        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
-    [drift] = [m for m in caplog.messages if "'new' is not in the schema" in m]
-    assert drift.endswith('; first value "good"')
+    events = record_problems(session, monkeypatch)
+    fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
+    [drift] = [e for e in events if e.cause is ProblemCause.SCHEMA_DRIFT]
+    assert drift.field == "new"
+    assert drift.detail.endswith('; first value "good"')
 
 
-def test_drift_is_reported_once_per_field_and_status(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_drift_is_a_problem_of_each_read_and_its_status_is_logged_once(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_rest.reply(
         DIVIDENDS_PATH,
         Reply(envelope([{**AAPL_DIVIDEND, "brand_new": 1}], status="PARTIAL")),
     )
+    events = record_problems(session, monkeypatch)
     with caplog.at_level(logging.WARNING):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
         fetch(session, DIVIDENDS, symbols=["AAPL"])
-    assert caplog.text.count("'brand_new' is not in the schema") == 1
     assert caplog.text.count("undocumented response status 'PARTIAL'") == 1
-    # The WARNING says where the field was seen and the first value it held.
-    assert "(schema drift) at GET /stocks/v1/dividends; first value 1\n" in caplog.text
+    # Each read's drift is its own problem, with the field and the first value it held; each
+    # read's first warns once.
+    assert [(e.cause, e.field, e.stream_id) for e in events] == [
+        (ProblemCause.SCHEMA_DRIFT, "brand_new", 1),
+        (ProblemCause.SCHEMA_DRIFT, "brand_new", 2),
+    ]
+    assert all(e.detail.endswith("; first value 1") for e in events)
+    assert [a.split(":")[0] for a in alarms(caplog)] == [
+        "stocks.dividends table 1",
+        "stocks.dividends table 2",
+    ]
 
 
 def test_drift_of_a_per_symbol_request_names_the_symbol(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     last = {"conditions": [1], "exchange": 1, "price": 1.5, "size": 0.1, "timestamp": 1704310200000}
     body = {
@@ -2165,12 +2205,15 @@ def test_drift_of_a_per_symbol_request_names_the_symbol(
     }
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(body))
     serve_pairs(fake_rest)
-    with caplog.at_level(logging.WARNING):
-        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
-    assert (
-        "crypto.last: REST field 'new' is not in the schema; it is dropped (schema drift) "
-        f'at GET {CRYPTO_LAST_PATH}; symbol X:BTCUSD; first value "x"'
-    ) in caplog.messages
+    events = record_problems(session, monkeypatch)
+    fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
+    (drift,) = events
+    assert (drift.cause, drift.field, drift.where) == (
+        ProblemCause.SCHEMA_DRIFT,
+        "new",
+        f"GET {CRYPTO_LAST_PATH}",
+    )
+    assert drift.detail.endswith('; first sent for X:BTCUSD; first value "x"')
 
 
 def test_a_row_without_its_symbol_is_a_data_failure(
@@ -2188,27 +2231,38 @@ def test_a_row_without_its_symbol_is_a_data_failure(
 
 
 def test_one_odd_row_costs_the_call_only_itself(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A row without its symbol and one with a value that does not fit are withheld and
     # counted; the good row beside them lands.
     nameless = {key: value for key, value in AAPL_DIVIDEND.items() if key != "ticker"}
     odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([nameless, odd, AAPL_DIVIDEND])))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
         out = fetch(session, DIVIDENDS, symbols=["AAPL"])
     assert [(r["Id"], r["Frequency"]) for r in out] == [("E1", 4)]
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings == [
+    assert sorted((e.cause, e.symbol, e.field, e.rows) for e in events) == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Frequency", 1),
+        (ProblemCause.UNREADABLE_KEYS, None, "Ticker", 1),
+    ]
+    # The first of each cause warns, pointing at m.problems().
+    assert sorted(alarms(caplog)) == [
         (
-            "stocks.dividends: REST field 'frequency' held a value that does not fit its type; "
-            f"its row is withheld (schema drift) at GET {DIVIDENDS_PATH}; first value 4.5"
+            "stocks.dividends table 1: unconvertible_values: 1 rows of AAPL, "
+            + next(e.detail for e in events if e.cause is ProblemCause.UNCONVERTIBLE_VALUES)
+            + f" (at REST GET {DIVIDENDS_PATH}); m.problems() lists it and every later "
+            "unconvertible_values problem of this table, which the log shows at DEBUG only"
         ),
         (
-            "stocks.dividends: withheld 2 REST row(s) the library cannot read whole, the first "
-            f"at GET {DIVIDENDS_PATH}: {DIVIDENDS_PATH}: row 0: no Ticker (wire key 'ticker'), "
-            "which the dataset needs; such rows are withheld and counted: the running count is "
-            "logged at DEBUG and shown in the SchemaDrift of each live table that lost them"
+            f"stocks.dividends table 1: unreadable_keys: 1 rows, {DIVIDENDS_PATH}: row 0: no "
+            f"Ticker (wire key 'ticker'), which the dataset needs (at REST GET {DIVIDENDS_PATH}); "
+            "m.problems() lists it and every later unreadable_keys problem of this table, which "
+            "the log shows at DEBUG only"
         ),
     ]
 
@@ -2488,7 +2542,7 @@ def test_a_page_whose_rows_are_all_unreadable_beside_pages_read_whole_fails_noth
     out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
     assert [r["Price"] for r in out] == [float(i) for i in range(11) if i != bad]
     assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
-        (RowFault.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)
     ]
 
 
@@ -2717,8 +2771,12 @@ def test_futures_trades_by_date_read_each_session_by_its_date(
     assert [r["Timestamp"] for r in out] == [sunday["timestamp"], tuesday["timestamp"]]
 
 
-def test_a_futures_session_without_data_is_left_out_with_its_own_warning(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_a_futures_session_without_data_is_left_out_as_its_own_problem(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Each session is its own request series, so a 404 on a later session after rows of an
     # earlier one is that session's: it has no data, and the call goes on.
@@ -2726,18 +2784,24 @@ def test_a_futures_session_without_data_is_left_out_with_its_own_warning(
     fake_rest.reply(session_target("ESH5", "2025-01-21"), Reply(envelope([trade])))
     fake_rest.reply(session_target("ESH5", "2025-01-22"), Reply(status=404))
     fake_rest.reply(session_target("ESH5", "2025-01-23"), Reply(status=404))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
         out = history(
             session, FUTURES_TRADES, start="2025-01-21", end="2025-01-23", symbols=["ESH5"]
         )
     assert [r["Timestamp"] for r in out] == [trade["timestamp"]]
-    # One WARNING for the read, naming each session.
-    assert caplog.messages == [
+    # A problem for each session, and one WARNING for the read, naming the first.
+    why = "(HTTP 404 from /futures/v1/trades/{ticker})"
+    assert [(e.cause, e.symbol, e.detail) for e in events] == [
         (
-            "futures.trades: Massive has no data for 2 [ESH5 for the session 2025-01-22 (HTTP 404 "
-            "from /futures/v1/trades/{ticker}), ESH5 for the session 2025-01-23 (HTTP 404 from "
-            "/futures/v1/trades/{ticker})], so they are left out"
+            ProblemCause.UNAVAILABLE_SYMBOLS,
+            "ESH5",
+            f"Massive has no data for it for the session {day} {why}",
         )
+        for day in ("2025-01-22", "2025-01-23")
+    ]
+    assert caplog.messages == [
+        no_data_alarm("futures.trades", 1, "ESH5", why=f"for the session 2025-01-22 {why}")
     ]
 
 
@@ -3079,18 +3143,22 @@ def test_columns_a_path_does_not_carry_are_null(
     assert (row["Symbol"], row["CashAmount"], row["StrikePrice"]) == ("AAPL", 0.25, None)
 
 
-def test_a_missing_symbol_and_an_error_row_warn_once_per_session(
+def test_a_missing_symbol_warns_once_per_read_and_an_error_row_once_per_session(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
     serve_pairs(fake_rest)
-    with caplog.at_level(logging.WARNING, LOGGER):
+    with caplog.at_level(logging.WARNING):
         for _ in range(2):
             assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
             (row,) = fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
             assert (row["Symbol"], row["Error"]) == ("I:VIX", "NOT_ENTITLED")
-    assert caplog.text.count("no data for 1 [X:ETHUSD (") == 1
+    # Each read is its own table in m.problems(), so each warns of its first missing symbol.
+    why = "(HTTP 404 from /v1/last/crypto/{from}/{to})"
+    assert alarms(caplog) == [
+        no_data_alarm("crypto.last", read, "X:ETHUSD", why=why) for read in (1, 3)
+    ]
     assert caplog.text.count("for 1 [I:VIX (NOT_ENTITLED: Not entitled)]") == 1
 
 
@@ -3559,9 +3627,9 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
         )
     assert [(r["Symbol"], r["Close"]) for r in odd] == [("C:GBPUSD", 4.0)]
     assert [(e.cause, e.symbol, e.field) for e in events] == [
-        (RowFault.UNCONVERTIBLE_VALUES, "C:EURUSD", "TimestampStart")
+        (ProblemCause.UNCONVERTIBLE_VALUES, "C:EURUSD", "TimestampStart")
     ]
-    assert events[0].reason == (
+    assert events[0].detail == (
         "stamped at 2025-03-03T05:00:00+00:00, which Massive is not known to use for a 1-day bar"
     )
     [warning] = unexpected_stamps(caplog)
@@ -4122,16 +4190,13 @@ def test_a_symbol_with_no_data_returns_no_rows(
 ) -> None:
     # Massive answers HTTP 404 for a symbol it has nothing for: no rows, one WARNING.
     fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    with caplog.at_level(logging.WARNING):
         out = history(
             session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["MSFT", "ZZZZ"]
         )
     assert out == []
     assert caplog.messages == [
-        (
-            "stocks.trades: Massive has no data for 1 [ZZZZ (HTTP 404 from "
-            "/v3/trades/{stockTicker})], so they are left out"
-        )
+        no_data_alarm("stocks.trades", 1, "ZZZZ", why="(HTTP 404 from /v3/trades/{stockTicker})")
     ]
 
 
@@ -4864,12 +4929,17 @@ def test_a_unified_row_without_a_ticker_or_a_request_without_one_refuses_nothing
 # --- Bounded and explaining log records ---------------------------------------------------------
 
 
-def test_the_missing_symbols_of_a_read_warn_once_together_and_each_at_debug(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_the_missing_symbols_of_a_read_warn_once_and_each_is_a_problem(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
+    events = record_problems(session, monkeypatch)
     with caplog.at_level(logging.DEBUG, LOGGER):
-        for _ in range(2):  # the second read names no new symbol, so it warns of nothing
+        for _ in range(2):  # each read is its own table: each warns of its first
             history(
                 session,
                 TRADES,
@@ -4877,18 +4947,24 @@ def test_the_missing_symbols_of_a_read_warn_once_together_and_each_at_debug(
                 end="2025-03-03",
                 symbols=["MSFT", "YYYY", "ZZZZ"],
             )
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings == [
-        (
-            "stocks.trades: Massive has no data for 2 [YYYY (HTTP 404 from "
-            "/v3/trades/{stockTicker}), ZZZZ (HTTP 404 from /v3/trades/{stockTicker})], so they "
-            "are left out"
-        )
+    why = "(HTTP 404 from /v3/trades/{stockTicker})"
+    assert alarms(caplog) == [
+        no_data_alarm("stocks.trades", read, "YYYY", why=why) for read in (1, 2)
     ]
-    debug = [r.getMessage() for r in caplog.records if " has no data (" in r.getMessage()]
-    assert len(debug) == 4  # each symbol of each read
-    assert all(r.startswith("stocks.trades: ") and "HTTP 404 from" in r for r in debug)
-    assert any("ZZZZ has no data (HTTP 404 from /v3/trades/{stockTicker}" in r for r in debug)
+    # Each symbol of each read is a problem, logged at DEBUG, and the read names them
+    # together at DEBUG.
+    assert [(e.cause, e.stream_id, e.symbol, e.detail) for e in events] == [
+        (ProblemCause.UNAVAILABLE_SYMBOLS, read, symbol, f"Massive has no data for it {why}")
+        for read in (1, 2)
+        for symbol in ("YYYY", "ZZZZ")
+    ]
+    debug = [r.getMessage() for r in caplog.records if r.name == LOGGER]
+    each = [m for m in debug if " has no data (" in m]
+    assert len(each) == 4  # each symbol of each read
+    assert all(m.startswith("stocks.trades: ") and "HTTP 404 from" in m for m in each)
+    together = [m for m in debug if "Massive has no data for" in m]
+    left_out = f"stocks.trades: Massive has no data for 2 [YYYY {why}, ZZZZ {why}], so they are"
+    assert together == [f"{left_out} left out"] * 2
 
 
 def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data(
@@ -5284,7 +5360,9 @@ def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
         "not found", status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
     )
     outcome = _not_found(session, error, symbol="ZZZZ", requests=0)
-    assert outcome == rest._Outcome((), 1, missing="ZZZZ (HTTP 404 from /v3/trades/{stockTicker})")
+    missing = rest._Missing("ZZZZ", "(HTTP 404 from /v3/trades/{stockTicker})")
+    assert outcome == rest._Outcome((), 1, missing=missing)
+    assert str(missing) == "ZZZZ (HTTP 404 from /v3/trades/{stockTicker})"
 
 
 def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:
@@ -5376,12 +5454,18 @@ def test_a_stream_splits_a_pair_through_the_sessions_rest_transport(
 
 
 def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The lookup reported it under unreadable_symbols: a poll names it in the cycle's Error,
-    # and no read reports it again as a symbol with no data.
+    # A poll leaves it out of the cycle, and a read lists it as an unreadable_symbols problem
+    # of its table, never as a symbol with no data.
     unjoined = _ticker("X:DOTUSD", "DOT", "USDT")
     fake_rest.reply(TICKERS_PATH, Reply(envelope([unjoined])), Reply(envelope([])))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
     reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
     request = Request(symbols=("X:DOTUSD",), params=(("date", date(2025, 3, 3)),))
     _, left_out = reader._plan_cycle(CRYPTO_OPEN_CLOSE, request, ("X:DOTUSD",), cancel=Cancel())
@@ -5395,6 +5479,15 @@ def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
         assert fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"]) == []
     assert [r for r in caplog.records if r.name == LOGGER] == []  # not as no data
     assert sent_data(fake_rest) == []
+    # The read, not the plan, lists it: once, for the fetch that left it out.
+    [event] = events
+    assert (event.cause, event.symbol, event.field, event.policy) == (
+        ProblemCause.UNREADABLE_SYMBOLS,
+        "X:DOTUSD",
+        "Symbol",
+        dm.OnError.LOG,
+    )
+    assert event.detail.endswith("which do not join to it; the pair is never requested")
 
 
 def test_ignored_withheld_rows_log_no_warning_but_still_reach_the_session(
@@ -5422,7 +5515,7 @@ def test_ignored_withheld_rows_log_no_warning_but_still_reach_the_session(
         with pytest.raises(RowDataError, match=r"\(1 under unconvertible_values\)"):
             fetch(m, DIVIDENDS, symbols=["AAPL"], on_error=strict)
     assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
-        (RowFault.UNCONVERTIBLE_VALUES, "AAPL", "Frequency", 1)
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Frequency", 1)
     ] * 2
 
 
@@ -5440,7 +5533,7 @@ def test_a_row_whose_ticker_list_cannot_be_read_is_withheld_not_left_out(
     out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
     assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [(1, "MSFT")]
     assert [(e.cause, e.field, e.rows) for e in events] == [
-        (RowFault.UNCONVERTIBLE_VALUES, "Tickers", 1)
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Tickers", 1)
     ]
 
 

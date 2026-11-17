@@ -60,12 +60,13 @@ HISTORY_SECTIONS: Final = (
     "compare-stocks",
     "chart-closes",
     "follow-the-news",
+    "see-problems",
     "stop-live-tables",
     "drive-with-a-watchlist",
     "convert-symbols",
 )
-"""The README's examples that read stock history with no setting, which follow its hook:
-Examples 1 to 6, the conversion of Yahoo tickers that ends Example 6, and Example 13."""
+"""The README's examples that need no setting, which follow its hook: Examples 1 to 6, the
+conversion of Yahoo tickers that ends Example 6, and Examples 13 and 14."""
 
 LIVE_SECTIONS: Final = (
     "what-your-plan-allows",

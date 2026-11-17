@@ -10,10 +10,11 @@ running after the session that made it is no longer reachable.
 These tests assert what only Massive can show: that the tables fill with real data, with
 plausible counts; that a reader with no setting gets them filled whatever limit Massive sets;
 and what each stock session sends. What the library does with the data, such as Example 2's
-ranking or Example 13's closed-session error, `tests/test_docs.py` checks against the fake
+ranking or Example 14's closed-session error, `tests/test_docs.py` checks against the fake
 servers. The groups follow the README:
 
-- the hook and Examples 1 to 6 and 13, with no setting, and again paced by a declared limit;
+- the hook and Examples 1 to 6, 13, and 14, with no setting, and again paced by a declared
+  limit;
 - Examples 7 to 12, which load the settings file Example 7 saves, checked against what the
   stock session of the moment sends: pre-market, regular, after hours, or overnight;
 - Example 7 without its setting, on a key whose stocks data Massive labels delayed;
@@ -196,7 +197,7 @@ def _console(tmp_path: Path, console_command: ConsoleCommand, evidence: Evidence
     return _Run(doc_examples.Console(tmp_path, command), evidence)
 
 
-# --- The hook and Examples 1 to 6 and 13 ----------------------------------------------------------
+# --- The hook and Examples 1 to 6, 13, and 14 ---------------------------------------------------
 
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
@@ -211,7 +212,7 @@ def test_the_history_examples_fill_with_no_setting(
     skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 6 and 13 fill with no setting, by a new reader's path.
+    """Whether the hook and Examples 1 to 6, 13, and 14 fill with no setting, on a reader's path.
 
     Runs them back to back in one console with the main key and no setting, as a new reader
     does. Their sessions get a rate governor of their own, as in a new server, not the run's,
@@ -268,7 +269,7 @@ def test_the_history_examples_fill_back_to_back_at_a_declared_pace(
     skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 6 and 13 fill with real data, at a declared pace.
+    """Whether the hook and Examples 1 to 6, 13, and 14 fill with real data, at a declared pace.
 
     Runs them back to back in one console while a session that declares stocks limited
     (`rest_requests_per_minute`, a user setting: the owner's stocks limit, else 5) holds the
@@ -303,15 +304,16 @@ def _run_history_examples(
     skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Run the hook and Examples 1 to 6 and 13 in one console, and check what Massive sent.
+    """Run the hook and Examples 1 to 6, 13, and 14 in one console; check what Massive sent.
 
     Checks: the hook's year of Apple's bars; Example 1's five daily bars with their columns;
     Example 2's day of more than 1,000 stocks, none over the counter, and its top 20;
     Example 3's three returns; Example 4's year of Nvidia's bars; Example 5's headlines for
     each of its stocks, at most ten each, the limit Massive applies per ticker; Example 6's
     four previous closes, and the previous closes of the three Yahoo tickers that end it,
-    under Massive's spellings. Example 13 and Example 6's edit run as written; what they do is
-    the library's, which `tests/test_docs.py` checks. Each example reads in the background,
+    under Massive's spellings; Example 13's Apple row, and its `ZZZZ` problem row quoting
+    Massive's HTTP 404. Example 14 and Example 6's edit run as written; what they do is the
+    library's, which `tests/test_docs.py` checks. Each example reads in the background,
     so Massive's refusal fails its table instead of raising: after each wait, a refusal in its
     session's `m.streams()` skips the test, quoting Massive, before its rows are checked.
     """
@@ -347,7 +349,47 @@ def _run_history_examples(
     evidence(f"example 6, Yahoo tickers: {sorted(_symbols(table_rows(yahoo)))}, filled: {filled}")
     skip_if_not_entitled(converting["m"])
     assert filled, f"the Yahoo tickers' closes did not fill within {_FILL_WAIT:.0f} s"
+    problems = run.section("see-problems", "m", "problems", "details")
+    _check_problems(
+        problems,
+        table_rows=table_rows,
+        skip_if_not_entitled=skip_if_not_entitled,
+        evidence=evidence,
+    )
     run.section("stop-live-tables")
+
+
+def _check_problems(
+    ran: Names,
+    *,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
+) -> None:
+    """Check Example 13: Apple's details, and `ZZZZ` as an `unavailable_symbols` row.
+
+    Massive answers a ticker it doesn't list with HTTP 404 on ticker details, which the README
+    states; the row's `Detail` names that answer. A refusal of the read skips, quoting Massive.
+    """
+
+    def missing() -> list[dict[str, Any]]:
+        return [
+            row
+            for row in table_rows(ran["problems"])
+            if row["Cause"] == "unavailable_symbols" and row["Symbol"] == "ZZZZ"
+        ]
+
+    def apple() -> set[str]:
+        return _symbols(table_rows(ran["details"]))
+
+    found = _wait(lambda: bool(missing()) and apple() == {"AAPL"}, _FILL_WAIT)
+    rows = missing()
+    evidence(f"example 13: details {sorted(apple())}, problems {rows}, found: {found}")
+    skip_if_not_entitled(ran["m"])
+    assert found, f"Example 13's rows did not appear within {_FILL_WAIT:.0f} s"
+    [row] = rows
+    assert row["Action"] == "SKIPPED"
+    assert "HTTP 404" in row["Detail"]
 
 
 def _check_history_examples(

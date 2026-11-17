@@ -13,11 +13,14 @@ is a listed index's ticker (`SPX`) gets the reference of its first contract
 answer is kept for the session and shared between every caller, so a stock and an index that
 share a bare ticker each get their own root's answer. The pre-filter assumes the underlying of
 every option on an index is a ticker on Massive's index list, active or retired, which a live
-test checks; an index missing from it would keep its bare ticker with no warning.
+test checks; an index missing from it would keep its bare ticker with no warning. The rows of
+a root the reference can't classify are withheld as `unreadable_symbols`, since their
+underlying may be an index's without its `I:` (`canonical_underlyings`).
 
 The REST transport (`_ingest/rest.py`) holds the session's kinds in its `RestState` and reads
-them through a `RestReader`, whose patience and error conversion the lookups use. The
-single-flight sharing itself is `SharedLookup`'s (`_ingest/shared_lookup.py`).
+them through a `RestReader`, whose patience and error conversion the lookups use, and reports
+the withheld rows as problems of its table. The single-flight sharing itself is
+`SharedLookup`'s (`_ingest/shared_lookup.py`).
 """
 
 from __future__ import annotations
@@ -37,8 +40,8 @@ from deephaven_massive._errors import LIBRARY_BUG, ErrorSource, MassiveError, co
 from deephaven_massive._ingest.rate_limits import OTHER
 from deephaven_massive._ingest.rest_requests import largest_page
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
-from deephaven_massive._log_limits import BoundedLog
-from deephaven_massive._massive import WireError
+from deephaven_massive._massive import RowFault, WireError
+from deephaven_massive._tables.withheld import Withheld, mark, with_marks, withhold_rows
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -46,7 +49,13 @@ if TYPE_CHECKING:
     from deephaven_massive._ingest.crypto_tickers import TickerListReader
     from deephaven_massive._massive import Cancel, Patience, RestClient
 
-__all__ = ["REREAD_AFTER", "KindOf", "OptionRootKinds", "RootKind", "canonical_underlyings"]
+__all__ = [
+    "REREAD_AFTER",
+    "KindOf",
+    "OptionRootKinds",
+    "RootKind",
+    "canonical_underlyings",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -413,41 +422,39 @@ _ROOT: Final = "OptionRoot"
 _SYMBOL: Final = "Symbol"
 _DATE: Final = "Date"
 
-_UNKNOWN_LIMIT: Final = 100
-"""The most option roots logged per process as ones the reference could not classify."""
-_unknown_roots: Final = BoundedLog(logger, limit=_UNKNOWN_LIMIT, level=logging.WARNING)
-"""Roots whose underlying keeps its bare ticker, one WARNING each."""
-
 
 def canonical_underlyings(
     batches: Sequence[pa.RecordBatch],
     kind: KindOf,
     *,
     dataset: str,
-) -> list[pa.RecordBatch]:
-    """Give the `Underlying` of each row on an index its `I:`, by the row's option root.
+) -> Withheld:
+    """Give the `Underlying` of each row on an index its `I:`, and withhold the rows it can't.
 
     For each root among a page's rows whose `Underlying` is bare, `kind` is asked once, with
-    the first such row's contract and trading day; rows of an `INDEX` root get `I:`. A root
-    Massive's reference could not classify (`UNKNOWN`) keeps its rows' bare ticker, since
-    nothing says it is an index: one WARNING per root per process says so. A row without
-    Massive's `root` takes the root of its `Symbol`. A null `Underlying` stays null.
+    the first such row's contract and trading day; rows of an `INDEX` root get `I:`. Rows of
+    a root Massive's reference could not classify (`UNKNOWN`) are withheld as
+    `unreadable_symbols`, since their `Underlying` may be an index's without its `I:`, and the
+    library publishes only canonical tickers. A row without Massive's `root` takes the root of
+    its `Symbol`. A null `Underlying` stays null.
 
     Args:
-        batches: A page's rows in the dataset's schema, with their `Date`.
+        batches: A page's rows in the dataset's schema, with their `Date`; at least one.
         kind: Returns a root's kind (`RestReader.root_kind`).
         dataset: The dataset's name, for messages.
 
     Returns:
-        The rows, each index underlying with its `I:`.
+        The rows to publish, each index underlying with its `I:`, and the withheld rows
+        grouped by their underlying as Massive sent it, for the reader to report.
 
     A failed lookup raises the `MassiveError` of `kind`.
     """
-    return [_canonical(batch, kind, dataset=dataset) for batch in batches]
+    marked = [_canonical(batch, kind, dataset=dataset) for batch in batches]
+    return withhold_rows(pa.Table.from_batches(marked), symbol=None)
 
 
 def _canonical(batch: pa.RecordBatch, kind: KindOf, *, dataset: str) -> pa.RecordBatch:
-    """Give one batch's index underlyings their `I:` (`canonical_underlyings`).
+    """Give one batch's index underlyings their `I:`, and mark the rows of unclassified roots.
 
     Args:
         batch: The rows.
@@ -455,12 +462,13 @@ def _canonical(batch: pa.RecordBatch, kind: KindOf, *, dataset: str) -> pa.Recor
         dataset: The dataset's name.
 
     Returns:
-        The rows, each index underlying with its `I:`.
+        The rows with the mark columns (`withheld.with_marks`), each index underlying with
+        its `I:` and each row of an unclassified root marked `UNREADABLE_SYMBOLS`.
     """
     underlyings = batch.column(_UNDERLYING)
     bare = pc.fill_null(pc.invert(pc.starts_with(underlyings, _INDEX_PREFIX)), fill_value=False)
     if not pc.any(bare).as_py():
-        return batch
+        return with_marks(batch, {}, sent=underlyings)
     symbols = batch.column(_SYMBOL)
     roots = pc.coalesce(batch.column(_ROOT), option_roots(symbols))
     firsts: dict[str, tuple[str, str, str]] = {}
@@ -477,6 +485,7 @@ def _canonical(batch: pa.RecordBatch, kind: KindOf, *, dataset: str) -> pa.Recor
         if wanted and isinstance(root, str) and root not in firsts:
             firsts[root] = (str(underlying), str(symbol), str(day))
     index_roots: list[str] = []
+    unknown: dict[str, str] = {}
     for root, (underlying, contract, day) in firsts.items():
         found = kind(root, underlying=underlying, contract=contract, day=day)
         match found:
@@ -485,29 +494,43 @@ def _canonical(batch: pa.RecordBatch, kind: KindOf, *, dataset: str) -> pa.Recor
             case RootKind.OTHER:
                 pass
             case RootKind.UNKNOWN:
-                _unknown_roots.log(
-                    root,
-                    "%s: Massive's Contract Overview gives no CFI code for option root %s (asked "
-                    "about %s as of %s), so its rows keep the underlying as Massive sent it, "
-                    "without an index's I: prefix",
-                    dataset,
-                    root,
-                    contract,
-                    day,
+                unknown[root] = (
+                    f"Massive's Contract Overview gives no CFI code for option root {root} "
+                    f"(asked about {contract} as of {day}), so the library can't tell whether "
+                    f"the underlying {underlying} is an index ({_INDEX_PREFIX}{underlying}) or "
+                    "not"
                 )
             case _:
                 assert_never(found)
-    if not index_roots:
-        return batch
     on_index = pc.and_(bare, pc.is_in(roots, value_set=pa.array(index_roots, pa.string())))
-    prefixed = pc.binary_join_element_wise(_INDEX_PREFIX, underlyings, "")
+    if index_roots:
+        prefixed = pc.binary_join_element_wise(_INDEX_PREFIX, underlyings, "")
+        logger.debug(
+            "%s: %d rows of the index option roots %s get the I: prefix",
+            dataset,
+            pc.sum(on_index).as_py() or 0,
+            index_roots,
+        )
+        position = batch.schema.get_field_index(_UNDERLYING)
+        batch = batch.set_column(
+            position, batch.schema.field(position), pc.if_else(on_index, prefixed, underlyings)
+        )
+    marked = with_marks(batch, {}, sent=underlyings)
+    if not unknown:
+        return marked
+    of_unknown = pc.and_(bare, pc.is_in(roots, value_set=pa.array(list(unknown), pa.string())))
     logger.debug(
-        "%s: %d rows of the index option roots %s get the I: prefix",
+        "%s: %d rows of the option roots %s, which Massive's Contract Overview could not "
+        "classify, are withheld",
         dataset,
-        pc.sum(on_index).as_py() or 0,
-        index_roots,
+        pc.sum(of_unknown).as_py() or 0,
+        list(unknown),
     )
-    position = batch.schema.get_field_index(_UNDERLYING)
-    return batch.set_column(
-        position, batch.schema.field(position), pc.if_else(on_index, prefixed, underlyings)
+    names = roots.to_pylist()
+    return mark(
+        marked,
+        RowFault.UNREADABLE_SYMBOLS,
+        of_unknown,
+        field=_UNDERLYING,
+        reason=lambda row: unknown[names[row]],
     )

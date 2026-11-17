@@ -41,13 +41,19 @@ from deephaven_massive._tables.liveness import (
     new_scope,
     release_scope,
 )
+from deephaven_massive._tables.problem_events import (
+    Problem,
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+)
 from deephaven_massive._tables.symbol_read_rows import SymbolReadState
 from deephaven_massive._tables.transports import (
     SymbolFailure,
     SymbolOutcome,
     SymbolRows,
 )
-from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skipped_rows_text
+from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch
 from tests._fakes.followed_read import QuietRead
 
 if TYPE_CHECKING:
@@ -61,6 +67,20 @@ SPEC = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     channels={NotBars.ANY: "T"},
+)
+
+PROBLEM = ProblemEvent(
+    cause=ProblemCause.NONCANONICAL_SYMBOLS,
+    action=ProblemAction.SKIPPED,
+    dataset=SPEC.name,
+    stream_id=1,
+    where="a symbol table",
+    symbol="msft",
+    field=None,
+    rows=1,
+    detail="a symbol table holds 'msft'",
+    at=1,
+    policy=dm.OnError.LOG,
 )
 
 Rows = Callable[[], list[dict[str, Any]]]
@@ -450,16 +470,60 @@ def test_a_row_that_is_not_a_ticker_is_skipped_and_listed(
     massive_session: dm.MassiveSession,
     stream_rows: Rows,
     dh_to_pylist: ToList,
+    problem_rows: Rows,
 ) -> None:
     script = Script(massive_session)
     wl = watchlist("AAPL", "msft")
     result = follow(massive_session, wl, script)
     wait_rows(dh_to_pylist, result, {"AAPL": 2})
-    until(lambda: "'msft'" in (stream_rows()[0]["Error"] or ""))
+
+    def skipped() -> list[tuple[object, ...]]:
+        return [(r["Cause"], r["Symbol"], r["EndedAt"] is not None) for r in problem_rows()]
+
+    # The row is a span of the read's problems, which ends once the row is deleted.
+    until(lambda: skipped() == [("noncanonical_symbols", "msft", False)])
+    assert stream_rows()[0]["Error"] is None
     delete(wl, "msft")
-    until(lambda: stream_rows()[0]["Error"] is None)
+    until(lambda: skipped() == [("noncanonical_symbols", "msft", True)])
     assert script.calls == [("AAPL",)]
     massive_session.release(result)
+
+
+def test_a_value_canonicalize_symbols_refuses_is_listed_until_its_row_is_deleted(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    problem_rows: Rows,
+) -> None:
+    # The converted table holds a null for the refused value, which the read skips like any
+    # null; the read still lists the value among its problems while the input holds it.
+    script = Script(massive_session)
+    wl = watchlist("AAPL", "no pe!")
+    converted = dm.canonicalize_symbols(wl, AssetClass.STOCKS)
+    result = follow(massive_session, converted, script)
+    wait_rows(dh_to_pylist, result, {"AAPL": 2})
+
+    def skipped() -> list[tuple[object, ...]]:
+        return [(r["Cause"], r["Symbol"], r["EndedAt"] is not None) for r in problem_rows()]
+
+    until(lambda: skipped() == [("noncanonical_symbols", "no pe!", False)])
+    delete(wl, "no pe!")
+    until(lambda: skipped() == [("noncanonical_symbols", "no pe!", True)])
+    assert script.calls == [("AAPL",)]
+    massive_session.release(result)
+
+
+def test_a_freed_session_gets_no_problem_of_the_symbol_table(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The skipped values hold the session weakly: once it is freed, their reports go nowhere.
+    core = massive_session._core
+    reported: list[Problem] = []
+    monkeypatch.setattr(core, "problems", reported.extend)
+    followed_read._report_problems(lambda: core, [PROBLEM])
+    followed_read._report_problems(lambda: None, [PROBLEM])
+    assert reported == [PROBLEM]
 
 
 def test_a_defect_of_a_read_fails_the_table_naming_it(
@@ -920,9 +984,6 @@ class _Heard:
     ) -> None:
         self.reports.append(("changed", (added, removed, step)))
 
-    def skipped(self, _read: object, text: str | None) -> None:
-        self.reports.append(("skipped", text))
-
     def invalid(self, _read: object, message: str) -> None:
         self.reports.append(("invalid", message))
 
@@ -943,15 +1004,13 @@ def test_the_router_hands_on_the_replay_first_then_every_report_in_order() -> No
     other = threading.Thread(target=listener, name="update graph stand-in")
     other.start()
     other.join(TIMEOUT)
-    router.on_skipped(("msft",))
     router.finish(read)
-    router.on_skipped(())  # handed on at once now
+    router.on_invalid("a later bad row")  # handed on at once now
     assert heard.reports == [
         ("baseline", (frozenset({"AAPL", "MSFT"}), 7)),
         ("changed", (frozenset({"NVDA"}), frozenset({"MSFT"}), 8)),
         ("invalid", "a bad row"),
-        ("skipped", skipped_rows_text(("msft",))),
-        ("skipped", None),
+        ("invalid", "a later bad row"),
     ]
 
 
@@ -962,7 +1021,6 @@ def test_a_stopped_coordinator_drops_every_report(massive_session: dm.MassiveSes
     coordinator.follow(read, None)  # the session closed: nothing starts
     coordinator.changed(read, frozenset({"AAPL"}), frozenset(), step=1)
     coordinator.invalid(read, "a bad row")
-    coordinator.skipped(read, None)
     coordinator.wake()
     assert coordinator.thread is None
     assert coordinator.following == 0
