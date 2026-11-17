@@ -522,8 +522,11 @@ def check_order(start: date | datetime, end: date | datetime) -> None:
             `MIXED_BOUNDS`, or if the range is reversed.
     """
     if isinstance(start, datetime) is not isinstance(end, datetime):
+        start_kind = "a datetime" if isinstance(start, datetime) else "a date"
+        end_kind = "a datetime" if isinstance(end, datetime) else "a date"
         raise ValueError(
-            f"start={start!r} and end={end!r} mix a date and a datetime. {MIXED_BOUNDS}"
+            f"start={start.isoformat()} is {start_kind} and end={end.isoformat()} is "
+            f"{end_kind}. {MIXED_BOUNDS}"
         )
     if isinstance(start, datetime) and isinstance(end, datetime):
         # In UTC: two datetimes sharing one tzinfo compare by wall clock and ignore `fold`.

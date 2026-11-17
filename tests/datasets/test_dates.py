@@ -219,15 +219,15 @@ def test_equal_dates_are_one_day_and_equal_datetimes_an_empty_range() -> None:
 )
 @pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.FUTURES])
 def test_mixed_bounds_are_refused(start: DateLike, end: DateLike, asset_class: AssetClass) -> None:
-    with pytest.raises(ValueError, match=r"^start=.* and end=.* mix a date and a datetime\. "):
+    mixed = r"^start=\S+ is a date(time)? and end=\S+ is a date(time)?\. "
+    with pytest.raises(ValueError, match=mixed):
         bounds(_spec(asset_class), start, end, now=NOW)
 
 
 def test_the_mixed_bounds_message_names_both_bounds_and_the_fix() -> None:
     message = (
-        "start=datetime.date(2025, 3, 3) and end=datetime.datetime(2025, 3, 4, 0, 0, "
-        "tzinfo=datetime.timezone.utc) mix a date and a datetime. Pass two dates for whole "
-        "days, or two datetimes for exact instants."
+        "start=2025-03-03 is a date and end=2025-03-04T00:00:00+00:00 is a datetime. Pass two "
+        "dates for whole days, or two datetimes for exact instants."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         bounds(_spec(AssetClass.STOCKS), "2025-03-03", "2025-03-04T00:00:00Z", now=NOW)

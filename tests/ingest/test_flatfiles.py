@@ -2604,8 +2604,7 @@ def test_mixed_futures_bounds_are_refused_before_any_read(
 ) -> None:
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     refused = (
-        "start=datetime.date(2024, 12, 17) and end=datetime.datetime(2024, 12, 17, 16, 0, "
-        "tzinfo=zoneinfo.ZoneInfo(key='America/Chicago')) mix a date and a datetime. Pass two "
+        "start=2024-12-17 is a date and end=2024-12-17T16:00:00-06:00 is a datetime. Pass two "
         "dates for whole days, or two datetimes for exact instants."
     )
     with pytest.raises(ValueError, match=rf"^{re.escape(refused)}$"):
