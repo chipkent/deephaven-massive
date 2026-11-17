@@ -2691,6 +2691,9 @@ def _tier_checked_files(root: Path) -> list[Path]:
 def _plan_references(root: Path, files: Iterable[Path]) -> list[str]:
     """Return each line of the Python files that names a plan by its tier, as `path:line: text`.
 
+    A reference wrapped onto the next line (`Only Currencies` then `Business includes it.`) is
+    reported at the line it starts on.
+
     Args:
         root: The repository root, which the paths are shown from.
         files: The Python files to read.
@@ -2702,8 +2705,13 @@ def _plan_references(root: Path, files: Iterable[Path]) -> list[str]:
     for path in files:
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines()
-        for number, words in sorted(_python_prose(text).items()):
-            if _PLAN_REFERENCE.search(words):
+        prose = _python_prose(text)
+        for number, words in sorted(prose.items()):
+            following = prose.get(number + 1, "")
+            wrapped = _PLAN_REFERENCE.search(f"{words} {following}") and not (
+                _PLAN_REFERENCE.search(following)
+            )
+            if _PLAN_REFERENCE.search(words) or wrapped:
                 found.append(f"{path.relative_to(root)}:{number}: {lines[number - 1].strip()}")
     return found
 
@@ -2742,6 +2750,19 @@ def test_a_plan_reference_is_found_by_its_tier(
     path.write_text(f"{line}\n", encoding="utf-8")
     expected = [f"src/x.py:1: {line}"] if names_a_plan else []
     assert _plan_references(tmp_path, [path]) == expected
+
+
+def test_a_plan_reference_wrapped_onto_the_next_line_is_found_where_it_starts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "src" / "x.py"
+    path.parent.mkdir(parents=True)
+    lines = ['"""Only Currencies', "Business includes it.", "A Basic key.", 'Done."""']
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert _plan_references(tmp_path, [path]) == [
+        'src/x.py:1: """Only Currencies',
+        "src/x.py:3: A Basic key.",
+    ]
 
 
 def test_the_tier_checked_files_are_the_namespaces_and_the_listed_tests(tmp_path: Path) -> None:
