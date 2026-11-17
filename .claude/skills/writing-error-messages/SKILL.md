@@ -54,8 +54,9 @@ A message passes when all seven hold.
    the type refusal `<name> must be <expected>, not <actual>`, a lower-case fragment with no
    period, as Python's own are. A value refusal reads `<name>=<value!r> is not <expected>.` A
    sentence starts with a capital unless its first word is a value or a code name. No
-   semicolons. No parentheses except around a unit, a local time, or a `request_id`. No
-   newline and no code block: link the docs section that holds the code.
+   semicolons. No parenthetical asides: parentheses appear only in code the reader types and
+   around a unit, a local time, or a `request_id`. No newline and
+   no code block: link the docs section that holds the code.
 7. **Advice that works.** A test runs every call, setting, or value the message tells the reader
    to use, on the case the message describes, and checks the outcome. A test pins the message's
    full text.
