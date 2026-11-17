@@ -75,7 +75,7 @@ LIVE_SECTIONS: Final = (
     "backfill-then-live",
     "dashboard",
 )
-"""The README's examples that load the settings file and stream stocks, 8 to 13, in the
+"""The README's examples that load the settings file and stream stocks, 7 to 12, in the
 README's order."""
 
 UNRUN_SECTIONS: Final = {

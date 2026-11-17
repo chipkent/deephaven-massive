@@ -32,6 +32,10 @@ gate, and what to do when a refresh adds something new.
   its pages, rendered by
   `scripts/render_reference.py`, which owns the whole directory: it rewrites stale pages and
   deletes any file it did not render.
+- **The README's plans table**: which of Massive's plans include the data the tutorial reads,
+  rendered by the same command from the same plan tables, between two marker lines of
+  `README.md`. Its rows name Massive's pages (`_datasets/readme_plans.py`, `ROWS`), and its
+  columns are the plans those pages list.
 
 Each WebSocket channel in `ws.json` also carries the hosts its page's "Connection" table
 lists, one per feed (`Real-Time`, `Delayed`, `Business`). The library streams from those
@@ -54,8 +58,8 @@ uv run python scripts/refresh.py                             # regenerate spec/*
 uv run python scripts/refresh.py --fetch                     # replace the snapshot with the live sources
 uv run python scripts/refresh.py --check --report drift.md   # write the drift report; changes nothing
 uv run pytest tests/massive/refresh -q                       # the parity test and every refresh gate
-uv run python scripts/render_reference.py                    # regenerate docs/datasets/
-uv run pytest tests/datasets/test_column_reference.py -q     # the column-reference parity tests
+uv run python scripts/render_reference.py                    # regenerate docs/datasets/ and the README's plans table
+uv run pytest tests/datasets/test_column_reference.py tests/datasets/test_readme_plans.py -q   # their parity tests
 ```
 
 ## Taking a change from Massive
@@ -81,8 +85,8 @@ uv run pytest tests/datasets/test_column_reference.py -q     # the column-refere
    dataset whose columns the refresh changed (`columns: m.forex.quotes: added …; removed …;
    retyped …`): the refresh itself cannot see datasets, so this is where a refresh shows what
    it does to each table. Put those lines in the pull request.
-6. Put the snapshot diff, the `spec/*.json` diff, the hand-input lines, and the regenerated
-   `docs/datasets/` in one pull request.
+6. Put the snapshot diff, the `spec/*.json` diff, the hand-input lines, the regenerated
+   `docs/datasets/`, and the README's regenerated plans table in one pull request.
 
 Rerun `render_reference.py` too whenever a dataset, a namespace, a dataset summary, or the
 column-description rule changes; the parity test fails until you do.

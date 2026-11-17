@@ -1,4 +1,4 @@
-"""Regenerate the generated user docs: `docs/datasets/` and the settings of `docs/configuration.md`.
+"""Regenerate the generated user docs: `docs/datasets/`, configuration settings, README plans.
 
 Run it from a source checkout:
 
@@ -16,10 +16,11 @@ what it does to each table.
 
 It also rewrites the generated part of `docs/configuration.md`, between its two marker lines,
 from `MassiveConfig`: each setting's settings-file key, docstring entry, values, and default.
-The rest of that page is written by hand and kept as it is.
-All the logic is in `deephaven_massive._datasets.column_reference` and
-`deephaven_massive._config`, where the unit tests and the coverage gate reach it; this script
-only wires it up.
+And it rewrites README.md's plans table, between its two marker lines, from the plan tables of
+Massive's pages. The rest of both pages is written by hand and kept as it is.
+All the logic is in `deephaven_massive._datasets.column_reference`,
+`deephaven_massive._datasets.readme_plans`, and `deephaven_massive._config`, where the unit
+tests and the coverage gate reach it; this script only wires it up.
 
 Exit status: 0 on success; 1 when rendering or syncing raises, after the interpreter has
 printed the traceback. The process leaves through `os._exit` once its output is flushed,
@@ -32,8 +33,12 @@ import atexit
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from deephaven_server import Server
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _exit() -> None:
@@ -60,12 +65,16 @@ from deephaven_massive._datasets.column_reference import (  # noqa: E402 - needs
     render,
     sync,
 )
+from deephaven_massive._datasets.readme_plans import with_plans_table  # noqa: E402 - needs the server above
 
 _DIRECTORY = Path(__file__).resolve().parent.parent / "docs" / "datasets"
 """The dataset reference's directory, found from this script's place in the checkout."""
 
 _CONFIGURATION_PAGE = _DIRECTORY.parent / "configuration.md"
 """The settings page, whose generated part this script rewrites."""
+
+_README = _DIRECTORY.parent.parent / "README.md"
+"""The README, whose plans table this script rewrites."""
 
 
 def main() -> None:
@@ -87,14 +96,28 @@ def main() -> None:
         sys.stdout.write(f"deleted {shown / name}\n")
     if not result.written and not result.deleted:
         sys.stdout.write(f"{shown}/ is up to date\n")
-    page = _CONFIGURATION_PAGE.read_text(encoding="utf-8")
-    rendered = _config.with_settings_reference(page)
-    shown_page = _CONFIGURATION_PAGE.relative_to(_DIRECTORY.parent.parent)
-    if rendered == page:
-        sys.stdout.write(f"{shown_page} is up to date\n")
+    _rewrite(_CONFIGURATION_PAGE, _config.with_settings_reference)
+    provenance = _massive.provenance()
+    _rewrite(_README, lambda page: with_plans_table(page, _session.CATALOG, provenance))
+
+
+def _rewrite(path: Path, rendered: Callable[[str], str]) -> None:
+    """Rewrite a page's generated part, and say whether it changed.
+
+    Args:
+        path: The page.
+        rendered: Returns the page's text with its generated part rendered again.
+
+    Side effects: writes the page when its text changed, and one line to standard output.
+    """
+    page = path.read_text(encoding="utf-8")
+    text = rendered(page)
+    shown = path.relative_to(_DIRECTORY.parent.parent)
+    if text == page:
+        sys.stdout.write(f"{shown} is up to date\n")
     else:
-        _CONFIGURATION_PAGE.write_text(rendered, encoding="utf-8")
-        sys.stdout.write(f"wrote {shown_page}\n")
+        path.write_text(text, encoding="utf-8")
+        sys.stdout.write(f"wrote {shown}\n")
 
 
 if __name__ == "__main__":
