@@ -4,9 +4,9 @@ Date: 2026-11-17
 
 Status: open
 
-Unknown: whether Massive files a stock trade made between 21:00 and midnight New York time, in
-the overnight session the consolidated tape runs from Sunday 2026-12-06, under the next trading
-day or under its own calendar date. Massive's blog post of 2026-08-26 says trades "reported
+Unknown: whether Massive files a stock trade made between 21:00 and midnight New York time under
+its calendar date or under the next trading day. The overnight session that makes such trades
+starts on Sunday 2026-12-06. Massive's blog post of 2026-08-26 says trades "reported
 between 9pm ET and midnight will count under the next calendar date", but no page of Massive's
 API documentation says which day its day bars and daily flat files put them in.
 
