@@ -28,7 +28,6 @@ from deephaven_massive._datasets.feeds import channel_only_host
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, ws, ws_connection, ws_silence
 from deephaven_massive._ingest.clients import SessionClients
-from deephaven_massive._ingest.host_decision import recency_of
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics
 from deephaven_massive._tables.transports import HostDecision
@@ -321,7 +320,8 @@ def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
 
 
 def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDecision]:
-    return lambda *_: HostDecision(host, recency_of(host), evidence)
+    # The hint reads the host and the evidence; the recency plays no part in it.
+    return lambda *_: HostDecision(host, Recency.UNKNOWN, evidence)
 
 
 @pytest.mark.parametrize(
@@ -383,6 +383,15 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
                 "MassiveConfig.websocket_hosts[AssetClass.FUTURES] pins this host; the key's "
                 "plan may not include this data there"
             ),
+        ),
+        pytest.param(
+            # A pinned real-time host keeps the pin's hint, whatever its snapshot said.
+            on_host(REALTIME_HOST, "websocket_hosts, last_trade.timeframe=REAL-TIME"),
+            (
+                "MassiveConfig.websocket_hosts[AssetClass.FUTURES] pins this host; the key's "
+                "plan may not include this data there"
+            ),
+            id="pinned real-time host",
         ),
     ],
 )

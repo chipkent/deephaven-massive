@@ -10,8 +10,7 @@ so no hostname of a single channel is typed by hand:
   `channel_only_host(asset_class, channel)` its one host when it has one;
 - `dataset_hosts(spec)`: every host a dataset's channels document, sorted by feed;
 - `fmv_host(asset_class)`: the one host the class's fair-market-value channel documents,
-  which every stream of the FMV channel family uses;
-- `host_feed(host)`: the feed label Massive's pages give a host, if any page lists it.
+  which every stream of the FMV channel family uses.
 
 A feed names where a channel is served, never how recent its data is: Massive's index value
 page lists only the `Business` feed, yet a plan may get those values 15 minutes late. So nothing
@@ -25,12 +24,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._errors import BrokenGuaranteeError, library_bug
-from deephaven_massive._massive import Transport, source, sources
+from deephaven_massive._massive import Transport, source
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._enums import AssetClass
-    from deephaven_massive._massive import Feed, FeedHost
+    from deephaven_massive._massive import FeedHost
 
 __all__ = [
     "FMV_CHANNEL",
@@ -38,7 +37,6 @@ __all__ = [
     "channel_only_host",
     "dataset_hosts",
     "fmv_host",
-    "host_feed",
 ]
 
 FMV_CHANNEL: Final = "FMV"
@@ -117,21 +115,3 @@ def fmv_host(asset_class: AssetClass) -> str:
             library_bug(f"the {asset_class.value} {FMV_CHANNEL} page does not document one host")
         )
     return host
-
-
-def host_feed(host: str) -> Feed | None:
-    """Return the feed Massive's pages give a host.
-
-    Every page that lists a host gives it one feed label, which a test checks.
-
-    Args:
-        host: A hostname, such as `"delayed.massive.com"`.
-
-    Returns:
-        The feed, such as `Feed.DELAYED`; None for a host no page lists (one a user pinned).
-    """
-    for channel in sources(Transport.WS).values():
-        for listed in channel.hosts:
-            if listed.host == host:
-                return listed.feed
-    return None
