@@ -66,6 +66,7 @@ from deephaven_massive._ingest import (
 )
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, CryptoTickers
+from deephaven_massive._ingest.rate_limits import Waiter
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import BoundedLog, LoggedKeys
 from deephaven_massive._massive import Cancel, RestPath, RowFault, Transport
@@ -704,7 +705,9 @@ def test_the_crypto_ticker_list_takes_one_patience_for_its_pages(
         "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
     )
     patiences = _Patiences(monkeypatch)
-    reader = _endpoints(session)._reader("crypto pairs", session._core.policy, background=True)
+    reader = _endpoints(session)._reader(
+        "crypto pairs", session._core.policy, waiter=Waiter.LIVE_TABLE
+    )
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the kept list takes no patience
     assert [bucket for bucket, _ in patiences.claims] == ["other", "other"]
@@ -749,6 +752,25 @@ def test_a_read_no_caller_waits_for_waits_out_max_outage_of_pauses(
     assert isinstance(q, FetchQuery)
     _endpoints(session).fetch(RATINGS, q._static_request(), call=1, stop=stop)
     assert seconds.seen == [600.0 if stop is None else 300.0]
+
+
+def test_a_poll_cycle_waits_out_max_outage_of_pauses(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A poll() cycle feeds a live table: its pauses are limited by max_outage (300 s by
+    # default), not the ten minutes of a read its caller waits for.
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
+    seconds = _Seconds(monkeypatch)
+    q = query(session, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, FetchQuery)
+    table = q.poll(60)
+    pause = threading.Event()
+    for _ in range(3000):
+        if seconds.seen:
+            break
+        pause.wait(0.01)
+    session.release(table)
+    assert seconds.seen[:1] == [300.0]
 
 
 def test_a_stream_s_lookups_wait_out_max_outage_and_a_host_decision_ten_minutes(
@@ -917,7 +939,7 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
             session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": date(2025, 3, 3)}
         )
         assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
-    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
     # It ends in BTC, which is a quote too; only the list says its quote is WBTC.
     assert reader.crypto_pair("X:ETHWBTC") == ("ETH", "WBTC")
@@ -987,7 +1009,7 @@ def _wait_for_pair(
 def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     *, session: dm.MassiveSession, outcome: str
 ) -> None:
-    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     future = _WatchedFuture()
     results, waiter = _wait_for_pair(reader, future)
     refused = dm.EntitlementError("refused", status=403)
@@ -1065,7 +1087,7 @@ class _Listeners:
 
 
 def _manual_session(
-    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, *, max_outage: float = 300.0
 ) -> tuple[dm.MassiveSession, FakeClock]:
     # A session whose governor runs on a manual clock: each pause lasts until the test moves
     # time past it.
@@ -1079,7 +1101,9 @@ def _manual_session(
     )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    m = dm.MassiveSession(
+        dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, max_outage=max_outage)
+    )
     return m, clock
 
 
@@ -1095,7 +1119,7 @@ DELISTED_TARGET = "/v3/reference/tickers?market=crypto&active=false&limit=1000"
 
 def _split_dot(m: dm.MassiveSession) -> Callable[[], object]:
     # A call that splits X:DOTUSD from the session's crypto ticker list.
-    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, background=True)
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, waiter=Waiter.LIVE_TABLE)
     return functools.partial(reader.crypto_pair, "X:DOTUSD")
 
 
@@ -1214,7 +1238,7 @@ def test_a_stopped_read_stops_its_crypto_ticker_list_and_a_waiter_reads_it_itsel
     fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     stop = Cancel()
-    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, background=True)
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, waiter=Waiter.LIVE_TABLE)
     caplog.set_level(logging.INFO, LOGGER)
     caplog.set_level(logging.INFO, SHARED_LOGGER)
     try:
@@ -1263,7 +1287,7 @@ def test_a_refusal_as_the_maker_stops_is_copied_to_its_waiters(
         )
 
     monkeypatch.setattr(client, "pages", refused)
-    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, background=True)
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, waiter=Waiter.LIVE_TABLE)
     try:
         maker = _Caller(
             m, functools.partial(reader.crypto_pair, "X:DOTUSD", cancel=stop), console=False
@@ -1292,7 +1316,7 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
     fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     stop = Cancel()
-    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, background=True)
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, waiter=Waiter.LIVE_TABLE)
     try:
         maker = _Caller(m, _split_dot(m), console=False)
         clock.wait_for_deadlines([60.0])
@@ -1377,7 +1401,10 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
         joiner = _Caller(m, decide, console=console == "joiner")
         clock.wait_for_deadlines([60.0, math.inf])
         clock.advance(60.0)
-        _gave_up_after_two_pauses((joiner if console == "joiner" else maker).join())
+        gave_up = (joiner if console == "joiner" else maker).join()
+        _gave_up_after_two_pauses(gave_up)
+        # A stream verb takes no wait=True, so its give-up error advises nothing about one.
+        assert "wait=True" not in str(gave_up)
         clock.wait_for_deadlines([120.0])  # the other caller decides on
         clock.advance(60.0)
         decision = (maker if console == "joiner" else joiner).join()
@@ -1389,6 +1416,27 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     assert (listeners.buckets, listeners.live) == (["stocks"], [])
     # The caller that gave up raises; its expected failure logs nothing above DEBUG.
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER]
+
+
+def test_a_poll_with_a_max_outage_of_zero_fails_at_its_first_rate_limit_pause(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, dh_to_pylist: ToPylist
+) -> None:
+    # A poll() cycle feeds a live table, so its reads wait out at most max_outage of pauses:
+    # with zero, the first pause fails the cycle, and so the table. The governor's clock is
+    # manual, so a cycle that waited out the pause instead would never end.
+    m, _ = _manual_session(fake_rest, monkeypatch, max_outage=0)
+    fake_rest.reply(DIVIDENDS_PATH, PAUSE)
+    try:
+        q = query(m, DIVIDENDS, symbols=["AAPL"])
+        assert isinstance(q, FetchQuery)
+        assert _failed_soon(q.poll(60))
+        assert m._core.diagnostics.wait_until_shown(TIMEOUT)
+        (row,) = dh_to_pylist(m.streams())
+    finally:
+        m.close()
+    assert "rate limited: Massive is refusing" in row["Error"]
+    assert "raise MassiveConfig.max_outage to wait longer" in row["Error"]
+    assert len(fake_rest.get_queries()) == 1
 
 
 def _lookup(m: dm.MassiveSession, kind: str) -> Callable[[], object]:
@@ -1584,7 +1632,7 @@ def test_a_poll_plans_a_pair_massive_does_not_list_as_a_call_with_no_data(
     # pair fails the table at its first cycle, in code or in a table, never at the call.
     serve_pairs(fake_rest)
     params = {"date": date(2025, 3, 3)}
-    reader = _endpoints(session)._reader("poll", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
     watch = SymbolTable(new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])]))
     request = Request(symbols=watch, params=(("date", date(2025, 3, 3)),))
     planned, left_out = reader._plan_cycle(
@@ -2977,7 +3025,7 @@ def test_a_read_fans_out_on_the_callers_pool(
             f"/v1/last/crypto/{pair}",
             Reply({"status": "success", "request_id": "r", "symbol": pair, "last": last}),
         )
-    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
     calls = rest_requests.plan_calls(
@@ -3026,7 +3074,7 @@ def test_a_parameter_one_path_refuses_leaves_no_cycle(
                 del refusal  # this frame must not hold its own error
 
     monkeypatch.setattr(rest, "shared_params", base)
-    reader = _endpoints(session)._reader("poll", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
     enabled = gc.isenabled()
     gc.disable()
     try:
@@ -3059,7 +3107,7 @@ def test_a_404_without_a_symbol_fails_the_call(
 def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without_data(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD",))
     calls = rest_requests.plan_calls(
@@ -3115,7 +3163,7 @@ def test_an_error_row_needs_only_its_symbol(
     )
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
-    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     table, _ = reader.read_fetch(
         timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",), tally=ReadTally()
     )
@@ -3127,7 +3175,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"{}", status=401))
-    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
     calls = rest_requests.plan_calls(
@@ -3206,7 +3254,7 @@ def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
 
 
 def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> None:
-    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
     assert reader.plan_fetch(DIVIDENDS, request, ()) == []
     table, requests = reader.read_fetch(DIVIDENDS, request, symbols=(), tally=ReadTally())
@@ -3838,7 +3886,7 @@ def test_a_fan_out_raises_the_real_failure_not_a_call_it_cancelled(
     session: dm.MassiveSession,
 ) -> None:
     # The first call only fails because the second one's failure cancelled its wait.
-    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     stop = _massive.Cancel()
 
     def run(call: rest_requests.Call) -> NoReturn:
@@ -5084,7 +5132,7 @@ def _value_cycle(m: dm.MassiveSession, values: tuple[str, ...]) -> poll.CycleRow
     with entered(m._core.exec_ctx):
         table = new_table([string_col("ProductCode", list(values))])
     boxed = ValueTable("product_code", "product_code", "ProductCode", underlying=False, table=table)
-    reader = _endpoints(m)._reader("poll", m._core.policy, background=False)
+    reader = _endpoints(m)._reader("poll", m._core.policy, waiter=Waiter.LIVE_TABLE)
     with ThreadPoolExecutor(1) as pool:
         return reader.read_cycle(
             futures_ns.PRODUCTS,
@@ -5112,6 +5160,21 @@ def test_a_poll_cycle_reads_each_value_and_leaves_out_one_massive_has_no_data_fo
     assert read.left_out == ("NQ (HTTP 404 from /futures/v1/products)",)
     assert [query["product_code"] for _, query in fake_rest.get_queries()] == [["ES"], ["NQ"]]
     assert any("NQ" in message and "no data" in message for message in caplog.messages)
+
+
+def test_a_poll_cycle_s_values_share_one_patience(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each value is read as if passed alone, but the cycle's pauses together stay within one
+    # patience: a second value never starts a budget of its own.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    nq = Reply(envelope([{"product_code": "NQ", "name": "E-mini Nasdaq-100"}]))
+    fake_rest.reply("/futures/v1/products", es, nq)
+    patiences = _Patiences(monkeypatch)
+    read = _value_cycle(rest_session, ("ES", "NQ"))
+    assert read.requests == len(patiences.claims) == 2
+    assert patiences.shared()
+    assert read.patience == 600.0
 
 
 def test_a_poll_cycle_raises_a_value_s_failure_other_than_no_data(
@@ -5146,7 +5209,7 @@ def test_a_poll_cycle_of_an_empty_table_of_values_reads_nothing(
 def _not_found(
     m: dm.MassiveSession, error: _massive.WireError, *, symbol: str | None, requests: int
 ) -> object:
-    reader = _endpoints(m)._reader("call-1", m._core.policy, background=False)
+    reader = _endpoints(m)._reader("call-1", m._core.policy, waiter=Waiter.CALL)
     return reader._not_found(
         error,
         spec=TRADES,
@@ -5238,7 +5301,7 @@ def test_a_call_with_no_data_is_never_counted_as_a_request(session: dm.MassiveSe
     # A pair Massive's list does not hold is never sent, so pacing and announcements skip it.
     path = (
         _endpoints(session)
-        ._reader("call-1", session._core.policy, background=False)
+        ._reader("call-1", session._core.policy, waiter=Waiter.CALL)
         .rest_path(CRYPTO_LAST_PATH)
     )
     sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD")
@@ -5264,7 +5327,7 @@ def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
     # and no read reports it again as a symbol with no data.
     unjoined = _ticker("X:DOTUSD", "DOT", "USDT")
     fake_rest.reply(TICKERS_PATH, Reply(envelope([unjoined])), Reply(envelope([])))
-    reader = _endpoints(session)._reader("poll", session._core.policy, background=False)
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
     request = Request(symbols=("X:DOTUSD",), params=(("date", date(2025, 3, 3)),))
     _, left_out = reader._plan_cycle(CRYPTO_OPEN_CLOSE, request, ("X:DOTUSD",), cancel=Cancel())
     assert left_out == [

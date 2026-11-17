@@ -1810,6 +1810,7 @@ class SharedDescription:
 
 _CHAIN = "/v3/snapshot/options/{underlyingAsset}"
 _UNIFIED = "/v3/snapshot"
+_INDICES = "/v3/snapshot/indices"
 _FUTURES = "/futures/v1/snapshot"
 _CONVERSION = "/v1/conversion/{from}/{to}"
 
@@ -1854,6 +1855,28 @@ _TODAYS_CHANGE = (
     "that over `prevDay.c`. The chain takes the v2 name, which the six snapshot and mover "
     "tables already use."
 )
+_SESSION_CHANGE = (
+    'The unified snapshot documents `session.{key}` as "The {measure} of the price change for '
+    'the asset from the previous trading day.", a number, as the option chain documents '
+    "`day.{key}`, read as `todays_change` and `todays_change_perc`. Massive's samples agree: "
+    "in the unified snapshot's samples, `change` is `close` minus `previous_close` (-1.05 "
+    "from 21.4 and 22.45; -0.06 from 6.65 and 6.71 for an NCLH option), with late trading "
+    "reported apart in `late_trading_change`. Massive's knowledge-base "
+    "article on the stocks snapshot before the open (https://massive.com/knowledge-base/"
+    "article/why-is-the-stocks-snapshots-day-bar-zero-before-the-open-and-how-do-i-get-the-"
+    'pre-market-change) says of the unified snapshot: "change of -0.585 is the latest price '
+    'against the same close, the same measure as todaysChange." A live read of 2026-11-16 found '
+    "`session.change` and `session.change_percent` equal to the chain's `day.change` and "
+    "`day.change_percent` for 20 of 20 SPY contracts."
+)
+_INDEX_CHANGE = (
+    'The indices snapshot documents `session.{key}` as "The {measure} of the change for the '
+    "index from the previous trading day.\", a number: the unified snapshot's text for "
+    '`session.{key}` ("The {measure} of the price change for the asset from the previous '
+    'trading day."), with "index" for "asset" and without "price". The unified snapshot serves '
+    "the same `session` object of an index and reads it as `todays_change` and "
+    "`todays_change_perc`, so an index's change has one name in both tables."
+)
 
 SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
     {
@@ -1881,6 +1904,19 @@ SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
                     "todaysChangePerc",
                     "The percentage change since the previous day.",
                 ),
+            )
+        },
+        **{
+            (source, f"session.{key}"): Spelling(
+                long_name=long_name,
+                source=f"/v3/snapshot/options/{{underlyingAsset}} `day.{key}`",
+                reason=reason.format(key=key, measure=measure),
+                whole_key=True,
+            )
+            for source, reason in ((_UNIFIED, _SESSION_CHANGE), (_INDICES, _INDEX_CHANGE))
+            for key, measure, long_name in (
+                ("change", "value", "todays_change"),
+                ("change_percent", "percent", "todays_change_perc"),
             )
         },
         (_CHAIN, "details"): _OPTION_DETAILS,

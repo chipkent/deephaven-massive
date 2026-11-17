@@ -24,15 +24,17 @@ decides which requests share one, how long each read waits, and what the user is
 - **Buckets.** A request is charged to its dataset's subscription (`bucket_of`); reference
   data and the other datasets Massive assigns to no subscription go to `OTHER`, which learns
   its limit from Massive's refusals, like a subscription, but cannot be declared.
-- **Patience.** Each read decides how long it waits out pauses (`read_patience`): a read its
-  caller waits for, `READ_PATIENCE` (10 minutes of pauses), or `CONSOLE_PATIENCE` (90 s) while
-  its thread holds the Deephaven update graph's lock, as a console command does, since every
-  table of the process stops updating meanwhile; that read's give-up error then advises leaving
-  out `wait=True` (`console_advice`). A read no caller waits for, which feeds a live table (a
-  background `fetch()` or `history()`, a watchlist's reads after the call, a stream's lookups),
-  waits out `MassiveConfig.max_outage`, the time any live table may stay cut off from Massive,
-  and its give-up error says so (`BACKGROUND_ADVICE`). A read that gives up fails alone; the
-  bucket keeps pausing and probing for every other read.
+- **Patience.** Each read decides how long it waits out pauses (`read_patience`), by who waits
+  for it (`Waiter`). A read its caller waits for waits out `READ_PATIENCE` (10 minutes of
+  pauses). A read that feeds a live table (a background `fetch()` or `history()`, a `poll()`
+  cycle, a watchlist's reads after the call, a stream's lookups) waits out
+  `MassiveConfig.max_outage`, the time any live table may stay cut off from Massive, and its
+  give-up error says so (`LIVE_TABLE_ADVICE`). Any read whose thread holds the Deephaven update
+  graph's lock, as a console command does, waits out only `CONSOLE_PATIENCE` (90 s), since
+  every table of the process stops updating meanwhile; a `fetch()` or `history()` call's
+  give-up error then advises leaving out `wait=True` (`console_advice`), and no other read's
+  does, since no other call takes `wait=True`. A read that gives up fails alone; the bucket
+  keeps pausing and probing for every other read.
 - **Refusal notices.** `RateLimitNotices` is the REST client's refusal hook: the first 429 of
   each subscription in a session logs one INFO line that says what happened and what to do.
   Requests pause and resume by themselves, so the refusal alone is nothing to act on; a read
@@ -62,7 +64,7 @@ import threading
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 from deephaven_massive import _massive
 from deephaven_massive._enums import Subscription
@@ -77,18 +79,19 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Patience, RequestGovernor, WireError
 
 __all__ = [
-    "BACKGROUND_ADVICE",
     "BUCKETS",
     "CONSOLE_PATIENCE",
     "GOVERNORS",
     "LABELS",
     "LEARN_ONLY",
+    "LIVE_TABLE_ADVICE",
     "OTHER",
     "READ_PATIENCE",
     "GovernorLease",
     "GovernorRegistry",
     "PaceCheck",
     "RateLimitNotices",
+    "Waiter",
     "announce",
     "bucket_of",
     "console_advice",
@@ -115,8 +118,8 @@ READ_PATIENCE: Final = 600.0
 """Seconds a read its caller waits for waits out its bucket's pauses before it fails with status
 429."""
 
-BACKGROUND_ADVICE: Final = "raise MassiveConfig.max_outage to let a background read wait longer"
-"""The remedy a background read's give-up error ends with (`Patience.advice`)."""
+LIVE_TABLE_ADVICE: Final = "raise MassiveConfig.max_outage to wait longer"
+"""The remedy the give-up error of a read that feeds a live table ends with (`Patience.advice`)."""
 
 CONSOLE_PATIENCE: Final = 90.0
 """Seconds a read waits out pauses while its thread holds the update graph's lock: every table
@@ -166,6 +169,24 @@ def _real_clock_governor() -> RequestGovernor:
     return _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, labels=LABELS)
 
 
+class Waiter(StrEnum):
+    """Who waits for a read, which decides how long it waits out pauses (`read_patience`).
+
+    Attributes:
+        CALL: The caller of `fetch()` or `history()` with `wait=True`, which gets the rows.
+        STREAM_OPEN: The caller of a stream verb, which waits for the stream's WebSocket host
+            decision. A stream verb takes no `wait=True`, so its give-up error advises
+            nothing about it.
+        LIVE_TABLE: No caller: the read feeds a live table, as a background `fetch()` or
+            `history()`, a `poll()` cycle, a watchlist's reads after the call, and a stream's
+            lookups do.
+    """
+
+    CALL = "call"
+    STREAM_OPEN = "stream_open"
+    LIVE_TABLE = "live_table"
+
+
 def console_advice(max_outage: float) -> str:
     """Return the remedy a console read's give-up error ends with (`Patience.advice`).
 
@@ -188,32 +209,42 @@ def console_advice(max_outage: float) -> str:
     )
 
 
-def read_patience(exec_ctx: ExecutionContext, *, max_outage: float, background: bool) -> Patience:
+def read_patience(exec_ctx: ExecutionContext, *, max_outage: float, waiter: Waiter) -> Patience:
     """Return the patience of a read starting now: how long it waits out its buckets' pauses.
 
     A read whose thread holds the Deephaven update graph's lock, as a console command does,
-    waits out `CONSOLE_PATIENCE` (90 s), since no table of the process updates meanwhile; its
-    give-up error advises leaving out `wait=True` (`console_advice`). Any other read its caller
-    waits for waits out `READ_PATIENCE` (10 minutes). A read no caller waits for feeds a live
-    table, so it waits out `MassiveConfig.max_outage`, the time any live table may stay cut off
-    from Massive. Only pauses count; waiting for a paced slot never does. Call it on the read's
-    own thread, before any fan-out and outside every library lock, since it asks Deephaven (a
-    Java call); pass the result to every request of the read. It logs nothing: the line that
-    starts the read (a `fetch()` call's, or a `poll()` cycle's) names its seconds.
+    waits out `CONSOLE_PATIENCE` (90 s), since no table of the process updates meanwhile; a
+    `fetch()` or `history()` call's give-up error then advises leaving out `wait=True`
+    (`console_advice`). Otherwise a read its caller waits for waits out `READ_PATIENCE` (10
+    minutes), and a read that feeds a live table waits out `MassiveConfig.max_outage`, the time
+    any live table may stay cut off from Massive, so with zero it fails at its first pause. Only
+    pauses count; waiting for a paced slot never does. Call it on the read's own thread, before
+    any fan-out and outside every library lock, since it asks Deephaven (a Java call); pass the
+    result to every request of the read. It logs nothing: the line that starts the read (a
+    `fetch()` call's, or a `poll()` cycle's) names its seconds.
 
     Args:
         exec_ctx: The session's execution context, whose update graph is asked.
         max_outage: The session's `MassiveConfig.max_outage`, in seconds.
-        background: True for a read no caller waits for.
+        waiter: Who waits for the read.
 
     Returns:
         A new `Patience` for the read.
     """
-    if holds_update_graph_lock(exec_ctx):
-        return _massive.Patience(CONSOLE_PATIENCE, advice=console_advice(max_outage))
-    if background:
-        return _massive.Patience(max_outage, advice=BACKGROUND_ADVICE)
-    return _massive.Patience(READ_PATIENCE)
+    console = holds_update_graph_lock(exec_ctx)
+    match waiter:
+        case Waiter.CALL:
+            if console:
+                return _massive.Patience(CONSOLE_PATIENCE, advice=console_advice(max_outage))
+            return _massive.Patience(READ_PATIENCE)
+        case Waiter.STREAM_OPEN:
+            return _massive.Patience(CONSOLE_PATIENCE if console else READ_PATIENCE)
+        case Waiter.LIVE_TABLE:
+            if console:
+                return _massive.Patience(CONSOLE_PATIENCE)
+            return _massive.Patience(max_outage, advice=LIVE_TABLE_ADVICE)
+        case _:
+            assert_never(waiter)
 
 
 def bucket_of(subscription: Subscription | None) -> str:
