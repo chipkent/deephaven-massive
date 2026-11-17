@@ -18,8 +18,8 @@ could drift from what a reader pastes:
 - `HISTORY_SECTIONS`, `LIVE_SECTIONS`, and `UNRUN_SECTIONS` name the README's examples the live run
   runs, and those it leaves out.
 - `dashboard_panels` reads the titles and contents of a `deephaven.ui` dashboard's panels.
-- `snapshots_cleared` and `seam_gaps` are the pure rules the live checks apply to Example 7's
-  snapshot and Example 11's backfill.
+- `snapshots_cleared` and `seam_gaps` are the pure rules the live checks apply to Example 8's
+  snapshot and Example 12's backfill.
 
 This module imports the library, so it is imported only once a Deephaven server runs.
 """
@@ -65,7 +65,7 @@ HISTORY_SECTIONS: Final = (
     "convert-symbols",
 )
 """The README's examples that read stock history with no setting, which follow its hook:
-Examples 1 to 6, the conversion of Yahoo tickers that ends Example 6, and Example 14."""
+Examples 1 to 7, and Example 15."""
 
 LIVE_SECTIONS: Final = (
     "what-your-plan-allows",
@@ -75,7 +75,7 @@ LIVE_SECTIONS: Final = (
     "backfill-then-live",
     "dashboard",
 )
-"""The README's examples that load the settings file and stream stocks, 7 to 12, in the
+"""The README's examples that load the settings file and stream stocks, 8 to 13, in the
 README's order."""
 
 UNRUN_SECTIONS: Final = {

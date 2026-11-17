@@ -163,10 +163,11 @@ Each of these has a source. Check it again before you write:
 
 ### Teaching plan
 
-Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13 and an options
-example added on 2026-11-17. Each example adds one idea, in dependency order: the call pattern,
-static tables, charts, polling, watchlists, settings, streaming, options, then stopping. Each
-title names the idea, then what the example does.
+Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13, and the options
+example and the Yahoo conversion's own example added on 2026-11-17. Each example adds one idea,
+in dependency order: the call pattern, static tables, charts, polling, watchlists, other sources'
+symbols, settings, streaming, options, then stopping. Each title names the idea, then what the
+example does.
 Each example's Plan line follows from the data it reads, and
 `tests/datasets/test_readme_plans.py` checks it against Massive's spec.
 
@@ -178,23 +179,24 @@ Each example's Plan line follows from the data it reads, and
 | 4 | Charts: plot a stock's daily closes for a year | 3 |
 | 5 | Live tables: poll for the latest news headlines | 1 to 3 |
 | 6 | Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes | 5 |
-| 7 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 |
-| 8 | Streaming: stream minute bars for the stocks on your list | 6, 7 |
-| 9 | Live calculations: track each stock's change since the previous close | 6, 8 |
-| 10 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 8 |
-| 11 | Backfill: start with today's minute bars, then continue live | 3, 10 |
-| 12 | Dashboards: show a live chart and table together with deephaven.ui | 4, 9 |
-| 13 | Options: read one expiry of a stock's calls | 7 |
-| 14 | Stopping live tables: release one table or close the session | 5 |
+| 7 | Symbols from another source: convert Yahoo tickers to Massive's | 6 |
+| 8 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 |
+| 9 | Streaming: stream minute bars for the stocks on your list | 6, 8 |
+| 10 | Live calculations: track each stock's change since the previous close | 6, 9 |
+| 11 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 9 |
+| 12 | Backfill: start with today's minute bars, then continue live | 3, 11 |
+| 13 | Dashboards: show a live chart and table together with deephaven.ui | 4, 10 |
+| 14 | Options: read one expiry of a stock's calls | 8 |
+| 15 | Stopping live tables: release one table or close the session | 5 |
 
 The owner's decisions behind it:
 
-- Example 6's title is the owner's wording. Examples 3 and 10 say "price returns" and "table
+- Example 6's title is the owner's wording. Examples 3 and 11 say "price returns" and "table
   types" (Deephaven's word), where the approved draft said "returns" and "live-table shapes".
-- Example 7 loads its settings with `dm.MassiveConfig.from_file`. `dm.MassiveConfig()` never
+- Example 8 loads its settings with `dm.MassiveConfig.from_file`. `dm.MassiveConfig()` never
   reads a file, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the file only for `from_file()` with
   no path; never imply that a session reads it.
-- Examples 4 and 12 use the Deephaven Express and deephaven.ui plugins, which
+- Examples 4 and 13 use the Deephaven Express and deephaven.ui plugins, which
   `deephaven-server` doesn't include, so the install command adds them.
 - Stock streams carry data only while stocks trade, so the streaming examples say so and
   offer crypto, which trades around the clock. Examples that poll stay under five requests a minute.

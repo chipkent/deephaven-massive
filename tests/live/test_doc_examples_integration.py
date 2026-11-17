@@ -10,13 +10,13 @@ running after the session that made it is no longer reachable.
 These tests assert what only Massive can show: that the tables fill with real data, with
 plausible counts; that a reader with no setting gets them filled whatever limit Massive sets;
 and what each stock session sends. What the library does with the data, such as Example 2's
-ranking or Example 13's closed-session error, `tests/test_docs.py` checks against the fake
+ranking or Example 15's closed-session error, `tests/test_docs.py` checks against the fake
 servers. The groups follow the README:
 
-- the hook and Examples 1 to 6 and 13, with no setting, and again paced by a declared limit;
-- Examples 7 to 12, which load the settings file Example 7 saves, checked against what the
+- the hook and Examples 1 to 7 and 15, with no setting, and again paced by a declared limit;
+- Examples 8 to 13, which load the settings file Example 8 saves, checked against what the
   stock session of the moment sends: pre-market, regular, after hours, or overnight;
-- Example 7 without its setting, on a key whose stocks data Massive labels delayed;
+- Example 8 without its setting, on a key whose stocks data Massive labels delayed;
 - the streaming example's crypto line;
 - the tester guide's example 10, which describes a key Massive refuses the live minute bars
   and the bars of 2015 to.
@@ -102,7 +102,7 @@ _DELAYED_REFUSAL: Final = "is not in MassiveConfig.delayed_subscriptions"
 """What the library's refusal of delayed data says about the setting that would accept it."""
 
 _STOCKS: Final = frozenset({"AAPL", "MSFT", "NVDA"})
-"""The stocks Examples 3, 7, 8, 9, and 12 read."""
+"""The stocks Examples 3, 8, 9, 10, and 13 read."""
 
 
 def _wait(check: Callable[[], bool], seconds: float) -> bool:
@@ -196,7 +196,7 @@ def _console(tmp_path: Path, console_command: ConsoleCommand, evidence: Evidence
     return _Run(doc_examples.Console(tmp_path, command), evidence)
 
 
-# --- The hook and Examples 1 to 6 and 13 ----------------------------------------------------------
+# --- The hook and Examples 1 to 7 and 15 ----------------------------------------------------------
 
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
@@ -211,7 +211,7 @@ def test_the_history_examples_fill_with_no_setting(
     skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 6 and 13 fill with no setting, by a new reader's path.
+    """Whether the hook and Examples 1 to 7 and 15 fill with no setting, by a new reader's path.
 
     Runs them back to back in one console with the main key and no setting, as a new reader
     does. Their sessions get a rate governor of their own, as in a new server, not the run's,
@@ -268,7 +268,7 @@ def test_the_history_examples_fill_back_to_back_at_a_declared_pace(
     skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 6 and 13 fill with real data, at a declared pace.
+    """Whether the hook and Examples 1 to 7 and 15 fill with real data, at a declared pace.
 
     Runs them back to back in one console while a session that declares stocks limited
     (`rest_requests_per_minute`, a user setting: the owner's stocks limit, else 5) holds the
@@ -303,14 +303,14 @@ def _run_history_examples(
     skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Run the hook and Examples 1 to 6 and 13 in one console, and check what Massive sent.
+    """Run the hook and Examples 1 to 7 and 15 in one console, and check what Massive sent.
 
     Checks: the hook's year of Apple's bars; Example 1's five daily bars with their columns;
     Example 2's day of more than 1,000 stocks, none over the counter, and its top 20;
     Example 3's three returns; Example 4's year of Nvidia's bars; Example 5's headlines for
     each of its stocks, at most ten each, the limit Massive applies per ticker; Example 6's
-    four previous closes, and the previous closes of the three Yahoo tickers that end it,
-    under Massive's spellings. Example 13 and Example 6's edit run as written; what they do is
+    four previous closes; and Example 7's previous closes of three Yahoo tickers, under
+    Massive's spellings. Example 15 and Example 6's edit run as written; what they do is
     the library's, which `tests/test_docs.py` checks. Each example reads in the background,
     so Massive's refusal fails its table instead of raising: after each wait, a refusal in its
     session's `m.streams()` skips the test, quoting Massive, before its rows are checked.
@@ -344,7 +344,7 @@ def _run_history_examples(
     yahoo = converting["yahoo_closes"]
     converted = {"AAPL", "BRK.B", "BACpL"}
     filled = _wait(lambda: _symbols(table_rows(yahoo)) == converted, _FILL_WAIT)
-    evidence(f"example 6, Yahoo tickers: {sorted(_symbols(table_rows(yahoo)))}, filled: {filled}")
+    evidence(f"example 7, Yahoo tickers: {sorted(_symbols(table_rows(yahoo)))}, filled: {filled}")
     skip_if_not_entitled(converting["m"])
     assert filled, f"the Yahoo tickers' closes did not fill within {_FILL_WAIT:.0f} s"
     run.section("stop-live-tables")
@@ -422,7 +422,7 @@ def _check_news(
     assert all(count <= 10 for count in counts.values()), f"more than ten for a stock: {counts}"
 
 
-# --- Examples 7 to 12, on a key Massive streams stocks to ----------------------------------------
+# --- Examples 8 to 13, on a key Massive streams stocks to ----------------------------------------
 
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
@@ -441,32 +441,32 @@ def test_the_live_examples_fill_in_the_current_stock_session(
     skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Whether Examples 7 to 12 fill with what the stock session of the moment sends.
+    """Whether Examples 8 to 13 fill with what the stock session of the moment sends.
 
     Saves the settings file with the README's commands, listing stocks as delayed when the
-    owner's settings do, in a stand-in home folder, runs Examples 7 to 12 in one console,
+    owner's settings do, in a stand-in home folder, runs Examples 8 to 13 in one console,
     in order, and collects whatever the console no longer reaches, such as the sessions each
     later example's `m` replaced. Then watches the streams across three minute boundaries.
 
-    Asserts at any hour: Example 7's snapshot of three stocks with its columns, except while
+    Asserts at any hour: Example 8's snapshot of three stocks with its columns, except while
     Massive's snapshots are empty (`doc_examples.snapshots_cleared`, or on the delayed feed,
-    whose lag the tests do not know, any empty snapshot); Example 12's three topics
+    whose lag the tests do not know, any empty snapshot); Example 13's three topics
     acknowledged and none of its streams failed. Then, by the session the feed is in
     (`streams.stock_session`: the wall clock on the real-time feed; on the delayed feed, the
     latest bar's end, so the test skips when no bar arrives there):
 
-    - pre-market, regular, or after hours: Example 8's minute bars; Example 10's bars of SPY;
-      bars reaching Example 12's chart. In the regular session, also: every stock has its
-      bar, Example 8's rows change each minute, the chart's stream grows each minute, and
-      Example 11's `spy` holds every minute REST has of the day so far across the seam with
+    - pre-market, regular, or after hours: Example 9's minute bars; Example 11's bars of SPY;
+      bars reaching Example 13's chart. In the regular session, also: every stock has its
+      bar, Example 9's rows change each minute, the chart's stream grows each minute, and
+      Example 12's `spy` holds every minute REST has of the day so far across the seam with
       the stream (`doc_examples.seam_gaps`). Outside it, REST may hold minutes made only of
       trades reported late, which no live bar had, so those minutes are recorded but not
       required.
-    - overnight: Example 8's `latest` and the other live tables stay empty, and `spy` holds
-      the bars REST has of the day Example 11 read, or none on a day the market is closed.
+    - overnight: Example 9's `latest` and the other live tables stay empty, and `spy` holds
+      the bars REST has of the day Example 12 read, or none on a day the market is closed.
 
     A run whose feed crosses from one session to another while it watches is skipped after
-    the checks that hold at any hour. When Massive refuses Example 7's snapshot or Example
+    the checks that hold at any hour. When Massive refuses Example 8's snapshot or Example
     12's streams, whose tables fail in the background, the test skips, quoting Massive,
     before checking that example; so too when the library refuses them as delayed data the
     settings file does not list, quoting the library.
@@ -491,7 +491,7 @@ def test_the_live_examples_fill_in_the_current_stock_session(
                 skip_if_not_entitled=skip_if_not_entitled,
                 evidence=evidence,
             )
-            snapshot.clear()  # Example 8's `m` replaces Example 7's, as in a reader's console
+            snapshot.clear()  # Example 9's `m` replaces Example 8's, as in a reader's console
             ran = {"stream-minute-bars": run.section("stream-minute-bars", "latest")}
             ran["change-since-close"] = run.section("change-since-close", "changes")
             ran["table-shapes"] = run.section("table-shapes", "since_start")
@@ -504,7 +504,7 @@ def test_the_live_examples_fill_in_the_current_stock_session(
             for line in stream_report(board):
                 evidence(line)
             skip_if_not_entitled(board)
-            assert acked >= len(_STOCKS), "Example 12's topics were not all acknowledged"
+            assert acked >= len(_STOCKS), "Example 13's topics were not all acknowledged"
             seen = [
                 _watch_minute(
                     ran, locked_rows=locked_rows, table_rows=table_rows, evidence=evidence
@@ -512,7 +512,7 @@ def test_the_live_examples_fill_in_the_current_stock_session(
                 for _ in range(_MINUTES_WATCHED)
             ]
             failed = [r["Error"] for r in table_rows(board.streams()) if r["State"] == "FAILED"]
-            assert not failed, f"Example 12's stream failed: {failed}"
+            assert not failed, f"Example 13's stream failed: {failed}"
             first_session = _feed_session(seen[0], delayed=delayed)
             last_session = _feed_session(seen[-1], delayed=delayed)
             evidence(f"stock session of the feed: {first_session}, then {last_session}")
@@ -547,7 +547,7 @@ def _check_snapshot(
     skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Check Example 7: a snapshot of three stocks, with the columns its text names.
+    """Check Example 8: a snapshot of three stocks, with the columns its text names.
 
     The snapshot reads in the background, so a refusal fails its table instead of raising:
     the check waits for rows or a failed read in `m.streams()`, skips on Massive's refusal,
@@ -557,7 +557,7 @@ def _check_snapshot(
     tests do not know, so there an empty snapshot of a finished read is recorded, not failed.
 
     Args:
-        ran: Example 7's `m` and `snapshot`.
+        ran: Example 8's `m` and `snapshot`.
         delayed: Whether the settings file lists stocks as delayed.
         table_rows: Snapshots a table into rows.
         skip_if_not_entitled: Skips when Massive or the settings refused a read of the
@@ -579,7 +579,7 @@ def _check_snapshot(
     finished = done()
     session.release(reads)
     skip_if_not_entitled(session)
-    assert not errors, f"Example 7's snapshot read failed: {errors}"
+    assert not errors, f"Example 8's snapshot read failed: {errors}"
     assert {"DayClose", "PrevDayClose", "TodaysChangePerc"} <= set(snapshot.column_names)
     rows = table_rows(snapshot)
     evidence(f"example 7: {[(r['Symbol'], r['DayClose']) for r in rows]}")
@@ -657,22 +657,22 @@ def _watch_minute(
 
 
 def _check_streaming(seen: list[dict[str, Any]], session: str, *, evidence: Evidence) -> None:
-    """Check Examples 8 to 12 while the stock market trades."""
+    """Check Examples 9 to 13 while the stock market trades."""
     last = seen[-1]
     evidence(f"checked in the {session} session")
-    assert last["latest"], f"no minute bar of Example 8 arrived in the {session} session"
-    assert last["since_start"], "Example 10's since_start holds no bar"
+    assert last["latest"], f"no minute bar of Example 9 arrived in the {session} session"
+    assert last["since_start"], "Example 11's since_start holds no bar"
     published = [minute["published"] for minute in seen]
-    assert published[-1] > 0, "Example 12's chart got no bar"
+    assert published[-1] > 0, "Example 13's chart got no bar"
     if session != streams.REGULAR:
         return
     assert _symbols(last["latest"]) == _STOCKS
     ends = {row["Symbol"]: row["TimestampEnd"] for row in seen[0]["latest"]}
     moved = [r["Symbol"] for r in last["latest"] if r["TimestampEnd"] != ends.get(r["Symbol"])]
-    assert moved, "no row of Example 8's latest changed as the minutes ended"
+    assert moved, "no row of Example 9's latest changed as the minutes ended"
     assert all(row["Close"] is not None for row in last["changes"]), last["changes"]
     grew = all(later > earlier for earlier, later in itertools.pairwise(published))
-    assert grew, f"Example 12's chart did not grow each minute: {published}"
+    assert grew, f"Example 13's chart did not grow each minute: {published}"
 
 
 def _rest_minutes(live_session: dm.MassiveSession, table_rows: TableRows, day: date) -> set[int]:
@@ -697,11 +697,11 @@ def _check_seam(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Check Example 11: every minute REST has of the day so far, none twice, across the seam.
+    """Check Example 12: every minute REST has of the day so far, none twice, across the seam.
 
     Args:
-        backfill: Example 11's `spy` and `live`.
-        day: The day Example 11 read.
+        backfill: Example 12's `spy` and `live`.
+        day: The day Example 12 read.
         live_session: The session that reads REST's minutes again.
         strict: Whether every REST minute must be in `spy`: in the regular session only, since
             outside it REST may hold minutes made only of trades reported late.
@@ -713,15 +713,15 @@ def _check_seam(
     spy_rows, live_rows = locked_rows(backfill["spy"], backfill["live"])
     spy = [int(row["TimestampStart"]) for row in spy_rows]
     live = [int(row["TimestampStart"]) for row in live_rows]
-    assert len(spy) == len(set(spy)), "Example 11's spy holds a minute twice"
-    assert live, "no live bar reached Example 11"
+    assert len(spy) == len(set(spy)), "Example 12's spy holds a minute twice"
+    assert live, "no live bar reached Example 12"
     missing, extra = doc_examples.seam_gaps(spy, live, _rest_minutes(live_session, table_rows, day))
     evidence(
         f"example 11: {len(spy)} minutes, {len(live)} live; missing {missing[:5]} "
         f"({len(missing)}); only in spy {extra[:5]}; required: {strict}"
     )
     if strict:
-        assert not missing, f"Example 11's spy lacks {len(missing)} minutes that REST has"
+        assert not missing, f"Example 12's spy lacks {len(missing)} minutes that REST has"
 
 
 def _check_overnight(
@@ -732,19 +732,19 @@ def _check_overnight(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Check Examples 8 to 11 between sessions: the live tables empty, `spy` only history."""
+    """Check Examples 9 to 12 between sessions: the live tables empty, `spy` only history."""
     evidence("checked overnight")
-    assert not last["latest"], "Example 8's latest filled overnight"
-    assert not last["since_start"], "Example 10's since_start filled overnight"
+    assert not last["latest"], "Example 9's latest filled overnight"
+    assert not last["since_start"], "Example 11's since_start filled overnight"
     assert all(row["Close"] is None for row in last["changes"]), last["changes"]
     spy = {int(row["TimestampStart"]) for row in last["spy"]}
     if not is_trading_day(day):
         evidence(f"example 11 on {day}, a closed day: {len(spy)} rows")
-        assert not spy, "Example 11's spy holds bars on a day the market is closed"
+        assert not spy, "Example 12's spy holds bars on a day the market is closed"
         return
     rest = _rest_minutes(live_session, table_rows, day)
     evidence(f"example 11 overnight, {day}: spy {len(spy)} minutes, REST {len(rest)}")
-    assert spy == rest, "Example 11's spy does not hold the day's minutes from history"
+    assert spy == rest, "Example 12's spy does not hold the day's minutes from history"
 
 
 # --- Single examples ----------------------------------------------------------------------------
@@ -760,12 +760,12 @@ def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_key(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether Example 7's snapshot fails without its setting on a key whose stocks are delayed.
+    """Whether Example 8's snapshot fails without its setting on a key whose stocks are delayed.
 
     First asks Massive how it labels the key's stocks snapshot (`recency_label`), and skips,
     quoting the answer, when Massive refused the snapshot or does not label it delayed: the
     question is about a key whose stocks data it labels delayed. Then saves the settings file
-    with `delayed_subscriptions: []`, with the README's own commands, and runs Example 7. The
+    with `delayed_subscriptions: []`, with the README's own commands, and runs Example 8. The
     snapshot reads in the background, so the library's refusal fails its table. Passes when the
     read's row in `m.streams()` is `FAILED` and its `Error` says stocks are not in
     `delayed_subscriptions`, which sets this refusal apart from Massive's refusal of a snapshot.
@@ -798,7 +798,7 @@ def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_key(
         failed = errors()
         ran[0]["m"].close()
     evidence(f"example 7 without the setting: {failed or 'no failure'}")
-    assert failed, "Example 7 read the snapshot without its setting"
+    assert failed, "Example 8 read the snapshot without its setting"
     assert _DELAYED_REFUSAL in failed[0], "the refusal does not name delayed_subscriptions"
 
 

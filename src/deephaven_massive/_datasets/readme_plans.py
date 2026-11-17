@@ -115,7 +115,13 @@ ROWS: Final = (
         "Previous day bar",
         "stocks.previous_day_bar",
         (f"{_REST}/aggregates/previous-day-bar.md",),
-        ("drive-with-a-watchlist", "change-since-close", "dashboard", "stop-live-tables"),
+        (
+            "drive-with-a-watchlist",
+            "convert-symbols",
+            "change-since-close",
+            "dashboard",
+            "stop-live-tables",
+        ),
     ),
     PlansRow(
         "News", "reference.news", (f"{_REST}/news.md",), ("follow-the-news", "stop-live-tables")

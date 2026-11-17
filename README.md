@@ -133,7 +133,7 @@ fixes.
 
 Paste each example into the **Console** panel of the Deephaven IDE and run it. Each example's
 **Plan** line names the Massive plans that run it. [Plans](#plans) shows how recent each plan's
-data is. Examples 8 to 12 read the settings file that Example 7 saves.
+data is. Examples 9 to 13 read the settings file that Example 8 saves.
 
 | # | Example |
 |---|---|
@@ -143,14 +143,15 @@ data is. Examples 8 to 12 read the settings file that Example 7 saves.
 | 4 | [Charts: plot a stock's daily closes for a year](#chart-closes) |
 | 5 | [Live tables: poll for the latest news headlines](#follow-the-news) |
 | 6 | [Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes](#drive-with-a-watchlist) |
-| 7 | [Plans and settings: load your settings from a file and read a delayed market snapshot](#what-your-plan-allows) |
-| 8 | [Streaming: stream minute bars for the stocks on your list](#stream-minute-bars) |
-| 9 | [Live calculations: track each stock's change since the previous close](#change-since-close) |
-| 10 | [Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started](#table-shapes) |
-| 11 | [Backfill: start with today's minute bars, then continue live](#backfill-then-live) |
-| 12 | [Dashboards: show a live chart and table together with deephaven.ui](#dashboard) |
-| 13 | [Options: read one expiry of a stock's calls](#options-chain) |
-| 14 | [Stopping live tables: release one table or close the session](#stop-live-tables) |
+| 7 | [Symbols from another source: convert Yahoo tickers to Massive's](#convert-symbols) |
+| 8 | [Plans and settings: load your settings from a file and read a delayed market snapshot](#what-your-plan-allows) |
+| 9 | [Streaming: stream minute bars for the stocks on your list](#stream-minute-bars) |
+| 10 | [Live calculations: track each stock's change since the previous close](#change-since-close) |
+| 11 | [Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started](#table-shapes) |
+| 12 | [Backfill: start with today's minute bars, then continue live](#backfill-then-live) |
+| 13 | [Dashboards: show a live chart and table together with deephaven.ui](#dashboard) |
+| 14 | [Options: read one expiry of a stock's calls](#options-chain) |
+| 15 | [Stopping live tables: release one table or close the session](#stop-live-tables) |
 
 <a id="read-daily-bars"></a>
 
@@ -336,12 +337,17 @@ At the next poll, Nvidia's row arrives and Microsoft's leaves, and the table kee
 Wherever a dataset takes symbols, it also takes a table with a `Symbol` column, and it follows a
 live one as it changes.
 
+Next, a list from another source.
+
 <a id="convert-symbols"></a>
 
-To read a list from Yahoo Finance, convert it first. Yahoo spells some tickers differently:
-Yahoo's `BRK-B` is Massive's `BRK.B`, and Yahoo's `BAC-PL` is Massive's `BACpL`. Tell the
-converter whose tickers they are with `convention=`. This reads the previous closes of a table
-of Yahoo tickers:
+### Symbols from another source: convert Yahoo tickers to Massive's
+
+**Plan:** Any Stocks plan
+
+Read the previous closes of a list of Yahoo Finance tickers. Yahoo spells some tickers
+differently: Yahoo's `BRK-B` is Massive's `BRK.B`, and Yahoo's `BAC-PL` is Massive's `BACpL`.
+Convert the list first, and tell the converter whose tickers they are with `convention=`:
 
 ```python
 import deephaven_massive as dm
@@ -362,6 +368,8 @@ the text you started with.
 `^GSPC` isn't a stock ticker, so its `Symbol` is null and every dataset skips the row.
 `stocks.where("isNull(Symbol)")` lists such rows. To fail instead of nulling a row, pass
 `on_error=dm.OnError.RAISE`.
+
+A dataset reads only Massive's own tickers, so convert any list that comes from elsewhere.
 
 Next, a settings file and a delayed snapshot.
 
@@ -535,7 +543,7 @@ Next, a live chart and a live table on one screen.
 
 Put a live chart and a live table side by side with
 [deephaven.ui](https://deephaven.io/core/ui/docs/). The table is
-Example 9's change table:
+Example 10's change table:
 
 ```python
 import deephaven.plot.express as dx
@@ -719,7 +727,7 @@ rate-limit error, after a pause. `m.rate_limits()` then shows the learned limit 
 `RequestsPerMinute`. Copy that number into the setting to skip the pause next time.
 
 `dm.MassiveConfig.from_file()` reads the same settings from a YAML file
-([Example 7](#what-your-plan-allows)). The [settings page](docs/configuration.md) lists every
+([Example 8](#what-your-plan-allows)). The [settings page](docs/configuration.md) lists every
 setting, its values, and its default, with an example settings file.
 
 <a id="bad-symbols-and-rows"></a>
