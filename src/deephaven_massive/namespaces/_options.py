@@ -294,7 +294,8 @@ SNAPSHOTS: Final = DatasetSpec(
 
 CONTRACTS: Final = DatasetSpec(
     name="options.contracts",
-    summary="Reference data on options contracts: type, exercise style, expiration, and strike.",
+    summary="Reference data on options contracts: call or put, exercise style, expiration, and "
+    "strike.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CONTRACTS,
     keys={(_REST, _CONTRACTS): _keys("Ticker", fanout="UnderlyingTicker")},
@@ -303,7 +304,7 @@ CONTRACTS: Final = DatasetSpec(
 )
 CONTRACT_DETAILS: Final = DatasetSpec(
     name="options.contract_details",
-    summary="Reference data on named options contracts: type, exercise style, expiration, and "
+    summary="Reference data on contracts you name: call or put, exercise style, expiration, "
     "strike.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CONTRACT,
@@ -923,20 +924,19 @@ class OptionsNamespace(Namespace):
         filters: Mapping[str, FilterValue] | None = None,
         on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
-        """Reference data on options contracts: type, exercise style, expiration, and strike.
+        """Reference data on options contracts: call or put, exercise style, expiration, and strike.
 
         Lists the contracts of one underlying, or of every underlying, so you can find their
         tickers. To read contracts you can already name, use `contract_details()`.
 
-        A standard contract has `SharesPerContract` of 100 and no `AdditionalUnderlyings`. An
-        adjusted one, such as root `AAPL1`, may differ in either.
-
         A table of underlyings lists each one's contracts:
 
-        - In a live table, add an underlying and its contracts appear. Remove it and they leave.
-        - A row that isn't Massive's exact stock or index ticker is skipped and logged. To fail
-          the call instead, pass `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
-        - In a static table, an error from Massive on one underlying fails `fetch()`.
+        - If the table is live, add an underlying and its contracts appear. Remove it and they
+          leave.
+        - By default, a row that isn't Massive's exact stock or index ticker is skipped and
+          logged. To fail the call instead, pass
+          `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
+        - If the table is static, an error from Massive on one underlying fails `fetch()`.
 
         Args:
             underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or a
@@ -1006,7 +1006,7 @@ class OptionsNamespace(Namespace):
         as_of: DateLike | None = None,
         on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
-        """Reference data on named options contracts: type, exercise style, expiration, and strike.
+        """Reference data on contracts you name: call or put, exercise style, expiration, strike.
 
         Reads each contract you name into the same columns as `contracts()`. Each contract is one
         request. To find a contract's ticker first, list its underlying's contracts with
@@ -1029,8 +1029,7 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None, empty, or `dm.ALL`;
-                - a ticker isn't Massive's exact option ticker, such as `"O:AAPL250117C00150000"`;
-                - a ticker is an underlying, such as `"AAPL"`;
+                - a ticker isn't an exact option ticker like `"O:AAPL250117C00150000"`;
                 - a table has no `Symbol` column;
                 - `as_of` is a `datetime` or isn't a date.
 
