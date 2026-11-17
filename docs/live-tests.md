@@ -245,8 +245,8 @@ groups run these tests:
 | `stream-night-reconcile` | The night's minute bars against REST history |
 | `half-day` | The bar-stamp tests, on the trading day after a half day |
 
-The `stream-day` group also answers a hand check: does Massive send any message on a stocks
-connection while no stock trades? The library warns when a stocks connection gets no message for
+The `stream-day` group also answers whether Massive sends any message on a stocks connection
+while no stock trades. The library warns when a stocks connection gets no message for
 5 minutes in trading hours. If Massive sends nothing on a quiet connection, a healthy connection
 can trip that warning.
 
