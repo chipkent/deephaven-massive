@@ -1893,8 +1893,9 @@ class RestReader:
 
         Without a value table the cycle is one read (`_read_one_cycle`). With one, each of the
         cycle's values is read as if passed alone (`Request.for_value`), one after another,
-        and the reads are joined: their rows in value order, their requests and pauses summed,
-        and what each left out. The cycle is one read: its rows count in one tally, checked once
+        and the reads are joined: their rows in value order, their requests summed, and what
+        each left out. They share one patience, taken once for the cycle, so the cycle's pauses
+        together stay within it. The cycle is one read: its rows count in one tally, checked once
         after its last value (`ReadTally.check`), so a value whose rows are all withheld,
         beside others read whole, adds no rows. A value Massive answers with HTTP 404 follows
         `ErrorPolicy.unavailable_symbols`, as a symbol does: under `LOG` and `IGNORE` it is
@@ -1923,6 +1924,7 @@ class RestReader:
             MassiveError: Any other failure of a read, as `_read_one_cycle` raises it.
         """
         tally = ReadTally()
+        patience = self.patience()  # once for the cycle, on this thread, before any value's read
         read = functools.partial(
             self._read_one_cycle,
             spec,
@@ -1933,6 +1935,7 @@ class RestReader:
             cancel=cancel,
             pace=pace,
             tally=tally,
+            patience=patience,
         )
         if values is None:
             rows = read(request)
@@ -1957,7 +1960,7 @@ class RestReader:
             if reads
             else schema.arrow_schema().empty_table(),
             sum(one.requests for one in reads),
-            sum(one.patience for one in reads),
+            patience.seconds,
             (*(name for one in reads for name in one.left_out), *absent),
         )
 
@@ -1973,6 +1976,7 @@ class RestReader:
         cancel: Cancel,
         pace: PaceCheck,
         tally: ReadTally,
+        patience: Patience,
     ) -> poll.CycleRows:
         """Run one read of a `poll()` cycle: the planned requests of `read_fetch` for its symbols.
 
@@ -1996,11 +2000,12 @@ class RestReader:
             pace: The table's pace check.
             tally: The cycle's count of its rows and of those withheld, which `read_cycle`
                 checks.
+            patience: The cycle's patience, which every value's read shares (`read_cycle`).
 
         Returns:
             The cycle's read (`poll.CycleRows`): its rows, its request count, the seconds of
-            rate-limit pauses its reads wait out (`patience()`, taken on the poller's thread
-            before any fan-out), and the symbols it left out, each with why.
+            rate-limit pauses the cycle's reads wait out together, and the symbols it left out,
+            each with why.
 
         Raises:
             UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a
@@ -2011,7 +2016,6 @@ class RestReader:
         """
         planned, left_out = self._plan_cycle(spec, request, symbols, cancel=cancel)
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
-        patience = self.patience()  # once for every path, on this thread, before any fan-out
         missing: list[str] = []
         table, requests = self._read_planned(
             spec,

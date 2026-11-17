@@ -5162,6 +5162,21 @@ def test_a_poll_cycle_reads_each_value_and_leaves_out_one_massive_has_no_data_fo
     assert any("NQ" in message and "no data" in message for message in caplog.messages)
 
 
+def test_a_poll_cycle_s_values_share_one_patience(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each value is read as if passed alone, but the cycle's pauses together stay within one
+    # patience: a second value never starts a budget of its own.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    nq = Reply(envelope([{"product_code": "NQ", "name": "E-mini Nasdaq-100"}]))
+    fake_rest.reply("/futures/v1/products", es, nq)
+    patiences = _Patiences(monkeypatch)
+    read = _value_cycle(rest_session, ("ES", "NQ"))
+    assert read.requests == len(patiences.claims) == 2
+    assert patiences.shared()
+    assert read.patience == 600.0
+
+
 def test_a_poll_cycle_raises_a_value_s_failure_other_than_no_data(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
