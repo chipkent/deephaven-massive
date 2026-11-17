@@ -447,10 +447,9 @@ diagnostics tables:
 
 #### 7. Exceed a request limit
 
-The examples' sessions declare no request limit, so a session learns a limited subscription's
-limit from Massive's first rate-limit error, as the README's
-[MassiveConfig](../README.md#massive-config) section says. This example checks it. Poll six
-stocks every 30 seconds, then release the table:
+Poll six stocks every 30 seconds, and watch the session learn your Stocks request limit from
+Massive's first rate-limit error. The examples' sessions declare no limit, as the README's
+[MassiveConfig](../README.md#massive-config) section explains. Then release the table:
 
 ```python
 import deephaven_massive as dm
@@ -470,7 +469,7 @@ Watch the `stocks` row of `rate_limits`:
 
 | When | The `stocks` row shows |
 |---|---|
-| Massive refuses a request for coming too fast | `State` `PAUSED`, until its `PausedUntil` |
+| Massive answers with a rate-limit error | `State` `PAUSED`, until its `PausedUntil` |
 | The pause ends | `RequestsPerMinute` at the limit, and `LimitSource` `LEARNED` |
 | Requests wait their turn under that limit | `State` `PACED` |
 | Massive doesn't limit your Stocks requests | `State` `READY` throughout |
