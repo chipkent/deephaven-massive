@@ -393,8 +393,8 @@ def check_policy(value: object, name: str = "on_error") -> ErrorPolicy:
         return value
     if isinstance(value, OnError):
         raise TypeError(
-            f"{name} must be dm.ErrorPolicy, not a dm.OnError member: pass "
-            f"dm.ErrorPolicy(dm.OnError.{value.name}) to set every cause to it"
+            f"{name}=dm.OnError.{value.name} is not a dm.ErrorPolicy. To set every cause to "
+            f"{value.name}, pass {name}=dm.ErrorPolicy(dm.OnError.{value.name})."
         )
     raise TypeError(
         f"{name} must be dm.ErrorPolicy, such as "

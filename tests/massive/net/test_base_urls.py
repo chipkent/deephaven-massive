@@ -1,6 +1,7 @@
 """Tests for `check_rest_base_url`, the rule of a URL the REST client may send the API key to."""
 
 import logging
+import re
 import traceback
 
 import pytest
@@ -36,7 +37,9 @@ def test_an_origin_alone_is_accepted_and_returned(
 )
 def test_a_base_url_names_only_an_origin(base_url: str) -> None:
     with pytest.raises(
-        ValueError, match=r"^rest_base_url '.*' must name only a scheme, host, and port$"
+        ValueError,
+        match=r"^rest_base_url='.*' names more than a scheme, host, and port\. Pass only those, "
+        r"such as 'https://api\.massive\.com'\.$",
     ):
         check_rest_base_url(base_url, setting="rest_base_url")
 
@@ -53,15 +56,25 @@ def test_a_base_url_names_only_an_origin(base_url: str) -> None:
 )
 def test_a_base_url_is_http_or_https_with_a_valid_port(base_url: str) -> None:
     with pytest.raises(
-        ValueError, match=r"^base_url '.*' is not an absolute http or https URL with a valid port$"
+        ValueError,
+        match=r"^base_url='.*' is not an absolute http or https URL with a valid port\.$",
     ):
         check_rest_base_url(base_url, setting="base_url")
 
 
 @pytest.mark.parametrize("base_url", ["http://api.massive.com", "http://10.0.0.1:8080"])
 def test_plain_http_is_refused_except_for_loopback(base_url: str) -> None:
-    with pytest.raises(ValueError, match="would send the API key in clear text; use https"):
+    refusal = (
+        f"base_url={base_url!r} would send the API key in clear text. Use https, or use http "
+        "only for a loopback host such as a local test server."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         check_rest_base_url(base_url, setting="base_url")
+    # The message's fixes: https, or http to a loopback host.
+    assert (
+        check_rest_base_url(base_url.replace("http:", "https:"), setting="base_url")[0] == "https"
+    )
+    assert check_rest_base_url("http://127.0.0.1:8080", setting="base_url")[0] == "http"
 
 
 @pytest.mark.parametrize(
@@ -93,9 +106,9 @@ def test_each_check_logs_its_outcome_at_debug(caplog: pytest.LogCaptureFixture) 
         (
             logging.DEBUG,
             (
-                "REST base URL refused: rest_base_url 'http://api.massive.com' would send the "
-                "API key in clear text; use https (http is allowed only for a loopback host, "
-                "such as a local test server)"
+                "REST base URL refused: rest_base_url='http://api.massive.com' would send the "
+                "API key in clear text. Use https, or use http only for a loopback host such as "
+                "a local test server."
             ),
         ),
     ]
@@ -115,7 +128,7 @@ def test_a_refused_base_url_never_shows_its_query_or_fragment(
     base_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="deephaven_massive")
-    with pytest.raises(ValueError, match=r"^base_url '[a-z]+://[^']*\*\*\*' ") as info:
+    with pytest.raises(ValueError, match=r"^base_url='[a-z]+://[^']*\*\*\*' ") as info:
         check_rest_base_url(base_url, setting="base_url")
     assert "hunter2" not in "".join(traceback.format_exception(info.value))
     assert "hunter2" not in caplog.text
