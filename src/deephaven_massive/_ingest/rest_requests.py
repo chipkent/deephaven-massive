@@ -26,7 +26,7 @@ plans.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Final, TypeAlias, assert_never
@@ -60,6 +60,7 @@ __all__ = [
     "Call",
     "CryptoSplit",
     "axis_query",
+    "capped_call",
     "fetch_paths",
     "history_calls",
     "largest_page",
@@ -612,11 +613,47 @@ def shared_params(
         # A page size, as the list paths read `limit`. The aggregates' range path reads its
         # `limit` as the number of base aggregates queried instead (at most 50,000); its
         # datasets set that maximum, and bars take no `limit` argument, so no cap shrinks it.
-        sizes = [v for v in (page_size(spec, rest_path), request.limit) if v is not None]
-        if sizes:
-            query["limit"] = min(sizes)
+        size = _page_limit(spec, rest_path, request.limit)
+        if size is not None:
+            query["limit"] = size
     path.update(fixed)
     return path, query
+
+
+def _page_limit(spec: DatasetSpec, rest_path: RestPath, cap: int | None) -> int | None:
+    """Return the `limit` a path's request sends: its page size, or a smaller cap.
+
+    Args:
+        spec: The dataset.
+        rest_path: The path, which takes a `limit` query parameter.
+        cap: The most rows the request may keep, or None.
+
+    Returns:
+        `page_size`, or `cap` when that is smaller; None when neither is known.
+    """
+    sizes = [v for v in (page_size(spec, rest_path), cap) if v is not None]
+    return min(sizes) if sizes else None
+
+
+def capped_call(spec: DatasetSpec, rest_path: RestPath, call: Call, *, cap: int) -> Call:
+    """Return a planned call that asks Massive for at most `cap` rows a page.
+
+    A read capped at `Request.limit` asks each later request only for the rows it still
+    wants, so no page brings rows it cannot keep. A path without a `limit` parameter sends
+    the call as planned.
+
+    Args:
+        spec: The dataset.
+        rest_path: The call's path.
+        call: The planned call.
+        cap: The rows the read still wants, at least 1.
+
+    Returns:
+        The call, its `limit` query parameter the smaller of its page size and `cap`.
+    """
+    if not any(param.name == "limit" and not param.in_path for param in rest_path.params):
+        return call
+    return replace(call, query={**call.query, "limit": _page_limit(spec, rest_path, cap)})
 
 
 def fetch_paths(
