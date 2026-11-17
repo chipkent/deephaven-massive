@@ -435,8 +435,8 @@ ends.
 `last_by()` reads Massive's stream instead of polling, and like the poll in Example 6, the
 stream follows the watchlist.
 
-Massive sends a minute bar only for a minute with trades. Stocks trade in pre-market, regular,
-and after-hours sessions, so a table you start overnight stays empty until pre-market trading.
+Massive sends a minute bar only for a minute with trades, so a table you start while no stock
+trades stays empty until trading resumes.
 Crypto trades around the clock, and on Currencies Starter or higher,
 `m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).last_by()` streams at any hour.
 
