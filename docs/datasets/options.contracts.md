@@ -22,7 +22,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 | Argument | Description |
 | --- | --- |
-| `underlying` | The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or a table of them in a `Symbol` column. Leave it out for every underlying. |
+| `underlying` | Massive's exact ticker of the underlying, such as `"AAPL"` or `"I:SPX"`. A table of them in a `Symbol` column lists each one's contracts. Leave it out for every underlying. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`as_of`](README.md#as_of) | The day whose contracts to list; leave it out for today. |
 | `expired` | True asks Massive for expired contracts. False is the default. |

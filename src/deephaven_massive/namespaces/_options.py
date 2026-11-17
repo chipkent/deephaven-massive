@@ -929,18 +929,19 @@ class OptionsNamespace(Namespace):
         Lists the contracts of one underlying, or of every underlying, so you can find their
         tickers. To read contracts you can already name, use `contract_details()`.
 
-        A table of underlyings lists each one's contracts:
+        Pass a table of underlyings to list each one's contracts:
 
-        - If the table is live, add an underlying and its contracts appear. Remove it and they
-          leave.
-        - By default, a row that isn't Massive's exact stock or index ticker is skipped and
-          logged. To fail the call instead, pass
-          `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
-        - If the table is static, an error from Massive on one underlying fails `fetch()`.
+        - A live table is followed. Add an underlying and its contracts appear. Remove it and
+          they leave.
+        - A static table is read once. An error from Massive on one underlying fails `fetch()`.
+
+        A row that isn't Massive's exact stock or index ticker is skipped and logged. To fail
+        instead, pass `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
 
         Args:
-            underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or a
-                table of them in a `Symbol` column. Leave it out for every underlying.
+            underlying: Massive's exact ticker of the underlying, such as `"AAPL"` or `"I:SPX"`.
+                A table of them in a `Symbol` column lists each one's contracts. Leave it out
+                for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
             expired: True asks Massive for expired contracts. False is the default.
@@ -1013,11 +1014,13 @@ class OptionsNamespace(Namespace):
         `contracts()`.
 
         By default, a contract Massive has no data for gets no row and is logged at `WARNING`. To
-        fail the call instead, pass `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`.
+        fail the table instead, pass
+        `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`; `fetch(wait=True)` then
+        raises `MassiveError`.
 
         Args:
             symbols: Option contracts to describe.
-            as_of: The day the details are as of; leave it out for today.
+            as_of: Reads each contract as it stood on this day; leave it out for today.
             on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
                 the default, takes each cause from the session's `MassiveConfig.on_error`.
 

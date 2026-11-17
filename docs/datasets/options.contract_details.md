@@ -23,7 +23,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Option contracts to describe. |
-| [`as_of`](README.md#as_of) | The day the details are as of; leave it out for today. |
+| [`as_of`](README.md#as_of) | Reads each contract as it stood on this day; leave it out for today. |
 | [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
