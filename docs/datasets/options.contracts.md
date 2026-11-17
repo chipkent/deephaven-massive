@@ -25,7 +25,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | `underlying` | The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or a table of them in a `Symbol` column. Leave it out for every underlying. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`as_of`](README.md#as_of) | The day whose contracts to list; leave it out for today. |
-| `expired` | True lists only expired contracts. False, the default, lists those still trading. |
+| `expired` | True lists only expired contracts. False, the default, lists active contracts. |
 | [`sort`](README.md#sort) | `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`. |
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A table of underlyings caps the rows of every underlying separately instead. |

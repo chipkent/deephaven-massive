@@ -926,12 +926,10 @@ class OptionsNamespace(Namespace):
         """Reference data on options contracts: type, exercise style, expiration, and strike.
 
         Lists the contracts of one underlying, or of every underlying, so you can find their
-        tickers. Each row also holds the contract's underlying, shares per contract, primary
-        exchange, and CFI code. To read contracts you can already name, use `contract_details()`.
+        tickers. To read contracts you can already name, use `contract_details()`.
 
-        An adjusted contract has its own root, such as `AAPL1`, and may deliver something other
-        than 100 shares. A standard contract has `SharesPerContract` of 100 and lists nothing in
-        `AdditionalUnderlyings`, so check both columns before you treat a contract as standard.
+        A standard contract has `SharesPerContract` of 100 and no `AdditionalUnderlyings`. An
+        adjusted one, such as root `AAPL1`, may differ in either.
 
         A table of underlyings lists each one's contracts:
 
@@ -945,8 +943,8 @@ class OptionsNamespace(Namespace):
                 table of them in a `Symbol` column. Leave it out for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
-            expired: True lists only expired contracts. False, the default, lists those still
-                trading.
+            expired: True lists only expired contracts. False, the default, lists active
+                contracts.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A table of underlyings caps the rows of
@@ -962,7 +960,8 @@ class OptionsNamespace(Namespace):
         Raises:
             TypeError: If an argument has the wrong type.
             ValueError: If:
-                - `underlying` isn't Massive's exact ticker, or is a currency or crypto pair;
+                - `underlying` isn't Massive's exact ticker;
+                - `underlying` is a currency or crypto pair, such as `"C:EURUSD"`;
                 - a table has no `Symbol` column;
                 - `as_of` is a `datetime` or isn't a date;
                 - `limit` isn't positive;
@@ -971,7 +970,7 @@ class OptionsNamespace(Namespace):
         Example:
             ::
 
-                listed = m.options.contracts("NVDA", expired=True).fetch()
+                listed = m.options.contracts("NVDA").fetch()
         """
         values = (
             value_table(
@@ -1014,7 +1013,7 @@ class OptionsNamespace(Namespace):
         contract. To find a contract's ticker first, list its underlying's contracts with
         `contracts()`.
 
-        By default, a contract Massive doesn't know gets no row and is logged as a `WARNING`. To
+        By default, a contract Massive has no data for gets no row and is logged as a `WARNING`. To
         fail the call instead, pass `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)`.
 
         Args:
@@ -1031,8 +1030,8 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is None, empty, or `dm.ALL`;
-                - a ticker isn't Massive's exact ticker of an option contract;
-                - a ticker is a stock or index ticker, such as `"AAPL"`;
+                - a ticker isn't Massive's exact ticker of an option contract, such as the stock
+                  ticker `"AAPL"`;
                 - a table has no `Symbol` column;
                 - `as_of` is a `datetime` or isn't a date.
 
