@@ -2077,7 +2077,11 @@ def test_an_unadjusted_poll_reads_a_crypto_pair_without_adjusted(
     assert requests["/v1/indicators/sma/AAPL"]["adjusted"] == ["false"]
     assert "adjusted" not in requests["/v1/indicators/sma/X:BTCUSD"]
     (row,) = streams_of(routed_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    assert (row["State"], row["Error"], row["Path"]) == (
+        "RUNNING",
+        None,
+        f"{SMA_STOCK}, {SMA_CRYPTO}",
+    )
 
 
 def test_a_replace_poll_lists_a_symbol_massive_has_no_data_for(
@@ -2354,14 +2358,14 @@ def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
     dh_to_pylist: ToPylist,
     dh_input_table: Callable[..., InputTable],
 ) -> None:
-    # The default path lacks `adjusted`; only the stock symbols' path takes it.
+    # The default path lacks `window`; only the stock symbols' path takes it.
     crypto_first = DatasetSpec(
         summary="A dataset for the tests.",
         name="indicators.crypto_first",
-        fetch_path=SMA_CRYPTO,
+        fetch_path=MACD_CRYPTO,
         fetch_paths_by_class={AssetClass.STOCKS: SMA_STOCK},
         poll_keys=("Symbol", "Timestamp"),
-        keys=SMA.keys,
+        keys=WINDOWED.keys,
     )
     fake_rest.reply(
         "/v1/indicators/sma/AAPL",
@@ -2370,7 +2374,11 @@ def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
     q = build_query(
-        routed_session._core, crypto_first, query_type=FetchQuery, symbols=watch, adjusted=False
+        routed_session._core,
+        crypto_first,
+        query_type=FetchQuery,
+        symbols=watch,
+        params={"window": 20},
     )
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])

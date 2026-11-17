@@ -123,7 +123,7 @@ class UnsupportedParameterError(PermanentError):
     """A parameter the call set that a symbol's path does not take, in a read by symbol.
 
     A dataset with a path per symbol class can route one symbol to a path that lacks a
-    parameter the call set, whose absence would change the data. That symbol's read
+    parameter the call set. That symbol's read
     fails with this error before any request, and the other symbols are read. The parameter is
     the caller's, so its source is `ErrorSource.USER`, and it is a bug.
     """

@@ -330,7 +330,7 @@ class CycleRows:
         patience: The most seconds of rate-limit pauses the cycle's reads would wait out (their
             patience), for the cycle's log line.
         left_out: The symbols the cycle has no rows for, each with why, such as
-            `"X:BTCUSD (/v1/indicators/macd/{cryptoTicker} does not take ['window'])"` or
+            `"<symbol> (<path> does not take ['<parameter>'])"` or
             `"AAPL1 (HTTP 404 from /v3/trades/{stockTicker})"`, in the order found; empty for
             none. The row's `Error` lists them (`NotePart.LEFT_OUT`).
     """

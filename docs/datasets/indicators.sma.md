@@ -26,7 +26,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | `window` | The number of bars averaged. |
 | [`timespan`](README.md#timespan) | The bar size, `MINUTE` or longer. |
 | `series_type` | The bar price the indicator is computed from. |
-| [`adjusted`](README.md#adjusted) | Split-adjusted bars. It has no effect on a crypto symbol, since a crypto pair has no splits. |
+| [`adjusted`](README.md#adjusted) | Split-adjusted bars. It has no effect on a crypto pair, which has no splits. |
 | [`start`](README.md#start) | The first bar's start. |
 | [`end`](README.md#end) | The end of the range, of the same kind as `start`. |
 | [`order`](README.md#order) | The direction of the bars' times. The endpoints have no `sort`. |

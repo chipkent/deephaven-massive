@@ -88,16 +88,16 @@ Massive's documentation lists no `day` unit, but it serves `1day` bars in the sh
 
 _ONE_DAY: Final = timedelta(days=1)
 
-_CRYPTO_PAIR_PLACEHOLDER: Final = "cryptoTicker"
-"""The path placeholder Massive names for one crypto pair, as in
-`/v1/indicators/sma/{cryptoTicker}`."""
-
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
 BARE_INDEX_PARAM: Final = "underlying_ticker"
 """The query parameter that takes an index without its `I:`: the options contracts list's
 `underlying_ticker` finds no contract for `I:SPX` and every one of `SPX`, so the request keeps
 the canonical ticker and only the wire gets the bare one (`wire_symbols.contracts_underlying`)."""
+
+_CRYPTO_PAIR_PLACEHOLDER: Final = "cryptoTicker"
+"""The path placeholder Massive names for one crypto pair, as in
+`/v1/indicators/sma/{cryptoTicker}`."""
 
 CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str] | Unsplit]"
 """Splits a crypto ticker into its base and quote currencies, or says why Massive has no data for
@@ -593,10 +593,9 @@ def shared_params(
     `adjusted` chooses whether prices are adjusted for splits, and a crypto pair has no splits,
     so on a path of one crypto pair (`_CRYPTO_PAIR_PLACEHOLDER`) that doesn't declare it, as
     the crypto indicators' don't, both values give the same prices and `adjusted` is left
-    out. The page size is
-    `DatasetSpec.page_size`, or else the path's documented maximum `limit`, or `Request.limit`
-    when that is smaller; a path that documents no maximum, for a dataset without a
-    `page_size`, gets only `Request.limit`.
+    out. The page size is `DatasetSpec.page_size`, or else the path's documented maximum
+    `limit`, or `Request.limit` when that is smaller; a path that documents no maximum, for a
+    dataset without a `page_size`, gets only `Request.limit`.
 
     Args:
         spec: The dataset.

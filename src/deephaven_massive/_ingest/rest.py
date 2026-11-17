@@ -2040,8 +2040,8 @@ class RestReader:
             spec: The dataset.
             template: The path that cannot serve them.
             symbols: The symbols.
-            reason: Why, for the log and the error, such as `"/v1/indicators/macd/{cryptoTicker}
-                does not take ['window']"`.
+            reason: Why, for the log and the error, in the form `"<path> does not take
+                ['<parameter>']"`.
 
         Raises:
             UnavailableSymbolError: Under `RAISE`, naming the symbols, the path, the reason,
@@ -2093,8 +2093,7 @@ class RestReader:
 
         Returns:
             Each path the cycle reads with its calls (`plan_fetch`), and each symbol left out
-            with why, such as `"X:BTCUSD (/v1/indicators/macd/{cryptoTicker} does not take
-            ['window'])"`.
+            with why, in the form `"<symbol> (<path> does not take ['<parameter>'])"`.
 
         A failed read of the crypto ticker list raises the `MassiveError` of `crypto_pair`, and
         a refusing path under `RAISE` the `UnavailableSymbolError` of `_unavailable`.

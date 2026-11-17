@@ -313,8 +313,8 @@ class IndicatorsNamespace(Namespace):
             window: The number of bars averaged.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
-            adjusted: Split-adjusted bars. It has no effect on a crypto symbol, since a crypto
-                pair has no splits.
+            adjusted: Split-adjusted bars. It has no effect on a crypto pair, which has no
+                splits.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
             order: The direction of the bars' times. The endpoints have no `sort`.
@@ -391,8 +391,8 @@ class IndicatorsNamespace(Namespace):
             window: The number of bars the average spans.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
-            adjusted: Split-adjusted bars. It has no effect on a crypto symbol, since a crypto
-                pair has no splits.
+            adjusted: Split-adjusted bars. It has no effect on a crypto pair, which has no
+                splits.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
             order: The direction of the bars' times. The endpoints have no `sort`.
@@ -468,8 +468,8 @@ class IndicatorsNamespace(Namespace):
             window: The number of bars looked back over.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
-            adjusted: Split-adjusted bars. It has no effect on a crypto symbol, since a crypto
-                pair has no splits.
+            adjusted: Split-adjusted bars. It has no effect on a crypto pair, which has no
+                splits.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
             order: The direction of the bars' times. The endpoints have no `sort`.
@@ -550,8 +550,8 @@ class IndicatorsNamespace(Namespace):
             signal_window: The bars of the signal line's average.
             timespan: The bar size, `MINUTE` or longer.
             series_type: The bar price the indicator is computed from.
-            adjusted: Split-adjusted bars. It has no effect on a crypto symbol, since a crypto
-                pair has no splits.
+            adjusted: Split-adjusted bars. It has no effect on a crypto pair, which has no
+                splits.
             start: The first bar's start.
             end: The end of the range, of the same kind as `start`.
             order: The direction of the bars' times. The endpoints have no `sort`.
