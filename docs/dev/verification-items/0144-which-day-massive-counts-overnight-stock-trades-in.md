@@ -11,15 +11,13 @@ ET and midnight will count under the next calendar date". No page of Massive's A
 says which day its day bars and daily flat files count them in.
 
 Meanwhile the library keeps the calendar date. Each row below changes if Massive counts those
-trades in the next trading day:
+trades in the next trading day. Changing the first two is a public change:
 
 | The library today | If Massive counts 21:00 to midnight in the next day |
 |---|---|
 | A stock tick's or intraday bar's `Date` is the New York date of its time | A 21:00 trade's `Date` is not its trading day |
 | A stock 1-day bar spans 00:00 to 00:00 of its date | The bar's `TimestampStart` is three hours after its first trade |
 | A range reads the stock flat files of the New York dates it covers | A range ending between 21:00 and midnight misses rows in the next day's file |
-
-Changing the first two is a public change for the owner. All three wait on this answer.
 
 Settled by `test_which_day_massive_counts_overnight_stock_trades_in` in
 `tests/namespaces/test_stocks_integration.py`, run after 20:00 New York time on the trading day
