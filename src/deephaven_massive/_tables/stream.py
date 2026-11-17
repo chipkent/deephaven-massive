@@ -2045,6 +2045,7 @@ class Flusher:
         )
         for sink in readers:
             if sink.publish(shared):
+                self._end_published_stale(sink, converted.symbols)
                 found = updates.get(sink, StreamUpdate())
                 updates[sink] = replace(found, rows_published=sink.rows_published)
                 if generation > sink.rows_generation:
@@ -2150,8 +2151,9 @@ class Flusher:
         therefore has a run of its own: a published row of the symbol ends it, and once
         `DROPPED_RUN_LIMIT` of its rows in a row have been withheld, every stream that holds the
         symbol (by name, or `dm.ALL`) marks it stale: a `stale_symbol_data` span of `m.problems()`,
-        which ends when a row of the symbol is published again. No stream fails for one
-        symbol; the run starts over.
+        which ends when a row of the symbol is published to the stream again
+        (`_end_published_stale`), not when one is converted: a futures row may still wait for
+        its date. No stream fails for one symbol; the run starts over.
 
         Args:
             plan: The dataset's plan for the channel.
@@ -2173,26 +2175,19 @@ class Flusher:
                 count, first = ended
                 became[symbol] = f"the last {count} rows were withheld; the first: {first}"
         for sink in going:
-            self._mark_stale(plan, sink, became, published=converted.symbols)
+            self._mark_stale(plan, sink, became)
 
-    def _mark_stale(
-        self,
-        plan: ChannelPlan,
-        sink: StreamSink,
-        became: Mapping[str, str],
-        *,
-        published: AbstractSet[str],
-    ) -> None:
-        """Update one stream's stale symbols; queue its `stale_symbol_data` spans if they changed.
+    def _mark_stale(self, plan: ChannelPlan, sink: StreamSink, became: Mapping[str, str]) -> None:
+        """Add one stream's symbols that became stale; queue its spans if they changed.
 
-        The symbols it holds that became stale join; the published ones leave. The ones it
-        no longer holds leave at every flush (`_end_unheld_stale`).
+        The symbols it holds that became stale join. A published one leaves when its row is
+        published (`_end_published_stale`), and one it no longer holds at every flush
+        (`_end_unheld_stale`).
 
         Args:
             plan: The dataset's plan for the channel.
             sink: The stream.
             became: Each symbol whose run reached the limit, with why.
-            published: The symbols this flush published.
         """
         held = {
             symbol: why for symbol, why in became.items() if sink.receives_all or sink.holds(symbol)
@@ -2209,12 +2204,32 @@ class Flusher:
             )
             found = self._stale[sink.stream_id] = ({}, tracker)
         stale, tracker = found
-        for symbol in published & stale.keys():
-            del stale[symbol]
         stale.update(held)
         spans = tracker.update({symbol: (symbol, None, why, 0) for symbol, why in stale.items()})
         if spans is not None:
             self._events.append((sink, (spans,)))
+
+    def _end_published_stale(self, sink: StreamSink, symbols: AbstractSet[str]) -> None:
+        """End the `stale_symbol_data` spans of the symbols a stream was just published rows of.
+
+        Args:
+            sink: The stream, which was just published rows of the batch.
+            symbols: The batch's distinct symbols.
+        """
+        found = self._stale.get(sink.stream_id)
+        if found is None:
+            return
+        stale, tracker = found
+        published = [
+            symbol for symbol in symbols & stale.keys() if sink.receives_all or sink.holds(symbol)
+        ]
+        if not published:
+            return
+        for symbol in published:
+            del stale[symbol]
+        spans = tracker.update({symbol: (symbol, None, why, 0) for symbol, why in stale.items()})
+        assert spans is not None  # the tracker held each symbol that just left
+        self._events.append((sink, (spans,)))
 
     def _end_unheld_stale(self, routed: list[StreamSink]) -> None:
         """End the `stale_symbol_data` spans of symbols their streams no longer hold.

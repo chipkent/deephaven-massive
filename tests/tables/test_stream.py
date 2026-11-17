@@ -1136,6 +1136,28 @@ def test_held_rows_never_count_as_dropped(futures_flush: FuturesFlush) -> None:
     assert flush.held.rows_of(flush.plan) == stream.DROPPED_RUN_LIMIT + 1
 
 
+def test_a_stale_futures_ticker_s_span_ends_only_when_its_held_row_publishes(
+    futures_flush: FuturesFlush,
+) -> None:
+    # NQM5's every row is withheld until it is stale; its next row is read whole but waits for
+    # its date, so nothing of NQM5 reaches the stream yet, and the span must hold.
+    flush = futures_flush
+    limit = stream.DROPPED_RUN_LIMIT
+    lost = frame([futures_trade("NQM5", BEFORE_ROLL_MS)] * limit, "futures/T")
+    marks = unread_keys(*range(limit), reason="a T row for NQM5: no Ticker", sent="NQM5")
+    flush.flusher.rows("T", lost, marks, generation=1)
+    flush.flusher.flush()
+    assert [list(found) for found in stale_spans(flush.events, 1)] == [["NQM5"]]
+    flush.events.clear()
+    flush.send("NQM5")
+    assert flush.published()[1] == 0
+    assert stale_spans(flush.events, 1) == []  # the row waits: the span holds
+    flush.calendar.set("NQM5", LookupState(Readiness.READY, loaded_at=0.0))
+    flush.flusher.flush()
+    assert flush.published()[1] == 1
+    assert stale_spans(flush.events, 1) == [{}]  # published: the span ends
+
+
 def test_a_refused_lookup_fails_only_the_streams_that_receive_the_ticker(
     futures_flush: FuturesFlush,
 ) -> None:

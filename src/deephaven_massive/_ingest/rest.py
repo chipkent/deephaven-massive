@@ -929,8 +929,10 @@ class RestReader:
         its number of threads. A fan-out sets the token when it ends. So if a call fails, or
         this thread is interrupted, the calls not yet started are cancelled, the running ones
         stop waiting for the rate governor at once, the read waits for the requests already on
-        the wire, and the failure of the earliest call that failed on its own is raised. Every
-        page's rows get the library's time columns (`_call`).
+        the wire, and the failure of the earliest call that failed on its own is raised; the
+        symbols Massive had no data for among the calls that completed are first listed as
+        `unavailable_symbols` problems (`_report_missing_of_failed`). Every page's rows get
+        the library's time columns (`_call`).
 
         Args:
             spec: The dataset.
@@ -993,7 +995,15 @@ class RestReader:
             if len(calls) <= 1:
                 outcomes = [run(call) for call in calls]
             else:
-                outcomes = self._fan_out(run, calls, executor=executor, stop=stop)
+                outcomes = self._fan_out(
+                    run,
+                    calls,
+                    executor=executor,
+                    stop=stop,
+                    on_failure=lambda done: self._report_missing_of_failed(
+                        spec, [o.missing for o in done if o.missing is not None]
+                    ),
+                )
         missing = [o.missing for o in outcomes if o.missing is not None]
         if missing and on_missing is not None:
             on_missing(missing)
@@ -1191,6 +1201,32 @@ class RestReader:
             bounded_list(str(one) for one in missing),
         )
 
+    def _report_missing_of_failed(self, spec: DatasetSpec, missing: Sequence[_Missing]) -> None:
+        """List the symbols Massive has no data for among the calls of a read another call failed.
+
+        The read raises the other call's failure, so `ErrorPolicy.unavailable_symbols` decides
+        nothing here: each symbol is only an `unavailable_symbols` problem of the read's table,
+        with the setting, so the failure never hides what Massive answered for it.
+
+        Args:
+            spec: The dataset.
+            missing: The symbols Massive answered with HTTP 404 in the calls that completed,
+                in call order: those of one path's calls (`_fan_out`), or of a `poll()`
+                cycle's earlier paths (`_read_one_cycle`).
+        """
+        if not missing:
+            return
+        self.problems(
+            self._unavailable_events(
+                spec, [(one.symbol, f"Massive has no data for it {one.why}") for one in missing]
+            )
+        )
+        logger.debug(
+            "%s: Massive has no data for %s; another request failed the read",
+            spec.name,
+            bounded_list(str(one) for one in missing),
+        )
+
     def _unavailable_events(
         self, spec: DatasetSpec, found: Sequence[tuple[str, str]]
     ) -> list[ProblemEvent]:
@@ -1285,6 +1321,7 @@ class RestReader:
         *,
         executor: ThreadPoolExecutor | None,
         stop: Cancel,
+        on_failure: Callable[[list[_Done]], None] | None = None,
     ) -> list[_Done]:
         """Run several calls concurrently and return their outcomes in call order.
 
@@ -1297,6 +1334,8 @@ class RestReader:
             calls: The calls.
             executor: The caller's pool, or None for one of this read's own.
             stop: The read's token.
+            on_failure: Given the outcomes of the calls that completed, in call order, when one
+                failed, before its failure is raised; or None.
 
         Returns:
             The outcomes, in call order.
@@ -1318,6 +1357,14 @@ class RestReader:
                 pool.shutdown()
         failed = [future for future in futures if future in done and future.exception()]
         if failed:
+            if on_failure is not None:
+                on_failure(
+                    [
+                        future.result()
+                        for future in futures
+                        if not future.cancelled() and future.exception() is None
+                    ]
+                )
             failed[0].result()  # raises the failure
         return [future.result() for future in futures]
 
@@ -2199,7 +2246,9 @@ class RestReader:
         (no data), and `ErrorPolicy.unavailable_symbols` decides (`_report_missing`): under
         `LOG` and `IGNORE` such symbols are left out of the cycle, each an
         `unavailable_symbols` problem of the table, and named in its `left_out`; under `RAISE`
-        the table fails. A parameter a path does not take never reaches a cycle:
+        the table fails. When a later path's failure fails the cycle, the symbols earlier paths
+        answered with HTTP 404 are still problems of the table (`_report_missing_of_failed`).
+        A parameter a path does not take never reaches a cycle:
         `check_parameters` refused it when the table was made.
         Before reading, the cycle's requests per bucket go to `pace`, which warns once when
         the paced ones outlast the interval.
@@ -2231,19 +2280,24 @@ class RestReader:
         planned, left_out = self._plan_cycle(spec, request, symbols, cancel=cancel)
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
         missing: list[_Missing] = []
-        table, requests = self._read_planned(
-            spec,
-            request,
-            planned,
-            current=spec.serves_current_data or spec.latest_is_current,
-            record=record,
-            on_recency=on_recency,
-            executor=executor,
-            cancel=cancel,
-            patience=patience,
-            tally=tally,
-            on_missing=missing.extend,
-        )
+        try:
+            table, requests = self._read_planned(
+                spec,
+                request,
+                planned,
+                current=spec.serves_current_data or spec.latest_is_current,
+                record=record,
+                on_recency=on_recency,
+                executor=executor,
+                cancel=cancel,
+                patience=patience,
+                tally=tally,
+                on_missing=missing.extend,
+            )
+        except Exception:
+            # A later path's failure fails the cycle; the earlier paths' 404s are still listed.
+            self._report_missing_of_failed(spec, missing)
+            raise
         if missing:
             self._report_missing(spec, missing)
             left_out.extend(str(one) for one in missing)
