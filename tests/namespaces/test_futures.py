@@ -13,7 +13,6 @@ import io
 import json
 import logging
 import re
-import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
@@ -1108,10 +1107,8 @@ def test_one_frame_lands_in_blink(
     ws_session.rows.update(SCHEDULE_ROWS)
     live = build(ws_session.session.futures).blink()
     seen = blink_to_append_only(live)
-    # The stream's contract is looked up as it opens; its schedule places its rows.
-    assert ws_session.connections.futures_calendar().wait_loaded(
-        [frame["sym"]], 15.0, stop=threading.Event()
-    )
+    # The stream's contract is looked up as it opens; its rows wait until its schedule
+    # places them.
     ws_session.subscribed(topic)
     assert ws_session.urls == ["wss://socket.test/futures"]  # every venue streams on /futures
     ws_session.publish(frame)
@@ -1159,9 +1156,6 @@ def test_a_contracts_table_feeds_a_stream(
     contracts = rest_session.futures.contracts(product_code="ES").fetch(wait=True)
     ws_session.rows.update(SCHEDULE_ROWS)
     live = ws_session.session.futures.trades(contracts.head(1)).last_by()
-    assert ws_session.connections.futures_calendar().wait_loaded(
-        ["ESZ4"], 15.0, stop=threading.Event()
-    )
     ws_session.subscribed("T.ESZ4")
     ws_session.publish(json.loads(load_fixture(OWNER, "ws_frames.json"))[0])
     (row,) = rows_when(live, lambda arrived: len(arrived) == 1)

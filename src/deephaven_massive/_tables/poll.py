@@ -55,9 +55,9 @@ reader raises `UnavailableSymbolError`, a `PermanentError`, which fails the tabl
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
 `PermanentError` fails the table through `publish_failure`, marks the row `FAILED`
 (`SessionCore.fail_stream`), and ends the poller. The permanent errors are `RowDataError` (a
-read of which the library could read no row whole, a withheld row of a cause the policy sets to
-`RAISE`, or a row that, in any mode, has a null poll key, which would merge unrelated rows; one
-row the library cannot read whole is withheld and reported, and the table goes on),
+read of which the library could read no row whole, or a withheld row of a cause the policy sets
+to `RAISE`; one row the library cannot read whole is withheld and reported, and the table goes
+on, a row with a null poll key, which would merge unrelated rows, included),
 `SymbolRowError` (a symbol table's row that is not Massive's ticker, under
 `noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the row is skipped and the cycle's
 `Error` lists it), and `UnavailableSymbolError` (a symbol Massive has no data for, under
@@ -149,7 +149,7 @@ from deephaven_massive._errors import (
     unmatched_form,
 )
 from deephaven_massive._log_limits import bounded_list, log_failure
-from deephaven_massive._massive import Transport
+from deephaven_massive._massive import RowFault, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import (
     NotePart,
@@ -164,6 +164,13 @@ from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import SymbolRowRule, read_symbols, skipped_rows_text
+from deephaven_massive._tables.withheld import (
+    failure_of,
+    logs_withheld,
+    mark,
+    with_marks,
+    withhold_rows,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Sequence
@@ -198,7 +205,9 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _ROW_TEXT: Final = 300
-"""The longest rendering of a row in the error of a null poll key."""
+"""The longest rendering of a row in the reason of a null poll key."""
+_SYMBOL: Final = "Symbol"
+"""The canonical symbol column, by which withheld rows are grouped when a dataset has one."""
 
 LEFT_OUT_SHOWN: Final = 10
 """How many symbols left out of a cycle the row's `Error` names before it counts the rest."""
@@ -1062,7 +1071,7 @@ class Poller:
         self._watch_end()  # before the row's update, so no late mark can follow it
         if self._stop.is_set():
             return False
-        published = self._publish(read.rows)
+        published = self._publish(self._withhold_unkeyed(core, read.rows))
         self._published += published
         logger.debug(
             "stream %d: %s poll() cycle: %d requests, %d rows read, %d published in %.3f s, "
@@ -1251,7 +1260,6 @@ class Poller:
             How many of the cycle's rows were published (tombstones not counted); 0 once the
             table has failed, when nothing is published.
         """
-        self._check_keys(table)
         keys = None
         identities = None
         published: int = table.num_rows
@@ -1280,38 +1288,73 @@ class Poller:
             self._seen |= identities
         return published
 
-    def _check_keys(self, table: pa.Table) -> None:
-        """Fail the cycle if any row has a null (or NaN) poll key, in every mode.
+    def _withhold_unkeyed(self, core: SessionCore, table: pa.Table) -> pa.Table:
+        """Withhold the cycle's rows with a null (or NaN) poll key, under `unreadable_keys`.
 
         A null key would silently merge unrelated rows: one keyed row for all of them, or
         every later row with the same null skipped by `APPEND`; a NaN never equals itself, so
-        `APPEND` would append its row again every cycle. Like a missing required key, it is a
-        data failure, so it fails the table. The dataset's nullable poll keys
-        (`DatasetSpec.nullable_poll_keys`, such as an option's `PutCall`, empty for common
-        stock) and its revision keys are not checked: a null there is a value.
+        `APPEND` would append its row again every cycle. So such a row is a row the library
+        cannot place, withheld in every mode as any unreadable key is (`withheld.py`): its
+        events go to the session, its count to the table's `SchemaDrift`, and the log reports
+        it at the level `ErrorPolicy.unreadable_keys` gives; under `RAISE` it fails the table.
+        The dataset's nullable poll keys (`DatasetSpec.nullable_poll_keys`, such as an option's
+        `PutCall`, empty for common stock) and its revision keys are not checked: a null there
+        is a value.
 
         Args:
+            core: The session's core.
             table: The cycle's rows.
 
+        Returns:
+            The cycle's rows with a value in every poll key that must have one.
+
         Raises:
-            RowDataError: Naming the dataset, the key column, the first such row's position in
-                the cycle, and that row's non-null values but its `TimestampInsert`, truncated
-                to `_ROW_TEXT` characters, so the row can be found although it was never
-                published.
+            RowDataError: Under `unreadable_keys=RAISE`, when a row is withheld; or, whatever
+                the policy, when every row of the cycle is withheld, the sign of a change in
+                Massive's format. Each names the dataset and the first such
+                row: its position in the cycle, the key column, and its non-null values but
+                its `TimestampInsert`, truncated to `_ROW_TEXT` characters, so the row can be
+                found although it was never published.
         """
         nullable = self._spec.nullable_poll_keys
-        for name in (k for k in self._key_names if k not in nullable):
-            missing = pc.is_null(table.column(name), nan_is_null=True)
-            row = pc.index(missing, True).as_py()
-            if row >= 0:
-                (values,) = table.slice(row, 1).to_pylist()
-                # The row as Massive sent it: the arrival time is the library's own.
-                text = repr({k: v for k, v in values.items() if v is not None and k != INSERT})
-                text = text if len(text) <= _ROW_TEXT else text[: _ROW_TEXT - 3] + "..."
-                raise RowDataError(
-                    f"{self._spec.name} poll(): row {row} of the cycle has a null poll key "
-                    f"{name!r}: {text}"
-                )
+        masks = [
+            (name, pc.is_null(table.column(name), nan_is_null=True))
+            for name in self._key_names
+            if name not in nullable
+        ]
+        if not any(pc.any(mask).as_py() for _, mask in masks):
+            return table
+        symbol = _SYMBOL if _SYMBOL in table.schema.names else None
+        sent = None if symbol is None else table.column(symbol)
+        marked = with_marks(table, {}, sent=sent)
+        for name, mask in masks:
+            reason = functools.partial(_null_key_reason, table, name)
+            marked = mark(marked, RowFault.UNREADABLE_KEYS, mask, field=name, reason=reason)
+        withheld = withhold_rows(marked, symbol=symbol)
+        spec, policy = self._spec, self._request.on_error
+        where = f"GET {required(spec.fetch_path, f'{spec.name} fetch path')}"
+        core.problems(
+            withheld.events(
+                dataset=spec.name,
+                transport=Transport.REST,
+                where=where,
+                stream_id=self._stream_id,
+            )
+        )
+        core.record_stream_drift(self._stream_id, Transport.REST, withheld.drift)
+        counts = withheld.counts()
+        dataset = f"{spec.name} poll()"
+        failure = failure_of(counts, policy, dataset=dataset, first_reason=withheld.first_reason)
+        if failure is not None:
+            raise RowDataError(failure)
+        if logs_withheld(counts, policy):
+            core.drift.report(spec.name, Transport.REST, withheld.drift, where=where)
+        if not withheld.rows.num_rows:
+            raise RowDataError(
+                f"{dataset}: every one of the cycle's {table.num_rows} rows has a null poll "
+                f"key, so Massive's format may have changed; the first: {withheld.first_reason}"
+            )
+        return withheld.rows
 
     def _fresh(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
         """Keep the rows of an `APPEND` cycle whose identity the poller has not appended yet.
@@ -1778,3 +1821,21 @@ def open_poll(
     )
     poller.start()
     return result
+
+
+def _null_key_reason(table: pa.Table, name: str, row: int) -> str:
+    """Say why a poll row was withheld: its key column, and the row as Massive sent it.
+
+    Args:
+        table: The cycle's rows.
+        name: The key column that is null.
+        row: The row's position in the cycle.
+
+    Returns:
+        The reason, with the row's non-null values but its `TimestampInsert` (the arrival time
+        is the library's own), truncated to `_ROW_TEXT` characters.
+    """
+    (values,) = table.slice(row, 1).to_pylist()
+    text = repr({k: v for k, v in values.items() if v is not None and k != INSERT})
+    text = text if len(text) <= _ROW_TEXT else text[: _ROW_TEXT - 3] + "..."
+    return f"row {row} of the cycle has a null poll key {name!r}: {text}"

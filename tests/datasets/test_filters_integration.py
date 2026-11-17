@@ -29,7 +29,6 @@ pytestmark = pytest.mark.integration
 Evidence: TypeAlias = "Callable[[str], None]"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("97")
 @pytest.mark.requests(1)
 def test_massive_answers_an_enum_filter_value_it_does_not_list(
@@ -43,7 +42,6 @@ def test_massive_answers_an_enum_filter_value_it_does_not_list(
     assert bad_values.ask_all(live_rest, bad_values.ENUM_FILTER, evidence)
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("98")
 @pytest.mark.requests(1)
 def test_massive_answers_a_filter_list_item_with_a_space(
@@ -58,7 +56,6 @@ def test_massive_answers_a_filter_list_item_with_a_space(
     assert bad_values.ask_all(live_rest, bad_values.FILTER_WHITESPACE, evidence)
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("118")
 @pytest.mark.requests(1)
 def test_massive_answers_a_filter_list_with_an_empty_item(

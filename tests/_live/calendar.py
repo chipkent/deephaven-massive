@@ -1,6 +1,6 @@
 """The US exchanges' calendar, and the recent days the live tests read.
 
-No live test reads a fixed date: a fixed date ages out of a Basic plan's two years of history
+No live test reads a fixed date: a fixed date ages out of the history a key may read
 and can land on a holiday. Each computes its days from the run's New York day with the
 exchanges' fixed holiday rules, here. The library keeps no holiday calendar on purpose, so this
 one lives with the tests, with the exchanges' weekend rule: they trade Monday to Friday. It

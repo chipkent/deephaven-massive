@@ -13,7 +13,7 @@ Two directories directly under `tests/` are helper packages, outside the mirror 
 pytest collects a test module wherever it lies, so one inside a helper package must still
 mirror a module. A module of `tests/_live/`, and of no other helper package
 (`TESTED_HELPER_PACKAGES`), has a unit test at the path the same mirror rule gives it:
-`tests/_live/plans.py` is tested by `tests/live/test_plans.py`.
+`tests/_live/pacing.py` is tested by `tests/live/test_pacing.py`.
 A `tests/scripts/test_<name>.py` mirrors `scripts/<name>.py` the same way, though a script need
 not have one. The only other test files that mirror no module are a `conftest.py`, in any test
 folder outside a helper package, and four files at the top of `tests/`: `embedded_server.py`
@@ -99,17 +99,19 @@ text), so it is checked both against the real tree and against a synthetic tree 
 
 import ast
 import functools
+import io
 import os
 import re
 import subprocess
 import sys
+import tokenize
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
 import pytest
 
-from tests._live import key_check, parallel
+from tests._live import parallel
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "src" / "deephaven_massive"
@@ -527,7 +529,7 @@ def test_a_conftest_needs_no_module_in_any_test_folder() -> None:
 
 def test_the_approved_directories_are_helper_packages() -> None:
     assert orphans([], _paths("_fakes/__init__.py", "_fakes/rest.py", "_fakes/ws/server.py")) == []
-    assert orphans([], _paths("_live/__init__.py", "_live/plans.py")) == []
+    assert orphans([], _paths("_live/__init__.py", "_live/pacing.py")) == []
 
 
 def test_another_underscore_directory_is_no_helper_package() -> None:
@@ -535,7 +537,9 @@ def test_another_underscore_directory_is_no_helper_package() -> None:
 
 
 def test_a_helper_module_is_tested_by_its_mirror() -> None:
-    files = _paths("_live/plans.py", "_live/__init__.py", "live/test_plans.py", "live/test_init.py")
+    files = _paths(
+        "_live/pacing.py", "_live/__init__.py", "live/test_pacing.py", "live/test_init.py"
+    )
     assert orphans([], files) == []
 
 
@@ -545,7 +549,7 @@ def test_a_test_of_a_fake_is_an_orphan() -> None:
 
 
 def test_a_test_of_no_helper_module_is_an_orphan() -> None:
-    files = _paths("_live/plans.py", "live/test_calendar.py", "_other/x.py", "other/test_x.py")
+    files = _paths("_live/pacing.py", "live/test_calendar.py", "_other/x.py", "other/test_x.py")
     assert orphans([], files) == [
         "tests/live/test_calendar.py",
         "tests/_other/x.py",
@@ -2370,8 +2374,8 @@ def test_a_docstring_alone_is_a_valid_layer_package_init(package: str) -> None:
 @pytest.mark.parametrize(
     "marker_option",
     [
-        # Selects only the live tests that name the plans they need.
-        "-m 'integration and needs'",
+        # Selects only the live tests.
+        "-m integration",
         # Replaces the default expression and selects every test, the live ones included.
         "-m ''",
     ],
@@ -2382,22 +2386,18 @@ def test_parallel_workers_refuse_the_live_tests_the_run_selects(
     # The refusal reads the tests a worker selected, whatever `-m` expression selected them,
     # and ends the run before the controller hands out any test. The run loads the refusal's
     # plugin with `-p`, as the conftest registers it in every run, and collects stand-ins of a
-    # unit file and a live one, so it needs neither the conftest nor a JVM; the live stand-in
-    # names the plans it needs, as `-m "integration and needs"` asks. `CI` and the missing key
+    # unit file and a live one, so it needs neither the conftest nor a JVM. `CI` and the missing key
     # are a second guard: a live test that did start would skip before reaching Massive. The
     # `-m` option goes through PYTEST_ADDOPTS, which pytest reads after the configured
     # `addopts`, so it replaces any default expression as a command-line `-m` would.
-    (tmp_path / "pytest.ini").write_text(
-        "[pytest]\nmarkers =\n    integration: a live test\n    needs(*plans): its plans\n"
-    )
+    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers =\n    integration: a live test\n")
     unit = tmp_path / "tests" / "live" / "test_streams.py"
     live = tmp_path / "tests" / "datasets" / "test_timestamps_integration.py"
     for path in (unit, live):
         path.parent.mkdir(parents=True)
     unit.write_text("def test_unit():\n    pass\n")
     live.write_text(
-        "import pytest\n\npytestmark = pytest.mark.integration\n\n\n"
-        "@pytest.mark.needs('stocks:starter')\ndef test_live():\n    pass\n"
+        "import pytest\n\npytestmark = pytest.mark.integration\n\n\ndef test_live():\n    pass\n"
     )
     env = {k: v for k, v in os.environ.items() if k != "MASSIVE_API_KEY"}
     env |= {"CI": "1", "PYTEST_ADDOPTS": marker_option, "PYTHONPATH": str(_ROOT)}
@@ -2437,85 +2437,32 @@ def test_every_run_registers_the_parallel_refusal(pytestconfig: pytest.Config) -
     assert pytestconfig.pluginmanager.get_plugin(parallel.PLUGIN_NAME) is parallel
 
 
-def test_every_run_registers_the_live_key_plugin(pytestconfig: pytest.Config) -> None:
-    # The CI check's run below loads the plugin by hand; a real run gets it from the conftest,
-    # with the conftest's source of plans.
-    assert pytestconfig.pluginmanager.get_plugin(key_check.PLUGIN_NAME) is key_check
-    assert key_check.PLANS_SOURCE in pytestconfig.stash
-
-
-_PROBE_RECORDER = """
-import os
-
-from tests._live import key_check
-
-
-def _probe(config, api_key):
-    with open(os.environ["PROBE_ATTEMPTS"], "a") as attempts:
-        attempts.write("probed\\n")
-    raise OSError("the plans were probed")
-
-
-def pytest_configure(config):
-    config.stash[key_check.PLANS_SOURCE] = _probe
-"""
-"""A pytest plugin that stands in for the conftest's source of plans and records each probe."""
-
-
-def test_a_live_test_under_ci_never_probes_the_plans_even_with_a_key(tmp_path: Path) -> None:
-    # The plans probe is a session fixture, set up before the function-scoped key check of
-    # the first live test, so it must check `CI` itself. The run gets a key (a dummy), and
-    # only that check stands between the test and the run's source of plans. The run loads
-    # the fixture's plugin with `-p`, as the conftest registers it in every run, with a
-    # stand-in source that records any probe, and collects a stand-in live test that needs
-    # the plans, so it needs neither the conftest nor a JVM.
-    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers =\n    integration: a live test\n")
-    (tmp_path / "probe_recorder.py").write_text(_PROBE_RECORDER)
-    live = tmp_path / "tests" / "datasets" / "test_timestamps_integration.py"
-    live.parent.mkdir(parents=True)
-    live.write_text(
-        "import pytest\n\npytestmark = pytest.mark.integration\n\n\n"
-        "def test_live(live_plans):\n    pass\n"
-    )
-    attempts = tmp_path / "attempts.txt"
-    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
-    env |= {
-        "CI": "1",
-        "MASSIVE_API_KEY": "not-a-real-key",
-        "PROBE_ATTEMPTS": str(attempts),
-        "PYTHONPATH": os.pathsep.join([str(tmp_path), str(_ROOT)]),
-    }
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-P",
-            "-m",
-            "pytest",
-            "--strict-markers",
-            "--import-mode=importlib",
-            "-rs",
-            "-p",
-            "no:cacheprovider",
-            "-p",
-            "tests._live.key_check",
-            "-p",
-            "probe_recorder",
-            "-m",
-            "integration",
-            "tests/datasets/test_timestamps_integration.py",
-        ],
-        cwd=tmp_path,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
-    )
-    output = result.stdout + result.stderr
-    assert result.returncode == pytest.ExitCode.OK, output
-    assert "live tests never run in CI" in output
-    assert " passed" not in output
-    assert not attempts.exists(), attempts.read_text()
+def test_a_live_test_checks_ci_and_its_key_before_anything_else() -> None:
+    # Every live fixture that reaches Massive is function-scoped, so the autouse key check,
+    # which pytest sets up before them, is what keeps a live test under CI or without a key
+    # from sending a request. Past its guard for tests that are not live, its first statement
+    # is the call that skips such a test.
+    tree = ast.parse((_ROOT / "tests" / "conftest.py").read_text())
+    (fixture,) = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_live_tests_need_a_key"
+    ]
+    autouse = [
+        keyword
+        for decorator in fixture.decorator_list
+        if isinstance(decorator, ast.Call)
+        for keyword in decorator.keywords
+        if keyword.arg == "autouse"
+    ]
+    assert [ast.unparse(keyword.value) for keyword in autouse] == ["True"]
+    body = fixture.body[1:] if ast.get_docstring(fixture) else fixture.body
+    guard, first = body[0], body[1]
+    assert isinstance(guard, ast.If)
+    assert ast.unparse(guard.test) == "request.node.get_closest_marker(_INTEGRATION) is None"
+    assert [type(statement) for statement in guard.body] == [ast.Return]
+    assert not guard.orelse
+    assert ast.unparse(first) == "key_check.live_key()"
 
 
 def test_the_live_marker_check_runs_before_deselection() -> None:
@@ -2527,6 +2474,174 @@ def test_the_live_marker_check_runs_before_deselection() -> None:
     ]
     decorators = [ast.unparse(decorator) for decorator in hook.decorator_list]
     assert decorators == ["pytest.hookimpl(tryfirst=True)"]
+
+
+# The live tests know no Massive plan. Massive decides what a key may read, how late, and how
+# fast, and changes its plans over time, so the live tests, their harness, and their runbooks
+# learn that only from Massive's answers and the owner's settings, never from a plan's name.
+# A plan's name is caught by its word: `Basic`, `Starter`, `Developer`, `Advanced`, `Business`,
+# or `business_expansion`, in any case, as a whole word, in a runbook's lines and in a Python
+# file's comments, docstrings, other strings, and names, each name read as the words its `_`
+# separates (`BASIC_LIMIT`, `classes_on_basic`). The harness may call the library's own names
+# that hold such a word (`_LIBRARY_NAMES`). A line that quotes Massive, holding `massive.com`
+# or a request id, may name one, and so may the spec refresh's tests, which parse Massive's
+# plan tables.
+
+_PLAN_WORD = re.compile(
+    r"\b(basic|starter|developer|advanced|business|business_expansion)\b", re.IGNORECASE
+)
+_QUOTES_MASSIVE = re.compile(r"massive\.com|\b[0-9a-f]{32}\b|request[_ ]id", re.IGNORECASE)
+"""A line that quotes Massive: a host or page of `massive.com`, or a request id (32 hex digits,
+or named `request_id`)."""
+
+
+def _live_harness_files(root: Path) -> list[Path]:
+    """Return the files of the live tests and their harness, which name no plan.
+
+    Args:
+        root: The repository root.
+
+    Returns:
+        `tests/conftest.py`, every file of `tests/_live/` and `tests/live/`, every live test
+        (`tests/**/*_integration.py`), `scripts/live_run.py`, and the two runbooks
+        `docs/live-tests.md` and `docs/tester-guide.md`, less `tests/massive/refresh/`; sorted.
+    """
+    tests = root / "tests"
+    files = {
+        tests / "conftest.py",
+        root / "scripts" / "live_run.py",
+        root / "docs" / "live-tests.md",
+        root / "docs" / "tester-guide.md",
+        *(tests / "_live").rglob("*.py"),
+        *(tests / "live").rglob("*.py"),
+        *tests.rglob("*_integration.py"),
+    }
+    refresh = tests / "massive" / "refresh"
+    return sorted(path for path in files if not path.is_relative_to(refresh))
+
+
+def _plan_names(root: Path, files: Iterable[Path]) -> list[str]:
+    """Return each line of the files that names a Massive plan, as `path:line: text`.
+
+    Args:
+        root: The repository root, which the paths are shown from.
+        files: The files to read.
+
+    Returns:
+        The lines, in file order.
+    """
+    found = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        prose = _python_prose(text) if path.suffix == ".py" else dict(enumerate(lines, 1))
+        for number, words in sorted(prose.items()):
+            line = lines[number - 1]
+            if _PLAN_WORD.search(words) and not _QUOTES_MASSIVE.search(line):
+                found.append(f"{path.relative_to(root)}:{number}: {line.strip()}")
+    return found
+
+
+_CODE_TOKENS = frozenset({tokenize.OP, tokenize.NUMBER})
+"""The tokens that hold no words: operators and numbers, also inside an f-string."""
+
+_LIBRARY_NAMES = frozenset({"rest_basic_subscriptions", "basic"})
+"""The library's own names that hold a plan's word, which the harness must call:
+`MassiveConfig.rest_basic_subscriptions` and the keyword `basic` of the rate-limit registry's
+`lease`. They are the library's names, so the library's own change renames them."""
+
+
+def _python_prose(source: str) -> dict[int, str]:
+    """Return the words a reader reads in Python source, by line.
+
+    The words are its comments, its strings, and its names, each name split on `_`; a name of
+    `_LIBRARY_NAMES` is left out, and `basic` only as a keyword argument (`lease(basic=x)`).
+
+    Args:
+        source: The source.
+
+    Returns:
+        Each line number that holds a comment, part of a string, or a name, mapped to that
+        text on the line.
+    """
+    prose: dict[int, list[str]] = {}
+    tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    depth = 0
+    for index, token in enumerate(tokens):
+        if token.type == tokenize.OP:
+            depth += {"(": 1, ")": -1}.get(token.string, 0)
+        if token.type in _CODE_TOKENS:
+            continue
+        text = token.string
+        if token.type == tokenize.NAME:
+            following = tokens[index + 1].string if index + 1 < len(tokens) else ""
+            keyword = depth > 0 and following == "="
+            if text in _LIBRARY_NAMES and (text != "basic" or keyword):
+                continue
+            text = " ".join(text.split("_"))
+        for offset, line in enumerate(text.splitlines()):
+            prose.setdefault(token.start[0] + offset, []).append(line)
+    return {number: " ".join(texts) for number, texts in prose.items()}
+
+
+def test_the_live_tests_name_no_plan() -> None:
+    found = _plan_names(_ROOT, _live_harness_files(_ROOT))
+    assert not found, (
+        "these lines name a Massive plan; describe the data the test needs, or Massive's answer "
+        "(its refusal, its label, its rate-limit reply), instead:\n" + "\n".join(found)
+    )
+
+
+@pytest.mark.parametrize(
+    ("line", "names_a_plan"),
+    [
+        ("# needs Stocks Starter", True),
+        ("LIMIT = 5  # the Basic pace", True),
+        ('tier = "business_expansion"', True),
+        ("config.rest_basic_subscriptions", False),
+        ("lease(basic=config.rest_basic_subscriptions)", False),
+        ("lease(basic=x)", False),
+        ("BASIC_LIMIT = 5", True),
+        ("def classes_on_basic():", True),
+        ("_BASIC_UNDERLYINGS = ()", True),
+        ("basic = 5", True),
+        ('reason = f"paced on Basic: {count}"', True),
+        ("a 403 from https://massive.com/pricing names Stocks Advanced", False),
+        ("Massive: 'upgrade to Business' (request_id 0123456789abcdef0123456789abcdef)", False),
+        ("Massive: 'upgrade to Business' (0123456789abcdef0123456789abcdef)", False),
+    ],
+)
+def test_a_plan_name_is_found_unless_the_line_quotes_massive(
+    tmp_path: Path, line: str, *, names_a_plan: bool
+) -> None:
+    path = tmp_path / "tests" / "live" / "test_x.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"{line}\n", encoding="utf-8")
+    expected = [f"tests/live/test_x.py:1: {line}"] if names_a_plan else []
+    assert _plan_names(tmp_path, [path]) == expected
+
+
+def test_the_live_harness_files_leave_out_the_spec_refresh(tmp_path: Path) -> None:
+    for relative in [
+        "tests/conftest.py",
+        "tests/_live/pacing.py",
+        "tests/live/test_pacing.py",
+        "tests/namespaces/test_stocks_integration.py",
+        "tests/massive/refresh/test_overrides_integration.py",
+        "tests/namespaces/test_stocks.py",
+    ]:
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text("")
+    found = [str(path.relative_to(tmp_path)) for path in _live_harness_files(tmp_path)]
+    assert found == [
+        "docs/live-tests.md",
+        "docs/tester-guide.md",
+        "scripts/live_run.py",
+        "tests/_live/pacing.py",
+        "tests/conftest.py",
+        "tests/live/test_pacing.py",
+        "tests/namespaces/test_stocks_integration.py",
+    ]
 
 
 # The logging rules.

@@ -11,8 +11,8 @@ public verbs:
 
 - **Crypto** (`crypto` unit, the Currencies subscription): trades, quotes, and minute bars of
   `X:BTCUSD` and `X:ETHUSD`, which trade around the clock.
-- **Futures** (`futures` unit): minute bars of the front ES and NQ contracts of the morning's
-  session, and from Futures Developer up their trades and quotes. Futures pause from 16:00 to
+- **Futures** (`futures` unit): minute bars, trades, and quotes of the front ES and NQ
+  contracts of the morning's session. Futures pause from 16:00 to
   17:00 Chicago time and, on a Sunday, open for the week at 17:00.
 
 The rows, samples, and gaps are recorded as a stream day records them (`stream_capture`:
@@ -28,8 +28,11 @@ again the same night appends to the same folder. At the night's end the last chi
 
 A unit fails when one of its streams failed, the night's gaps passed 30 minutes, the recorder
 could not write a batch, an hour its market was open went without a row (`quiet_hours`), or a
-row near a boundary carries the wrong `Date`. The next day `stream-night-reconcile` compares
-the night's minute bars with history (`reconcile.run_night_reconcile`).
+row near a boundary carries the wrong `Date`. A unit none of whose streams could open is
+`refused` or skipped as not listed (`stream_capture.unopened_verdict`), and one the owner lists
+as delayed skips its quiet hours, since the delayed feed's lag is not known in advance. The
+next day `stream-night-reconcile` compares the night's minute bars with history
+(`reconcile.run_night_reconcile`).
 
 Runs in a child process with an embedded Deephaven server and an open session, like the stream
 day; the functions here run on its main thread, apart from the recorder's.
@@ -60,12 +63,15 @@ from tests._live.live_run.stream_capture import (
     held_streams,
     index_futures,
     record_gap,
+    refusal_note,
     sample_until,
+    split_failures,
     total_gaps,
+    unopened_verdict,
     wait_for_diagnostics,
     write_csv,
 )
-from tests._live.live_run.stream_units import delay_of
+from tests._live.live_run.stream_units import NIGHT_UNITS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -130,7 +136,7 @@ def boundaries(unit: str, night: date) -> list[Boundary]:
     """Return the boundaries a unit's rows cross during a night.
 
     Args:
-        unit: The unit, such as `"futures delayed"`.
+        unit: The unit, `"crypto"` or `"futures"`.
         night: The night's evening.
 
     Returns:
@@ -139,7 +145,7 @@ def boundaries(unit: str, night: date) -> list[Boundary]:
         00:00 UTC, from the evening's UTC date to the next.
     """
     evening, morning = night.isoformat(), (night + timedelta(days=1)).isoformat()
-    if unit.startswith("futures"):
+    if unit == "futures":
         before = "" if night.weekday() == timetable.SUNDAY else evening
         close = datetime.combine(night, FUTURES_PAUSE, CHICAGO)
         return [Boundary("16:00 Chicago close", close, before, morning)]
@@ -159,7 +165,7 @@ def open_hours(unit: str, night: date) -> list[tuple[datetime, datetime]]:
         it, on an evening other than Sunday's, the night's start to the 16:00 Chicago pause.
     """
     start, end = timetable.night_start(night), timetable.night_end(night)
-    if not unit.startswith("futures"):
+    if unit != "futures":
         return [(start, end)]
     after = (futures_open(night), end)
     if night.weekday() == timetable.SUNDAY:
@@ -167,12 +173,11 @@ def open_hours(unit: str, night: date) -> list[tuple[datetime, datetime]]:
     return [(start, datetime.combine(night, FUTURES_PAUSE, CHICAGO)), after]
 
 
-def night_streams(units: list[str], *, tiers: dict[str, str], night: date) -> list[Stream]:
+def night_streams(units: list[str], *, night: date) -> list[Stream]:
     """Return a night's streams for its due units.
 
     Args:
-        units: The due units, such as `["crypto real-time", "futures delayed"]`.
-        tiers: Each class's tier: Futures Starter streams no trades or quotes.
+        units: The due units, such as `["crypto", "futures"]`.
         night: The night's evening; the futures contracts are the morning session's front ones.
 
     Returns:
@@ -181,21 +186,18 @@ def night_streams(units: list[str], *, tiers: dict[str, str], night: date) -> li
     contracts = index_futures(night + timedelta(days=1))
     streams: list[Stream] = []
     for unit in units:
-        if unit.startswith("crypto"):
+        if unit == "crypto":
             streams += [
                 _ticks("crypto-trades", unit, lambda m: m.crypto.trades(CRYPTO)),
                 _ticks("crypto-quotes", unit, lambda m: m.crypto.quotes(CRYPTO)),
                 Stream("crypto-minute-bars", unit, lambda m: m.crypto.bars(CRYPTO, MINUTE)),
             ]
             continue
-        streams.append(
-            Stream("futures-minute-bars", unit, lambda m: m.futures.bars(contracts, MINUTE))
-        )
-        if tiers["futures"] != "starter":
-            streams += [
-                _ticks("futures-trades", unit, lambda m: m.futures.trades(contracts)),
-                _ticks("futures-quotes", unit, lambda m: m.futures.quotes(contracts)),
-            ]
+        streams += [
+            Stream("futures-minute-bars", unit, lambda m: m.futures.bars(contracts, MINUTE)),
+            _ticks("futures-trades", unit, lambda m: m.futures.trades(contracts)),
+            _ticks("futures-quotes", unit, lambda m: m.futures.quotes(contracts)),
+        ]
     return streams
 
 
@@ -208,7 +210,7 @@ def run_stream_night(
     m: MassiveSession,
     *,
     units: list[str],
-    tiers: dict[str, str],
+    delayed: frozenset[str],
     night: date,
     folder: Path,
     until: datetime,
@@ -220,7 +222,7 @@ def run_stream_night(
     Args:
         m: The session.
         units: The due units.
-        tiers: Each class's tier.
+        delayed: The subscriptions the owner's settings list as delayed.
         night: The night's evening, its New York date.
         folder: The attempt's folder, shared by every child of the same night.
         until: When the night ends (09:30 New York time the next morning).
@@ -229,17 +231,21 @@ def run_stream_night(
     """
     clock = clock or Clock()
     record_gap(folder, clock.now(), day_start=timetable.night_start(night))
-    streams = night_streams(units, tiers=tiers, night=night)
+    streams = night_streams(units, night=night)
     recorder = Recorder(folder)
-    with held_streams(m, streams, recorder):
+    with held_streams(m, streams, recorder) as opened:
         sample_until(m, folder, until=until, clock=clock, recorder=recorder)
         wait_for_diagnostics(m)
         failures = failed_streams(diagnostics_rows(m, m.streams()))
     summary = summarize_night(folder, streams, units=units, night=night, end=clock.now())
     gaps = total_gaps(folder)
     for unit in units:
+        refused, broken = split_failures(failures.get(NIGHT_UNITS[unit], []), opened.get(unit, []))
         status, reason = night_verdict(
-            failure=failures.get("currencies" if unit.startswith("crypto") else "futures", ""),
+            refused=refused,
+            broken=broken,
+            streams=sum(s.unit == unit for s in streams),
+            delayed=NIGHT_UNITS[unit] in delayed,
             gaps=gaps,
             errors=recorder.errors,
             quiet=[datetime.fromisoformat(h) for h in summary["quiet_hours"][unit]],
@@ -351,8 +357,7 @@ def quiet_hours(
     """Return the hours a unit's market was open and its streams recorded no row.
 
     An hour is a whole UTC hour of arrival inside the night and before `end`. It is judged when
-    the market was open through all of it, by the rows' own time (the hour moved back by the
-    unit's delay, `open_hours`), and no recorded gap touches it.
+    the market was open through all of it (`open_hours`), and no recorded gap touches it.
 
     Args:
         unit: The unit.
@@ -368,12 +373,10 @@ def quiet_hours(
     last = min(timetable.night_end(night), end)
     hour = start.replace(minute=0, second=0, microsecond=0)
     hour += _HOUR if hour < start else timedelta()
-    delay = delay_of(unit)
     markets = open_hours(unit, night)
     quiet: list[datetime] = []
     while hour + _HOUR <= last:
-        first, final = hour - delay, hour + _HOUR - delay
-        trading = any(a <= first and final <= b for a, b in markets)
+        trading = any(a <= hour and hour + _HOUR <= b for a, b in markets)
         gapped = any(a < hour + _HOUR and hour < b for a, b in gaps)
         if trading and not gapped and not rows[f"{hour:%Y-%m-%dT%H}"]:
             quiet.append(hour)
@@ -476,7 +479,10 @@ def reconnects(folder: Path) -> dict[str, int]:
 
 def night_verdict(
     *,
-    failure: str,
+    refused: list[str],
+    broken: list[str],
+    streams: int,
+    delayed: bool,
     gaps: timedelta,
     errors: list[str],
     quiet: list[datetime],
@@ -485,32 +491,43 @@ def night_verdict(
     """Decide one unit's result at the end of a night.
 
     Args:
-        failure: The error of its class's first failed stream, `""` for none.
+        refused: The refusals of its streams (`split_failures`), Massive's and the settings'
+            alike.
+        broken: The errors of its streams that failed otherwise.
+        streams: How many streams it opened or tried to open.
+        delayed: Whether the owner's settings list its subscription as delayed.
         gaps: The night's gaps.
         errors: The recorder's errors.
         quiet: Its quiet hours (`quiet_hours`).
         wrong: Its boundary rows (`boundary_rows`) with rows of an unexpected `Date`.
 
     Returns:
-        `("passed", "")` or `("passed", "gaps N")`, or `("failed", why)`.
+        `("passed", why)`, its reason the gaps and a refused stream, if any; `("refused",
+        "refused: <error>")`, or `("skipped", "not listed as delayed: <error>")`, when every
+        stream was refused (`unopened_verdict`); `("skipped", why)` for quiet
+        hours of a delayed unit, unless a boundary row carries the wrong `Date`, which the
+        feed's lag cannot explain; or `("failed", why)`.
     """
     minutes = round(gaps.total_seconds() / 60)
-    if failure:
-        return "failed", f"a stream failed: {failure}"
+    if broken or (refused and len(refused) >= streams):
+        return ("failed", f"a stream failed: {broken[0]}") if broken else unopened_verdict(refused)
     if gaps > MAX_GAP:
         return "failed", f"gaps {minutes}"
     if errors:
         return "failed", errors[0]
-    if quiet:
-        first = quiet[0].astimezone(NEW_YORK)
-        return "failed", (
-            f"no rows in {len(quiet)} hour(s) its market was open, the first from "
-            f"{first:%a %H:%M %Z}"
-        )
     if wrong:
         w = wrong[0]
         return "failed", (
             f"{w['stream']}: {w['wrong']} rows {w['side']} {w['boundary']} dated "
             f"{w['dates']}, not {w['expected']}"
         )
-    return "passed", f"gaps {minutes}" if minutes else ""
+    if quiet:
+        first = quiet[0].astimezone(NEW_YORK)
+        why = (
+            f"no rows in {len(quiet)} hour(s) its market was open, the first from "
+            f"{first:%a %H:%M %Z}"
+        )
+        return ("skipped", f"{why}, on the delayed feed") if delayed else ("failed", why)
+    notes = [f"gaps {minutes}"] if minutes else []
+    notes += [refusal_note(refused)] if refused else []
+    return "passed", "; ".join(notes)

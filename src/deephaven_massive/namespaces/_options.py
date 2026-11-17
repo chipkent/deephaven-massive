@@ -289,6 +289,8 @@ SNAPSHOTS: Final = DatasetSpec(
     keys={(_REST, _SNAPSHOT): _keys("Ticker", fanout="UnderlyingAssetTicker")},
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
+    # Massive refuses `type` beside tickers, so the library sends it for `dm.ALL` only.
+    library_params=frozenset({"type"}),
     revision_keys=_SNAPSHOT_REVISION,
 )
 

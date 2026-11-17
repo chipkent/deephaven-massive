@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 PROBE_LIMIT: Final = timedelta(minutes=15)
 """How long the probe's child may run, its server's start included, before it is stopped: a
-probe paces every request as Basic, so it takes a few minutes at most."""
+probe sends two requests, so it takes a few minutes at most, its server's start included."""
 
 SHOWN_OUTPUT: Final = 20
 """The last lines of a failed probe child's output that its error shows."""
@@ -39,13 +39,9 @@ class ProbeResult:
 
     Attributes:
         when: When it ran, ISO UTC.
-        tiers: Each subscription's tier, or None when the probe could not tell (*unknown*).
-        flat_files: The flat-file prefixes the S3 pair reached, sorted.
-        history_start: Each subscription's earliest readable date, ISO, or `"all"` for a tier
-            that keeps all history; empty when the tiers are unknown.
         clock_offset: The machine clock minus Massive's `serverTime`, in seconds, or None.
         key_rejected: Whether Massive rejected the API key.
-        error: Why the tiers are unknown, `""` otherwise.
+        error: Why the market status could not be read, `""` when it was.
         closures: Massive's upcoming market closures: each ISO date's status, `closed` or
             `early-close` (a date with both, on different exchanges, is `closed`); None when
             they could not be read.
@@ -53,9 +49,6 @@ class ProbeResult:
     """
 
     when: str
-    tiers: dict[str, str] | None = None
-    flat_files: list[str] = field(default_factory=list)
-    history_start: dict[str, str] = field(default_factory=dict)
     clock_offset: float | None = None
     key_rejected: bool = False
     error: str = ""
@@ -65,23 +58,6 @@ class ProbeResult:
 
 class ProbeChildError(Exception):
     """The probe's child process ended without writing a result, or did not end in time."""
-
-
-def plans_variable(tiers: dict[str, str], flat_files: list[str]) -> str:
-    """Spell tiers in the `MASSIVE_LIVE_PLANS` grammar the live tests read.
-
-    Args:
-        tiers: Each subscription's tier.
-        flat_files: The prefixes the S3 pair reached.
-
-    Returns:
-        Every class with its tier, then each reached flat-file prefix as `s3=<prefix>`, such as
-        `"stocks=starter,options=basic,...,s3=us_stocks_sip/day_aggs_v1"`, so the live tests
-        skip a prefix the credentials do not reach. Basic classes are named too, so the value
-        is never empty: an empty one would make the live tests probe the key again themselves.
-    """
-    entries = [f"{name}={tier}" for name, tier in tiers.items()]
-    return ",".join([*entries, *(f"s3={prefix}" for prefix in sorted(flat_files))])
 
 
 def write_result(path: Path, result: ProbeResult) -> None:

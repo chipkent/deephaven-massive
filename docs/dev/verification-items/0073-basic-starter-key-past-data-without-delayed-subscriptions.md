@@ -5,4 +5,5 @@ Date: 2026-10-31
 Status: open
 
 Only current-data datasets are checked for `DELAYED`. Settled by
-`tests/namespaces/test_stocks_integration.py` (Stocks Basic).
+`tests/namespaces/test_stocks_integration.py`, which needs a key whose past stock data Massive
+labels `DELAYED`.

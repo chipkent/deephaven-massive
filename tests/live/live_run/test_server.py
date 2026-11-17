@@ -31,7 +31,7 @@ def test_a_group_child_gets_a_heap_sized_to_its_group_and_its_crash_log_in_the_a
     *, group: str, memory: int | None, heap: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "a").mkdir()
-    (tmp_path / "a" / "request.json").write_text(json.dumps({"group": group, "tiers": {}}))
+    (tmp_path / "a" / "request.json").write_text(json.dumps({"group": group}))
     monkeypatch.setattr(machine_checks, "memory_total", lambda: memory)
     argv = ["_group", "--out", str(tmp_path), "--attempt", "a", "--token", "t"]
     assert server.jvm_args(argv) == [

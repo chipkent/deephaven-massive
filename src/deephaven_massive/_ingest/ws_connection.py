@@ -14,7 +14,7 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   dropped because a key could not be read, are recorded on the connection's `SchemaDrift` and
   handed to the flush thread, which logs them and counts the drops; a dropped row fails no
   stream. The connection logs one WARNING per outage, and one
-  when it goes silent during its market's trading hours (`NO_FRAMES_WARNING`), each with its
+  when it goes silent during its market's trading hours (`ws_silence.SilenceCheck`), each with its
   recovery at INFO. The connection's `m.connections()` row is rewritten as its state changes, at
   most once a second while messages flow, and its traffic is logged as a summary every
   `SUMMARY_INTERVAL` seconds.
@@ -59,12 +59,10 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_PREFIX, FMV_HOST, REALTIME_HOST, delayed_fix
-from deephaven_massive._datasets.trading_hours import in_trading_hours
 from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
 from deephaven_massive._errors import (
     NEW_SESSION,
@@ -89,6 +87,7 @@ from deephaven_massive._ingest.subscriptions import (
     stream_topics,
     wildcard,
 )
+from deephaven_massive._ingest.ws_silence import SilenceCheck
 from deephaven_massive._log_limits import bounded_list, log_failure
 from deephaven_massive._massive import (
     Cancel,
@@ -108,6 +107,7 @@ from deephaven_massive._tables.diagnostics import (
     describe_symbols,
     utc_text,
 )
+from deephaven_massive._tables.held_rows import HeldRows
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink
 
 if TYPE_CHECKING:
@@ -120,14 +120,13 @@ if TYPE_CHECKING:
     from deephaven_massive._ingest.futures_calendar import RowFetch
     from deephaven_massive._ingest.ws import WsConnections
     from deephaven_massive._massive import RowMarks, Source, Status
+    from deephaven_massive._tables.futures_dates import FuturesSessionDates
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._tables.stream import FuturesSessionDates
     from deephaven_massive._tables.transports import HostDecision
 
 __all__ = [
     "CONNECTION_SETTINGS",
     "IDLE_GRACE",
-    "NO_FRAMES_WARNING",
     "OPTIONS_CAP",
     "SUMMARY_INTERVAL",
     "ClientFactory",
@@ -157,12 +156,6 @@ _MESSAGE_ROW_NS: Final = 1_000_000_000
 
 SUMMARY_INTERVAL: Final = 60.0
 """Seconds between a connection's DEBUG summaries of its traffic, so a stall shows in the log."""
-
-NO_FRAMES_WARNING: Final = 300.0
-"""Seconds a connection with acknowledged subscriptions may go without a frame during its asset
-class's regular trading hours before it logs a WARNING that its live tables may be stale. Five
-minutes, since a connection carrying only a few quiet symbols can go a minute or two without a
-trade; the check runs with each `SUMMARY_INTERVAL` summary."""
 
 KEEPALIVE_WINDOW: Final = 40.0
 """Seconds a socket that died silently may still look open: the `websockets` keepalive's
@@ -373,10 +366,11 @@ class _TopicStates:
 
 @dataclass(slots=True)
 class _Episodes:
-    """A connection's two silence episodes, each logged once as a WARNING. Loop-confined.
+    """A connection's outage, logged once as a WARNING. Loop-confined.
 
-    Each also shows in its streams' `Error` while it lasts, and an outage that lasts
-    `MassiveConfig.max_outage` for a stream fails it (`down`).
+    It also shows in its streams' `Error` while it lasts, and an outage that lasts
+    `MassiveConfig.max_outage` for a stream fails it (`down`). The other silence, a connected
+    socket with no frames in trading hours, is the `SilenceCheck`'s.
 
     Attributes:
         slot_warned: Whether the outage has logged its WARNING for waiting on a free
@@ -395,9 +389,6 @@ class _Episodes:
         down_note: The `Error` of a down stream during the outage under way, or None.
         last_frame_at: When the last frame of any kind arrived or the socket opened
             (nanoseconds since the epoch); data has the connection's own `_last_message_at`.
-        quiet_at: When the no-frames WARNING was logged (nanoseconds since the epoch), or
-            None outside that episode.
-        quiet_note: The `Error` of every stream that is not down during that episode, or None.
         failure: The error the outage fails its streams with, made at its first failure, so
             the outage logs it once however many streams it fails; None until then.
         expired: The streams an outage has failed, which no later outage holds down again.
@@ -410,8 +401,6 @@ class _Episodes:
     data_since_open: bool = False
     down_note: str | None = None
     last_frame_at: int = 0
-    quiet_at: int | None = None
-    quiet_note: str | None = None
     failure: MassiveError | None = None
     expired: set[int] = field(default_factory=set)
 
@@ -490,6 +479,7 @@ class Connection:
             f"{group.label} flush {decision.host}{self.path}",
             interval=group.flush_interval,
             sessions=sessions,
+            held=None if sessions is None else HeldRows(sessions, max_outage=group.max_outage),
             # Rows of a reconnected socket may recover a stream the outage holds down.
             on_new_generation=lambda: self.post(self._check_recovered),
         )
@@ -533,6 +523,7 @@ class Connection:
         self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
         self._ended = False
         self._episodes = _Episodes()
+        self._silence = SilenceCheck(url, asset_class, on_note=self._show_silence_note)
         # When another connection with the key took this one, until the next socket opens.
         self._taken_at: float | None = None
         self._backlog_timer: Timer | None = None
@@ -726,7 +717,7 @@ class Connection:
         self._streams[stream.stream_id] = stream
         if self._episodes.down_since is not None:  # it opens during an outage: held down
             self._hold_down(stream.stream_id, self._group.max_outage, since=time.time())
-        if self._episodes.down_since is not None or self._episodes.quiet_note is not None:
+        if self._episodes.down_since is not None or self._silence.note is not None:
             self._show_outage_notes([stream.stream_id])
         keys = self._required.get(stream.channel, frozenset()) | stream.plan.required
         if self._required.get(stream.channel) != keys:
@@ -882,7 +873,7 @@ class Connection:
             status: The decoded status.
         """
         self._episodes.last_frame_at = time.time_ns()
-        self._heard()
+        self._silence.heard()
         if generation == self.subscriptions.generation:
             self.subscriptions.status(status)
 
@@ -911,7 +902,7 @@ class Connection:
             drift: The frame's drift for the channel.
         """
         now = time.time_ns()
-        self._heard()
+        self._silence.heard()
         if self._episodes.down_since is not None:  # data flows again: the outage may be over
             self._episodes.data_since_open = True
             self._check_recovered()
@@ -982,61 +973,20 @@ class Connection:
         traffic.next_window()
 
     def _check_frames(self, now: int) -> None:
-        """Warn once per episode when the connection goes silent while its market trades.
-
-        A connection that holds acknowledged subscriptions and has received no frame of any
-        kind for `NO_FRAMES_WARNING` seconds, during its asset class's regular trading hours
-        (`in_trading_hours`), logs one WARNING that its live tables may be stale and shows it
-        in every stream's `Error` (`_set_quiet_note`); the streams keep running, since quiet symbols
-        and market holidays are silent too. The first frame after it clears the note and logs
-        the recovery at INFO (`_heard`). A connection that is not connected is the outage's
-        (`_on_state`), not this one's.
+        """Check for a silent connection (`SilenceCheck.check`) with its state now.
 
         Args:
             now: The current time, in nanoseconds since the epoch.
         """
-        episodes = self._episodes
-        if episodes.quiet_at is not None:
-            return
-        last = max(episodes.last_frame_at, self._last_message_at or 0)
-        silent = (now - last) / 1e9
-        if (
-            self._state is not ConnectionState.CONNECTED
-            or not self.subscriptions.acknowledged
-            or silent < NO_FRAMES_WARNING
-            or not in_trading_hours(self.asset_class, datetime.fromtimestamp(now / 1e9, UTC))
-        ):
-            return
-        episodes.quiet_at = now
-        logger.warning(
-            "%s: no frame for %.0f s during %s trading hours, though %d topics are "
-            "acknowledged, so its live tables may be stale; a market holiday or symbols that "
-            "are not trading explain it, and m.connections() shows the connection's state",
-            self.url,
-            silent,
-            self.asset_class.value,
-            len(self.subscriptions.acknowledged),
-        )
-        self._set_quiet_note(
-            f"no data since {utc_text(last / 1e9)} during {self.asset_class.value} trading "
-            "hours; quiet symbols or a market holiday may explain it"
+        self._silence.check(
+            now,
+            connected=self._state is ConnectionState.CONNECTED,
+            acknowledged=len(self.subscriptions.acknowledged),
+            last_frame=max(self._episodes.last_frame_at, self._last_message_at or 0),
         )
 
-    def _heard(self) -> None:
-        """End a silence episode on a frame's arrival: log the recovery and clear the note."""
-        if self._episodes.quiet_at is None:
-            return
-        self._episodes.quiet_at = None
-        logger.info("%s: frames arrive again", self.url)
-        self._set_quiet_note(None)
-
-    def _set_quiet_note(self, note: str | None) -> None:
-        """Show the silence's note on every stream, or clear it.
-
-        Args:
-            note: The text, or None to clear it.
-        """
-        self._episodes.quiet_note = note
+    def _show_silence_note(self) -> None:
+        """Show the silence's note on every stream, or clear it (`SilenceCheck.note`)."""
         self._show_outage_notes(list(self._streams))
 
     def _warn_down(self, *, waiting_slot: bool, at: float) -> None:
@@ -1421,8 +1371,7 @@ class Connection:
         last = max(episodes.last_frame_at, self._last_message_at or 0) / 1e9
         if episodes.down_since is None:
             episodes.down_since = last or now
-            episodes.quiet_at = None  # the outage's note replaces the silence's
-            episodes.quiet_note = None
+            self._silence.end()  # the outage's note replaces the silence's
         since = utc_text(episodes.down_since)
         note = f"connection down since {since}; no data"
         if detail is not None:
@@ -1631,7 +1580,7 @@ class Connection:
                 stream_id: StreamUpdate(
                     notes={
                         NotePart.OUTAGE: episodes.down_note if stream_id in episodes.down else None,
-                        NotePart.QUIET: episodes.quiet_note,
+                        NotePart.QUIET: self._silence.note,
                     },
                     gap=ended.get(stream_id),
                 )
@@ -2095,19 +2044,9 @@ class ConnectionGroup:
         if calendar is not None:
             calendar.close(wait=wait)
 
-    def wake_schedule_waiters(self) -> None:
-        """Wake every thread waiting for futures schedules, so each checks its stop event.
-
-        A session's close calls it after it set its stop event (`FuturesCalendar.wake`). The
-        calendar is read under the lock and woken outside it; a group without a calendar has
-        no waiter. Never blocks.
-        """
-        with self.lock:
-            calendar = self._calendar
-        if calendar is not None:
-            calendar.wake()
-
-    def futures_calendar(self, *, contracts_path: str, schedules_path: str) -> FuturesCalendar:
+    def futures_calendar(
+        self, *, snapshot_path: str, contracts_path: str, schedules_path: str
+    ) -> FuturesCalendar:
         """Return the group's futures schedule calendar, creating it on first use.
 
         The calendar dates the streamed futures rows of every session on the group's futures
@@ -2119,6 +2058,7 @@ class ConnectionGroup:
         first wins, and the other is closed at once. Never waits on the network.
 
         Args:
+            snapshot_path: The `futures.snapshots` dataset's REST path.
             contracts_path: The `futures.contracts` dataset's REST path.
             schedules_path: The `futures.schedules` dataset's REST path.
 
@@ -2134,6 +2074,7 @@ class ConnectionGroup:
             return found
         candidate = FuturesCalendar(
             self._fetch_rows,
+            snapshot_path=snapshot_path,
             contracts_path=contracts_path,
             schedules_path=schedules_path,
             label=self.label,

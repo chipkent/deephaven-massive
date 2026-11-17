@@ -87,8 +87,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   `MassiveError("rate limited: ...")` with status 429 (the first 429 of each subscription has
   already logged its INFO notice). One odd row never fails a read: a row the library cannot
   read whole is withheld and reported as drift; a read whose every row of its symbols and
-  window was withheld, across all its pages, raises `RowDataError` (`ReadTally.check`). Static
-  verbs raise each error, and log it at DEBUG, or at ERROR for a defect.
+  window was withheld, across all its pages and parts (an `AUTO` `history()`'s files too, and
+  every value of a table of values), fails with `RowDataError`: the read's entry point makes its
+  one `ReadTally`, every part adds to it, and the entry point checks it once
+  (`ReadTally.check`, or `ReadTally.judge` by symbol). Static verbs raise each error, and log
+  it at DEBUG, or at ERROR for a defect.
 - **Host decisions.** `resolve_host` decides each WebSocket host once per session
   (`_ingest/host_decision.py`), single-flight: the first caller of a (class, family) makes the one
   REST request and every concurrent caller waits for its answer.
@@ -767,7 +770,8 @@ class RestReader:
         current: bool,
         cancel: Cancel | None,
         patience: Patience,
-    ) -> tuple[list[pa.Table | MassiveError], int]:
+        tally: ReadTally,
+    ) -> tuple[list[pa.Table | MassiveError | None], int]:
         """Make each planned request and return each one's rows or failure, in plan order.
 
         The read by symbol (`_ingest/symbol_reads.py`): unlike `read`, a request that fails
@@ -779,7 +783,8 @@ class RestReader:
         symbol Massive answered HTTP 404 on its first request has no data and follows
         `ErrorPolicy.unavailable_symbols`: under `LOG` and `IGNORE` it has no rows and one
         line per path names it (`_report_missing`); under `RAISE` its result is an
-        `UnavailableSymbolError`.
+        `UnavailableSymbolError`. Every page's rows count in `tally`, which the read's entry
+        point judges after its last part (`ReadTally.judge`).
 
         Args:
             spec: The dataset.
@@ -791,14 +796,14 @@ class RestReader:
             current: True when the pages are checked for a `DELAYED` label (`read`).
             cancel: Ends the read's waits when set, or None.
             patience: The patience of the whole read, shared by every request.
+            tally: The whole read's count of its rows and of those withheld, which this read
+                adds to and never checks.
 
         Returns:
-            Each request's rows (an Arrow table of the dataset's schema) or its
-            `MassiveError`, in plan order, and the number of requests that were answered. When
-            the library could read none of the rows of the read's symbols and window whole,
-            across all its requests (`ReadTally.failure`), each answered request's result is
-            that `RowDataError`, whatever the read's policy; a request whose rows are all
-            withheld, beside others read whole, gives its symbols no rows.
+            Each request's rows (an Arrow table of the dataset's schema), its `MassiveError`,
+            or None for a request of a symbol Massive has no data for, in plan order; and the
+            number of requests that were answered. A request whose rows are all withheld gives
+            its symbols no rows.
 
         Raises:
             AuthenticationError: If Massive rejects the API key on any request: every request
@@ -810,7 +815,6 @@ class RestReader:
         for rest_path, _ in units:
             if rest_path.template not in converters:
                 converters[rest_path.template] = RowConverter.build(self.catalog, spec, rest_path)
-        tally = ReadTally()
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
             run = functools.partial(
                 self._call_alone,
@@ -828,9 +832,6 @@ class RestReader:
                 done = [run(unit) for unit in units]
             else:
                 done = self._fan_out(run, units, executor=None, stop=stop)
-        unreadable = tally.failure(
-            spec.name, source=", ".join(f"GET {template}" for template in converters)
-        )
         answered = [
             (rest_path.template, outcome)
             for (rest_path, _), outcome in zip(units, done, strict=True)
@@ -840,17 +841,13 @@ class RestReader:
         missing = [o.missing for _, o in answered if o.missing is not None]
         if missing and not refused:
             self._report_missing(spec, missing)
-        results: list[pa.Table | MassiveError] = []
+        results: list[pa.Table | MassiveError | None] = []
         for (rest_path, _), outcome in zip(units, done, strict=True):
             if not isinstance(outcome, _Outcome):
                 results.append(outcome)
-            elif refused and outcome.missing is not None:
+            elif outcome.missing is not None:
                 # Under RAISE a symbol with no data fails alone; the others keep their rows.
-                results.append(_missing_error(spec, [outcome.missing]))
-            elif unreadable is not None and outcome.missing is None:
-                # Every row of the read was withheld: each symbol it answered fails, as a
-                # failed request fails its own, and the followed table goes on.
-                results.append(unreadable)
+                results.append(_missing_error(spec, [outcome.missing]) if refused else None)
             else:
                 schema = converters[rest_path.template].arrow_schema
                 results.append(pa.Table.from_batches(outcome.batches, schema=schema))
@@ -1258,8 +1255,9 @@ class RestReader:
         and before the time columns are filled for good. The withheld rows count in the page's
         drift, give the session their problem events, and log each unreadable symbol spelling
         once at the level the read's `unreadable_symbols` gives. The page's rows inside the
-        window, and those withheld, are added to `tally`, which the read checks after its last
-        page (`ReadTally.check`), so a page whose rows are all withheld never fails a read on its
+        window, and those withheld, are added to `tally`, which the read's entry point checks
+        after its last part (`ReadTally.check`), so a page whose rows are all withheld never
+        fails a read on its
         own. Logs one DEBUG line per page with the rows left after each step, so an empty table
         can be traced to the step that emptied it.
 
@@ -1301,7 +1299,7 @@ class RestReader:
                 record(withheld.drift)
             self._report_withheld(spec, withheld, where=where)
         asked = windowed.num_rows
-        tally.add(asked, withheld)
+        tally.add(asked, withheld, source=where)
         kept = [fill(batch) for batch in withheld.rows.to_batches()]
         logger.debug(
             "%s: %d rows read, %d converted, %d in the window, %d withheld, %d kept as whole bars",
@@ -1793,7 +1791,9 @@ class RestReader:
         Without a value table the cycle is one read (`_read_one_cycle`). With one, each of the
         cycle's values is read as if passed alone (`Request.for_value`), one after another,
         and the reads are joined: their rows in value order, their requests and pauses summed,
-        and what each left out. A value Massive answers with HTTP 404 follows
+        and what each left out. The cycle is one read: its rows count in one tally, checked once
+        after its last value (`ReadTally.check`), so a value whose rows are all withheld,
+        beside others read whole, adds no rows. A value Massive answers with HTTP 404 follows
         `ErrorPolicy.unavailable_symbols`, as a symbol does: under `LOG` and `IGNORE` it is
         left out of the cycle and named in its `left_out`.
 
@@ -1815,8 +1815,11 @@ class RestReader:
         Raises:
             UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a
                 value Massive answered with HTTP 404.
+            RowDataError: If the library could read none of the rows of the cycle's symbols
+                whole, across all its values, paths, and pages, whatever its policy.
             MassiveError: Any other failure of a read, as `_read_one_cycle` raises it.
         """
+        tally = ReadTally()
         read = functools.partial(
             self._read_one_cycle,
             spec,
@@ -1826,9 +1829,12 @@ class RestReader:
             executor=executor,
             cancel=cancel,
             pace=pace,
+            tally=tally,
         )
         if values is None:
-            return read(request)
+            rows = read(request)
+            tally.check(spec.name)
+            return rows
         reads: list[poll.CycleRows] = []
         absent: list[str] = []
         for value in values:
@@ -1841,6 +1847,7 @@ class RestReader:
                 found = f"{value} (HTTP 404 from {template})"
                 self._report_missing(spec, [found])
                 absent.append(found)
+        tally.check(spec.name)
         schema = self.catalog.dataset_schema(spec)
         return poll.CycleRows(
             pa.concat_tables([one.rows for one in reads])
@@ -1862,6 +1869,7 @@ class RestReader:
         executor: ThreadPoolExecutor,
         cancel: Cancel,
         pace: PaceCheck,
+        tally: ReadTally,
     ) -> poll.CycleRows:
         """Run one read of a `poll()` cycle: the planned requests of `read_fetch` for its symbols.
 
@@ -1883,6 +1891,8 @@ class RestReader:
             executor: The poller's fan-out pool.
             cancel: The poller's stop token, which ends the cycle's waits.
             pace: The table's pace check.
+            tally: The cycle's count of its rows and of those withheld, which `read_cycle`
+                checks.
 
         Returns:
             The cycle's read (`poll.CycleRows`): its rows, its request count, the seconds of
@@ -1910,6 +1920,7 @@ class RestReader:
             executor=executor,
             cancel=cancel,
             patience=patience,
+            tally=tally,
             on_missing=missing.extend,
         )
         if missing:
@@ -2136,6 +2147,7 @@ class RestReader:
         request: Request,
         *,
         symbols: tuple[str, ...] | AllSymbols | None,
+        tally: ReadTally,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
         cancel: Cancel | None = None,
@@ -2152,6 +2164,8 @@ class RestReader:
             spec: The dataset, with a fetch path.
             request: The normalized arguments.
             symbols: The static symbols.
+            tally: The whole read's count of its rows and of those withheld, which the caller
+                checks after the read's last part (`ReadTally.check`).
             record: Receives each page's drift, or None.
             executor: A pool for fan-out requests, or None for one of each read's own.
             cancel: A background read's stop token, which ends the read's waits when set; None
@@ -2192,6 +2206,7 @@ class RestReader:
             executor=executor,
             cancel=cancel,
             patience=patience,
+            tally=tally,
         )
 
     def _read_planned(
@@ -2205,6 +2220,7 @@ class RestReader:
         executor: ThreadPoolExecutor | None,
         cancel: Cancel | None,
         patience: Patience,
+        tally: ReadTally,
         on_recency: Callable[[Recency], None] | None = None,
         on_missing: Callable[[Sequence[str]], None] | None = None,
     ) -> tuple[pa.Table, int]:
@@ -2228,6 +2244,8 @@ class RestReader:
             executor: A pool for fan-out requests, or None for one of each read's own.
             cancel: Ends the reads' waits when set, or None.
             patience: The patience of the whole read, shared by every path's requests.
+            tally: The whole read's count of its rows and of those withheld, which this read
+                adds to and never checks: the read's entry point checks it after its last part.
             on_recency: Receives each page's recency evidence (`read`), or None.
             on_missing: Receives each path's template and its symbols Massive answered with
                 HTTP 404 (`read`), or None.
@@ -2235,15 +2253,10 @@ class RestReader:
         Returns:
             The rows of every path, in path order, and the request count.
 
-        Raises:
-            RowDataError: If the library could read none of the rows of the read's symbols
-                whole, across all its paths and pages (`ReadTally.check`), whatever its policy.
-
-        Errors are otherwise those of `read`.
+        Errors are those of `read`.
         """
         tables = []
         requests = 0
-        tally = ReadTally()
         for rest_path, calls in planned:
             table, made = self.read(
                 spec,
@@ -2262,7 +2275,6 @@ class RestReader:
             )
             tables.append(table)
             requests += made
-        tally.check(spec.name, source=", ".join(f"GET {path.template}" for path, _ in planned))
         if not tables:
             schema = self.catalog.dataset_schema(spec)
             return schema.arrow_schema().empty_table(), 0
@@ -2542,13 +2554,16 @@ class RestEndpoints:
         request: every path is planned before the first one is read.
         """
         reader = self._reader(f"call-{call}", request.on_error, background=stop is not None)
+        tally = ReadTally()
         table, _ = reader.read_fetch(
             spec,
             request,
             symbols=request.static_symbols,
+            tally=tally,
             cancel=as_cancel(stop),
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
+        tally.check(spec.name)
         return self._static(spec, table)
 
     def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
@@ -2613,7 +2628,8 @@ class RestEndpoints:
             [call_bucket(spec, rest_path.template, unit) for rest_path, unit in units],
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
-        return read_rest_by_symbol(
+        tally = ReadTally()
+        outcomes = read_rest_by_symbol(
             reader,
             self._core,
             spec,
@@ -2626,8 +2642,10 @@ class RestEndpoints:
             current=_fetch_is_current(spec, request),
             call=call,
             cancel=cancel,
+            tally=tally,
             to_table=functools.partial(self._static, spec),
         )
+        return tally.judge(spec.name, outcomes)
 
     def fetch_by_value(
         self,
@@ -2673,6 +2691,7 @@ class RestEndpoints:
         window: HistoryWindow,
         *,
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
         days: Sequence[date] | None = None,
     ) -> Table:
@@ -2701,6 +2720,9 @@ class RestEndpoints:
             request: The normalized arguments, with static symbols.
             window: The call's window (`history_window` in `_datasets/history_source.py`).
             call: The call's id, which names its fan-out threads, as in `fetch`.
+            tally: The whole `history()` call's count of its rows and of those withheld, which
+                the caller checks after the call's last part (`ReadTally.check`): this read may
+                be one part of a call that also reads flat files.
             stop: A background read's stop token, as `fetch` takes it.
             days: For `dm.ALL`, the only days of the window to request, such as the days the
                 flat files lack; None for every day. Explicit symbols ignore it.
@@ -2729,7 +2751,6 @@ class RestEndpoints:
             pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
         )
         patience = reader.patience()
-        tally = ReadTally()
         table, requests = reader.read(
             spec,
             rest_path,
@@ -2741,7 +2762,6 @@ class RestEndpoints:
             patience=patience,
             tally=tally,
         )
-        tally.check(spec.name, source=f"GET {rest_path.template}")
         logger.info(
             "%s history: source=REST requests=%d, waiting out at most %.0f s of pauses",
             spec.name,
@@ -2778,6 +2798,7 @@ class RestEndpoints:
         *,
         symbols: Sequence[str],
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> dict[str, SymbolOutcome]:
         """Read REST `history` for each symbol over the call's window, each one's own outcome.
@@ -2794,6 +2815,8 @@ class RestEndpoints:
             window: The call's window.
             symbols: The canonical symbols to read.
             call: The call's id, which names the read's fan-out threads.
+            tally: The whole read's count of its rows and of those withheld, which the caller
+                judges after the read's last part (`ReadTally.judge`).
             stop: A background read's stop token, or None, as `fetch` takes it.
 
         Returns:
@@ -2826,6 +2849,7 @@ class RestEndpoints:
             current=False,
             call=call,
             cancel=cancel,
+            tally=tally,
             to_table=functools.partial(self._static, spec),
         )
 

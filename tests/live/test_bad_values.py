@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import deephaven_massive as dm
 from deephaven_massive._massive import (
     RequestGovernor,
     RestClient,
@@ -25,7 +26,7 @@ from deephaven_massive._massive import (
 # plain values of the fakes, which no fixture hands over; the server comes from `fake_rest`.
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import Reply, envelope
-from tests._live import bad_values, plans
+from tests._live import bad_values
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -141,7 +142,7 @@ def _ignore(line: str) -> None:
 
 @pytest.fixture
 def client(fake_rest: FakeRestServer) -> Iterator[RestClient]:
-    governor = RequestGovernor((*plans.TIERS, "other"), clock=FakeClock())
+    governor = RequestGovernor((*dm.Subscription, "other"), clock=FakeClock())
     made = RestClient("test-key", base_url=fake_rest.url, max_concurrency=1, governor=governor)
     yield made
     made.close()

@@ -11,12 +11,13 @@ modules (`child_commands` and what it imports) import the library or Deephaven. 
   start;
 - `commands`: the commands: check, run, status, pack, and the upgrade check;
 - `context`: what a command needs from the world, and what one run keeps in memory;
-- `state`: the state file, the entitlements, and when a check is due;
+- `state`: the state file, and when a check is due;
 - `schedule` and `timetable`: the next step, by a fixed daily timetable;
 - `attempts` and `children`: running each group in a child process, and recording its results;
 - `outcomes`: the pytest plugin that records each test phase as it runs;
-- `run_probe`, `probe_result`, and `machine_checks`: what the key can do, the probe's result
-  as the parent reads it from its child, and whether the machine is ready;
+- `run_probe`, `probe_result`, and `machine_checks`: whether Massive takes the key, its clock
+  and market closures, the probe's result as the parent reads it from its child, and whether
+  the machine is ready;
 - `group_child`: the child side of the built-in groups;
 - `reply_examples`, `replies`, `stream_capture`, `stream_night`, `stream_units`, `reconcile`, and
   `upgrade_check`: the built-in groups: the documentation's examples, a trading day of streams

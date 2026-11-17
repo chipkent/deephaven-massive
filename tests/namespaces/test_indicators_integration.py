@@ -29,7 +29,6 @@ pytestmark = pytest.mark.integration
 Evidence: TypeAlias = "Callable[[str], None]"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("90")
 @pytest.mark.requests(1)
 def test_massive_answers_an_indicator_timespan_of_second(
@@ -43,7 +42,6 @@ def test_massive_answers_an_indicator_timespan_of_second(
     assert bad_values.ask_all(live_rest, bad_values.INDICATOR_TIMESPAN, evidence)
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("91")
 @pytest.mark.requests(1)
 def test_massive_answers_an_indicator_window_of_0(

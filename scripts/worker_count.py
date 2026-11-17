@@ -9,12 +9,12 @@ bounded by memory as well as by CPUs:
 Two CPUs stay free for pytest's controller process, which starts a JVM of its own, and the rest
 of the machine. Available memory is what the system can hand out without paging: Linux's
 `MemAvailable`, or the free, inactive, and speculative pages macOS's `vm_stat` reports. When it
-cannot be read, the CPUs alone decide. `CHECK_WORKERS`, a positive integer, overrides the rule.
+cannot be read, the CPUs alone decide. `--workers N`, a positive integer, overrides the rule.
 
 It prints the count on standard output and one line on standard error that says how it was
 chosen. It uses only the standard library.
 
-    uv run python scripts/worker_count.py
+    uv run python scripts/worker_count.py [--workers N]
 
 The examples below are doctests, which `check.sh full` runs before it asks for a count:
 
@@ -28,11 +28,11 @@ Choice(workers=8, reason='10 CPUs, 64.0 GiB available, 3.0 GiB per worker')
 >>> choose(cpus=4, available=None, override=None)
 Choice(workers=2, reason='4 CPUs, available memory unknown')
 >>> choose(cpus=10, available=64 * GiB, override="3")
-Choice(workers=3, reason='CHECK_WORKERS=3')
+Choice(workers=3, reason='--workers 3')
 >>> choose(cpus=10, available=64 * GiB, override="0")
 Traceback (most recent call last):
 ...
-ValueError: CHECK_WORKERS must be a positive integer, not '0'
+ValueError: --workers must be a positive integer, not '0'
 >>> parse_vm_stat(
 ...     "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
 ...     "Pages free:                               10.\n"
@@ -47,6 +47,7 @@ ValueError: CHECK_WORKERS must be a positive integer, not '0'
 
 from __future__ import annotations
 
+import argparse
 import os
 import pathlib
 import re
@@ -59,8 +60,8 @@ from typing import NamedTuple
 #: and the Python process around it.
 WORKER_MEMORY = 3 * 2**30
 
-#: The environment variable that sets the count outright.
-OVERRIDE = "CHECK_WORKERS"
+#: The option that sets the count outright.
+OVERRIDE = "--workers"
 
 #: The CPUs left for pytest's controller and the rest of the machine.
 _SPARE_CPUS = 2
@@ -82,7 +83,7 @@ def choose(*, cpus: int, available: int | None, override: str | None) -> Choice:
     Args:
         cpus: The machine's logical CPUs.
         available: The bytes of memory available, or `None` when unknown.
-        override: The value of `CHECK_WORKERS`, or `None` when it is unset or blank.
+        override: The value of `--workers`, or `None` when it is not given or blank.
 
     Returns:
         The override when given; else at most `cpus - 2` and at most one worker per
@@ -94,7 +95,7 @@ def choose(*, cpus: int, available: int | None, override: str | None) -> Choice:
     if override is not None:
         if not override.isdigit() or int(override) < 1:
             raise ValueError(f"{OVERRIDE} must be a positive integer, not {override!r}")
-        return Choice(int(override), f"{OVERRIDE}={override}")
+        return Choice(int(override), f"{OVERRIDE} {override}")
     by_cpu = cpus - _SPARE_CPUS
     if available is None:
         return Choice(max(1, by_cpu), f"{cpus} CPUs, available memory unknown")
@@ -134,13 +135,21 @@ def available_memory() -> int | None:
     return parse_vm_stat(result.stdout) if result.returncode == 0 else None
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Print the count on standard output and the summary line on standard error.
 
+    Args:
+        argv: The arguments, without the program's name; the command line's by default.
+
     Returns:
-        0, or 2 when `CHECK_WORKERS` is not a positive integer.
+        0, or 2 when `--workers` is not a positive integer (argparse exits 2 itself on an
+        unknown argument).
     """
-    override = os.environ.get(OVERRIDE, "").strip() or None
+    parser = argparse.ArgumentParser(
+        prog="worker_count.py", description="Choose how many pytest-xdist workers to run."
+    )
+    parser.add_argument(OVERRIDE, metavar="N", default="", help="the count, overriding the rule")
+    override = parser.parse_args(argv).workers.strip() or None
     try:
         choice = choose(cpus=os.cpu_count() or 1, available=available_memory(), override=override)
     except ValueError as error:

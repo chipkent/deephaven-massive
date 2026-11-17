@@ -1,133 +1,68 @@
-"""Which live streams a key's subscriptions allow: the units of the live run's streaming groups.
+"""The units of the live run's streaming groups: one per subscription, and their night units.
 
-A *streaming unit* is one asset class at one recency, such as `"stocks delayed"` or
-`"currencies real-time"`. The live-run program (`live_run`) streams each unit for one full
-trading day (`stream-day`), compares that day with history the next day (`stream-day-reconcile`),
-and measures the throughput of the busiest ones (`throughput`). A unit is new, and so due, when
-a class starts to stream or moves from delayed to real-time data.
+A *streaming unit* is one subscription's streams, named by the subscription, such as `"stocks"`
+or `"currencies"`. The live-run program (`live_run`) streams each unit for one full trading day
+(`stream-day`), compares that day with history the next day (`stream-day-reconcile`), and
+measures the throughput of the busiest ones (`throughput`). Every subscription has a unit,
+whatever the key holds: Massive's refusal of a unit's streams is its answer, recorded as
+`refused`.
 
 The overnight group (`stream-night`) has units of its own, named by what they stream: `crypto`
-for the Currencies subscription, whose crypto pairs trade around the clock, and `futures`, such
-as `"crypto real-time"` or `"futures delayed"`.
+for the Currencies subscription, whose crypto pairs trade around the clock, and `futures`.
 
-The recency of each tier, and the documented delay of delayed data, come from Massive's plan
-tables; Basic streams nothing. Every function is pure.
+Which feed a unit streams from is the owner's settings' choice (`delayed_subscriptions`), made
+in the child that opens the session; a unit's name does not change with it. Every function is
+pure.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+SUBSCRIPTIONS: Final = ("stocks", "options", "indices", "currencies", "futures")
+"""Massive's subscriptions, one per asset class, in the order their units run."""
 
-DELAYED: Final = "delayed"
-REAL_TIME: Final = "real-time"
+NIGHT_UNITS: Final = {"crypto": "currencies", "futures": "futures"}
+"""The units a stream night streams, each with the subscription it belongs to."""
 
-RECENCY: Final[Mapping[tuple[str, str], str]] = {
-    ("stocks", "starter"): DELAYED,
-    ("stocks", "developer"): DELAYED,
-    ("stocks", "advanced"): REAL_TIME,
-    ("stocks", "business"): REAL_TIME,
-    ("stocks", "business_expansion"): REAL_TIME,
-    ("options", "starter"): DELAYED,
-    ("options", "developer"): DELAYED,
-    ("options", "advanced"): REAL_TIME,
-    ("options", "business"): REAL_TIME,
-    ("options", "business_expansion"): REAL_TIME,
-    ("indices", "starter"): DELAYED,
-    ("indices", "advanced"): REAL_TIME,
-    ("indices", "business"): REAL_TIME,
-    ("currencies", "starter"): REAL_TIME,
-    ("currencies", "business"): REAL_TIME,
-    ("futures", "starter"): DELAYED,
-    ("futures", "developer"): DELAYED,
-    ("futures", "advanced"): REAL_TIME,
-    ("futures", "business"): REAL_TIME,
-}
-"""The recency of each streaming tier (`vendor/massive/websocket/`'s plan tables); a tier not
-listed, Basic, streams nothing."""
-
-DELAYS: Final[Mapping[str, timedelta]] = {
-    "stocks": timedelta(minutes=15),
-    "options": timedelta(minutes=15),
-    "indices": timedelta(minutes=15),
-    "futures": timedelta(minutes=10),
-}
-"""How far each class's delayed data lags the market; currencies are never delayed."""
-
-NIGHT_CLASSES: Final[Mapping[str, str]] = {"currencies": "crypto", "futures": "futures"}
-"""The subscriptions a stream night streams, each with the name its night unit starts with."""
-
-THROUGHPUT_CLASSES: Final = ("stocks", "currencies")
-"""The classes whose throughput is measured: the two with a busy stream of every symbol."""
+THROUGHPUT_UNITS: Final = ("stocks", "currencies")
+"""The units whose throughput is measured: the two with a busy stream of every symbol."""
 
 
-def unit(name: str, recency: str) -> str:
-    """Name a streaming unit.
-
-    Args:
-        name: The class.
-        recency: `DELAYED` or `REAL_TIME`.
+def stream_units() -> list[str]:
+    """Return the units of a stream day.
 
     Returns:
-        Such as `"stocks delayed"`.
+        One unit per subscription, in `SUBSCRIPTIONS` order.
     """
-    return f"{name} {recency}"
+    return list(SUBSCRIPTIONS)
 
 
-def stream_units(tiers: Mapping[str, str]) -> list[str]:
-    """Return the units a key's tiers can stream.
-
-    Args:
-        tiers: Each class's tier.
+def night_units() -> list[str]:
+    """Return the units of a stream night.
 
     Returns:
-        One unit per class that streams, in the classes' order.
+        `["crypto", "futures"]`.
     """
-    return [
-        unit(name, RECENCY[name, tier]) for name, tier in tiers.items() if (name, tier) in RECENCY
-    ]
+    return list(NIGHT_UNITS)
 
 
-def night_units(tiers: Mapping[str, str]) -> list[str]:
-    """Return the units a key's tiers can stream through a night.
-
-    Args:
-        tiers: Each class's tier.
-
-    Returns:
-        A `crypto` unit when Currencies streams and a `futures` unit when Futures does, such as
-        `["crypto real-time", "futures delayed"]`.
-    """
-    return [
-        unit(NIGHT_CLASSES[name], RECENCY[name, tier])
-        for name, tier in tiers.items()
-        if name in NIGHT_CLASSES and (name, tier) in RECENCY
-    ]
-
-
-def throughput_units(tiers: Mapping[str, str]) -> list[str]:
+def throughput_units() -> list[str]:
     """Return the units whose throughput is measured.
 
-    Args:
-        tiers: Each class's tier.
-
     Returns:
-        The stream units of `THROUGHPUT_CLASSES`.
+        `THROUGHPUT_UNITS`, as a list.
     """
-    return [u for u in stream_units(tiers) if u.split()[0] in THROUGHPUT_CLASSES]
+    return list(THROUGHPUT_UNITS)
 
 
-def delay_of(unit_name: str) -> timedelta:
-    """Return how far a unit's data lags the market.
+def subscription_of(unit: str) -> str:
+    """Return the subscription a streaming unit belongs to.
 
     Args:
-        unit_name: The unit.
+        unit: A stream-day or stream-night unit.
 
     Returns:
-        The class's documented delay for a delayed unit, else zero.
+        The subscription: a night's `crypto` unit is the Currencies subscription's.
     """
-    name, recency = unit_name.split()
-    return DELAYS.get(name, timedelta()) if recency == DELAYED else timedelta()
+    return NIGHT_UNITS.get(unit, unit)

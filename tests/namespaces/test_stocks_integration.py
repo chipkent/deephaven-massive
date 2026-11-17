@@ -10,9 +10,7 @@ client, because the library filters the very bars in question. How to run these 
 
 from __future__ import annotations
 
-import dataclasses
 import logging
-import os
 import time
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
@@ -23,6 +21,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._massive import RestClient, Transport, WireError, source
+from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -130,7 +129,6 @@ def _stream_evidence(
     return rows, (str(failed[0]) if failed else None)
 
 
-@pytest.mark.needs("stocks:advanced")
 @pytest.mark.verifies("21")
 @pytest.mark.timeout(100)
 def test_luld_frames_convert_to_a_current_instant(
@@ -140,7 +138,7 @@ def test_luld_frames_convert_to_a_current_instant(
     wait_acked: WaitAcked,
     market_status: MarketStatus,
     stream_report: Report,
-    skip_if_not_entitled: Callable[[dm.MassiveSession, str], None],
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     instant_text: Text,
     evidence: Evidence,
     table_rows: TableRows,
@@ -155,8 +153,7 @@ def test_luld_frames_convert_to_a_current_instant(
     acknowledged the topic. Bands exist only in the regular session, so when
     `/v1/marketstatus/now` does not say `open` the test skips after the acknowledgement.
     Passes when the first row's instant is within a day of now; a failed stream fails the
-    test, quoting the error; a refused stream (a Business plan without the trades and quotes
-    expansion has no LULD) skips, naming the plan.
+    test, quoting the error; a stream Massive refuses skips, quoting Massive.
     """
     caplog.set_level(logging.INFO, logger="deephaven_massive")
     table = live_session.stocks.luld(dm.ALL).append_only()
@@ -172,7 +169,7 @@ def test_luld_frames_convert_to_a_current_instant(
         evidence=evidence,
         table_rows=table_rows,
     )
-    skip_if_not_entitled(live_session, "Stocks Advanced, or Business with the expansion")
+    skip_if_not_entitled(live_session)
     if failure is not None:
         pytest.fail(f"the LULD stream failed (a unit mismatch fails its bound check): {failure}")
     assert acked, "Massive acknowledged no LULD topic"
@@ -188,7 +185,6 @@ def test_luld_frames_convert_to_a_current_instant(
     assert abs(now - int(rows[0]["Timestamp"])) < _DAY_NS
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("41")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(60)
@@ -224,7 +220,6 @@ def test_an_ipo_keeps_its_issuer_name(
     assert rows
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("33")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -262,7 +257,6 @@ def test_stock_week_bars_start_on_monday_or_sunday(
     assert not misses, f"week bars closer to another window than the library's: {misses}"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("34")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
@@ -295,7 +289,6 @@ def test_month_bars_from_mid_month_against_the_whole_month(
     assert not extra, f"bars from mid-month that are not whole months: {extra}"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("35")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
@@ -383,14 +376,12 @@ def _record_library_stock_stamps(
         evidence(f"library {span.value} history: {outcome}")
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("50")
-@pytest.mark.requests(5)
+@pytest.mark.requests(14)
 @pytest.mark.timeout(100)
 def test_stock_day_and_longer_bar_stamps_from_rest(
     live_session: dm.MassiveSession,
     *,
-    classes_on_basic: frozenset[str],
     stamp_days: StampDays,
     rest_rows: RestRows,
     stamped_bar: ToStampedBar,
@@ -412,9 +403,7 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     trading day after a half day), beside the range bars of that day; the week bars of the
     half day's week and the week before, and the month bars of the two whole months before
     the current one; and the library's `TimestampStart`, `TimestampEnd`, and `Date` for the
-    same requests. With Stocks on Basic, which allows 5 requests a minute, it reads the range
-    bars of both days, the grouped-daily row and minute bars of the half day only, and the week
-    and month bars, and leaves out `/prev` and the library's lines. Passes when every source
+    same requests: about 14 requests in all. Passes when every source
     answered and each grouped-daily row is stamped where the library expects a 1-day bar: at
     00:00, 13:00, or 16:00 New York time of its own day. Reading the rest: range stamps there,
     longer bars at 00:00 New York time on their period's first day (or the weekend before a
@@ -424,34 +413,28 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     Grouped-daily volume runs a little below the range bar's, so only the stamps are asserted.
     """
     days = stamp_days["day"]
-    basic = "stocks" in classes_on_basic
-    read = days[-1:] if basic else days  # the half day is the last
     grouped = {
         day: [
             stamped_bar(r) for r in rest_rows(_GROUPED, {"date": day}, {}) if r.get("T") == _SYMBOL
         ]
-        for day in read
+        for day in days
     }
     ranged = day_bar_report(_SYMBOL, days, {"grouped daily": grouped})
-    minutes = [minute_span_report(_SYMBOL, day) for day in read]
+    minutes = [minute_span_report(_SYMBOL, day) for day in days]
     spans = {span: stamp_days[span] for span in ("week", "month")}
     periods = period_bar_report(_SYMBOL, spans, {"week": (2, 2), "month": (2, 2)})
-    if basic:
-        evidence("Stocks on Basic: /prev and the library's lines are not read")
-    else:
-        assert prev_bar_report(_SYMBOL), "/prev returned no bar"
-        _record_library_stock_stamps(
-            live_session, stamp_days=stamp_days, library_stamps=library_stamps, evidence=evidence
-        )
+    assert prev_bar_report(_SYMBOL), "/prev returned no bar"
+    _record_library_stock_stamps(
+        live_session, stamp_days=stamp_days, library_stamps=library_stamps, evidence=evidence
+    )
     assert all(ranged.values()), f"a stamp day has no range bar: {ranged}"
-    assert all(minutes), f"a stamp day has no minute bars: {dict(zip(read, minutes, strict=True))}"
+    assert all(minutes), f"a stamp day has no minute bars: {dict(zip(days, minutes, strict=True))}"
     assert all(grouped.values()), f"a stamp day has no grouped-daily row: {grouped}"
     assert periods, "the range did not return one bar for each of two weeks and two months"
     odd = {day: [b[0] for b in bars if not _day_stamp(b[0], day)] for day, bars in grouped.items()}
     assert not any(odd.values()), f"grouped-daily stamps the library does not expect: {odd}"
 
 
-@pytest.mark.needs("stocks:starter", "s3")
 @pytest.mark.verifies("50")
 @pytest.mark.timeout(200)
 def test_stock_day_bar_stamps_of_the_day_file(
@@ -497,13 +480,9 @@ def test_stock_day_bar_stamps_of_the_day_file(
 
 
 _DIVIDEND_TRIES: Final = 10
-"""How many `stock_dividend` events the dividend check tries on a paid Stocks plan for one whose
-ticker has day bars: most such tickers are thin over-the-counter issues without a bar in a
-given month, so a handful is not enough."""
-
-_DIVIDEND_TRIES_BASIC: Final = 3
-"""How many it tries on Stocks Basic: one request for the events, one per try, and one for the
-as-traded bars keep it within the five requests a minute of Stocks Basic."""
+"""How many `stock_dividend` events the dividend check tries for one whose ticker has day bars:
+most such tickers are thin over-the-counter issues without a bar in a given month, so a handful
+is not enough."""
 
 _DIVIDEND_WINDOW: Final = timedelta(days=30)
 """How far before a `stock_dividend` event's execution date the check looks for a day bar: a
@@ -529,7 +508,6 @@ def _days(
     return {str(row["Date"]): row for row in table_rows(table)}
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("54")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -575,9 +553,8 @@ def test_every_page_echoes_its_adjustment(
     assert all(sent is echo for sent, echo in grouped_echoes), f"grouped: {grouped_echoes}"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("55")
-@pytest.mark.requests(4)
+@pytest.mark.requests(13)
 @pytest.mark.timeout(100)
 def test_cash_dividends_are_never_adjusted(
     live_session: dm.MassiveSession,
@@ -595,9 +572,10 @@ def test_cash_dividends_are_never_adjusted(
     traded stock may not trade for days). Passes when the ratio of the adjusted to the
     as-traded close takes no step across the ex-dividend date: the same ratio on every day, so
     `adjusted` concerns splits only, as the library documents, and an adjustment for the
-    dividend would show as a step on the ex-date. With Stocks on Basic
-    only the newest such dividend is tried (`special_dividends` keeps one), so the test sends
-    at most 4 stock requests. Skips when no dividend tried has bars on both sides.
+    dividend would show as a step on the ex-date. It tries up to three such dividends, two
+    requests each, after the run's search for them (`special_dividends`, up to seven requests,
+    sent once a run): at most 13 stock requests. Skips when no dividend tried has bars on both
+    sides.
     """
     dividends = special_dividends(live_session)
     spans = {
@@ -637,14 +615,12 @@ def test_cash_dividends_are_never_adjusted(
     assert all(abs(step) <= _SAME_PRICE for step in steps), f"the ratio steps: {ratios}"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("56")
-@pytest.mark.requests(5)
+@pytest.mark.requests(12)
 @pytest.mark.timeout(100)
 def test_stock_dividend_events_and_the_adjustment(
     live_session: dm.MassiveSession,
     *,
-    classes_on_basic: frozenset[str],
     recent_month: DaySpan,
     table_rows: TableRows,
     evidence: Evidence,
@@ -653,9 +629,8 @@ def test_stock_dividend_events_and_the_adjustment(
 
     Walks the most recent `stock_dividend` events of the year ending with the most recent whole
     month, newest first, until one's ticker has a day bar in the 30 days before its execution
-    date (many such tickers are thinly traded or delisted), at most 10 of them (3 with Stocks on
-    Basic, which allows 5 requests a minute), and
-    records each event's adjustment factor and that ticker's day bars on both bases across the
+    date (many such tickers are thinly traded or delisted), at most 10 of them, and records each
+    event's adjustment factor and that ticker's day bars on both bases across the
     date. Skips as not exercised when none has such a bar; fails when the as-traded bars lack
     the earlier day the adjusted ones hold.
     Reading it: prices before the date that differ by the event's factor mean such events are
@@ -670,7 +645,7 @@ def test_stock_dividend_events_and_the_adjustment(
             sort="execution_date",
             order=dm.Order.DESC,
             filters={"adjustment_type": "stock_dividend"},
-            limit=_DIVIDEND_TRIES_BASIC if "stocks" in classes_on_basic else _DIVIDEND_TRIES,
+            limit=_DIVIDEND_TRIES,
         ).fetch(wait=True)
     )
     listed = [(e["Symbol"], e["ExecutionDate"], e["HistoricalAdjustmentFactor"]) for e in events]
@@ -698,7 +673,6 @@ def test_stock_dividend_events_and_the_adjustment(
     assert earlier[-1] in traded, f"{symbol} has no as-traded bar of {earlier[-1]}"
 
 
-@pytest.mark.needs("stocks:basic", "currencies:basic")
 @pytest.mark.settles("61")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -744,7 +718,6 @@ def test_daily_indicator_stamps(
     assert found
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("62")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -787,7 +760,6 @@ def test_unknown_ticker_statuses(
     assert not unexpected, f"answers other than an empty 200 or a 404: {unexpected}"
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("63")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
@@ -901,9 +873,8 @@ def _with_bars(
     return None
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("53")
-@pytest.mark.requests(3)
+@pytest.mark.requests(12)
 @pytest.mark.timeout(100)
 def test_split_basis_before_and_on_the_split(
     live_session: dm.MassiveSession,
@@ -920,9 +891,9 @@ def test_split_basis_before_and_on_the_split(
     when, before the split, the as-traded close is the adjusted close times the ratio and the
     adjusted volume the as-traded volume times the ratio (within 1%), and both bases agree on the
     execution date: `adjusted` restates prices before a split by its ratio, as the library
-    documents. With Stocks on Basic only the newest such split is tried (`recent_splits` keeps
-    one), so the test sends at most 3 stock requests. Skips when the year had no such split
-    with bars.
+    documents. It tries up to three such splits, two requests each, after the run's search for
+    them (`recent_splits`, up to six requests, sent once a run): at most 12 stock requests. Skips
+    when the year had no such split with bars.
     """
     splits = recent_splits(live_session)
     found = _with_bars(
@@ -950,7 +921,6 @@ def test_split_basis_before_and_on_the_split(
     assert abs(same - 1) < _SAME_PRICE, f"the bases differ on the execution date: {same}"
 
 
-@pytest.mark.needs("stocks:starter", "s3")
 @pytest.mark.verifies("53")
 @pytest.mark.requests(12)
 @pytest.mark.timeout(100)
@@ -1003,7 +973,6 @@ def _previous_bar_status(client: RestClient) -> str:
     ).status
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("73")
 @pytest.mark.requests(3)
 @pytest.mark.timeout(100)
@@ -1011,46 +980,45 @@ def test_past_stock_data_is_served_with_the_default_config(
     live_config: dm.MassiveConfig,
     *,
     live_rest: RestClient,
-    rest_for_key: Callable[[str], RestClient],
     previous_trading_day: date,
     evidence: Evidence,
 ) -> None:
     """The previous day's bar and a past day's open and close fetch on the default config.
 
-    Massive labels past data `DELAYED` on Basic and Starter keys, though its rows are final, so
-    only datasets of the market's current state are checked against
+    Massive labels past data `DELAYED` on some keys, though its rows are final, so only
+    datasets of the market's current state are checked against
     `MassiveConfig.delayed_subscriptions`. The question needs a key whose past data Massive
-    labels `DELAYED`: the test reads AAPL's previous day bar raw and records the envelope
-    status, and uses the main key when it says `DELAYED`, else `MASSIVE_DELAYED_API_KEY` when
-    that key's answer says so; without such a key it skips, "needs a Basic or Starter stocks
-    key". A session on that key with no subscription listed then reads AAPL's
-    `previous_day_bar` and its `daily_open_close` of the last trading day before the run.
-    Fails if either raises `EntitlementError` or returns no row.
+    labels `DELAYED`: the test reads AAPL's previous day bar raw, records the envelope status,
+    and skips, quoting it, when the status is not `DELAYED`. A session on the key with no
+    subscription listed then reads AAPL's `previous_day_bar` and its `daily_open_close` of the
+    last trading day before the run. Fails if the library refuses either read as delayed data
+    the settings do not list (an `EntitlementError` whose source is `ErrorSource.USER`, which
+    the test catches so the live-test hook does not skip on it), or if either returns no row.
+
+    Raises:
+        EntitlementError: When Massive refuses a read, which skips the test, quoting Massive.
     """
     status = _previous_bar_status(live_rest)
-    evidence(f"the main key's previous day bar envelope status: {status!r}")
-    key = live_config.api_key
+    evidence(f"the key's previous day bar envelope status: {status!r}")
     if status != "DELAYED":
-        key = os.environ.get("MASSIVE_DELAYED_API_KEY", "").strip()
-        if not key:
-            pytest.skip(
-                f"needs a Basic or Starter stocks key: Massive labels the main key's past data "
-                f"{status!r}, not DELAYED, and MASSIVE_DELAYED_API_KEY is not set"
-            )
-        status = _previous_bar_status(rest_for_key(key))
-        evidence(f"MASSIVE_DELAYED_API_KEY's previous day bar envelope status: {status!r}")
-        if status != "DELAYED":
-            pytest.skip(
-                f"needs a Basic or Starter stocks key: Massive labels the past data of both "
-                f"keys {status!r}, not DELAYED"
-            )
-    config = dataclasses.replace(live_config, api_key=key, delayed_subscriptions=frozenset())
-    session = dm.MassiveSession(config)
+        pytest.skip(
+            f"Massive labels this key's past stock data {status!r}; the question is about a key "
+            f"whose past data it labels DELAYED"
+        )
+    session = dm.MassiveSession(with_delayed(live_config, frozenset()))
     try:
         previous = session.stocks.previous_day_bar(_SYMBOL).fetch(wait=True)
         evidence(f"previous_day_bar fetch(): {previous.size} row(s)")
         day = session.stocks.daily_open_close(_SYMBOL, previous_trading_day).fetch(wait=True)
         evidence(f"daily_open_close {previous_trading_day} fetch(): {day.size} row(s)")
+    except dm.EntitlementError as error:
+        if error.source is not dm.ErrorSource.USER:
+            raise  # Massive's refusal: the live-test hook skips, quoting it
+        # The settings' refusal of delayed data is the failure the question asks about; the
+        # hook would report it as a skip.
+        refusal = " ".join(str(error).split())
+        evidence(f"the library refused past data on the default config: {refusal}")
+        pytest.fail(f"the library refused past data on the default config: {refusal}")
     finally:
         session.close()
     assert previous.size == 1, "previous_day_bar returned no row"
