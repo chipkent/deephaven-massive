@@ -20,10 +20,11 @@ two currencies don't make up its ticker. The library withholds the row, or fails
 ## Ruling
 
 Option 1, decided by the owner in the coordinating chat session on 2026-11-17, for the three
-examples above, logged at WARNING. Under the owner's standing rule that a case unlike its
-siblings is made to match them, the ruling also covers every other cause of a withheld row on
-every transport, a flat file whose every line is malformed, and a WebSocket frame that isn't
-JSON. The owner confirmed this scope when the record was read back on 2026-11-17.
+examples above, logged at WARNING. When the record was read back that day, the owner confirmed
+that the ruling covers every other cause of a withheld row on every transport; a flat file whose
+every line is malformed is one. The read-back did not name a WebSocket frame that isn't JSON or
+that has no `ev` field, so the owner did not confirm those: they take the same treatment under
+the owner's standing rule that a case unlike its siblings is made to match them.
 
 ## Reason
 
