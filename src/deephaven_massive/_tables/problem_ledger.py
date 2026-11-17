@@ -261,7 +261,7 @@ class ProblemLedger:
             The changed row.
         """
         symbol = self._clean(event.symbol)
-        key: ProblemKey = (event.stream_id, event.cause, symbol, event.field, None)
+        key: ProblemKey = (event.stream_id, event.cause, symbol, self._clean(event.field), None)
         found = self._rows.get(key)
         action = event.action
         if found is None and not self._admits(key):
@@ -356,7 +356,7 @@ class ProblemLedger:
                 spans.stream_id,
                 spans.cause,
                 self._clean(span.symbol),
-                span.field,
+                self._clean(span.field),
                 span.since,
             )
             if key in self._rows:
@@ -376,7 +376,13 @@ class ProblemLedger:
             The changed row, and True when it is the span's own row.
         """
         symbol = self._clean(span.symbol)
-        key: ProblemKey = (spans.stream_id, spans.cause, symbol, span.field, span.since)
+        key: ProblemKey = (
+            spans.stream_id,
+            spans.cause,
+            symbol,
+            self._clean(span.field),
+            span.since,
+        )
         found = self._rows.get(key)
         if found is not None:  # it ended, and holds again from the same start
             row = replace(
@@ -449,13 +455,13 @@ class ProblemLedger:
         return self._counts[key[0], key[1]] < KEYS_PER_CAUSE
 
     def _clean(self, text: str | None) -> str | None:
-        """Return a symbol with the session's secrets removed.
+        """Return a symbol or field with the session's secrets removed.
 
         Args:
-            text: The symbol as sent or given, or None.
+            text: The symbol or field as sent or given, or None.
 
         Returns:
-            The symbol, each secret replaced; None for None.
+            The text, each secret replaced; None for None.
         """
         return None if text is None else self._redactor.received(text)
 

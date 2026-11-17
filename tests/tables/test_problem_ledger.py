@@ -1,5 +1,7 @@
 """Tests for the rows of `m.problems()`: merging, spans, the cap, queries, and redaction."""
 
+from dataclasses import replace
+
 import pytest
 
 import deephaven_massive as dm
@@ -154,8 +156,11 @@ def test_every_text_is_redacted(ledger: ProblemLedger) -> None:
     [row] = ledger.apply([event(symbol=f"x{KEY}", detail=f"refused key {KEY}")])
     assert row.symbol == "x***"
     assert row.detail == "refused key ***"
-    [span] = ledger.apply([snapshot(1, {"a": Span(symbol=KEY, detail=KEY, since=1)})])
-    assert (span.symbol, span.detail) == ("***", "***")
+    [span] = ledger.apply([snapshot(1, {"a": Span(symbol=KEY, field=KEY, detail=KEY, since=1)})])
+    assert (span.symbol, span.field, span.detail) == ("***", "***", "***")
+    # A field Massive's documentation lacks is named as Massive sent it, which may hold a key.
+    [drift] = ledger.apply([replace(event(), field=f"x{KEY}")])
+    assert drift.field == "x***"
 
 
 def test_past_the_cap_problems_add_up_in_one_overflow_row(
