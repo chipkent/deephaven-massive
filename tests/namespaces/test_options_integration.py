@@ -1573,7 +1573,12 @@ def _compare_collision(
     Returns:
         The side the reference puts the contract on ("index", "other", "no CFI", or "not
         compared" when the reference or the library has no row), and each mismatch found,
-        including a library read that fails for a contract the reference classifies.
+        including Massive's underlying against the reference when the library has no row, and
+        a library read that fails for a contract the reference classifies.
+
+    Raises:
+        EntitlementError: When the library refuses the read, Massive's refusal or delayed data
+            the settings don't list; the live-test hook skips the test.
     """
     source_name, row = sample
     ticker = str(row["ticker"])
@@ -1586,6 +1591,9 @@ def _compare_collision(
         published = _published_underlyings(
             session, source_name, ticker, day=day, table_rows=table_rows
         )
+    except dm.EntitlementError:
+        # A refusal is not a mismatch: the live-test hook skips the test for it.
+        raise
     except dm.MassiveError as error:
         evidence(
             f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r} "
@@ -1597,17 +1605,20 @@ def _compare_collision(
         f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r} (CFI {cfi!r}), "
         f"library {sorted(set(published))}"
     )
-    if reference is None or not published:
+    if reference is None:
         return "not compared", []
+    problems: list[str] = []
+    if sent != reference.removeprefix("I:"):
+        problems.append(f"{ticker}: Massive {sent!r} vs {reference!r}")
+    if not published:
+        return "not compared", problems
     # A contract the reference gives no CFI code keeps Massive's bare ticker in the library.
     side = "no CFI" if not cfi else "index" if is_index_option(str(cfi)) else "other"
-    problems = [
+    problems += [
         f"{source_name} {ticker}: library {value!r} vs {reference!r}"
         for value in sorted(set(published))
         if value != reference
     ]
-    if sent != reference.removeprefix("I:"):
-        problems.append(f"{ticker}: Massive {sent!r} vs {reference!r}")
     return side, problems
 
 
