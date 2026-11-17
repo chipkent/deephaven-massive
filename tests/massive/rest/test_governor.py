@@ -27,6 +27,7 @@ from deephaven_massive._massive.rest.governor import (
     Admission,
     BucketState,
     Patience,
+    PauseNotice,
     Permit,
     RequestGovernor,
     _Bucket,
@@ -794,6 +795,180 @@ def test_a_bucket_listener_hears_only_its_bucket() -> None:
     assert len(heard) == 2
     with pytest.raises(ValueError, match="unknown bucket 'crypto'"):
         governor.subscribe_bucket("crypto", listener)
+
+
+# --- Pause notices -------------------------------------------------------------------------------
+
+
+def _notices(governor: RequestGovernor) -> list[tuple[str, float, float, bool]]:
+    """Subscribe a pause listener.
+
+    Returns:
+        The list its notices land in, as plain tuples.
+    """
+    heard: list[tuple[str, float, float, bool]] = []
+    governor.subscribe_pauses(lambda n: heard.append((n.bucket, n.started, n.ends, n.ended)))
+    return heard
+
+
+def _refused_now(governor: RequestGovernor, *, retry_after: float, bucket: str = "stocks") -> None:
+    permit = governor.admission(bucket, lane=object()).acquire(Cancel())
+    _refuse(governor, permit, retry_after=retry_after)
+
+
+def test_a_pause_that_starts_and_ends_unseen_is_told_with_its_exact_times() -> None:
+    # No snapshot falls inside the pause, yet its listener hears it start, then end, with the
+    # times the pause really had: a reader that comes only afterwards still learns of it.
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    heard = _notices(governor)
+    start = clock.time()
+    _refused_now(governor, retry_after=2.0)
+    clock.advance(30.0)
+    assert heard == [("stocks", start, start + 2.0, False)]
+    governor.snapshot()  # the first call that finds it over tells its end
+    assert heard[1:] == [("stocks", start, start + 2.0, True)]
+    governor.snapshot()
+    governor.next_change()
+    assert len(heard) == 2  # an end is told once
+
+
+def test_a_pause_seen_across_two_reads_is_one_pause_lengthened_by_a_later_refusal() -> None:
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    heard = _notices(governor)
+    start = clock.time()
+    burst = [governor.admission("stocks", lane=object()).acquire(Cancel()) for _ in range(3)]
+    _refuse(governor, burst[0], retry_after=20.0)
+    clock.advance(5.0)
+    governor.snapshot()  # still paused: nothing to tell
+    _refuse(governor, burst[1], retry_after=5.0)  # sent before the pause, shorter: no change
+    _refuse(governor, burst[2], retry_after=40.0)  # lengthens it, from now
+    assert governor.next_change() == 40.0  # its answer names the end, still open
+    clock.advance(40.0)
+    assert governor.next_change() is None
+    assert heard == [
+        ("stocks", start, start + 20.0, False),
+        ("stocks", start, start + 45.0, False),  # the same pause: its start is kept
+        ("stocks", start, start + 45.0, True),
+    ]
+
+
+def test_a_refusal_after_an_unseen_end_tells_that_end_before_its_own_pause() -> None:
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    heard = _notices(governor)
+    start = clock.time()
+    _refused_now(governor, retry_after=2.0)
+    _refused_now(governor, retry_after=5.0, bucket="options")
+    clock.advance(3.0)
+    _refused_now(governor, retry_after=4.0)  # the probe after the first pause, refused again
+    assert heard == [
+        ("stocks", start, start + 2.0, False),
+        ("options", start, start + 5.0, False),
+        ("stocks", start, start + 2.0, True),  # every pause over ends first
+        ("stocks", start + 3.0, start + 7.0, False),  # a new pause, from its own start
+    ]
+
+
+def test_ends_found_together_are_told_in_the_order_the_pauses_ended() -> None:
+    # The times a listener is told never go back, whatever order the buckets come in.
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    heard = _notices(governor)
+    start = clock.time()
+    _refused_now(governor, retry_after=9.0)  # stocks, first of the buckets
+    _refused_now(governor, retry_after=3.0, bucket="options")
+    clock.advance(10.0)
+    governor.snapshot()
+    assert heard[2:] == [
+        ("options", start, start + 3.0, True),
+        ("stocks", start, start + 9.0, True),
+    ]
+
+
+def test_a_listener_subscribed_mid_pause_hears_of_it_at_once() -> None:
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    early = _notices(governor)
+    start = clock.time()
+    _refused_now(governor, retry_after=10.0)
+    _refused_now(governor, retry_after=2.0, bucket="options")
+    clock.advance(5.0)
+    late = _notices(governor)  # the options pause is over: only the open one is news to it
+    assert late == [("stocks", start, start + 10.0, False)]
+    assert early[-1] == ("options", start, start + 2.0, True)  # told to who heard it start
+    governor.unsubscribe_pauses(print)  # never subscribed: ignored
+
+
+def test_a_pause_listener_is_told_its_refusal_until_unsubscribed() -> None:
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    heard: list[PauseNotice] = []
+    governor.subscribe_pauses(heard.append)
+    permit = governor.admission("stocks", lane=object()).acquire(Cancel())
+    _refuse(governor, permit, retry_after=1.0, message="HTTP 429: slow down (req 7)")
+    assert heard[0].refusal == "HTTP 429: slow down (req 7)"
+    assert heard[0].at == heard[0].started
+    governor.unsubscribe_pauses(heard.append)
+    clock.advance(2.0)
+    governor.snapshot()
+    assert len(heard) == 1
+
+
+def test_a_pause_listener_that_raises_is_logged_and_the_others_still_hear(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    governor = _governor(FakeClock(manual=True))
+
+    def broken(notice: PauseNotice) -> None:
+        raise RuntimeError("listener broke")
+
+    governor.subscribe_pauses(broken)
+    heard = _notices(governor)
+    with caplog.at_level(logging.ERROR):
+        _refused_now(governor, retry_after=1.0)
+    assert "a rate-limit pause listener failed" in caplog.text
+    assert len(heard) == 1
+
+
+def test_pause_notices_reach_a_listener_in_order_whatever_thread_finds_them() -> None:
+    # Refusals on one thread, readers finding pauses over on another: under the lock, every
+    # pause's start reaches the listener before its end, and each end comes once.
+    clock = FakeClock(manual=True)
+    governor = _governor(clock)
+    heard = _notices(governor)
+    start = threading.Barrier(2)
+
+    def refuse() -> None:
+        start.wait()
+        for _ in range(300):
+            _refused_now(governor, retry_after=0.5)
+            clock.advance(1.0)
+
+    def read() -> None:
+        start.wait()
+        for _ in range(300):
+            governor.snapshot()
+
+    threads = [threading.Thread(target=refuse), threading.Thread(target=read)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(TIMEOUT)
+    governor.snapshot()
+    opened: set[float] = set()
+    ended: set[float] = set()
+    for _, began, _, over in heard:
+        if over:
+            assert began in opened
+            assert began not in ended
+            ended.add(began)
+        else:
+            assert began not in ended
+            opened.add(began)
+    assert opened == ended
+    assert len(opened) == 300
 
 
 # --- Many threads --------------------------------------------------------------------------------

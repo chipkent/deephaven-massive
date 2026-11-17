@@ -72,8 +72,9 @@ class SessionClients:
         No client is created yet. The lease comes from the process's registry
         (`rate_limits.GOVERNORS`), keyed by the configuration's API key and REST base URL,
         declaring its `rest_requests_per_minute`; its release is registered as a session
-        closer. The governor's listener and the source of the `m.rate_limits()` rows are the
-        core's diagnostics, which hold no reference to the core.
+        closer. The governor's listeners, of its changes and of its pauses, and the source of
+        the `m.rate_limits()` rows are the core's diagnostics, which hold no reference to the
+        core.
 
         Args:
             core: The session's core, for its configuration, its `registry_lock`, its
@@ -89,6 +90,7 @@ class SessionClients:
             limits=config.rest_requests_per_minute,
             label=core.label,
             listener=diagnostics.rate_limits_changed,
+            on_pause=diagnostics.pause_changed,
         )
         core.on_close(self._lease.release)
         diagnostics.watch_rate_limits(

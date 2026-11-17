@@ -24,9 +24,10 @@ later row of the key replaces:
   snapshot through its pull (`RateLimitPull`) whenever it was told the state changed
   (`rate_limits_changed`), and a row can never be overtaken by an older one. The writer also
   pulls again when the state changes with time alone (a pause ends, a slot frees): it waits on
-  its queue no longer than until the moment the pull names. A bucket that is `PAUSED` is
-  also a `rate_limited` span of `m.problems()`, from the pull that first shows the pause to the
-  one that shows it ended.
+  its queue no longer than until the moment the pull names. Each pause of a bucket is also a
+  `rate_limited` span of `m.problems()`, from its start to its end as the governor tells them
+  (`pause_changed`, from `RequestGovernor.subscribe_pauses`), not as pulls see them, so a pause
+  that starts and ends between two pulls still has its row.
 - **problems**: every problem with the feed: one row per (table, cause, symbol, field, span),
   merged by the session's `ProblemLedger` (`_tables/problem_ledger.py`) from the problems the
   session's reporter queues (`report_problems`). Keyed by `PROBLEM_KEYS`.
@@ -90,7 +91,7 @@ from deephaven_massive._errors import (
     source_of,
     unmatched_form,
 )
-from deephaven_massive._massive import Transport
+from deephaven_massive._massive import PauseNotice, Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import wait_for_update_cycle
 from deephaven_massive._tables.liveness import QueueWorker, new_scope, release_scope
@@ -747,7 +748,7 @@ class _Batch:
         streams: The latest stream row per key.
         connections: The latest connection row per key.
         symbol_reads: The latest symbol-read row per key.
-        problems: The problems, in order.
+        problems: The problems and the rate-limit pause notices, in order.
         reads: The read queries, in order.
         gone: The tables that left their registries.
         added: The `wait_until_shown` events.
@@ -757,7 +758,7 @@ class _Batch:
     streams: dict[int, StreamRow] = field(default_factory=dict)
     connections: dict[tuple[str, str, str], ConnectionRow] = field(default_factory=dict)
     symbol_reads: dict[tuple[int, str], SymbolReadRow] = field(default_factory=dict)
-    problems: list[Problem] = field(default_factory=list)
+    problems: list[Problem | PauseNotice] = field(default_factory=list)
     reads: list[_ReadQuery] = field(default_factory=list)
     gone: list[int] = field(default_factory=list)
     added: list[threading.Event] = field(default_factory=list)
@@ -786,7 +787,7 @@ class _Batch:
                 batch.connections[item.transport, item.asset_class, item.family] = item
             elif isinstance(item, SymbolReadRow):
                 batch.symbol_reads[item.stream_id, item.symbol] = item
-            elif isinstance(item, (ProblemEvent, ProblemSpans)):
+            elif isinstance(item, (ProblemEvent, ProblemSpans, PauseNotice)):
                 batch.problems.append(item)
             elif isinstance(item, _ReadQuery):
                 batch.reads.append(item)
@@ -800,8 +801,8 @@ class _Batch:
 
 
 _Item: TypeAlias = (
-    "ConnectionRow | StreamRow | SymbolReadRow | Problem | _ReadQuery | _StreamGone"
-    " | threading.Event | object"
+    "ConnectionRow | StreamRow | SymbolReadRow | Problem | PauseNotice | _ReadQuery"
+    " | _StreamGone | threading.Event | object"
 )
 
 
@@ -911,10 +912,11 @@ class Diagnostics:
     non-blocking `put`. A row that does not fit its schema is logged at ERROR and skipped; the
     rest of its batch is added. The rate-limit rows are pulled rather than queued:
     `watch_rate_limits` names their pull, and `rate_limits_changed` (safe from any thread,
-    never blocking) asks the writer to pull them again, at most once per batch. Problems are
-    queued by `report_problems` and merged by the writer's `ProblemLedger`, which also learns
-    each table's query from its `m.streams()` row, or from `name_read` for a read with none,
-    and ends a table's open spans once its row is final (`FINAL_STATES`).
+    never blocking) asks the writer to pull them again, at most once per batch. Each pause of a
+    bucket is a `rate_limited` span, made from the governor's notices (`pause_changed`).
+    Problems are queued by `report_problems` and merged by the writer's `ProblemLedger`, which
+    also learns each table's query from its `m.streams()` row, or from `name_read` for a read
+    with none, and ends a table's open spans once its row is final (`FINAL_STATES`).
 
     `release()` lets the writer add the rows already queued, release the scope, and exit, and
     waits for it unless told not to (a caller that holds the update graph's lock must not: the
@@ -935,7 +937,7 @@ class Diagnostics:
         "_ledger",
         "_on_death",
         "_paused",
-        "_pending_pauses",
+        "_pauses",
         "_problems",
         "_rate_due",
         "_rate_limits",
@@ -999,13 +1001,13 @@ class Diagnostics:
         # When the rate-limit rows next change with time alone (`time.monotonic()`), or None;
         # read and written only by the writer thread.
         self._rate_due: float | None = None
-        # Read and written only by the writer thread: the problems table's rows, and the
-        # rate-limit pauses it shows.
+        # Read and written only by the writer thread: the problems table's rows, the
+        # rate-limit pauses it shows, and each open pause's latest notice by its bucket.
         self._ledger = ProblemLedger(redactor)
         self._paused = SpanTracker(
             ProblemCause.RATE_LIMITED, dataset=None, stream_id=None, where="m.rate_limits()"
         )
-        self._pending_pauses: list[ProblemSpans] = []
+        self._pauses: dict[str, PauseNotice] = {}
         self._scope = new_scope()
         try:
             with self._scope.open():
@@ -1105,6 +1107,19 @@ class Diagnostics:
             if not self._released:
                 for problem in problems:
                     self._writer.put(problem)
+
+    def pause_changed(self, notice: PauseNotice) -> None:
+        """Queue a rate-limit pause's start, lengthening, or end for `m.problems()`.
+
+        The governor calls it under its lock (`RequestGovernor.subscribe_pauses`), so it only
+        queues: a leaf lock around a non-blocking `put`. After `release()`, it queues nothing.
+
+        Args:
+            notice: The pause's notice.
+        """
+        with self._release_lock:
+            if not self._released:
+                self._writer.put(notice)
 
     def stream_gone(self, stream_id: int) -> None:
         """End the open problem spans of a table that left its registry. Never blocks.
@@ -1233,12 +1248,17 @@ class Diagnostics:
         """The writer's last step (`on_exit`): end the open pauses, then release the scope.
 
         A rate-limit pause belongs to no table, so no final stream row ends it: the session's
-        end does, so a view kept from before the release shows no pause still open.
+        end does, so a view kept from before the release shows no pause still open. Each ends
+        at the close, or at its own end if that came first and its notice never arrived.
         """
         try:
-            ended = self._paused.update({})
-            if ended is not None:
-                self._problems.add(self._ledger.apply([ended]))
+            now = time.time_ns()
+            ended = []
+            for bucket, notice in list(self._pauses.items()):
+                del self._pauses[bucket]
+                at = min(now, round(notice.ends * 1e9))
+                ended.append(self._paused.update(self._held_pauses(), at=at))
+            self._problems.add(self._ledger.apply(s for s in ended if s is not None))
         finally:  # the scope is released whatever the last rows did
             self._scope_released = True
             release_scope(self._exec_ctx, self._scope)
@@ -1294,12 +1314,13 @@ class Diagnostics:
         The rate-limit rows are pulled when a marker is in the batch, or when their
         time-driven change has come, so a queue that never goes quiet cannot hold them back.
 
-        The problems are merged last, after the streams' rows have named their queries and
-        the rate-limit pull has shown its pauses.
+        The problems are merged last, after the streams' rows have named their queries; the
+        rate-limit pull, which reports each pause it finds over (`RequestGovernor.snapshot`),
+        comes before them, so a pause whose end it finds is queued for the next batch.
 
         Args:
-            items: Rows, problems, read queries, `wait_until_shown` events, and rate-limit
-                markers, in queue order.
+            items: Rows, problems, pause notices, read queries, `wait_until_shown` events, and
+                rate-limit markers, in queue order.
 
         Raises:
             BrokenGuaranteeError: If an item is none of those, rather than taking it for one.
@@ -1347,14 +1368,6 @@ class Diagnostics:
             pull = required(self._rate_pull, "the rate-limit pull")
         rows, change = pull()
         self._rate_due = None if change is None else time.monotonic() + change
-        paused = {
-            row.bucket: (None, row.bucket, _pause_detail(row), 0)  # Field keys each bucket
-            for row in rows
-            if row.state is RateLimitState.PAUSED
-        }
-        spans = self._paused.update(paused)
-        if spans is not None:
-            self._pending_pauses.append(spans)
         return list(rows)
 
     def _problem_rows(self, streams: Sequence[StreamRow], batch: _Batch) -> list[ProblemRow]:
@@ -1375,8 +1388,13 @@ class Diagnostics:
         for call, query in named:
             for row in ledger.stream_seen(call, query):
                 changed[row.key] = row
-        pauses, self._pending_pauses = self._pending_pauses, []
-        for row in ledger.apply([*pauses, *batch.problems]):
+        problems: list[Problem] = []
+        for problem in batch.problems:
+            if isinstance(problem, PauseNotice):
+                problems.extend(self._pause_spans(problem))
+            else:
+                problems.append(problem)
+        for row in ledger.apply(problems):
             changed[row.key] = row
         # Last, so a span the batch opened for a table whose row is now final ends too.
         now = time.time_ns()
@@ -1385,6 +1403,45 @@ class Diagnostics:
             for row in ledger.stream_ended(stream_id, now):
                 changed[row.key] = row
         return list(changed.values())
+
+    def _pause_spans(self, notice: PauseNotice) -> list[ProblemSpans]:
+        """Turn one pause notice into the `rate_limited` snapshot it makes.
+
+        The governor tells each pause's start before its end (`RequestGovernor.subscribe_pauses`),
+        so an end always finds its pause open; one that does not is a library bug, logged.
+
+        Args:
+            notice: The notice, in the order the governor made it.
+
+        Returns:
+            The snapshot; none when the notice changes nothing shown.
+        """
+        at = round(notice.at * 1e9)
+        if notice.ended:
+            if self._pauses.pop(notice.bucket, None) is None:
+                logger.error(
+                    "diagnostics: the end of a pause never begun: %r. %s", notice, LIBRARY_BUG
+                )
+                return []
+            spans = self._paused.update(self._held_pauses(), at=at)
+        else:
+            self._pauses[notice.bucket] = notice
+            spans = self._paused.update(
+                self._held_pauses(), at=at, since=round(notice.started * 1e9)
+            )
+        return [] if spans is None else [spans]
+
+    def _held_pauses(self) -> dict[str, tuple[str | None, str | None, str, int]]:
+        """Return the open pauses as `rate_limited` spans, by bucket.
+
+        Returns:
+            Each span's symbol (none), field (the bucket, which keeps the pauses of two
+            buckets rows of their own), detail, and rows (none).
+        """
+        return {
+            bucket: (None, bucket, _pause_detail(notice), 0)
+            for bucket, notice in self._pauses.items()
+        }
 
     def _rate_wait(self) -> float | None:
         """Return how long the writer may wait for an item: until the rows next change.
@@ -1402,18 +1459,16 @@ class Diagnostics:
         self._apply([_RATE_LIMITS_CHANGED])
 
 
-def _pause_detail(row: RateLimitRow) -> str:
-    """Return the `Detail` of a paused bucket's `rate_limited` span.
+def _pause_detail(notice: PauseNotice) -> str:
+    """Return the `Detail` of a bucket's `rate_limited` span.
 
     Args:
-        row: The bucket's `m.rate_limits()` row, `PAUSED`.
+        notice: The pause's latest notice.
 
     Returns:
         Such as `"bucket stocks paused until 2026-11-02T14:05:10Z: <Massive's refusal>"`.
     """
-    until = "" if row.paused_until is None else f" until {utc_text(row.paused_until / 1e9)}"
-    refusal = "" if row.last_refusal is None else f": {row.last_refusal}"
-    return f"bucket {row.bucket} paused{until}{refusal}"
+    return f"bucket {notice.bucket} paused until {utc_text(notice.ends)}: {notice.refusal}"
 
 
 def thread_died(label: str, thread: str, death: BaseException) -> MassiveError:

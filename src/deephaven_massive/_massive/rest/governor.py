@@ -109,10 +109,24 @@ make safe.
 
 One governor serves every session of a process that uses the same API key and REST origin,
 so their requests share the counters as Massive's do (the library's registry builds and shares
-them). Thread-safe: one leaf lock guards every bucket, held only to read or change state, never
-for a wait, a request, or a callback. Listeners (`subscribe`, `subscribe_bucket`) are called
-after the lock is released and must only enqueue; one that raises is logged and does not disturb
-the governor. Time comes from an injectable `Clock`, so tests never sleep.
+them). Thread-safe: one leaf lock guards every bucket, held only to read or change state and to
+tell the pause listeners (below), never for a wait or a request. Listeners (`subscribe`,
+`subscribe_bucket`) are called after the lock is released and must only enqueue; one that
+raises is logged and does not disturb the governor.
+
+**Pause notices.** A pause listener (`subscribe_pauses`) hears of every pause as plain data
+(`PauseNotice`): when it starts, each time it lengthens, and when it ends, with its exact start
+and end, so a pause too short for anyone to see it in a `snapshot` still reaches it. Nothing
+runs when a pause's time runs out, so its end is reported by the first call that finds it
+over: `snapshot`, `next_change` (whose answer names that moment, so a reader that calls again
+then reports it on time), a later refusal (before the pause it starts), or `subscribe_pauses`.
+A pause listener is called under the governor's lock, so each one hears every pause's notices
+in order, the start before the end, whichever threads made them, and the ends a call finds
+before any pause it starts, in the order they ended, so the times a listener is told never go
+back. It must only enqueue (a leaf lock of its own at most, no log, no call back into the
+governor); one that raises, a library bug, is logged and does not disturb the governor.
+
+Time comes from an injectable `Clock`, so tests never sleep.
 
 This module imports only the standard library and `net`.
 """
@@ -146,6 +160,7 @@ __all__ = [
     "Admission",
     "BucketState",
     "Patience",
+    "PauseNotice",
     "Permit",
     "RequestGovernor",
     "is_rate_limit_refusal",
@@ -498,6 +513,33 @@ class BucketState:
     last_refusal: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class PauseNotice:
+    """A pause of one bucket that started, lengthened, or ended (`subscribe_pauses`).
+
+    A pause is named by its bucket and its start: every notice of one pause carries the same
+    `started`, and a pause that starts after it ended is a new one.
+
+    Attributes:
+        bucket: The bucket's name.
+        started: When the pause began, in seconds since the Unix epoch on the governor's clock.
+        ends: When it ends: a later notice of the same pause may set it later; final once
+            `ended`.
+        ended: True once the pause is over.
+        at: When the governor made the notice: `started` for a pause that starts, the
+            refusal's time for one it lengthens, the subscription's time for one open when
+            the listener subscribed (`subscribe_pauses`), and `ends` for one that ended.
+        refusal: The message of the 429 that began or last lengthened it, with its request id.
+    """
+
+    bucket: str
+    started: float
+    ends: float
+    ended: bool
+    at: float
+    refusal: str
+
+
 class _Waiter:
     """One waiting request: its lane, and the event that wakes it."""
 
@@ -528,6 +570,7 @@ class _Bucket:
         "last_refusal",
         "learned",
         "open",
+        "pause_started",
         "pause_until",
         "probe",
         "probing",
@@ -574,6 +617,9 @@ class _Bucket:
         self.attempts = 0
         self.refusals = 0
         self.pause_until = float("-inf")
+        # When the pause its pause listeners last heard of began (seconds since the Unix
+        # epoch), until they hear it ended; None when they know of no open pause.
+        self.pause_started: float | None = None
         self.episode = 0
         self.run_refusals = 0  # counted refusals of the current run; 0 when none is going
         # The episode the current run started in: a request granted before it (a lower episode)
@@ -862,7 +908,13 @@ class RequestGovernor:
                 governor.done(permit, answered=True)
     """
 
-    __slots__ = ("_buckets", "_clock", "_listeners", "_lock")
+    __slots__ = (
+        "_buckets",
+        "_clock",
+        "_listeners",
+        "_lock",
+        "_pause_listeners",
+    )
 
     def __init__(
         self,
@@ -902,6 +954,8 @@ class RequestGovernor:
         }
         # Each listener, with the buckets whose changes it hears.
         self._listeners: tuple[tuple[Callable[[], None], frozenset[str]], ...] = ()
+        # The listeners of every pause's notices (`subscribe_pauses`).
+        self._pause_listeners: tuple[Callable[[PauseNotice], None], ...] = ()
 
     @property
     def clock(self) -> Clock:
@@ -1227,10 +1281,14 @@ class RequestGovernor:
                 asked = MAX_RETRY_AFTER
         with self._lock:
             now = self._clock.monotonic()
+            wall = self._clock.time()
+            # A pause that is over ends before the one this refusal may start.
+            self._tell_pauses(self._ended_pauses(now, wall))
             state.settle(now)  # before `finish`, so a slow probe still holds its run open
             sent = state.finish(permit, now, hold=True)
             if sent is None:
                 return per_minute
+            was_until = state.pause_until
             state.refusals += 1
             state.last_refusal = message
             if permit.episode == state.episode:
@@ -1255,6 +1313,9 @@ class RequestGovernor:
                 minute = int(sent // _MINUTE)
                 if state.refused_minute is None or minute < state.refused_minute:
                     state.refused_minute = minute
+            self._tell_pauses(
+                self._pause_changed(permit.bucket, was_until, now=now, wall=wall, refusal=message)
+            )
             # A request sent before a pause that has already ended leaves no pause.
             paused = max(0.0, state.pause_until - now)
             learned = state.learn_ready()
@@ -1281,6 +1342,7 @@ class RequestGovernor:
         with self._lock:
             now = self._clock.monotonic()
             wall = self._clock.time()
+            self._tell_pauses(self._ended_pauses(now, wall))
             states = []
             for name, bucket in self._buckets.items():
                 bucket.expire(now)
@@ -1316,6 +1378,7 @@ class RequestGovernor:
         """
         with self._lock:
             now = self._clock.monotonic()
+            self._tell_pauses(self._ended_pauses(now, self._clock.time()))
             moments = []
             for bucket in self._buckets.values():
                 bucket.expire(now)
@@ -1407,6 +1470,130 @@ class RequestGovernor:
             raise ValueError(f"unknown bucket {bucket!r}; known: {list(self._buckets)}")
         with self._lock:
             self._listeners = (*self._listeners, (listener, frozenset((bucket,))))
+
+    def subscribe_pauses(self, listener: Callable[[PauseNotice], None]) -> None:
+        """Tell `listener` of every pause of any bucket: its start, each lengthening, its end.
+
+        It first hears of each pause open now, at once, as a start; a pause that is over but
+        not yet reported ends first, for the listeners that heard it start.
+
+        Args:
+            listener: Called with each `PauseNotice`, under the governor's lock and on the
+                thread that made or found the change (a request's thread, a reader's of
+                `snapshot`). It must only enqueue: take at most a leaf lock of its own, never
+                log, and never call the governor, whose lock is not reentrant. An `Exception`
+                it raises, a library bug, is logged at ERROR and ignored.
+        """
+        with self._lock:
+            now = self._clock.monotonic()
+            wall = self._clock.time()
+            self._tell_pauses(self._ended_pauses(now, wall))
+            self._pause_listeners = (*self._pause_listeners, listener)
+            for name, bucket in self._buckets.items():
+                if bucket.pause_started is not None:
+                    notice = PauseNotice(
+                        bucket=name,
+                        started=bucket.pause_started,
+                        ends=wall + bucket.pause_until - now,
+                        ended=False,
+                        at=wall,
+                        refusal=bucket.last_refusal or "",
+                    )
+                    self._tell_pauses((notice,), only=listener)
+
+    def unsubscribe_pauses(self, listener: Callable[[PauseNotice], None]) -> None:
+        """Stop telling a listener of pauses; an unknown one is ignored.
+
+        Since listeners are told under the lock, it is never called once this returns.
+
+        Args:
+            listener: A listener given to `subscribe_pauses` (compared by equality).
+        """
+        with self._lock:
+            self._pause_listeners = tuple(
+                each for each in self._pause_listeners if each != listener
+            )
+
+    def _pause_changed(
+        self, name: str, was_until: float, *, now: float, wall: float, refusal: str
+    ) -> tuple[PauseNotice, ...]:
+        """Note a refusal's effect on its bucket's pause; the lock is held.
+
+        Args:
+            name: The bucket.
+            was_until: The bucket's `pause_until` before the refusal.
+            now: The monotonic time.
+            wall: The wall-clock time read with it.
+            refusal: The 429's message.
+
+        Returns:
+            The pause's notice when the refusal started it or lengthened it (a new pause starts
+            now, a lengthened one keeps its start); none when it left the pause as it was.
+        """
+        bucket = self._buckets[name]
+        if bucket.pause_until <= was_until:
+            return ()
+        if bucket.pause_started is None:
+            bucket.pause_started = wall
+        notice = PauseNotice(
+            bucket=name,
+            started=bucket.pause_started,
+            ends=wall + bucket.pause_until - now,
+            ended=False,
+            at=wall,
+            refusal=refusal,
+        )
+        return (notice,)
+
+    def _ended_pauses(self, now: float, wall: float) -> list[PauseNotice]:
+        """Mark each reported pause whose time has run out as ended; the lock is held.
+
+        Args:
+            now: The monotonic time.
+            wall: The wall-clock time read with it.
+
+        Returns:
+            One ended notice per such pause, its `ends` the moment it ended.
+        """
+        notices = []
+        for name, bucket in self._buckets.items():
+            if bucket.pause_started is not None and bucket.pause_until <= now:
+                ends = wall + bucket.pause_until - now
+                notices.append(
+                    PauseNotice(
+                        bucket=name,
+                        started=bucket.pause_started,
+                        ends=ends,
+                        ended=True,
+                        at=ends,
+                        refusal=bucket.last_refusal or "",
+                    )
+                )
+                bucket.pause_started = None
+        # In the order they ended, so the times a listener is told never go back.
+        return sorted(notices, key=lambda notice: notice.ends)
+
+    def _tell_pauses(
+        self,
+        notices: Iterable[PauseNotice],
+        *,
+        only: Callable[[PauseNotice], None] | None = None,
+    ) -> None:
+        """Hand notices to the pause listeners, in order; the lock is held.
+
+        A listener that raises is a library bug, logged at ERROR; the others are still told.
+
+        Args:
+            notices: The notices.
+            only: The one listener to tell, or None to tell every listener.
+        """
+        listeners = self._pause_listeners if only is None else (only,)
+        for notice in notices:
+            for listener in listeners:
+                try:
+                    listener(notice)
+                except Exception:  # a library bug: the listeners only enqueue
+                    logger.exception("a rate-limit pause listener failed. %s", LIBRARY_BUG_REPORT)
 
     def unsubscribe(self, listener: Callable[[], None]) -> None:
         """Stop calling a listener, for every bucket it hears; an unknown one is ignored.

@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import pyarrow as pa
@@ -25,7 +26,7 @@ from deephaven_massive._datasets.schema import Schema
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily, Recency
 from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError
-from deephaven_massive._massive import Redactor, Transport
+from deephaven_massive._massive import Cancel, PauseNotice, Redactor, RequestGovernor, Transport
 from deephaven_massive._tables import diagnostics
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.diagnostics import (
@@ -70,6 +71,7 @@ from deephaven_massive._tables.symbol_read_rows import (
     SymbolReadRow,
     SymbolReadState,
 )
+from tests._fakes.clock import FakeClock
 
 Rows = Callable[[Table], list[dict[str, Any]]]
 TIMEOUT = 30.0
@@ -1055,20 +1057,44 @@ def test_a_table_that_left_its_registry_ends_its_open_spans(
     diagnostics.stream_gone(8)  # after release: not queued
 
 
-def test_a_paused_bucket_is_a_rate_limited_span_until_its_pause_ends(
+START = 1_800_000_000.0
+"""A pause's start in the tests, in whole seconds since the epoch, as the governor reports it."""
+
+
+def _pause(
+    bucket: str = "stocks",
+    *,
+    ends: float = START + 20,
+    ended: bool = False,
+    at: float | None = None,
+    started: float = START,
+) -> PauseNotice:
+    if at is None:
+        at = ends if ended else started
+    return PauseNotice(
+        bucket=bucket, started=started, ends=ends, ended=ended, at=at, refusal="HTTP 429"
+    )
+
+
+def _utc(seconds: float) -> datetime:
+    return datetime.fromtimestamp(seconds, UTC)
+
+
+def _pauses(dh_to_pylist: Rows, diagnostics: Diagnostics) -> list[tuple[Any, ...]]:
+    # Each rate_limited row: its bucket, start, end, and detail, sorted.
+    return sorted(
+        (r["Field"], r["FirstSeen"], r["EndedAt"], r["Detail"])
+        for r in dh_to_pylist(diagnostics.problems)
+        if r["Cause"] == "rate_limited"
+    )
+
+
+def test_a_pause_is_a_rate_limited_span_from_its_start_to_its_end(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
+    # Across two batches: the pause shows open, then the same row ends at the pause's end.
     diagnostics = _diagnostics(dh_exec_ctx)
-    source = _RatePull()
-    source.rows = [
-        dataclasses.replace(
-            _rate_row("stocks", RateLimitState.PAUSED),
-            paused_until=1_793_628_000 * 10**9,
-            last_refusal="HTTP 429",
-        ),
-        _rate_row("other", RateLimitState.READY),
-    ]
-    diagnostics.watch_rate_limits(source)
+    diagnostics.pause_changed(_pause())
     assert diagnostics.wait_until_shown(TIMEOUT)
     [row] = dh_to_pylist(diagnostics.problems)
     assert (row["Cause"], row["Action"], row["StreamId"], row["Dataset"], row["EndedAt"]) == (
@@ -1078,56 +1104,128 @@ def test_a_paused_bucket_is_a_rate_limited_span_until_its_pause_ends(
         None,
         None,
     )
-    assert row["Detail"] == "bucket stocks paused until 2026-11-02T14:00:00Z: HTTP 429"
-    assert row["Field"] == "stocks"
-    source.rows = [_rate_row("stocks", RateLimitState.READY)]
-    diagnostics.rate_limits_changed()
+    assert (row["Field"], row["FirstSeen"]) == ("stocks", _utc(START))
+    assert row["Detail"] == "bucket stocks paused until 2027-01-15T08:00:20Z: HTTP 429"
+    diagnostics.pause_changed(_pause(ended=True))
     assert diagnostics.wait_until_shown(TIMEOUT)
     [ended] = dh_to_pylist(diagnostics.problems)
-    assert ended["EndedAt"] is not None
+    assert (ended["FirstSeen"], ended["EndedAt"]) == (_utc(START), _utc(START + 20))
     diagnostics.release()
 
 
-def test_a_pause_that_holds_at_release_ends_with_the_session(
+def test_a_pause_that_starts_and_ends_within_one_batch_still_has_its_row(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:
-    # A session closed during a pause leaves no pause open in a view kept from before.
+    # The pause is over before the writer adds anything: it still shows, with its own times.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    diagnostics.pause_changed(_pause(ends=START + 1))
+    diagnostics.pause_changed(_pause(ends=START + 1, ended=True))
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    assert [row[:3] for row in _pauses(dh_to_pylist, diagnostics)] == [
+        ("stocks", _utc(START), _utc(START + 1))
+    ]
+    diagnostics.release()
+
+
+def test_a_short_pause_of_a_real_governor_has_its_row_though_no_pull_saw_it(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    # The governor's pull never shows the pause PAUSED: it began and ended between two pulls.
+    clock = FakeClock(manual=True, wall=START)
+    governor = RequestGovernor(("stocks", "other"), clock=clock)
+    diagnostics = _diagnostics(dh_exec_ctx)
+    governor.subscribe_pauses(diagnostics.pause_changed)
+    permit = governor.admission("stocks", lane=object()).acquire(Cancel())
+    governor.refused(permit, retry_after=2.0, message="HTTP 429")
+    clock.advance(5.0)
+
+    def pull() -> tuple[list[RateLimitRow], float | None]:
+        governor.snapshot()  # as `m.rate_limits()` reads it
+        return [], governor.next_change()
+
+    diagnostics.watch_rate_limits(pull)
+    assert diagnostics.wait_until_shown(TIMEOUT)  # the pull finds the pause over
+    assert diagnostics.wait_until_shown(TIMEOUT)  # its end, queued by that pull
+    assert [row[:3] for row in _pauses(dh_to_pylist, diagnostics)] == [
+        ("stocks", _utc(START), _utc(START + 2))
+    ]
+    diagnostics.release()
+
+
+def test_a_lengthened_pause_keeps_its_row_and_shows_its_new_end(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    diagnostics = _diagnostics(dh_exec_ctx)
+    diagnostics.pause_changed(_pause())
+    diagnostics.pause_changed(_pause(ends=START + 40, at=START + 5))
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    assert _pauses(dh_to_pylist, diagnostics) == [
+        (
+            "stocks",
+            _utc(START),
+            None,
+            "bucket stocks paused until 2027-01-15T08:00:40Z: HTTP 429",
+        )
+    ]
+    diagnostics.release()
+
+
+def test_a_pause_open_at_release_ends_with_the_session(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    # A session closed during a pause leaves no pause open in a view kept from before. Its
+    # end is the close, or the pause's own end when that came first and was never told.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    now = time.time()
+    diagnostics.pause_changed(_pause(started=now - 10, ends=now + 600))
+    diagnostics.pause_changed(_pause("options", started=now - 10, ends=round(now - 5)))
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    keeper = new_scope()
+    keeper.manage(diagnostics.problems)
+    assert [row[2] for row in _pauses(dh_to_pylist, diagnostics)] == [None, None]
+    diagnostics.release()
+    assert diagnostics.wait_until_shown(TIMEOUT)  # the kept table takes the last rows in
+    ends = {row[0]: row[2] for row in _pauses(dh_to_pylist, diagnostics)}
+    assert ends["options"] == _utc(round(now - 5))
+    assert _utc(now) <= ends["stocks"] < _utc(now + 600)
+    diagnostics.pause_changed(_pause("other"))  # after release: not queued
+    release_scope(dh_exec_ctx, keeper)
+
+
+def test_pauses_of_two_buckets_are_rows_of_their_own(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    # Both pauses start at once; each keeps its own row, and one ending leaves the other open.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    diagnostics.pause_changed(_pause("stocks"))
+    diagnostics.pause_changed(_pause("options"))
+    diagnostics.pause_changed(_pause("stocks", ended=True))
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    ended = {row[0]: row[2] is not None for row in _pauses(dh_to_pylist, diagnostics)}
+    assert ended == {"stocks": True, "options": False}
+    diagnostics.release()
+
+
+def test_a_paused_row_pulled_is_no_problem_of_its_own(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    # Only the governor's notices make pause rows: a pull showing PAUSED adds none twice.
     diagnostics = _diagnostics(dh_exec_ctx)
     source = _RatePull()
     source.rows = [_rate_row("stocks", RateLimitState.PAUSED)]
     diagnostics.watch_rate_limits(source)
     assert diagnostics.wait_until_shown(TIMEOUT)
-    keeper = new_scope()
-    keeper.manage(diagnostics.problems)
-    [row] = dh_to_pylist(diagnostics.problems)
-    assert row["EndedAt"] is None
+    assert dh_to_pylist(diagnostics.problems) == []
     diagnostics.release()
-    assert diagnostics.wait_until_shown(TIMEOUT)  # the kept table takes the last rows in
-    [ended] = dh_to_pylist(diagnostics.problems)
-    assert ended["EndedAt"] is not None
-    release_scope(dh_exec_ctx, keeper)
 
 
-def test_buckets_paused_in_one_pull_are_rows_of_their_own(
-    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+def test_the_end_of_a_pause_never_begun_is_logged_as_a_bug(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Both pauses start at the same pull; each keeps its own row, and one ending leaves the
-    # other open.
     diagnostics = _diagnostics(dh_exec_ctx)
-    source = _RatePull()
-    source.rows = [
-        _rate_row("stocks", RateLimitState.PAUSED),
-        _rate_row("options", RateLimitState.PAUSED),
-    ]
-    diagnostics.watch_rate_limits(source)
-    assert diagnostics.wait_until_shown(TIMEOUT)
-    assert sorted(r["Field"] for r in dh_to_pylist(diagnostics.problems)) == ["options", "stocks"]
-    source.rows = [
-        _rate_row("stocks", RateLimitState.READY),
-        _rate_row("options", RateLimitState.PAUSED),
-    ]
-    diagnostics.rate_limits_changed()
-    assert diagnostics.wait_until_shown(TIMEOUT)
-    ended = {r["Field"]: r["EndedAt"] is not None for r in dh_to_pylist(diagnostics.problems)}
-    assert ended == {"stocks": True, "options": False}
+    with caplog.at_level(logging.ERROR):
+        diagnostics.pause_changed(_pause(ended=True))
+        assert diagnostics.wait_until_shown(TIMEOUT)
+    assert "the end of a pause never begun" in caplog.text
+    assert dh_to_pylist(diagnostics.problems) == []
     diagnostics.release()
