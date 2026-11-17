@@ -295,7 +295,7 @@ class _Missing:
 
     Attributes:
         symbol: The symbol, as the call named it.
-        why: Why, such as `"for the session 2026-10-30 (HTTP 404 from /futures/vX/trades/{ticker})"`
+        why: Why, such as `"for the session 2026-10-30 (HTTP 404 from GET /futures/vX/trades/ESZ6)"`
             or `"(Massive's crypto ticker list does not hold it)"`.
     """
 
@@ -792,6 +792,24 @@ class RestReader:
             A new `Patience`, for every request of the read.
         """
         return read_patience(self.exec_ctx, max_outage=self.max_outage, waiter=self.waiter)
+
+    def _value_target(self, spec: DatasetSpec, request: Request, value: str) -> str:
+        """Return the path and query a value of a value table is read at, for messages.
+
+        Args:
+            spec: The dataset.
+            request: The request with the value table.
+            value: One value of the table.
+
+        Returns:
+            Such as `"/v3/snapshot/options/SPY"` for an underlying sent in the path, or
+            `"/futures/v1/products?product_code=NQ"` for a value sent as a query parameter.
+        """
+        rest_path = self.rest_path(required(spec.fetch_path, f"{spec.name}'s fetch path"))
+        parameter = required(request.value_table, "the request's value table").parameter
+        if any(param.name == parameter and param.in_path for param in rest_path.params):
+            return request_target(rest_path, {parameter: value}, {})
+        return request_target(rest_path, {}, {parameter: value})
 
     def rest_path(self, template: str) -> RestPath:
         """Return a generated REST path.
@@ -1537,7 +1555,7 @@ class RestReader:
                 error,
                 spec=spec,
                 call=call,
-                template=template,
+                requested=requested,
                 bucket=bucket,
                 window=window,
                 kept=kept,
@@ -1551,7 +1569,7 @@ class RestReader:
         *,
         spec: DatasetSpec,
         call: Call,
-        template: str,
+        requested: str,
         bucket: str,
         window: HistoryWindow | None,
         kept: Sequence[pa.RecordBatch],
@@ -1568,7 +1586,7 @@ class RestReader:
             error: The request's failure.
             spec: The dataset.
             call: The call.
-            template: The call's path template, for messages.
+            requested: The call's request as sent, such as `GET /v3/trades/AAPL`, for messages.
             bucket: The call's rate-limit bucket, for the public error.
             window: The `history()` window whose rows the call keeps, or None.
             kept: The rows the call kept before the failure.
@@ -1595,7 +1613,7 @@ class RestReader:
                 "%s: HTTP 404 for %s from %s arrived after %s closed; the call reports the close",
                 spec.name,
                 call.symbol,
-                template,
+                requested,
                 self.state.label,
             )
             raise self.public_error(error) from error
@@ -1619,11 +1637,11 @@ class RestReader:
             spec.name,
             call.symbol,
             scope,
-            template,
+            requested,
             error.request_id,
             error.message,
         )
-        missing = _Missing(call.symbol, f"{scope} (HTTP 404 from {template})".lstrip())
+        missing = _Missing(call.symbol, f"{scope} (HTTP 404 from {requested})".lstrip())
         return _Outcome(tuple(kept), requests + 1, missing=missing)
 
     def _page_rows(
@@ -2219,8 +2237,9 @@ class RestReader:
             except MassiveError as error:
                 if error.status != HTTPStatus.NOT_FOUND or self.state.closed:
                     raise
-                template = required(spec.fetch_path, f"{spec.name}'s fetch path")
-                found = _Missing(value, f"(HTTP 404 from {template})")
+                found = _Missing(
+                    value, f"(HTTP 404 from GET {self._value_target(spec, request, value)})"
+                )
                 self._report_missing(spec, [found])
                 absent.append(str(found))
         tally.check(spec.name)

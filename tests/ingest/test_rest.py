@@ -5464,7 +5464,7 @@ def _not_found(
         error,
         spec=TRADES,
         call=rest_requests.Call({"stockTicker": symbol}, {}, symbol),
-        template=TRADES_PATH,
+        requested=f"GET /v3/trades/{symbol}",
         bucket="stocks",
         window=None,
         kept=[],
