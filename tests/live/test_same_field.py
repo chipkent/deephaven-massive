@@ -11,13 +11,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import deephaven_massive as dm
 from deephaven_massive._massive import RequestGovernor, RestClient
 
 # The governor's fake clock, so no pacing wait sleeps, and the reply and envelope builders are
 # plain values of the fakes, which no fixture hands over; the server comes from `fake_rest`.
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import Reply, envelope
-from tests._live import plans, same_field
+from tests._live import same_field
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -34,7 +35,7 @@ def _ignore(line: str) -> None:
 
 @pytest.fixture
 def client(fake_rest: FakeRestServer) -> Iterator[RestClient]:
-    governor = RequestGovernor(plans.TIERS, clock=FakeClock())
+    governor = RequestGovernor(tuple(dm.Subscription), clock=FakeClock())
     made = RestClient("test-key", base_url=fake_rest.url, max_concurrency=1, governor=governor)
     yield made
     made.close()

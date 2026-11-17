@@ -30,10 +30,9 @@ KEY = "PLANTED-child-key-2d7a"
 def test_the_group_child_watches_its_parent_then_runs_its_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("MASSIVE_API_KEY", KEY)
     (tmp_path / "a").mkdir()
-    (tmp_path / "a" / "request.json").write_text(
-        json.dumps({"group": "responses", "tiers": {"stocks": "basic"}})
-    )
+    (tmp_path / "a" / "request.json").write_text(json.dumps({"group": "responses"}))
     events: list[str] = []
     monkeypatch.setattr(
         group_child, "run_group", lambda _out, attempt, **_options: events.append(attempt)
@@ -48,42 +47,66 @@ def test_the_group_child_watches_its_parent_then_runs_its_group(
     assert events == ["watching 4321", "a"]
 
 
-def test_the_group_childs_sessions_declare_the_basic_and_delayed_subscriptions(
+SETTINGS = """\
+delayed_subscriptions: [options]
+rest_basic_subscriptions: [stocks]
+max_outage: 7
+"""
+
+
+def test_a_child_without_a_settings_file_takes_the_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MASSIVE_API_KEY", KEY)
+    config = child_commands.session_config({}, declare_limits=True)
+    assert (config.delayed_subscriptions, config.rest_basic_subscriptions) == (set(), set())
+
+
+def test_a_childs_sessions_take_the_owners_settings_as_the_live_tests_do(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's delayed listing, limits, and hosts pass through; every other setting not."""
+    monkeypatch.setenv("MASSIVE_API_KEY", KEY)
+    settings = tmp_path / "settings.yaml"
+    settings.write_text(SETTINGS)
+    environ = {"DEEPHAVEN_MASSIVE_CONFIG_FILE": str(settings)}
+    config = child_commands.session_config(environ, declare_limits=True)
+    assert {s.value for s in config.delayed_subscriptions} == {"options"}
+    assert {s.value for s in config.rest_basic_subscriptions} == {"stocks"}
+    assert config.max_outage != 7
+    upgrade = child_commands.session_config(environ, declare_limits=False)
+    assert ({s.value for s in upgrade.delayed_subscriptions}, upgrade.rest_basic_subscriptions) == (
+        {"options"},
+        set(),
+    )
+
+
+def test_the_group_child_opens_its_sessions_and_names_the_delayed_subscriptions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "a").mkdir()
-    request = {"group": "upgrade-check", "tiers": {"stocks": "basic", "options": "starter"}}
-    (tmp_path / "a" / "request.json").write_text(json.dumps(request))
+    (tmp_path / "a" / "request.json").write_text(json.dumps({"group": "upgrade-check"}))
+    settings = tmp_path / "settings.yaml"
+    settings.write_text(SETTINGS)
     monkeypatch.setenv("MASSIVE_API_KEY", KEY)
-    seen: dict[str, Callable[..., Any]] = {}
+    seen: dict[str, Any] = {}
 
     def run_group(
         _out: Path,
         _attempt: str,
         *,
         open_session: Callable[[], MassiveSession],
-        tier_of: Callable[[str], str | None],
+        delayed: frozenset[str],
     ) -> None:
-        seen["open_session"], seen["tier_of"] = open_session, tier_of
-
-    tiers: list[dict[str, str] | None] = [{"stocks": "starter"}, None]
-
-    def probe_key(_credentials: Credentials, *, now: datetime) -> ProbeResult:
-        return ProbeResult(when="", tiers=tiers.pop(0))
+        seen["open_session"], seen["delayed"] = open_session, delayed
 
     monkeypatch.setattr(group_child, "run_group", run_group)
-    monkeypatch.setattr(child_commands, "probe_key", probe_key)
     child_commands.run_group_child(
-        tmp_path,
-        "a",
-        environ={"MASSIVE_API_KEY": KEY},
+        tmp_path, "a", environ={"DEEPHAVEN_MASSIVE_CONFIG_FILE": str(settings)}
     )
-    open_session = seen["open_session"]
-    with open_session() as session:
-        assert {str(s) for s in session._core.config.rest_basic_subscriptions} == {"stocks"}
-        assert {str(s) for s in session._core.config.delayed_subscriptions} == {"options"}
-    assert seen["tier_of"]("stocks") == "starter"
-    assert seen["tier_of"]("stocks") is None
+    assert seen["delayed"] == frozenset({"options"})
+    with seen["open_session"]() as session:
+        assert not session._core.config.rest_basic_subscriptions  # the upgrade check learns
 
 
 def test_a_group_child_ends_once_its_parent_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,7 +144,7 @@ def test_the_probe_child_writes_its_probe_for_the_parent(
 
     def probe_key(credentials: Credentials, *, now: datetime) -> ProbeResult:
         seen.append(credentials)
-        return ProbeResult(when="2026-11-04T17:00:00Z", tiers={"stocks": "starter"})
+        return ProbeResult(when="2026-11-04T17:00:00Z", clock_offset=0.5)
 
     monkeypatch.setattr(child_commands, "probe_key", probe_key)
     result = tmp_path / "probe.json"
@@ -134,8 +157,8 @@ def test_the_probe_child_writes_its_probe_for_the_parent(
     )
     assert code == 0
     assert watched == [4321]  # a probe child watches its parent too
-    assert seen == [Credentials(api_key=KEY, s3_pair=None)]
-    assert read_result(result).tiers == {"stocks": "starter"}
+    assert seen == [Credentials(api_key=KEY)]
+    assert read_result(result).clock_offset == 0.5
 
 
 def test_a_refused_child_command_line_returns_its_status(

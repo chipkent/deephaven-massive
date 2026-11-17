@@ -28,6 +28,7 @@ from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.publisher import BlinkPublisher
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import (
     FlatFileRead,
@@ -224,8 +225,10 @@ class Recorder:
         *,
         dates: Sequence[date] | None = None,
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> Table:
+        del tally
         self.call_ids.append(call)
         extra = {} if stop is None else {"stop": stop}
         return self._record("history", spec, request, window=window, dates=dates, **extra)
@@ -238,9 +241,10 @@ class Recorder:
         *,
         symbols: Sequence[str],
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> dict[str, SymbolOutcome]:
-        del request, stop
+        del request, stop, tally
         self.call_ids.append(call)
         self.by_symbol.append((tuple(symbols), window, threading.current_thread().name))
         if self.raises is not None:
@@ -272,11 +276,14 @@ class FlatFiles:
         call: int,
         infer_holidays: bool,
         logged: LoggedKeys,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
         del logged
         self.inferred.append(infer_holidays)
-        table = self.recorder.history(spec, request, window, dates=dates, call=call, stop=stop)
+        table = self.recorder.history(
+            spec, request, window, dates=dates, call=call, tally=tally, stop=stop
+        )
         return FlatFileRead(((date.min, table),), table, self.unread)
 
     def history_by_symbol(
@@ -295,7 +302,7 @@ class FlatFiles:
         del dates, forced
         self.logged.append(logged)
         return self.recorder.history_by_symbol(
-            spec, request, window, symbols=symbols, call=call, stop=stop
+            spec, request, window, symbols=symbols, call=call, tally=ReadTally(), stop=stop
         )
 
     def read_history(

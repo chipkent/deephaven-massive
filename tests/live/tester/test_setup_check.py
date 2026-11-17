@@ -20,8 +20,6 @@ ROOT = Path(__file__).resolve().parents[3]
 COMMIT = "a" * 40
 ACCEPTED = ProbeResult(
     when="2026-10-30T15:00:00Z",
-    tiers={"stocks": "basic", "options": "basic"},
-    history_start={"stocks": "2024-10-30", "options": "2024-10-30"},
     clock_offset=0.2,
 )
 
@@ -111,16 +109,13 @@ def test_console_items_fail_without_the_install_or_its_parts() -> None:
     assert no_server[0].detail == "v lacks the Deephaven server: install it as the guide says"
 
 
-def test_probe_items_describe_the_key_and_its_plans() -> None:
-    items = setup_check.probe_items(ACCEPTED)
-    assert [i.name for i in items] == ["key", "plan stocks", "plan options", "flat files"]
-    assert items[1].detail == "basic, history from 2024-10-30"
-    assert items[3].detail == "none"
+def test_probe_items_describe_the_key() -> None:
+    assert setup_check.probe_items(ACCEPTED) == [Item("key", OK, "Massive accepted the API key")]
     rejected = ProbeResult(when="t", key_rejected=True)
     assert setup_check.probe_items(rejected)[0].verdict == FAIL
     unknown = ProbeResult(when="t", error="HTTP 503")
     assert setup_check.probe_items(unknown) == [
-        Item("key", WARN, "could not tell the plans (HTTP 503); try again soon")
+        Item("key", WARN, "could not reach Massive (HTTP 503); try again soon")
     ]
 
 

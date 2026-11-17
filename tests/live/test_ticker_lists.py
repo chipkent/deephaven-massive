@@ -76,7 +76,7 @@ def test_each_venue_read_names_its_anchors_then_its_products_by_strategy_type(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     products = _products(load_fixture)
-    reads, left_out = ticker_lists.spread_reads(products, reads=None)
+    reads = ticker_lists.spread_reads(products)
     assert [(read.venue, read.product_codes) for read in reads] == [
         ("XCME", ("ES", "6A", "6A:XF")),
         ("XCBT", ("ZN", "ZC", "BOB")),
@@ -88,16 +88,6 @@ def test_each_venue_read_names_its_anchors_then_its_products_by_strategy_type(
         ("XMGE", ("MW:IC", "MW:BZ")),
         ("XKBT", ("KE:IC",)),
     ]
-    assert left_out == []
-
-
-def test_a_read_limit_keeps_the_anchor_venues_and_names_the_rest(
-    load_fixture: Callable[[str, str], bytes],
-) -> None:
-    products = _products(load_fixture)
-    reads, left_out = ticker_lists.spread_reads(products, reads=4)
-    assert [read.venue for read in reads] == ["XCME", "XCBT", "XNYM", "XCEC"]
-    assert left_out == ["XMGE", "XKBT"]
 
 
 def test_a_venue_read_names_at_most_the_products_per_read(
@@ -108,7 +98,7 @@ def test_a_venue_read_names_at_most_the_products_per_read(
         {"product_code": code, "strategy_type": kind, "trading_venue": "XNYM"}
         for code, kind in (("A", "x"), ("B", "x"), ("", "y"), ("C", "y"))
     ]
-    reads, _ = ticker_lists.spread_reads(products, reads=3)
+    reads = ticker_lists.spread_reads(products)
     assert reads[2].product_codes == ("CL", "NG", "A", "C")
 
 

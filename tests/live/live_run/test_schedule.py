@@ -15,9 +15,7 @@ from tests._live.calendar import NEW_YORK
 from tests._live.live_run import schedule, timetable
 from tests._live.live_run.context import RunMemory
 from tests._live.live_run.schedule import Step, next_step
-from tests._live.live_run.state import Attempt, RunState, check_of, entitlement_id, record
-
-BASIC = dict.fromkeys(("stocks", "options", "indices", "currencies", "futures"), "basic")
+from tests._live.live_run.state import Attempt, RunState, check_of, record
 
 WEDNESDAY = date(2026, 11, 4)
 
@@ -26,10 +24,8 @@ def _at(day: date, hour: int, minute: int = 0) -> datetime:
     return datetime(day.year, day.month, day.day, hour, minute, tzinfo=NEW_YORK)
 
 
-def _state(**tiers: str) -> RunState:
-    state = RunState(commit="c")
-    state.current = entitlement_id(state, BASIC | tiers, [])
-    return state
+def _state() -> RunState:
+    return RunState(commit="c")
 
 
 def _collected(state: RunState) -> None:
@@ -64,15 +60,6 @@ def test_a_failed_probe_is_tried_again_five_minutes_later_up_to_three_times() ->
     assert next_step(_state(), memory, now).action != "probe"
 
 
-def test_the_pause_after_a_probe_is_slept_through() -> None:
-    now = _at(WEDNESDAY, 12)
-    memory = _probed(now)
-    memory.not_before = now + timedelta(seconds=65)
-    assert next_step(_state(), memory, now) == Step(
-        "sleep", "the pause after the probe", memory.not_before
-    )
-
-
 def test_any_time_groups_run_at_once_and_leave_when_done() -> None:
     state = _state()
     _collected(state)
@@ -85,7 +72,7 @@ def test_any_time_groups_run_at_once_and_leave_when_done() -> None:
 
 
 def test_any_time_groups_wait_through_a_stream_day() -> None:
-    state = _state(stocks="starter")
+    state = _state()
     _collected(state)
     state.stream_day = WEDNESDAY.isoformat()
     state.any_time = ["evidence"]
@@ -170,7 +157,7 @@ def test_a_weekend_sleeps_until_mondays_probe() -> None:
 
 
 def test_a_stream_day_probes_early_and_streams() -> None:
-    state = _state(stocks="starter")
+    state = _state()
     state.stream_day = WEDNESDAY.isoformat()
     memory = RunMemory(probed_at=_at(WEDNESDAY, 3))
     assert next_step(state, memory, _at(WEDNESDAY, 3, 20)) == Step("probe")
@@ -184,13 +171,13 @@ def test_a_stream_day_probes_early_and_streams() -> None:
 
 
 def test_the_next_probe_after_a_planned_stream_day_is_its_early_one() -> None:
-    state = _state(stocks="starter")
+    state = _state()
     state.stream_day = "2026-11-05"
     assert schedule.next_probe(state, WEDNESDAY) == _at(date(2026, 11, 5), 3, 15)
 
 
 def test_a_stream_day_restarts_a_dead_child_a_few_times_only() -> None:
-    state = _state(stocks="starter")
+    state = _state()
     for _ in range(schedule.MAX_STREAM_STARTS):
         assert not schedule.ran_today(state, "stream-day", WEDNESDAY)
         state.attempts.append(Attempt("stream-day", "s", WEDNESDAY.isoformat(), ""))
@@ -204,26 +191,44 @@ def test_an_interrupted_attempt_does_not_count_as_run() -> None:
 
 
 @pytest.mark.parametrize(
-    ("group", "tiers", "names"),
+    ("group", "names"),
     [
-        ("evidence", {}, None),
-        (
-            "stream-day",
-            {"stocks": "starter", "currencies": "starter"},
-            ["stocks delayed", "currencies real-time"],
-        ),
-        ("throughput", {"stocks": "advanced", "indices": "starter"}, ["stocks real-time"]),
-        ("upgrade-check", {}, []),
+        ("evidence", None),
+        ("stream-day", ["stocks", "options", "indices", "currencies", "futures"]),
+        ("throughput", ["stocks", "currencies"]),
+        ("stream-night", ["crypto", "futures"]),
+        ("upgrade-check", []),
     ],
 )
-def test_the_known_checks_of_each_group(
-    group: str, tiers: dict[str, str], names: list[str] | None
-) -> None:
-    assert schedule.known_names(_state(**tiers), group, WEDNESDAY) == names
+def test_the_known_checks_of_each_group(group: str, names: list[str] | None) -> None:
+    """Every subscription's unit is known from the start: what the key holds is not asked."""
+    assert schedule.known_names(_state(), group, WEDNESDAY) == names
 
 
-def test_without_any_probe_no_unit_is_known() -> None:
-    assert schedule.known_names(RunState(commit="c"), "stream-day", WEDNESDAY) == []
+def test_a_group_that_ran_today_runs_again_when_a_refusal_of_its_subscription_clears() -> None:
+    """The key gained a subscription: its refused checks run again that evening.
+
+    Evidence ran this morning and Massive refused a stocks check; a smoke check of stocks then
+    passed, so the refused evidence check is due at once and evidence runs again, though it
+    ran today, while its slot is open.
+    """
+    state = _state()
+    _collected(state)
+    state.known["evidence"] = ["tests/x.py::test_quotes"]
+    refusal = "refused: HTTP 403 from GET /v3/quotes/AAPL on h: not entitled"
+    evidence = check_of(state, "evidence", "tests/x.py::test_quotes")
+    smoke = check_of(state, "smoke", "tests/x.py::test_smoke")
+    day = WEDNESDAY.isoformat()
+    record(state, evidence, status="refused", reason=refusal, day=day)
+    record(state, smoke, status="refused", reason=refusal, day=day)
+    for group in ("rate-limits", "evidence", "smoke"):
+        _finish(state, group, WEDNESDAY)
+    now = _at(WEDNESDAY, 17)
+    assert next_step(state, _probed(now), now).group != "evidence"
+    record(state, smoke, status="passed", reason="", day=day)
+    assert next_step(state, _probed(now), now) == Step(
+        "run", "evidence", _at(WEDNESDAY + timedelta(days=1), 3)
+    )
 
 
 def test_half_day_checks_are_named_after_their_half_day() -> None:
@@ -235,15 +240,15 @@ def test_half_day_checks_are_named_after_their_half_day() -> None:
 
 
 def test_a_reconciliation_is_due_for_each_unit_that_streamed_a_whole_day() -> None:
-    state = _state(stocks="starter")
-    check = check_of(state, "stream-day", "stocks delayed")
+    state = _state()
+    check = check_of(state, "stream-day", "stocks")
     record(state, check, status="passed", reason="", day="2026-11-03")
-    check_of(state, "stream-day", "options delayed")
+    check_of(state, "stream-day", "options")
     assert schedule.due_names(state, "stream-day-reconcile", WEDNESDAY) == []  # no day yet
     state.stream_days = ["2026-11-04"]
     assert schedule.due_names(state, "stream-day-reconcile", WEDNESDAY) == []  # not over
     state.stream_days = ["2026-11-03"]
-    assert schedule.due_names(state, "stream-day-reconcile", WEDNESDAY) == ["stocks delayed"]
+    assert schedule.due_names(state, "stream-day-reconcile", WEDNESDAY) == ["stocks"]
 
 
 def test_any_time_leaves_out_the_stream_examples() -> None:
@@ -279,7 +284,7 @@ THURSDAY = date(2026, 11, 5)
 
 
 def _night_state(evening: date = WEDNESDAY) -> RunState:
-    state = _state(currencies="starter", futures="starter")
+    state = _state()
     _collected(state)
     state.stream_night = evening.isoformat()
     return state
@@ -311,7 +316,7 @@ def test_a_night_whose_child_started_too_often_runs_no_more() -> None:
 
 def test_a_night_whose_units_passed_runs_no_more() -> None:
     state = _night_state()
-    for unit in ("crypto real-time", "futures delayed"):
+    for unit in ("crypto", "futures"):
         record(state, check_of(state, "stream-night", unit), status="passed", reason="", day="")
     now = _at(WEDNESDAY, 17)
     assert next_step(state, _probed(now), now).group != "stream-night"
@@ -390,19 +395,19 @@ def test_a_sunday_sleeps_until_its_night_rather_than_mondays_probe() -> None:
 def test_the_night_units_and_their_reconciliation() -> None:
     state = _night_state()
     assert schedule.known_names(state, "stream-night", WEDNESDAY) == [
-        "crypto real-time",
-        "futures delayed",
+        "crypto",
+        "futures",
     ]
     record(
         state,
-        check_of(state, "stream-night", "crypto real-time"),
+        check_of(state, "stream-night", "crypto"),
         status="passed",
         reason="",
         day="",
     )
     state.stream_nights = ["2026-11-04"]
     assert schedule.due_names(state, "stream-night-reconcile", WEDNESDAY) == []  # not over
-    assert schedule.due_names(state, "stream-night-reconcile", THURSDAY) == ["crypto real-time"]
+    assert schedule.due_names(state, "stream-night-reconcile", THURSDAY) == ["crypto"]
 
 
 def test_the_next_start_of_the_night_is_shown_in_new_york_time() -> None:

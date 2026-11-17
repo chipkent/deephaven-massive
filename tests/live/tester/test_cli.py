@@ -44,7 +44,7 @@ def _run(
     *,
     root: Path = ROOT,
     check: Callable[[Path, argparse.Namespace, MutableMapping[str, str]], list[Item]] = _check,
-    plans: Callable[[MutableMapping[str, str]], dict[str, str] | None] = lambda _e: None,
+    delayed: Callable[[MutableMapping[str, str]], tuple[str, ...] | None] = lambda _e: None,
 ) -> tuple[int, list[str]]:
     out = io.StringIO()
     status = cli.main(
@@ -55,7 +55,7 @@ def _run(
         check=check,
         describe=_describe,
         now=lambda: datetime(2026, 10, 30, 14, 15, tzinfo=UTC),
-        plans=plans,
+        delayed=delayed,
     )
     return status, out.getvalue().splitlines()
 
@@ -115,7 +115,7 @@ def test_check_says_not_ready_when_an_item_failed(tmp_path: Path) -> None:
 def test_check_both_runs_the_setup_check_on_this_machine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    accepted = ProbeResult(when="t", tiers={"stocks": "basic"}, history_start={"stocks": "x"})
+    accepted = ProbeResult(when="t", clock_offset=0.1)
     monkeypatch.setattr(cli, "probe_key", lambda *_args, **_options: accepted)
     arguments = cli.parser().parse_args(
         ["check", "--folder", str(tmp_path), "--console-python", "/nowhere/python"]
@@ -123,7 +123,7 @@ def test_check_both_runs_the_setup_check_on_this_machine(
     items = cli.check_both(ROOT, arguments, {"MASSIVE_API_KEY": KEY})
     names = [item.name for item in items]
     assert "console" in names
-    assert "plan stocks" in names
+    assert "key" in names
 
 
 def test_the_parser_defaults_to_the_guides_console_python() -> None:
@@ -191,7 +191,6 @@ def test_describe_machine_describes_this_machine(tmp_path: Path) -> None:
     environment = cli.describe_machine(ROOT, tmp_path, {"MASSIVE_API_KEY": KEY})
     assert environment["set"] == {
         "MASSIVE_API_KEY": True,
-        "MASSIVE_DELAYED_API_KEY": False,
         "MASSIVE_S3_ACCESS_KEY_ID": False,
         "MASSIVE_S3_SECRET_ACCESS_KEY": False,
         "HTTPS_PROXY": False,
@@ -199,16 +198,15 @@ def test_describe_machine_describes_this_machine(tmp_path: Path) -> None:
     }
 
 
-def test_examples_writes_the_settings_the_keys_plans_need(tmp_path: Path) -> None:
+def test_examples_writes_the_settings_the_testers_own_file_lists(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / cli.EXAMPLES_FOLDER).mkdir(parents=True)
     (root / cli.EXAMPLES_FOLDER / "01_a.py").write_text("pass\n", encoding="utf-8")
-    tiers = {"stocks": "starter", "options": "basic"}
     status, lines = _run(
         ["examples", "--folder", str(tmp_path / "t")],
         {"MASSIVE_API_KEY": KEY},
         root=root,
-        plans=lambda _environ: tiers,
+        delayed=lambda _environ: ("stocks",),
     )
     assert status == 0
     assert lines[0] == "settings: delayed_subscriptions: [stocks]"
@@ -216,7 +214,7 @@ def test_examples_writes_the_settings_the_keys_plans_need(tmp_path: Path) -> Non
     assert settings.read_text(encoding="utf-8") == "delayed_subscriptions: [stocks]\n"
 
 
-def test_examples_runs_as_on_the_free_plan_when_the_plans_are_unknown(tmp_path: Path) -> None:
+def test_examples_lists_nothing_delayed_without_a_settings_file(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / cli.EXAMPLES_FOLDER).mkdir(parents=True)
     (root / cli.EXAMPLES_FOLDER / "01_a.py").write_text("pass\n", encoding="utf-8")
@@ -226,6 +224,6 @@ def test_examples_runs_as_on_the_free_plan_when_the_plans_are_unknown(tmp_path: 
         root=root,
     )
     assert lines[:2] == [
-        "could not tell the key's plans; the examples run as on the free plan",
+        "no settings file at ~/massive/settings.yaml: no subscription is listed delayed",
         "settings: delayed_subscriptions: []",
     ]

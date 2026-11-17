@@ -117,19 +117,12 @@ or range are ignored for this rule:
 | Read or stream | Fails when the library can read none of |
 |---|---|
 | A `fetch()` or `history()` from REST | The rows of all its pages. |
-| A `history()` from flat files | The rows of all its files. |
+| A `history()` from flat files | The rows of all its files, and of the REST pages of any days REST fills. |
 | A `fetch()` or `history()` that follows a symbol table | The rows of one of its reads. The symbols of that read fail, and the table goes on. |
 | A `poll()` table | The rows of one cycle's read. |
 | A `dm.ALL` stream | 100 consecutive rows of its channel. |
 | A stream of named symbols | 100 consecutive rows of one of its symbols. |
 | A stream of named symbols | 100 consecutive rows whose symbol the library can't read. |
-
-Two reads are still judged in parts
-([#704](https://github.com/chipkent/deephaven-massive/issues/704)). An `AUTO` `history()` that
-fills days from REST judges its files and each REST read apart: one read per filled day, or
-one for all the filled days of bars a day or longer. So a REST read whose rows are all
-unreadable fails the call. And a `fetch()` or `poll()` with a value table judges each value's
-read apart, so one value whose rows are all unreadable fails the call or the table.
 
 Under `raise`:
 
@@ -186,6 +179,10 @@ on_error:
   unconvertible_values: log  # the default
   # A flat-file line that isn't a readable row.
   malformed_rows: log  # the default
+  # A futures ticker Massive streams that its lists don't hold.
+  unlisted_contracts: log  # the default
+  # A futures row Massive's schedules give no session for.
+  unscheduled_products: log  # the default
   # A futures exchange you name that the plan lacks.
   refused_venues: raise  # the default
 
@@ -235,6 +232,8 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 | `on_error.unreadable_keys` | Decides whether a row of Massive's data whose key the library can't read fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unconvertible_values` | Decides whether a row of Massive's data holding a value the library can't read as its column's type fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unlisted_contracts` | Decides what happens to the rows of a futures ticker Massive streams that neither its futures snapshot nor its contracts list has held for 30 minutes. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unscheduled_products` | Decides what happens to the rows of a futures product that Massive's schedules give no session for: none at all, or none that holds the row's time. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of an exchange the call names in `venues`, as it does for an exchange the plan doesn't include. | `log`, `ignore`, or `raise` | `raise` |
 | `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
 | `websocket_hosts.options` | Sets the WebSocket host options streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `options` | `delayed.massive.com` when `delayed_subscriptions` lists `options`, else `socket.massive.com` |
@@ -365,7 +364,8 @@ A key can't be read when it is one of these:
 
 - the row's symbol, its time, or another column its dataset needs, missing or of
   the wrong type;
-- a time of 0, or one outside 1990 to 2100.
+- a time of 0, or one outside 1990 to 2100;
+- a `poll()` table's key column, null or NaN, which would merge unrelated rows.
 
 A symbol that is present but isn't Massive's ticker is `unreadable_symbols`. Set
 `raise` to fail the table at the first such row. Such a row is a sign
@@ -401,6 +401,34 @@ of each file it reads.
 
 Only a `history()` that reads flat files meets such a line. Under any setting, a
 file whose every line is malformed fails the read.
+
+#### on_error.unlisted_contracts
+
+A futures stream dates each row from its product's trading schedule, which it finds
+through those lists, and holds the rows until then. Massive's lists sometimes lag
+its stream, so a ticker missing from both waits and is asked about again, at 2, 8,
+and 30 seconds and then every minute. After 30 minutes its rows are left out,
+then and later, until a list holds it.
+
+- `raise` fails the stream at that point.
+- `log` leaves the rows out and logs one warning per stream.
+- `ignore` does the same with no warning: only the `DEBUG` log names it.
+
+A live table counts the rows left out in `SchemaDrift` in `m.streams()`.
+
+#### on_error.unscheduled_products
+
+A futures stream dates each row from its product's trading schedule. A row no
+session holds waits while the library loads the schedule again. If Massive's answer
+still has no session for it, the library can't date the row, so it leaves the row
+out. A product with no session at all is asked about again each day, and once
+Massive publishes its sessions, its rows are dated and published again.
+
+- `raise` fails the stream at the first row left out.
+- `log` leaves the rows out and logs one warning per stream.
+- `ignore` does the same with no warning: only the `DEBUG` log names it.
+
+A live table counts the rows left out in `SchemaDrift` in `m.streams()`.
 
 #### on_error.refused_venues
 

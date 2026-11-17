@@ -1,19 +1,20 @@
-"""When a live stream must deliver rows: an open session whose delayed feed has caught up.
+"""When a live stream must deliver rows: an open session of the stream's market.
 
 A stream test asserts that Massive acknowledged its topics, whatever the hour, and requires
-rows only when they must arrive. That needs the market open for the stream's kind of rows, and,
-on a delayed plan, open for longer than the plan's delay: a 15-minute delayed index feed sends
-the first values of a session fifteen minutes after its open. Stock trades and quotes are due in
-the extended hours too, from 04:00 New York time, though one stock can go a minute without
-either then, so a test of one stock requires them only in the regular session
-(`may_go_quiet`). Every other stock stream, and every option
-and index stream, is due only in the regular session, from
-09:30 to its close at 16:00 (13:00 on a half trading day), whatever Massive's status says after
-the close. The futures session opens at the time of Massive's futures market status, and forex
-and crypto at no time this module knows, so their rows are due as soon as their market is open.
-The delays are those of the vendored WebSocket "Plan Recency" tables (`FEED_DELAYS`). Before
-the rows are due, the test skips after the acknowledgement, and a pass always means that rows
-reached the table.
+rows only when they must arrive, which needs the market open for the stream's kind of rows.
+Stock trades and quotes are due in the extended hours too, from 04:00 New York time, though one
+stock can go a minute without either then, so a test of one stock requires them only in the
+regular session (`may_go_quiet`). Every other stock stream, and every option and index stream,
+is due only in the regular session, from 09:30 to its close at 16:00 (13:00 on a half trading
+day), whatever Massive's status says after the close. The futures session opens at the time of
+Massive's futures market status, and forex and crypto at no time this module knows, so their
+rows are due as soon as their market is open. Before the rows are due, the test skips after the
+acknowledgement, and a pass always means that rows reached the table.
+
+Massive's delayed feed lags the market by an amount this module does not know: Massive decides
+it, and a stream shows it in its rows' age. So the rows are due by the market's clock alone,
+and a test of a subscription the owner lists in `delayed_subscriptions` skips, rather than
+fails, when no row comes while rows are due.
 
 A minute bar arrives only after its minute has ended, so a test that streams minute bars waits
 until a little past the next minute boundary (`minute_bar_deadline`).
@@ -23,8 +24,8 @@ pre-market from 04:00, the regular session from 09:30, and after hours from its 
 (17:00 on a half trading day). Massive sends a bar only for a minute with trades, though, and
 one stock can go a minute without a trade outside the regular session, so a test that streams
 one stock's bars requires them only in the regular session. `stock_session` names the session
-a plan's feed is in, so a test of several stocks, such as the README's streaming examples, can
-check what each session sends, an empty table overnight included.
+of a row's own time, so a test of several stocks, such as the README's streaming examples, can
+check what each session sends.
 
 Every function is pure; `tests/conftest.py`'s `rows_due` fixture reads the market status and
 calls them.
@@ -33,25 +34,9 @@ calls them.
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 from tests._live.calendar import NEW_YORK, is_half_day, is_trading_day
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from tests._live.plans import LivePlans
-
-FEED_DELAYS: Final[Mapping[tuple[str, str], timedelta]] = {
-    ("stocks", "starter"): timedelta(minutes=15),
-    ("stocks", "developer"): timedelta(minutes=15),
-    ("options", "starter"): timedelta(minutes=15),
-    ("options", "developer"): timedelta(minutes=15),
-    ("indices", "starter"): timedelta(minutes=15),
-    ("futures", "starter"): timedelta(minutes=10),
-    ("futures", "developer"): timedelta(minutes=10),
-}
-"""How far each plan's stream lags the market; a plan not listed is real-time."""
 
 INDEX_OPEN: Final = time(9, 30)
 """When the regular session opens each trading day, in New York time: the S&P indices start
@@ -65,8 +50,8 @@ A stream that needs the regular session has no rows due from then on, even while
 market status still says `open`: on 2026-11-09 `indicesGroups.s_and_p` read `open` at 17:53,
 though I:SPX's last value came at 16:05. The S&P indices send their closing values for a few
 minutes past 16:00, so a stream that starts before the close still gets values during its wait;
-one that starts later is skipped, even on a delayed plan whose feed still lags behind the
-close, because no value after the close is certain to come."""
+one that starts later is skipped, even on a delayed feed that still lags behind the close,
+because no value after the close is certain to come."""
 
 HALF_DAY_CLOSE: Final = time(13, 0)
 """When the regular session closes on a half trading day, in New York time."""
@@ -156,36 +141,6 @@ def minute_bar_deadline(now: datetime) -> datetime:
     return minute + MINUTE_BAR_LAG
 
 
-def rows_due(plans: LivePlans, name: str, *, opened: datetime | None, now: datetime) -> bool:
-    """Tell whether a class's stream must have delivered rows by now.
-
-    Args:
-        plans: The run's plans, whose class plan sets the feed's delay.
-        name: The class, such as `"stocks"` or `"futures"`.
-        opened: When the market opened, as an aware instant; None when it is not open.
-        now: The present, as an aware instant.
-
-    Returns:
-        True when the market is open and has been open at least the plan's delay.
-    """
-    if opened is None:
-        return False
-    return now >= opened + feed_delay(plans, name)
-
-
-def feed_delay(plans: LivePlans, name: str) -> timedelta:
-    """Return how far a class's stream lags the market on the run's plan.
-
-    Args:
-        plans: The run's plans.
-        name: The class, such as `"stocks"` or `"futures"`.
-
-    Returns:
-        The class plan's delay in `FEED_DELAYS`, zero on a real-time plan.
-    """
-    return FEED_DELAYS.get((name, plans.tiers[name]), timedelta(0))
-
-
 EXTENDED_CLOSE: Final = time(20, 0)
 """When after-hours stock trading ends on a full trading day, in New York time."""
 
@@ -200,20 +155,19 @@ OVERNIGHT: Final = "overnight"
 market is closed included."""
 
 
-def stock_session(now: datetime, delay: timedelta) -> str:
-    """Name the stock session a feed delayed by `delay` is sending at `now`.
+def stock_session(at: datetime) -> str:
+    """Name the stock session an instant of the feed falls in.
 
     Args:
-        now: An aware instant.
-        delay: The plan's feed delay (`FEED_DELAYS`), zero on a real-time plan.
+        at: An aware instant of the feed's own time: a row's timestamp, so a delayed feed is
+            named by the time its rows carry, not the wall clock.
 
     Returns:
         `PRE_MARKET` from 04:00 to 09:30 New York time, `REGULAR` until the close
         (`regular_close`), `AFTER_HOURS` until 20:00 (17:00 on a half trading day), and
-        `OVERNIGHT` at any other time and on a day the market is closed, each of the feed's
-        own time, `now` less the delay.
+        `OVERNIGHT` at any other time and on a day the market is closed.
     """
-    feed = (now - delay).astimezone(NEW_YORK)
+    feed = at.astimezone(NEW_YORK)
     day = feed.date()
     if not is_trading_day(day):
         return OVERNIGHT
@@ -226,7 +180,7 @@ def stock_session(now: datetime, delay: timedelta) -> str:
     return REGULAR if feed < regular_close(feed) else AFTER_HOURS
 
 
-def may_go_quiet(market: str, family: str, *, now: datetime, delay: timedelta) -> bool:
+def may_go_quiet(market: str, family: str, *, now: datetime) -> bool:
     """Tell whether one symbol's stream may send no row in a test's wait, though rows are due.
 
     Stock trades and quotes are due in the extended hours (`EXTENDED_HOURS_FAMILIES`), but one
@@ -240,12 +194,11 @@ def may_go_quiet(market: str, family: str, *, now: datetime, delay: timedelta) -
         market: The market, as the `market_status` fixture names it, such as `"stocks"`.
         family: The stream's family, the last part of its dataset's name, such as `"quotes"`.
         now: The present, as an aware instant.
-        delay: How far the stream's feed lags the market (`feed_delay`), zero when real-time.
 
     Returns:
-        True for stock trades and quotes while the feed is in the pre-market or after hours
+        True for stock trades and quotes while `now` is in the pre-market or after hours
         (`stock_session`); False for every other stream, and in every other session.
     """
     if market != "stocks" or family not in EXTENDED_HOURS_FAMILIES:
         return False
-    return stock_session(now, delay) in {PRE_MARKET, AFTER_HOURS}
+    return stock_session(now) in {PRE_MARKET, AFTER_HOURS}

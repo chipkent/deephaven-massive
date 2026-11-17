@@ -28,7 +28,6 @@ def test_the_filter_reads_only_set_variables_longest_first() -> None:
     secrets = SecretFilter.from_environment(
         {
             "MASSIVE_API_KEY": f" {KEY} ",
-            "MASSIVE_DELAYED_API_KEY": "  ",
             "MASSIVE_S3_SECRET_ACCESS_KEY": S3,
             "UNRELATED": "x",
         }
@@ -99,7 +98,7 @@ def test_a_proxy_password_is_a_secret_as_written_and_decoded() -> None:
 
 
 def test_fingerprints_name_the_set_secrets_and_never_hold_a_value() -> None:
-    environ = {"MASSIVE_API_KEY": " PLANTED-fp-key ", "MASSIVE_DELAYED_API_KEY": ""}
+    environ = {"MASSIVE_API_KEY": " PLANTED-fp-key ", "MASSIVE_S3_ACCESS_KEY_ID": ""}
     found = secret_scrub.fingerprints(environ, "salt")
     assert list(found) == ["MASSIVE_API_KEY"]
     assert "PLANTED" not in found["MASSIVE_API_KEY"]

@@ -151,14 +151,14 @@ def _rebuilt(bars: list[dict[str, Any]], start: datetime, end: datetime) -> tupl
 def _library_rows(call: Callable[[], Table], table_rows: TableRows) -> list[dict[str, Any]] | str:
     """Run one library call and describe its outcome.
 
-    A refusal is not an outcome to record: it propagates, so the test fails (the declared plan
-    covers the data) rather than reporting it as an answer.
+    A refusal is not an outcome to record: it propagates, and the test skips, quoting Massive,
+    rather than reporting it as an answer.
 
     Returns:
         The result's rows, or the text of the `MassiveError` (other than a refusal) it raised.
 
     Raises:
-        EntitlementError: When the call is refused.
+        EntitlementError: When the call is refused; the live tests' hook skips the test.
     """
     try:
         return table_rows(call())
@@ -168,14 +168,12 @@ def _library_rows(call: Callable[[], Table], table_rows: TableRows) -> list[dict
         return f"MassiveError: {error}"
 
 
-@pytest.mark.needs("currencies:basic")
 @pytest.mark.verifies("37")
-@pytest.mark.requests(4)
+@pytest.mark.requests(5)
 @pytest.mark.timeout(100)
 def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     live_session: dm.MassiveSession,
     *,
-    classes_on_basic: frozenset[str],
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -189,9 +187,8 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     day, each stamped at its first or last millisecond, which the library labels with that day.
     A source that stamps the bar of day D before 00:00 UTC of D (such as 21:00 or 22:00 UTC of
     D-1, the 17:00 New York open of D's trading day) fails it: the library would label that bar
-    D-1, a bug to fix by mapping that source's stamp to the day it closes. With Currencies on
-    Basic, which allows 5 requests a minute, it leaves out the library's `previous_day_bar`,
-    which reads the same `/prev` as the raw request.
+    D-1, a bug to fix by mapping that source's stamp to the day it closes. The library's
+    `previous_day_bar`, which reads the same `/prev` as the raw request, is recorded too.
     """
     prevs = rest_rows(_PREV, {"forexTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -220,12 +217,9 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
         f"grouped equal to /prev: {[_same(_ohlcv(b), _ohlcv(prev)) for b in grouped]}"
     )
     bars = live_session.forex.bars(_PAIR, dm.Timespan.DAY)
-    if "currencies" in classes_on_basic:
-        evidence("Currencies on Basic: the library's previous_day_bar is not read")
-    else:
-        prev_bar = live_session.forex.previous_day_bar(_PAIR)
-        prev_rows = _library_rows(partial(prev_bar.fetch, wait=True), table_rows)
-        evidence(f"library previous_day_bar (/prev): {prev_rows}")
+    prev_bar = live_session.forex.previous_day_bar(_PAIR)
+    prev_rows = _library_rows(partial(prev_bar.fetch, wait=True), table_rows)
+    evidence(f"library previous_day_bar (/prev): {prev_rows}")
     rest = partial(bars.history, day, day, source=dm.HistorySource.REST, wait=True)
     evidence(f"library history(REST): {_library_rows(rest, table_rows)}")
     assert _at_day_edge(int(prev["t"]), day), f"/prev stamped {prev['t']}"
@@ -238,7 +232,6 @@ def test_forex_day_bars_of_every_rest_source_and_their_stamps(
     assert _same(_ohlcv(grouped[0]), _ohlcv(prev)), "the grouped bar is not /prev's bar"
 
 
-@pytest.mark.needs("currencies:basic")
 @pytest.mark.settles("37")
 @pytest.mark.requests(3)
 @pytest.mark.timeout(100)
@@ -306,7 +299,6 @@ def test_forex_day_bars_rebuilt_from_hour_bars_over_the_utc_and_trading_days(
     )
 
 
-@pytest.mark.needs("currencies:starter", "s3")
 @pytest.mark.verifies("37")
 @pytest.mark.timeout(100)
 def test_forex_day_bar_of_the_flat_file_and_its_stamp(
@@ -393,7 +385,6 @@ def _canonical(raw: Iterable[str]) -> set[str]:
     return {canonical_from_wire(dm.AssetClass.FOREX, text) or text for text in raw}
 
 
-@pytest.mark.needs("currencies:starter", "s3")
 @pytest.mark.verifies("39")
 @pytest.mark.timeout(100)
 def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
@@ -423,7 +414,6 @@ def test_forex_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     assert grouped == filed, "grouped daily and the day file hold different pairs"
 
 
-@pytest.mark.needs("currencies:starter", "s3")
 @pytest.mark.verifies("64")
 @pytest.mark.timeout(100)
 def test_forex_flat_files_of_a_weekend(
@@ -451,7 +441,6 @@ def test_forex_flat_files_of_a_weekend(
     assert pairs["Sunday"], "no Sunday file, or an empty one"
 
 
-@pytest.mark.needs("currencies:basic")
 @pytest.mark.verifies("33")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -488,7 +477,6 @@ def test_forex_week_bars_start_on_monday_or_sunday(
     assert not misses, f"week bars closer to another window than the library's: {misses}"
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.verifies("27")
 @pytest.mark.timeout(160)
 def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
@@ -498,6 +486,7 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     wait_acked: WaitAcked,
     market_status: Callable[[str], str],
     stream_report: Callable[[dm.MassiveSession], list[str]],
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     evidence: Evidence,
 ) -> None:
     """Whether `C.EUR-USD` and `CA.EUR-USD` are acknowledged and deliver frames.
@@ -507,7 +496,8 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     market is open it also waits up to 60 s for quotes and asserts they arrived with `Symbol`
     `C:EURUSD`; when it says closed the test skips after the acknowledgement. The session's
     diagnostics are recorded before the release. Passing confirms the dash spelling; a refusal
-    in the stream's error means topics must use another spelling.
+    in the stream's error means topics must use another spelling. A stream Massive refuses the
+    key skips, quoting Massive.
     """
     quotes = live_session.forex.quotes(_PAIR).append_only()
     minute_bars = live_session.forex.bars(_PAIR, dm.Timespan.MINUTE)
@@ -520,6 +510,7 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     bar_rows = wait_rows(live_session, bars, deadline) if quote_rows else []
     for line in stream_report(live_session):
         evidence(line)
+    skip_if_not_entitled(live_session)
     live_session.release(quotes)
     live_session.release(bars)
     evidence(f"C quotes received: {len(quote_rows)}; first: {quote_rows[:1]}")
@@ -531,7 +522,6 @@ def test_forex_pair_topics_spelled_with_a_dash_are_acknowledged_and_deliver(
     assert {row["Symbol"] for row in quote_rows} == {_PAIR}
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("87")
 @pytest.mark.requests(1)
 def test_massive_answers_a_conversion_precision_of_5(
@@ -549,7 +539,6 @@ def test_massive_answers_a_conversion_precision_of_5(
     assert bad_values.ask_all(live_rest, bad_values.PRECISION, evidence)
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("88")
 @pytest.mark.requests(2)
 def test_massive_answers_a_conversion_amount_of_0_or_below(
@@ -563,7 +552,6 @@ def test_massive_answers_a_conversion_amount_of_0_or_below(
     assert bad_values.ask_all(live_rest, bad_values.AMOUNT, evidence)
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("89")
 @pytest.mark.requests(1)
 def test_massive_answers_lower_case_currency_codes(

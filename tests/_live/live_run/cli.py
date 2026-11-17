@@ -26,7 +26,7 @@ from tests._live.live_run import children, commands, machine_checks
 from tests._live.live_run.context import RunContext, RunRefusedError
 from tests._live.live_run.probe_result import probe_in_child
 from tests._live.live_run.secret_scrub import SecretFilter
-from tests._live.plans import TIERS
+from tests._live.live_run.stream_units import SUBSCRIPTIONS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -154,7 +154,7 @@ def parser() -> argparse.ArgumentParser:
         "upgrade-check", help="the attended upgrade check; only when the owner asks"
     )
     upgrade.add_argument(
-        "subscription", choices=tuple(TIERS), help="the subscription you will upgrade"
+        "subscription", choices=SUBSCRIPTIONS, help="the subscription you will upgrade"
     )
     upgrade.add_argument("--out", type=Path, required=True, help=out_help)
     return top

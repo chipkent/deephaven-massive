@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # The single verification entry point for this repository.
 #
-# Usage: scripts/check.sh [fast|full] [--all] [--no-fix]
+# Usage: scripts/check.sh [fast|full] [--all] [--no-fix] [--workers=N]
 #
-#   fast      uv sync --upgrade (newest versions), ruff check --fix, ruff format, mypy
-#   full      fast, then the tests of the files the branch changes, without coverage (the default)
-#   --all     with full: run the whole suite with coverage, whatever changed
-#   --no-fix  report instead of rewrite: ruff check and ruff format --check (CI and git hooks)
+#   fast         uv sync --upgrade (newest versions), ruff check --fix, ruff format, mypy
+#   full         fast, then the tests of the files the branch changes, without coverage (the default)
+#   --all        with full: run the whole suite with coverage, whatever changed
+#   --no-fix     report instead of rewrite: ruff check and ruff format --check (CI and git hooks)
+#   --workers=N  with full: run pytest on N workers instead of the count the machine has room for
 #
 # full lists the files the working tree changes (scripts/check_scope.py): run by hand, against
 # origin/main; in the pre-push hook to a branch the remote already has, since that branch's
@@ -19,7 +20,7 @@
 #
 # pytest runs on as many workers as the machine has room for (scripts/worker_count.py): two
 # fewer than its CPUs, and one per 3 GiB of available memory, since each worker starts its own
-# JVM. CHECK_WORKERS overrides the count. A targeted run uses no more workers than it has
+# JVM. --workers=N overrides the count. A targeted run uses no more workers than it has
 # test files, and one worker runs in pytest's own process.
 #
 # With CI=true, ruff reports in GitHub annotation format. The script stops at the first
@@ -27,17 +28,19 @@
 set -euo pipefail
 
 usage() {
-    sed -n '4,9s/^# \{0,1\}//p' "$0"
+    sed -n '4,10s/^# \{0,1\}//p' "$0"
 }
 
 tier=full
 fix=1
 all=0
+workers_option=()
 for arg in "$@"; do
     case "$arg" in
         fast | full) tier="$arg" ;;
         --no-fix) fix=0 ;;
         --all) all=1 ;;
+        --workers=*) workers_option=(--workers "${arg#--workers=}") ;;
         -h | --help)
             usage
             exit 0
@@ -89,7 +92,7 @@ step "mypy" uv run mypy src tests scripts
 if [[ "$tier" == "full" ]]; then
     step "check_scope.py doctests" uv run python -m doctest scripts/check_scope.py
     step "worker_count.py doctests" uv run python -m doctest scripts/worker_count.py
-    workers=$(uv run python scripts/worker_count.py)
+    workers=$(uv run python scripts/worker_count.py ${workers_option[@]+"${workers_option[@]}"})
     tests=()
     if ((all)); then
         scope=full

@@ -205,7 +205,7 @@ def bad_requests(today: date) -> dict[str, tuple[BadRequest, ...]]:
 
     Args:
         today: The day the requests are sent, New York time, from which their date ranges are
-            counted, so each stays within a Basic plan's two years.
+            counted, so each stays recent.
 
     Returns:
         The requests by check (`PRECISION` and the other constants of this module).

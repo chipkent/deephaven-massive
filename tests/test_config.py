@@ -971,7 +971,8 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
             (
                 ", line 1, column 12: on_error has no cause 'malformed_row'; the causes are "
                 "noncanonical_symbols, unreadable_symbols, unavailable_symbols, unreadable_keys, "
-                "unconvertible_values, malformed_rows, refused_venues"
+                "unconvertible_values, malformed_rows, unlisted_contracts, unscheduled_products, "
+                "refused_venues"
             ),
         ),
         (

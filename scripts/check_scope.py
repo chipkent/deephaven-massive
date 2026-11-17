@@ -12,8 +12,8 @@ The tests of a change are, in order and without repeats:
   `scripts/`, or of a helper package under `tests/`, when it exists. The mirror drops one
   leading underscore from each path component and maps a dunder module to its bare name, as
   `tests/test_layout.py` requires: `src/deephaven_massive/_massive/rest/client.py` has
-  `tests/massive/rest/test_client.py`, and `tests/_live/plans.py` has
-  `tests/live/test_plans.py`;
+  `tests/massive/rest/test_client.py`, and `tests/_live/pacing.py` has
+  `tests/live/test_pacing.py`;
 - the documentation tests, `tests/test_docs.py` and `tests/live/tester/test_examples.py`, when
   a user page, an image under `docs/`, the tester guide, or its examples changed: the paths
   the `docs` pattern of CI's `Decide which jobs the change affects` step matches, read from
@@ -52,7 +52,7 @@ The examples below are doctests, which `check.sh full` runs before it asks for a
 >>> exists = {
 ...     "tests/massive/rest/test_client.py",
 ...     "tests/test_init.py",
-...     "tests/live/test_plans.py",
+...     "tests/live/test_pacing.py",
 ...     "tests/test_layout.py",
 ...     *DOCS_TESTS,
 ... }.__contains__
@@ -64,9 +64,9 @@ Decision(scope='lint', tests=(), reason='2 changed files, none with a test')
 >>> decide(["src/deephaven_massive/__init__.py", "tests/test_init.py"], docs, exists).tests
 ('tests/test_init.py',)
 >>> decide(
-...     ["tests/_live/plans.py", "tests/test_layout.py", "tests/conftest.py"], docs, exists
+...     ["tests/_live/pacing.py", "tests/test_layout.py", "tests/conftest.py"], docs, exists
 ... ).tests
-('tests/live/test_plans.py', 'tests/test_layout.py')
+('tests/live/test_pacing.py', 'tests/test_layout.py')
 >>> decide(["src/deephaven_massive/_session.py", "tests/test_gone.py"], docs, exists)
 Decision(scope='lint', tests=(), reason='2 changed files, none with a test')
 >>> decide(["AGENTS.md", "README.md"], docs, exists).tests

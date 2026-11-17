@@ -21,8 +21,8 @@ The test has five parts:
 | [Report a problem](#report-a-problem) | Report each problem when it happens | A bug-report zip |
 | [Finish the test](#finish) | Send your results and clean up | Your notes and the results zip |
 
-A free Massive account is enough to start, and each paid plan your key holds adds the checks
-that plan allows.
+Any Massive key is enough to start. Each check of data your key lacks records Massive's
+refusal, which is part of the test.
 
 The live checks need a computer that stays on and awake for the whole test, with 20 GB of free
 disk.
@@ -51,7 +51,7 @@ you finish it, and next to each item, note anything that failed, surprised you, 
 - [ ] `live_run.py check` says `ready: yes`
 - [ ] Started the run, stopped it with Control-C, and resumed it
 - [ ] Checked on the run daily (dates: )
-- [ ] Covered five trading days, and on a paid plan one stream day (date: )
+- [ ] Covered five trading days, and one stream day if Massive streams to my key (date: )
 
 ## Reports
 - [ ] Sent each problem with its bug-report zip
@@ -158,42 +158,51 @@ your bug reports.
 A program runs the 25 test examples first, and saves what each one did. Then, in the Deephaven
 IDE, you run the README tutorial and the test examples by hand, and judge what each one shows.
 
-Each test example tries one part of the library. Most run on Basic, Massive's free plan:
+Each test example tries one part of the library. Most read data every Massive key holds:
 
-| # | Example | Plan |
+| # | Example | Data it needs |
 |---|---|---|
-| 1 | Open a session with a debug log | Any plan |
-| 2 | Find datasets and their columns | Any plan |
-| 3 | Read two weeks of daily bars | Any plan |
-| 4 | Summarize bars with table operations | Any plan |
-| 5 | Read reference data | Any plan |
-| 6 | Poll the market's status | Any plan |
-| 7 | Exceed Basic's request limit | Any plan |
-| 8 | Read history in the background | Any plan |
-| 9 | Compare two stocks' returns over a year | Any plan |
-| 10 | Ask for data Basic doesn't include | Any plan |
-| 11 | Convert symbols from other sources | Any plan |
-| 12 | Check the debug log for your key | Any plan |
-| 13 | Chart a moving average | Any plan |
-| 14 | Compare company size with return | Any plan |
-| 15 | Compute a dividend's yield | Any plan |
-| 16 | Chart the 10-year to 2-year Treasury spread | Any plan |
-| 17 | Stream live minute bars | Stocks Starter or higher |
-| 18 | Backfill today's minute bars | Stocks Starter or higher |
-| 19 | Stream crypto trades | Currencies Starter or higher |
-| 20 | Edit watchlists that tables follow | Stocks Basic and Futures Basic |
-| 21 | Stream a crypto watchlist | Currencies Starter or higher |
-| 22 | Stream the trades of the top gainers | Stocks Developer, Advanced, or Business + Expansion |
-| 23 | Read history that follows a watchlist | Any plan |
-| 24 | Save the diagnostics tables | Any plan |
-| 25 | Close a session | Any plan |
+| 1 | Open a session with a debug log | Any key |
+| 2 | Find datasets and their columns | Any key |
+| 3 | Read two weeks of daily bars | Any key |
+| 4 | Summarize bars with table operations | Any key |
+| 5 | Read reference data | Any key |
+| 6 | Poll the market's status | Any key |
+| 7 | Exceed a request limit | Any key |
+| 8 | Read history in the background | Any key |
+| 9 | Compare two stocks' returns over a year | Any key |
+| 10 | Ask for data your key may lack | Any key |
+| 11 | Convert symbols from other sources | Any key |
+| 12 | Check the debug log for your key | Any key |
+| 13 | Chart a moving average | Any key |
+| 14 | Compare company size with return | Any key |
+| 15 | Compute a dividend's yield | Any key |
+| 16 | Chart the 10-year to 2-year Treasury spread | Any key |
+| 17 | Stream live minute bars | Streamed stock minute bars |
+| 18 | Backfill today's minute bars | Streamed stock minute bars |
+| 19 | Stream crypto trades | Streamed crypto trades |
+| 20 | Edit watchlists that tables follow | Stock bars and dividends, and futures contracts |
+| 21 | Stream a crypto watchlist | Streamed crypto trades |
+| 22 | Stream the trades of the top gainers | Streamed stock trades |
+| 23 | Read history that follows a watchlist | Any key |
+| 24 | Save the diagnostics tables | Any key |
+| 25 | Close a session | Any key |
 
-Run the paid examples on the free plan too. Massive refuses each one, and checking how the
-library reports a refusal is part of the test.
+Run every example, whatever your key holds. Massive refuses the data your key lacks, and
+checking how the library reports a refusal is part of the test.
 
 <a id="run-every-example"></a>
 
 ### Run every example with one command
+
+Examples 17, 18, and 22 read the settings file of the README's
+[settings example](../README.md#what-your-plan-allows), `~/massive/settings.yaml`. Save it
+first, as that example shows:
+
+| Massive serves your key stocks | Save the file that lists |
+|---|---|
+| Delayed, or not at all | `stocks` as delayed |
+| In real time | Nothing as delayed |
 
 The example runner starts its own Deephaven server. Run it before you start yours, because the
 two would share your key's request limit. In a terminal, run the examples:
@@ -203,14 +212,16 @@ cd ~/massive-test/deephaven-massive
 uv run python scripts/tester.py examples
 ```
 
-The runner writes a settings file for your plans, which examples 17, 18, and 22 read. It prints a line per example as it runs,
+The runner gives examples 17, 18, and 22 a copy of your settings file's
+`delayed_subscriptions`, and prints it as `settings:`. It prints a line per example as it runs,
 then `no example failed`, or `failed:` and the examples' names. Each example's output is in
 `~/massive-test/examples-output/`, and `summary.txt` there gives each one's verdict:
 
 | Verdict | What you do |
 |---|---|
 | `passed` | Nothing |
-| `refused by your plan` | Nothing, unless your plan includes that example's data |
+| `refused by Massive` | Nothing, unless your plan includes that example's data |
+| `not listed as delayed` | List the subscription the error names in `delayed_subscriptions` of your settings file, and run the examples again |
 | `failed` | Report it, as [Report a problem](#report-a-problem) shows |
 
 <a id="start-the-server"></a>
@@ -262,10 +273,6 @@ Run each example of the README's [Tutorial](../README.md#tutorial) that your pla
 pasted as it is into the console. The text after each example says what you should see. In your
 checklist, note each place where what you see differs from that text.
 
-Whatever your plan, save the settings file of the README's
-[settings example](../README.md#what-your-plan-allows), because test examples 17, 18, and 22
-read it. On the free plan, save the Starter or Developer file.
-
 <a id="run-by-hand"></a>
 
 ### Run the test examples by hand
@@ -302,9 +309,9 @@ print(m)
 You should see the library's version without its leading `v`, such as `0.1.0rc1`, then a line
 such as `<MassiveSession #12 open>`. The number counts the sessions this server has opened.
 
-The examples open their sessions as the README's do. On Basic, a session slows to five
-requests a minute after Massive's first rate-limit error, as the README's
-[MassiveConfig](../README.md#massive-config) table says, and example 7 checks it.
+The examples open their sessions as the README's do. When Massive limits a subscription's
+requests, a session slows to five requests a minute after Massive's first rate-limit error, as
+the README's [MassiveConfig](../README.md#massive-config) table says, and example 7 checks it.
 
 #### 2. Find datasets and their columns
 
@@ -436,9 +443,9 @@ diagnostics tables:
 | `streams` | A row for `live_status`, with `State` `RUNNING`: the table is updating |
 | `connections` | No streaming connection: a poll doesn't stream |
 
-#### 7. Exceed Basic's request limit
+#### 7. Exceed a request limit
 
-Poll six stocks every 30 seconds, more than Basic allows, then release the table:
+Poll six stocks every 30 seconds, more than a limited key may send, then release the table:
 
 ```python
 import deephaven_massive as dm
@@ -454,11 +461,11 @@ streams = m.streams()
 m.release(paced)
 ```
 
-Watch `rate_limits` and `paced` for two minutes. On Basic, once Massive refuses a request, the
-`stocks` row of `rate_limits` shows `RequestsPerMinute` 5 and `LimitSource` `LEARNED`, which
-means the library learned the limit from Massive's refusal. The row reads
-`PACED` while requests wait for a free slot. `paced` gets its six rows either way. On a paid
-Stocks plan, nothing is refused.
+Watch `rate_limits` and `paced` for two minutes. When Massive limits your Stocks requests, it
+refuses one. The `stocks` row of `rate_limits` then shows `RequestsPerMinute` 5 and
+`LimitSource` `LEARNED`: the library learned the limit from Massive's refusal. The row reads
+`PACED` while requests wait for a free slot. `paced` gets its six rows either way. When
+Massive doesn't limit your Stocks requests, nothing is refused.
 
 Then close the `paced` panel. The table stops, and the `stocks` row returns to `READY`.
 `m.release()` lets the library stop a table once no panel or other table uses it.
@@ -540,10 +547,10 @@ growth_chart = (
 0.15 means 15%, and `AnnualVolatility` is the annualized standard deviation of daily returns.
 `growth_chart` draws two lines that start at 1.0.
 
-#### 10. Ask for data Basic doesn't include
+#### 10. Ask for data your key may lack
 
-Ask Basic for the latest trade, live minute bars, and bars from 2015. Basic includes none of
-them, and the code prints how Massive refuses each. `wait=True` makes `fetch()` and `history()`
+Ask for the latest trade, live minute bars, and bars from 2015, and print how Massive answers
+each. `wait=True` makes `fetch()` and `history()`
 wait for Massive's answer, so a refusal raises in the call:
 
 ```python
@@ -572,17 +579,17 @@ except dm.MassiveError as error:
     print(f"bars from 2015: {type(error).__name__}: {error}")
 ```
 
-On the free plan, you should see three lines:
+On a key that holds none of the three, you should see three lines:
 
 | Line | What it says |
 |---|---|
 | The latest trade | `EntitlementError`, quoting Massive's refusal |
 | Live minute bars | That they opened. Seconds later, their `stocks.bars` row in `streams` reads `FAILED`. |
-| Bars from 2015 | `EntitlementError`: your plan's history doesn't reach 2015 |
+| Bars from 2015 | `EntitlementError`: your key's history doesn't reach 2015 |
 
-A line says `no error` on a paid plan that includes that data. An `EntitlementError` that names
-`delayed_subscriptions` means your plan is delayed, and the README's settings example shows the
-setting.
+A line says `no error` when your key holds that data. An `EntitlementError` that names
+`delayed_subscriptions` means Massive serves your key that data delayed, and the README's
+settings example shows the setting.
 
 For each message, including the `Error` in `streams`, note whether it told you what went wrong
 and what to do. Note any that blamed your key when the cause was your plan. For the live minute
@@ -762,8 +769,8 @@ wherever the curve was inverted.
 
 #### 17. Stream live minute bars
 
-Keep the latest minute bar of five stocks, with a paid Stocks plan. The session loads the
-settings file you saved for the README tutorial:
+Keep the latest minute bar of five stocks, on a key Massive streams stock minute bars to. The
+session loads the settings file you saved before running every example:
 
 ```python
 import deephaven_massive as dm
@@ -784,7 +791,7 @@ stays empty until the stocks trade.
 #### 18. Backfill today's minute bars
 
 Start with AAPL's minute bars from earlier today, and add each new minute as it ends, with the
-plan and settings file of example 17:
+key and settings file of example 17:
 
 ```python
 from datetime import datetime
@@ -811,7 +818,8 @@ bar. On a day AAPL doesn't trade, the table is empty.
 
 #### 19. Stream crypto trades
 
-Stream Bitcoin and Ether trades, and count them by the minute, with a paid Currencies plan.
+Stream Bitcoin and Ether trades, and count them by the minute, on a key Massive streams crypto
+trades to.
 Crypto trades around the clock, so this example works at any hour:
 
 ```python
@@ -877,7 +885,7 @@ product_watchlist.add(new_table({"ProductCode": ["NQ"]}))
 
 #### 21. Stream a crypto watchlist
 
-You need a paid Currencies plan, and it works at any hour:
+You need a key Massive streams crypto trades to, and it works at any hour:
 
 ```python
 from deephaven import input_table, new_table
@@ -909,8 +917,7 @@ of `streams`:
 #### 22. Stream the trades of the top gainers
 
 Poll the day's top gainers every minute, and stream the trades of whichever stocks are on that
-list. You need a Stocks plan that streams trades: Developer, Advanced, or Business +
-Expansion:
+list. You need a key Massive streams stock trades to:
 
 ```python
 import deephaven_massive as dm
@@ -1031,33 +1038,41 @@ stay open, and their tables keep updating.
 
 ## Run the live checks
 
-`scripts/live_run.py` runs every check your plans allow, at set New York times, and records
-Massive's answers for the maintainer. You start it once and leave it running for at least five
-trading days. It checks your plans when it starts and each trading morning, so you can change
-plans during the test.
+`scripts/live_run.py` runs every check at set New York times, and records Massive's answers
+for the maintainer. You start it once and leave it running for at least five trading days. A
+check Massive refuses runs again each trading day, so you can change plans during the test.
 
 Keep your key free of other programs while the run goes: a live check can't stream while another
 program holds the key's connection. Two kinds of check keep the key busy for many hours:
 
-| Check | When, in New York time | Which plans |
+| Check | When, in New York time | What it needs |
 |---|---|---|
-| A stream day: a trading day of live data | A plan check at 03:15, then streams from 03:45 to 20:30, on a day the program picks | Any paid plan |
-| A stream night: Bitcoin, Ether, and the ES and NQ futures overnight | 16:30 to 09:30 the next morning, on an evening before a full trading day | A paid Currencies or Futures plan |
+| A stream day: a trading day of live data | A probe at 03:15, then streams from 03:45 to 20:30, on a day the program picks | A key Massive streams to |
+| A stream night: Bitcoin, Ether, and the ES and NQ futures overnight | 16:30 to 09:30 the next morning, on an evening before a full trading day | Streamed crypto or futures |
 
 <a id="check-the-computer"></a>
 
 ### Check the computer
 
-Stop every other use of your key first, the Deephaven server included. Then, in a terminal, run
-the program's check, which writes nothing:
+Stop every other use of your key first, the Deephaven server included.
+
+The run reads your settings file through `DEEPHAVEN_MASSIVE_CONFIG_FILE`, so it streams each
+subscription your file lists as delayed from Massive's delayed feed. Add this line to your
+shell's startup file, beside your keys:
+
+```bash
+export DEEPHAVEN_MASSIVE_CONFIG_FILE="$HOME/massive/settings.yaml"
+```
+
+Then, in a new terminal, run the program's check, which writes nothing:
 
 ```bash
 cd ~/massive-test/deephaven-massive
 uv run python scripts/live_run.py check
 ```
 
-You should see a line per item of the computer, each starting `OK`, `WARN`, or `FAIL`, then your
-plan for each subscription, and `ready: yes`. A `FAIL` line names what's wrong. The disk fails
+You should see a line per item of the computer, each starting `OK`, `WARN`, or `FAIL`, then the
+market closures Massive lists, and `ready: yes`. A `FAIL` line names what's wrong. The disk fails
 below 20 GB free, and the memory warns below 8 GB.
 
 The program keeps the computer awake while it runs, but closing a laptop's lid still puts it to
@@ -1098,7 +1113,7 @@ You should see `resuming`, and every check that passed stays passed.
 | What happened | What you do |
 |---|---|
 | Control-C, a closed terminal, a crash, or a restart of the computer | In a new terminal, go to `~/massive-test/deephaven-massive` and run the resume command. |
-| You changed your plan | Nothing. The next morning's plan check sees it. To make the run see it at once, stop and resume it. |
+| You changed your plan | Nothing, unless Massive now serves a subscription delayed that it didn't. Then list it in `delayed_subscriptions` of your settings file, and stop and resume the run. A refused check runs again each trading day. |
 | You got S3 keys for the first time | Add them to your startup file as the README's [Set your API keys](../README.md#set-your-api-keys) shows, then stop the run with Control-C and resume it from `~/massive-test/deephaven-massive` in a new terminal. |
 | A new release comes out | Nothing. Keep testing the release you installed, unless a comment on your issue asks you to switch. |
 
@@ -1113,14 +1128,15 @@ cd ~/massive-test/deephaven-massive
 uv run python scripts/live_run.py status --out ~/massive-live
 ```
 
-You should see `latest probe:` with your plans, the next stream day and night, every check with
+You should see `latest probe:` with its time, the next stream day and night, every check with
 its status, and a table of counts per group. Most statuses need nothing from you:
 
 | Status | What you do |
 |---|---|
 | `passed` or `not run` | Nothing |
-| `skipped:` and a reason, or `not started (optional)` | Nothing. Your plan lacks that check, or its market is closed, and a check skipped for the moment runs again. |
-| `refused` | Nothing. Massive refused data its documentation says your plan includes, and the maintainer reads it in the results. |
+| `skipped:` and a reason, or `not started (optional)` | Nothing. Its market was closed, or another condition of the moment stopped it, and it runs again. |
+| `skipped: not listed as delayed:` | List the subscription it names in `delayed_subscriptions` of your settings file, then stop and resume the run. |
+| `refused:` and Massive's answer | Nothing. Massive refused data your key lacks, and the check runs again each trading day. If your dashboard shows your key holds that data, say so on your issue. |
 | `failed` or `error` | Nothing. A failed check runs once more by itself, and the maintainer reads both attempts in the results. |
 
 Note each date you checked, and the date of the stream day, in your checklist.
@@ -1145,8 +1161,8 @@ the run, unless you're finishing.
 
 ### Run the upgrade check when asked
 
-The upgrade check tests that the library stops limiting a subscription to Basic's five requests
-a minute once you upgrade it. Run it only when a comment on your issue asks:
+The upgrade check tests that the library stops limiting a subscription's requests once you
+upgrade it to a plan Massive doesn't limit. Run it only when a comment on your issue asks:
 
 1. Stop the run with Control-C, before you upgrade.
 2. In the same terminal, start the check with the subscription you'll upgrade: `stocks`,
@@ -1169,7 +1185,6 @@ a minute once you upgrade it. Run it only when a comment on your issue asks:
 |---|---|
 | `the API key was rejected` | Copy the key from Massive's dashboard into your startup file again, then stop the run with Control-C and resume it from `~/massive-test/deephaven-massive` in a new terminal. |
 | `a run or an upgrade check is using ...` | Another `run` is already going. Use it, or stop it first. |
-| The plan check shows a lower plan than you bought | Stop and resume the run, which checks again. If the plan is still lower, say so on your issue. |
 | A gap in a stream day or night, in the zip's `REPORT.md` | Keep the computer awake with the lid open. When a stream day's or night's gaps add up to more than 30 minutes, it fails, and the program plans one more. |
 | Anything else | Post the `status` output on your issue, and attach the newest zip. |
 
@@ -1226,7 +1241,8 @@ A report is an issue with a zip of your logs, your keys removed:
    The date, time, and time zone.
 
    ## My setup
-   - Plan of each subscription:
+   - Subscriptions Massive serves me delayed:
+   - Subscriptions whose requests Massive limits per minute:
    - Server: Python environment or Docker
    ```
 
@@ -1251,8 +1267,8 @@ but never their values.
 
 ## Finish the test
 
-The test ends when the live checks have covered five trading days and, if your key holds a paid
-plan, one stream day run to its end at 20:30. Then send your results and clean up:
+The test ends when the live checks have covered five trading days and, if Massive streams to
+your key, one stream day run to its end at 20:30. Then send your results and clean up:
 
 1. Stop the live run with Control-C in its terminal, and stop any Deephaven server the same way.
 2. In the live run's terminal, [pack the results](#pack-the-results).

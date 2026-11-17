@@ -25,11 +25,11 @@ everything else belongs here:
   A static symbol list that would cross it raises `ValueError` when the verb is called; a
   reactive table's excess topics are deferred, in sorted order, and admitted as room frees.
 - **Watchlist changes.** A change of a reactive symbol table reaches the stream's connection
-  directly, except for futures and crypto, whose changes wait for a lookup first. Those run one
-  at a time, in order, on the session's `symbol changes` worker, so a removal never overtakes
-  an earlier addition still waiting: a futures contract waits up to `SCHEDULE_WAIT` for its
-  trading schedule, so its first rows are dated. Any exception of a change is logged with its
-  trace and fails the stream.
+  directly, except for crypto, whose changes wait for a lookup first. Those run one at a time,
+  in order, on the session's `symbol changes` worker, so a removal never overtakes an earlier
+  addition still waiting. A futures contract subscribes at once: its product and schedule are
+  asked for (`FuturesCalendar.watch`), and the flush holds its rows until they are dated. Any
+  exception of a change is logged with its trace and fails the stream.
 - **Crypto pairs.** A topic needs a pair's two currencies, which only Massive's crypto ticker
   list gives. Every pair, whatever its source, is split on the `symbol changes` worker before
   it is subscribed: a crypto stream of a symbol list opens with no topic and submits its pairs
@@ -131,8 +131,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "JOIN_TIMEOUT",
-    "SCHEDULE_WAIT",
-    "SCHEDULE_WAIT_HOLDING_LOCK",
     "WsConnections",
 ]
 
@@ -140,18 +138,6 @@ logger = logging.getLogger(__name__)
 
 JOIN_TIMEOUT: Final = 5.0
 """Seconds `m.close()` waits for each connection's threads before it logs a WARNING."""
-
-SCHEDULE_WAIT: Final = 15.0
-"""Seconds a futures stream waits for its contracts' products and schedules before it
-subscribes them, so their first rows are dated by the schedules: the verb waits for explicit
-contracts, and the session's `symbol changes` worker for those a symbol table holds or adds. A
-lookup still running then dates its rows once it ends, and they have a null `Date` meanwhile."""
-
-SCHEDULE_WAIT_HOLDING_LOCK: Final = 1.0
-"""Seconds the wait of `SCHEDULE_WAIT` lasts instead when the verb's thread holds the update
-graph's lock (a console command): no live table updates while it waits, and its rows get a null
-`Date` until the schedules load anyway, so it waits only long enough for a lookup that is
-already answered."""
 
 _SKIPPED_PAIR_LIMIT: Final = 100
 """The most crypto pairs with no data logged per process under each of `LOG` and `IGNORE`."""
@@ -370,6 +356,7 @@ class WsConnections:
         # The futures schedule calendar reads the paths of the futures reference datasets.
         by_name = core.catalog.by_name
         self._calendar_paths: Final = (
+            required(by_name["futures.snapshots"].fetch_path, "futures.snapshots's fetch path"),
             required(by_name["futures.contracts"].fetch_path, "futures.contracts's fetch path"),
             required(by_name["futures.schedules"].fetch_path, "futures.schedules's fetch path"),
         )
@@ -457,15 +444,15 @@ class WsConnections:
             )
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
-            # Started before the schedule wait, so a failure or interrupt during that wait
-            # leaves a running connection that `_abandon` retires once idle: a registered
-            # connection that never started would be reused by later streams and never
-            # connect. It subscribes nothing until `_attach`, after the schedules load.
+            # Started first, so a failure or interrupt below leaves a running connection
+            # that `_abandon` retires once idle: a registered connection that never started
+            # would be reused by later streams and never connect. It subscribes nothing until
+            # `_attach`.
             if created:
                 connection.start()
             if asset_class is AssetClass.FUTURES and wanted:
-                locked = holds_update_graph_lock(self._exec_ctx)
-                self._load_schedules(wanted, stream_id=stream_id, holding_lock=locked)
+                # The lookups start now; the flush holds the rows until they are dated.
+                self.futures_calendar().watch(wanted)
             opened = open_stream_tables(
                 plan,
                 core.dataset_schema(spec),
@@ -512,51 +499,6 @@ class WsConnections:
             self._abandon(connection, stream_id)
             raise
         return opened.handle
-
-    def _load_schedules(
-        self, contracts: frozenset[str], *, stream_id: int, holding_lock: bool
-    ) -> None:
-        """Load futures contracts' schedules before they subscribe, waiting a bounded time.
-
-        Runs on the verb's thread or on the `symbol changes` worker, with no library lock
-        held. It waits only on the calendar's worker, which makes no Deephaven call, so a
-        console command holding the update graph's lock may run it; such a caller waits
-        `SCHEDULE_WAIT_HOLDING_LOCK`, since no live table updates meanwhile, and any other
-        `SCHEDULE_WAIT`. A lookup that does not end in time is logged at WARNING once; its rows
-        get a null `Date` until it ends. A failed lookup logs its own WARNING. `close()` ends the
-        wait at once (`FuturesCalendar.wake`), so the worker never delays the session's close
-        or the interpreter's exit.
-
-        Args:
-            contracts: Canonical futures symbols; spreads are never looked up.
-            stream_id: The stream, for the log.
-            holding_lock: Whether the calling thread holds the update graph's lock.
-
-        Raises:
-            SessionClosedError: If the session is closed (`futures_calendar`), or closes during
-                the wait.
-        """
-        wait = SCHEDULE_WAIT_HOLDING_LOCK if holding_lock else SCHEDULE_WAIT
-        calendar = self.futures_calendar()
-        calendar.watch(contracts)
-        loaded = calendar.wait_loaded(contracts, wait, stop=self._closing)
-        if self._closing.is_set():  # close() ended the wait: the stream goes with the session
-            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
-        if not loaded:
-            logger.warning(
-                "futures stream %d: the schedules of %s did not load within %.0f s%s; their "
-                "rows get a null Date until they do",
-                stream_id,
-                bounded_list(sorted(contracts)),
-                wait,
-                ", the most a caller holding the update graph's lock waits" if holding_lock else "",
-            )
-        else:
-            logger.debug(
-                "futures stream %d: schedules loaded for %s",
-                stream_id,
-                bounded_list(sorted(contracts)),
-            )
 
     def _plan(self, core: SessionCore, spec: DatasetSpec, channel: str) -> ChannelPlan:
         """Return the cached plan of a (dataset, channel), building it on first use.
@@ -794,13 +736,13 @@ class WsConnections:
 
         Runs on an update-graph thread (or the caller thread for the initial replay), with the
         update-graph lock held: it takes the group's lock only to find the connection, and
-        never blocks or raises. A futures or crypto change, which waits for a lookup first, goes
-        to the `symbol changes` worker (`_run_change`), which runs a session's changes one at a
-        time, in order; every other change goes to the connection's loop at once. The added
-        futures contracts are handed to the schedule calendar here (`FuturesCalendar.watch`,
-        which only queues them), so every lookup starts at once and only the wait runs on the
-        worker. A change that finds the session closing, or the worker shut down by
-        `close()`, is dropped and logged at DEBUG, since the stream goes with the session.
+        never blocks or raises. A crypto change, which waits for a lookup first, goes to the
+        `symbol changes` worker (`_run_change`), which runs a session's changes one at a time,
+        in order; every other change goes to the connection's loop at once. The added futures
+        contracts are handed to the schedule calendar first (`FuturesCalendar.watch`, which
+        only queues their lookups); the flush holds their rows until they are dated. A change
+        that finds the session closing, or the worker shut down by `close()`, is dropped and
+        logged at DEBUG, since the stream goes with the session.
 
         Args:
             stream_id: The stream.
@@ -812,21 +754,17 @@ class WsConnections:
         if connection is None:
             return
         asset_class = connection.asset_class
-        if asset_class is AssetClass.FUTURES:
-            change = self._change_contracts
-            if added:
-                try:
-                    calendar = self.futures_calendar()
-                except SessionClosedError as error:
-                    self._drop_change(stream_id, added, removed, error=error)
-                    return
-                calendar.watch(added)
-        elif asset_class is AssetClass.CRYPTO:
-            change = self._change_pairs
-        else:
-            connection.post(connection.change_symbols, stream_id, added, removed)
+        if asset_class is AssetClass.CRYPTO:
+            self._submit_change(self._change_pairs, stream_id, added=added, removed=removed)
             return
-        self._submit_change(change, stream_id, added=added, removed=removed)
+        if asset_class is AssetClass.FUTURES and added:
+            try:
+                calendar = self.futures_calendar()
+            except SessionClosedError as error:
+                self._drop_change(stream_id, added, removed, error=error)
+                return
+            calendar.watch(added)
+        connection.post(connection.change_symbols, stream_id, added, removed)
 
     def _submit_change(
         self,
@@ -841,7 +779,7 @@ class WsConnections:
         A change that finds the worker shut down by `close()` is dropped and logged at DEBUG.
 
         Args:
-            change: `_change_contracts` or `_change_pairs`.
+            change: `_change_pairs`, the only change that runs on the worker.
             stream_id: The stream.
             added: Canonical symbols to subscribe.
             removed: Canonical symbols to unsubscribe.
@@ -894,7 +832,7 @@ class WsConnections:
         asks for the report exactly once.
 
         Args:
-            change: `_change_contracts` or `_change_pairs`.
+            change: `_change_pairs`, the only change that runs on the worker.
             stream_id: The stream.
             added: Canonical symbols the table now holds.
             removed: Canonical symbols it no longer holds.
@@ -921,32 +859,6 @@ class WsConnections:
                 connection = self.group.streams.get(stream_id)
             if connection is not None:
                 connection.flusher.fail([stream_id], failure)
-
-    def _change_contracts(
-        self, stream_id: int, added: frozenset[str], removed: frozenset[str]
-    ) -> None:
-        """Load a futures stream's added contracts' schedules, then post the change.
-
-        Runs on the `symbol changes` worker (`_run_change`), which holds no lock and never holds
-        the update graph's, so it waits up to `SCHEDULE_WAIT` (`_load_schedules`); the lookups
-        started when the change was reported (`_symbols_changed`). The contracts a symbol
-        table holds when the stream opens, and those it adds later, subscribe once their
-        schedules load, and their first rows are dated, as explicit contracts' are. A change
-        that finds the session closed is dropped and logged at DEBUG: the close tears the
-        stream down, so failing it from here would only blame its watchlist.
-
-        Args:
-            stream_id: The stream.
-            added: Canonical symbols the table now holds.
-            removed: Canonical symbols it no longer holds.
-        """
-        if added:
-            try:
-                self._load_schedules(added, stream_id=stream_id, holding_lock=False)
-            except SessionClosedError as error:
-                self._drop_change(stream_id, added, removed, error=error)
-                return
-        self._post_change(stream_id, added, removed)
 
     def _post_change(self, stream_id: int, added: frozenset[str], removed: frozenset[str]) -> None:
         """Post a change to the stream's connection's loop, if the stream still exists.
@@ -1288,8 +1200,10 @@ class WsConnections:
         """
         with self._lock:
             self._check_open()
-        contracts, schedules = self._calendar_paths
-        return self.group.futures_calendar(contracts_path=contracts, schedules_path=schedules)
+        snapshot, contracts, schedules = self._calendar_paths
+        return self.group.futures_calendar(
+            snapshot_path=snapshot, contracts_path=contracts, schedules_path=schedules
+        )
 
     def owns_row(self, connection: Connection, family: ChannelFamily) -> bool:
         """Tell whether the session shows a connection's row for its class and a family.
@@ -1338,7 +1252,6 @@ class WsConnections:
             self._closed = True
             mine, closing = self._leave()
         self._closing.set()
-        self.group.wake_schedule_waiters()  # a worker waiting for schedules sees the close
         self._changes.shutdown(wait=False, cancel_futures=True)
         for stream_id, connection in mine:
             connection.flusher.routes.remove(stream_id)
