@@ -398,7 +398,10 @@ def test_close_during_an_open_wakes_the_waiters(
         error = opener.exception(TIMEOUT)
     helper.join(TIMEOUT)
     assert isinstance(error, dm.MassiveError)
-    assert "was closed while a stream was opening" in str(error)
+    assert str(error) == (
+        "This session was closed while a stream was opening. Open a new dm.MassiveSession() to "
+        "read again."
+    )
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # the opener released the new stream
     assert core.streams._streams == {}
 
@@ -1091,7 +1094,7 @@ def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
 
     monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     for verb in ("blink", "append_only"):
-        with pytest.raises(dm.MassiveError, match="failed: entitlement"):
+        with pytest.raises(dm.MassiveError, match=r"^test\.trades stream \d+ failed: entitlement$"):
             getattr(stream_query(massive_session), verb)()
     drain()
     assert core.results.held() == 0
@@ -1115,7 +1118,9 @@ def test_a_failure_while_the_shape_is_derived_is_named(
         core.fail_stream(1, dm.MassiveError("entitlement"))
         return blink_to_append_only(blink)
 
-    with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
+    with pytest.raises(
+        dm.MassiveError, match=r"^test\.trades stream 1 failed: entitlement$"
+    ) as raised:
         core.streams.result(
             SPEC,
             q._request,
@@ -1207,7 +1212,9 @@ def test_a_failure_while_the_blink_copy_is_described_is_named(
         core.fail_stream(1, dm.MassiveError("entitlement"))
         return describe(blink, SPEC, schema)
 
-    with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
+    with pytest.raises(
+        dm.MassiveError, match=r"^test\.trades stream 1 failed: entitlement$"
+    ) as raised:
         core.streams.result(
             SPEC,
             q._request,

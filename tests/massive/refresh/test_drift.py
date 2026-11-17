@@ -13,6 +13,7 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -1035,7 +1036,11 @@ def test_check_adds_the_gate_stops_of_the_live_sources(tmp_path: Path) -> None:
 def test_check_lets_a_bucket_failure_through(tmp_path: Path, fake_s3: FakeS3) -> None:
     before = store(make(), tmp_path / "vendor")
     fake_s3.refuse("", status=403, code="AccessDenied", message="No")
-    with pytest.raises(WireEntitlementError, match=r"^HTTP 403 for s3://flatfiles/ at ") as info:
+    expected = (
+        "Massive answered the list of s3://flatfiles/ at https://files.massive.com with HTTP 403 "
+        '(request_id 4442587FB7D0A2F9): "AccessDenied: No".'
+    )
+    with pytest.raises(WireEntitlementError, match=rf"^{re.escape(expected)}$") as info:
         drift.check(
             snapshot_directory=before,
             get=served(make()).__getitem__,

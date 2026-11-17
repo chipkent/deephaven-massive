@@ -271,7 +271,7 @@ def test_a_description_of_a_missing_column_fails(dh_exec_ctx: ExecutionContext) 
     lacking = new_table([string_col("Symbol", ["AAPL"])])  # no Price column
     with pytest.raises(
         RuntimeError,
-        match=r"^describing a stocks\.trades result failed: .*Column\(s\) not found: Price, Note",
+        match=r"^Describing a stocks\.trades result failed: .*Column\(s\) not found: Price, Note",
     ) as raised:
         describe(lacking, SPEC, SCHEMA)
     assert type(raised.value.__cause__) is RuntimeError  # jpy's form of the Java exception

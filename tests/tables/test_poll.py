@@ -6,6 +6,7 @@ import functools
 import gc
 import logging
 import queue
+import re
 import threading
 import weakref
 from collections.abc import Callable, Iterator
@@ -35,7 +36,6 @@ from deephaven_massive._enums import AssetClass, PollMode, Recency
 from deephaven_massive._error_policy import resolve_policy
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    NEW_SESSION,
     BrokenGuaranteeError,
     PermanentError,
     RowDataError,
@@ -84,10 +84,10 @@ DIVIDENDS = DatasetSpec(
 )
 ToPylist = Callable[[Table], list[dict[str, Any]]]
 
-GOOD = "last good cycle at 2027-01-15T08:00:00Z"
+GOOD = "The last good cycle ran at 2027-01-15T08:00:00Z."
 """The suffix of a failing cycle's text after the first, good cycle at the fake clock's start."""
 
-NO_GOOD = "no good cycle since the poll started at 2027-01-15T08:00:00Z"
+NO_GOOD = "No cycle has succeeded since the poll started at 2027-01-15T08:00:00Z."
 """The suffix of a failing cycle's text before any good one."""
 
 FAILED = ProblemCause.POLL_CYCLE_FAILED
@@ -509,8 +509,8 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
             f"0.000 s, {patience}"
         ),
         (
-            "stocks.dividends poll() stream 1: a cycle failed, and the next one runs as scheduled: "
-            "HTTP 503 from GET /stocks/v1/dividends"
+            "stocks.dividends poll() stream 1: a cycle failed. HTTP 503 from GET "
+            "/stocks/v1/dividends The next cycle runs as scheduled."
         ),
     ]
 
@@ -582,8 +582,9 @@ def test_late_cycles_warn_once_and_are_one_span_until_a_cycle_is_on_time(
             logging.WARNING,
             (
                 "stocks.dividends poll() stream 1: a cycle took 90 s, longer than the 60 s "
-                "interval, so the table updates late; m.rate_limits() shows whether its requests "
-                "are paced or paused by Massive's rate limit, and m.problems() lists the run"
+                "interval, so the table updates late. m.problems() lists the run of late cycles. "
+                "Read m.rate_limits() to see whether Massive's rate limit paces or pauses the "
+                "requests."
             ),
         ),
         (
@@ -661,20 +662,23 @@ def test_polls_refused_for_one_entitlement_log_one_warning(
             poller = poller_of(pollers)
             poller.thread.join(TIMEOUT)
             assert not poller.thread.is_alive()
-    failed = [(r.levelno, r.getMessage()) for r in caplog.records if "failed: HTTP" in r.message]
+    failed = [(r.levelno, r.getMessage()) for r in caplog.records if "failed. HTTP" in r.message]
     assert [level for level, _ in failed if level >= logging.WARNING] == [
         logging.WARNING,
         logging.WARNING,
     ]
     warned = [message for level, message in failed if level == logging.WARNING]
     assert warned[0] == (
-        "stocks.dividends poll() stream 1 failed: HTTP 403 from GET /stocks/v1/dividends (each "
-        "later poll() table of stocks.dividends refused this way logs at DEBUG)"
+        "stocks.dividends poll() stream 1 failed. HTTP 403 from GET /stocks/v1/dividends Each "
+        "later poll() table of stocks.dividends refused this way logs at DEBUG."
     )
-    assert warned[1].startswith("stocks.dividends poll() stream 3 failed: HTTP 401")
+    assert warned[1] == (
+        "stocks.dividends poll() stream 3 failed. HTTP 401 from GET /stocks/v1/dividends Each "
+        "later poll() table of stocks.dividends refused this way logs at DEBUG."
+    )
     # Every refusal still logs at DEBUG with its own stream.
     debug = [message for level, message in failed if level == logging.DEBUG]
-    assert [m.split(" failed")[0] for m in debug] == [
+    assert [m.split(" failed.")[0] for m in debug] == [
         f"stocks.dividends poll() stream {n}" for n in (1, 2, 3)
     ]
     for table in tables:
@@ -758,15 +762,15 @@ def test_other_errors_keep_the_rows_and_are_a_gap_until_the_next_good_cycle(
         "2027-01-15T08:01:00Z",
         None,
     )
-    assert gap["Detail"] == f"HTTP 503 from GET /stocks/v1/dividends; {GOOD}"
+    assert gap["Detail"] == (f"{GOOD} Then a cycle failed: HTTP 503 from GET /stocks/v1/dividends")
     assert pairs(table, dh_to_pylist) == [("AAPL", 1.0)]
     # An expected failure: one WARNING for the run.
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (
             logging.WARNING,
             (
-                "stocks.dividends poll() stream 1: a cycle failed, and the next one runs as "
-                "scheduled: HTTP 503 from GET /stocks/v1/dividends"
+                "stocks.dividends poll() stream 1: a cycle failed. HTTP 503 from GET "
+                "/stocks/v1/dividends The next cycle runs as scheduled."
             ),
         )
     ]
@@ -781,15 +785,16 @@ def test_other_errors_keep_the_rows_and_are_a_gap_until_the_next_good_cycle(
     # A defect is never hidden behind the outage: it starts its own run, at ERROR.
     [defect] = caplog.records
     assert defect.levelno == logging.ERROR
-    assert defect.getMessage().startswith(
-        "stocks.dividends poll() stream 1: the cycle failed. This is a bug in deephaven-massive."
+    assert defect.getMessage() == (
+        "stocks.dividends poll() stream 1: a cycle failed on an unexpected error. The next cycle "
+        f"runs as scheduled. {LIBRARY_BUG}"
     )
     # The same span, from the run's first failed cycle, names the latest error.
     (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
     assert (utc(gap["SpanStart"]), gap["EndedAt"], gap["Detail"]) == (
         "2027-01-15T08:01:00Z",
         None,
-        f"a defect; {GOOD}",
+        f"{GOOD} Then a cycle failed: a defect",
     )
     assert stream_rows()[0]["Error"] is None
     caplog.clear()
@@ -856,10 +861,10 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
         (row,) = stream_rows()
         assert (row["State"], row["Error"]) == ("RUNNING", None)
         (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
-        assert (gap["Detail"], gap["EndedAt"]) == (f"{error}; {GOOD}", None)
+        assert (gap["Detail"], gap["EndedAt"]) == (f"{GOOD} Then a cycle failed: {error}", None)
     script.rows()  # a good cycle with no new row: quiet data, which ends the run of failures
     next_cycle(clock)
-    good_again = "last good cycle at 2027-01-15T08:06:00Z"
+    good_again = "The last good cycle ran at 2027-01-15T08:06:00Z."
     for _ in range(5):  # failures at 420 to 660 s: under 300 s since the run's first
         script.fail(error)
         next_cycle(clock)
@@ -868,7 +873,7 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     assert first["EndedAt"] is not None
     assert (utc(second["SpanStart"]), second["Detail"], second["EndedAt"]) == (
         "2027-01-15T08:07:00Z",
-        f"{error}; {good_again}",
+        f"{good_again} Then a cycle failed: {error}",
         None,
     )
     script.fail(error)  # 300 s after the run's first failure: max_outage
@@ -876,10 +881,10 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     failure = (
-        f"stocks.dividends poll(): {good_again}; every cycle since 2027-01-15T08:07:00Z has "
-        "failed, for 300 s, longer than MassiveConfig.max_outage (300 s); the rows since then "
-        "may be missing, so this table stopped; call the verb again for a new live table. The "
-        f"latest error: {error}"
+        "stocks.dividends poll(): every cycle since 2027-01-15T08:07:00Z has failed, for 300 s, "
+        "which reaches max_outage=300 s, so this table stopped, and the rows since then may be "
+        "missing. Call the method again for a new live table. The latest error: HTTP 503 from "
+        "GET /stocks/v1/dividends"
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
     # Massive's outage may be over by the next call, as the latest error says.
@@ -916,7 +921,7 @@ def test_one_failure_long_after_the_last_good_cycle_keeps_the_table(
     (row,) = stream_rows()
     assert (row["State"], row["Error"]) == ("RUNNING", None)
     (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
-    assert (gap["Detail"], gap["EndedAt"]) == (f"{error}; {GOOD}", None)
+    assert (gap["Detail"], gap["EndedAt"]) == (f"{GOOD} Then a cycle failed: {error}", None)
     script.rows(("AAPL", 2.0))
     next_cycle(clock, interval)
     (row,) = stream_rows()
@@ -1003,7 +1008,7 @@ def test_a_cycle_running_past_its_interval_is_marked_until_it_ends(
     clock.advance(1.0)
     pollers.check_running()
     pollers.check_running()  # marked once
-    late = f"cycle running since 2027-01-15T08:01:00Z; {GOOD}"
+    late = f"A cycle has run since 2027-01-15T08:01:00Z. {GOOD}"
     (span,) = problems_of(massive_session, dh_to_pylist, LATE)
     assert (span["Action"], utc(span["SpanStart"]), span["Detail"], span["EndedAt"]) == (
         "DELAYED",
@@ -1062,10 +1067,10 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
     poller_of(pollers).thread.join(TIMEOUT)
     (row,) = stream_rows()
     failure = (
-        f"stocks.dividends poll(): {GOOD}; the cycle running since 2027-01-15T08:01:00Z has "
-        "received nothing for 301 s, longer than MassiveConfig.max_outage (300 s); the rows "
-        "since then may be missing, so this table stopped; call the verb again for a new live "
-        "table"
+        "stocks.dividends poll(): the cycle running since 2027-01-15T08:01:00Z has received "
+        "nothing for 301 s, longer than max_outage=300 s, so this table stopped, and the rows "
+        "since then may be missing. The last good cycle ran at 2027-01-15T08:00:00Z. Call the "
+        "method again for a new live table."
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
     # No page came: the network's, and data may flow again.
@@ -1134,7 +1139,7 @@ def test_the_watch_thread_checks_running_cycles_and_ends_with_its_last_poller(
         table = start(massive_session, script=script, pollers=pollers, clock=clock)
         _second_cycle_running(script, clock)
         clock.advance(61.0)
-        late = f"cycle running since 2027-01-15T08:01:00Z; {GOOD}"
+        late = f"A cycle has run since 2027-01-15T08:01:00Z. {GOOD}"
 
         def marked() -> bool:
             spans = problems_of(massive_session, dh_to_pylist, LATE)
@@ -1198,7 +1203,9 @@ def test_a_failing_check_is_logged_and_the_others_still_run(
     with caplog.at_level(logging.ERROR, LOGGER):
         pollers.check_running()
     assert checked == [poller_of(pollers)]
-    assert any("checking a poll()'s running cycle failed" in m for m in caplog.messages)
+    assert caplog.messages == [
+        f"A check of a poll() table's running cycle failed. The library goes on. {LIBRARY_BUG}"
+    ]
     del table
 
 
@@ -1209,23 +1216,33 @@ def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_to_pylist: ToPylist,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     core = massive_session._core
     monkeypatch.setattr(core, "config", dataclasses.replace(core.config, max_outage=0))
     script.fail(RuntimeError("a defect"))
-    table = start(massive_session, script=script, pollers=pollers, clock=clock)
-    poller = poller_of(pollers)
-    poller.thread.join(TIMEOUT)
-    until(lambda: bool(table.j_table.isFailed()))
+    with caplog.at_level(logging.ERROR, LOGGER):
+        table = start(massive_session, script=script, pollers=pollers, clock=clock)
+        poller = poller_of(pollers)
+        poller.thread.join(TIMEOUT)
+        until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     failure = (
-        f"stocks.dividends poll(): {NO_GOOD}; every cycle since 2027-01-15T08:00:00Z has "
-        "failed, for 0 s, longer than MassiveConfig.max_outage (0 s); the rows since then may "
-        "be missing, so this table stopped; call the verb again for a new live table. The "
-        f"latest error: a defect. {LIBRARY_BUG}"
+        "stocks.dividends poll(): every cycle since 2027-01-15T08:00:00Z has failed, for 0 s, "
+        "which reaches max_outage=0 s, so this table stopped, and the rows since then may be "
+        "missing. Call the method again for a new live table. The latest error: a defect. "
+        + LIBRARY_BUG
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
+    assert f"stocks.dividends poll() stream 1 failed. {failure}" in caplog.messages
+    # As the message says, calling the method again gives a new live table.
+    script.rows(("AAPL", 1.0))
+    again = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(again, dh_to_pylist) == [("AAPL", 1.0)])
+    assert [r["State"] for r in stream_rows()] == ["FAILED", "RUNNING"]
+    massive_session.release(again)
 
 
 def test_a_reactive_symbol_table_is_read_each_cycle(
@@ -1665,7 +1682,10 @@ def test_close_stops_every_poller_and_marks_the_rows(
     (row,) = dh_to_pylist(streams)  # a view taken before the close keeps the final rows
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates. " + NEW_SESSION,
+        (
+            "This session was closed, so this table no longer updates. Open a new "
+            "dm.MassiveSession() to read again."
+        ),
     )
     del streams
     with pytest.raises(dm.MassiveError, match="is closed"):
@@ -1792,9 +1812,9 @@ def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
     assert escaped == []
     assert not poller.fail(dm.MassiveError("closed"))  # counted as failed: not tried again
     assert (
-        "stocks.dividends poll() stream 1: could not fail its table with HTTP 403 from GET "
-        "/stocks/v1/dividends"
-    ) in caplog.text
+        "stocks.dividends poll() stream 1: could not fail the table, so it stops updating with "
+        f"no error. The error was: HTTP 403 from GET /stocks/v1/dividends {LIBRARY_BUG}"
+    ) in caplog.messages
     monkeypatch.undo()
     massive_session.release(table)
 
@@ -1920,7 +1940,10 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
     poller = poller_of(pollers)
     clock.wait_for_sleepers(1)
     core = massive_session._core
-    closed = f"{core.label} was closed; this table no longer updates. " + NEW_SESSION
+    closed = (
+        "This session was closed, so this table no longer updates. Open a new "
+        "dm.MassiveSession() to read again."
+    )
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
     failures: list[Exception] = []
     publisher = poller._publisher
@@ -2614,7 +2637,7 @@ def test_a_failure_while_publishing_keeps_the_poller(
     (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
     assert (utc(gap["SpanStart"]), gap["Detail"], gap["EndedAt"]) == (
         "2027-01-15T08:00:00Z",
-        f"publish failed; {NO_GOOD}",
+        f"{NO_GOOD} Then a cycle failed: publish failed",
         None,
     )
     script.rows(("AAPL", 2.0))
@@ -2642,7 +2665,8 @@ def test_a_failed_publish_still_evicts_the_keys_it_dropped(
     next_cycle(clock)
     assert stream_rows()[0]["Error"] is None
     (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
-    assert (gap["Detail"], gap["EndedAt"]) == (f"conversion failed; {GOOD}", None)
+    detail = f"{GOOD} Then a cycle failed: conversion failed"
+    assert (gap["Detail"], gap["EndedAt"]) == (detail, None)
     assert pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)]
     script.rows(("AAPL", 4.0))  # the next cycle still tombstones MSFT
     next_cycle(clock)
@@ -2805,7 +2829,8 @@ def test_a_failed_append_remembers_nothing(
     assert feed_session._core.diagnostics.wait_until_shown(30.0)
     assert dh_to_pylist(feed_session.streams())[0]["Error"] is None
     (gap,) = problems_of(feed_session, dh_to_pylist, FAILED)
-    assert (gap["Detail"], gap["EndedAt"]) == (f"conversion failed; {GOOD}", None)
+    detail = f"{GOOD} Then a cycle failed: conversion failed"
+    assert (gap["Detail"], gap["EndedAt"]) == (detail, None)
     assert ids(table, dh_to_pylist) == [("a", 1.0)]
     next_cycle(clock)  # so the next cycle appends b, and still skips a
     until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
@@ -2855,7 +2880,7 @@ def test_a_row_with_a_null_poll_key_is_withheld_in_every_mode(
         (e.cause, e.symbol, e.field, e.rows, e.detail) for e in events
     ]
     assert (cause, symbol, column, count) == (ProblemCause.UNREADABLE_KEYS, "AAPL", field, 1)
-    assert reason.startswith(f"row 1 of the cycle has a null poll key {field!r}: ")
+    assert reason.startswith(f"row 1 of the cycle has a null key column {field!r}: ")
     (row,) = streams_of(feed_session, dh_to_pylist)
     assert (row["State"], row["RowsPublished"]) == ("RUNNING", 1)
 
@@ -2879,7 +2904,7 @@ def test_a_row_with_a_null_poll_key_fails_the_table_under_raise(
     assert row["State"] == "FAILED"
     assert row["Error"] == (
         "stocks.dividends poll(): Massive sent 1 row the library cannot read whole, so it "
-        "withheld it: 1 under unreadable_keys. Row 1 of the cycle has a null poll key 'Id': "
+        "withheld it: 1 under unreadable_keys. Row 1 of the cycle has a null key column 'Id': "
         "{'Symbol': 'AAPL', 'Currency': 'USD'}. To go on without such rows, pass "
         "on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the call or to "
         "dm.MassiveConfig."
@@ -2928,9 +2953,9 @@ def test_a_cycle_whose_every_row_has_a_null_poll_key_fails_the_table(
     assert row["State"] == "FAILED"
     assert row["Error"] == (
         "stocks.dividends poll(): every one of the 2 rows Massive sent this cycle has a null "
-        "poll key, so the library withheld them all. Row 0 of the cycle has a null poll key "
-        "'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}. m.problems() counts the withheld rows by "
-        "cause and symbol."
+        "key column, so the library withheld them all. Row 0 of the cycle has a null key "
+        "column 'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}. m.problems() counts the withheld "
+        "rows by cause and symbol."
     )
     assert row["RowsPublished"] == 0
 
@@ -2990,7 +3015,7 @@ def test_a_nan_poll_key_is_withheld_and_a_long_row_is_truncated(
     until(lambda: table.size == 1)
     until(lambda: len(events) == 1)
     (event,) = events
-    prefix = "row 0 of the cycle has a null poll key 'CashAmount': "
+    prefix = "row 0 of the cycle has a null key column 'CashAmount': "
     assert event.detail.startswith(prefix + "{'Symbol': 'xxx")
     rendered = event.detail.removeprefix(prefix)
     assert len(rendered) == 300
@@ -3471,7 +3496,8 @@ def test_a_poller_refuses_a_mode_no_cycle_publishes_by(
     *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
 ) -> None:
     # AUTO is resolved before a poller starts; a mode with no publish rule must not be upserted.
-    refused = r"^stocks\.dividends poll\(\) has no rule for auto\."
+    refused = re.escape(f"stocks.dividends poll() has no rule for mode AUTO. {LIBRARY_BUG}")
+    refused = f"^{refused}$"
     with pytest.raises(BrokenGuaranteeError, match=refused):
         poll.Poller(
             massive_session._core,
