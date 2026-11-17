@@ -65,7 +65,7 @@ HISTORY_SECTIONS: Final = (
     "convert-symbols",
 )
 """The README's examples that read stock history with no setting, which follow its hook:
-Examples 1 to 6, the conversion of Yahoo tickers that ends Example 6, and Example 13."""
+Examples 1 to 6, the conversion of Yahoo tickers that ends Example 6, and Example 14."""
 
 LIVE_SECTIONS: Final = (
     "what-your-plan-allows",
@@ -79,6 +79,9 @@ LIVE_SECTIONS: Final = (
 README's order."""
 
 UNRUN_SECTIONS: Final = {
+    "options-chain": (
+        "the smoke tests read m.options.chain on the owner's key; tests/test_docs.py runs it"
+    ),
     "massive-config": "it opens a session and reads nothing; tests/test_docs.py runs it",
     "bad-symbols-and-rows": (
         "it sets error policies, which tests/test_docs.py checks; its one read is Example 1's "

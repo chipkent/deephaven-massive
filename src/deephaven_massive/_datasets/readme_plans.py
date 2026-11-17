@@ -126,6 +126,12 @@ ROWS: Final = (
         (f"{_REST}/snapshots/full-market-snapshot.md",),
         ("what-your-plan-allows",),
     ),
+    PlansRow(
+        "Option chain",
+        "options.chain",
+        ("https://massive.com/docs/rest/options/snapshots/option-chain-snapshot.md",),
+        ("options-chain",),
+    ),
 )
 """The data the README's tutorial reads, in the order its examples first read it."""
 
@@ -182,16 +188,21 @@ def _plans(pages: Sequence[Sequence[tuple[str, PlanAccess]]]) -> list[str]:
 
 
 def plans_table(catalog: Catalog, provenance: Provenance) -> str:
-    """Render the README's plans table.
+    """Render the README's plans table: one table per family of plans.
+
+    Massive's plan names start with the subscription they belong to, so the plans the rows'
+    pages list fall into families by their first word. Each family gets its own table, so a
+    reader of one subscription's examples isn't given a column for each plan of another.
 
     Args:
         catalog: The catalog, which holds each row's dataset.
         provenance: The vendor pages' plan tables, by URL, and each source's pages.
 
     Returns:
-        The guide, a blank line, and the table, ending in one newline: a header of **Data**
-        and every plan the rows' pages list, then one row per entry of `ROWS`, its label
-        linked to its dataset's page and each cell `plan_cell` of its pages for that plan.
+        The guide, then each family's table after a blank line, ending in one newline. A table
+        has a header of **Data** and the family's plans in the order the pages list them, then
+        one row per entry of `ROWS` whose pages list a plan of the family: its label linked to
+        its dataset's page, and each cell `plan_cell` of its pages for that plan.
 
     Raises:
         KeyError: If a row's dataset isn't in the catalog.
@@ -199,12 +210,24 @@ def plans_table(catalog: Catalog, provenance: Provenance) -> str:
             tables.
     """
     pages = [_row_pages(row, catalog, provenance) for row in ROWS]
-    plans = _plans(pages)
-    lines = [_GUIDE, "", table_row(["Data", *plans]), table_row(["---"] * (len(plans) + 1))]
-    for row, row_pages in zip(ROWS, pages, strict=True):
-        link = f"[{row.label}](docs/datasets/{page_name(catalog.by_name[row.dataset])}#plans)"
-        lines.append(table_row([link, *(plan_cell(plan, row_pages) for plan in plans)]))
+    families: dict[str, list[str]] = {}
+    for plan in _plans(pages):
+        families.setdefault(_family(plan), []).append(plan)
+    lines = [_GUIDE]
+    for plans in families.values():
+        lines.extend(("", table_row(["Data", *plans]), table_row(["---"] * (len(plans) + 1))))
+        for row, row_pages in zip(ROWS, pages, strict=True):
+            if not set(plans) & set(_plans([row_pages])):
+                continue
+            name = page_name(catalog.by_name[row.dataset])
+            link = f"[{row.label}](docs/datasets/{name}#plans)"
+            lines.append(table_row([link, *(plan_cell(plan, row_pages) for plan in plans)]))
     return "\n".join(lines) + "\n"
+
+
+def _family(plan: str) -> str:
+    """Return the family of a plan: the first word of its name, its subscription."""
+    return plan.split(maxsplit=1)[0]
 
 
 def with_plans_table(page: str, catalog: Catalog, provenance: Provenance) -> str:
@@ -262,7 +285,7 @@ def expected_plan_line(pages: Sequence[Sequence[tuple[str, PlanAccess]]]) -> str
         for plan in plans
     ]
     if all(included):
-        families = {plan.split()[0] for plan in plans}
+        families = {_family(plan) for plan in plans}
         if len(families) != 1:
             raise ValueError(f"the plans {plans} share no first word")
         return f"Any {families.pop()} plan"

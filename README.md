@@ -132,7 +132,7 @@ fixes.
 ## Tutorial
 
 Paste each example into the **Console** panel of the Deephaven IDE and run it. Each example's
-**Plan** line names the Massive plans that run it, and Examples 8 to 12 read the settings file
+**Plan** line names the Massive plans that run it, and Examples 8 to 13 read the settings file
 that Example 7 saves.
 
 | # | Example |
@@ -149,7 +149,8 @@ that Example 7 saves.
 | 10 | [Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started](#table-shapes) |
 | 11 | [Backfill: start with today's minute bars, then continue live](#backfill-then-live) |
 | 12 | [Dashboards: show a live chart and table together with deephaven.ui](#dashboard) |
-| 13 | [Stopping live tables: release one table or close the session](#stop-live-tables) |
+| 13 | [Options: read one expiry of a stock's calls](#options-chain) |
+| 14 | [Stopping live tables: release one table or close the session](#stop-live-tables) |
 
 <a id="plans"></a>
 
@@ -164,6 +165,10 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | [Previous day bar](docs/datasets/stocks.previous_day_bar.md#plans) | End-of-day | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
 | [News](docs/datasets/reference.news.md#plans) | Updated hourly, 2 years | Updated hourly, All history | Updated hourly, All history | Updated hourly, All history | Updated hourly, All history |
 | [Snapshots](docs/datasets/stocks.snapshots.md#plans) | Not included | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
+
+| Data | Options Basic | Options Starter | Options Developer | Options Advanced | Options Business |
+| --- | --- | --- | --- | --- | --- |
+| [Option chain](docs/datasets/options.chain.md#plans) | Not included | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
 
 <!-- End of the generated plans table. -->
 
@@ -593,6 +598,37 @@ A dashboard arranges panels in rows and columns, and each panel holds any table 
 Deephaven's guide to
 [creating dashboards](https://deephaven.io/core/ui/docs/creating-layouts/creating-dashboards/)
 shows more layouts.
+
+Next, options on the stocks you follow.
+
+<a id="options-chain"></a>
+
+### Options: read one expiry of a stock's calls
+
+**Plan:** Options Starter or higher
+
+Read Apple's calls that expire on December 18, 2026, with their quotes, implied volatility, and
+open interest. If the plans table shows your options plan delayed, list `options` in your
+settings file too, as `delayed_subscriptions: [stocks, options]`.
+
+```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession(dm.MassiveConfig.from_file("~/massive/settings.yaml"))
+chain = m.options.chain(
+    "AAPL", contract_type=dm.ContractType.CALL, filters={"expiration_date": "2026-12-18"}
+).fetch()
+calls = chain.view(
+    ["StrikePrice", "LastQuoteBidPrice", "LastQuoteAskPrice", "ImpliedVolatility", "OpenInterest"]
+).sort("StrikePrice")
+```
+
+`calls` has a row for each call of that expiry, from the lowest strike to the highest.
+
+`m.options.chain` reads a snapshot of every contract of one underlying, and its arguments narrow
+it to the contracts you want. To read contracts you can already name, such as
+`O:AAPL261218C00250000`, call `m.options.contract_details` instead. The
+[dataset index](docs/datasets/README.md) lists the other options datasets.
 
 Next, how to stop live tables when you're done with them.
 

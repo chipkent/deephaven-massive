@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 README = Path(__file__).resolve().parents[2] / "README.md"
 BARS_HISTORY = ROWS[0].urls[0]
-SNAPSHOTS = ROWS[-1].urls[0]
+SNAPSHOTS = next(row for row in ROWS if row.dataset == "stocks.snapshots").urls[0]
 
 
 def _with_page(base: Provenance, url: str, plans: dict[str, str]) -> Provenance:
@@ -57,10 +57,19 @@ def _with_page(base: Provenance, url: str, plans: dict[str, str]) -> Provenance:
     )
 
 
-def _lines(table: str) -> list[list[str]]:
-    """Return a rendered table's rows, each as its cells."""
-    rows = [line for line in table.splitlines() if line.startswith("| ")]
-    return [[cell.strip() for cell in row.strip("|").split(" | ")] for row in rows]
+def _tables(text: str) -> list[list[list[str]]]:
+    """Return each rendered table's rows, each as its cells, header and rule included."""
+    tables: list[list[list[str]]] = []
+    for block in text.split("\n\n"):
+        rows = [line for line in block.splitlines() if line.startswith("| ")]
+        if rows:
+            tables.append([[cell.strip() for cell in row.strip("|").split(" | ")] for row in rows])
+    return tables
+
+
+def _lines(text: str) -> list[list[str]]:
+    """Return the rows of the first rendered table, the one the stock examples read."""
+    return _tables(text)[0]
 
 
 def test_the_readme_holds_the_rendered_table() -> None:
@@ -71,26 +80,31 @@ def test_the_readme_holds_the_rendered_table() -> None:
 
 
 def test_a_row_shows_what_each_dataset_page_shows_for_the_same_plan() -> None:
-    rows = _lines(plans_table(CATALOG, provenance()))
-    header, body = rows[0], rows[2:]
-    assert header[0] == "Data"
-    assert [row[0] for row in body] == [
-        f"[{r.label}](docs/datasets/{r.dataset}.md#plans)" for r in ROWS
-    ]
-    # Each cell appears in the dataset page's own Plans table, in the same plan's row.
-    for row, cells in zip(ROWS, body, strict=True):
-        dataset_page = (README.parent / "docs" / "datasets" / f"{row.dataset}.md").read_text()
-        for plan, cell in zip(header[1:], cells[1:], strict=True):
-            line = next(x for x in dataset_page.splitlines() if x.startswith(f"| {plan} |"))
-            assert f"| {cell} |" in line, (row.label, plan, cell)
+    labels = {f"[{r.label}](docs/datasets/{r.dataset}.md#plans)": r for r in ROWS}
+    shown = []
+    for table in _tables(plans_table(CATALOG, provenance())):
+        header, body = table[0], table[2:]
+        assert header[0] == "Data"
+        # One family of plans per table: every plan's name starts with the same word.
+        assert len({plan.split(maxsplit=1)[0] for plan in header[1:]}) == 1
+        for cells in body:
+            row = labels[cells[0]]
+            shown.append(row)
+            # Each cell appears in the dataset page's own Plans table, in the same plan's row.
+            text = (README.parent / "docs" / "datasets" / f"{row.dataset}.md").read_text()
+            for plan, cell in zip(header[1:], cells[1:], strict=True):
+                line = next(x for x in text.splitlines() if x.startswith(f"| {plan} |"))
+                assert f"| {cell} |" in line, (row.label, plan, cell)
+    assert shown == list(ROWS)
 
 
 def test_a_plan_one_page_lists_gets_a_column_with_empty_cells_elsewhere() -> None:
     base = provenance()
     plans = {t.plan: t.recency or "" for t in base.plans[SNAPSHOTS].plans}
-    changed = _with_page(base, SNAPSHOTS, {**plans, "A new plan": "Real-time"})
+    newest = f"{next(iter(plans)).split(maxsplit=1)[0]} Newest"
+    changed = _with_page(base, SNAPSHOTS, {**plans, newest: "Real-time"})
     rows = _lines(plans_table(CATALOG, changed))
-    assert rows[0][-1] == "A new plan"
+    assert rows[0][-1] == newest
     assert [row[-1] for row in rows[2:]] == ["", "", "", "", "Real-time"]
 
 
