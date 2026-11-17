@@ -19,10 +19,9 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import dtypes, new_table
+from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.table import Table
-from deephaven.table_factory import InputTable
 from deephaven.update_graph import shared_lock
 from typing_extensions import Unpack, override
 
@@ -175,7 +174,24 @@ CONTRACTS = DatasetSpec(
     name="options.contracts",
     asset_class=AssetClass.OPTIONS,
     fetch_path=CONTRACTS_PATH,
-    detail_path=CONTRACT_PATH,
+    keys={(R, CONTRACTS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+)
+CONTRACT_DETAILS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="options.contract_details",
+    asset_class=AssetClass.OPTIONS,
+    fetch_path=CONTRACT_PATH,
+    keys={(R, CONTRACT_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+    per_symbol=True,
+)
+# A contract is read on the per-contract path, which takes neither `order` nor the list's
+# filters, so a parameter one path of a call lacks can be tested.
+ROUTED = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="options.routed",
+    asset_class=AssetClass.OPTIONS,
+    fetch_path=CONTRACTS_PATH,
+    fetch_paths_by_class={AssetClass.OPTIONS: CONTRACT_PATH},
     keys={
         (R, CONTRACTS_PATH): SourceKeys(symbol=KeySpec("Ticker")),
         (R, CONTRACT_PATH): SourceKeys(symbol=KeySpec("Ticker")),
@@ -406,6 +422,8 @@ SPECS = (
     CRYPTO_LAST,
     MOVERS,
     CONTRACTS,
+    CONTRACT_DETAILS,
+    ROUTED,
     SMA,
     CONVERSION,
     INDEX_SNAPSHOTS,
@@ -1841,10 +1859,19 @@ def test_order_without_sort_fails_where_no_path_has_order(session: dm.MassiveSes
 def test_order_without_sort_fails_on_a_chosen_path_without_order(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # The contracts list path has `order`; the per-contract detail path has neither.
-    q = query(session, CONTRACTS, symbols=["O:SPY251219C00600000"], params={"order": Order.ASC})
+    q = query(session, ROUTED, symbols=["O:SPY251219C00600000"], params={"order": Order.ASC})
     assert isinstance(q, FetchQuery)
     with pytest.raises(ValueError, match=r"does not take \['order'\]"):
+        q.fetch(wait=True)
+    assert fake_rest.requests == []
+
+
+def test_a_filter_a_chosen_path_lacks_fails_never_drops(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    q = query(session, ROUTED, symbols=["O:SPY251219C00600000"], filters={"strike_price_gte": 1})
+    assert isinstance(q, FetchQuery)
+    with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
         q.fetch(wait=True)
     assert fake_rest.requests == []
 
@@ -1966,28 +1993,6 @@ def test_an_explicit_adjusted_fails_on_another_path_without_it(
     with pytest.raises(ValueError, match=r"dividends does not take \['adjusted'\]"):
         q.fetch(wait=True)
     assert fake_rest.requests == []
-
-
-def test_a_per_symbol_detail_path_serves_named_symbols(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    contract = {"ticker": "O:SPY250117C00600000", "strike_price": 600.0}
-    fake_rest.reply(CONTRACTS_PATH, Reply(envelope([contract])))
-    fake_rest.reply(
-        "/v3/reference/options/contracts/O%3ASPY250117C00600000", Reply(envelope(contract))
-    )
-    listed = fetch(session, CONTRACTS, filters={"strike_price_gte": 500})
-    named = fetch(session, CONTRACTS, symbols=["O:SPY250117C00600000"])
-    assert [path for path, _ in fake_rest.get_queries()] == [
-        CONTRACTS_PATH,
-        "/v3/reference/options/contracts/O:SPY250117C00600000",
-    ]
-    assert listed == named
-    # A filter of the list path cannot reach the detail path: it fails, never drops.
-    q = query(session, CONTRACTS, symbols=["O:SPY250117C00600000"], filters={"strike_price_gte": 1})
-    assert isinstance(q, FetchQuery)
-    with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
-        q.fetch(wait=True)
 
 
 def test_row_symbols_are_canonical(
@@ -3343,61 +3348,21 @@ def test_a_decision_is_shared_even_if_recording_it_fails(
     assert len(snapshots.requests) == 1
 
 
-def test_a_parameter_a_named_contract_lacks_fails_a_watchlist_poll_at_the_call(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+def test_a_poll_checks_each_value_of_a_table_as_the_parameter_it_is_sent_as(
+    *, session: dm.MassiveSession
 ) -> None:
-    # A contract the watchlist names reads the per-contract path, which takes no filter of the
-    # list path, so the poll fails as a list of the same contracts does.
-    watch = new_table([string_col("Symbol", ["O:SPY250117C00600000"])])
-    for symbols in (watch, ["O:SPY250117C00600000"]):
-        q = query(session, CONTRACTS, symbols=symbols, filters={"strike_price_gte": 1})
-        assert isinstance(q, FetchQuery)
-        with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
-            q.poll(60)
-    assert fake_rest.requests == []
-
-
-@pytest.mark.parametrize("held", [[], ["O:SPY250117C00600000"]], ids=["empty", "a contract"])
-def test_a_parameter_a_named_contract_lacks_fails_a_watchlist_fetch_at_the_call(
-    *,
-    session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    dh_input_table: Callable[..., InputTable],
-    held: list[str],
-) -> None:
-    # As a poll does: a contract the watchlist names, now or later, reads the per-contract
-    # path, which takes no filter of the list path, so the fetch fails at the call.
-    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
-    if held:
-        watch.add(new_table([string_col("Symbol", held)]))
-    q = query(session, CONTRACTS, symbols=watch, filters={"strike_price_gte": 1})
-    assert isinstance(q, FetchQuery)
-    for wait in (False, True):
-        with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
-            q.fetch(wait=wait)
-    assert fake_rest.requests == []
-
-
-def test_a_poll_checks_only_the_paths_its_symbols_can_reach(*, session: dm.MassiveSession) -> None:
-    # A poll of contracts by a table of underlyings names no contract: it reads only the list
-    # path, so a filter the per-contract path lacks is fine. A watchlist may name contracts.
+    # Each value of a table of underlyings is sent as `underlying_ticker`, which the contracts
+    # list takes and a named contract's path doesn't.
     reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
-    listed = Request(filters=(("strike_price_gte", 1),))
-    reader.check_parameters(CONTRACTS, listed)
-    watch = SymbolTable(new_table([string_col("Symbol", ["O:SPY250117C00600000"])]))
-    with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
-        reader.check_parameters(CONTRACTS, dataclasses.replace(listed, symbols=watch))
-    # Each value of a table of underlyings is sent as `underlying_ticker`, which the list path
-    # takes and a named contract's path doesn't.
     with entered(session._core.exec_ctx):
         table = new_table([string_col("Underlying", ["SPY"])])
     underlyings = ValueTable(
         "underlying", "underlying_ticker", "Underlying", underlying=True, table=table
     )
-    reader.check_parameters(CONTRACTS, dataclasses.replace(listed, value_table=underlyings))
+    reader.check_parameters(CONTRACTS, Request(value_table=underlyings))
     named = Request(symbols=("O:SPY250117C00600000",), value_table=underlyings)
     with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
-        reader.check_parameters(CONTRACTS, named)
+        reader.check_parameters(CONTRACT_DETAILS, named)
 
 
 def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(

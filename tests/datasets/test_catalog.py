@@ -1180,6 +1180,13 @@ def test_wire_parameters_gate() -> None:
             "/stocks/v1/dividends"
         ),
     )
+    elsewhere = dataclasses.replace(DIVIDENDS, symbol_params_elsewhere={"tickers": "use X"})
+    assert problems(elsewhere) == (
+        (
+            "wire parameters: stocks.dividends: symbol parameter 'tickers' is not a parameter of "
+            "/stocks/v1/dividends"
+        ),
+    )
     wrong = {
         **STOCK_TRADES.keys,
         (R, "/v3/trades/{stockTicker}"): keys(request("ticker"), "SipTimestamp"),
