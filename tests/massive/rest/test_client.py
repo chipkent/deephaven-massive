@@ -202,13 +202,26 @@ def test_each_connection_has_a_pool_that_never_retries_with_the_timeouts(
 @pytest.mark.parametrize(
     ("base_url", "reason"),
     [
-        ("https://api.massive.com/v3", "must name only a scheme, host, and port"),
-        ("http://api.massive.com", "would send the API key in clear text"),
-        ("ftp://api.massive.com", "is not an absolute http or https URL"),
+        (
+            "https://api.massive.com/v3",
+            (
+                "names more than a scheme, host, and port. Pass only those, such as "
+                "'https://api.massive.com'."
+            ),
+        ),
+        (
+            "http://api.massive.com",
+            (
+                "would send the API key in clear text. Use https, or use http only for a loopback "
+                "host such as a local test server."
+            ),
+        ),
+        ("ftp://api.massive.com", "is not an absolute http or https URL with a valid port."),
     ],
 )
 def test_the_client_refuses_a_base_url_the_shared_rule_refuses(base_url: str, reason: str) -> None:
-    with pytest.raises(ValueError, match=f"^base_url '.*' {reason}"):
+    expected = f"base_url={base_url!r} {reason}"
+    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
         RestClient(_KEY, base_url=base_url, max_concurrency=1, governor=_governor())
 
 
@@ -223,7 +236,13 @@ def test_plain_http_is_allowed_for_loopback() -> None:
 def test_an_api_key_that_cannot_be_a_header_is_refused_without_being_shown(
     api_key: str,
 ) -> None:
-    with pytest.raises(ValueError, match=r"^api_key must be non-empty visible ASCII") as caught:
+    refused = (
+        r"^api_key (is empty\. Pass your Massive API key\.|holds a .* character at index \d+, "
+    )
+    refused += (
+        r"and an API key may hold only visible ASCII\. Pass the key without that character\.)$"
+    )
+    with pytest.raises(ValueError, match=refused) as caught:
         RestClient(
             api_key, base_url="https://api.massive.com", max_concurrency=1, governor=_governor()
         )
