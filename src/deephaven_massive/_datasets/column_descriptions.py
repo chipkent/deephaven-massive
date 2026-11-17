@@ -141,8 +141,8 @@ _FINISHED_ROWS: Final = (
     'values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows '
     "read after their window ended. That test reads the local clock, which can be off, and a "
     "row read within moments of its end, or from a delayed feed, may still lack the window's "
-    "last trades; an end set later than the window's (an index day's extra hour, a stamp kept "
-    "as sent) only keeps a finished row out longer."
+    "last trades; an end set later than the window's (an index day's extra hour) only keeps a "
+    "finished row out longer."
 )
 """How every `TimestampEnd` description tells finished rows from unfinished ones."""
 

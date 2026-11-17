@@ -84,16 +84,16 @@ def deephaven_time_text(value: object, name: str) -> object:
             continue
         if read is to_j_zdt and "T" not in value.split()[0]:
             raise ValueError(
-                f"{name}={value!r} names a day and a zone but no time; pass '2025-03-03' for "
-                "the whole day, or a time such as '2025-03-03T00:00 ET'"
+                f"{name}={value!r} names a day and a zone but no time. Pass '2025-03-03' for "
+                "the whole day, or a time such as '2025-03-03T00:00 ET'."
             )
         logger.debug("%s=%r read as Deephaven text: %s", name, value, java)
         return java
     raise ValueError(
-        f"{name}={value!r} is neither ISO-8601 (such as '2025-03-03' or "
-        "'2025-03-03T09:30:00-05:00') nor Deephaven date or time text (such as "
-        f"'2025-03-03T09:30 America/New_York'; Deephaven: {reason}). Deephaven reads zones "
-        "such as ET, CT, UTC, and America/New_York"
+        f"{name}={value!r} is neither ISO-8601 text nor Deephaven date or time text, and "
+        f"Deephaven says \"{reason.rstrip('.')}\". Pass text such as '2025-03-03', "
+        "'2025-03-03T09:30:00-05:00', or '2025-03-03T09:30 America/New_York', in a zone "
+        "Deephaven reads, such as ET, CT, UTC, or America/New_York."
     ) from unread
 
 

@@ -26,7 +26,6 @@ from deephaven_massive._datasets.row_times import (
     DATE,
     END,
     INSERT,
-    ISSUES_URL,
     LIBRARY_COLUMNS,
     START,
     TIMESTAMP,
@@ -274,7 +273,11 @@ def test_an_intraday_bar_ends_its_length_after_its_start() -> None:
         "2025-03-03",
     ]
     # A bar rule cannot do without its timespan.
-    with pytest.raises(ValueError, match=r"stocks\.bars: a bar rule needs its timespan"):
+    with pytest.raises(
+        ValueError,
+        match=r"^stocks\.bars: a bar rule was built without its timespan\. This is a bug in "
+        r"deephaven-massive\. ",
+    ):
         TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS)
 
 
@@ -319,13 +322,13 @@ def test_a_futures_second_bar_keeps_massive_s_end_and_warns_when_it_is_not_its_l
             "2025-03-07T15:00:03.500000+00:00",
         ]
         fill(rule, sent)
-    warned = [r for r in caplog.records if "is not its start plus its length" in r.message]
+    warned = [r for r in caplog.records if "not at its start plus its length" in r.message]
     # Once per dataset per process, at WARNING: the bar's window is then not its length.
     assert [r.levelno for r in warned] == [logging.WARNING]
     assert warned[0].message == (
-        "futures.bars: a bar's end from Massive (1741359660000000000 ns) is not its start plus "
-        "its length (1741359601000000000 ns); TimestampEnd keeps Massive's e, so the bar's "
-        "window is not its length"
+        "futures.bars: Massive sent a bar that ends at 2025-03-07T15:01:00+00:00, not at its "
+        "start plus its length, 2025-03-07T15:00:01+00:00. Nothing to do: TimestampEnd keeps the "
+        "end Massive sent, so this bar's window is not its length."
     )
     agreeing = bars(["2025-03-07T15:00:00"], ends=["2025-03-07T15:00:01"])
     caplog.clear()
@@ -596,7 +599,11 @@ def test_the_real_futures_datasets_get_their_session_rule() -> None:
 
 
 def test_a_daily_rule_needs_the_session_s_warnings() -> None:
-    with pytest.raises(ValueError, match="a daily rule needs the session's warnings"):
+    with pytest.raises(
+        ValueError,
+        match=r"^crypto\.daily_open_close: a daily rule was built without the session's "
+        r"warnings\. This is a bug in deephaven-massive\. ",
+    ):
         TimeRule("crypto.daily_open_close", RowTimes.DAY, A.CRYPTO, T.DAY)
 
 
@@ -622,15 +629,13 @@ def test_a_day_summary_not_in_utc_gets_its_dates_widest_window_and_one_warning()
     ]
     (call,) = log.log.call_args_list
     key, message, *args = call.args
-    assert key == "day summary not in UTC crypto.daily_open_close"
+    assert key == "day not in UTC crypto.daily_open_close"
     assert message % tuple(args) == (
         "crypto.daily_open_close: Massive sent the day summary of X for 2025-03-04 with isUTC "
-        "false, so its day is not the UTC day the other crypto tables use, and Massive does not "
-        "say which zone's day it is. The row keeps Massive's Date and IsUtc, and gets the widest "
-        "window that date's day has in any time zone, TimestampStart 2025-03-03T10:00:00+00:00 "
-        "to TimestampEnd 2025-03-05T12:00:00+00:00 (00:00 at UTC+14 to 24:00 at UTC-12), so a "
-        "join on TimestampEnd never attaches it before its day ended; please report it at "
-        f"{ISSUES_URL} (logged once per dataset per session)"
+        "false, so the library cannot tell which zone's day it covers. The row keeps Date and "
+        "IsUtc, with TimestampStart 2025-03-03T10:00:00+00:00 and TimestampEnd "
+        "2025-03-05T12:00:00+00:00, the span of that date in every zone. Report the row at "
+        "https://github.com/chipkent/deephaven-massive/issues so its day can be settled."
     )
     # A batch whose rows are all in UTC, or whose flags are unknown, keeps the UTC day and
     # warns of nothing.
@@ -788,22 +793,23 @@ def test_an_unexpected_stamp_is_returned_to_withhold_with_one_warning_per_form(
         assert stamped(week, [saturday], label="options.bars") == [saturday]
     assert moved == [datetime(2024, 11, 27, tzinfo=NEW_YORK), odd, None]
     assert odd_stamps(rule, [close, odd, None]) == [False, True, False]
-    served = (
-        "The library cannot tell which day it covers, so the row is withheld rather than "
-        "published at a guessed day (bars of {period}). Please "
-        f"report the stamp at {ISSUES_URL} so the day cut can be settled (logged once per "
-        "dataset, bar length, and time of day of the stamp per session)"
+    withheld = (
+        "so the library cannot tell which day this one covers and withholds it. Report the "
+        "stamp at https://github.com/chipkent/deephaven-massive/issues so the library can learn "
+        "which day such bars cover."
     )
     week_text = (
-        "a bar of AAPL from s is stamped 2025-03-01T05:00:00+00:00 (2025-03-01T00:00:00-05:00 "
-        "in America/New_York), which is not a stamp Massive is known to use for such a bar "
-        "(00:00:00.000 in America/New_York, on a Sunday). " + served.format(period="2 weeks")
+        "Massive sent a bar of AAPL stamped 2025-03-01T05:00:00+00:00 "
+        "(2025-03-01T00:00:00-05:00 in America/New_York). Massive is known to stamp bars of 2 "
+        f"weeks at 00:00:00.000 in America/New_York, on a Sunday, {withheld}"
     )
     assert stamp_warnings(caplog) == [
-        "stocks.bars: a 1-day bar of AAPL from s is stamped 2024-11-29T19:30:00+00:00 "
-        "(2024-11-29T14:30:00-05:00 in America/New_York), which is not a stamp Massive is "
-        "known to use for such a bar (00:00:00.000, 04:00:00.000, 13:00:00.000, 16:00:00.000 "
-        "in America/New_York). " + served.format(period="1 day"),
+        (
+            "stocks.bars: Massive sent a 1-day bar of AAPL stamped 2024-11-29T19:30:00+00:00 "
+            "(2024-11-29T14:30:00-05:00 in America/New_York). Massive is known to stamp bars of "
+            "1 day at 00:00:00.000, 04:00:00.000, 13:00:00.000, and 16:00:00.000 in "
+            f"America/New_York, {withheld}"
+        ),
         f"stocks.bars: {week_text}",
         f"options.bars: {week_text}",
     ]
@@ -993,7 +999,7 @@ def test_a_longer_bar_is_expected_on_the_1st_of_its_period(
     rule = StampRule(NEW_YORK, frozenset(), "bar", T.MONTH, 1, log, months=months)
     stamped(rule, [first + DAY_NS], label="x.bars")
     _, message, *args = log.log.call_args.args
-    assert f"on the 1st of {named})" in message % tuple(args)
+    assert f"on the 1st of {named}, so the library cannot tell" in message % tuple(args)
 
 
 def test_repeated_stamps_are_converted_once_and_kept_in_order() -> None:
