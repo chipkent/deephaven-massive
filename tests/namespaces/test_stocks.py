@@ -1691,7 +1691,14 @@ def test_fmv_streams_from_its_host_beside_delayed_stock_trades(
         "stocks.trades": ("delayed.massive.com", "DELAYED", "RUNNING"),
         "stocks.fmv": ("business.massive.com", "REALTIME", "FAILED"),
     }
-    assert "Massive said: not authorized to access FMV.MSFT" in rows["stocks.fmv"]["Error"]
+    assert rows["stocks.fmv"]["Error"] == (
+        'Massive answered the subscription to FMV.MSFT on wss://business.massive.com/stocks: "not '
+        'authorized to access FMV.MSFT". Massive documents stocks.fmv only on its Business feed, '
+        "business.massive.com; its plans are listed at "
+        "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.fmv.md. "
+        "Massive documents one host for FMV data, business.massive.com, and websocket_hosts does "
+        "not apply to it."
+    )
     evidence = {r["Family"]: r["Evidence"] for r in dh_to_pylist(session.session.connections())}
     assert evidence == {
         "TICK": "MassiveConfig.delayed_subscriptions",

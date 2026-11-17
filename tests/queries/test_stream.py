@@ -42,7 +42,8 @@ RowsWhen: TypeAlias = Callable[
 
 @pytest.mark.parametrize("capacity", [0, -1, 2**31])
 def test_ring_bounds(massive_session: dm.MassiveSession, capacity: int) -> None:
-    with pytest.raises(ValueError, match="capacity must be between 1 and 2147483647"):
+    refusal = f"capacity={capacity} is not between 1 and 2147483647."
+    with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
         trades(massive_session).ring(capacity)
 
 

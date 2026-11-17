@@ -588,7 +588,7 @@ def test_bad_types_are_refused(massive_session: dm.MassiveSession) -> None:
     ratings = massive_session.partners.benzinga.ratings
     with pytest.raises(TypeError, match="sort must be a str"):
         ratings(sort=1)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="limit must be positive"):
+    with pytest.raises(ValueError, match=whole("limit=0 is not positive.")):
         ratings(limit=0)
     with pytest.raises(TypeError, match="filters must be a mapping"):
         ratings(filters=[("date", "2025-01-01")])  # type: ignore[arg-type]  # the point: refused at run time

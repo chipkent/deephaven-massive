@@ -148,11 +148,27 @@ def test_a_feed_with_a_limit_polls_its_latest_rows(
     assert [c[0] for c in rest.calls] == ["poll"]
 
 
-@pytest.mark.parametrize("interval", [0, -1, float("inf"), float("nan"), 1e300, 10**400])
+@pytest.mark.parametrize(
+    ("interval", "refusal"),
+    [
+        (0, "interval=0 is not a positive, finite number."),
+        (-1, "interval=-1 is not a positive, finite number."),
+        (float("inf"), "interval=inf is not a positive, finite number."),
+        (float("nan"), "interval=nan is not a positive, finite number."),
+        (
+            1e300,
+            (
+                "interval=1e+300 is longer than a timedelta can hold. Pass a number of seconds, "
+                "such as 60."
+            ),
+        ),
+        (10**400, "interval is an int too large to convert to a float. Pass a smaller number."),
+    ],
+)
 def test_poll_interval_values(
-    massive_session: dm.MassiveSession, rest: Recorder, interval: object
+    *, massive_session: dm.MassiveSession, rest: Recorder, interval: object, refusal: str
 ) -> None:
-    with pytest.raises(ValueError, match=r"^interval"):
+    with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
         feed(massive_session).poll(interval)  # type: ignore[arg-type]  # the point: refused at run time
     assert rest.calls == []
 
@@ -193,7 +209,8 @@ def test_poll_interval_types(
 
 def test_poll_mode_is_an_enum(massive_session: dm.MassiveSession, rest: Recorder) -> None:
     with pytest.raises(
-        TypeError, match=r"^mode must be dm\.PollMode, e\.g\. dm\.PollMode\.UPSERT$"
+        TypeError,
+        match=r"^mode must be dm\.PollMode, such as dm\.PollMode\.UPSERT, not 'upsert'$",
     ):
         feed(massive_session).poll(
             30,

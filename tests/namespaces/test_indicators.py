@@ -149,7 +149,7 @@ def test_macd_takes_three_windows(massive_session: dm.MassiveSession) -> None:
         "short_window": 12,
         "signal_window": 9,
     }
-    with pytest.raises(ValueError, match="signal_window must be positive"):
+    with pytest.raises(ValueError, match=whole("signal_window=0 is not positive.")):
         massive_session.indicators.macd("AAPL", short_window=12, long_window=26, signal_window=0)
 
 
@@ -167,7 +167,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         )
         with pytest.raises(ValueError, match=whole(refusal)):
             i.sma("AAPL", 20, timespan=span)
-    with pytest.raises(ValueError, match="window must be positive"):
+    with pytest.raises(ValueError, match=whole("window=0 is not positive.")):
         i.rsi("AAPL", 0)
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         i.rsi("AAPL", 14, adjusted=1)  # type: ignore[arg-type]  # the point: refused at run time

@@ -172,7 +172,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         e.labor_market(filters={"nope": 1})
     with pytest.raises(ValueError, match="end"):
         e.labor_market(start="2025-02-01", end="2025-01-01")
-    with pytest.raises(ValueError, match="limit must be positive"):
+    with pytest.raises(ValueError, match=whole("limit=0 is not positive.")):
         e.labor_market(limit=0)
     with pytest.raises(TypeError, match="sort must be a str"):
         e.labor_market(sort=1)  # type: ignore[arg-type]  # the point: refused at run time

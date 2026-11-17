@@ -31,7 +31,6 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
-from deephaven_massive._datasets.column_reference import page_url
 from deephaven_massive._datasets.filters import filter_keys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
@@ -2093,11 +2092,13 @@ def test_a_refused_admin_subscription_fails_its_table_and_links_its_page(
     rows_by = {r["Dataset"]: r for r in shown_streams(ws_session, dh_to_pylist)}
     refused, running = rows_by["options.admin_messages"], rows_by["options.trades"]
     assert refused["State"] == "FAILED"
-    assert "refused the subscription to AD.*; Massive said: not authorized" in refused["Error"]
-    assert refused["Error"].endswith(
-        "options.admin_messages streams only in real time, on the plans listed at "
-        "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
-        "options.admin_messages.md"
+    assert refused["Error"] == (
+        'Massive answered the subscription to AD.* on wss://socket.test/options: "not authorized '
+        'to access AD.*". options.admin_messages streams only in real time, on the plans listed '
+        "at https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
+        "options.admin_messages.md. Massive documents the options AD channel only on "
+        "socket.massive.com. To stream from another host, pass "
+        'websocket_hosts={dm.AssetClass.OPTIONS: "<host>"} to dm.MassiveConfig.'
     )
     assert running["State"] == "RUNNING"
     ws_session.session.release(notices)
@@ -2129,12 +2130,14 @@ def test_admin_messages_on_the_delayed_feed_fail_on_massives_refusal(
     assert session.urls == ["wss://delayed.test/options"]
     (row,) = shown_streams(session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert "delayed.test/options refused the subscription to AD.*" in row["Error"]
-    assert "MassiveConfig.delayed_subscriptions lists dm.Subscription.OPTIONS" in row["Error"]
-    assert "(Massive documents the options AD channel only on socket.massive.com)" in row["Error"]
-    assert row["Error"].endswith(
-        "options.admin_messages streams only in real time, on the plans listed at "
-        + page_url(options.ADMIN_MESSAGES)
+    assert row["Error"] == (
+        'Massive answered the subscription to AD.* on wss://delayed.test/options: "not '
+        'authorized to access AD.*". options.admin_messages streams only in real time, on the '
+        "plans listed at https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
+        "options.admin_messages.md. Massive documents the options AD channel only on "
+        "socket.massive.com. delayed_subscriptions lists dm.Subscription.OPTIONS, so this table "
+        "streams from Massive's delayed feed. To stream from the real-time feed, remove "
+        "dm.Subscription.OPTIONS from delayed_subscriptions."
     )
     session.session.release(notices)
 

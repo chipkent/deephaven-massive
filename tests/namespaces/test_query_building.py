@@ -183,7 +183,7 @@ def test_limit_is_a_row_cap_not_a_wire_parameter(massive_session: dm.MassiveSess
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit="10")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="limit must be an int"):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=True)
-    with pytest.raises(ValueError, match="limit must be positive"):
+    with pytest.raises(ValueError, match=whole("limit=0 is not positive.")):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], limit=0)
 
 
@@ -253,9 +253,17 @@ def test_a_request_built_without_a_session_policy_follows_the_defaults(
 def test_the_call_s_policy_must_be_an_error_policy(
     massive_session: dm.MassiveSession, policy: object
 ) -> None:
-    with pytest.raises(TypeError, match=r"^on_error must be dm\.ErrorPolicy"):
+    if policy is dm.OnError.RAISE:
+        refusal = (
+            "on_error=dm.OnError.RAISE is not a dm.ErrorPolicy. To set every cause to RAISE, "
+            "pass on_error=dm.ErrorPolicy(dm.OnError.RAISE)."
+        )
+        match = whole(refusal)
+    else:
+        match = r"^on_error must be dm\.ErrorPolicy"
+    with pytest.raises(TypeError, match=match):
         build(massive_session, DIVIDENDS, symbols=["AAPL"], on_error=policy)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(TypeError, match=r"^on_error must be dm\.ErrorPolicy"):
+    with pytest.raises(TypeError, match=match):
         massive_session.stocks.trades("AAPL", on_error=policy)  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -496,7 +504,8 @@ def test_filters_go_through_the_catalog_check(massive_session: dm.MassiveSession
 
 
 def test_timespan_is_an_enum_on_every_dataset(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
+    refusal = "timespan must be dm.Timespan, such as dm.Timespan.DAY, not 'day'"
+    with pytest.raises(TypeError, match=whole(refusal)):
         build(massive_session, INDICATOR, timespan="day")  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -1322,7 +1331,8 @@ def test_bar_periods_are_left_to_massive() -> None:
     _check_bar_period(Timespan.SESSION, 1)
     _check_bar_period(Timespan.DAY, 0)
     _check_bar_period(Timespan.MINUTE, -5)
-    with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan, e\.g\. dm\.Timespan\.DAY"):
+    refusal = "timespan must be dm.Timespan, such as dm.Timespan.DAY, not 'day'"
+    with pytest.raises(TypeError, match=whole(refusal)):
         _check_bar_period("day", 1)
 
 

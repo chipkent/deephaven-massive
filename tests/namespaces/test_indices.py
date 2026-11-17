@@ -438,7 +438,7 @@ def test_snapshots_filters_are_the_snapshot_parameters(m: dm.MassiveSession) -> 
 def test_snapshots_check_their_list_parameters(m: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         m.indices.snapshots("I:SPX", order="asc")  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="limit must be positive"):
+    with pytest.raises(ValueError, match=whole("limit=0 is not positive.")):
         m.indices.snapshots("I:SPX", limit=0)
 
 
@@ -914,10 +914,15 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
 
     wait_for(lambda: error() is not None)
     message = str(error())
-    assert (
-        "socket.test/indices refused the subscription to V.I:SPX; Massive said: not authorized"
-    ) in message
-    assert "MassiveConfig.websocket_hosts[AssetClass.INDICES]" in message
+    assert message == (
+        'Massive answered the subscription to V.I:SPX on wss://socket.test/indices: "not '
+        'authorized". Massive documents indices.values only on its Business feed, '
+        "business.massive.com; its plans are listed at "
+        "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.values.md. "
+        "Massive documents the indices V channel only on business.massive.com. To stream from "
+        'another host, pass websocket_hosts={dm.AssetClass.INDICES: "<host>"} to '
+        "dm.MassiveConfig."
+    )
     assert "business.massive.com" in message
     assert [type(error) for error in failures] == [dm.EntitlementError]
     del result
