@@ -927,22 +927,15 @@ class OptionsNamespace(Namespace):
         Lists the contracts of one underlying, or of every underlying, so you can find their
         tickers. To read contracts you can already name, use `contract_details()`.
 
-        A table of underlyings lists each one's contracts. With a live table, add an underlying
-        and its contracts appear. Remove it and they leave. What a failed underlying does to the
-        result depends on the method you call: see `fetch()` and `poll()`.
-
-        By default, a row of the table that isn't Massive's exact stock or index ticker is
-        skipped and logged. `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`
-        makes it an error instead.
-
         Args:
             underlying: Massive's exact ticker of the underlying, such as `"AAPL"` or `"I:SPX"`.
-                A table of them in a `Symbol` column lists each one's contracts. Leave it out
-                for every underlying.
+                A table of stock or index tickers in a `Symbol` column lists each one's
+                contracts. With a live table, add an underlying and its contracts appear. Leave
+                it out for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
-            expired: True sends Massive's `expired=true`, which Massive documents as "Query for
-                expired contracts". False, the default, sends nothing.
+            expired: True asks Massive for expired contracts (Massive: "Query for expired
+                contracts"). Defaults to False.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A table of underlyings caps every
@@ -1011,10 +1004,7 @@ class OptionsNamespace(Namespace):
         request. To find a contract's ticker first, list its underlying's contracts with
         `contracts()`.
 
-        By default, a contract Massive has no data for gets no row and is logged at `WARNING`.
-        `on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE)` makes it an error
-        instead. What an error does to the result depends on the method you call: see `fetch()`
-        and `poll()`.
+        By default, a contract Massive has no data for gets no row, and the log names it.
 
         Args:
             symbols: Option contracts to describe.
