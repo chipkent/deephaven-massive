@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import traceback
 from typing import TYPE_CHECKING
@@ -356,6 +357,7 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
     rows: list[dict[str, object]] = []
     marked: list[RowMarks] = []
     drifts: list[DriftReport] = []
+    arrived = threading.Event()  # the refusal and the rows both reached the library
     trades = Source(
         key="stocks/T",
         transport=Transport.WS,
@@ -376,6 +378,13 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         rows.extend(dict(zip(columns, row, strict=True)) for row in data)
         marked.append(marks)
         drifts.append(drift)
+        if received:
+            arrived.set()
+
+    def on_status(_generation: int, status: Status) -> None:
+        received.append(status)
+        if rows:
+            arrived.set()
 
     client = WsClient(
         fake_ws_server.url(),
@@ -383,7 +392,7 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         sources=(trades,),
         # On the loop thread, before any frame: a row without its ticker is marked.
         on_open=lambda _generation: client.set_required("T", frozenset({"Ticker"})),
-        on_status=lambda _generation, status: received.append(status),
+        on_status=on_status,
         on_data=on_data,
         on_state=lambda *_: None,
         reconnect_backoff=1.0,
@@ -404,7 +413,7 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         )
         fake_ws_server.wait_for(lambda server: server.connections[0].auth is not None)
         fake_ws_server.send(frame)
-        fake_ws_server.wait_for(lambda _server: bool(received) and bool(rows))
+        assert arrived.wait(10)
     finally:
         client.close()
         assert client.join(10.0)

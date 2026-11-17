@@ -2443,7 +2443,7 @@ def test_a_client_state_with_no_rule_is_a_defect(ws_session: WsSession) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     ws_session.subscribed("T.AAPL")
     connection = ws_session.connection()
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError, match="BOGUS"):
         ws_session.on_loop(connection, lambda: connection._on_state("BOGUS", None))  # type: ignore[arg-type]  # the point: refused at run time
     ws_session.session.release(result)
 

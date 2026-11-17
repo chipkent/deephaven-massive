@@ -918,7 +918,9 @@ def test_a_unit_whose_stream_massive_refused_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_ws_server.refuse["AM.I:SPX"] = "not authorized"
-    harness = make_ws_session()
+    # The refusal names no topic, and `I:NDX` awaits its answer in the same step, so the
+    # library pins it on `AM.I:SPX` only once that topic goes unconfirmed and is sent again.
+    harness = make_ws_session(subscription_confirmation_timeout=0.5)
 
     def refused() -> None:
         def failed() -> bool:
@@ -927,7 +929,7 @@ def test_a_unit_whose_stream_massive_refused_is_refused(
             states = stream_capture.diagnostics_rows(harness.session, harness.session.streams())
             return any(r["State"] == "FAILED" for r in states)
 
-        fake_ws_server.wait_for(lambda _: failed())
+        harness.wait(lambda _: failed(), "the refused stream to fail")
 
     day = _Day(stop_after=1, action=refused)
     seen, report = _reports()
@@ -994,7 +996,7 @@ def test_a_throughput_unit_is_refused_only_when_massive_refused_all_its_streams(
             states = stream_capture.diagnostics_rows(harness.session, harness.session.streams())
             return len([r for r in states if r["State"] == "FAILED"]) == len(topics)
 
-        fake_ws_server.wait_for(lambda _: failed())
+        harness.wait(lambda _: failed(), "the refused stream to fail")
 
     seen, report = _reports()
     steps = _record_diagnostics_reads(monkeypatch)

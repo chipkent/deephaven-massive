@@ -438,16 +438,27 @@ class WsSession:
 
         Returns:
             What `action` returned.
+
+        Raises:
+            Exception: What `action` raised, raised again on the caller's thread.
         """
         done = threading.Event()
         result: list[object] = []
+        raised: list[Exception] = []
 
         def run() -> None:
-            result.append(action())
-            done.set()
+            try:
+                result.append(action())
+            except Exception as error:  # the caller raises it too; the loop still sees it
+                raised.append(error)
+                raise
+            finally:
+                done.set()
 
         assert connection.post(run)
         assert done.wait(TIMEOUT)
+        if raised:
+            raise raised[0]
         return result[0]
 
     def subscribed(self, *topics: str) -> None:

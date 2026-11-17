@@ -195,7 +195,7 @@ def test_a_stream_example_records_frames_and_a_refused_stream(
             assert m._core.diagnostics.wait_until_shown(15.0)
             return any(r["State"] == "FAILED" for r in dh_to_pylist(m.streams()))
 
-        fake_ws_server.wait_for(lambda _: failed())
+        harness[-1].wait(lambda _: failed(), "the refused stream to fail")
 
     def minute_bars(m: MassiveSession, _: date) -> Table:
         bars = m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE)

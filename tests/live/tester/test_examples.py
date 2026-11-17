@@ -245,6 +245,15 @@ def test_every_example_runs_against_the_fake_market(
                 return
             pace.wait(0.02)
 
+    paced = threading.Event()  # never set; only paces the looks at the downloads
+
+    def look_again(_seconds: float) -> None:
+        # The fake market serves a download in milliseconds: look every 20 ms, not every second.
+        paced.wait(0.02)
+
+    def downloaded(namespace: dict[str, Any]) -> bool:
+        return examples.wait_for_downloads(namespace, sleep=look_again)
+
     files = [p for p in examples.example_files(EXAMPLES) if p.name not in LIVE]
     lines: list[str] = []
     outcomes = examples.run_examples(
@@ -253,6 +262,7 @@ def test_every_example_runs_against_the_fake_market(
         tmp_path,
         secrets=SecretFilter((KEY,)),
         echo=lines.append,
+        wait=downloaded,
         settle=refuse,
     )
     # Example 10's live minute bars return before Massive refuses them, and the run reads the
