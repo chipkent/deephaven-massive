@@ -199,7 +199,7 @@ Examples 17, 18, and 22 read the settings file of the README's
 [settings example](../README.md#what-your-plan-allows), `~/massive/settings.yaml`. Save it
 first, as that example shows:
 
-| Massive serves your key stocks | Save the file that lists |
+| Massive serves your key's stocks | Save the file that lists |
 |---|---|
 | Delayed, or not at all | `stocks` as delayed |
 | In real time | Nothing as delayed |
@@ -450,7 +450,7 @@ diagnostics tables:
 
 Poll six stocks every 30 seconds, and watch the session learn your Stocks request limit from
 Massive's first rate-limit error. A session learns it this way when
-[`rest_requests_per_minute`](../README.md#massive-config) doesn't give it:
+[`rest_requests_per_minute`](configuration.md#setting-details) doesn't give it:
 
 ```python
 import deephaven_massive as dm
