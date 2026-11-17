@@ -2444,8 +2444,13 @@ def split_once(ws_session: WsSession, pair: str, topic: str) -> None:
         ws_session.pair_answers[pair] = dm.MassiveError("HTTP 503: busy", status=503)
 
 
-WAITING = "wait for Massive's crypto ticker list, which could not be read (HTTP 503: busy)"
-"""The end of a waiting pairs' `Error`, after their list."""
+def waiting_pairs(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]], stream: int
+) -> list[object]:
+    # The pairs of a stream that wait for Massive's crypto ticker list now: its open
+    # `symbol_read_retrying` spans, sorted.
+    spans = spans_of(ws_session, dh_to_pylist, RETRYING)
+    return [s[2] for s in spans if s[0] == stream and not s[5]]
 
 
 @pytest.mark.parametrize("source", SOURCES)
@@ -2471,17 +2476,13 @@ def test_a_pair_the_session_split_before_streams_while_the_list_cannot_be_read(
     )
     result = ws_session.query(CRYPTO, pairs).append_only()
     wait_for(lambda: subscriptions_of(ws_session, "XT.ETH-USD") == 2)
-    wait_for(
-        lambda: (
-            f"crypto pairs 2 [X:DOTUSD, X:SOLUSD] {WAITING}"
-            in (stream_row(ws_session, dh_to_pylist, 2)["Error"] or "")
-        )
-    )
+    wait_for(lambda: waiting_pairs(ws_session, dh_to_pylist, 2) == ["X:DOTUSD", "X:SOLUSD"])
     assert {symbol for symbol, _ in lookups(ws_session)[before:]} == {"X:DOTUSD"}
     with ws_session.cond:
         ws_session.pair_answers["X:DOTUSD"] = ("DOT", "USD")
     ws_session.subscribed("XT.DOT-USD", "XT.SOL-USD")
-    wait_for(lambda: stream_row(ws_session, dh_to_pylist, 2)["Error"] is None)
+    wait_for(lambda: waiting_pairs(ws_session, dh_to_pylist, 2) == [])
+    assert stream_row(ws_session, dh_to_pylist, 2)["Error"] is None
     assert "X:ETHUSD" not in {symbol for symbol, _ in lookups(ws_session)[before:]}
     assert subscriptions_of(ws_session, "XT.ETH-USD") == 2
     ws_session.session.release(result)
@@ -2500,22 +2501,12 @@ def test_a_waiting_pair_another_stream_splits_stops_waiting(
         ws_session.pair_answers["X:DOTUSD"] = busy
         ws_session.pair_answers["X:ETHUSD"] = busy
     waiting = ws_session.query(CRYPTO, ["X:DOTUSD", "X:ETHUSD"]).append_only()
-    wait_for(
-        lambda: (
-            f"crypto pairs 2 [X:DOTUSD, X:ETHUSD] {WAITING}"
-            in (stream_row(ws_session, dh_to_pylist, 1)["Error"] or "")
-        )
-    )
+    wait_for(lambda: waiting_pairs(ws_session, dh_to_pylist, 1) == ["X:DOTUSD", "X:ETHUSD"])
     with ws_session.cond:
         ws_session.pair_answers["X:ETHUSD"] = ("ETH", "USD")
     other = ws_session.query(CRYPTO, ["X:ETHUSD"]).append_only()
     ws_session.subscribed("XT.ETH-USD")
-    wait_for(
-        lambda: (
-            f"crypto pairs 1 [X:DOTUSD] {WAITING}"
-            in (stream_row(ws_session, dh_to_pylist, 1)["Error"] or "")
-        )
-    )
+    wait_for(lambda: waiting_pairs(ws_session, dh_to_pylist, 1) == ["X:DOTUSD"])
     ws_session.session.release(other)
     ws_session.session.release(waiting)
 
