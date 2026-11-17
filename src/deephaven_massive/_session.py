@@ -497,8 +497,7 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `BufferedRows`: rows waiting to reach their tables. Past 1,000,000, a WARNING is
               logged.
             - `Reconnects`, `LastMessageAt`, `NextReconnectAt`, `UpdatedAt`, and `LastError`.
-              `LastError` gives the latest status in a few words; `m.problems()` holds every
-              problem with its cause, so you can filter it.
+              `LastError` is the connection's latest error, kept after it recovers.
 
             A connection's problems, such as an outage, are rows of `m.problems()`, one for each
             live table on it.
@@ -542,9 +541,7 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `Loading`: how many symbols a watchlist's read has yet to read.
             - `RequestsPerCycle`: the REST requests of the latest poll.
             - `State`: `RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or `CLOSED`.
-            - `Error`: why it failed or closed; null while it runs. It gives the latest status in
-              a few words; `m.problems()` holds every problem with its cause, so you can filter
-              it.
+            - `Error`: why it failed or closed; null while it runs.
             - `CreatedAt`: when it started.
 
             The problems of a table that keeps running, such as rows the library withheld or

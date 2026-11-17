@@ -250,8 +250,8 @@ Act on these states:
 | `m.connections()` | `WAITING_SLOT` | Massive refused this connection at login: your account has no free connection for this asset class. | Stop any other program that uses your key. The library keeps trying, and its live tables fail after `max_outage`. |
 | `m.symbol_reads()` | `FAILED` | The symbol's read failed, and `Error` says why. | Fix what `Error` names, then delete the symbol's row from the watchlist and add it back. |
 
-`Error` in `m.streams()` and `LastError` in `m.connections()` give the latest status in a few
-words. `m.problems()` holds every problem with its cause, so you can filter it.
+`Error` in `m.streams()` says why a table failed, and `LastError` in `m.connections()` holds a
+connection's latest error. `m.problems()` holds every problem with its cause, so you can filter it.
 
 <a id="the-log"></a>
 
