@@ -162,6 +162,23 @@ def test_a_bad_row_of_a_refreshing_table_is_nulled(
     scope.release()
 
 
+def test_a_failing_input_fails_the_converted_table_and_nothing_else(
+    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture, dh_input_table: Callable[..., InputTable]
+) -> None:
+    # The watch of the refused values ignores its input's failure: the converted table fails
+    # with its input on its own, and the watch's listener raises nothing.
+    source = dh_input_table({"Symbol": dtypes.string})
+    scope = new_scope()
+    with scope.open():
+        strict = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
+        result = dm.canonicalize_symbols(strict, AssetClass.CRYPTO, on_error=OnError.LOG)
+    with caplog.at_level(logging.ERROR):
+        source.add(new_table([string_col("Symbol", ["no pe!"])]))  # fails `strict`
+        wait_for(lambda: bool(result.j_table.isFailed()))
+    assert not [r for r in caplog.records if r.name.startswith("deephaven_massive")]
+    scope.release()
+
+
 def test_canonicalize_symbols_rejects_bad_arguments(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["C:EURUSD"]), int_col("Size", [1])])
     with pytest.raises(TypeError, match=r"^table must be a Deephaven Table, not list$"):

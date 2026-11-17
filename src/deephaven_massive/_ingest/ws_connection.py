@@ -1633,9 +1633,11 @@ class Connection:
         """
         by_core: dict[SessionCore, list[Problem]] = {}
         for stream_id, causes in changes.items():
-            stream = self._streams.get(stream_id)
-            core = None if stream is None else stream.sink.core()
-            if stream is None or core is None:  # a freed session shows no problem
+            # Every caller passes streams the connection holds: a stream held down leaves
+            # `_episodes.down` when it leaves `_streams`.
+            stream = self._streams[stream_id]
+            core = stream.sink.core()
+            if core is None:  # a freed session shows no problem
                 continue
             trackers = self._spans.setdefault(stream_id, {})
             for cause, (current, since) in causes.items():

@@ -91,16 +91,20 @@ class ProblemReporter:
             problems: The problems, from one payload, snapshot, or step.
         """
         held = [p for p in problems if isinstance(p, ProblemEvent) or p.spans]
-        alarms = [p for p in held if p.cause not in _LOGGED_BY_SOURCE and _policy(p) not in _QUIET]
+        alarms = [
+            (p, text)
+            for p in held
+            if p.cause not in _LOGGED_BY_SOURCE and (text := _alarm(p)) is not None
+        ]
         with self._lock:
             first = []
-            for problem in alarms:
+            for problem, text in alarms:
                 pair = (problem.stream_id, problem.cause)
                 if pair not in self._warned:
                     self._warned.add(pair)
-                    first.append(problem)
+                    first.append((problem, text))
         clean = self._redactor.received
-        for problem in first:
+        for problem, text in first:
             table = "" if problem.stream_id is None else f" table {problem.stream_id}"
             logger.warning(
                 "%s%s: %s: %s; m.problems() lists it and every later %s problem of this "
@@ -108,7 +112,7 @@ class ProblemReporter:
                 problem.dataset,
                 table,
                 problem.cause.value,
-                clean(_detail(problem)),
+                clean(text),
                 problem.cause.value,
             )
         for problem in held:
@@ -116,39 +120,32 @@ class ProblemReporter:
         self._queue(problems)
 
 
-def _policy(problem: Problem) -> OnError | None:
-    """Return the setting that decides how loudly a problem logs.
+def _alarm(problem: Problem) -> str | None:
+    """Return the reason a problem's WARNING gives, or None when its setting keeps it quiet.
+
+    A snapshot's spans may follow different settings (a value `canonicalize_symbols` refused
+    follows the converter's `on_error`, the table's own skipped values the table's), so the
+    WARNING names the first span whose setting warns.
 
     Args:
         problem: An event, or a snapshot that holds a span.
 
     Returns:
-        The event's setting, or the first span's own setting when it has one (a value
-        `canonicalize_symbols` refused follows its `on_error`), else the snapshot's.
+        The event's detail after its rows and symbol, or the warning span's symbol and
+        detail; None under `IGNORE` or `RAISE`, which log at DEBUG only.
     """
     if isinstance(problem, ProblemEvent):
-        return problem.policy
-    span = next(iter(problem.spans.values()))
-    return problem.policy if span.policy is None else span.policy
-
-
-def _detail(problem: Problem) -> str:
-    """Return a problem's first reason, for its WARNING.
-
-    Args:
-        problem: An event, or a snapshot that holds a span.
-
-    Returns:
-        The event's detail after its rows and symbol, or the snapshot's first span's symbol
-        and detail.
-    """
-    if isinstance(problem, ProblemEvent):
+        if problem.policy in _QUIET:
+            return None
         symbol = "" if problem.symbol is None else f" of {problem.symbol}"
         if problem.rows:
             head = f"{problem.rows} rows{symbol}, "
         else:
             head = "" if problem.symbol is None else f"{problem.symbol}: "
         return f"{head}{problem.detail} (at {problem.where})"
-    span = next(iter(problem.spans.values()))
-    head = "" if span.symbol is None else f"{span.symbol}: "
-    return f"{head}{span.detail} (at {problem.where})"
+    for span in problem.spans.values():
+        policy = problem.policy if span.policy is None else span.policy
+        if policy not in _QUIET:
+            head = "" if span.symbol is None else f"{span.symbol}: "
+            return f"{head}{span.detail} (at {problem.where})"
+    return None

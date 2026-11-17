@@ -41,6 +41,12 @@ from deephaven_massive._tables.liveness import (
     new_scope,
     release_scope,
 )
+from deephaven_massive._tables.problem_events import (
+    Problem,
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+)
 from deephaven_massive._tables.symbol_read_rows import SymbolReadState
 from deephaven_massive._tables.transports import (
     SymbolFailure,
@@ -61,6 +67,20 @@ SPEC = DatasetSpec(
     summary="A dataset for the tests.",
     asset_class=AssetClass.STOCKS,
     channels={NotBars.ANY: "T"},
+)
+
+PROBLEM = ProblemEvent(
+    cause=ProblemCause.NONCANONICAL_SYMBOLS,
+    action=ProblemAction.SKIPPED,
+    dataset=SPEC.name,
+    stream_id=1,
+    where="a symbol table",
+    symbol="msft",
+    field=None,
+    rows=1,
+    detail="a symbol table holds 'msft'",
+    at=1,
+    policy=dm.OnError.LOG,
 )
 
 Rows = Callable[[], list[dict[str, Any]]]
@@ -465,6 +485,43 @@ def test_a_row_that_is_not_a_ticker_is_skipped_and_listed(
     until(lambda: skipped() == [("noncanonical_symbols", "msft", True)])
     assert script.calls == [("AAPL",)]
     massive_session.release(result)
+
+
+def test_a_value_canonicalize_symbols_refuses_is_listed_until_its_row_is_deleted(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+    problem_rows: Rows,
+) -> None:
+    # The converted table holds a null for the refused value, which the read skips like any
+    # null; the read still lists the value among its problems while the input holds it.
+    script = Script(massive_session)
+    wl = watchlist("AAPL", "no pe!")
+    converted = dm.canonicalize_symbols(wl, AssetClass.STOCKS)
+    result = follow(massive_session, converted, script)
+    wait_rows(dh_to_pylist, result, {"AAPL": 2})
+
+    def skipped() -> list[tuple[object, ...]]:
+        return [(r["Cause"], r["Symbol"], r["EndedAt"] is not None) for r in problem_rows()]
+
+    until(lambda: skipped() == [("noncanonical_symbols", "no pe!", False)])
+    delete(wl, "no pe!")
+    until(lambda: skipped() == [("noncanonical_symbols", "no pe!", True)])
+    assert script.calls == [("AAPL",)]
+    massive_session.release(result)
+
+
+def test_a_freed_session_gets_no_problem_of_the_symbol_table(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The skipped values hold the session weakly: once it is freed, their reports go nowhere.
+    core = massive_session._core
+    reported: list[Problem] = []
+    monkeypatch.setattr(core, "problems", reported.extend)
+    followed_read._report_problems(lambda: core, [PROBLEM])
+    followed_read._report_problems(lambda: None, [PROBLEM])
+    assert reported == [PROBLEM]
 
 
 def test_a_defect_of_a_read_fails_the_table_naming_it(

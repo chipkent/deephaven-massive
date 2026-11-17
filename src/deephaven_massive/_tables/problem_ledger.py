@@ -205,12 +205,11 @@ class ProblemLedger:
         if stream_id in self._queries:
             return []
         self._queries[stream_id] = query = self._redactor.received(query)
+        # Each of the table's rows was added while its query was unknown, so has none yet.
         changed = []
         for key in self._by_stream.get(stream_id, ()):
-            row = self._rows[key]
-            if row.query is None:
-                self._rows[key] = row = replace(row, query=query)
-                changed.append(row)
+            self._rows[key] = row = replace(self._rows[key], query=query)
+            changed.append(row)
         return changed
 
     def stream_ended(self, stream_id: int, at: int) -> list[ProblemRow]:

@@ -117,7 +117,7 @@ from deephaven_massive._errors import (
     required,
 )
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
-from deephaven_massive._massive import DriftReport, DriftSample, RowFault, Transport, WireType
+from deephaven_massive._massive import DriftReport, RowFault, Transport, WireType
 from deephaven_massive._tables.columns import col_defs, dataset_table
 from deephaven_massive._tables.diagnostics import StreamUpdate
 from deephaven_massive._tables.execution_context import entered
@@ -284,16 +284,12 @@ class Converted:
 
     Attributes:
         batch: The rows read whole, in the dataset's schema.
-        drift: The drift of the rows' timestamps and widening: the wire keys of the epoch
-            fields other than the time column that held a value the routine fails, and of the
-            `long` fields a `double` column would round, each with its first value.
         withheld: The rows the library could not read whole, withheld from `batch`.
         symbols: The batch's distinct canonical symbols, so a stream that receives none of
             them, or all of them, needs no filter.
     """
 
     batch: pa.Table
-    drift: DriftReport
     withheld: Withheld
     symbols: frozenset[str] = frozenset()
 
@@ -535,8 +531,7 @@ class ChannelPlan:
                 session dates; None keeps the 17:00 Chicago rule's.
 
         Returns:
-            The rows read whole, the drift of their timestamps and widening, the rows withheld,
-            and the batch's distinct symbols.
+            The rows read whole, the rows withheld, and the batch's distinct symbols.
         """
         values = list(zip(*rows, strict=True)) if rows else None  # one tuple per source field
         wire = pa.Table.from_arrays(
@@ -551,7 +546,6 @@ class ChannelPlan:
         sent = None if self.symbol_field is None else wire.column(self.symbol_field)
         wire = with_marks(wire, marks, sent=None if sent is None else sent.combine_chunks())
         count = wire.num_rows
-        found: list[DriftReport] = []
         failures: list[Failure] = []
         arrays: dict[str, pa.Array] = {}
         rounded = RoundedFields()
@@ -563,15 +557,12 @@ class ChannelPlan:
             elif name == _SYMBOL:
                 values = self._symbols(wire.column(field).combine_chunks(), symbols, failures)
             elif unit is not None:
-                values = self._instants(
-                    name, unit, wire.column(field), found=found, failures=failures
-                )
+                values = self._instants(name, unit, wire.column(field), failures=failures)
             else:
                 values = wire.column(field).combine_chunks()
             arrays[name] = rounded.widen(
                 values, column_type.arrow_type, wire_key=self.wire_keys.get(name), column=name
             )
-        found.append(rounded.drift())
         batch = pa.Table.from_arrays(list(arrays.values()), schema=self.arrow_schema)
         for name in MARK_COLUMNS:
             batch = batch.append_column(name, wire.column(name))
@@ -583,11 +574,10 @@ class ChannelPlan:
             received=received,
             session_dates=None if sessions is None else sessions.correct,
         )
-        drift = functools.reduce(DriftReport.merge, found, DriftReport())
         if self.symbol_field is None:  # rows that name no symbol go whole to every stream
-            return Converted(filled, drift, withheld)
+            return Converted(filled, withheld)
         distinct = pc.call_function("unique", [filled.column(_SYMBOL)]).to_pylist()
-        return Converted(filled, drift, withheld, frozenset(s for s in distinct if s is not None))
+        return Converted(filled, withheld, frozenset(s for s in distinct if s is not None))
 
     def _symbols(
         self, sent: pa.Array, known: dict[str, str | None], failures: list[Failure]
@@ -617,7 +607,6 @@ class ChannelPlan:
         unit: TimeUnit,
         column: pa.ChunkedArray,
         *,
-        found: list[DriftReport],
         failures: list[Failure],
     ) -> pa.Array:
         """Convert an epoch column, noting the rows whose value fails the routine.
@@ -626,8 +615,6 @@ class ChannelPlan:
             name: The column.
             unit: The epoch's unit.
             column: The rows' raw values.
-            found: Extended, for a column other than the time column, with its wire key and
-                its first failing value as drift.
             failures: Receives the rows whose value fails: for the time column, to mark
                 `unreadable_keys`; for any other, `unconvertible_values`.
 
@@ -639,8 +626,7 @@ class ChannelPlan:
         values, failed = masked_instants(
             unit, sent, time_column=name == self.time_name, label=label
         )
-        first = first_failure(sent, failed)
-        if first is None:
+        if first_failure(sent, failed) is None:
             return values
 
         def reason(row: int) -> str:
@@ -649,12 +635,6 @@ class ChannelPlan:
         if name == self.time_name:
             failures.append((RowFault.UNREADABLE_KEYS, failed, name, reason))
             return values
-        key = self.wire_keys[name]
-        found.append(
-            DriftReport(
-                unconvertible=frozenset({key}), samples={key: DriftSample(None, str(first))}
-            )
-        )
         failures.append((RowFault.UNCONVERTIBLE_VALUES, failed, name, reason))
         return values
 
@@ -1386,12 +1366,11 @@ class Flusher:
         lock, inside the flusher's execution context, with no other library lock held: it
         calls Deephaven (`to_table`, `partition_by`, `where_in`, `add`, `publish_failure`) and
         then each session with a stream that published once (`update_streams`). The drift the
-        flush found, its frames' and its rows' timestamps', is merged per channel and dataset
-        (`_found`) and reported once the flush lock is released (`_report_found`), so each
-        stream gets one `schema_drift` problem per field per flush, not one per frame. A
-        channel's frames
-        from two sockets publish as one batch per socket (`_batches`), and a flush that gave a
-        stream its first rows of a newer socket calls `on_new_generation` last.
+        flush's frames found is merged per channel (`_found`) and reported once the flush lock
+        is released (`_report_found`), so each stream gets one `schema_drift` problem per field
+        per flush, not one per frame. A channel's frames from two sockets publish as one batch
+        per socket (`_batches`), and a flush that gave a stream its first rows of a newer
+        socket calls `on_new_generation` last.
         """
         with self._flush_lock, entered(self._exec_ctx):
             controls = _drain(self._control)
@@ -1414,7 +1393,9 @@ class Flusher:
                 if isinstance(item, _Drift):
                     self._found(routes.get(item.channel, ()), item.drift, where=item.where)
             _report_updates(updates)
-            self._forget([sink for sinks in routes.values() for sink in sinks])
+            routed = [sink for sinks in routes.values() for sink in sinks]
+            self._forget(routed)
+            self._end_unheld_stale(routed)
             found, self._drift = self._drift, {}
             events, self._events = self._events, []
             new_generation, self._new_generation = self._new_generation, False
@@ -1430,9 +1411,9 @@ class Flusher:
         reports, and logs, once rather than a thousand times.
 
         Args:
-            sinks: The streams of the channel or dataset the drift is about.
+            sinks: The streams of the channel the drift is about.
             drift: The drift.
-            where: The connection's URL and the channel, or the flush thread and the channel.
+            where: The connection's URL and the channel.
         """
         key = (sinks, where)
         self._drift[key] = self._drift.get(key, DriftReport()).merge(drift)
@@ -1557,8 +1538,7 @@ class Flusher:
         rows the library cannot read whole are
         withheld (`ChannelPlan.convert`), and each stream applies its own policy to them
         (`_withheld`); they count toward the plan's and their symbols' runs (`_counted`,
-        `_counted_symbols`). The drift of the rows' timestamps is reported like a frame's
-        (`_found`).
+        `_counted_symbols`).
 
         Args:
             plan: The dataset's plan for the channel.
@@ -1572,10 +1552,6 @@ class Flusher:
             readers = self._withheld(plan, withheld, readers)
             if not readers:
                 return
-        drift = converted.drift
-        if drift.extra:
-            where = f"{self._thread.name} channel {plan.channel}"
-            self._found(tuple(readers), drift, where=where)
         # The dataset's run first: when it fails every stream, no symbol is named stale.
         if self._counted(plan, converted, readers=readers):
             return
@@ -1809,9 +1785,8 @@ class Flusher:
     ) -> None:
         """Update one stream's stale symbols, and queue its `stale_symbol` spans if they changed.
 
-        The symbols it holds that became stale join; the published ones leave, and so do the
-        ones it no longer holds, such as a symbol whose watchlist row was deleted, since no row
-        of it can reach the stream again.
+        The symbols it holds that became stale join; the published ones leave. The ones it
+        no longer holds leave at every flush (`_end_unheld_stale`).
 
         Args:
             plan: The dataset's plan for the channel.
@@ -1836,12 +1811,38 @@ class Flusher:
         stale, tracker = found
         for symbol in published & stale.keys():
             del stale[symbol]
-        if not sink.receives_all:
-            for symbol in [s for s in stale if not sink.holds(s)]:
-                del stale[symbol]
         stale.update(held)
         spans = tracker.update({symbol: (symbol, None, why, 0) for symbol, why in stale.items()})
         if spans is not None:
+            self._events.append((sink, (spans,)))
+
+    def _end_unheld_stale(self, routed: list[StreamSink]) -> None:
+        """End the `stale_symbol` spans of symbols their streams no longer hold.
+
+        A symbol whose watchlist row was deleted can never publish to the stream again, so its
+        span would hold until the stream closed. Runs at every flush, rows or not, so emptying a
+        watchlist ends its spans too. Runs after `_forget`, so every stream with stale symbols
+        is routed.
+
+        Args:
+            routed: The streams the flush routed.
+        """
+        if not self._stale:
+            return
+        sinks = {sink.stream_id: sink for sink in routed}
+        for stream_id, (stale, tracker) in self._stale.items():
+            sink = sinks[stream_id]
+            if sink.receives_all:
+                continue
+            gone = [symbol for symbol in stale if not sink.holds(symbol)]
+            if not gone:
+                continue
+            for symbol in gone:
+                del stale[symbol]
+            spans = tracker.update(
+                {symbol: (symbol, None, why, 0) for symbol, why in stale.items()}
+            )
+            assert spans is not None  # the tracker held each symbol that just left
             self._events.append((sink, (spans,)))
 
     def _convert(self, plan: ChannelPlan, batch: _Batch, *, arrived: list[int]) -> Converted:

@@ -98,8 +98,9 @@ class ErrorPolicy:
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
 
             A listed crypto pair is unreadable too when its ticker isn't its two currencies
-            written together. Under `dm.OnError.LOG` or `dm.OnError.IGNORE` it gets no rows. A
-            watchlist read by `fetch()` names it in `Error` in `m.symbol_reads()`.
+            written together. Under `dm.OnError.LOG` or `dm.OnError.IGNORE` it gets no rows, and
+            `m.problems()` lists it. A watchlist read by `fetch()` also names it in `Error` in
+            `m.symbol_reads()`.
         unavailable_symbols: Decides what happens to a symbol Massive has no data for: it
             answers HTTP 404, or its crypto ticker list doesn't hold the pair. Defaults to
             `LOG`.

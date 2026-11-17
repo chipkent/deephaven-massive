@@ -982,8 +982,9 @@ class WsConnections:
         out rate-limit pauses (`rate_limits.read_patience`; the worker never holds it, so 10
         minutes). Each pair (`_split`) is subscribed, or skipped, or waits for the list
         (`_wait`). A skipped pair Massive has no data for follows the stream's
-        `unavailable_symbols` (`_no_data`); one whose currencies the library cannot read was
-        reported under its `unreadable_symbols` by the lookup.
+        `unavailable_symbols` (`_no_data`); one whose currencies the library cannot read, which
+        the lookup logged (or raised under `RAISE`), is an `unreadable_symbols` problem of the
+        stream (`_unreadable`).
 
         Args:
             stream_id: The stream.
@@ -1002,6 +1003,9 @@ class WsConnections:
         no_data = {pair: why.why for pair, why in unsplit.items() if why.no_data}
         if no_data and not self._no_data(stream_id, no_data, reader=reader, state=state):
             return
+        unread = {pair: why.why for pair, why in unsplit.items() if not why.no_data}
+        if unread:
+            self._unreadable(stream_id, unread, reader=reader, state=state)
         if failure is not None and not failure.is_retryable:
             self._fail(stream_id, copy_error(failure, f"{reader}: {failure}"))
             return
@@ -1060,6 +1064,45 @@ class WsConnections:
                 case _:
                     raise BrokenGuaranteeError(unmatched_form("a crypto pair's lookup", found))
         return split, unsplit, [], None
+
+    def _unreadable(
+        self, stream_id: int, unread: Mapping[str, str], *, reader: str, state: _PairState
+    ) -> None:
+        """Report the pairs whose currencies the library cannot read as the stream's problems.
+
+        Massive's crypto ticker list gives such a pair's currencies, but they don't join to its
+        ticker, so the stream never subscribes it: a library bug, under the stream's
+        `unreadable_symbols`, which the lookup logged. Never under `RAISE`, where the lookup
+        raised and failed the stream.
+
+        Args:
+            stream_id: The stream.
+            unread: The pairs, with why.
+            reader: Who read them, for the problem's origin.
+            state: The stream's pairs, with its dataset and its `unreadable_symbols`.
+        """
+        core = self._core()
+        if core is None:  # a freed session shows no problem
+            return
+        at = time.time_ns()
+        core.problems(
+            [
+                ProblemEvent(
+                    cause=ProblemCause.UNREADABLE_SYMBOLS,
+                    action=ProblemAction.WITHHELD,
+                    dataset=state.dataset,
+                    stream_id=stream_id,
+                    where=reader,
+                    symbol=pair,
+                    field="Symbol",
+                    rows=0,
+                    detail=f"{why}; the pair is never subscribed",
+                    at=at,
+                    policy=state.policy.unreadable_symbols,
+                )
+                for pair, why in sorted(unread.items())
+            ]
+        )
 
     def _no_data(
         self, stream_id: int, no_data: Mapping[str, str], *, reader: str, state: _PairState

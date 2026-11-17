@@ -660,7 +660,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `StreamId`: the table's row in `m.streams()`, or a `wait=True` read's own id.
             - `Query`: the call that made the table, such as `m.stocks.trades('AAPL')`.
             - `Symbol`: the symbol the problem concerns, as Massive sent it or you gave it.
-            - `Field`: the column or field the problem concerns; for a flat-file line, the file.
+            - `Field`: the column or field the problem concerns; for a flat-file line, the
+              file, and for a rate-limit pause, its `Bucket` in `m.rate_limits()`.
             - `Cause`: why, such as `unconvertible_values` or `outage`. A cause named for an
               `dm.ErrorPolicy` setting follows that setting.
             - `Action`: what the library did: `WITHHELD` rows of Massive's data, `SKIPPED` a

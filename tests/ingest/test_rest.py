@@ -5179,12 +5179,18 @@ def test_a_stream_splits_a_pair_through_the_sessions_rest_transport(
 
 
 def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The lookup reported it under unreadable_symbols: a poll names it in the cycle's Error,
-    # and no read reports it again as a symbol with no data.
+    # A poll leaves it out of the cycle, and a read lists it as an unreadable_symbols problem
+    # of its table, never as a symbol with no data.
     unjoined = _ticker("X:DOTUSD", "DOT", "USDT")
     fake_rest.reply(TICKERS_PATH, Reply(envelope([unjoined])), Reply(envelope([])))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
     reader = _endpoints(session)._reader("poll", session._core.policy)
     request = Request(symbols=("X:DOTUSD",), params=(("date", date(2025, 3, 3)),))
     _, left_out = reader._plan_cycle(CRYPTO_OPEN_CLOSE, request, ("X:DOTUSD",), cancel=Cancel())
@@ -5198,6 +5204,15 @@ def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
         assert fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"]) == []
     assert [r for r in caplog.records if r.name == LOGGER] == []  # not as no data
     assert sent_data(fake_rest) == []
+    # The read, not the plan, lists it: once, for the fetch that left it out.
+    [event] = events
+    assert (event.cause, event.symbol, event.field, event.policy) == (
+        ProblemCause.UNREADABLE_SYMBOLS,
+        "X:DOTUSD",
+        "Symbol",
+        dm.OnError.LOG,
+    )
+    assert event.detail.endswith("which do not join to it; the pair is never requested")
 
 
 def test_ignored_withheld_rows_log_no_warning_but_still_reach_the_session(

@@ -2525,8 +2525,8 @@ def test_a_pair_whose_currencies_do_not_join_is_skipped_but_is_not_a_missing_sym
     make_ws_session: Callable[..., WsSession],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    # The lookup reported it under unreadable_symbols: unavailable_symbols=RAISE never fails
-    # the stream over it.
+    # It is an unreadable_symbols problem of the stream, never one of unavailable_symbols, so
+    # unavailable_symbols=RAISE never fails the stream over it.
     ws_session = make_ws_session(on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE))
     ws_session.pair_answers["X:DOTUSD"] = Unsplit("its currencies do not join", no_data=False)
     result = ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
@@ -2534,7 +2534,7 @@ def test_a_pair_whose_currencies_do_not_join_is_skipped_but_is_not_a_missing_sym
     wait_for(lambda: "X:DOTUSD" in [symbol for symbol, _ in lookups(ws_session)])
     ws_session.flush()
     assert running(ws_session, dh_to_pylist)
-    assert problems_of(ws_session, dh_to_pylist) == []  # the lookup's own problem, not this
+    assert problems_of(ws_session, dh_to_pylist) == [("unreadable_symbols", "X:DOTUSD", False)]
     sent = {json.loads(f)["params"] for f in ws_session.server.frames()}
     assert not any("DOT" in topic for topic in sent)
     ws_session.session.release(result)
@@ -2622,6 +2622,7 @@ def test_pair_bookkeeping_of_a_stream_that_ended_changes_nothing(
     monkeypatch.setattr(connections, "_core", lambda: None)
     pairs = {"X:ETHTUSD": "not listed"}
     assert connections._no_data(stream_id, pairs, reader="r", state=state)  # a freed session
+    connections._unreadable(stream_id, pairs, reader="r", state=state)
     monkeypatch.undo()
     assert problems == []
     ws_session.session.release(result)

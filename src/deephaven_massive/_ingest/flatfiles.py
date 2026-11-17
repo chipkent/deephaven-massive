@@ -1694,6 +1694,8 @@ class FlatFileHistory:
         with entered(self._core.exec_ctx):
             for read, drift, marks in batches:
                 if file.malformed_lines and effect_of(setting).fails:
+                    # Listed first, as every cause is whatever its setting.
+                    self._core.problems([_malformed_event(transform, file, setting)])
                     raise RowDataError(_malformed_message(transform.dataset, file))
                 rows, odd, withheld = transform.apply(read, marks, received=time.time_ns(), key=key)
                 served += rows.num_rows
@@ -1809,16 +1811,16 @@ class FlatFileHistory:
 
 
 def _malformed_event(transform: _Transform, file: FlatFile, setting: OnError) -> ProblemEvent:
-    """Return the `malformed_rows` problem of a file read to its end with malformed lines.
+    """Return the `malformed_rows` problem of a file with malformed lines.
 
     Its detail gives the lines' count and the first one's row number and fault
-    (`FlatFile.malformed_reason`), never a line's text. Under `RAISE`, the read failed at the
-    first block after such a line, so no file with one is read to its end.
+    (`FlatFile.malformed_reason`), never a line's text. Under `LOG` and `IGNORE` the file was
+    read to its end; under `RAISE` the read fails at the first block after such a line.
 
     Args:
         transform: The read's block transform, for its dataset and call.
         file: The file, with at least one malformed line.
-        setting: The call's `malformed_rows`, `LOG` or `IGNORE`.
+        setting: The call's `malformed_rows`.
 
     Returns:
         The event, counting the lines as rows, with the file as its field.
@@ -1832,8 +1834,13 @@ def _malformed_event(transform: _Transform, file: FlatFile, setting: OnError) ->
         symbol=None,
         field=file.location,
         rows=file.malformed_lines,
-        detail=f"skipped {file.malformed_lines} malformed line(s) of {file.location}, the "
-        f"first: {file.malformed_reason}; the file's other rows are kept",
+        detail=f"{file.malformed_lines} malformed line(s) of {file.location}, the first: "
+        f"{file.malformed_reason}; "
+        + (
+            "malformed_rows=raise fails the read"
+            if effect_of(setting).fails
+            else "skipped, and the file's other rows are kept"
+        ),
         at=time.time_ns(),
         policy=setting,
     )

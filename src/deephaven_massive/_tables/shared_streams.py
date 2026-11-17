@@ -13,7 +13,7 @@ core weakly. Every entry point that can change what keeps the session alive (`re
 `_release_hold`, `shut_down`) holds the core in a local variable until it returns and updates the
 live set (`live_set.sync`) in the same `registry_lock` section as the change. The core reads and
 changes the registry's rows through the by-id methods (`row`, `change_row`, `record_failure`,
-`live_fails`, `close_rows`, and `in`), always under `registry_lock`, when a transport reports a row
+`live_fails`, and `close_rows`), always under `registry_lock`, when a transport reports a row
 change or a failure by stream id, and when the session closes.
 
 Lock order: the update-graph (UG) lock, then `registry_lock`, then the live set's leaf lock. A
@@ -174,17 +174,6 @@ class SharedStreams:
         Read with `registry_lock` held (`live_set.sync`).
         """
         return bool(self._streams)
-
-    def __contains__(self, stream_id: object) -> bool:
-        """Return whether a stream is registered; `registry_lock` is held.
-
-        Args:
-            stream_id: The stream id.
-
-        Returns:
-            True while the stream is in the registry.
-        """
-        return stream_id in self._streams
 
     def row(self, stream_id: int) -> StreamRow | None:
         """Return a registered stream's current row; `registry_lock` is held.

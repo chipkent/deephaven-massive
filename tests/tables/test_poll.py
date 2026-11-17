@@ -11,7 +11,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -50,15 +50,17 @@ from deephaven_massive._tables.liveness import (
     release_scope,
 )
 from deephaven_massive._tables.poll import LIVE_COLUMN, Pollers, open_poll
-from deephaven_massive._tables.problem_events import ProblemCause
+from deephaven_massive._tables.problem_events import (
+    Problem,
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+)
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import FetchQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
-
-if TYPE_CHECKING:
-    from deephaven_massive._tables.problem_events import ProblemEvent
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
@@ -1458,6 +1460,65 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
     assert not failed
 
 
+def test_a_value_canonicalize_symbols_refuses_is_shown_until_its_row_is_deleted(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
+) -> None:
+    # The converted table holds a null for the refused value, which the poll skips like any
+    # null; the poll still lists the value among its problems while the input holds it.
+    source = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    source.add(new_table([string_col("Symbol", ["AAPL", "no pe!"])]))
+    converted = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(converted)
+    )
+    clock.wait_for_sleepers(1)
+    assert script.symbols == [("AAPL",)]
+
+    def refused() -> list[tuple[object, ...]]:
+        return [
+            (r["StreamId"], r["Symbol"], r["Action"], r["EndedAt"] is not None)
+            for r in problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+        ]
+
+    assert refused() == [(1, "no pe!", "SKIPPED", False)]
+    source.delete(new_table([string_col("Symbol", ["no pe!"])]))
+    until(lambda: refused() == [(1, "no pe!", "SKIPPED", True)])
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
+
+
+def test_a_freed_session_gets_no_problem_of_the_symbol_table(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The skipped values hold the session weakly: once it is freed, their reports go nowhere.
+    core = massive_session._core
+    reported: list[Problem] = []
+    monkeypatch.setattr(core, "problems", reported.extend)
+    problem = ProblemEvent(
+        cause=NONCANONICAL,
+        action=ProblemAction.SKIPPED,
+        dataset=DIVIDENDS.name,
+        stream_id=1,
+        where="a symbol table",
+        symbol="msft",
+        field=None,
+        rows=1,
+        detail="a symbol table holds 'msft'",
+        at=1,
+        policy=dm.OnError.LOG,
+    )
+    poll._report_problems(lambda: core, [problem])
+    poll._report_problems(lambda: None, [problem])
+    assert reported == [problem]
+
+
 # --- Lifetime ------------------------------------------------------------------------------------
 
 
@@ -1808,6 +1869,21 @@ def test_a_cycle_after_the_core_is_gone_ends_the_poller(
     with ThreadPoolExecutor(1) as pool:
         assert poller._cycle(pool) is False
     assert poller._end_reason() == "its session is gone"
+
+
+def test_a_late_cycle_after_the_core_is_gone_opens_no_span(
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
+) -> None:
+    # The session is freed while a cycle ends late: no span opens, since nothing would end it.
+    poller = _unstarted_poller(massive_session, script, pollers)
+
+    def gone() -> SessionCore | None:
+        return None  # the core was collected
+
+    poller._core = gone
+    poller._note_pace(5.0)  # longer than the 1 s interval
+    assert poller._late
+    assert poller._late_spans.update({}) is None  # no span was opened
 
 
 def test_a_stop_during_a_cycle_publishes_nothing(
@@ -2303,6 +2379,10 @@ def test_raise_fails_a_poll_on_a_symbol_whose_path_refuses_a_parameter(
         "settings file"
     )
     assert fake_rest.requests == []
+    # The problem is listed before the table fails, as under every setting.
+    until(lambda: bool(problems_of(raising_session, dh_to_pylist, UNAVAILABLE)))
+    [listed] = problems_of(raising_session, dh_to_pylist, UNAVAILABLE)
+    assert (listed["Symbol"], listed["Policy"]) == ("X:BTCUSD", "raise")
 
 
 def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(

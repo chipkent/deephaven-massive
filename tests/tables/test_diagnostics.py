@@ -1078,9 +1078,35 @@ def test_a_paused_bucket_is_a_rate_limited_span_until_its_pause_ends(
         None,
     )
     assert row["Detail"] == "bucket stocks paused until 2026-11-02T14:00:00Z: HTTP 429"
+    assert row["Field"] == "stocks"
     source.rows = [_rate_row("stocks", RateLimitState.READY)]
     diagnostics.rate_limits_changed()
     assert diagnostics.wait_until_shown(TIMEOUT)
     [ended] = dh_to_pylist(diagnostics.problems)
     assert ended["EndedAt"] is not None
+    diagnostics.release()
+
+
+def test_buckets_paused_in_one_pull_are_rows_of_their_own(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    # Both pauses start at the same pull; each keeps its own row, and one ending leaves the
+    # other open.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    source = _RatePull()
+    source.rows = [
+        _rate_row("stocks", RateLimitState.PAUSED),
+        _rate_row("options", RateLimitState.PAUSED),
+    ]
+    diagnostics.watch_rate_limits(source)
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    assert sorted(r["Field"] for r in dh_to_pylist(diagnostics.problems)) == ["options", "stocks"]
+    source.rows = [
+        _rate_row("stocks", RateLimitState.READY),
+        _rate_row("options", RateLimitState.PAUSED),
+    ]
+    diagnostics.rate_limits_changed()
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    ended = {r["Field"]: r["EndedAt"] is not None for r in dh_to_pylist(diagnostics.problems)}
+    assert ended == {"stocks": True, "options": False}
     diagnostics.release()

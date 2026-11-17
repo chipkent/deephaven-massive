@@ -40,7 +40,6 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._massive import (
     DriftReport,
-    DriftSample,
     RowFault,
     RowMark,
     Transport,
@@ -229,7 +228,6 @@ def test_rows_without_symbols_convert_whole_and_withhold_only_a_bad_time(
     assert withheld.counts() == {RowFault.UNREADABLE_KEYS: 1}
     assert [(g.symbol, g.sent, g.field) for g in withheld.groups] == [(None, None, "Timestamp")]
     assert withheld.by_symbol() == {}
-    assert converted.drift == DriftReport()
 
 
 FOREX_ROWS = [
@@ -261,7 +259,6 @@ def test_conversion_withholds_unreadable_symbols_and_reports_their_spellings(
         converted = plan.convert(
             frame(FOREX_ROWS, "forex/C"), (), cache, arrived=arrivals(FOREX_ROWS)
         )
-    assert converted.drift == DriftReport()
     [group] = converted.withheld.groups
     assert (group.fault, group.symbol, group.sent, group.rows) == (
         RowFault.UNREADABLE_SYMBOLS,
@@ -300,12 +297,10 @@ def test_conversion_withholds_rows_with_a_bad_time_or_another_bad_timestamp(
     assert withheld.first_reason == (
         "timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100"
     )
-    assert converted.drift == DriftReport(unconvertible=frozenset({"trft"}))
-    assert converted.drift.samples["trft"] == DriftSample(None, str(2**62))
     assert batch.column("ParticipantTimestamp").to_pylist() == [None]  # 0 is absent
 
 
-def test_a_size_beyond_2_53_is_withheld_and_reported_as_drift(
+def test_a_size_beyond_2_53_is_withheld(
     massive_session: dm.MassiveSession,
 ) -> None:
     # The trade's size is a `long` on the channel but a `double` in the dataset.
@@ -319,8 +314,6 @@ def test_a_size_beyond_2_53_is_withheld_and_reported_as_drift(
     assert [(g.fault, g.symbol, g.field) for g in converted.withheld.groups] == [
         (RowFault.UNCONVERTIBLE_VALUES, "AAPL", "Size")
     ]
-    assert converted.drift == DriftReport(rounded=frozenset({"s"}))
-    assert converted.drift.samples["s"] == DriftSample(None, str(2**53 + 1))
 
 
 def test_rows_convert_as_the_same_rows_keyed_by_column(massive_session: dm.MassiveSession) -> None:
@@ -1322,7 +1315,8 @@ def test_a_stale_symbol_the_stream_no_longer_holds_ends_its_span(
     massive_session: dm.MassiveSession, flusher: Flusher, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A watchlist row deleted while its symbol is stale: no row of it can reach the stream
-    # again, so its span ends at the next flush instead of holding until the stream closes.
+    # again, so its span ends at the next flush, rows or none, instead of holding until the
+    # stream closes.
     core = massive_session._core
     problems: list[Problem] = []
     monkeypatch.setattr(core, "problems", problems.extend)
@@ -1337,9 +1331,11 @@ def test_a_stale_symbol_the_stream_no_longer_holds_ends_its_span(
     assert [list(found) for found in stale_spans(problems, 8)] == [["ILLQ"]]
     problems.clear()
     named.set_symbols(frozenset({"AAPL"}))
-    flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)
-    flusher.flush()
+    flusher.flush()  # no rows: the watchlist may have emptied
     assert stale_spans(problems, 8) == [{}]
+    problems.clear()
+    flusher.flush()
+    assert stale_spans(problems, 8) == []  # ended once
 
 
 def test_a_dataset_whose_every_row_is_withheld_fails_its_streams_and_marks_nothing_stale(

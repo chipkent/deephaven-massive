@@ -1005,6 +1005,63 @@ class RestReader:
             for symbol, why in found
         ]
 
+    def _unsplit_outcome(self, spec: DatasetSpec, call: Call, unsplit: Unsplit) -> _Outcome:
+        """Return the outcome of a call for a crypto pair with no split, which sends no request.
+
+        A pair Massive has no data for is named in `missing`, as HTTP 404 is. One whose
+        currencies the library cannot read, which the lookup logged, is an
+        `unreadable_symbols` problem of the read's table, never a symbol with no data.
+
+        Args:
+            spec: The dataset.
+            call: The call, planned for one pair.
+            unsplit: Why the pair has no split (`call.unsplit`).
+
+        Returns:
+            No rows and no request.
+        """
+        logger.debug(
+            "%s: %s has no split (%s); no request is sent", spec.name, call.symbol, unsplit.why
+        )
+        symbol = required(call.symbol, "a split call's symbol")
+        if unsplit.no_data:
+            return _Outcome((), 0, missing=_Missing(symbol, f"({unsplit.why})"))
+        self.problems(self._unreadable_events(spec, [(symbol, unsplit.why)]))
+        return _Outcome((), 0, missing=None)
+
+    def _unreadable_events(
+        self, spec: DatasetSpec, found: Sequence[tuple[str, str]]
+    ) -> list[ProblemEvent]:
+        """Return the `unreadable_symbols` problems of crypto pairs a read leaves out.
+
+        Massive's crypto ticker list gives such a pair's currencies, but they don't join to
+        its ticker, so no request is sent for it: a library bug, which the lookup logged.
+
+        Args:
+            spec: The dataset.
+            found: Each pair with why, in call order.
+
+        Returns:
+            One event per pair, for the read's table.
+        """
+        at = time.time_ns()
+        return [
+            ProblemEvent(
+                cause=ProblemCause.UNREADABLE_SYMBOLS,
+                action=ProblemAction.WITHHELD,
+                dataset=spec.name,
+                stream_id=self.stream_id,
+                where=spec.name,
+                symbol=symbol,
+                field="Symbol",
+                rows=0,
+                detail=f"{why}; the pair is never requested",
+                at=at,
+                policy=self.policy.unreadable_symbols,
+            )
+            for symbol, why in found
+        ]
+
     def _fan_out(
         self,
         run: Callable[[_Item], _Done],
@@ -1109,17 +1166,7 @@ class RestReader:
         `EntitlementError` of `_check_recency`.
         """
         if call.unsplit is not None:
-            why = call.unsplit.why
-            logger.debug(
-                "%s: %s has no split (%s); no request is sent", spec.name, call.symbol, why
-            )
-            # A pair whose currencies cannot be read was reported by the lookup, not as no data.
-            missing = (
-                _Missing(required(call.symbol, "a split call's symbol"), f"({why})")
-                if call.unsplit.no_data
-                else None
-            )
-            return _Outcome((), 0, missing=missing)
+            return self._unsplit_outcome(spec, call, call.unsplit)
         kept: list[pa.RecordBatch] = []
         requests = 0
         template = converter.rest_path.template
@@ -1971,8 +2018,8 @@ class RestReader:
     ) -> None:
         """Apply `ErrorPolicy.unavailable_symbols` to symbols whose path refuses a parameter.
 
-        Under `LOG` and `IGNORE` the cycle leaves them out, each an `unavailable_symbols`
-        problem of the table; under `RAISE` the table fails.
+        Each is an `unavailable_symbols` problem of the table, whatever the setting. Under
+        `LOG` and `IGNORE` the cycle leaves them out; under `RAISE` the table fails.
 
         Args:
             spec: The dataset.
@@ -1985,6 +2032,11 @@ class RestReader:
             UnavailableSymbolError: Under `RAISE`, naming the symbols, the path, the reason,
                 and the setting.
         """
+        self.problems(
+            self._unavailable_events(
+                spec, [(name, f"{template} cannot serve it: {reason}") for name in symbols]
+            )
+        )
         if effect_of(self.policy.unavailable_symbols).fails:
             raise UnavailableSymbolError(
                 f"{spec.name} poll(): {', '.join(symbols)} cannot be polled: {reason}. Remove "
@@ -1993,11 +2045,6 @@ class RestReader:
                 source=ErrorSource.USER,
                 is_bug=True,
             )
-        self.problems(
-            self._unavailable_events(
-                spec, [(name, f"{template} cannot serve it: {reason}") for name in symbols]
-            )
-        )
         logger.debug(
             "%s poll(): %s left out of the cycle: %s",
             spec.name,
@@ -2017,12 +2064,12 @@ class RestReader:
 
         A path that does not take a parameter the caller set (`shared_params` raises
         `ValueError`) is left out with its symbols, and the cycle reads every other path, as
-        `ErrorPolicy.unavailable_symbols` says (`_unavailable`): under `LOG` each symbol logs
-        one WARNING per session, naming the path and the parameter, and DEBUG on later cycles.
-        A crypto pair Massive's crypto ticker list gives no split for is planned as a call that
-        is never sent (`Call.unsplit`): the read reports a pair Massive has no data for as it
-        reports HTTP 404, and the cycle leaves out one whose currencies cannot be read, named
-        with why.
+        `ErrorPolicy.unavailable_symbols` says (`_unavailable`): each symbol is an
+        `unavailable_symbols` problem of the table. A crypto pair Massive's crypto ticker list
+        gives no split for is planned as a call that is never sent (`Call.unsplit`): the read
+        reports a pair Massive has no data for as it reports HTTP 404, and the cycle leaves out
+        one whose currencies cannot be read, named with why, an `unreadable_symbols` problem
+        of the table each cycle (`_call`).
 
         Args:
             spec: The dataset, with a fetch path.

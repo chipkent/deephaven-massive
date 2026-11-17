@@ -347,8 +347,9 @@ library bug. To report it, see
 [Report a bug](troubleshooting.md#report-a-bug).
 
 A listed crypto pair is unreadable too when its ticker isn't its two currencies
-written together. Under `log` or `ignore` it gets no rows. A
-watchlist read by `fetch()` names it in `Error` in `m.symbol_reads()`.
+written together. Under `log` or `ignore` it gets no rows, and
+`m.problems()` lists it. A watchlist read by `fetch()` also names it in `Error` in
+`m.symbol_reads()`.
 
 #### on_error.unavailable_symbols
 

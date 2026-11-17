@@ -13,8 +13,8 @@ The registry belongs to one `SessionCore`, which creates it and alone holds it; 
 core weakly. Every entry point that can change what keeps the session alive (`track`, `release`,
 `_shut_down`, `finish_read`) holds the core in a local variable until it returns and updates the
 live set (`live_set.sync`) in the same `registry_lock` section as the change. The core reads and
-changes the rows through the by-id methods (`row`, `change_row`, `live_fails`, `close_rows`, and
-`in`), always under `registry_lock`, when a transport reports a row change or a failure by
+changes the rows through the by-id methods (`row`, `change_row`, `live_fails`, and
+`close_rows`), always under `registry_lock`, when a transport reports a row change or a failure by
 stream id, and when the session closes.
 """
 
@@ -157,17 +157,6 @@ class WorkerTables:
         Read with `registry_lock` held (`live_set.sync`).
         """
         return bool(self._workers)
-
-    def __contains__(self, stream_id: object) -> bool:
-        """Return whether a worker table is registered; `registry_lock` is held.
-
-        Args:
-            stream_id: The table's `StreamId`.
-
-        Returns:
-            True while the table is in the registry.
-        """
-        return stream_id in self._workers
 
     def row(self, stream_id: int) -> StreamRow | None:
         """Return a registered worker table's current row; `registry_lock` is held.

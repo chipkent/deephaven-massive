@@ -37,8 +37,7 @@ query, and no log noise for problems the table already holds.
 
 ## Consequences
 
-A user who read `Error` notes, `Gaps`, or `SchemaDrift` reads `m.problems()` instead. A stream
-of named symbols keeps running while one of its symbols stays unreadable.
+A user who read `Error` notes, `Gaps`, or `SchemaDrift` reads `m.problems()` instead.
 
 ## Rule
 

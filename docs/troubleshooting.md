@@ -44,7 +44,7 @@ Each row says what happened in these columns:
 | `Query` | The call that made the table. |
 | `Dataset` | The table's dataset. |
 | `Symbol` | The symbol the problem concerns, when it concerns one. |
-| `Field` | The column the problem concerns, when it concerns one. For a flat-file line, the file. |
+| `Field` | The column the problem concerns, when it concerns one. For a flat-file line, the file, and for a rate-limit pause, its `Bucket` in `m.rate_limits()`. |
 | `Cause` | Why. [Each cause](#problem-causes) has a row of its own. |
 | `Action` | What the library did. |
 | `Source` | Whose problem it is: `massive`, `user` for your input, or `library`. |

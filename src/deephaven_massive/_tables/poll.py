@@ -967,8 +967,10 @@ class Poller:
                     at=int(self._clock.time() * 1e9),
                     since=int(began_at * 1e9),
                 )
-                if spans is not None:
-                    core.problems([spans])
+                # A cycle is marked once, and every cycle that ended rewrote the span
+                # (`_note_pace`), so this note is new.
+                assert spans is not None
+                core.problems([spans])
             if failing:
                 self._running = False  # fails once
                 # Stopped under the watch lock: the cycle's `_watch_end` comes after, so it

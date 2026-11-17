@@ -116,7 +116,7 @@ def test_a_cause_its_source_warns_of_logs_at_debug_only(caplog: pytest.LogCaptur
     assert len(queued) == 2
 
 
-def test_a_span_warns_by_its_first_span_and_an_empty_snapshot_only_queues(
+def test_a_span_warns_and_an_empty_snapshot_only_queues(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     queued: list[Sequence[Problem]] = []
@@ -162,3 +162,20 @@ def test_a_span_s_own_setting_decides_its_alarm(caplog: pytest.LogCaptureFixture
     with caplog.at_level(logging.DEBUG, problem_reporter.__name__):
         ProblemReporter(queued.extend, REDACTOR)([refused])
     assert warnings(caplog) == []
+
+
+def test_an_ignored_span_never_silences_one_that_warns(caplog: pytest.LogCaptureFixture) -> None:
+    # The converter's refusals come first in the snapshot; one ignored there must not keep the
+    # table's own skipped value, under LOG, from warning.
+    mixed = spans(
+        ProblemCause.NONCANONICAL_SYMBOLS,
+        {
+            "refused x": Span(symbol="x", detail="refused", since=1, policy=dm.OnError.IGNORE),
+            "own y": Span(symbol="y", detail="skipped", since=1, policy=dm.OnError.LOG),
+        },
+    )
+    queued: list[Problem] = []
+    with caplog.at_level(logging.DEBUG, problem_reporter.__name__):
+        ProblemReporter(queued.extend, REDACTOR)([mixed])
+    [warning] = warnings(caplog)
+    assert warning.startswith("stocks.trades table 7: noncanonical_symbols: y: skipped (at here)")

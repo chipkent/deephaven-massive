@@ -1331,7 +1331,7 @@ class Diagnostics:
         rows, change = pull()
         self._rate_due = None if change is None else time.monotonic() + change
         paused = {
-            row.bucket: (None, None, _pause_detail(row), 0)
+            row.bucket: (None, row.bucket, _pause_detail(row), 0)  # Field keys each bucket
             for row in rows
             if row.state is RateLimitState.PAUSED
         }

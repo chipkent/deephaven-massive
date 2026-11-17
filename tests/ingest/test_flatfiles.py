@@ -878,8 +878,8 @@ MALFORMED_ROWS = (
 """Two rows between a line with too few fields, one with too many, and one not UTF-8 text."""
 
 MALFORMED = (
-    f"skipped 3 malformed line(s) of {LOCATION.format(TRADES_0303)}, the first: row 2 after the "
-    "header has 2 fields where the header has 13; the file's other rows are kept"
+    f"3 malformed line(s) of {LOCATION.format(TRADES_0303)}, the first: row 2 after the header "
+    "has 2 fields where the header has 13; skipped, and the file's other rows are kept"
 )
 """The detail of the one `malformed_rows` problem of the file that holds `MALFORMED_ROWS`."""
 
@@ -916,16 +916,20 @@ def test_malformed_lines_are_skipped_as_one_problem_per_file_warned_by_the_setti
 
 
 def test_a_malformed_line_fails_the_read_under_raise(
-    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The problem is listed before the read fails, as under every setting.
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
-    with (
-        dm.MassiveSession(
-            dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE))
-        ) as m,
-        pytest.raises(dm.MassiveError) as info,
-    ):
-        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    with dm.MassiveSession(
+        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE))
+    ) as m:
+        events = record_problems(m, monkeypatch)
+        q = query(m, STOCK_TRADES, symbols=dm.ALL)
+        with pytest.raises(dm.MassiveError) as info:
+            q.history("2025-03-03", "2025-03-03", wait=True)
+    [listed] = events
+    assert (listed.cause, listed.policy) == (ProblemCause.MALFORMED_ROWS, dm.OnError.RAISE)
+    assert listed.detail.endswith("; malformed_rows=raise fails the read")
     assert str(info.value) == (
         f"stocks.trades: {LOCATION.format(TRADES_0303)} holds a malformed line, the first: row 2 "
         "after the header has 2 fields where the header has 13. To skip such lines and keep the "

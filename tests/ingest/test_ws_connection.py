@@ -10,7 +10,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from types import SimpleNamespace
@@ -29,7 +29,9 @@ from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.host_decision import recency_of
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, utc_text
-from deephaven_massive._tables.problem_events import ProblemCause
+from deephaven_massive._tables.problem_events import Problem, ProblemCause
+from deephaven_massive._tables.session_core import SessionCore
+from deephaven_massive._tables.stream import StreamSink
 from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.ws import FakeMassiveServer, status_frame
 from tests._fakes.ws_session import REALTIME, TIMEOUT, WsSession
@@ -1963,6 +1965,53 @@ def test_any_frame_ends_the_quiet_feed_span_and_the_stream_keeps_running(
         fake_ws_server.send(frame)
         wait_for(lambda: quiet() is None)
     assert ended(ws_session, dh_to_pylist, QUIET) == [(1, True), (1, True)]  # one per episode
+    ws_session.session.release(result)
+
+
+def test_a_span_reaches_only_the_streams_whose_session_lives(
+    *, ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, dh_to_pylist: ToPylist
+) -> None:
+    # A session freed without close() keeps its streams on the connection until its closer
+    # runs on the reaper; a span shown meanwhile reaches only the streams of live sessions.
+    first = ws_session.query(TRADES, ["AAPL"]).blink()
+    second = ws_session.query(TRADES, ["MSFT"]).blink()
+    ws_session.subscribed("T.AAPL", "T.MSFT")
+    connection = ws_session.connection()
+    core_of = StreamSink.core
+
+    def freed(sink: StreamSink) -> SessionCore | None:
+        return None if sink.stream_id == 2 else core_of(sink)
+
+    monkeypatch.setattr(StreamSink, "core", freed)
+    ws_session.on_loop(connection, lambda: connection._set_quiet_note("quiet"))
+    assert spans_of(ws_session, dh_to_pylist) == {(1, QUIET): "quiet"}
+    assert ws_session.on_loop(connection, lambda: sorted(connection._spans)) == [1]
+    monkeypatch.undo()
+    ws_session.session.release(first)
+    ws_session.session.release(second)
+
+
+def test_a_span_that_did_not_change_is_not_reported_again(
+    *, ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, dh_to_pylist: ToPylist
+) -> None:
+    result = ws_session.query(TRADES, ["AAPL"]).blink()
+    ws_session.subscribed("T.AAPL")
+    connection = ws_session.connection()
+    core = ws_session.session._core
+    reported: list[Problem] = []
+    report = core.problems
+
+    def recording(problems: Sequence[Problem]) -> None:
+        reported.extend(problems)
+        report(problems)
+
+    monkeypatch.setattr(core, "problems", recording)
+    for _ in range(2):  # the same note twice: its span holds on, unchanged
+        ws_session.on_loop(connection, lambda: connection._set_quiet_note("quiet"))
+    assert [(p.cause, p.stream_id) for p in reported if p.cause is ProblemCause.QUIET_FEED] == [
+        (ProblemCause.QUIET_FEED, 1)
+    ]
+    assert spans_of(ws_session, dh_to_pylist) == {(1, QUIET): "quiet"}
     ws_session.session.release(result)
 
 
