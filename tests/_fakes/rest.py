@@ -346,6 +346,21 @@ class FakeRestServer:
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
+            @override
+            def handle_one_request(self) -> None:
+                # A client may drop the connection before sending a request: urllib3 does when
+                # the TLS certificate names another host. The drop arrives as a reset on macOS
+                # and as a broken pipe on Linux, where the TLS read still writes to it, and ends
+                # the connection as a close would. (A TLS EOF reads as a close already.) Either
+                # error after a request line arrived is still raised.
+                self.raw_requestline = b""
+                try:
+                    super().handle_one_request()
+                except (ConnectionResetError, BrokenPipeError):
+                    if self.raw_requestline:
+                        raise
+                    self.close_connection = True
+
             def do_GET(self) -> None:
                 parts = urlsplit(self.path)
                 proxied = bool(parts.scheme)
