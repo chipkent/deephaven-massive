@@ -48,9 +48,11 @@ __all__ = [
     "track_refused",
 ]
 
-_CONVERTED: Final[weakref.WeakKeyDictionary[Table, RefusedValues]] = weakref.WeakKeyDictionary()
-"""Each table `canonicalize_symbols` returned without failing, with the values it refuses now;
-guarded by `_CONVERTED_LOCK`, a leaf lock."""
+_CONVERTED: Final[weakref.WeakKeyDictionary[Table, tuple[str, RefusedValues]]] = (
+    weakref.WeakKeyDictionary()
+)
+"""Each table `canonicalize_symbols` returned without failing, with the column it converted and
+the values it refuses now; guarded by `_CONVERTED_LOCK`, a leaf lock."""
 
 _CONVERTED_LOCK: Final = threading.Lock()
 
@@ -169,6 +171,9 @@ class RefusedValues:
                 name in `Field`; None when it is the follower's symbol table.
         """
         with self._lock:
+            # A follower that is gone is dropped here too, so readers made and released while
+            # the values never change don't pile up.
+            self._followers = [(ref, f) for ref, f in self._followers if ref() is not None]
             self._followers.append((weakref.ref(follower), field))
             follower.refused_changed(self._values, self.policy, field=field)
 
@@ -223,25 +228,33 @@ def refused_detail(why: str) -> str:
     return f"canonicalize_symbols refused it: {why}"
 
 
-def track_refused(table: Table, refused: RefusedValues) -> None:
+def track_refused(table: Table, refused: RefusedValues, *, column: str) -> None:
     """Remember the values a table `canonicalize_symbols` returned refuses.
 
     Args:
         table: The returned table.
         refused: Its refused values.
+        column: The column it converted.
     """
     with _CONVERTED_LOCK:
-        _CONVERTED[table] = refused
+        _CONVERTED[table] = (column, refused)
 
 
-def refused_values_of(table: Table) -> RefusedValues | None:
-    """Return the refused values of a table `canonicalize_symbols` returned.
+def refused_values_of(table: Table, column: str) -> RefusedValues | None:
+    """Return the refused values of a table `canonicalize_symbols` returned, read by a column.
+
+    A dataset reads one column of the table; only when `canonicalize_symbols` converted that
+    column are its refused values the dataset's skipped values.
 
     Args:
-        table: A table a dataset follows.
+        table: A table a dataset reads.
+        column: The column the dataset reads.
 
     Returns:
-        Its refused values, or None for any other table.
+        Its refused values, or None for any other table or column.
     """
     with _CONVERTED_LOCK:
-        return _CONVERTED.get(table)
+        found = _CONVERTED.get(table)
+    if found is None or found[0] != column:
+        return None
+    return found[1]

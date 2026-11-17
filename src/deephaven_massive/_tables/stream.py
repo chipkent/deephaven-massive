@@ -2566,7 +2566,7 @@ def open_stream_tables(
                     on_invalid=functools.partial(_fail_later, weakref.ref(sink)),
                     on_skipped=skipped.update,
                 )
-                refused = refused_values_of(symbols.table)
+                refused = refused_values_of(symbols.table, rule.column)
                 if refused is not None:  # a table `canonicalize_symbols` returned
                     refused.follow(skipped)
                 watch.keep_alive_with(blink)

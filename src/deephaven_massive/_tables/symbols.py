@@ -94,12 +94,10 @@ def canonicalize_symbols(
     20 per table, so the table and every table made from it keep updating. Under
     `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. A `fetch()`,
     `history()`, or `poll()` of the returned table, or a stream of a live one, lists each such
-    value in `m.problems()` under the cause `noncanonical_symbols`. A live read lists it while
-    a row holds it, and its row gets an `EndedAt` once you fix or delete the row. A `fetch()`
-    or `history()` of a static table lists it once. Under `OnError.RAISE`, a current bad value
-    raises `ValueError` here, and a bad row added later fails the live table, along with any
-    dataset that follows it as a watchlist. This function's `on_error` is its own: a session's
-    `dm.ErrorPolicy` doesn't apply to it.
+    value in `m.problems()` under the cause `noncanonical_symbols`. Under `OnError.RAISE`, a
+    current bad value raises `ValueError` here, and a bad row added later fails the live table,
+    along with any dataset that follows it as a watchlist. This function's `on_error` is its
+    own: a session's `dm.ErrorPolicy` doesn't apply to it.
 
     Example:
         ::
@@ -172,12 +170,17 @@ def canonicalize_symbols(
     if table.is_refreshing and not effect.fails:
         _track_refused(table, converted, column=column, mode=mode, convert=convert)
     elif not effect.fails:  # a static input's refused values are the ones found above
-        _keep_refused(converted, tuple(refused), mode=mode, convert=convert)
+        _keep_refused(converted, tuple(refused), column=column, mode=mode, convert=convert)
     return converted
 
 
 def _keep_refused(
-    converted: Table, values: tuple[str, ...], *, mode: OnError, convert: Callable[[str], str]
+    converted: Table,
+    values: tuple[str, ...],
+    *,
+    column: str,
+    mode: OnError,
+    convert: Callable[[str], str],
 ) -> None:
     """Keep the values a static input table holds that the converter refuses.
 
@@ -187,12 +190,13 @@ def _keep_refused(
     Args:
         converted: The table `canonicalize_symbols` returns.
         values: The input's refused values.
+        column: The column it converted.
         mode: The call's `on_error`, `LOG` or `IGNORE`.
         convert: The class's strict verdict (`strict_converter`).
     """
     refused = RefusedValues(mode, why=lambda value: refusal(value, convert))
     refused.change(values)
-    track_refused(converted, refused)
+    track_refused(converted, refused, column=column)
 
 
 def _track_refused(
@@ -227,7 +231,7 @@ def _track_refused(
     watch.keep_alive_with(converted)
     watch.start()
     refused.keep(watch)
-    track_refused(converted, refused)
+    track_refused(converted, refused, column=column)
 
 
 def _no_change(added: frozenset[str], removed: frozenset[str]) -> None:

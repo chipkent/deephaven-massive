@@ -1569,6 +1569,45 @@ def test_a_value_canonicalize_symbols_refuses_in_a_table_of_values_is_shown(
     assert not failed
 
 
+def test_a_refused_value_of_another_column_is_no_problem_of_the_poll(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
+) -> None:
+    # The table's Symbol column was converted, but the poll reads its ProductCode column, whose
+    # values are all good: the converter's refusals belong to a column the poll never reads.
+    source = dh_input_table(
+        {"Id": dtypes.string, "Symbol": dtypes.string, "ProductCode": dtypes.string},
+        key_cols="Id",
+    )
+    source.add(
+        new_table(
+            [
+                string_col("Id", ["1", "2"]),
+                string_col("Symbol", ["AAPL", "no pe!"]),
+                string_col("ProductCode", ["ES", "NQ"]),
+            ]
+        )
+    )
+    converted = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    values = ValueTable(
+        "product_code", "product_code", "ProductCode", underlying=False, table=converted
+    )
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
+    )
+    clock.wait_for_sleepers(1)
+    assert script.values == [("ES", "NQ")]
+    assert problems_of(massive_session, dh_to_pylist, NONCANONICAL) == []
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
+
+
 def test_a_freed_session_gets_no_problem_of_the_symbol_table(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:

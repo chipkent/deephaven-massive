@@ -683,7 +683,7 @@ class Poller:
             values=self._value_rule,
             report=functools.partial(_report_problems, self._core),
         )
-        _follow_refused(request, self._skipped)
+        _follow_refused(request, self._skipped, column=self._rule.column)
         where = f"{spec.name} poll() stream {stream_id}"
         self._failures = SpanTracker(
             ProblemCause.POLL_CYCLE_FAILED, dataset=spec.name, stream_id=stream_id, where=where
@@ -1580,7 +1580,7 @@ def _report_problems(
         core.problems(problems)
 
 
-def _follow_refused(request: Request, skipped: SkippedValues) -> None:
+def _follow_refused(request: Request, skipped: SkippedValues, *, column: str) -> None:
     """Join the values `canonicalize_symbols` refuses to a poll's own skipped values.
 
     Only a live table `canonicalize_symbols` returned has refused values (`refused_values_of`):
@@ -1589,15 +1589,16 @@ def _follow_refused(request: Request, skipped: SkippedValues) -> None:
     Args:
         request: The poll's request.
         skipped: The poll's skipped values.
+        column: The column the poll reads of its symbol table.
     """
     symbols = request.symbols
     if isinstance(symbols, SymbolTable):
-        refused = refused_values_of(symbols.table)
+        refused = refused_values_of(symbols.table, column)
         if refused is not None:
             refused.follow(skipped)
     values = request.value_table
     if values is not None:
-        refused = refused_values_of(values.table)
+        refused = refused_values_of(values.table, values.column)
         if refused is not None:
             refused.follow(skipped, field=values.column)
 

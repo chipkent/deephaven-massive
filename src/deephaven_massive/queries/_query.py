@@ -173,7 +173,9 @@ def _read_symbol_table(
     if call is not None:
         where = f"the symbol table of {query}"
         events = rule.skipped_events(rows.skipped, stream_id=call, where=where, field=None)
-        refused = refused_values_of(symbols.table)  # a table `canonicalize_symbols` returned
+        refused = refused_values_of(
+            symbols.table, rule.column
+        )  # a table `canonicalize_symbols` returned
         if refused is not None:
             events += refused.events(dataset=spec.name, stream_id=call, where=where, field=None)
         if events:

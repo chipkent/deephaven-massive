@@ -943,7 +943,7 @@ def _build(
             on_invalid=router.on_invalid,
             on_skipped=skipped.update if values_column is None else skipped.update_values,
         )
-        refused = refused_values_of(symbol_table)
+        refused = refused_values_of(symbol_table, rule.column)
         if refused is not None:  # a table `canonicalize_symbols` returned
             refused.follow(skipped, field=values_column)
         # A table derived from the result keeps the blink table, and so the watch, alive.

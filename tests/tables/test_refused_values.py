@@ -87,6 +87,17 @@ def test_a_follower_gets_the_values_now_and_each_change_beside_its_own() -> None
     assert len(problems) == 3
 
 
+def test_a_follower_that_is_gone_is_dropped_when_another_follows() -> None:
+    # Readers made and released while the values never change leave no entry behind.
+    refused = RefusedValues(OnError.LOG, why={"^X": "no"}.get)
+    reported: list[Problem] = []
+    for _ in range(5):
+        refused.follow(SkippedValues(RULE, stream_id=7, report=reported.extend))
+    keep = SkippedValues(RULE, stream_id=8, report=reported.extend)
+    refused.follow(keep)
+    assert len(refused._followers) == 1
+
+
 def test_a_table_of_values_is_a_source_of_its_own_named_by_its_column() -> None:
     # A poll that reads a converted symbol table and a converted table of values: each table's
     # refused values come and go alone, and the values table's spans name its column.
@@ -165,9 +176,10 @@ def test_a_live_converted_table_keeps_its_refused_values_current(
     scope = new_scope()
     with scope.open():
         result = dm.canonicalize_symbols(source, AssetClass.CRYPTO)
-    refused = refused_values_of(result)
+    refused = refused_values_of(result, "Symbol")
     assert refused is not None
-    assert refused_values_of(source) is None  # only the returned table is known
+    assert refused_values_of(source, "Symbol") is None  # only the returned table is known
+    assert refused_values_of(result, "ProductCode") is None  # nor any column it didn't convert
     problems: list[Problem] = []
     skipped = SkippedValues(RULE, stream_id=7, report=problems.extend)
     refused.follow(skipped)
@@ -193,7 +205,7 @@ def test_a_static_conversion_keeps_its_refused_values_once() -> None:
     static = dm.canonicalize_symbols(
         new_table([string_col("Symbol", ["^X", "X:BTCUSD"])]), AssetClass.CRYPTO
     )
-    refused = refused_values_of(static)
+    refused = refused_values_of(static, "Symbol")
     assert refused is not None
     problems: list[Problem] = []
     refused.follow(SkippedValues(RULE, stream_id=7, report=problems.extend))
@@ -217,12 +229,12 @@ def test_a_failing_conversion_tracks_nothing(
     scope = new_scope()
     with scope.open():
         strict = dm.canonicalize_symbols(source, AssetClass.CRYPTO, on_error=OnError.RAISE)
-    assert refused_values_of(strict) is None  # a refused value fails it instead
+    assert refused_values_of(strict, "Symbol") is None  # a refused value fails it instead
     release_scope(dh_exec_ctx, scope)
 
 
 def test_a_tracked_table_is_forgotten_with_its_values(dh_exec_ctx: ExecutionContext) -> None:
     table = new_table([string_col("Symbol", ["a"])])
     refused = RefusedValues(OnError.LOG, why=RULE.refusal)
-    track_refused(table, refused)
-    assert refused_values_of(table) is refused
+    track_refused(table, refused, column="Symbol")
+    assert refused_values_of(table, "Symbol") is refused
