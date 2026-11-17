@@ -472,12 +472,11 @@ class FrameDecoder:
     Example:
         ::
 
-            from deephaven_massive._massive.spec.types import Field, Source, Transport, WireType
+            from deephaven_massive._massive.spec.types import Field, WireType, WsChannel
             from deephaven_massive._massive.ws.protocol import FrameDecoder
 
-            trades = Source(
+            trades = WsChannel(
                 key="stocks/T",
-                transport=Transport.WS,
                 fields=(
                     Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
                     Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE),

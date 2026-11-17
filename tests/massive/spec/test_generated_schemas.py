@@ -12,6 +12,8 @@ import pytest
 from deephaven_massive._massive.spec import generated_schemas
 from deephaven_massive._massive.spec.types import (
     Conversion,
+    Feed,
+    FeedHost,
     Membership,
     Param,
     ParamKind,
@@ -19,6 +21,7 @@ from deephaven_massive._massive.spec.types import (
     RestPath,
     Source,
     Transport,
+    WsChannel,
 )
 
 if TYPE_CHECKING:
@@ -26,7 +29,8 @@ if TYPE_CHECKING:
 
 
 def _file(*entries: Mapping[str, object]) -> str:
-    return json.dumps({"sources": list(entries)})
+    # A channel has no documented host unless the entry gives some; a flat file reads none.
+    return json.dumps({"sources": [{"hosts": [], **entry} for entry in entries]})
 
 
 _FIELD = {
@@ -49,13 +53,54 @@ def test_parse_reads_memberships_and_other_transports() -> None:
         ],
     }
     (value,) = generated_schemas.parse(Transport.WS, _file(entry)).values()
-    assert type(value) is Source
+    assert type(value) is WsChannel
     assert value.transport is Transport.WS
     assert value.fields[0].conversion is Conversion.TEXT_OR_INTEGER_ID
     assert value.memberships == (
         Membership(kind="trades", group="stocks", position=2),
         Membership(kind="values", group="indices", position=0, projection={"x": "Value"}),
     )
+
+
+def test_parse_reads_a_channel_s_hosts_and_a_flat_file_as_a_plain_source() -> None:
+    hosts = [{"feed": "Delayed", "host": "d.test"}, {"feed": "Real-Time", "host": "r.test"}]
+    channel = {"key": "stocks/T", "hosts": hosts, "fields": [], "memberships": []}
+    (value,) = generated_schemas.parse(Transport.WS, _file(channel)).values()
+    assert isinstance(value, WsChannel)
+    assert value.hosts == (
+        FeedHost(feed=Feed.DELAYED, host="d.test"),
+        FeedHost(feed=Feed.REAL_TIME, host="r.test"),
+    )
+    (prefix,) = generated_schemas.parse(Transport.FLAT_FILES, _file(channel)).values()
+    assert type(prefix) is Source
+    assert prefix.transport is Transport.FLAT_FILES
+
+
+@pytest.mark.parametrize(
+    ("hosts", "error", "message"),
+    [
+        ([{"feed": "Night", "host": "n.test"}], ValueError, "'Night' is not a valid Feed"),
+        ([{"feed": "Delayed", "host": None}], TypeError, "'host' is None, not a string"),
+        (
+            [{"feed": "Delayed", "host": "a.test"}, {"feed": "Delayed", "host": "b.test"}],
+            ValueError,
+            "repeated feeds",
+        ),
+    ],
+    ids=["unknown feed", "no host", "a feed twice"],
+)
+def test_parse_refuses_a_malformed_host(
+    hosts: list[dict[str, object]], error: type[Exception], message: str
+) -> None:
+    entry = {"key": "stocks/T", "hosts": hosts, "fields": [], "memberships": []}
+    with pytest.raises(error, match=message):
+        generated_schemas.parse(Transport.WS, _file(entry))
+
+
+def test_parse_refuses_a_channel_without_hosts() -> None:
+    text = json.dumps({"sources": [{"key": "stocks/T", "fields": [], "memberships": []}]})
+    with pytest.raises(ValueError, match="missing member 'hosts'"):
+        generated_schemas.parse(Transport.WS, text)
 
 
 def test_parse_reads_ignored_keys_and_refuses_ones_that_are_not_text() -> None:

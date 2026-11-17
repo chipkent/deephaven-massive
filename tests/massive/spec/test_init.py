@@ -23,6 +23,7 @@ from deephaven_massive._massive.spec.types import (
     Transport,
     WireType,
     WireUnit,
+    WsChannel,
 )
 
 if TYPE_CHECKING:
@@ -92,7 +93,8 @@ def test_every_transport_loads_its_generated_file(
     loaded = spec.sources(transport)
     text = resources.files(spec).joinpath(name).read_text(encoding="utf-8")
     assert list(loaded) == [entry["key"] for entry in json.loads(text)["sources"]]
-    assert all(type(value) is Source and value.transport is transport for value in loaded.values())
+    kind = WsChannel if transport is Transport.WS else Source
+    assert all(type(value) is kind and value.transport is transport for value in loaded.values())
     assert unloaded[transport] is loaded
 
 

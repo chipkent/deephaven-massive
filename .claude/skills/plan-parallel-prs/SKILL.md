@@ -176,7 +176,10 @@ Most of an agent's cost is context re-read every turn. Start a fresh agent with 
 for each new round of work instead of resuming a long one; resume only for a small follow-up.
 As coordinator, keep your own turns short and start a fresh session at each phase change, with
 a handover note. Settle minor choices yourself instead of running multi-agent debates, and don't
-re-run a broad review whose last pass found little.
+re-run a broad review whose last pass found little. When an agent's PR opens, goes green, or
+merges, start a fresh agent with a short handover note (the branch state, what is done, what
+remains, any traps) instead of resuming the long one; the project settings also make agents
+compact at about 300,000 tokens.
 
 ## 8. After a merge
 

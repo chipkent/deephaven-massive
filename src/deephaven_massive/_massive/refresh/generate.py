@@ -41,7 +41,7 @@ from deephaven_massive._massive.refresh.plan_access import plan_access
 from deephaven_massive._massive.refresh.rest_sources import Coverage, generate_rest
 from deephaven_massive._massive.refresh.snapshot import Snapshot
 from deephaven_massive._massive.refresh.ws_sources import WsCoverage, generate_ws
-from deephaven_massive._massive.spec.types import PlanAccess, RestPath, Source, Transport
+from deephaven_massive._massive.spec.types import PlanAccess, RestPath, Source, Transport, WsChannel
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -76,7 +76,7 @@ class Generated:
     """
 
     rest: tuple[RestPath, ...]
-    ws: tuple[Source, ...]
+    ws: tuple[WsChannel, ...]
     flat_files: tuple[Source, ...]
     rest_coverage: Coverage
     ws_coverage: WsCoverage
@@ -172,7 +172,7 @@ def _generate_each(
     snapshot: Snapshot, hand: HandInput
 ) -> tuple[
     tuple[tuple[RestPath, ...], Coverage],
-    tuple[tuple[Source, ...], WsCoverage],
+    tuple[tuple[WsChannel, ...], WsCoverage],
     tuple[tuple[Source, ...], FlatFileCoverage],
 ]:
     """Run the three generators, collecting the problems of all of them before stopping.
@@ -296,7 +296,7 @@ def refresh(
     generated = generate(snapshot, hand)
     texts = {
         render.REST_FILE.name: render.render_rest(generated.rest),
-        render.WS_FILE.name: render.render_sources(generated.ws),
+        render.WS_FILE.name: render.render_channels(generated.ws),
         render.FLAT_FILES_FILE.name: render.render_sources(generated.flat_files),
         render.DESCRIPTIONS_FILE.name: render.render_descriptions(
             {

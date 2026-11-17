@@ -2,4 +2,4 @@
 
 Date: 2026-11-09
 
-Status: moved to `src/deephaven_massive/namespaces/_options.py`, "The admin messages name none"; `src/deephaven_massive/_datasets/catalog.py`, "real_time_only"
+Status: moved to `src/deephaven_massive/namespaces/_options.py`, "The admin messages name none"; `src/deephaven_massive/_ingest/host_decision.py`, "the library never refuses it first"

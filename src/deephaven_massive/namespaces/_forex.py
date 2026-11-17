@@ -160,7 +160,6 @@ FMV: Final = DatasetSpec(
     channels={NotBars.ANY: "FMV"},
     channel_family=ChannelFamily.FMV,
     keys={(_WS, "forex/FMV"): SourceKeys(symbol=KeySpec("Ticker"), time=KeySpec("FmvLastUpdated"))},
-    real_time_only=True,
 )
 """`m.forex.fmv`: the `FMV` stream of the Business feed."""
 

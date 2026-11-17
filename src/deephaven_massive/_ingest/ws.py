@@ -84,8 +84,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, assert_never
 
+from deephaven_massive._datasets.feeds import dataset_hosts
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
-from deephaven_massive._enums import AssetClass, ChannelFamily, OnError, Recency
+from deephaven_massive._enums import AssetClass, ChannelFamily, OnError
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     LIBRARY_BUG,
@@ -101,7 +102,7 @@ from deephaven_massive._errors import (
     required,
     unmatched_form,
 )
-from deephaven_massive._ingest.host_decision import real_time_note
+from deephaven_massive._ingest.host_decision import refusal_note
 from deephaven_massive._ingest.subscriptions import is_wildcard, stream_topics, wildcard
 from deephaven_massive._ingest.ws_connection import (
     OPTIONS_CAP,
@@ -436,13 +437,15 @@ class WsConnections:
         symbols = () if pairs else request.symbol_key()  # subscribed once split
         wanted, topics = _wanted(asset_class, channel, symbols, pairs=self.pairs())
         decision = self._resolve(asset_class, spec.channel_family)
-        if spec.real_time_only and decision.recency is not Recency.REALTIME:
+        documented = dataset_hosts(spec)
+        if len(documented) == 1 and documented[0].host != decision.host:
             # Massive's answer decides: the library refuses nothing it might serve.
             logger.info(
-                "%s stream %d: Massive documents it only on the real-time feed; subscribing on "
-                "%s (%s), so Massive's answer decides whether it streams",
+                "%s stream %d: Massive documents it only on %s; subscribing on %s (%s), so "
+                "Massive's answer decides whether it streams",
                 spec.name,
                 stream_id,
+                documented[0].host,
                 decision.host,
                 decision.evidence,
             )
@@ -488,7 +491,7 @@ class WsConnections:
                 wanted,
                 topics,
                 static,
-                refusal_note=real_time_note(spec) if spec.real_time_only else "",
+                refusal_note=refusal_note(spec),
             )
             if asset_class is AssetClass.CRYPTO:  # its pairs are split by the stream's policy
                 with self._lock:
@@ -933,18 +936,19 @@ class WsConnections:
     def _split(
         self, symbols: Iterable[str], policy: ResolvedPolicy
     ) -> tuple[set[str], dict[str, Unsplit], list[str], MassiveError | None]:
-        """Split crypto pairs by Massive's crypto ticker list, stopping at a failed read.
+        """Split crypto pairs by Massive's crypto ticker list, reading none after a failed read.
 
-        A split is kept for the group (`pairs`), so each pair is looked up once.
+        A split is kept for the group (`pairs`), so each pair is looked up once, and a pair
+        split before is split even while the list cannot be read.
 
         Args:
             symbols: Canonical crypto tickers, sorted.
             policy: The stream's resolved policy, for the lookup (`crypto_pair`).
 
         Returns:
-            The pairs split, those the list gives no split for with why (`Unsplit`), those left
-            unsplit by a failed read of the list, and that failure (None when the list was
-            read).
+            The pairs split, those the list gives no split for with why (`Unsplit`), those not
+            split before and left unread by a failed read of the list, and that failure (None
+            when the list was read).
 
         Raises:
             MassiveError: The lookup's own error, when its source is `ErrorSource.LIBRARY`: a
@@ -953,19 +957,25 @@ class WsConnections:
         """
         split: set[str] = set()
         unsplit: dict[str, Unsplit] = {}
-        pending = list(symbols)
-        for index, symbol in enumerate(pending):
+        waiting: list[str] = []
+        failure: MassiveError | None = None
+        for symbol in symbols:
             with self._lock:
                 known = symbol in self.group.pairs
             if known:
                 split.add(symbol)
+                continue
+            if failure is not None:  # the list just failed to read: wait with the failed pair
+                waiting.append(symbol)
                 continue
             try:
                 found = self._crypto_pair(symbol, policy)
             except MassiveError as error:
                 if error.source is ErrorSource.LIBRARY:
                     raise  # a defect is never retried or shown as a waiting pair
-                return split, unsplit, pending[index:], error
+                failure = error
+                waiting.append(symbol)
+                continue
             match found:
                 case Unsplit():
                     unsplit[symbol] = found
@@ -975,7 +985,7 @@ class WsConnections:
                     split.add(symbol)
                 case _:
                     raise BrokenGuaranteeError(unmatched_form("a crypto pair's lookup", found))
-        return split, unsplit, [], None
+        return split, unsplit, waiting, failure
 
     def _unreadable(
         self, stream_id: int, unread: Mapping[str, str], *, reader: str, state: _PairState
