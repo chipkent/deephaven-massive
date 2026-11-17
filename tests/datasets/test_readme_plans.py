@@ -249,6 +249,16 @@ def test_plans_no_plan_line_can_describe_are_refused() -> None:
     )
     with pytest.raises(ValueError, match="no Plan line can say"):
         expected_plan_line([[(SNAPSHOTS, gapped)]])
+    # Included by every plan but one in the middle: "X or higher" would drop the first.
+    holed = dataclasses.replace(
+        snapshots,
+        plans=tuple(
+            dataclasses.replace(t, access="Not included" if i == 1 else "Included")
+            for i, t in enumerate(snapshots.plans)
+        ),
+    )
+    with pytest.raises(ValueError, match="no Plan line can say"):
+        expected_plan_line([[(SNAPSHOTS, holed)]])
     # Included by none.
     none = dataclasses.replace(
         snapshots,

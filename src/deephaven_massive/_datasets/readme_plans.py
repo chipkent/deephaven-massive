@@ -302,7 +302,7 @@ def expected_plan_line(pages: Sequence[Sequence[tuple[str, PlanAccess]]]) -> str
             raise ValueError(f"the plans {plans} share no first word")
         return f"Any {families.pop()} plan"
     first = len(included) - next(i for i, ok in enumerate(reversed(included)) if not ok)
-    if first == len(plans) or not all(included[first:]):
+    if first == len(plans) or any(included[:first]):
         raise ValueError(f"no Plan line can say which of {plans} include the data")
     return f"{plans[first]} or higher"
 
