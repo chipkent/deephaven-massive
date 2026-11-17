@@ -294,8 +294,7 @@ SNAPSHOTS: Final = DatasetSpec(
 
 CONTRACTS: Final = DatasetSpec(
     name="options.contracts",
-    summary="Reference data on options contracts: call or put, exercise style, expiration, and "
-    "strike.",
+    summary="Options contracts by underlying: call or put, exercise style, expiration, and strike.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CONTRACTS,
     keys={(_REST, _CONTRACTS): _keys("Ticker", fanout="UnderlyingTicker")},
@@ -304,8 +303,7 @@ CONTRACTS: Final = DatasetSpec(
 )
 CONTRACT_DETAILS: Final = DatasetSpec(
     name="options.contract_details",
-    summary="Reference data on contracts you name: call or put, exercise style, expiration, "
-    "strike.",
+    summary="The options contracts you name: call or put, exercise style, expiration, and strike.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CONTRACT,
     # The rows carry their ticker, although the request names it too.
@@ -924,7 +922,7 @@ class OptionsNamespace(Namespace):
         filters: Mapping[str, FilterValue] | None = None,
         on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
-        """Reference data on options contracts: call or put, exercise style, expiration, and strike.
+        """Options contracts by underlying: call or put, exercise style, expiration, and strike.
 
         Lists the contracts of one underlying, or of every underlying, so you can find their
         tickers. To read contracts you can already name, use `contract_details()`.
@@ -932,9 +930,9 @@ class OptionsNamespace(Namespace):
         A table of underlyings is read in one of two ways:
 
         - A live table is followed. Add an underlying and its contracts appear. Remove it and
-          they leave.
-        - A static table is read once. An error from Massive on one underlying fails the whole
-          table.
+          they leave. An error on one underlying fails only that underlying.
+        - A static table is a fixed list. In `fetch()`, an error from Massive on one underlying
+          fails the whole table.
 
         A row that isn't Massive's exact stock or index ticker is skipped and logged. To fail
         instead, pass `on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
@@ -945,7 +943,8 @@ class OptionsNamespace(Namespace):
                 for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
-            expired: True asks Massive for expired contracts. False is the default.
+            expired: True sends Massive's `expired=true`, which Massive documents as "Query for
+                expired contracts". False, the default, sends nothing.
             sort: `"ticker"`, `"underlying_ticker"`, `"expiration_date"`, or `"strike_price"`.
             order: The direction of `sort`.
             limit: The most rows to return, in total. A table of underlyings caps every
@@ -1008,7 +1007,7 @@ class OptionsNamespace(Namespace):
         as_of: DateLike | None = None,
         on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
-        """Reference data on contracts you name: call or put, exercise style, expiration, strike.
+        """The options contracts you name: call or put, exercise style, expiration, and strike.
 
         Reads each contract you name into the same columns as `contracts()`. Each contract is one
         request. To find a contract's ticker first, list its underlying's contracts with
