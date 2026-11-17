@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from deephaven_massive._massive.ws.backoff import JITTER, STABLE_UPTIME, Backoff
@@ -52,12 +54,12 @@ def test_only_a_stable_connection_resets_the_count() -> None:
 @pytest.mark.parametrize(
     ("initial", "maximum", "message"),
     [
-        (0.0, 10.0, "initial backoff must be positive, not 0.0"),
-        (-1.0, 10.0, "must be positive"),
-        (float("nan"), 10.0, "must be positive"),
-        (20.0, 10.0, "maximum backoff 10.0 is below the initial 20.0"),
+        (0.0, 10.0, "initial=0.0 is not a positive number of seconds."),
+        (-1.0, 10.0, "initial=-1.0 is not a positive number of seconds."),
+        (float("nan"), 10.0, "initial=nan is not a positive number of seconds."),
+        (20.0, 10.0, "maximum=10.0 is below initial=20.0."),
     ],
 )
 def test_bounds_are_checked(initial: float, maximum: float, message: str) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         Backoff(initial, maximum)

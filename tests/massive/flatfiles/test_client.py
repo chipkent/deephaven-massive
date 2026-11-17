@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import logging
 import random
+import re
 import socket
 import ssl
 import struct
@@ -65,6 +66,10 @@ if TYPE_CHECKING:
 
 TIMEOUT = 30.0
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
+CLOSED = (
+    "The library closed its connections to https://files.massive.com before this request was sent."
+)
+TRUST_IT = ". If a proxy or a private CA signs it, set SSL_CERT_FILE to a bundle that trusts it."
 FUTURES_KEY = "us_futures_nymex/trades_v1/2025/03/2025-03-04.csv.gz"
 ACCESS_KEY = "AKIDFLATFILES"
 PRIVATE_KEY = "flat-file-secret"
@@ -302,8 +307,9 @@ def test_a_close_while_the_network_settings_are_read_creates_no_client(
         client.close()
 
     monkeypatch.setattr(client_module, "https_proxy", proxy_for)
-    with pytest.raises(WireError, match="is closed"):
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == CLOSED
     assert (fake_s3.clients, fake_s3.keys()) == ([], [])
 
 
@@ -449,7 +455,8 @@ def test_rejected_credentials_are_a_wire_auth_error(
     error = info.value
     # The message says what happened to which object; the remedy is the library's to add.
     assert error.message == (
-        f"HTTP 403 for s3://flatfiles/{FUTURES_KEY} at https://files.massive.com ({code}: Rejected)"
+        f"Massive answered the read of s3://flatfiles/{FUTURES_KEY} at https://files.massive.com "
+        f'with HTTP 403 (request_id 4442587FB7D0A2F9): "{code}: Rejected".'
     )
     assert (error.status, error.host, error.path) == (403, "files.massive.com", FUTURES_KEY)
     assert error.request_id == fake_s3.request_id
@@ -463,8 +470,8 @@ def test_another_403_is_a_wire_entitlement_error(
     with pytest.raises(WireEntitlementError) as info:
         client.open(FUTURES_KEY)
     assert info.value.message == (
-        f"HTTP 403 for s3://flatfiles/{FUTURES_KEY} at https://files.massive.com "
-        "(AccessDenied: Access Denied)"
+        f"Massive answered the read of s3://flatfiles/{FUTURES_KEY} at https://files.massive.com "
+        'with HTTP 403 (request_id 4442587FB7D0A2F9): "AccessDenied: Access Denied".'
     )
     assert (info.value.status, info.value.path) == (403, FUTURES_KEY)
     assert info.value.request_id == fake_s3.request_id
@@ -490,7 +497,8 @@ def test_another_status_is_a_wire_error_at_once(
     error = info.value
     assert type(error) is WireError
     assert error.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: HTTP {status} ({code}: No)"
+        f"Massive answered the read of s3://flatfiles/{KEY} at https://files.massive.com with "
+        f'HTTP {status} (request_id 4442587FB7D0A2F9): "{code}: No".'
     )
     assert (error.status, error.path, error.request_id) == (status, KEY, fake_s3.request_id)
     assert isinstance(error.__cause__, ClientError)
@@ -526,8 +534,8 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
     error = info.value
     assert type(error) is WireError
     assert error.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: HTTP {status} "
-        f"({code}: Try again)"
+        f"Massive answered the read of s3://flatfiles/{KEY} at https://files.massive.com with "
+        f'HTTP {status} (request_id 4442587FB7D0A2F9): "{code}: Try again".'
     )
     assert (error.status, error.request_id) == (status, fake_s3.request_id)
     # S3 answers a timeout with HTTP 400, whose status alone does not say it may pass.
@@ -540,13 +548,13 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
     logged = [
         (r.levelno, r.getMessage())
         for r in caplog.records
-        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "giving up" in r.msg)
+        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "Giving up" in r.msg)
     ]
     assert logged == [
-        (logging.INFO, f"{error}; retry 1 of 3 in 0.55 s"),
-        (logging.INFO, f"{error}; retry 2 of 3 in 1.10 s"),
-        (logging.INFO, f"{error}; retry 3 of 3 in 2.20 s"),
-        (logging.DEBUG, f"{error}; giving up after 4 attempts"),
+        (logging.INFO, f"{error} Retry 1 of 3 in 0.55 s."),
+        (logging.INFO, f"{error} Retry 2 of 3 in 1.10 s."),
+        (logging.INFO, f"{error} Retry 3 of 3 in 2.20 s."),
+        (logging.DEBUG, f"{error} Giving up after 4 attempts."),
     ]
 
 
@@ -636,8 +644,12 @@ def test_an_unreachable_endpoint_is_a_wire_error_after_the_retries(
     *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock
 ) -> None:
     fake_s3.fail(KEY, "unreachable")
-    with pytest.raises(WireError, match=f"^cannot read s3://flatfiles/{KEY} at ") as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == (
+        f"No answer to the read of s3://flatfiles/{KEY} at https://files.massive.com after 4 "
+        'tries: Could not connect to the endpoint URL: "https://files.massive.com".'
+    )
     assert type(info.value) is WireError
     assert (info.value.status, info.value.request_id, info.value.path) == (None, None, KEY)
     assert isinstance(info.value.__cause__, EndpointConnectionError)
@@ -662,8 +674,17 @@ def test_a_failure_no_retry_can_fix_is_not_retried(
         raise failure
 
     fake_s3.before_answer = fail
-    with pytest.raises(WireError, match=f"^cannot read s3://flatfiles/{KEY} at ") as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    # botocore's own text follows the colon, on one line.
+    said = {
+        "ParamValidationError": "Parameter validation failed: Invalid bucket name",
+        "HTTPClientError": "An HTTP Client raised an unhandled exception: a bug in the HTTP layer",
+    }[type(failure).__name__]
+    assert info.value.message == (
+        f"The read of s3://flatfiles/{KEY} at https://files.massive.com failed before it was "
+        f"sent: {said}."
+    )
     assert info.value.__cause__ is failure
     assert clock.waits == []
     # S3 never answered: the failure is the client's.
@@ -695,14 +716,11 @@ def _handshake_refused(_key: str) -> None:
     [
         (
             _certificate_rejected,
-            (
-                r"TLS certificate verification failed for files\.massive\.com \(.*\); if a proxy "
-                r"or private CA signs it, set SSL_CERT_FILE to a bundle that trusts it$"
-            ),
+            "SSL validation failed for https://files.massive.com certificate verify failed",
         ),
         (
             _certificate_rejected_by_way_of_the_proxy,
-            r"TLS certificate verification failed for files\.massive\.com \(.*proxy\.corp.*\);",
+            'Failed to connect to proxy URL: "https://proxy.corp:3129"',
         ),
     ],
     ids=["certificate", "certificate-at-the-proxy"],
@@ -722,10 +740,13 @@ def test_a_certificate_failure_is_never_retried(
         failure(key)
 
     fake_s3.before_answer = fail
-    with pytest.raises(
-        WireError, match=f"^cannot read s3://flatfiles/{KEY} at .*: {message}"
-    ) as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == (
+        f"The TLS certificate of files.massive.com did not verify for the read of "
+        f"s3://flatfiles/{KEY} at https://files.massive.com: {message}. If a proxy or a private "
+        "CA signs it, set SSL_CERT_FILE to a bundle that trusts it."
+    )
     assert (info.value.status, info.value.path) == (None, KEY)
     assert isinstance(info.value.__cause__, BotoCoreError)
     assert info.value.kind is WireFailure.LOCAL  # SSL_CERT_FILE, on this machine, is the fix
@@ -756,14 +777,13 @@ def test_a_failed_tls_handshake_got_no_answer_and_is_retried(
         _handshake_refused(key)
 
     fake_s3.before_answer = fail
-    with pytest.raises(
-        WireError,
-        match=(
-            f"^cannot read s3://flatfiles/{KEY} at .*: TLS failed for files\\.massive\\.com "
-            r"\(SSL validation failed for https://files\.massive\.com .*wrong version number"
-        ),
-    ) as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == (
+        f"No answer to the read of s3://flatfiles/{KEY} at https://files.massive.com after 4 "
+        "tries: the TLS connection to files.massive.com failed: SSL validation failed for "
+        "https://files.massive.com wrong version number."
+    )
     assert isinstance(info.value.__cause__, SSLError)
     assert info.value.kind is WireFailure.NO_ANSWER
     assert (attempts, clock.waits) == ([KEY] * 4, WAITS)
@@ -792,7 +812,7 @@ def test_closing_the_client_ends_a_retry_wait(fake_s3: FakeS3) -> None:
     reader.join(TIMEOUT)
     assert not reader.is_alive()
     (error,) = raised
-    assert error.message == "the flat-file client for https://files.massive.com is closed"
+    assert error.message == CLOSED
     assert error.kind is WireFailure.STOPPED
     assert fake_s3.keys() == [KEY]
     assert clock.monotonic() == 0.0  # the wait ended without time passing
@@ -813,7 +833,11 @@ def test_a_dropped_body_fails_the_read_and_is_never_requested_again(
     assert file is not None
     with file, pytest.raises(WireError) as info:
         list(file.batches(stocks_plan()))
-    assert info.value.message.startswith(f"cannot read s3://flatfiles/{KEY} at ")
+    assert info.value.message == (
+        f"The connection broke off while the library read Massive's file s3://flatfiles/{KEY} "
+        "at https://files.massive.com: An error occurred while reading from response stream: "
+        "Connection broken: IncompleteRead."
+    )
     assert isinstance(info.value.__cause__, OSError)
     assert file.dropped
     assert info.value.kind is WireFailure.NO_ANSWER  # a transport failure, not the file's content
@@ -837,7 +861,9 @@ def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
     *, client: FlatFileClient, clock: FakeClock, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG, logger=client_module.__name__)
-    error = WireError("cannot read s3://flatfiles/k at here: dropped", kind=WireFailure.NO_ANSWER)
+    error = WireError(
+        "No answer to the read of s3://flatfiles/k at here: dropped.", kind=WireFailure.NO_ANSWER
+    )
     cancel = threading.Event()
     assert [client.wait_to_reread(error, retry, cancel) for retry in range(4)] == [
         True,
@@ -849,13 +875,34 @@ def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
     logged = [
         (r.levelno, r.getMessage())
         for r in caplog.records
-        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "giving up" in r.msg)
+        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "Giving up" in r.msg)
     ]
     assert logged == [
-        (logging.INFO, f"{error}; reading it again from its start, reread 1 of 3 in 0.55 s"),
-        (logging.INFO, f"{error}; reading it again from its start, reread 2 of 3 in 1.10 s"),
-        (logging.INFO, f"{error}; reading it again from its start, reread 3 of 3 in 2.20 s"),
-        (logging.DEBUG, f"{error}; giving up after 4 reads"),
+        (
+            logging.INFO,
+            (
+                "No answer to the read of s3://flatfiles/k at here: dropped. Reading it again from "
+                "its start, reread 1 of 3 in 0.55 s."
+            ),
+        ),
+        (
+            logging.INFO,
+            (
+                "No answer to the read of s3://flatfiles/k at here: dropped. Reading it again from "
+                "its start, reread 2 of 3 in 1.10 s."
+            ),
+        ),
+        (
+            logging.INFO,
+            (
+                "No answer to the read of s3://flatfiles/k at here: dropped. Reading it again from "
+                "its start, reread 3 of 3 in 2.20 s."
+            ),
+        ),
+        (
+            logging.DEBUG,
+            "No answer to the read of s3://flatfiles/k at here: dropped. Giving up after 4 reads.",
+        ),
     ]
 
 
@@ -1026,7 +1073,10 @@ def test_a_tls_failure_part_way_through_the_body_is_a_dropped_read(
     body = _body(StreamingBody(raw, len(data)))
     with FlatFile(body, KEY, location="here", host=None) as file, pytest.raises(WireError) as info:
         list(file.batches(stocks_plan()))
-    assert info.value.message.startswith("cannot read here: ")
+    assert info.value.message == (
+        "The connection broke off while the library read Massive's file here: "
+        "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] bad record mac."
+    )
     assert isinstance(info.value.__cause__, OSError)
     assert file.dropped
 
@@ -1058,7 +1108,10 @@ def test_a_drop_after_the_first_block_fails_loudly_and_repeats_no_row(
 
     with FlatFile(body, KEY, location="here", host=None) as file, pytest.raises(WireError) as info:
         read(file)
-    assert info.value.message.startswith("cannot read here: ")
+    assert info.value.message == (
+        "The connection broke off while the library read Massive's file here: An error "
+        "occurred while reading from response stream: Connection broken: IncompleteRead."
+    )
     assert isinstance(info.value.__cause__, OSError)
     assert file.dropped
     assert 0 < len(seen) < total
@@ -1070,11 +1123,13 @@ def test_a_client_that_cannot_be_created_is_a_wire_error(
 ) -> None:
     monkeypatch.setenv("AWS_PROFILE", "no-such-profile")
     client = make_client()
-    with pytest.raises(
-        WireError,
-        match=r"cannot create the S3 client for https://files\.massive\.com: .*no-such-profile",
-    ) as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == (
+        "The library could not create its S3 client for https://files.massive.com: The config "
+        "profile (no-such-profile) could not be found. Set AWS_PROFILE to a profile that "
+        "exists, or correct the proxy in HTTPS_PROXY."
+    )
     assert info.value.host == "files.massive.com"
     assert info.value.kind is WireFailure.LOCAL  # AWS_PROFILE, on this machine, is the fix
     assert fake_s3.clients == []
@@ -1087,8 +1142,9 @@ def test_a_closed_client_makes_no_request(*, client: FlatFileClient, fake_s3: Fa
     assert fake_s3.closes == 1
     client.close()  # idempotent
     assert fake_s3.closes == 1
-    with pytest.raises(WireError, match=r"the flat-file client for .* is closed") as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == CLOSED
     assert info.value.path == KEY
     assert fake_s3.keys() == [KEY]
 
@@ -1284,7 +1340,8 @@ def test_a_404_page_that_is_not_s3s_is_a_wire_error_over_the_network(
     error = info.value
     assert type(error) is WireError
     assert error.message == (
-        f"cannot read s3://flatfile/{KEY} at {tls_server.url}: HTTP 404 (404: Not Found)"
+        f"Massive answered the read of s3://flatfile/{KEY} at {tls_server.url} with HTTP 404: "
+        '"404: Not Found".'
     )
     assert (error.status, error.path) == (404, KEY)
     assert clock.waits == []
@@ -1305,7 +1362,12 @@ def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(
     client = make_client(endpoint_url=tls_server.url, clock=clock)
     try:
         with pytest.raises(
-            WireError, match=r"certificate verification failed for 127\.0\.0\.1 .*SSL_CERT_FILE"
+            WireError,
+            match=(
+                rf"^{re.escape('The TLS certificate of 127.0.0.1 did not verify for the read of ')}"
+                rf"{re.escape(f's3://flatfiles/{KEY} at {tls_server.url}: ')}.*CERTIFICATE_VERIFY"
+                rf".*{re.escape(TRUST_IT)}$"
+            ),
         ):
             client.open(KEY)
     finally:
@@ -1325,7 +1387,11 @@ def test_a_certificate_for_another_name_fails_at_once_over_the_network(
     try:
         with pytest.raises(
             WireError,
-            match=r"certificate verification failed for localhost \(.*\); .*SSL_CERT_FILE",
+            match=(
+                rf"^{re.escape('The TLS certificate of localhost did not verify for the read of ')}"
+                rf"{re.escape(f's3://flatfiles/{KEY} at {endpoint_url}: ')}.*localhost.*"
+                rf"{re.escape(TRUST_IT)}$"
+            ),
         ) as info:
             client.open(KEY)
     finally:
@@ -1426,9 +1492,14 @@ def test_an_unreachable_proxy_is_retried_and_its_password_stays_out_of_the_error
     finally:
         client.close()
     assert clock.waits == WAITS
-    assert info.value.message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: cannot connect "
-        f"through the proxy http://127.0.0.1:{port} ("
+    # The operating system's words for the refused connection follow the last colon.
+    assert re.fullmatch(
+        re.escape(
+            f"No answer to the read of s3://flatfiles/{KEY} at https://files.massive.com after 4 "
+            f"tries: the proxy http://127.0.0.1:{port} could not be reached: "
+        )
+        + r".+\.",
+        info.value.message,
     )
     secret = f"{user}:{password}@"
     assert secret not in info.value.message
@@ -1457,8 +1528,8 @@ def test_a_proxy_that_refuses_the_credentials_is_never_retried(
     finally:
         client.close()
     assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at {tls_server.url}: the proxy {fake_rest.url} "
-        "refused its credentials (HTTP 407); check the user and password in HTTPS_PROXY"
+        f"The proxy {fake_rest.url} refused its credentials with HTTP 407 for the read of "
+        f"s3://flatfiles/{KEY} at {tls_server.url}. Correct the user and password in HTTPS_PROXY."
     )
     assert (info.value.status, info.value.path) == (407, KEY)
     assert info.value.kind is WireFailure.LOCAL
@@ -1578,8 +1649,14 @@ def test_an_error_response_cut_short_every_time_is_a_wire_error_after_the_retrie
     finally:
         client.close()
         server.close()
-    assert info.value.message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at {server.url}: the error response was cut short ("
+    # urllib3's words for the broken body follow the last colon.
+    assert re.fullmatch(
+        re.escape(
+            f"No answer to the read of s3://flatfiles/{KEY} at {server.url} after 4 tries: the "
+            "error response was cut short: "
+        )
+        + r".+\.",
+        info.value.message,
     )
     assert isinstance(info.value.__cause__, ProtocolError)
     assert (info.value.status, info.value.path) == (None, KEY)
@@ -1633,8 +1710,8 @@ def test_a_last_page_without_its_pagination_fields_ends_the_listing(
 @pytest.mark.parametrize(
     ("pagination", "listings", "message"),
     [
-        ("missing", [None], "a truncated page gave no continuation token"),
-        ("repeat", [None, "after-2"], "a truncated page gave the same continuation token"),
+        ("missing", [None], "no continuation token"),
+        ("repeat", [None, "after-2"], "the same continuation token as before"),
     ],
 )
 def test_a_truncated_page_without_a_new_token_is_a_wire_error(
@@ -1650,7 +1727,10 @@ def test_a_truncated_page_without_a_new_token_is_a_wire_error(
     fake_s3.pagination = pagination
     with pytest.raises(WireError) as info:
         client.prefixes()
-    assert info.value.message == f"cannot list {BUCKET}: {message}"
+    assert info.value.message == (
+        f"Massive answered the list of {BUCKET} with a truncated page and {message}, so the "
+        "library could not list the rest."
+    )
     assert info.value.host == "files.massive.com"
     assert fake_s3.listings == listings
 
@@ -1695,15 +1775,19 @@ def test_a_listing_that_stays_unreachable_is_a_wire_error_after_the_retries(
 ) -> None:
     caplog.set_level(logging.DEBUG, logger=client_module.__name__)
     fake_s3.fail("", "unreachable")
-    with pytest.raises(WireError, match=f"^cannot list {BUCKET}: ") as info:
+    with pytest.raises(WireError) as info:
         client.prefixes()
+    assert info.value.message == (
+        f"No answer to the list of {BUCKET} after 4 tries: Could not connect to the endpoint "
+        'URL: "https://files.massive.com".'
+    )
     assert (info.value.status, info.value.path) == (None, "")
     assert isinstance(info.value.__cause__, EndpointConnectionError)
     assert clock.waits == WAITS
     assert [
         r.levelno
         for r in caplog.records
-        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "giving up" in r.msg)
+        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "Giving up" in r.msg)
     ] == [
         logging.INFO,
         logging.INFO,
@@ -1715,14 +1799,36 @@ def test_a_listing_that_stays_unreachable_is_a_wire_error_after_the_retries(
 @pytest.mark.parametrize(
     ("status", "code", "error_type", "message"),
     [
-        (403, "AccessDenied", WireEntitlementError, f"HTTP 403 for {BUCKET} (AccessDenied: No)"),
+        (
+            403,
+            "AccessDenied",
+            WireEntitlementError,
+            (
+                f"Massive answered the list of {BUCKET} with HTTP 403 "
+                "(request_id 4442587FB7D0A2F9): "
+                '"AccessDenied: No".'
+            ),
+        ),
         (
             403,
             "InvalidAccessKeyId",
             WireAuthError,
-            f"HTTP 403 for {BUCKET} (InvalidAccessKeyId: No)",
+            (
+                f"Massive answered the list of {BUCKET} with HTTP 403 "
+                "(request_id 4442587FB7D0A2F9): "
+                '"InvalidAccessKeyId: No".'
+            ),
         ),
-        (404, "NoSuchBucket", WireError, f"cannot list {BUCKET}: HTTP 404 (NoSuchBucket: No)"),
+        (
+            404,
+            "NoSuchBucket",
+            WireError,
+            (
+                f"Massive answered the list of {BUCKET} with HTTP 404 "
+                "(request_id 4442587FB7D0A2F9): "
+                '"NoSuchBucket: No".'
+            ),
+        ),
     ],
 )
 def test_a_refused_listing_is_a_wire_error_at_once(
@@ -1751,8 +1857,9 @@ def test_a_refused_listing_is_a_wire_error_at_once(
 
 def test_a_closed_client_lists_nothing(*, client: FlatFileClient, fake_s3: FakeS3) -> None:
     client.close()
-    with pytest.raises(WireError, match=r"the flat-file client for .* is closed") as info:
+    with pytest.raises(WireError) as info:
         client.prefixes()
+    assert info.value.message == CLOSED
     assert info.value.path == ""
     assert (fake_s3.listings, fake_s3.clients) == ([], [])
 
@@ -1778,7 +1885,7 @@ def test_closing_the_client_ends_a_listing_retry_wait(fake_s3: FakeS3) -> None:
     lister.join(TIMEOUT)
     assert not lister.is_alive()
     (error,) = raised
-    assert error.message == "the flat-file client for https://files.massive.com is closed"
+    assert error.message == CLOSED
     assert fake_s3.listings == [None]
 
 
@@ -1868,10 +1975,7 @@ def test_a_close_ends_the_wait_for_a_connection_of_open_and_prefixes(
     client.close()
     for waiter in waiters:
         waiter.join(TIMEOUT)
-    assert (
-        sorted(error.message for error in errors)
-        == ["the flat-file client for https://files.massive.com is closed"] * 2
-    )
+    assert sorted(error.message for error in errors) == [CLOSED] * 2
     held.close()
 
 
@@ -1978,14 +2082,20 @@ def test_an_endpoint_s_user_and_password_never_reach_a_message(
     finally:
         flat_files.close()
     message = str(info.value)
-    assert message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at https://***@files.massive.com: "
+    assert message == (
+        f"No answer to the read of s3://flatfiles/{KEY} at https://***@files.massive.com after 4 "
+        f'tries: Could not connect to the endpoint URL: "https://***@files.massive.com/flatfiles/'
+        f'{KEY}".'
     )
     assert "hunter2" not in message
     assert "reader" not in message
     assert "https://***@files.massive.com/flatfiles/" in message
-    with pytest.raises(WireError, match=r"^the flat-file client for https://\*\*\*@files"):
+    with pytest.raises(WireError) as closed:
         flat_files.open(KEY)
+    assert closed.value.message == (
+        "The library closed its connections to https://***@files.massive.com before this "
+        "request was sent."
+    )
 
 
 class _UnclosableRaw(io.BytesIO):
