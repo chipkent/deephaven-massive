@@ -555,9 +555,8 @@ def _convert_stock(text: str) -> str:
         )
     if text == text.lower() != text.upper():
         raise ValueError(
-            f"{text!r} is not a Massive stock ticker. Massive's tickers are upper case, with a "
-            "lower-case marker only where Massive writes one, as in 'KIMpL'. If you mean "
-            f"{text.upper()!r}, pass {text.upper()!r}."
+            f"{text!r} is not a Massive stock ticker, because Massive's tickers are "
+            f"case-sensitive. If you mean {text.upper()!r}, pass {text.upper()!r}."
         )
     raise ValueError(
         f"{text!r} is not a Massive stock ticker, which looks like 'AAPL', 'BRK.B', or "
@@ -628,8 +627,7 @@ def _convert_future(text: str) -> str:
     raise ValueError(
         f"{text!r} is not a Massive futures ticker. A contract looks like 'ESZ5' or 'NGZ26' and "
         "a spread like 'GCQ6-GCZ6', in upper case. Pass the ticker as m.futures.contracts() "
-        "lists it. Every form: "
-        "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#futures-tickers."
+        "lists it."
     )
 
 
@@ -1627,8 +1625,8 @@ def check_symbol(
     if other not in {resolved, AssetClass.STOCKS} and CANONICAL_GRAMMARS[other](text):
         raise ValueError(
             f"{text!r} is {_class_noun_with_article(other)} ticker, and this dataset takes "
-            f"{CLASS_NOUNS[resolved]} tickers. For {CLASS_NOUNS[other]} data, use the "
-            f"m.{other.value} datasets."
+            f"{CLASS_NOUNS[resolved]} tickers. Pass {_class_noun_with_article(resolved)} "
+            f"ticker, or read {CLASS_NOUNS[other]} data through m.{other.value}."
         )
     try:
         fixed = _CONVERTERS[resolved](text)

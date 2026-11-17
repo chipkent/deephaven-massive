@@ -127,8 +127,7 @@ NOT_CANONICAL = [
 
 FUTURES_FORMS = (
     "A contract looks like 'ESZ5' or 'NGZ26' and a spread like 'GCQ6-GCZ6', in upper case. Pass "
-    "the ticker as m.futures.contracts() lists it. Every form: "
-    "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#futures-tickers."
+    "the ticker as m.futures.contracts() lists it."
 )
 """The sentences after the first of every refusal of text that is no futures ticker."""
 
@@ -497,9 +496,8 @@ STOCK_FORMS = (
             dm.canonical_symbol_stock,
             "kimpl",
             (
-                "'kimpl' is not a Massive stock ticker. Massive's tickers are upper case, with a "
-                "lower-case marker only where Massive writes one, as in 'KIMpL'. If you mean "
-                "'KIMPL', pass 'KIMPL'."
+                "'kimpl' is not a Massive stock ticker, because Massive's tickers are "
+                "case-sensitive. If you mean 'KIMPL', pass 'KIMPL'."
             ),
         ),
         (dm.canonical_symbol_stock, " AAPL ", "' AAPL ' has surrounding whitespace. Pass 'AAPL'."),
@@ -723,9 +721,9 @@ def test_the_fix_a_refusal_names_converts(
 
 
 @pytest.mark.parametrize("text", ["KIMpL", "KIMr", "KIMw", "AAPL"])
-def test_the_lower_case_markers_a_stock_refusal_names_are_canonical(text: str) -> None:
-    # The refusal of all lower-case text says Massive writes a lower-case marker only where it
-    # writes one: a preferred's `p`, rights' `r`, and when-issued `w` pass as they are.
+def test_a_stock_ticker_with_its_lower_case_marker_is_canonical(text: str) -> None:
+    # The refusal of all lower-case text says Massive's tickers are case-sensitive: a
+    # preferred's `p`, rights' `r`, and when-issued `w` pass as Massive writes them.
     assert check_symbol(STK, text) == text
 
 
@@ -899,23 +897,22 @@ def test_check_symbol_names_the_fix() -> None:
     assert check_symbol(FX, "C:EURUSD") == "C:EURUSD"
     # Text the converter refuses gets the converter's reason and fix, unchanged.
     lower = (
-        "'aapl' is not a Massive stock ticker. Massive's tickers are upper case, with a "
-        "lower-case marker only where Massive writes one, as in 'KIMpL'. If you mean 'AAPL', "
-        "pass 'AAPL'."
+        "'aapl' is not a Massive stock ticker, because Massive's tickers are case-sensitive. "
+        "If you mean 'AAPL', pass 'AAPL'."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(lower)}$"):
         check_symbol(STK, "aapl")
     assert check_symbol(STK, "AAPL") == "AAPL"
     # A canonical ticker of another class names the class the dataset takes, not a converter.
     crypto = (
-        "'X:BTCUSD' is a crypto ticker, and this dataset takes stock tickers. For crypto data, "
-        "use the m.crypto datasets."
+        "'X:BTCUSD' is a crypto ticker, and this dataset takes stock tickers. Pass a stock "
+        "ticker, or read crypto data through m.crypto."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(crypto)}$"):
         check_symbol(STK, "X:BTCUSD")
     index = (
-        "'I:SPX' is an index ticker, and this dataset takes stock tickers. For index data, use "
-        "the m.indices datasets."
+        "'I:SPX' is an index ticker, and this dataset takes stock tickers. Pass a stock "
+        "ticker, or read index data through m.indices."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(index)}$"):
         check_symbol(STK, "I:SPX")
