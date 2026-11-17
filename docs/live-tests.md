@@ -35,6 +35,16 @@ The run takes three settings from the file and leaves every other setting at its
 | `rest_requests_per_minute` | Each subscription Massive limits by the minute, and its limit | The rate-limit tests skip, and other tests run slower |
 | `websocket_hosts` | The host Massive serves an asset class from, such as `indices: business.massive.com`. See [`websocket_hosts`](configuration.md#setting-details). | The library picks the host |
 
+A file that sets all three looks like this:
+
+```yaml
+delayed_subscriptions: [stocks]   # Massive serves your stocks delayed
+rest_requests_per_minute:
+  options: 5                      # Massive limits your options requests to 5 a minute
+websocket_hosts:
+  indices: business.massive.com   # Massive serves your index values from this host
+```
+
 A settings file the library refuses stops the run at the first test that loads it, with the
 library's message.
 
@@ -56,7 +66,7 @@ output to `live-checks.log`, the file to attach to an issue.
 
    | Marker | What it runs |
    |---|---|
-   | `integration` | The open-question tests, and every README example as written. An open question is a behavior the library relies on that Massive's docs leave open ([the list](dev/verification-items/README.md)). |
+   | `integration` | Every live test without one of the other markers: the open-question tests, every README example as written, and a few live-table tests. An open question is a behavior the library relies on that Massive's docs leave open ([the list](dev/verification-items/README.md)). |
    | `integration_smoke` | Every dataset and method once |
    | `integration_rate_limits` | Three tests that go past a subscription's request limit on purpose |
 
@@ -160,7 +170,7 @@ Five tests record what Massive does for you to judge. Find each one's lines unde
 
 | Test | The question | Open an issue when |
 |---|---|---|
-| `test_the_options_cap_counts_contracts_or_topics` | Does Massive's cap of 1,000 option contracts per connection count contracts, or channel subscriptions? A contract's trades and quotes are two channel subscriptions, and the library assumes the cap counts these. The test subscribes both for 1,000 contracts. | Massive acknowledges all 2,000 channel subscriptions. |
+| `test_the_options_cap_counts_contracts_or_topics` | Does Massive's cap of 1,000 option contracts per connection count contracts, or channel subscriptions? A contract's trades and quotes are two channel subscriptions. The library counts these against the cap. The test subscribes both for 1,000 contracts. | Massive acknowledges all 2,000 channel subscriptions. |
 | `test_an_index_minute_file_holds_its_own_new_york_day` | Does an index minute file hold every minute that REST has for its New York day? | Its evidence lists any minute the file lacks. |
 | `test_index_day_windows_and_files_across_many_indices` | Is the library right to end index day bars at 01:00 New York time? | Always. Attach its verdict lines (a), (b), and (c). |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | Does each futures bar of a session or longer hold the whole sessions that open in its UTC days? | Always. Attach its `VERDICT` lines. |
@@ -176,8 +186,9 @@ uv run pytest -m integration tests/namespaces/test_futures_integration.py -k bar
 uv run pytest -m integration tests/namespaces/test_options_integration.py -k gamma 2>&1 | tee -a live-checks.log
 ```
 
-Run the options test again when it skips as inconclusive. That skip means Massive refused
-some of its channel subscriptions, or the socket reconnected without saying why.
+When the options test skips because the socket reconnected without saying why, run it again.
+When it skips because Massive refused some channel subscriptions for want of a plan, your key
+can't answer it.
 
 <a id="index-hosts"></a>
 
