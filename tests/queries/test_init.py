@@ -14,6 +14,7 @@ _DEFINED = {
     "HistoryQuery": _history,
     "Query": _query,
     "StreamHistoryQuery": _history,
+    "NoSymbolStreamHistoryQuery": _history,
     "NoSymbolStreamQuery": _stream,
     "StreamQuery": _stream,
 }
@@ -51,9 +52,12 @@ def test_a_dataset_method_returns_one_of_its_classes(massive_session: MassiveSes
     assert isinstance(query, queries.Query)
 
 
-def test_a_stream_without_symbols_is_a_no_symbol_stream_query(
+def test_a_stream_without_symbols_is_a_no_symbol_stream_query_with_history(
     massive_session: MassiveSession,
 ) -> None:
     query = massive_session.options.admin_messages()
-    assert type(query) is queries.NoSymbolStreamQuery
+    assert type(query) is queries.NoSymbolStreamHistoryQuery
+    assert isinstance(query, queries.NoSymbolStreamQuery)
+    assert isinstance(query, queries.HistoryQuery)
     assert not isinstance(query, queries.StreamQuery)
+    assert not hasattr(query, "last_by")

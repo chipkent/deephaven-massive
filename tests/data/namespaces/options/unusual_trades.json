@@ -1,0 +1,40 @@
+{
+  "count": 2,
+  "request_id": "a3f8b2c1d4e5f6a7",
+  "results": [
+    {
+      "conditions": [
+        227
+      ],
+      "exchange": 316,
+      "flags": [
+        "block_premium"
+      ],
+      "price": 15.25,
+      "root": "SPY",
+      "sequence_number": 112233,
+      "sip_timestamp": 1761751432123456800,
+      "size": 120,
+      "ticker": "O:SPY260123C00687000",
+      "underlying_ticker": "SPY"
+    },
+    {
+      "conditions": [
+        219
+      ],
+      "exchange": 304,
+      "flags": [
+        "block_premium",
+        "iso"
+      ],
+      "price": 42.1,
+      "root": "SPXW",
+      "sequence_number": 98765,
+      "sip_timestamp": 1761751431987654400,
+      "size": 25,
+      "ticker": "O:SPXW261218C06000000",
+      "underlying_ticker": "SPX"
+    }
+  ],
+  "status": "OK"
+}

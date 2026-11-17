@@ -263,8 +263,7 @@ class _StreamShapes(Query):
 class NoSymbolStreamQuery(_StreamShapes):
     """A query of a live stream whose rows name no symbol: `blink()`, `append_only()`, `ring()`.
 
-    Massive sends a few streams per channel rather than per symbol, such as
-    `m.options.admin_messages()`, whose rows are notices from the options exchanges. Their rows
+    Massive sends OPRA's administrative messages per channel rather than per symbol. Their rows
     have no `Symbol` column, so their query has no `last_by()`. Each of its three methods returns
     the stream as a different kind of live Deephaven table: `blink()` holds only the latest
     update cycle's rows, `append_only()` keeps every row since the call, and `ring(capacity)`
@@ -277,7 +276,8 @@ class NoSymbolStreamQuery(_StreamShapes):
     `m.streams()`, and the next call on an identical query opens a new stream.
 
     Import it as `from deephaven_massive.queries import NoSymbolStreamQuery` to annotate your own
-    code. You get one from a dataset method and never construct one.
+    code. You never construct one. `m.options.admin_messages()` returns its subclass
+    `NoSymbolStreamHistoryQuery`, which adds `history()`.
 
     Example:
         ::

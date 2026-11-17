@@ -1233,6 +1233,16 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
         ("/v2/last/trade/{optionsTicker}", "p"): _OPTIONS_PRICE,
         ("/v3/snapshot/options/{underlyingAsset}", "last_trade.price"): _OPTIONS_PRICE,
         ("us_options_opra/trades_v1", "price"): _OPTIONS_PRICE,
+        ("/options/v1/unusual-trades", "price"): DescriptionFix(
+            vendor="The price of the trade. This is the actual dollar value per whole contract of "
+            "this trade.",
+            text=_OPTIONS_PRICE_TEXT,
+            reason="Massive's own page for the endpoint contradicts it: a trade qualifies 'when "
+            "its notional premium (price x size x 100) is $100,000 or more', and its sample "
+            "trade of 120 contracts at 15.25 carries `block_premium` only because 15.25 x 120 x "
+            "100 is $183,000. The price is per share of the underlying. The text is Massive's "
+            "own for the options trade price (`/v3/trades/{optionsTicker}` `price`).",
+        ),
         ("/v2/last/trade/{optionsTicker}", "i"): DescriptionFix(
             vendor=_STOCK_TRADE_ID, text=_OPTIONS_ID_TEXT, reason=_OPTIONS_ID_REASON
         ),
@@ -1567,10 +1577,9 @@ KINDS: Mapping[str, Mapping[str, Sequence[str]]] = MappingProxyType(
         },
         "luld": {"stocks": ["stocks/LULD"]},
         "imbalances": {"stocks": ["stocks/NOI"]},
-        # OPRA's administrative messages, read by `options.admin_messages` alone: every dataset
-        # with a WebSocket source has a kind, which orders its columns and is checked against
-        # the catalog, and no other source shares this channel's rows.
-        "admin_messages": {"options": ["options/AD"]},
+        # OPRA's administrative messages, read by `options.admin_messages` alone: the REST
+        # archive and the stream carry the same messages, so their columns merge as one kind.
+        "admin_messages": {"options": ["/options/v1/admin-messages", "options/AD"]},
         "fmv": {
             "stocks": ["stocks/FMV"],
             "options": ["options/FMV"],
@@ -2003,6 +2012,20 @@ SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
             "is already `SipTimestamp`, the name Massive spells `sip_timestamp` for an options "
             "trade's SIP time.",
         ),
+        **{
+            (path, "root"): Spelling(
+                long_name="option_root",
+                source="every options dataset's `OptionRoot`, read from the contract's ticker",
+                reason='Massive describes `root` as "The OCC root symbol of the contract (e.g., '
+                "SPXW). Differs from the underlying for weekly roots and for contracts adjusted "
+                'after a corporate action (e.g., AMCR1)." That is the root every other options '
+                "dataset carries as `OptionRoot`, the OCC symbol's root read from the ticker "
+                "(`SPXW` for `O:SPXW251219C06000000`, `AMCR1` for an adjusted contract), so "
+                "Massive's value takes that column and the library derives none beside it.",
+                whole_key=True,
+            )
+            for path in ("/options/v1/open-interest", "/options/v1/unusual-trades")
+        },
     }
 )
 """`(source, key)` to the long name of that object or field, taken from another endpoint."""
