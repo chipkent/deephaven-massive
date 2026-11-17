@@ -340,6 +340,12 @@ Set `raise` when a missing symbol means your list is wrong.
 A symbol Massive answers with no rows and no error has no rows, whatever this
 setting says.
 
+This setting also covers a watchlist symbol a `poll()` can't request with your
+arguments. For example, a `poll()` of `m.options.contracts` over a watchlist, with
+`contract_type` set, can't request a contract the watchlist names, since a named
+contract takes only `as_of`. Passed in code, such a symbol raises `ValueError` at
+the call.
+
 #### on_error.unreadable_keys
 
 A key can't be read when it is one of these:
