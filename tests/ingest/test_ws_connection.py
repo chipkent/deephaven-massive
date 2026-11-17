@@ -381,13 +381,14 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
                 "plan may not include this data there"
             ),
         ),
-        (
+        pytest.param(
             # A pinned real-time host keeps the pin's hint, whatever its snapshot said.
             on_host(REALTIME_HOST, "websocket_hosts, last_trade.timeframe=REAL-TIME"),
             (
                 "MassiveConfig.websocket_hosts[AssetClass.FUTURES] pins this host; the key's "
                 "plan may not include this data there"
             ),
+            id="pinned real-time host",
         ),
     ],
 )
