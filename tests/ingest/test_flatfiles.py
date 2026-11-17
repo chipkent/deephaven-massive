@@ -84,6 +84,7 @@ from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import HistoryQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
+from tests._fakes.s3 import REQUEST_ID
 
 TIMEOUT = 30.0
 RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]
@@ -223,6 +224,8 @@ TRADES_0303 = TRADES_KEY.format(3)
 TRADES_0304 = TRADES_KEY.format(4)
 TRADES_0305 = TRADES_KEY.format(5)
 LOCATION = "s3://flatfiles/{} at https://files.massive.com"
+A = "Massive answered the read of s3://flatfiles/"
+"""How Massive's answer to the read of a file starts, before the file's key."""
 FUTURES_KEY = "us_futures_{}/trades_v1/{:%Y/%m/%Y-%m-%d}.csv.gz"
 FUTURES_0304 = "us_futures_{}/trades_v1/2025/03/2025-03-04.csv.gz"
 STOCK_KEY = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
@@ -2736,9 +2739,10 @@ def test_a_refused_futures_venue_names_the_venue(
         with pytest.raises(
             dm.EntitlementError,
             match=(
-                r"^futures\.trades: Massive refused the flat files of NYMEX\. HTTP 403 for "
-                r"s3://flatfiles/us_futures_nymex/trades_v1/2025/03/2025-03-04\.csv\.gz at "
-                r"https://files\.massive\.com \(AccessDenied: Access Denied\) Leave "
+                r"^futures\.trades: Massive refused the flat files of NYMEX\. Massive answered "
+                r"the read of s3://flatfiles/us_futures_nymex/trades_v1/2025/03/2025-03-04\.csv"
+                r"\.gz at https://files\.massive\.com with HTTP 403 \(request_id "
+                rf'{REQUEST_ID}\): "AccessDenied: Access Denied"\. Leave '
                 r"dm\.FuturesVenue\.NYMEX out of venues, or, to skip every venue Massive "
                 r"refuses, pass on_error=dm\.ErrorPolicy\(refused_venues=dm\.OnError\.LOG\) to "
                 r"the call or to dm\.MassiveConfig\.$"
@@ -2771,17 +2775,17 @@ def two_days_of_venues(
 
 SKIPPED_NYMEX = (
     r"futures\.trades history \(MassiveSession #\d+ call-\d+\): Massive refused the flat "
-    "files of NYMEX for the whole range: HTTP 403 for "
-    rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com "
-    r"\(AccessDenied: Access Denied\)"
+    "files of NYMEX for the whole range: Massive answered the read of "
+    rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com with HTTP 403 "
+    rf'\(request_id {REQUEST_ID}\): "AccessDenied: Access Denied"'
 )
 """The DEBUG record of a read that skipped NYMEX after S3 refused `REFUSED_0305`."""
 
 NYMEX_ALARM = (
     r"futures\.trades table \d+: refused_venues: Massive refused the flat files of NYMEX for "
-    "the whole range: HTTP 403 for "
-    rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com "
-    r"\(AccessDenied: Access Denied\) \(at [^)]*call-\d+\); "
+    "the whole range: Massive answered the read of "
+    rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com with HTTP 403 "
+    rf'\(request_id {REQUEST_ID}\): "AccessDenied: Access Denied" \(at [^)]*call-\d+\); '
     r"m\.problems\(\) lists it and every later refused_venues problem of this table, which the "
     r"log shows at DEBUG only"
 )
@@ -2938,7 +2942,7 @@ def test_a_venue_refused_past_the_range_end_is_skipped_for_the_whole_range(
             "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange."
         )
         assert [r.getMessage() for r in caplog.records if "holiday" in r.getMessage()] == []
-        assert f"of NYMEX for the whole range: HTTP 403 for s3://flatfiles/{later}" in caplog.text
+        assert f"of NYMEX for the whole range: {A}{later} at " in caplog.text
     finally:
         m.close()
 
@@ -3100,9 +3104,10 @@ def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
             dm.EntitlementError,
             match=(
                 r"^futures\.trades: Massive refused the flat files of every venue the read "
-                r"asked for, CME and NYMEX\. HTTP 403 for s3://flatfiles/us_futures_cme/"
-                r"trades_v1/2025/03/2025-03-04\.csv\.gz at https://files\.massive\.com "
-                r"\(AccessDenied: No\) To read from REST instead, pass contract tickers such as "
+                r"asked for, CME and NYMEX\. Massive answered the read of "
+                r"s3://flatfiles/us_futures_cme/trades_v1/2025/03/2025-03-04\.csv\.gz at "
+                rf"https://files\.massive\.com with HTTP 403 \(request_id {REQUEST_ID}\): "
+                r'"AccessDenied: No"\. To read from REST instead, pass contract tickers such as '
                 r"'ESZ6' in place of dm\.ALL, with source=dm\.HistorySource\.REST\.$"
             ),
         ) as info:
@@ -3186,9 +3191,9 @@ def test_a_refused_file_is_an_entitlement_error(
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
         dm.EntitlementError,
-        match=r"^stocks\.trades: Massive refused its flat files\. HTTP 403 for "
-        rf"s3://flatfiles/{re.escape(TRADES_0303)} at https://files\.massive\.com "
-        r"\(AccessDenied: Access Denied\)$",
+        match=r"^stocks\.trades: Massive refused its flat files\. Massive answered the read of "
+        rf"s3://flatfiles/{re.escape(TRADES_0303)} at https://files\.massive\.com with HTTP "
+        rf'403 \(request_id {REQUEST_ID}\): "AccessDenied: Access Denied"\.$',
     ) as info:
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
@@ -3216,8 +3221,9 @@ def test_rejected_credentials_are_an_authentication_error(
     with pytest.raises(
         dm.AuthenticationError,
         match=re.escape(
-            f"{spec.name}: Massive rejected the flat-file credentials. HTTP 403 for "
-            f"s3://flatfiles/{key} at https://files.massive.com ({code}: Rejected) Pass the S3 "
+            f"{spec.name}: Massive rejected the flat-file credentials. {A}{key} at "
+            f"https://files.massive.com with HTTP 403 (request_id {REQUEST_ID}): "
+            f'"{code}: Rejected". Pass the S3 '
             "access key Massive's dashboard shows as s3_access_key_id and s3_secret_access_key "
             "to dm.MassiveConfig."
         )
@@ -3233,7 +3239,14 @@ def test_a_server_error_is_a_massive_error(
 ) -> None:
     fake_s3.refuse("us_stocks_sip/", status=500, code="InternalError", message="Try again")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with pytest.raises(dm.MassiveError, match=r"HTTP 500 \(InternalError: Try again\)") as info:
+    with pytest.raises(
+        dm.MassiveError,
+        match=re.escape(
+            f"{A}{TRADES_0303} at https://files.massive.com with HTTP 500 (request_id "
+            f'{REQUEST_ID}): "InternalError: Try again".'
+        )
+        + "$",
+    ) as info:
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert (info.value.status, info.value.request_id) == (500, fake_s3.request_id)
     assert len(retry_clock.waits) == 3  # retried on the fake clock, never on real time
@@ -3245,7 +3258,12 @@ def test_an_unreachable_endpoint_is_a_massive_error(
     fake_s3.fail(TRADES_0303, "unreachable")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
-        dm.MassiveError, match=re.escape("cannot read s3://flatfiles/us_stocks_sip")
+        dm.MassiveError,
+        match=re.escape(
+            f"No answer to the read of s3://flatfiles/{TRADES_0303} at https://files.massive.com "
+            'after 4 tries: Could not connect to the endpoint URL: "https://files.massive.com".'
+        )
+        + "$",
     ):
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert len(retry_clock.waits) == 3  # retried on the fake clock, never on real time
@@ -3272,7 +3290,8 @@ def test_a_malformed_file_is_a_massive_error(
     fake_s3.put(TRADES_0303, body if isinstance(body, bytes) else make_csv_gz(body))
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
-        dm.MassiveError, match=re.escape(f"cannot read s3://flatfiles/{TRADES_0303}")
+        dm.MassiveError,
+        match=re.escape(f"The library could not read Massive's file s3://flatfiles/{TRADES_0303}"),
     ):
         q.history("2025-03-03", "2025-03-03", wait=True)
 
@@ -3290,7 +3309,11 @@ def test_a_dropped_connection_is_a_massive_error(
     fake_s3.put_dropped(TRADES_0303, data[: len(data) // 2])
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
-        dm.MassiveError, match=re.escape(f"cannot read s3://flatfiles/{TRADES_0303}")
+        dm.MassiveError,
+        match=re.escape(
+            "The connection broke off while the library read Massive's file "
+            f"s3://flatfiles/{TRADES_0303}"
+        ),
     ):
         q.history("2025-03-03", "2025-03-03", wait=True)
 
@@ -3350,7 +3373,10 @@ def test_a_dropped_connection_is_read_again_from_the_start(
     assert 1.0 <= waits[1] <= 1.2
     rereads = [r.getMessage() for r in caplog.records if "again from its start" in r.getMessage()]
     assert len(rereads) == 2
-    assert rereads[0].startswith(f"cannot read {LOCATION.format(TRADES_0303)}: ")
+    assert rereads[0].startswith(
+        f"The connection broke off while the library read Massive's file "
+        f"{LOCATION.format(TRADES_0303)}: "
+    )
 
 
 def test_a_connection_that_keeps_dropping_fails_after_three_rereads(
@@ -3368,14 +3394,18 @@ def test_a_connection_that_keeps_dropping_fails_after_three_rereads(
     with (
         caplog.at_level(logging.DEBUG, logger=LOGGER),
         pytest.raises(
-            dm.MassiveError, match=re.escape(f"cannot read {LOCATION.format(TRADES_0304)}: ")
+            dm.MassiveError,
+            match=re.escape(
+                "The connection broke off while the library read Massive's file "
+                f"{LOCATION.format(TRADES_0304)}: "
+            ),
         ),
     ):
         q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert sorted(fake_s3.keys()) == [TRADES_0303] + [TRADES_0304] * 4
     assert len(retry_clock.waits) == 3
     # The call raises the failure, so the client's give-up is DEBUG detail.
-    assert [r.levelno for r in caplog.records if "giving up after 4 reads" in r.getMessage()] == [
+    assert [r.levelno for r in caplog.records if "Giving up after 4 reads." in r.getMessage()] == [
         logging.DEBUG
     ]
 
@@ -3419,9 +3449,10 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
         q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
     assert type(info.value) is dm.MassiveError
     assert str(info.value) == (
-        f"stocks.trades: cannot read {LOCATION.format(TRADES_0303)}: HTTP 404 ({code}: "
-        f"{message}) The usual cause is an s3_bucket or s3_endpoint_url in dm.MassiveConfig "
-        "that is not Massive's. Leave both out to read Massive's."
+        f"stocks.trades: {A}{TRADES_0303} at https://files.massive.com with HTTP 404 "
+        f'(request_id {REQUEST_ID}): "{code}: {message}". The usual cause is an s3_bucket or '
+        "s3_endpoint_url in dm.MassiveConfig that is not Massive's. Leave both out to read "
+        "Massive's."
     )
     assert (info.value.status, info.value.request_id) == (404, fake_s3.request_id)
     # Not skipped as holidays: the call fails, and its failure is logged with its id, at DEBUG
@@ -4023,7 +4054,8 @@ def test_a_client_that_cannot_be_created_is_a_massive_error(
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
         dm.MassiveError,
-        match=r"cannot create the S3 client for https://files\.massive\.com: .*no-such-profile",
+        match=r"^The library could not create its S3 client for https://files\.massive\.com: "
+        r".*no-such-profile",
     ):
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert fake_s3.clients == []
@@ -4040,7 +4072,11 @@ def test_closing_the_session_closes_the_boto_client(
     assert client.closed
     client.close()  # idempotent
     assert fake_s3.closes == 1
-    with pytest.raises(_massive.WireError, match="is closed"):
+    with pytest.raises(
+        _massive.WireError,
+        match=r"^The library closed its connections to https://files\.massive\.com before this "
+        r"request was sent\.$",
+    ):
         client.open(TRADES_0303)  # a read that raced close() cannot reopen it
     assert fake_s3.keys() == [TRADES_0303]
 
@@ -4436,8 +4472,8 @@ def test_a_missing_key_header_is_a_massive_error(
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert type(info.value) is dm.MassiveError
     assert str(info.value) == (
-        f"cannot read s3://flatfiles/{TRADES_0303} at https://files.massive.com: the header "
-        f"lacks the key column {key_header}. {LIBRARY_BUG}"
+        f"The library could not read Massive's file s3://flatfiles/{TRADES_0303} at "
+        f"https://files.massive.com: its header lacks the key column {key_header}. {LIBRARY_BUG}"
     )
 
 
@@ -4452,7 +4488,7 @@ def test_a_futures_file_without_its_session_header_is_a_massive_error(
     fake_s3.put_csv(FUTURES_0304.format("cme"), lacking, data)
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with pytest.raises(
-        dm.MassiveError, match=r"the header lacks the key column session_end_date\. "
+        dm.MassiveError, match=r"its header lacks the key column session_end_date\. "
     ):
         q.history("2025-03-04", "2025-03-04", wait=True)
 
@@ -4541,8 +4577,8 @@ def test_an_empty_file_is_a_massive_error(*, session: dm.MassiveSession, fake_s3
     with pytest.raises(dm.MassiveError) as info:
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert str(info.value) == (
-        f"cannot read {LOCATION.format(TRADES_0303)}: the file is empty: no header line. "
-        f"{LIBRARY_BUG}"
+        f"The library could not read Massive's file {LOCATION.format(TRADES_0303)}: the file is "
+        f"empty and has no header line. {LIBRARY_BUG}"
     )
 
 

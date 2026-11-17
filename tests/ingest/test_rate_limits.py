@@ -543,12 +543,19 @@ def test_the_default_registry_names_the_other_buckets_requests() -> None:
     governor = lease.governor
     permit = governor.admission(OTHER, lane=object()).acquire(_massive.Cancel())
     governor.refused(permit, retry_after=700.0, message="busy")
-    with pytest.raises(_massive.WireError, match="refusing requests outside Massive's"):
+    # No setting declares the other bucket's limit, so the give-up names no setting to pace it.
+    with pytest.raises(
+        _massive.WireError,
+        match=r"^busy The next request goes at .* Retry after that time, or stop the other "
+        r"program\.$",
+    ):
         governor.admission(OTHER, lane=object(), patience=_massive.Patience(0.0)).acquire(
             _massive.Cancel()
         )
     # The other bucket cannot be declared; it learns its limit from Massive's refusals.
-    with pytest.raises(ValueError, match=r"\['other'\] cannot be declared"):
+    with pytest.raises(
+        ValueError, match=r"^The buckets \['other'\] cannot take a declared limit\. "
+    ):
         governor.declare({OTHER: 5})
     lease.release()
 

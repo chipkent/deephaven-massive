@@ -1182,8 +1182,9 @@ def _gave_up_after_two_pauses(result: object) -> None:
     assert result.status == 429
     # The governor's sentences say why the read gave up; the read adds where to watch the pace.
     assert re.search(
-        r"Massive is refusing .*this read waits out at most 90 s of pauses and has spent 60 s.* "
-        r"See each subscription's pace in m\.rate_limits\(\)\.$",
+        r'with HTTP 429: "slow down"\. The next request goes at .*, past the 90 s this read '
+        r"waits for Massive's pauses, of which it has already waited 60 s\. .* See each "
+        r"subscription's pace in m\.rate_limits\(\)\.$",
         str(result),
     )
 
@@ -1490,7 +1491,7 @@ def test_a_poll_with_a_max_outage_of_zero_fails_at_its_first_rate_limit_pause(
         (row,) = dh_to_pylist(m.streams())
     finally:
         m.close()
-    assert "Massive is refusing" in row["Error"]
+    assert 'with HTTP 429: "slow down". The next request goes at ' in row["Error"]
     assert "Pass a larger max_outage to dm.MassiveConfig to wait longer." in row["Error"]
     assert len(fake_rest.get_queries()) == 1
 
@@ -2194,7 +2195,7 @@ def test_drift_is_a_problem_of_each_read_and_its_status_is_logged_once(
     with caplog.at_level(logging.WARNING):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
         fetch(session, DIVIDENDS, symbols=["AAPL"])
-    assert caplog.text.count("undocumented response status 'PARTIAL'") == 1
+    assert caplog.text.count("with status 'PARTIAL', which Massive does not document") == 1
     # Each read's drift is its own problem, with the field and the first value it held; each
     # read's first warns once.
     assert [(e.cause, e.field, e.stream_id) for e in events] == [
@@ -2425,14 +2426,16 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     refusal = {"status": "ERROR", "request_id": "r7", "message": "slow down"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(refusal, status=429, headers={"Retry-After": "700"}))
     given_up = (
-        r"^Massive is refusing stocks requests with HTTP 429 \(latest refusal: "
-        r".*r7.*\)\. Its next request, a probe, goes at 2027-01-15T08:10:00\+00:00 "
-        r"\(.* local time\), but this read waits out at most 300 s of pauses and has spent "
-        r"0 s of its patience\. The usual cause is another program or process using the same "
-        r"Massive account, whose limit they share\. "
-        r"To go on: retry after that time; stop the other program; or declare the limit Massive "
-        r"gives this subscription \(rest_requests_per_minute\), or upgrade it\.? "
-        r"See each subscription's pace in m\.rate_limits\(\)\.$"
+        "^"
+        + re.escape(
+            "Massive answered GET /stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 "
+            'with HTTP 429 (request_id r7): "slow down". The next request goes at 2027-01-15 '
+            "08:10:00 UTC, past the 300 s this read waits for Massive's pauses. The usual cause is "
+            "another program using the same Massive account, which shares its limit. Retry after "
+            "that time, stop the other program, or set rest_requests_per_minute in "
+            "dm.MassiveConfig to pace requests. See each subscription's pace in m.rate_limits()."
+        )
+        + "$"
     )
     with caplog.at_level(logging.INFO):
         for _ in range(2):

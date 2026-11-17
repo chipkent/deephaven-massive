@@ -500,7 +500,7 @@ def test_each_symbol_s_history_ends_in_its_own_outcome(
     assert str(_failure(out["AMZN"]).error).startswith(
         "stocks.trades: the rows of AMZN were cut short after 1 page arrived. "
     )
-    assert str(_failure(out["WMT"]).error).startswith("Massive is refusing ")
+    assert str(_failure(out["WMT"]).error).startswith("Massive answered GET ")
     # MSFT's missing data warns as history() warns it, as a problem; no failure warns.
     warned = [r for r in caplog.records if r.name in {LOGGER, REST_LOGGER}]
     assert [r.getMessage() for r in warned if r.levelno >= logging.WARNING] == []
