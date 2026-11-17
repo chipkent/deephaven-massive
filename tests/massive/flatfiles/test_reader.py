@@ -886,10 +886,9 @@ def test_a_file_whose_every_line_is_malformed_fails_without_quoting_a_line(
         table(opened(KEY, text), plan())
     assert info.value.message == (
         f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of its 2 "
-        "lines is malformed, so the file's format may have changed; the first: row 1 after "
-        "the header has 2 fields where the header has 13"
+        "lines is malformed; the first: row 1 after the header has 2 fields where the header has 13"
     )
-    assert info.value.kind is WireFailure.UNREADABLE
+    assert info.value.kind is WireFailure.UNREADABLE_ROWS  # Massive's data, not the library's
 
 
 def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(
@@ -1010,9 +1009,9 @@ def test_a_file_whose_every_line_is_not_utf8_fails(
         table(opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows)), plan())
     assert info.value.message == (
         f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of its 2 "
-        "lines is malformed, so the file's format may have changed; the first: row 1 after "
-        "the header is not UTF-8 text"
+        "lines is malformed; the first: row 1 after the header is not UTF-8 text"
     )
+    assert info.value.kind is WireFailure.UNREADABLE_ROWS
 
 
 def test_a_header_that_is_not_valid_csv_is_a_wire_error(

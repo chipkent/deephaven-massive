@@ -23,16 +23,6 @@ def test_each_member_fails_or_skips_at_its_level(setting: OnError, effect: OnErr
 
 
 @pytest.mark.parametrize(
-    ("setting", "level"),
-    [(OnError.RAISE, logging.ERROR), (OnError.LOG, logging.ERROR), (OnError.IGNORE, logging.DEBUG)],
-)
-def test_the_site_s_level_is_what_log_reports_at_and_ignore_never_is(
-    setting: OnError, level: int
-) -> None:
-    assert effect_of(setting, level=logging.ERROR).level == level
-
-
-@pytest.mark.parametrize(
     ("setting", "effect"),
     [
         (OnError.RAISE, OnErrorEffect(fails=True, level=logging.WARNING)),

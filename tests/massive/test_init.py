@@ -59,6 +59,7 @@ EXPECTED_INTERFACE = [
     "object_key",
     "origin_of",
     "provenance",
+    "request_target",
     "set_reply_capture",
     "source",
     "sources",

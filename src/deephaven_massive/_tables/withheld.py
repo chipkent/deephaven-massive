@@ -49,6 +49,7 @@ __all__ = [
     "FAULT",
     "MARK_COLUMNS",
     "REASON",
+    "WITHHELD_LISTED",
     "Failure",
     "Withheld",
     "failure_of",
@@ -59,6 +60,7 @@ __all__ = [
     "marked_count",
     "merged",
     "placed",
+    "reason_sentence",
     "setting_of",
     "with_marks",
     "withhold_rows",
@@ -470,21 +472,49 @@ def setting_of(policy: ResolvedPolicy, fault: RowFault) -> OnError:
     return _SETTINGS[fault](policy)
 
 
+WITHHELD_LISTED: Final = "m.problems() counts the withheld rows by cause and symbol."
+"""What ends the message of a read or stream that failed because it withheld every row: where
+the user finds the rows, since no setting would publish them."""
+
+
+def reason_sentence(reason: str) -> str:
+    """Return why a row was withheld as a sentence of a message.
+
+    Args:
+        reason: A withheld row's reason, such as `Withheld.first_reason`.
+
+    Returns:
+        The reason with a capital first letter and one final period.
+    """
+    text = reason.rstrip(".")
+    return f"{text[:1].upper()}{text[1:]}."
+
+
 def failure_of(
-    counts: Mapping[RowFault, int], policy: ResolvedPolicy, *, dataset: str, first_reason: str
+    counts: Mapping[RowFault, int],
+    policy: ResolvedPolicy,
+    *,
+    dataset: str,
+    first_reason: str,
+    where: str | None = None,
 ) -> str | None:
     """Say why withheld rows fail a read, when a cause they follow is `RAISE`.
+
+    The rows are Massive's data the library cannot read, so the message names the setting
+    that goes on without them and asks for no bug report.
 
     Args:
         counts: The withheld rows by fault (`Withheld.counts`).
         policy: The read's or the stream's policy.
         dataset: The dataset, for the message.
         first_reason: Why the payload's first withheld row was withheld.
+        where: Where the rows came from, such as a flat file's location, when the message
+            needs to say; None when the dataset says enough.
 
     Returns:
-        The failure's message, naming the dataset, each failing cause with its count, the
-        first reason, and the setting that would go on without the rows; None when no cause
-        with withheld rows is `RAISE`.
+        The failure's message, naming the dataset, each failing cause with its count, where
+        the rows came from, the first reason, and the setting that would go on without the
+        rows; None when no cause with withheld rows is `RAISE`.
     """
     failing = [
         (fault, count)
@@ -493,11 +523,13 @@ def failure_of(
     ]
     if not failing:
         return None
-    named = ", ".join(f"{count} under {fault.value}" for fault, count in failing)
+    named = [f"{count} under {fault.value}" for fault, count in failing]
+    listed = named[0] if len(named) == 1 else f"{', '.join(named[:-1])} and {named[-1]}"
+    came = "" if where is None else f" They came from {where}."
     hint = policy_hint(failing[0][0].value, OnError.LOG)
     return (
-        f"{dataset}: Massive sent rows the library cannot read whole, which it withheld "
-        f"({named}); the first: {first_reason.rstrip('.')}. To go on without such rows, {hint}"
+        f"{dataset}: Massive sent rows the library cannot read whole, so it withheld them: "
+        f"{listed}.{came} {reason_sentence(first_reason)} To go on without such rows, {hint}."
     )
 
 

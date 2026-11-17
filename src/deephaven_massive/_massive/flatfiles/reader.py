@@ -446,8 +446,9 @@ class FlatFile:
                 yield block.rows, headers.merge(block.drift), block.marks
             if self.malformed_lines and not self.rows_read:
                 raise self._error(
-                    f"every one of its {self.malformed_lines} lines is malformed, so the file's "
-                    f"format may have changed; the first: {self.malformed_reason}"
+                    f"every one of its {self.malformed_lines} lines is malformed; the first: "
+                    f"{self.malformed_reason}",
+                    kind=WireFailure.UNREADABLE_ROWS,
                 )
         except (
             pa.ArrowException,
@@ -597,21 +598,23 @@ class FlatFile:
             raise self._error(f"the header lacks the key column {', '.join(lacking)}")
         return names
 
-    def _error(self, reason: str) -> WireError:
+    def _error(self, reason: str, *, kind: WireFailure = WireFailure.UNREADABLE) -> WireError:
         """Return the error of a file that cannot be read, naming the file.
 
         Args:
             reason: What is wrong with the file.
+            kind: `WireFailure.UNREADABLE` for a file the reader cannot read as a whole, or
+                `WireFailure.UNREADABLE_ROWS` for one whose every line is malformed.
 
         Returns:
-            `WireError("cannot read <location>: <reason>")`, `WireFailure.UNREADABLE`, for
-            the caller to raise.
+            `WireError("cannot read <location>: <reason>")` of that kind, for the caller to
+            raise.
         """
         return WireError(
             f"cannot read {self._location}: {reason}",
             host=self._host,
             path=self._key,
-            kind=WireFailure.UNREADABLE,
+            kind=kind,
         )
 
     def _apply(self, block: pa.RecordBatch, plan: ReadPlan) -> _Block:

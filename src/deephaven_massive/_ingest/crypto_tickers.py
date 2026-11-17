@@ -22,6 +22,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Final, Protocol, TypeAlias
 
+from deephaven_massive._enums import OnError
+from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     ErrorSource,
@@ -41,7 +43,6 @@ from deephaven_massive._tables.transports import Unsplit
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from deephaven_massive._enums import OnError
     from deephaven_massive._ingest.rest_requests import CryptoSplit
     from deephaven_massive._massive import Patience, RestClient, RestPath
 
@@ -73,8 +74,8 @@ CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
 
 _UNREADABLE_LIMIT: Final = 100
 """The most listed tickers whose currencies do not join logged per process, per level."""
-_logged_unjoined: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.ERROR)
-"""Listed tickers whose currencies do not join, under `unreadable_symbols=LOG`: a library bug."""
+_logged_unjoined: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.WARNING)
+"""Listed tickers whose currencies do not join, under `unreadable_symbols=LOG`: Massive's data."""
 _ignored_unjoined: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.DEBUG)
 """The same, under `unreadable_symbols=IGNORE`: logged at DEBUG only."""
 
@@ -166,8 +167,8 @@ class CryptoTickerList:
         is found without a restart, and the list is read at most once an hour.
 
         A ticker the list does not hold is one Massive has no data for. A listed ticker whose
-        currencies do not join to it is Massive's data in a form the library cannot read, a
-        library bug, which follows `unreadable_symbols`: logged once at ERROR under `LOG`, at
+        currencies do not join to it is Massive's data in a form the library cannot read, which
+        follows `unreadable_symbols`: logged once at WARNING under `LOG`, at
         DEBUG under `IGNORE`, and in both the pair has no split, which is not Massive's
         absence of data, so `unavailable_symbols` never applies to it.
 
@@ -207,11 +208,12 @@ class CryptoTickerList:
         if entry is None:
             return NOT_LISTED
         if isinstance(entry, str):
-            effect = effect_of(unreadable, level=logging.ERROR)
+            effect = effect_of(unreadable)
             if effect.fails:
-                raise RowDataError(f"{where}: {entry}. {LIBRARY_BUG}")
+                hint = policy_hint("unreadable_symbols", OnError.LOG)
+                raise RowDataError(f"{where}: {entry}. To give the pair no rows and go on, {hint}.")
             unjoined = _logged_unjoined if effect.level > logging.DEBUG else _ignored_unjoined
-            unjoined.log(symbol, "%s: %s; the pair gets no rows. %s", where, entry, LIBRARY_BUG)
+            unjoined.log(symbol, "%s: %s. The pair gets no rows.", where, entry)
             return Unsplit(entry, no_data=False)
         return entry
 

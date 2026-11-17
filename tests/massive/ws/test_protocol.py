@@ -24,7 +24,7 @@ from websockets.exceptions import (
 from websockets.http11 import Response
 
 from deephaven_massive._massive import WireFailure
-from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
+from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec import sources
 from deephaven_massive._massive.spec.types import (
     Conversion,
@@ -41,7 +41,7 @@ from deephaven_massive._massive.spec.types import (
 from deephaven_massive._massive.ws import protocol
 from deephaven_massive._massive.ws import protocol as protocol_module
 from deephaven_massive._massive.ws.protocol import (
-    DROPPED_ERROR_LIMIT,
+    DROPPED_WARNING_LIMIT,
     MAX_TOPICS_PER_FRAME,
     Data,
     FrameDecoder,
@@ -666,25 +666,32 @@ def test_set_required_checks_its_names(
 def test_a_frame_that_is_not_json_is_dropped_and_logged(
     decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # Massive's frame, not a defect of the library: a WARNING with no bug report.
     assert decoder.decode("{oops") == []
-    assert "not JSON" in caplog.text
-    assert caplog.records[0].levelno == logging.ERROR
-    assert caplog.records[0].getMessage().endswith(LIBRARY_BUG_REPORT)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "Massive sent a frame from socket.massive.com/stocks that is not JSON, so the "
+                "library dropped it: '{oops'"
+            ),
+        )
+    ]
 
 
-def test_dropped_frames_log_a_bounded_number_of_errors(
+def test_dropped_frames_log_a_bounded_number_of_warnings(
     decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    for _ in range(DROPPED_ERROR_LIMIT + 5):
+    for _ in range(DROPPED_WARNING_LIMIT + 5):
         assert decoder.decode("{oops") == []
     ours = [r for r in caplog.records if r.name == protocol_module.__name__]
-    # The limit's ERRORs, one ERROR saying the rest are quieter, then DEBUG only.
+    # The limit's WARNINGs, one WARNING saying the rest are quieter, then DEBUG only.
     assert [r.levelno for r in ours] == (
-        [logging.ERROR] * (DROPPED_ERROR_LIMIT + 1) + [logging.DEBUG] * 5
+        [logging.WARNING] * (DROPPED_WARNING_LIMIT + 1) + [logging.DEBUG] * 5
     )
-    assert ours[DROPPED_ERROR_LIMIT].getMessage() == (
-        f"socket.massive.com/stocks: {DROPPED_ERROR_LIMIT} dropped frames or elements were "
+    assert ours[DROPPED_WARNING_LIMIT].getMessage() == (
+        f"socket.massive.com/stocks: {DROPPED_WARNING_LIMIT} dropped frames or elements were "
         "logged; further ones are logged at DEBUG"
     )
 
@@ -694,7 +701,16 @@ def test_an_element_without_ev_is_dropped_and_its_siblings_kept(
 ) -> None:
     events = decoder.decode(_frame(5, {"sym": "A"}, {"ev": 3}, {"ev": "E", "b": True}))
     assert len(events) == 1
-    assert caplog.text.count("no text 'ev'") == 3
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "Massive sent an element of a frame from socket.massive.com/stocks with no text "
+                f"'ev', so the library dropped it: {item}"
+            ),
+        )
+        for item in ("5", "{'sym': 'A'}", "{'ev': 3}")
+    ]
 
 
 def test_an_unknown_channel_is_dropped_and_warned_once(

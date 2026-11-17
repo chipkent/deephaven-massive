@@ -52,8 +52,8 @@ class ErrorPolicy:
     setting: its cause's setting decides only whether the table fails and how loudly the log
     reports it. When the library can read none of the rows of your symbols inside your call's
     window whole, across all the pages or files the call read, the call fails whatever the
-    setting, since Massive's format has most likely changed. Rows outside the window count
-    neither way. A live stream judges runs of rows instead:
+    setting, since the table would otherwise hold nothing and show no error. Rows outside the
+    window count neither way. A live stream judges runs of rows instead:
     https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error lists
     how each read and stream judges.
 
@@ -93,9 +93,8 @@ class ErrorPolicy:
             can't read as Massive's ticker fails the table; the row is left out either way.
             Defaults to `LOG`.
 
-            Set `dm.OnError.RAISE` to fail the table at the first such row. Such a symbol is a
-            library bug. To report it, see
-            https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
+            Set `dm.OnError.RAISE` to fail the table at the first such row. Such a symbol is
+            Massive's data: `m.problems()` gives what Massive sent, for a report to Massive.
 
             A listed crypto pair is unreadable too when its ticker isn't its two currencies
             written together. Under `dm.OnError.LOG` or `dm.OnError.IGNORE` it gets no rows, and

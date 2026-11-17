@@ -1344,7 +1344,7 @@ def test_each_setting_has_its_detail_in_a_settings_files_spelling() -> None:
     assert "\n- `log` skips the line, keeps the file's other rows, and logs one\n" in details
     assert "Never list\n`currencies`, the one subscription for forex and crypto" in details
     # A full link to another page under docs/ becomes a relative link.
-    assert "see\n[Report a bug](troubleshooting.md#report-a-bug)." in details
+    assert "See\n[Live table messages](troubleshooting.md#live-table-messages)." in details
     assert "https://github.com" not in details
     assert "dm.OnError" not in reference
     assert "dm.Subscription" not in reference

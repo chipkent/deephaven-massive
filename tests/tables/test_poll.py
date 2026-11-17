@@ -2877,10 +2877,12 @@ def test_a_row_with_a_null_poll_key_fails_the_table_under_raise(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(feed_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith(
-        "stocks.dividends poll(): Massive sent rows the library cannot read whole, which it "
-        "withheld (1 under unreadable_keys); the first: row 1 of the cycle has a null poll key "
-        "'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}"
+    assert row["Error"] == (
+        "stocks.dividends poll(): Massive sent rows the library cannot read whole, so it "
+        "withheld them: 1 under unreadable_keys. Row 1 of the cycle has a null poll key 'Id': "
+        "{'Symbol': 'AAPL', 'Currency': 'USD'}. To go on without such rows, pass "
+        "on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the dataset method or to "
+        "MassiveConfig, or write 'on_error: {unreadable_keys: log}' in the settings file."
     )
     assert row["RowsPublished"] == 0  # nothing of the cycle was published
 
@@ -2924,10 +2926,11 @@ def test_a_cycle_whose_every_row_has_a_null_poll_key_fails_the_table(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(feed_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith(
-        "stocks.dividends poll(): every one of the cycle's 2 rows has a null poll key, so "
-        "Massive's format may have changed; the first: row 0 of the cycle has a null poll key "
-        "'Id': "
+    assert row["Error"] == (
+        "stocks.dividends poll(): every one of the 2 rows Massive sent this cycle has a null "
+        "poll key, so the library withheld them all. Row 0 of the cycle has a null poll key "
+        "'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}. m.problems() counts the withheld rows by "
+        "cause and symbol."
     )
     assert row["RowsPublished"] == 0
 
@@ -3505,7 +3508,13 @@ def test_a_poll_failed_by_a_withheld_row_still_shows_its_count(
     table = q.poll(60)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(rest_session, dh_to_pylist)
-    assert "(1 under unconvertible_values)" in row["Error"]
+    assert row["Error"] == (
+        "stocks.dividends: Massive sent rows the library cannot read whole, so it withheld them: "
+        "1 under unconvertible_values. /stocks/v1/dividends: row 0: Frequency (wire key "
+        "'frequency') expects long, got 4.5. To go on without such rows, pass "
+        "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the dataset method or "
+        "to MassiveConfig, or write 'on_error: {unconvertible_values: log}' in the settings file."
+    )
     (withheld,) = problems_of(rest_session, dh_to_pylist, ProblemCause.UNCONVERTIBLE_VALUES)
     assert (withheld["StreamId"], withheld["Field"], withheld["Rows"], withheld["Policy"]) == (
         1,

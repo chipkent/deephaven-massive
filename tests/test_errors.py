@@ -120,6 +120,12 @@ def test_an_error_is_massives_unless_its_source_says_otherwise(error: type[Massi
     assert error("x", source=ErrorSource.USER).source is ErrorSource.USER
 
 
+def test_a_row_the_library_cannot_read_is_massive_s_data_and_no_bug() -> None:
+    error = RowDataError("stocks.trades: Massive's flat file has a malformed line.")
+    assert (error.source, error.is_bug, error.is_retryable) == (ErrorSource.MASSIVE, False, False)
+    assert str(error) == "stocks.trades: Massive's flat file has a malformed line."
+
+
 def test_a_subclass_sets_the_source_and_bug_flag_of_its_every_instance() -> None:
     class UnreadableError(MassiveError):
         default_source = ErrorSource.LIBRARY
@@ -163,8 +169,10 @@ def test_every_source_has_a_lowercase_value() -> None:
             ErrorSource.USER,
         ),
         # Data Massive delivered that the client could not read is the library's to fix, and
-        # so is a failure of the client itself.
+        # so is a failure of the client itself; a file whose every line is malformed is
+        # Massive's data.
         (WireError("bad file", kind=WireFailure.UNREADABLE), ErrorSource.LIBRARY),
+        (WireError("bad lines", kind=WireFailure.UNREADABLE_ROWS), ErrorSource.MASSIVE),
         (WireError("bug", kind=WireFailure.CLIENT_DEFECT), ErrorSource.LIBRARY),
     ],
 )

@@ -37,8 +37,9 @@ Interface:
     - `FlatFileClient`, `FlatFile`, `ReadPlan`, `ReadColumn`, `object_key`: the S3 flat-file
       client, one file being decoded into Arrow batches, what to read from it, and where a
       dataset's file for a day lives.
-    - `RestClient`, `Page`, `to_batch`: the REST client, one decoded response, and the
-      conversion of a page's rows to an Arrow batch with its drift report.
+    - `RestClient`, `Page`, `to_batch`, `request_target`: the REST client, one decoded
+      response, the conversion of a page's rows to an Arrow batch with its drift report, and
+      the path and query a request sends, for a message that names it.
     - `RequestGovernor`, `BucketState`, `PauseNotice`: when each REST request of a Massive
       subscription may start (a subscription's declared or learned pace, the pause after a
       429), shared by the clients of one API key; a snapshot of one subscription's state for
@@ -120,6 +121,7 @@ from deephaven_massive._massive.rest.governor import (
     PauseNotice,
     RequestGovernor,
 )
+from deephaven_massive._massive.rest.query import request_target
 from deephaven_massive._massive.rest.response import Page
 from deephaven_massive._massive.spec import provenance, source, sources
 from deephaven_massive._massive.spec.types import (
@@ -191,6 +193,7 @@ __all__ = [
     "object_key",
     "origin_of",
     "provenance",
+    "request_target",
     "set_reply_capture",
     "source",
     "sources",

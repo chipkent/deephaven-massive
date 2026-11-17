@@ -212,6 +212,7 @@ from deephaven_massive._tables.problem_events import (
 from deephaven_massive._tables.transports import FlatFileRead
 from deephaven_massive._tables.withheld import (
     MARK_COLUMNS,
+    WITHHELD_LISTED,
     Failure,
     Withheld,
     failure_of,
@@ -221,6 +222,7 @@ from deephaven_massive._tables.withheld import (
     mark_failures,
     merged,
     placed,
+    reason_sentence,
     with_marks,
     withhold_rows,
 )
@@ -1817,11 +1819,13 @@ class FlatFileHistory:
         transform: _Transform,
         file: FlatFile,
     ) -> Iterator[tuple[pa.RecordBatch, DriftReport, RowMarks]]:
-        """Hand on a file's batches; list its malformed lines when they are all it holds.
+        """Hand on a file's batches; list its malformed lines, and fail, when they are all it holds.
 
         The reader raises after the last block of a file whose every line is malformed
-        (`WireFailure.UNREADABLE`), so the read never reaches its own report of them. A
-        dropped connection is another failure, which reports nothing before its reread.
+        (`WireFailure.UNREADABLE_ROWS`), so the read never reaches its own report of them. The
+        lines are Massive's data, so the read fails with a `RowDataError` whatever
+        `malformed_rows` says, since it withheld every row of the file. Any other wire error,
+        such as a dropped connection, reports nothing before its reread.
 
         Args:
             batches: The file's batches.
@@ -1832,15 +1836,21 @@ class FlatFileHistory:
             Each batch, as the reader hands it on.
 
         Raises:
-            WireError: The reader's failure, unchanged.
+            RowDataError: If every line of the file is malformed.
+            WireError: Any other failure of the reader, unchanged.
         """
         try:
             yield from batches
         except WireError as error:
-            if error.kind is WireFailure.UNREADABLE and file.malformed_lines and not file.rows_read:
-                setting = transform.policy.malformed_rows
-                self._core.problems([_malformed_event(transform, file, setting)])
-            raise
+            if error.kind is not WireFailure.UNREADABLE_ROWS:
+                raise
+            setting = transform.policy.malformed_rows
+            self._core.problems([_malformed_event(transform, file, setting)])
+            raise RowDataError(
+                f"{transform.dataset}: every one of the {file.malformed_lines} lines of Massive's "
+                f"flat file {file.location} is malformed, so the library withheld them all. "
+                f"{reason_sentence(file.malformed_reason)} {WITHHELD_LISTED}"
+            ) from error
 
     def _report_withheld(self, transform: _Transform, withheld: Withheld, *, where: str) -> None:
         """Report a file's withheld rows: drift, problem events, and unreadable spellings.
@@ -1895,6 +1905,7 @@ class FlatFileHistory:
             transform.policy,
             dataset=transform.dataset,
             first_reason=withheld.first_reason,
+            where=where,
         )
         if failure is not None:
             self._core.problems(
@@ -1907,7 +1918,7 @@ class FlatFileHistory:
                 )
             )
             self._report_drift(transform, drift, where=where)
-            raise RowDataError(f"{failure} (in {where})")
+            raise RowDataError(failure)
         return merged((before, withheld))
 
 
@@ -1950,8 +1961,8 @@ def _malformed_event(transform: _Transform, file: FlatFile, setting: OnError) ->
 def _malformed_message(dataset: str, file: FlatFile) -> str:
     """Say which file holds a malformed line, under `malformed_rows=RAISE`, and what to do.
 
-    A `RowDataError` carries it (`ErrorSource.LIBRARY`: data from Massive the library
-    can't read), and a retry of the read would meet the same line.
+    A `RowDataError` carries it: a line Massive wrote that the library cannot read is
+    Massive's data (`ErrorSource.MASSIVE`), and a retry of the read would meet the same line.
 
     Args:
         dataset: The dataset read, such as `stocks.trades`.
@@ -1961,10 +1972,11 @@ def _malformed_message(dataset: str, file: FlatFile) -> str:
         The message: the dataset, the file, the first such line's row number and fault (never
         its text), and the setting that skips such lines.
     """
+    reason = file.malformed_reason
     return (
-        f"{dataset}: {file.location} holds a malformed line, the first: "
-        f"{file.malformed_reason}. To skip such lines and keep the file's other rows, "
-        f"{policy_hint('malformed_rows', OnError.LOG)}"
+        f"{dataset}: Massive's flat file {file.location} has a malformed line. "
+        f"{reason[:1].upper()}{reason[1:]}. To skip such lines and keep the rest of the file, "
+        f"{policy_hint('malformed_rows', OnError.LOG)}."
     )
 
 

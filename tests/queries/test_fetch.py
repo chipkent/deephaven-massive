@@ -667,9 +667,10 @@ def test_a_followed_fetch_names_a_listed_pair_whose_ticker_it_can_t_read_in_symb
     until(lambda: reads().get("X:DOTUSD", ("", 0, None))[0] == "DONE")
     state, rows, error = reads()["X:DOTUSD"]
     assert (state, rows) == ("DONE", 0)
-    assert error is not None
-    assert error.startswith("skipped: ")
-    assert "the pair gets no rows" in error
+    assert error == (
+        "skipped: Massive's reference data gives the currencies 'DOT' and 'USDT', which do not "
+        "join to it, so the pair gets no rows"
+    )
     assert reads()["X:BTCUSD"] == ("DONE", 1, None)
     assert [p for p, _ in fake_rest.get_queries() if p != "/v3/reference/tickers"] == [
         "/v1/last/crypto/BTC/USD"

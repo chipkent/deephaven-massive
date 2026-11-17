@@ -2024,13 +2024,15 @@ def test_row_symbols_are_canonical(
             fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]["Converted"] == 65.5
         )
         # Under RAISE the row's cause fails the read first.
-        with pytest.raises(
-            RowDataError,
-            match=r"^forex\.conversion: Massive sent rows the library cannot read whole, which it "
-            r"withheld \(1 under unreadable_symbols\); the first: Massive sent the symbol "
-            r"'not a pair', a spelling the library cannot read\.",
-        ):
+        with pytest.raises(RowDataError) as info:
             fetch(strict, CONVERSION, params={"from": "AUD", "to": "XXX"})
+        assert str(info.value) == (
+            "forex.conversion: Massive sent rows the library cannot read whole, so it withheld "
+            "them: 1 under unreadable_symbols. Massive sent the symbol 'not a pair', a spelling "
+            "the library cannot read as Massive's ticker. To go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the dataset method or "
+            "to MassiveConfig, or write 'on_error: {unreadable_symbols: log}' in the settings file."
+        )
 
 
 def dividend(ticker: str, row_id: str) -> dict[str, object]:
@@ -2083,10 +2085,17 @@ def test_a_withheld_rows_cause_under_raise_fails_the_read(
     )
     with dm.MassiveSession(config) as m, pytest.raises(RowDataError) as info:
         fetch(m, DIVIDENDS, symbols=["AAPL"])
-    assert str(info.value).startswith(
-        "stocks.dividends: Massive sent rows the library cannot read whole, which it withheld "
-        f"(1 under {cause}); the first: "
+    hint = (
+        f"To go on without such rows, pass on_error=dm.ErrorPolicy({cause}=dm.OnError.LOG) to the "
+        f"dataset method or to MassiveConfig, or write 'on_error: {{{cause}: log}}' in the "
+        "settings file."
     )
+    assert re.fullmatch(
+        r"stocks\.dividends: Massive sent rows the library cannot read whole, so it withheld "
+        rf"them: 1 under {cause}\. \S.*\. {re.escape(hint)}",
+        str(info.value),
+    )
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
 
 
 def test_a_reactive_symbol_table_is_read_once_for_fetch(
@@ -2222,12 +2231,16 @@ def test_a_row_without_its_symbol_is_a_data_failure(
     row = {key: value for key, value in AAPL_DIVIDEND.items() if key != "ticker"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([row])))
     with (
-        caplog.at_level(logging.ERROR, LOGGER),
+        caplog.at_level(logging.DEBUG),
         pytest.raises(RowDataError, match=r"^stocks.dividends: "),
     ):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
-    # Logged at ERROR with the same text, after the id of the call that failed.
-    assert re.search(r"call 1 failed after \d+\.\d{3} s: stocks\.dividends: ", caplog.text)
+    # Massive's data, no bug: nothing logs at ERROR, and the call that raised it logs its
+    # failure at DEBUG with the same text, after the call's id.
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    [failed] = [r for r in caplog.records if "call 1 failed" in r.getMessage()]
+    assert failed.levelno == logging.DEBUG
+    assert re.search(r"call 1 failed after \d+\.\d{3} s: stocks\.dividends: ", failed.getMessage())
 
 
 def test_one_odd_row_costs_the_call_only_itself(
@@ -2291,9 +2304,14 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
 ) -> None:
     nanos = 1704310200000000000  # nanoseconds where the indicators send milliseconds
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": [{"timestamp": nanos}]})))
-    mismatch = r"timestamp unit mismatch for indicators\.sma\.Timestamp"
-    with pytest.raises(RowDataError, match=mismatch):
+    with pytest.raises(RowDataError) as info:
         fetch(session, SMA, symbols=["AAPL"])
+    assert str(info.value) == (
+        "indicators.sma: the library could read none of the 1 rows of the read's symbols and "
+        "window from GET /v1/indicators/sma/AAPL whole, so it withheld them all. "
+        "Timestamp unit mismatch for indicators.sma.TimestampStart: 1704310200000000000 ms "
+        "overflows 64-bit nanoseconds. m.problems() counts the withheld rows by cause and symbol."
+    )
 
 
 # --- Errors ---------------------------------------------------------------------------------------
@@ -2509,7 +2527,7 @@ def test_a_read_whose_rows_in_the_window_are_all_unreadable_fails(
     with pytest.raises(
         RowDataError,
         match=r"^stocks\.trades: the library could read none of the \d rows of the read's symbols "
-        r"and window from GET /v3/trades/\{stockTicker\} whole",
+        r"and window from GET /v3/trades/AAPL whole",
     ):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
 
@@ -5116,8 +5134,15 @@ def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
     strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
     params = {"from": "AUD", "to": "XXX"}
     with dm.MassiveSession(config) as m:
-        with pytest.raises(dm.MassiveError, match=r"\(1 under unreadable_symbols\)"):
+        with pytest.raises(dm.MassiveError) as info:
             fetch(m, CONVERSION, params=params, on_error=strict)
+        assert str(info.value) == (
+            "forex.conversion: Massive sent rows the library cannot read whole, so it withheld "
+            "them: 1 under unreadable_symbols. Massive sent the symbol 'not a pair', a spelling "
+            "the library cannot read as Massive's ticker. To go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the dataset method or "
+            "to MassiveConfig, or write 'on_error: {unreadable_symbols: log}' in the settings file."
+        )
         with pytest.raises(dm.MassiveError, match=r"could read none of the 1 rows"):
             fetch(m, CONVERSION, params=params)
 
@@ -5572,8 +5597,16 @@ def test_ignored_withheld_rows_log_no_warning_but_still_reach_the_session(
         withheld = [r for r in caplog.records if "withheld 1 REST row" in r.getMessage()]
         assert withheld == []
         strict = dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)
-        with pytest.raises(RowDataError, match=r"\(1 under unconvertible_values\)"):
+        with pytest.raises(RowDataError) as info:
             fetch(m, DIVIDENDS, symbols=["AAPL"], on_error=strict)
+        assert str(info.value) == (
+            "stocks.dividends: Massive sent rows the library cannot read whole, so it withheld "
+            "them: 1 under unconvertible_values. /stocks/v1/dividends: row 0: Frequency (wire key "
+            "'frequency') expects long, got 4.5. To go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the dataset method "
+            "or to MassiveConfig, or write 'on_error: {unconvertible_values: log}' in the "
+            "settings file."
+        )
     assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
         (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Frequency", 1)
     ] * 2

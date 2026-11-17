@@ -63,9 +63,9 @@ LIBRARY_BUG_REPORT: Final = (
 )
 """What ends each of the wire clients' ERROR records about a defect of the library.
 
-A defect is a broken internal invariant, an unexpected exception on a library thread, or data
-from Massive the library cannot convert or read: none is the user's to fix, so the text says
-how to report it."""
+A defect is a broken internal invariant or an unexpected exception on a library thread: neither
+is the user's to fix, so the text says how to report it. Data from Massive the library cannot
+read is Massive's, not a defect, and its records never end with this sentence."""
 
 
 class WireFailure(enum.Enum):
@@ -100,6 +100,10 @@ class WireFailure(enum.Enum):
     UNREADABLE = "unreadable"
     """Massive delivered data the client could not read: a malformed or truncated flat file,
     a header the file lacks, or a body that is not the JSON the path declares."""
+
+    UNREADABLE_ROWS = "unreadable_rows"
+    """Massive delivered a flat file the client read whole, but whose every line is malformed,
+    so it has no row to give. The lines are Massive's data, not a defect of the client."""
 
     CLIENT_DEFECT = "client_defect"
     """The client itself failed on an unexpected exception: a bug in it, not anything Massive

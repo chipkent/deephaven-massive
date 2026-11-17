@@ -164,12 +164,15 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
         ),
         _C.UNREADABLE_SYMBOLS: CauseTraits(
             policy="unreadable_symbols",
-            source=_LIBRARY,
+            source=_MASSIVE,
             action=ProblemAction.WITHHELD,
             span=False,
             summary="Massive sent a row whose symbol the library can't read as Massive's ticker. "
             "The row is left out.",
-            fix="Report a [bug](#report-a-bug) with the row's `Detail`.",
+            fix="The library withheld the row because Massive sent it in a form the library "
+            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. To "
+            "quiet it, set `unreadable_symbols` to `dm.OnError.IGNORE`; to fail the table, "
+            "`dm.OnError.RAISE`.",
         ),
         _C.UNAVAILABLE_SYMBOLS: CauseTraits(
             policy="unavailable_symbols",
@@ -182,29 +185,38 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
         ),
         _C.UNREADABLE_KEYS: CauseTraits(
             policy="unreadable_keys",
-            source=_LIBRARY,
+            source=_MASSIVE,
             action=ProblemAction.WITHHELD,
             span=False,
             summary="Massive sent a row whose symbol, time, or other key the library can't read. "
             "The row is left out.",
-            fix="Report a [bug](#report-a-bug) with the row's `Detail`.",
+            fix="The library withheld the row because Massive sent it in a form the library "
+            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. To "
+            "quiet it, set `unreadable_keys` to `dm.OnError.IGNORE`; to fail the table, "
+            "`dm.OnError.RAISE`.",
         ),
         _C.UNCONVERTIBLE_VALUES: CauseTraits(
             policy="unconvertible_values",
-            source=_LIBRARY,
+            source=_MASSIVE,
             action=ProblemAction.WITHHELD,
             span=False,
             summary="Massive sent a row with a value the library can't read as its column's type. "
             "The row is left out.",
-            fix="Report a [bug](#report-a-bug) with the row's `Detail`.",
+            fix="The library withheld the row because Massive sent it in a form the library "
+            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. To "
+            "quiet it, set `unconvertible_values` to `dm.OnError.IGNORE`; to fail the table, "
+            "`dm.OnError.RAISE`.",
         ),
         _C.MALFORMED_ROWS: CauseTraits(
             policy="malformed_rows",
-            source=_LIBRARY,
+            source=_MASSIVE,
             action=ProblemAction.SKIPPED,
             span=False,
             summary="A line of a flat file isn't a row the library can read. The line is left out.",
-            fix="Report a [bug](#report-a-bug) with the row's `Detail`.",
+            fix="The library skipped the line because Massive sent it in a form the library "
+            "can't read. `Detail` names the file and its first such line, for a report to "
+            "Massive. To quiet it, set `malformed_rows` to `dm.OnError.IGNORE`; to fail the "
+            "read, `dm.OnError.RAISE`.",
         ),
         _C.REFUSED_VENUES: CauseTraits(
             policy="refused_venues",

@@ -63,7 +63,6 @@ from websockets.exceptions import (
 
 from deephaven_massive._massive.net import codec
 from deephaven_massive._massive.net.errors import (
-    LIBRARY_BUG_REPORT,
     WireError,
     WireFailure,
     is_certificate_failure,
@@ -106,8 +105,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-DROPPED_ERROR_LIMIT: Final = 20
-"""How many dropped frames or elements one connection logs at ERROR; later ones log at DEBUG."""
+DROPPED_WARNING_LIMIT: Final = 20
+"""How many dropped frames or elements one connection logs at WARNING; later ones log at DEBUG."""
 
 MAX_TOPICS_PER_FRAME = 1000
 """The most topics one subscribe or unsubscribe frame names.
@@ -559,9 +558,9 @@ class FrameDecoder:
         Each status object becomes a `Status` where it appears. A channel's data objects become
         one `Data`, placed where the channel's first object appears. A frame that is not JSON,
         an element that is not an object with a text `ev`, and the objects of a channel with no
-        source are dropped and logged (the first two at ERROR, as data the library cannot read,
-        up to `DROPPED_ERROR_LIMIT` times per connection and at DEBUG after that; the third at
-        WARNING once per channel); none of them stops the other events.
+        source are dropped and logged (the first two at WARNING, as Massive's data the library
+        cannot read, up to `DROPPED_WARNING_LIMIT` times per connection and at DEBUG after
+        that; the third at WARNING once per channel); none of them stops the other events.
 
         Args:
             data: The frame's payload.
@@ -574,11 +573,10 @@ class FrameDecoder:
         except ValueError:
             logger.log(
                 self._drop_level(),
-                "dropped a frame from %s%s that is not JSON: %s. %s",
+                "Massive sent a frame from %s%s that is not JSON, so the library dropped it: %s",
                 self._host,
                 self._path,
                 _quote(data),
-                LIBRARY_BUG_REPORT,
                 exc_info=True,
             )
             return []
@@ -588,11 +586,11 @@ class FrameDecoder:
             if not isinstance(item, dict) or not isinstance(ev := item.get("ev"), str):
                 logger.log(
                     self._drop_level(),
-                    "dropped an element of a frame from %s%s with no text 'ev': %s. %s",
+                    "Massive sent an element of a frame from %s%s with no text 'ev', so the "
+                    "library dropped it: %s",
                     self._host,
                     self._path,
                     _quote(item),
-                    LIBRARY_BUG_REPORT,
                 )
             elif ev == "status":
                 order.append(self._status(item))
@@ -619,18 +617,18 @@ class FrameDecoder:
         """Count one dropped frame or element, and return the level to log it at.
 
         Returns:
-            ERROR for the first `DROPPED_ERROR_LIMIT` of the connection, so a vendor change
-            that breaks every frame logs a bounded number of ERRORs, and DEBUG after that.
+            WARNING for the first `DROPPED_WARNING_LIMIT` of the connection, so a vendor change
+            that breaks every frame logs a bounded number of WARNINGs, and DEBUG after that.
         """
         self._dropped += 1
-        if self._dropped <= DROPPED_ERROR_LIMIT:
-            return logging.ERROR
-        if self._dropped == DROPPED_ERROR_LIMIT + 1:
-            logger.error(
+        if self._dropped <= DROPPED_WARNING_LIMIT:
+            return logging.WARNING
+        if self._dropped == DROPPED_WARNING_LIMIT + 1:
+            logger.warning(
                 "%s%s: %d dropped frames or elements were logged; further ones are logged at DEBUG",
                 self._host,
                 self._path,
-                DROPPED_ERROR_LIMIT,
+                DROPPED_WARNING_LIMIT,
             )
         return logging.DEBUG
 

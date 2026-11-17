@@ -1584,6 +1584,7 @@ _WIRE_CLIENTS = frozenset(
         "Page",
         "Patience",
         "to_batch",
+        "request_target",
         "WsClient",
         "WsState",
         "Status",

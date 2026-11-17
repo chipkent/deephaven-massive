@@ -3,6 +3,7 @@
 import inspect
 import json
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
@@ -414,7 +415,17 @@ def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_withheld_with_a_wa
         (ProblemCause.UNCONVERTIBLE_VALUES, "TimestampStart", 1)
     ]
     strict = dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)
-    with pytest.raises(dm.MassiveError, match=r"\(1 under unconvertible_values\)"):
+    hint = re.escape(
+        "To go on without such rows, pass "
+        "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the dataset method or to "
+        "MassiveConfig, or write 'on_error: {unconvertible_values: log}' in the settings file."
+    )
+    whole = (
+        r"^indicators\.sma: Massive sent rows the library cannot read whole, so it withheld them: "
+        r"1 under unconvertible_values\. Stamped at \S+, which Massive is not known to use for a "
+        rf"1-\w+ bar\. {hint}$"
+    )
+    with pytest.raises(dm.MassiveError, match=whole):
         sma("AAPL", 20, timespan=timespan, on_error=strict).fetch(wait=True)
     [warning] = stamp_warnings(caplog)  # the known stamp gives none
     assert warning.startswith(

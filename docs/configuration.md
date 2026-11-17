@@ -144,8 +144,9 @@ Under `raise`:
 - A malformed flat-file line fails every symbol of that file's read.
 - A watchlist row whose value isn't Massive's exact ticker fails the whole table.
 
-A read or stream fails, whatever the setting, when Massive's rows stop being readable. Massive
-has most likely changed its format. Report it as a [bug](troubleshooting.md#report-a-bug).
+A read or stream fails, whatever the setting, when Massive's rows stop being readable, since it
+would otherwise hold nothing and show no error. The rows are Massive's data, and `m.problems()`
+gives what Massive sent and why, for a report to Massive.
 
 - A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows. For
   a watchlist read, its symbols fail instead, and `m.symbol_reads()` shows them `FAILED`.
@@ -372,9 +373,8 @@ ticker, or the call raises `ValueError`. A table whose every row is bad raises
 
 #### on_error.unreadable_symbols
 
-Set `raise` to fail the table at the first such row. Such a symbol is a
-library bug. To report it, see
-[Report a bug](troubleshooting.md#report-a-bug).
+Set `raise` to fail the table at the first such row. Such a symbol is
+Massive's data: `m.problems()` gives what Massive sent, for a report to Massive.
 
 A listed crypto pair is unreadable too when its ticker isn't its two currencies
 written together. Under `log` or `ignore` it gets no rows, and

@@ -837,10 +837,10 @@ class WsConnections:
         Nothing reads the worker's futures, so an exception that escaped here would vanish.
         Any exception of the change is a defect of the library: it is logged at ERROR with its
         trace, and it fails the stream (`Flusher.fail`), if the stream still exists. A
-        `MassiveError` that already names itself a defect (`ErrorSource.LIBRARY`, such as
-        one from the crypto pair lookup) fails the stream with its own message, ended with
-        `LIBRARY_BUG` unless it holds it already; any other exception is wrapped once in a
-        `MassiveError` that names the change and asks for a bug report. Either way the message
+        `MassiveError` that already names itself a defect (`ErrorSource.LIBRARY`) fails the
+        stream with its own message, ended with `LIBRARY_BUG` unless it holds it already; any
+        other exception is wrapped once in a `MassiveError` that names the change and asks for
+        a bug report. Either way the message
         asks for the report exactly once.
 
         Args:
@@ -998,9 +998,9 @@ class WsConnections:
         """Report the pairs whose currencies the library cannot read as the stream's problems.
 
         Massive's crypto ticker list gives such a pair's currencies, but they don't join to its
-        ticker, so the stream never subscribes it: a library bug, under the stream's
-        `unreadable_symbols`, which the lookup logged. Never under `RAISE`, where the lookup
-        raised and failed the stream.
+        ticker, so the stream never subscribes it: Massive's data the library cannot read, under
+        the stream's `unreadable_symbols`, which the lookup logged. Never under `RAISE`, where
+        the lookup raised a `RowDataError`, which no retry fixes, so it failed the stream.
 
         Args:
             stream_id: The stream.

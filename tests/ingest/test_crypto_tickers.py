@@ -184,17 +184,17 @@ def test_a_crypto_pair_lookup_never_guesses(
 
 
 @pytest.mark.parametrize(
-    ("setting", "level"), [(dm.OnError.LOG, logging.ERROR), (dm.OnError.IGNORE, logging.DEBUG)]
+    ("setting", "level"), [(dm.OnError.LOG, logging.WARNING), (dm.OnError.IGNORE, logging.DEBUG)]
 )
-def test_a_listed_pair_whose_currencies_do_not_join_is_a_library_bug(
+def test_a_listed_pair_whose_currencies_do_not_join_is_massive_s_data(
     *,
     fake_rest: FakeRestServer,
     caplog: pytest.LogCaptureFixture,
     setting: dm.OnError,
     level: int,
 ) -> None:
-    # Massive's data the library can't read: logged as a bug, and the pair has no split. Its
-    # own ticker, since each is logged once per process.
+    # Massive's data the library can't read: logged as a warning with no bug report, and the
+    # pair has no split. Its own ticker, since each is logged once per process.
     config = dm.MassiveConfig(
         api_key="test-key",
         rest_base_url=fake_rest.url,
@@ -214,7 +214,10 @@ def test_a_listed_pair_whose_currencies_do_not_join_is_a_library_bug(
         assert (found.no_data, "do not join" in found.why) == (False, True)
         [record] = [r for r in caplog.records if "do not join" in r.getMessage()]
         assert record.levelno == level
-        assert LIBRARY_BUG in record.getMessage()
+        assert record.getMessage() == (
+            "'X:XYZUSD' cannot be split into its two currencies: Massive's reference data gives "
+            "the currencies 'XYZ' and 'USDT', which do not join to it. The pair gets no rows."
+        )
     finally:
         m.close()
 
@@ -235,8 +238,16 @@ def test_a_listed_pair_whose_currencies_do_not_join_raises_under_raise(
     m = dm.MassiveSession(config)
     try:
         reader = _endpoints(m)._reader("call-1", m._core.policy, waiter=Waiter.CALL)
-        with pytest.raises(RowDataError, match=r"^'X:DOTUSD' cannot be split .*do not join"):
+        with pytest.raises(RowDataError) as info:
             reader.crypto_pair("X:DOTUSD")
+        assert str(info.value) == (
+            "'X:DOTUSD' cannot be split into its two currencies: Massive's reference data gives "
+            "the currencies 'DOT' and 'USDT', which do not join to it. To give the pair no rows "
+            "and go on, pass on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the "
+            "dataset method or to MassiveConfig, or write 'on_error: {unreadable_symbols: log}' "
+            "in the settings file."
+        )
+        assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
     finally:
         m.close()
 

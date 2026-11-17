@@ -37,7 +37,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._error_policy import DEFAULT_POLICY, ResolvedPolicy
-from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, BrokenGuaranteeError
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, BrokenGuaranteeError, RowDataError
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.rest import RestReader
@@ -758,6 +758,16 @@ def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
     assert not failed
 
 
+UNREADABLE_BRKB = (
+    "test.trades: Massive sent rows the library cannot read whole, so it withheld them: 1 under "
+    "unreadable_symbols. Massive sent the symbol 'BRK/B', a spelling the library cannot read as "
+    "Massive's ticker. To go on without such rows, pass "
+    "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the dataset method or to "
+    "MassiveConfig, or write 'on_error: {unreadable_symbols: log}' in the settings file."
+)
+"""The failure of a stream under `unreadable_symbols=RAISE` that met the symbol BRK/B."""
+
+
 def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams_under_raise(
     make_ws_session: Callable[..., WsSession], dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
 ) -> None:
@@ -768,10 +778,7 @@ def test_a_frame_symbol_the_library_cannot_read_fails_the_all_streams_under_rais
     wait_for(lambda: failed_after_flush(ws_session, every))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith(
-        "test.trades: Massive sent rows the library cannot read whole, which it withheld "
-        "(1 under unreadable_symbols); the first: Massive sent the symbol 'BRK/B', a spelling"
-    )
+    assert row["Error"] == UNREADABLE_BRKB
 
 
 def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too_under_raise(
@@ -785,10 +792,7 @@ def test_an_unreadable_frame_symbol_fails_the_symbol_streams_too_under_raise(
     wait_for(lambda: failed_after_flush(ws_session, one))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith(
-        "test.trades: Massive sent rows the library cannot read whole, which it withheld "
-        "(1 under unreadable_symbols); the first: Massive sent the symbol 'BRK/B', a spelling"
-    )
+    assert row["Error"] == UNREADABLE_BRKB
 
 
 def test_a_failing_upstream_watchlist_fails_the_stream(
@@ -2446,8 +2450,12 @@ def test_a_crypto_stream_with_no_pair_massive_lists_opens_no_socket(
 
 @pytest.mark.parametrize(
     "failure",
-    [dm.AuthenticationError("bad key", status=401), dm.EntitlementError("no plan", status=403)],
-    ids=["key", "plan"],
+    [
+        dm.AuthenticationError("bad key", status=401),
+        dm.EntitlementError("no plan", status=403),
+        RowDataError("'X:DOTUSD' cannot be split into its two currencies"),
+    ],
+    ids=["key", "plan", "unjoined-pair-under-raise"],
 )
 def test_a_pair_list_failure_no_retry_can_fix_fails_the_stream_at_once(
     ws_session: WsSession,
