@@ -544,6 +544,15 @@ def test_each_waiter_gets_its_patience_and_advice_with_and_without_the_lock(
     assert (held.seconds, held.advice) == console
 
 
+def test_a_waiter_no_case_names_is_refused(dh_exec_ctx: ExecutionContext) -> None:
+    with pytest.raises(AssertionError):
+        read_patience(
+            dh_exec_ctx,
+            max_outage=300.0,
+            waiter="someone",  # type: ignore[arg-type]  # the point: a waiter no case names is refused
+        )
+
+
 def test_the_patience_constants_and_advice_read_as_documented() -> None:
     assert (READ_PATIENCE, CONSOLE_PATIENCE) == (600.0, 90.0)
     assert LIVE_TABLE_ADVICE == "raise MassiveConfig.max_outage to wait longer"
