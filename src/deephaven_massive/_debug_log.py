@@ -82,7 +82,8 @@ the planted-secret test, `tests/massive/net/test_redaction.py`, which drives eve
 with distinctive secrets and DEBUG on every logger and finds them in no record or error; and the
 thread-name tests of `tests/ingest/test_ws.py` and `tests/tables/test_poll.py`.
 Reviewers check the rest: that each new decision and failure logs, with its values. Ask: could
-an agent fix this from the log alone?
+an agent fix this from the log alone? How a WARNING or ERROR record's text reads is the
+`writing-error-messages` skill's subject.
 
 This module imports the standard library and the wire package's interface (for the snapshot
 date), which loads no client and no Deephaven, so `dm.enable_debug_logging` works before a

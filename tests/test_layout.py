@@ -1549,6 +1549,7 @@ _WIRE_VOCABULARY = frozenset(
         "FeedHost",
         "Field",
         "ParamKind",
+        "PlanAccess",
         "Provenance",
         "RestPath",
         "WsChannel",

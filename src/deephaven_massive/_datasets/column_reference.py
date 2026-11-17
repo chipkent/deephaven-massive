@@ -59,21 +59,25 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.schema import Column
-    from deephaven_massive._massive import Provenance
+    from deephaven_massive._massive import PlanAccess, Provenance
 
 __all__ = [
     "COMMAND",
     "INDEX",
+    "NOT_INCLUDED",
     "PAGES_URL",
     "DatasetCall",
     "QueryMethod",
     "SyncResult",
     "call_path",
     "column_changes",
+    "dataset_urls",
     "page_name",
     "page_url",
+    "plan_cell",
     "render",
     "sync",
+    "table_row",
 ]
 
 COMMAND: Final = "uv run python scripts/render_reference.py"
@@ -102,7 +106,7 @@ _PAGE_AREAS: Final = (
 _FROM_REQUEST: Final = "request"
 """The wire-field cell of a key the library fills from the request rather than from a field."""
 
-_NOT_INCLUDED: Final = "Not included"
+NOT_INCLUDED: Final = "Not included"
 """Massive's word for a plan without the data, which a plan cell shows alone."""
 
 _INDEX_GUIDE: Final = (
@@ -382,7 +386,7 @@ def render(
     to its shared rule on the index when it has one, and its line from the method's docstring
     (`DatasetCall.descriptions`), followed for `sort` by the fields it takes and for `filters`
     by the keys it accepts (`filters.filter_keys`). Then come the plan tables of Massive's pages
-    that document its sources (`_dataset_urls`, from `Provenance.plans`): one row per plan, one
+    that document its sources (`dataset_urls`, from `Provenance.plans`): one row per plan, one
     column per page, each cell the plan's recency and history (or "Not included"), and the
     summary of a page that lists no plan. Then the columns, one row per column in result order
     (**Column**, **Type**, the `ColumnType` value such as `Instant`, **Description**, and, for
@@ -492,9 +496,9 @@ def _method_section(specs: Sequence[DatasetSpec], calls: Mapping[str, DatasetCal
         "",
         _METHODS_GUIDE,
         "",
-        _row(["Method", "Returns"]),
-        _row(["---"] * 2),
-        *(_row([f"`{m.call}`", m.summary]) for m in methods.values()),
+        table_row(["Method", "Returns"]),
+        table_row(["---"] * 2),
+        *(table_row([f"`{m.call}`", m.summary]) for m in methods.values()),
     ]
 
 
@@ -529,10 +533,16 @@ def _grid_section(grid: Mapping[str, Mapping[str, DatasetSpec]]) -> list[str]:
     if not grid:
         return []
     classes = [c.value for c in AssetClass]
-    lines = ["", f"## {_GRID_HEADING}", "", _row(["Dataset", "Asset classes"]), _row(["---"] * 2)]
+    lines = [
+        "",
+        f"## {_GRID_HEADING}",
+        "",
+        table_row(["Dataset", "Asset classes"]),
+        table_row(["---"] * 2),
+    ]
     for name, by_class in grid.items():
         links = (f"[{c.capitalize()}]({page_name(by_class[c])})" for c in classes if c in by_class)
-        lines.append(_row([f"`{name}`", ", ".join(links)]))
+        lines.append(table_row([f"`{name}`", ", ".join(links)]))
     return lines
 
 
@@ -562,10 +572,10 @@ def _namespace_sections(
     lines: list[str] = []
     for heading, members in by_heading.items():
         lines.extend(("", f"## {heading}", ""))
-        lines.append(_row(["Dataset", "Summary", "Methods"]))
-        lines.append(_row(["---"] * 3))
+        lines.append(table_row(["Dataset", "Summary", "Methods"]))
+        lines.append(table_row(["---"] * 3))
         lines.extend(
-            _row(
+            table_row(
                 [
                     f"[`{call_path(spec)}`]({page_name(spec)})",
                     spec.summary,
@@ -606,9 +616,9 @@ def _type_section(specs: Sequence[DatasetSpec], catalog: Catalog) -> list[str]:
         "",
         _TYPES_GUIDE,
         "",
-        _row(["Type", "Holds"]),
-        _row(["---"] * 2),
-        *(_row([f"`{t.value}`", meaning]) for t, meaning in _TYPE_NAMES.items() if t in used),
+        table_row(["Type", "Holds"]),
+        table_row(["---"] * 2),
+        *(table_row([f"`{t.value}`", meaning]) for t, meaning in _TYPE_NAMES.items() if t in used),
     ]
 
 
@@ -633,9 +643,9 @@ def _difference_section(
         "",
         _TYPE_DIFFERENCES,
         "",
-        _row(["Dataset", "Column", "Types"]),
-        _row(["---"] * 3),
-        *(_row(cells) for cells in differences),
+        table_row(["Dataset", "Column", "Types"]),
+        table_row(["---"] * 3),
+        *(table_row(cells) for cells in differences),
     ]
 
 
@@ -764,7 +774,7 @@ def _page(
         _INDEX_LINK,
         *_arguments(spec, call, catalog),
     ]
-    urls = _dataset_urls(spec, provenance)
+    urls = dataset_urls(spec, provenance)
     lines.extend(_plans(urls, provenance))
     lines.extend(_columns(spec, catalog))
     if urls:
@@ -834,8 +844,8 @@ def _arguments(spec: DatasetSpec, call: DatasetCall, catalog: Catalog) -> list[s
     lines = ["", "## Arguments", ""]
     if any(name in ARGUMENT_RULES for name in call.arguments):
         lines.extend((_ARGUMENTS_GUIDE, ""))
-    lines.append(_row(["Argument", "Description"]))
-    lines.append(_row(["---"] * 2))
+    lines.append(table_row(["Argument", "Description"]))
+    lines.append(table_row(["---"] * 2))
     for name in call.arguments:
         text = described.get(name, "")
         added = ""
@@ -845,7 +855,7 @@ def _arguments(spec: DatasetSpec, call: DatasetCall, catalog: Catalog) -> list[s
             keys = filter_keys(catalog, spec, typed=call.typed)
             added = "Keys: " + (", ".join(f"`{key}`" for key in keys) or "none") + "."
         shown = f"[`{name}`]({INDEX}#{name})" if name in ARGUMENT_RULES else f"`{name}`"
-        lines.append(_row([shown, " ".join(part for part in (text, added) if part)]))
+        lines.append(table_row([shown, " ".join(part for part in (text, added) if part)]))
     return lines
 
 
@@ -939,20 +949,10 @@ def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
             for title in titles
         }
         header = ["Plan", *columns]
-        lines.extend(("", _row(header), _row(["---"] * len(header))))
+        lines.extend(("", table_row(header), table_row(["---"] * len(header))))
         for plan in plans:
-            cells = []
-            for column in columns.values():
-                texts = {
-                    url: _plan_cell(t.access, t.recency, t.history)
-                    for url, page in column
-                    for t in page.plans
-                    if t.plan == plan
-                }
-                if len(set(texts.values())) > 1:
-                    texts = {url: _named(url, text) for url, text in texts.items()}
-                cells.append("; ".join(dict.fromkeys(texts.values())))
-            lines.append(_row([plan, *cells]))
+            cells = [plan_cell(plan, column) for column in columns.values()]
+            lines.append(table_row([plan, *cells]))
     unlisted = [(url, page) for url, page in pages if not page.plans]
     if unlisted:
         lines.append("")
@@ -966,6 +966,33 @@ def _plans(urls: Iterable[str], provenance: Provenance) -> list[str]:
             for url, page in unlisted
         )
     return lines
+
+
+def plan_cell(plan: str, pages: Sequence[tuple[str, PlanAccess]]) -> str:
+    """Say what one plan gets of the data some vendor pages document, as one table cell.
+
+    The dataset pages' Plans tables and the README's plans table both fill their cells with
+    it, so the two never disagree.
+
+    Args:
+        plan: The plan's name, as Massive writes it.
+        pages: Each page's URL and its plan tables. Where they state different terms for the
+            plan, each term names the class its page's URL names, such as "crypto: Updated as
+            needed, 2 years; forex: Updated hourly, 2 years".
+
+    Returns:
+        The plan's terms on the pages, each distinct text once, joined by "; "; empty when no
+        page lists the plan.
+    """
+    texts = {
+        url: _terms_text(t.access, t.recency, t.history)
+        for url, page in pages
+        for t in page.plans
+        if t.plan == plan
+    }
+    if len(set(texts.values())) > 1:
+        texts = {url: _named(url, text) for url, text in texts.items()}
+    return "; ".join(dict.fromkeys(texts.values()))
 
 
 def _named(url: str, text: str) -> str:
@@ -995,7 +1022,7 @@ def _class_named(url: str) -> str | None:
     return next((c.value for c in AssetClass if c.value in _segments(url)), None)
 
 
-def _plan_cell(access: str, recency: str | None, history: str | None) -> str:
+def _terms_text(access: str, recency: str | None, history: str | None) -> str:
     """Condense one plan's terms into a table cell.
 
     Args:
@@ -1007,9 +1034,9 @@ def _plan_cell(access: str, recency: str | None, history: str | None) -> str:
         "Not included" for a plan without the data; otherwise its recency and history, such as
         "15-minute delayed, 5 years", or its access text when the page gives neither.
     """
-    if access == _NOT_INCLUDED:
-        return _NOT_INCLUDED
-    shown = [part for part in (recency, history) if part and part != _NOT_INCLUDED]
+    if access == NOT_INCLUDED:
+        return NOT_INCLUDED
+    shown = [part for part in (recency, history) if part and part != NOT_INCLUDED]
     return ", ".join(shown) or access
 
 
@@ -1082,8 +1109,8 @@ def _columns(spec: DatasetSpec, catalog: Catalog) -> list[str]:
     several = len(wire) > 1
     schema = catalog.dataset_schema(spec)
     header = ["Column", "Type", "Description", *(["Read from"] if several else [])]
-    lines = ["", "## Columns", "", _row(header), _row(["---"] * len(header))]
-    lines.extend(_row(_cells(column, several=several)) for column in schema.columns)
+    lines = ["", "## Columns", "", table_row(header), table_row(["---"] * len(header))]
+    lines.extend(table_row(_cells(column, several=several)) for column in schema.columns)
     fields = ["Column", *(_WIRE_HEADINGS[t] for t in wire)]
     lines.extend(
         (
@@ -1094,11 +1121,11 @@ def _columns(spec: DatasetSpec, catalog: Catalog) -> list[str]:
             "",
             _wire_guide(schema.columns, wire),
             "",
-            _row(fields),
-            _row(["---"] * len(fields)),
+            table_row(fields),
+            table_row(["---"] * len(fields)),
         )
     )
-    lines.extend(_row(_wire_cells(column, wire)) for column in schema.columns)
+    lines.extend(table_row(_wire_cells(column, wire)) for column in schema.columns)
     lines.extend(("", "</details>"))
     return lines
 
@@ -1154,7 +1181,7 @@ def _wire_cells(column: Column, wire: Sequence[Transport]) -> list[str]:
     return [f"`{column.name}`", *fields]
 
 
-def _row(cells: Sequence[str]) -> str:
+def table_row(cells: Sequence[str]) -> str:
     """Return one Markdown table row, with every `|` inside a cell escaped.
 
     Args:
@@ -1168,7 +1195,7 @@ def _row(cells: Sequence[str]) -> str:
     return "| " + " | ".join(escaped) + " |"
 
 
-def _dataset_urls(spec: DatasetSpec, provenance: Provenance) -> list[str]:
+def dataset_urls(spec: DatasetSpec, provenance: Provenance) -> list[str]:
     """Return the vendor pages that document one dataset's sources, sorted and distinct.
 
     Massive documents a source several asset classes share (the unified snapshot

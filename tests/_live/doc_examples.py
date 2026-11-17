@@ -18,8 +18,8 @@ could drift from what a reader pastes:
 - `HISTORY_SECTIONS`, `LIVE_SECTIONS`, and `UNRUN_SECTIONS` name the README's examples the live run
   runs, and those it leaves out.
 - `dashboard_panels` reads the titles and contents of a `deephaven.ui` dashboard's panels.
-- `snapshots_cleared` and `seam_gaps` are the pure rules the live checks apply to Example 7's
-  snapshot and Example 11's backfill.
+- `snapshots_cleared` and `seam_gaps` are the pure rules the live checks apply to Example 8's
+  snapshot and Example 12's backfill.
 
 This module imports the library, so it is imported only once a Deephaven server runs.
 """
@@ -65,8 +65,8 @@ HISTORY_SECTIONS: Final = (
     "drive-with-a-watchlist",
     "convert-symbols",
 )
-"""The README's examples that need no setting, which follow its hook: Examples 1 to 6, the
-conversion of Yahoo tickers that ends Example 6, and Examples 13 and 14."""
+"""The README's examples that need no setting, which follow its hook: Examples 1 to 7, 15, and
+16."""
 
 LIVE_SECTIONS: Final = (
     "what-your-plan-allows",
@@ -80,11 +80,10 @@ LIVE_SECTIONS: Final = (
 README's order."""
 
 UNRUN_SECTIONS: Final = {
-    "massive-config": "it opens a session and reads nothing; tests/test_docs.py runs it",
-    "bad-symbols-and-rows": (
-        "it sets error policies, which tests/test_docs.py checks; its one read is Example 1's "
-        "daily bars"
+    "options-chain": (
+        "the smoke tests read m.options.chain on the owner's key; tests/test_docs.py runs it"
     ),
+    "massive-config": "it opens a session and reads nothing; tests/test_docs.py runs it",
 }
 """The README sections with Python blocks that the live run of the examples leaves out, and why."""
 

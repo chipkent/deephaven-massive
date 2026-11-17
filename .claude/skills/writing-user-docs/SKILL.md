@@ -1,6 +1,6 @@
 ---
 name: writing-user-docs
-description: "Use this skill whenever you write, rewrite, edit, restructure, or review any text a user of deephaven-massive reads: README.md (its hook, Install, Configuration, examples, next steps), docs/troubleshooting.md, docs/tester-guide.md, or the hand-written text of docs/datasets/ (its intro and the shared argument rules in _datasets/argument_rules.py). Use it for a whole page or one sentence, for requests like 'write the Install section', 'improve the hook', 'add an example', 'make the README sell', 'fix this paragraph', 'this reads like AI', or 'grade this page', and whenever a code change alters something a user page describes (a default, a limit, an error, a column, an install step), even if the request never mentions docs. It researches the readers and their pains, gets the owner's sign-off on the outline, writes to docs/dev/user-docs.md, runs the checker, and grades the draft with the calibrated editor in agents/editor.md until it passes. Not for docstrings (writing-docstrings), PR descriptions or issue bodies (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write, rewrite, edit, restructure, or review any text a user of deephaven-massive reads: README.md (its hook, Install, Configuration, examples, next steps), docs/troubleshooting.md, docs/tester-guide.md, or the hand-written text of docs/datasets/ (its intro and the shared argument rules in _datasets/argument_rules.py). Use it for a whole page or one sentence, for requests like 'write the Install section', 'improve the hook', 'add an example', 'make the README sell', 'fix this paragraph', 'this reads like AI', or 'grade this page', and whenever a code change alters something a user page describes (a default, a limit, an error, a column, an install step), even if the request never mentions docs. It researches the readers and their pains, gets the owner's sign-off on the outline, writes to docs/dev/user-docs.md, runs the checker, and grades the draft with the calibrated editor in agents/editor.md, at most three times. Not for docstrings (writing-docstrings), PR descriptions or issue bodies (writing-a-pr-description), or messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing user docs
@@ -91,6 +91,8 @@ every FALSE or UNSOURCED claim before grading.
 Then spawn one pair of fresh, independent graders, which haven't seen your draft being written,
 each with this brief, scoped to the changed sections, and give them the approved version of any
 revised hook to compare against:
+The scope is the sections the change touched, unless the request itself is a review of the
+whole page. Older text outside the scope is never graded or rewritten.
 
 ```text
 Read <repo>/.claude/skills/writing-user-docs/agents/editor.md and follow it exactly. Grade
@@ -106,9 +108,9 @@ second pair, given the first pair's sheets, only when the first pair finds a fal
 claim or the page misses the bar.
 
 A page ships only at a passing grade, and every grade uses fresh graders. When patching leaves
-a passage short of the bar, rewrite it from its outline and grade it again. If a few
-rewrite-and-grade rounds still can't pass it, ask the owner for help with the specific obstacle
-(`writing-to-the-owner`), with the graders' sheets; never ask for sign-off on failing text.
+a passage short of the bar, rewrite it from its outline and grade it again, with at most three
+fresh grades. If the third doesn't pass, send the owner the failing passage and the graders'
+sheets as a request for help (`writing-to-the-owner`), never as finished text.
 Never call a failing draft done. Push a page as soon as it passes; never hold it back for other pages.
 If you can't spawn a subagent, grade it yourself with `editor.md` and say the grade is your own.
 

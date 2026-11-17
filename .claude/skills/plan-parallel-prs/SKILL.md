@@ -31,9 +31,10 @@ lands, so neither can merge. Never plan a step you already know is bad, such as 
 verbatim to be rewritten later, to make a diff easier to review: fix the content as you move
 it. Docs that share a file, a
 generated page, or a generator go on one branch, never on parallel branches. Each user doc ships
-only at a passing grade: one that fails is rewritten from its outline and graded again, and
-only an obstacle a few rounds can't clear goes to the owner, as a request for help, never for
-sign-off. A doc that passes is pushed at once, never held back for others.
+only at a passing grade: one that fails is rewritten from its outline and graded again, with at
+most three fresh grades. If the third doesn't pass, the failing passage and the graders' sheets
+go to the owner as a request for help, never as finished text. A doc that passes is pushed at
+once, never held back for others.
 
 ## 3. Set the merge order
 
@@ -175,12 +176,13 @@ says only what the agent cannot know:
 
 Most of an agent's cost is context re-read every turn. Start a fresh agent with a short brief
 for each new round of work instead of resuming a long one; resume only for a small follow-up.
-As coordinator, keep your own turns short and start a fresh session at each phase change, with
-a handover note. Settle minor choices yourself instead of running multi-agent debates, and don't
-re-run a broad review whose last pass found little. When an agent's PR opens, goes green, or
-merges, start a fresh agent with a short handover note (the branch state, what is done, what
-remains, any traps) instead of resuming the long one; the project settings also make agents
-compact at about 300,000 tokens.
+Every agent, the coordinator included, hands over to a fresh one with a written handover note
+(the branch state, what is done, what remains, any traps) at about 150,000 tokens of context or
+after a PR's first push (`AGENTS.md`, Keep context small). The coordinator also hands over at
+each phase change, and messages the owner only when something is ready or needs them. Settle
+minor choices yourself instead of running multi-agent debates, and don't re-run a broad review
+whose last pass found little. The project settings also make agents compact at about 300,000
+tokens.
 
 ## 8. After a merge
 

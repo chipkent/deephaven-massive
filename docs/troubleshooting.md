@@ -120,22 +120,23 @@ A `...` in a message stands for more words in the text you see.
 
 ### Reads
 
-These come from `fetch()` and `history()`. By default a read runs in the background: Massive's
-error fails its table, and shows in the `Error` column of its row in `m.streams()`. A call with
-`wait=True` raises the error instead.
+A read is a call to `fetch()` or `history()`. By default it runs in the background. Massive's
+error then fails its table and shows in `Error` in `m.streams()`. With `wait=True`, the call
+raises it instead.
 
 | You see | Why | What to do |
 |---|---|---|
-| A `fetch()` or `history()` table has no rows | The download is still running, it failed, or Massive had no rows. | Find the read's row in `m.streams()`. `LOADING` means its rows are on their way, `FAILED` has the reason in `Error`, and `DONE` means Massive had no rows, as "No rows for a symbol" explains. A watchlist's read shows `RUNNING` once each symbol has been read, and `m.symbol_reads()` shows each symbol's result. |
+| A `fetch()` or `history()` table without `wait=True` has no rows | The read runs in the background, and its `State` in `m.streams()` says how it went. | Find that `State` in [the states table](#diagnostics) and follow its fix. |
 | `try`/`except` around `fetch()` or `history()` doesn't catch Massive's error | The call returned before Massive answered, and the error went to the table. | Pass `wait=True` to wait for Massive's answer, so its error raises in the call. |
-| No rows for a symbol | Massive has no data for it in that range, or the company changed its ticker. | List the ticker's changes with `m.reference.ticker_events("META").fetch()`. |
-| `... Your plan doesn't include this data timeframe ...` | You asked for data more recent than your plan covers. | End the range earlier. The plan table on the dataset's [reference page](datasets/README.md) shows how recent each plan's data is. |
-| `EntitlementError: the plan does not include ... futures flat files ...` | You named an exchange in `venues` whose flat files your plan doesn't include. | Leave `venues` out to read every exchange your plan allows, name only those exchanges, or pass `on_error=dm.ErrorPolicy(refused_venues=dm.OnError.LOG)` to skip the refused one. To skip refused exchanges in every call, set `on_error.refused_venues` in [`MassiveConfig`](configuration.md#settings-reference). |
-| `EntitlementError: the plan does not include the flat files of any venue requested ...` | Your plan includes no flat files of the exchanges the read asked for. | Name in `venues` only the exchanges your plan includes. If your plan has no flat files for this dataset, read REST instead: pass contract tickers such as `ESZ6` in place of `dm.ALL`, with `source=dm.HistorySource.REST`, if your plan includes the dataset's REST data. The Plans table on each futures page of the [dataset reference](datasets/README.md) shows what each plan includes. |
+| A symbol that used to trade has no rows | The company changed its ticker. | List its changes with `m.reference.ticker_events("META").fetch()`. |
+| A symbol gets no rows, and the log names `unavailable_symbols` | Massive doesn't serve that ticker. | Look it up in Massive's lists: `m.reference.tickers()`, `m.options.contracts()`, or `m.futures.contracts()`. |
+| `... Your plan doesn't include this data timeframe ...` | You asked for data more recent than your plan covers. | End the range earlier. The Plans table on the dataset's [reference page](datasets/README.md) shows how recent each plan's data is. |
+| `EntitlementError: the plan does not include ... futures flat files ...` | You named an exchange in `venues` whose flat files your plan doesn't include. | Name in `venues` only the exchanges your plan includes. To skip a refused exchange instead of failing, pass `on_error=dm.ErrorPolicy(refused_venues=dm.OnError.LOG)` ([`on_error.refused_venues`](configuration.md#setting-details)). |
+| `EntitlementError: the plan does not include the flat files of any venue requested ...` | Your plan includes no flat files of the exchanges the read asked for. | Name in `venues` only the exchanges your plan includes. To read REST instead, pass contract tickers such as `ESZ6` in place of `dm.ALL`, with `source=dm.HistorySource.REST`. The Plans table on each futures page of the [dataset reference](datasets/README.md) shows what your plan includes. |
 | `... object has no attribute 'history'` | The dataset reads what Massive has now, so its query has `fetch()` and `poll()` instead. | If the dataset method takes `start` and `end`, pass the range there and call `fetch()`, such as `m.stocks.dividends("AAPL", start="2024-01-01", end="2024-12-31").fetch()`. |
-| `... object has no attribute 'fetch'` | The dataset streams or reads a past range, so its query has no `fetch()`. | For each symbol's latest row, use the dataset's one-row counterpart, such as `m.stocks.last_trade(...)` for trades, or the asset class's `snapshots(...)`. For bars, call `history(start, end)`, or, outside futures, `previous_day_bar(...)` for the last session's bar. `dm.datasets()` lists each dataset's methods. |
+| `... object has no attribute 'fetch'` | The dataset streams or reads a past range, so its query has no `fetch()`. | Call `history(start, end)` for a range. For each symbol's latest row, call the dataset's one-row counterpart, such as `m.stocks.last_trade(...)`. `dm.datasets()` lists each dataset's methods. |
 | Rows are missing, and the log names `unreadable_keys`, `unreadable_symbols`, or `unconvertible_values` | Massive sent a row whose value, symbol, time, or other key the library can't read. The library leaves the row out of the table and lists it in [`m.problems()`](#problems) with its cause. | Nothing in your code: the row is Massive's data, and the row's `Detail` in `m.problems()` gives what Massive sent and why, for a report to Massive. To fail the read instead, pass the dataset method `on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.RAISE, unreadable_symbols=dm.OnError.RAISE, unconvertible_values=dm.OnError.RAISE)`, as [Bad symbols and rows](configuration.md#on-error) shows. |
-| A read is slow | Massive limits the subscription's requests per minute, and the read waits between them. | Read fewer symbols. `m.rate_limits()` shows each subscription's limit. |
+| A read is slow | Massive limits the subscription's requests per minute, and the read waits between them. | Read fewer symbols. If you know your subscription's limit, set it in [`rest_requests_per_minute`](configuration.md#setting-details), so reads keep to it from the start instead of pausing after Massive refuses one. `m.rate_limits()` shows each limit. |
 | A `history()` is slow, and its table's description says it read flat files | Each flat file holds a whole day of data, and `history()` downloads all of it, however few symbols or short a range you ask for. The `m.indices.values` file for 2026-11-09 was 2.9 GB. | Read fewer days. For a few symbols, pass `source=dm.HistorySource.REST` if the dataset's page lists REST under "Read from". |
 | Prices jump at a stock split | Live bars, flat files, and bars read with `adjusted=False` are as traded. | Read bars with `history()` and leave `adjusted` at `True`, the default, for split-adjusted prices. The [stock bars page](datasets/stocks.bars.md#arguments) explains `adjusted`. |
 
@@ -150,18 +151,18 @@ failed, `Error` in its `m.streams()` row says why.
 |---|---|---|
 | A stock table stays empty | No stock trades while the market is closed. | Check whether the market is open with `m.reference.market_status().fetch()`. |
 | Live tables stop updating while a console command runs | Deephaven updates no live table until the command ends. | Keep console commands short. Leave out `wait=True` from `fetch()` and `history()`: the call returns at once, and its table fills in the background. |
-| `AuthenticationError` from a live table that mentions WebSocket streams | Massive gives this answer for a wrong key, and may give it for a plan that doesn't stream this asset class. | Run `m.reference.market_status().fetch()` with the same key. If it works, your key is right, so read this data with `history()` or `poll()`. |
+| `AuthenticationError` from a live table that mentions WebSocket streams | Massive gives this answer for a wrong key, and may give it for a plan that doesn't stream this asset class. | Run `m.reference.market_status().fetch()` with the same key. If it works, your key is right. Read this data with `history()`, or poll its REST counterpart, such as `m.stocks.last_trade(...)`. |
 | A watchlist row never appears, and `m.problems()` names its value | The value isn't Massive's exact ticker, so the table skips the row. | Fix or delete the row. [`symbols`](datasets/README.md#symbols) shows Massive's spelling for each asset class. |
 | A row of a table you converted never appears | `dm.canonicalize_symbols` couldn't convert it, so its `Symbol` is null, and every dataset skips the row. | Fix the rows in the table you started from. `.where("isNull(Symbol)")` on the converted table lists them. [Symbols from another source](../README.md#convert-symbols) shows the conversion. |
-| A symbol gets no rows, and the log says Massive has no data for it | Massive doesn't serve that ticker. | Look it up in Massive's lists: `m.reference.tickers()`, `m.options.contracts()`, or `m.futures.contracts()`. |
-| `... another connection with this API key took the WebSocket connection ...` | A newer connection with your key took this one's place: another program, or a session on this server with different streaming settings. Massive allows your account one connection per asset class. | Stop the other program, give both sessions the same `MassiveConfig`, or set `connection_taken=dm.ConnectionTaken.RECONNECT` in [`MassiveConfig`](configuration.md#settings-reference) to take the connection back. Then run the line that made the table again. Under `RECONNECT`, if the other program also reconnects, the two take turns, and each loses data while the other holds the connection. |
-| `... longer than MassiveConfig.max_outage ...` | The table got no data for longer than `max_outage`, which defaults to 300 seconds. | To allow longer outages, raise [`max_outage`](configuration.md#setting-details). |
-| `... as long as MassiveConfig.max_outage allows ...` in `Error` of `m.symbol_reads()` | A watchlist symbol's reads kept failing with a temporary error, such as a rate limit. They failed for `max_outage` seconds, 300 by default. | Delete the symbol's row from the watchlist and add it back to read it again. To keep trying longer, raise [`max_outage`](configuration.md#setting-details). |
-| `... MB the library keeps for one connection ...` | Deephaven couldn't add a stream's rows as fast as they arrived. A console command causes this, since no table updates while it runs. So does a stream busier than the server can keep up with. The waiting rows reached the library's limit of 1,024 MB for one connection, so it stopped every live table on that connection. | Keep console commands short, and stream fewer symbols. Then run the line that made the table again. |
-| `Massive is refusing ... with HTTP 429 ...` from a `fetch()` or `history()` without `wait=True`, or in the `Detail` of a `poll()` table's `poll_cycle_failed` row in `m.problems()` | Waiting out Massive's rate limits would have taken the read or the poll past `max_outage`, 300 seconds by default. The usual cause is another program using the same Massive account. | Stop the other program, then call the method again. A `poll()` table whose `State` is still `RUNNING` tries again at its next poll. To wait longer, raise [`max_outage`](configuration.md#setting-details). |
+| `... another connection with this API key took the WebSocket connection ...` | Massive allows your account one connection per asset class, and a newer connection with your key took this one's place. It came from another program, or from a session on this server with different streaming settings. | Stop the other program, or give both sessions the same `MassiveConfig`. Then run the line that made the table again. To take the connection back automatically, see [`connection_taken`](configuration.md#setting-details). |
+| `... longer than MassiveConfig.max_outage ...` | The table went without data it needs for longer than `max_outage`, which defaults to 300 seconds. The message says what it waited for. | To allow longer outages, raise [`max_outage`](configuration.md#setting-details). |
+| `... as long as MassiveConfig.max_outage allows ...` in `Error` of `m.symbol_reads()` | A watchlist symbol's reads kept failing with a temporary error, such as a rate limit. They failed for `max_outage` seconds. | Delete the symbol's row from the watchlist and add it back to read it again. To keep trying longer, raise [`max_outage`](configuration.md#setting-details). |
+| `... MB the library keeps for one connection ...` | Deephaven fell behind the stream, or stopped while a console command ran. The waiting rows reached the library's 1,024 MB limit for one connection, so every live table on that connection stopped. | Keep console commands short, and stream fewer symbols. Then run the line that made the table again. |
+| `Massive is refusing ... with HTTP 429 ...` in a read's `Error`, or in a `poll_cycle_failed` row's `Detail` in `m.problems()` | Waiting out Massive's rate limits would have taken the read or poll cycle past `max_outage`. The usual cause is another program using the same Massive account. | Stop the other program, then call the method again. A `poll()` table still `RUNNING` tries again by itself at its next poll. |
+| The server exits with `AssertionFailure: Assertion failed: asserted isFailed == false` from `MergedListener.propagateErrorDownstream` | Your code filtered a live table with `where_in` by a table made from it. When the live table failed, for example because its session closed, a bug in Deephaven 42.9 and earlier failed the filtered table twice. | For a `fetch()` or `history()` table, read with `wait=True`, so the table is static. Otherwise replace `table.where_in(keys, "Key")` with `table.join(keys.select_distinct("Key"), "Key")`, which keeps the same rows and columns. |
 | `... Can not listen to failed table ...` | You built a table on a live table that failed or whose session was closed. | Make the live table again, or build on a static copy from `table.snapshot()`. |
 | `'HistoryQuery' object has no attribute ...`, such as `'last_by'` | Massive streams only 1-second and 1-minute bars at `multiplier=1`. For any other bars, `bars()` returns a `HistoryQuery`, which has no stream methods. | Pass `dm.Timespan.SECOND` or `dm.Timespan.MINUTE` with `multiplier` at 1. To read any other bars, call `history(start, end)`. |
-| mypy or pyright says `HistoryQuery` has no attribute `last_by` on 1-second or 1-minute bars | A `bars()` result can be a `StreamHistoryQuery` or a `HistoryQuery`, so a type checker allows its stream methods only after your code checks the class. | Keep the query in a variable and check it with `assert isinstance(minute, StreamHistoryQuery)` before the stream method, as [the minute-bars example](../README.md#stream-minute-bars) shows. |
+| mypy or pyright says `HistoryQuery` has no attribute `last_by` on 1-second or 1-minute bars | A `bars()` result can be a `StreamHistoryQuery` or a `HistoryQuery`, so a type checker allows its stream methods only after your code checks the class. | Keep the query in a variable, such as `minute`, and check it with `assert isinstance(minute, StreamHistoryQuery)` before the stream method. `StreamHistoryQuery` imports from `deephaven_massive.queries`. |
 | Memory keeps growing | An `append_only()` table keeps every row. | Keep the last rows with `ring(n)`, or each symbol's latest row with `last_by()`. |
 | A table keeps updating after you delete its variable | A panel or a table made from it still uses it, or Python hasn't garbage-collected it yet. | Close its panels and delete the tables made from it. Before you delete a live table's variable, call `m.release(table)`, as [Stopping live tables](../README.md#stop-live-tables) shows, so it stops without waiting for Python. |
 
@@ -223,36 +224,36 @@ checking:
 |---|---|---|
 | `m.problems()` | Problem of the session or its tables, as [Read the problems table](#problems) describes | A table looks wrong |
 | `m.streams()` | Live table, and each `fetch()` or `history()` that runs in the background or follows a watchlist | A table failed or stays empty |
-| `m.connections()` | Streaming connection, and each real-time or delayed feed the session chose | A stream gets no data |
+| `m.connections()` | Streaming connection, and a `REST` row for each kind of data, saying whether it's real-time or delayed | A stream gets no data |
 | `m.rate_limits()` | Massive subscription, with its rate-limit state | A read is slow |
 | `m.symbol_reads()` | Symbol of a watchlist read with `history()` or `fetch()` | A watchlist symbol has no rows |
 
-To see a table's state, read `m.streams()`. On any Stocks plan, this example polls Apple's
-news in a new session, `demo`, and shows the poll's row:
+To see a table's state, read `m.streams()`. This example polls Apple's news and shows the
+poll's row:
 
 ```python
 import deephaven_massive as dm
 
-demo = dm.MassiveSession()
-news = demo.reference.news("AAPL", limit=10).poll(300)
-streams = demo.streams()
+m = dm.MassiveSession()  # or the session you already have
+news = m.reference.news("AAPL", limit=10).poll(300)
+streams = m.streams()
 ```
 
-`streams` has one row, for the news poll. `Query` shows the call that made it, and `State` is
+`streams` has a row for the news poll. `Query` shows the call that made it, and `State` is
 `RUNNING` while the poll delivers rows. `help(m.streams)` describes every column.
 
 Act on these states:
 
 | Table | `State` | Why | What to do |
 |---|---|---|---|
+| `m.streams()` | `LOADING` | A read's rows are on their way. | Wait. A watchlist read turns `RUNNING` once each symbol has been read. `m.symbol_reads()` shows each symbol's result. |
+| `m.streams()` | `DONE` | The read finished. With no rows, Massive had none for it. | Nothing, unless you expected rows. Then check the range, and look the symbol up in Massive's lists, such as `m.reference.tickers()`. |
 | `m.streams()` | `FAILED` | The table stopped, and `Error` says why. | Fix what `Error` names, then run the line that made the table again. |
-| `m.connections()` | `WAITING` | The library hasn't connected: no live table on this connection has a symbol to stream yet. | Add a symbol to your watchlist. The connection opens at the first one. If your watchlist already has symbols, the library isn't streaming them. Each has a row in `m.problems()`, and its `Cause` says why. |
+| `m.connections()` | `WAITING` | The library hasn't connected: no live table on this connection has a symbol it can stream yet. | Add a symbol to your watchlist. If it already has symbols, find them in `m.problems()`, whose `Cause` says why each is skipped. |
 | `m.connections()` | `WAITING_SLOT` | Massive refused this connection at login: your account has no free connection for this asset class. | Stop any other program that uses your key. The library keeps trying, and its live tables fail after `max_outage`. |
 | `m.symbol_reads()` | `FAILED` | The symbol's read failed, and `Error` says why. | Fix what `Error` names, then delete the symbol's row from the watchlist and add it back. |
 
-`Error` in `m.streams()` says why a table failed. `LastError` in `m.connections()` shows a
-connection's latest error. Each holds one message. `m.problems()` has a row for every problem,
-with its `Cause`.
+`LastError` in `m.connections()` shows a connection's latest error.
 
 <a id="the-log"></a>
 

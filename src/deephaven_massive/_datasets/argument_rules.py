@@ -41,7 +41,7 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "- A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.\n"
             "- In text or a list, any other spelling, such as `aapl`, raises `ValueError`, "
             "unless the dataset's page says it takes another source's tickers. In a table, that "
-            "row is skipped and logged.\n"
+            "row is skipped, and `m.problems()` lists it.\n"
             "- To convert another source's tickers, use `dm.canonicalize_symbols` for a table "
             "or `dm.canonical_symbol` for one value. A stock needs the source's convention: "
             "`convention=dm.SymbolConvention.YAHOO` converts Yahoo's `BRK-B` to `BRK.B`. A row "

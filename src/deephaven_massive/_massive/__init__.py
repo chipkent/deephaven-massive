@@ -26,7 +26,7 @@ Interface:
       (`Source.memberships`).
     - `provenance`, `Provenance`: the day the vendor sources were fetched, the vendor URL
       of each source, and what each vendor page says about Massive's plans
-      (`Provenance.plans`), for documents that cite them.
+      (`Provenance.plans`, each page's a `PlanAccess`), for documents that cite them.
     - `Transport`, `Source`, `RestPath`, `WsChannel`, `Feed`, `FeedHost`, `Field`,
       `ParamKind`, `WireType`, `WireUnit`, `DriftReport`, `DriftSample`: the value types of
       that description (a channel's documented hosts among them), and a drift report with the
@@ -131,6 +131,7 @@ from deephaven_massive._massive.spec.types import (
     FeedHost,
     Field,
     ParamKind,
+    PlanAccess,
     Provenance,
     RestPath,
     RowFault,
@@ -162,6 +163,7 @@ __all__ = [
     "ParamKind",
     "Patience",
     "PauseNotice",
+    "PlanAccess",
     "Provenance",
     "ReadColumn",
     "ReadPlan",

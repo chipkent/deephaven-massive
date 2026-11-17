@@ -101,9 +101,10 @@ These protect the owner's repository, money, and secrets.
   `dataset`; decision 21), so the key stays out of objects users leave in console globals.
 - **Regenerate generated and vendored files; never edit them by hand**, since the next run
   erases the edit: `_massive/spec/*.json` and `vendor/massive/` (`uv run python
-  scripts/refresh.py`, `--fetch` for the vendor snapshot), and `docs/datasets/`
-  and the settings of `docs/configuration.md` (`scripts/render_reference.py`). Hand input goes
-  only where `docs/dev/spec-refresh.md` says, each with its reason; commit output with its cause.
+  scripts/refresh.py`, `--fetch` for the vendor snapshot), and `docs/datasets/`, the settings
+  of `docs/configuration.md`, and the README's plans table (`scripts/render_reference.py`).
+  Hand input goes only where `docs/dev/spec-refresh.md` says, each with its reason; commit
+  output with its cause.
 
 ## The public API and the data
 
@@ -161,8 +162,8 @@ These protect the owner's repository, money, and secrets.
     answer) and from settings the user gives, never from a plan's name, a probe for a plan,
     or a built-in table of what a plan includes. They work for whatever plans a user holds.
     A live test sends its requests and, on an entitlement refusal, skips and quotes Massive.
-    User docs may still say which plans include a dataset, generated from Massive's spec so
-    they follow Massive's changes.
+    User docs may still say which plans include a dataset, generated from Massive's spec or
+    checked against it by a test, so they follow Massive's changes (decision 126).
   - **Massive's answer is the error.** The library reports Massive's refusal as Massive's: its
     status, its text, and the call that caused it. It never reinterprets or guesses.
   - **A ticker Massive has no data for gives no rows by default** (decision 104), because that
@@ -237,6 +238,11 @@ These protect the owner's repository, money, and secrets.
   is or does, in words a newcomer knows (no `base`, `core`, `common`, `helpers`, or `util`).
 - **Log every decision and failure with its values**, so a failing run's log is enough to fix
   it (rules: the `_debug_log.py` docstring).
+- **An error message says what happened with its values, whose answer it is, and what to do
+  next.** It names Massive's refusals as `Massive answered <call> with HTTP <n>: "<text>"`,
+  uses only words a user knows (public names, never internal ones), puts the fix last as an
+  imperative sentence, uses sentences rather than semicolon chains, and a test runs every call
+  it suggests and pins its full text (`writing-error-messages`).
 - **The library never opens a connection only to test whether one would work**: a second
   connection with the user's key can take their own stream (decision 97).
 - **No decision or planning references** in code, comments, docstrings, test names, error
@@ -303,6 +309,10 @@ These protect the owner's repository, money, and secrets.
   the owner in that design form before any code is written (`writing-to-the-owner` §3). Every
   other design the critic accepts is yours to settle: record it in the PR under Decisions and
   start.
+- **Keep context small.** Hand over to a fresh agent, with a written handover (the branch state,
+  what is done, what remains, any traps), at about 150,000 tokens of context or after a PR's
+  first push (decision 130). Batch reads: one script over many files, not many single greps,
+  and send a wide search to a search agent that returns only its conclusion.
 - **One PR per change that can merge on its own.** A PR holds one change with everything it
   needs to be correct: the code, its tests, and its docs together (a new column lands with its
   docs page and tests in one PR). A mechanical step the change needs (a rename, a file move, a
@@ -339,7 +349,9 @@ These protect the owner's repository, money, and secrets.
 - Merge `main` or your base branch only to resolve a merge conflict, or after an open PR that
   renames a public name lands (a text merge can't catch the old name in your new code; rerun the
   tests). Read both sides of each merge conflict, never take one wholesale, regenerate a
-  generated file instead of merging it, and say in the PR body how you resolved it.
+  generated file instead of merging it, and say in the PR body how you resolved it. A merge push
+  is reviewed only for its conflict resolutions and what the merge forced you to change
+  (`pre-push-review`, decision 130).
 - **A decision record is the evidence behind a rule, not the rule.** Rules live here, in the
   user docs and docstrings, and in the `docs/dev/` page on their subject; a record holds the
   owner's ruling that set one, and the rule links it (`decision N`). A verification item is a
@@ -367,8 +379,9 @@ These protect the owner's repository, money, and secrets.
   `scripts/check_pr_body.py` fails without the line and the answer.
 - Skills: `writing-tests` for any test, `writing-docstrings` for text in code,
   `writing-a-pr-description` for PR descriptions, issue bodies, and reports,
-  `writing-a-record` for a decision or verification item, and `writing-user-docs` for a user
-  page or any change to what one describes.
+  `writing-a-record` for a decision or verification item, `writing-error-messages` for the text
+  of an exception, a warning or error log, or a diagnostics table's error cell, and
+  `writing-user-docs` for a user page or any change to what one describes.
 
 ## Deephaven invariants
 
