@@ -238,7 +238,7 @@ def test_a_rejected_key_fails_every_stream(
         assert failed.flusher.join(TIMEOUT)
     # An expected failure, not a defect: one WARNING for the cause, however many streams it
     # fails, and no ERROR.
-    rejected = [r for r in caplog.records if "rejected the API key" in r.getMessage()]
+    rejected = [r for r in caplog.records if "status auth_failed" in r.getMessage()]
     assert [r.levelno for r in rejected] == [logging.WARNING]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     with ws_session.connections.group.lock:
@@ -248,9 +248,9 @@ def test_a_rejected_key_fails_every_stream(
     assert row["State"] == "FAILED"
     # Massive may answer `auth_failed` to a key whose plan has no streams of the class, too.
     assert row["LastError"] == (
-        "Massive rejected the API key at 127.0.0.1/stocks: authentication failed. Massive gives "
-        "this answer for a wrong key and for a key with no WebSocket streams of stocks, and its "
-        "text tells which."
+        "Massive answered the authentication at 127.0.0.1/stocks with status auth_failed: "
+        '"authentication failed". Massive gives this answer for a wrong key and for a key with '
+        "no WebSocket streams of stocks, and its text tells which."
     )
     assert [s["State"] for s in streams_of(ws_session, dh_to_pylist)] == ["FAILED", "FAILED"]
     again = q.blink()  # a fresh stream, on a fresh connection
@@ -269,7 +269,9 @@ def test_a_fatal_handshake_names_the_status_and_host(
     fake_ws_server.close(1011)
     ws_session.wait(lambda s: WsState.FAILED in s.states)
     [row] = connections_of(ws_session, dh_to_pylist)
-    assert row["LastError"] == "WebSocket connection to 127.0.0.1/stocks failed: HTTP 404."
+    assert row["LastError"] == (
+        "Massive answered the WebSocket connection to 127.0.0.1/stocks with HTTP 404."
+    )
     del result
 
 
@@ -2663,3 +2665,16 @@ def test_an_outage_starts_at_the_first_failed_attempt_not_while_waiting(
     assert down_since >= added_at
     ws_session.subscribed("T.AAPL")  # the next attempt connects
     ws_session.session.release(result)
+
+
+def test_the_no_acknowledgement_detail_names_two_subscriptions_or_counts_many() -> None:
+    text = ws_connection.Connection._no_ack_text
+    assert text(frozenset({"T.AAPL", "Q.AAPL"})) == (
+        "Massive has not confirmed the subscriptions Q.AAPL and T.AAPL, so their rows may be "
+        "missing. The library re-sends them until Massive confirms."
+    )
+    many = frozenset(f"T.S{n}" for n in range(7))
+    assert text(many) == (
+        "Massive has not confirmed 7 subscriptions, the first 5: T.S0, T.S1, T.S2, T.S3, and "
+        "T.S4, so their rows may be missing. The library re-sends them until Massive confirms."
+    )

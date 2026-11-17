@@ -838,7 +838,7 @@ def test_a_failure_after_the_close_fails_the_table_with_the_close(
     core = massive_session._core
     sink, _ = make_sink(core, ALL)
     failures = _record_failures(sink, monkeypatch)
-    closed = f"{core.label} was closed; this table no longer updates. " + NEW_SESSION
+    closed = "This session was closed, so this table no longer updates. " + NEW_SESSION
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
     with caplog.at_level(logging.ERROR, logger="deephaven_massive._tables.stream"):
         assert sink.fail(MassiveError("a failure that raced the close"))

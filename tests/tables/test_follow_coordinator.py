@@ -1274,8 +1274,7 @@ def test_a_dying_coordinator_fails_every_followed_table(
     with caplog.at_level(logging.ERROR):
         massive_session._core.follows.wake()
         until(lambda: bool(first.j_table.isFailed()) and bool(second.j_table.isFailed()))
-    assert "massive #" in caplog.text
-    assert "died; its queue is no longer handled" in caplog.text
+    assert "A library thread died, so its session's live tables fail. " in caplog.text
     until(lambda: [args.exc_type for args in escaped] == [SystemExit])
     assert massive_session._core.follows.following == 0
     with massive_session._core.registry_lock:

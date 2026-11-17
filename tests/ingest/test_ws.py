@@ -39,6 +39,7 @@ from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._error_policy import DEFAULT_POLICY, ResolvedPolicy
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    NEW_SESSION,
     BrokenGuaranteeError,
     RowDataError,
     session_closed,
@@ -1467,11 +1468,11 @@ def test_a_stream_opening_as_its_connection_fails_fails_too(
         return real(*args, **kwargs)
 
     monkeypatch.setattr(ws, "open_stream_tables", failing_meanwhile)
-    with pytest.raises(dm.MassiveError, match=r"stream 2 failed: .*rejected the API key"):
+    with pytest.raises(dm.MassiveError, match=r"stream 2 failed: .*with status auth_failed"):
         ws_session.query(TRADES, ["MSFT"]).blink()
     wait_for(lambda: [r["State"] for r in streams_of(ws_session, dh_to_pylist)] == ["FAILED"] * 2)
     rows = streams_of(ws_session, dh_to_pylist)
-    assert all("rejected the API key" in r["Error"] for r in rows)
+    assert all("with status auth_failed" in r["Error"] for r in rows)
     del first
 
 
@@ -1870,8 +1871,8 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
         for future in futures:
             future.result(TIMEOUT)
     # A verb that races the close finds the session closed, or its stream failed by the close.
-    name = other._core.label
-    assert all(session_closed() == t or f"{name} was closed" in t for t in closed_errors)
+    closed = "This session was closed, so this table no longer updates. " + NEW_SESSION
+    assert all(t in (session_closed(), closed) or closed in t for t in closed_errors)
     core = ws_session.session._core
     drained = threading.Event()
     core.defer(drained.set)
