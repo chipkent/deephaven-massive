@@ -5,4 +5,5 @@ Date: 2026-10-23
 Status: open
 
 `socket.massive.com`, as for any snapshot without a `timeframe`; a refusal names `websocket_hosts`.
-Settled by `tests/ingest/test_host_decision_integration.py` (Business key).
+Settled by `tests/ingest/test_host_decision_integration.py`, which needs a key whose stocks
+snapshot carries no `timeframe` label.

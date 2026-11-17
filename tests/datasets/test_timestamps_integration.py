@@ -46,7 +46,6 @@ def _check(
     assert abs(age) * 1e9 < _RECENT_NS
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.verifies("2")
 def test_forex_last_quote_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
@@ -70,7 +69,6 @@ def test_forex_last_quote_timestamp_is_milliseconds(
     )
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.verifies("2")
 def test_crypto_last_trade_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
@@ -95,7 +93,6 @@ def test_crypto_last_trade_timestamp_is_milliseconds(
     )
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.verifies("2")
 def test_forex_conversion_last_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,

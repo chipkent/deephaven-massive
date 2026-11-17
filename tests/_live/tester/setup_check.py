@@ -16,7 +16,7 @@ secrets, the disk, the memory, and a way to keep the machine awake); which tag t
 is on; the console install's versions and the commit pip installed it from
 (`INSPECT_CONSOLE`, run by the console's own Python or inside the image); that this commit is
 the checkout's; and, through the live-run program's probe (`run_probe.probe_key`), whether
-Massive accepts the key and which plan each subscription is on. Each item is `OK`, `WARN`, or
+Massive accepts the key. Each item is `OK`, `WARN`, or
 `FAIL`, and a failed item says how to fix it.
 """
 
@@ -179,25 +179,19 @@ def console_items(
 
 
 def probe_items(result: ProbeResult) -> list[Item]:
-    """Describe the key's probe: accepted or not, and each subscription's plan.
+    """Describe the key's probe: accepted or not.
 
     Args:
         result: The live-run program's probe of the key.
 
     Returns:
-        The `key` item, and one `plan` item per subscription when the probe could tell.
+        The `key` item.
     """
     if result.key_rejected:
         return [Item("key", FAIL, "Massive rejected the API key: copy it again from the dashboard")]
-    if result.tiers is None:
-        return [Item("key", WARN, f"could not tell the plans ({result.error}); try again soon")]
-    items = [Item("key", OK, "Massive accepted the API key")]
-    for name, tier in result.tiers.items():
-        history = result.history_start.get(name, "")
-        items.append(Item(f"plan {name}", OK, f"{tier}, history from {history}"))
-    flat = ", ".join(result.flat_files) or "none"
-    items.append(Item("flat files", OK, flat))
-    return items
+    if result.error:
+        return [Item("key", WARN, f"could not reach Massive ({result.error}); try again soon")]
+    return [Item("key", OK, "Massive accepted the API key")]
 
 
 def check_setup(

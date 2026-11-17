@@ -27,38 +27,31 @@ Evidence: TypeAlias = "Callable[[str], None]"
 _FILINGS_LIMIT = 5_000
 """The most rows read of each filings dataset; a result of exactly this many is cut short."""
 
-_FILINGS_PAGE = 100
-"""The largest page of the 10-K sections and 8-K text, the most of each read with Stocks on
-Basic: one request each, where 5,000 rows would take up to 50."""
 
-
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("25")
-@pytest.mark.requests(4)
+@pytest.mark.requests(102)
 @pytest.mark.timeout(100)
 def test_filings_rows_without_a_ticker(
     live_session: dm.MassiveSession,
     *,
     recent_month: DaySpan,
-    classes_on_basic: frozenset[str],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """How many rows of the four filings datasets lack `ticker`.
 
     Reads the most recent whole month of each (up to 5,000 rows, flagged when cut short) and
-    records how many rows have no `Symbol`. With Stocks on Basic, the 10-K sections and 8-K
-    text, served 100 rows a page, are read one page each, so the test sends 4 requests.
+    records how many rows have no `Symbol`. Massive serves the 10-K sections and the 8-K text
+    100 rows a page, so each may take 50 requests, and the test sends up to 102.
     Reading it: any count is the answer; the library keeps such rows with a null `Symbol`
     either way.
     """
     filings = live_session.stocks.filings
     start, end = recent_month
-    paged = _FILINGS_PAGE if "stocks" in classes_on_basic else _FILINGS_LIMIT
     queries = {
         "filings.index": filings.index(start=start, end=end, limit=_FILINGS_LIMIT),
-        "filings.sections_10k": filings.sections_10k(start=start, end=end, limit=paged),
-        "filings.text_8k": filings.text_8k(start=start, end=end, limit=paged),
+        "filings.sections_10k": filings.sections_10k(start=start, end=end, limit=_FILINGS_LIMIT),
+        "filings.text_8k": filings.text_8k(start=start, end=end, limit=_FILINGS_LIMIT),
         "filings.risk_factors": filings.risk_factors(start=start, end=end, limit=_FILINGS_LIMIT),
     }
     counts = {}
@@ -66,14 +59,13 @@ def test_filings_rows_without_a_ticker(
         rows = table_rows(query.fetch(wait=True))
         lacking = [row for row in rows if row["Symbol"] is None]
         counts[name] = len(rows)
-        cut = " (cut short at the limit)" if len(rows) in {_FILINGS_LIMIT, paged} else ""
+        cut = " (cut short at the limit)" if len(rows) == _FILINGS_LIMIT else ""
         evidence(f"{name} {start}..{end}: {len(rows)} rows{cut}, {len(lacking)} without a ticker")
         for row in lacking[:3]:
             evidence(f"    e.g. {row}")
     assert any(counts.values())
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("42")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)

@@ -1,12 +1,13 @@
 """Live checks of Massive's WebSocket protocol through the wire client, frame by frame.
 
-Each test opens one wire `WsClient` to one cluster on `socket.massive.com` (or, for a delayed
-stocks plan, `delayed.massive.com`), records every status and, where the form of a value is
+Each test opens one wire `WsClient` to one cluster on `socket.massive.com` (for stocks, on the
+host the owner's settings pin in `websocket_hosts`, or `delayed.massive.com` when they list
+stocks in `delayed_subscriptions`), records every status and, where the form of a value is
 the question, every raw frame (`evidence`), and closes the client before the next test; a probe
 of a cluster waits a few seconds after the previous one closed, so the two never overlap on the
 server. The checks whose question belongs to no asset class (the unsubscribe, the frame size,
-the wildcard) use crypto, which trades all the time, and fall back to stocks on a key that
-streams stocks but no currencies, while the stock market's rows flow. The tests that subscribe
+the wildcard) use crypto, which trades all the time, and fall back to stocks when Massive
+refuses the key the crypto stream, while the stock market's rows flow. The tests that subscribe
 to many topics or a wildcard deliberately exceed Massive's limits: they are marked
 `integration_limits` and run only with `-m integration_limits`. How to run these tests is in
 `docs/live-tests.md`.
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import deephaven_massive as dm
 from deephaven_massive._massive import (
     RestClient,
     Status,
@@ -36,8 +38,7 @@ from deephaven_massive._massive import (
 )
 from deephaven_massive._massive.spec.convert import UnconvertibleError, field_converter
 from deephaven_massive._massive.ws import protocol
-from tests._live import plans
-from tests._live.live_run.stream_units import DELAYED, RECENCY
+from tests._live import summary
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -75,17 +76,28 @@ _STATUSES, _ROWS, _FRAMES = "statuses", "rows", "frames"
 _DELAYED_HOST = "delayed.massive.com"
 
 _PLAN_REFUSALS = ("not authorized", "not entitled", "plan")
-"""Words of a status that refuses a subscription for want of a plan, in lower case."""
+"""Words of a status in which Massive refuses the key a subscription, in lower case."""
 
 
 def _refuses_plan(message: str) -> bool:
-    """Tell whether a status message refuses a subscription for want of a plan.
+    """Tell whether a status message is Massive refusing the key a subscription.
 
     Returns:
         True when the message names authorization, entitlement, or the plan.
     """
     lowered = message.lower()
     return any(word in lowered for word in _PLAN_REFUSALS)
+
+
+def _skip_if_refused(records: _Records) -> None:
+    """Skip the test, quoting Massive, when Massive refused its subscription and acked none.
+
+    Args:
+        records: What the probe received.
+    """
+    refused = [s.message for _, s in records.statuses if _refuses_plan(s.message)]
+    if refused and not records.acked():
+        pytest.skip(f"{summary.REFUSED}{refused[0]}")
 
 
 def _unconverted(stream: str, column: str, frames: Sequence[dict[str, Any]]) -> list[object]:
@@ -195,7 +207,7 @@ class _Probe:
             cluster: The cluster, such as `"crypto"`.
             api_key: The Massive API key.
             host: The feed's host: `socket.massive.com` by default, `delayed.massive.com` for
-                a delayed plan.
+                a subscription the owner's settings list as delayed.
             frames: Returns a copy of the raw frames recorded so far (none when not recorded).
             keep_rows: Whether to keep the decoded rows; a probe that only counts
                 acknowledgements drops them, so a busy subscription costs no memory.
@@ -354,9 +366,8 @@ class _Target:
         cluster: The cluster, `"crypto"` or `"stocks"`.
         host: The feed's host.
         symbol: The symbol in a topic, `"BTC-USD"` or `"AAPL"`.
-        busy: A channel that delivers the symbol's rows within seconds: `XT` (crypto trades),
-            `A` (stock second bars), or, on the base Stocks Business plan, which has no second
-            bars, `AM`.
+        busy: A channel that delivers the symbol's rows within seconds: `XT` (crypto trades) or
+            `A` (stock second bars).
         light: A light channel of every symbol, for a wildcard: `XT` or `AM` (minute bars).
         symbol_field: The decoded rows' column that names the symbol.
     """
@@ -373,52 +384,73 @@ _CRYPTO = _Target("crypto", _HOST, "BTC-USD", "XT", "XT", "Pair")
 
 
 @pytest.fixture
-def target(live_plans: plans.LivePlans, rows_due: RowsDue) -> Callable[..., _Target]:
+def target(
+    probe: OpenProbe, *, live_config: MassiveConfig, rows_due: RowsDue, evidence: Evidence
+) -> Callable[..., _Target]:
     """Return a function that picks the cluster of a check whose question has no class.
 
-    Crypto when the key holds Currencies Starter; otherwise stocks, on the feed of the key's
-    Stocks plan, when it streams stocks at all.
+    Crypto first: a probe of its own subscribes `XT.BTC-USD` and closes. When Massive refuses
+    it, stocks, on the host the owner's settings choose (`_stocks_target`); no second host is
+    tried, so a refusal there skips the test that subscribes.
 
     Returns:
         A function `(*, rows)`: when `rows` is True the check needs rows, so on stocks it skips
-        unless stock bars are due, in the regular session past the plan's feed delay
-        (`rows_due`); it skips without a plan that streams crypto or stocks.
+        unless stock bars are due by the market's clock (`rows_due`).
     """
 
     def pick(*, rows: bool) -> _Target:
-        if plans.meets("currencies", live_plans.tiers["currencies"], "starter"):
+        topic = f"{_CRYPTO.busy}.{_CRYPTO.symbol}"
+        trial = probe(_CRYPTO.cluster, _STATUSES)
+        trial.send("subscribe", [topic])
+        records = trial.wait(lambda r: r.answered([topic]), _WAIT)
+        trial.close()
+        _CLOSED_AT[_CRYPTO.cluster] = time.monotonic()
+        refused = [s.message for _, s in records.statuses if _refuses_plan(s.message)]
+        if topic in records.acked() or not refused:
             return _CRYPTO
-        tier = live_plans.tiers["stocks"]
-        if tier == "basic":
-            pytest.skip("needs Currencies Starter ($49/month), or a Stocks plan that streams")
+        evidence(f"{topic}: {summary.REFUSED}{refused[0]}; streaming stocks instead")
         if rows:
             status, due = rows_due("stocks", "bars")
             if not due:
                 pytest.skip(
-                    f"not exercised: the stock market is {status}, or within the feed delay, "
-                    "and the key streams no currencies"
+                    f"not exercised: the stock market is {status}, and Massive refused the "
+                    "crypto stream"
                 )
-        return _stocks_target(tier)
+        return _stocks_target(live_config)
 
     return pick
 
 
-def _stocks_target(tier: str) -> _Target:
-    """Return the stocks cluster on the feed of a Stocks plan that streams.
+def _stocks_target(config: MassiveConfig) -> _Target:
+    """Return the stocks cluster on the host the owner's settings choose.
 
     Args:
-        tier: The key's Stocks plan, any but `"basic"`.
+        config: The live configuration, with the owner's settings.
 
     Returns:
-        The stocks target: the delayed host on a delayed plan, and `AM` as the busy channel on
-        the base Business plan, which has no second bars.
+        The stocks target: the host the settings pin for stocks (`websocket_hosts`), else
+        `delayed.massive.com` when they list stocks in `delayed_subscriptions`, else
+        `socket.massive.com`; second bars (`A`) as the busy channel.
     """
-    host = _DELAYED_HOST if RECENCY.get(("stocks", tier)) == DELAYED else _HOST
-    busy = "AM" if tier == "business" else "A"
-    return _Target("stocks", host, "AAPL", busy, "AM", "Symbol")
+    delayed = dm.Subscription.STOCKS in config.delayed_subscriptions
+    host = config.websocket_hosts.get(dm.AssetClass.STOCKS, _DELAYED_HOST if delayed else _HOST)
+    return _Target("stocks", host, "AAPL", "A", "AM", "Symbol")
 
 
-@pytest.mark.needs("currencies:starter")
+def _skip_quiet_delayed(chosen: _Target, rows: object) -> None:
+    """Skip the test when the delayed feed sent no row, though the market is open.
+
+    A delayed feed lags by an amount the tests do not know, so a quiet stream there is no
+    failure; the real-time feed's quiet stream is, and the test's assertion says so.
+
+    Args:
+        chosen: The target streamed.
+        rows: What arrived: empty when no row did.
+    """
+    if not rows and chosen.host == _DELAYED_HOST:
+        pytest.skip(f"no row on the delayed feed ({chosen.host}) in the test's wait")
+
+
 @pytest.mark.verifies("19")
 @pytest.mark.timeout(160)
 def test_form_of_the_forex_quote_exchange_id(
@@ -430,8 +462,9 @@ def test_form_of_the_forex_quote_exchange_id(
     as `48`; the library reads either. Subscribes `C.EUR-USD`, asserts that Massive
     acknowledged it, and records the raw `C` frames and the JSON type of `x`. Quotes are
     required unless `/v1/marketstatus/now` says the forex market is closed, when the test
-    skips after the acknowledgement. Passes when the library's conversion of the `Exchange`
-    column reads every quote's `x`; any other form would fail the row.
+    skips after the acknowledgement, and Massive's refusal skips it, quoting Massive. Passes
+    when the library's conversion of the `Exchange` column reads every quote's `x`; any other
+    form would fail the row.
     """
     made = probe("forex", _FRAMES)
     made.send("subscribe", ["C.EUR-USD"])
@@ -443,6 +476,7 @@ def test_form_of_the_forex_quote_exchange_id(
         evidence(line)
     for quote in quotes[:5]:
         evidence(f"raw C: x={quote.get('x')!r} ({type(quote.get('x')).__name__}) {quote}")
+    _skip_if_refused(records)
     assert "C.EUR-USD" in acked.acked(), f"not acknowledged: {acked.status_lines()}"
     if status == "closed":
         pytest.skip("the forex market is closed (per /v1/marketstatus/now)")
@@ -451,7 +485,6 @@ def test_form_of_the_forex_quote_exchange_id(
     assert not refused, f"forex quote `x` values the library cannot read: {refused[:5]}"
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.verifies("20")
 @pytest.mark.timeout(100)
 def test_form_of_the_crypto_trade_id(probe: OpenProbe, *, evidence: Evidence) -> None:
@@ -459,17 +492,22 @@ def test_form_of_the_crypto_trade_id(probe: OpenProbe, *, evidence: Evidence) ->
 
     It is declared and sampled as an integer, while REST and the flat files send text, and it
     arrives as text such as `"1114020236"`; the library keeps either as text. Records the raw
-    `XT` frames of `XT.BTC-USD` and the JSON type of `i`. Passes when trades arrived and the
-    library's conversion of the `Id` column reads every trade's `i`.
+    `XT` frames of `XT.BTC-USD` and the JSON type of `i`. Massive's refusal skips the test,
+    quoting Massive. Passes when trades arrived and the library's conversion of the `Id`
+    column reads every trade's `i`.
     """
     made = probe("crypto", _FRAMES)
     made.send("subscribe", ["XT.BTC-USD"])
-    records = made.wait(lambda r: bool(r.objects("XT")), _WAIT)
+    records = made.wait(
+        lambda r: bool(r.objects("XT")) or any(_refuses_plan(s.message) for _, s in r.statuses),
+        _WAIT,
+    )
     trades = records.objects("XT")
     for line in records.status_lines():
         evidence(line)
     for trade in trades[:5]:
         evidence(f"raw XT: i={trade.get('i')!r} ({type(trade.get('i')).__name__}) {trade}")
+    _skip_if_refused(records)
     assert trades
     refused = _unconverted("crypto/XT", "Id", trades)
     assert not refused, f"crypto trade `i` values the library cannot read: {refused[:5]}"
@@ -483,7 +521,7 @@ def test_whether_an_unsubscribe_is_acknowledged(
     """Whether Massive acknowledges an unsubscribe, and how soon frames stop.
 
     The library awaits no acknowledgement and removes a topic at once. Subscribes
-    `XT.BTC-USD` (or, on a key that streams stocks but no currencies, AAPL's second bars while
+    `XT.BTC-USD` (or, when Massive refuses the key the crypto stream, AAPL's second bars while
     they are due), waits for a row, unsubscribes, and records every status and every row in
     the next 15 s. Reading it: either way the library is right; the evidence records what a
     removed topic still delivers, and for how long.
@@ -494,6 +532,8 @@ def test_whether_an_unsubscribe_is_acknowledged(
     made.send("subscribe", [topic])
     before = made.wait(lambda r: bool(r.rows), _WAIT)
     evidence(f"{topic} on {chosen.host}/{chosen.cluster}")
+    _skip_if_refused(before)
+    _skip_quiet_delayed(chosen, before.rows)
     sent = time.monotonic()
     made.send("unsubscribe", [topic])
     after = made.wait(lambda _: False, _LISTEN)
@@ -513,8 +553,7 @@ def test_whether_an_unsubscribe_is_acknowledged(
 def test_a_frame_of_one_thousand_topics_is_acknowledged(
     probe: OpenProbe,
     *,
-    target: Callable[..., _Target],
-    live_plans: plans.LivePlans,
+    live_config: MassiveConfig,
     live_rest: RestClient,
     evidence: Evidence,
 ) -> None:
@@ -523,34 +562,24 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
     The library sends at most 1,000 topics per frame. Subscribes 1,000 minute-bar topics (a
     light channel) in one frame, and records the acknowledgements and any other status,
     stopping as soon as every topic is answered; an acknowledgement needs no open market. The
-    topics are stocks (`AM.<ticker>`) on the feed of a key's Stocks plan that streams, since
-    Massive lists thousands of stocks; on a key without one, crypto pairs (`XA.<pair>`), which
-    skip when Massive lists fewer than 1,000 (624 on 2026-11-10). The test opens one
+    topics are stocks (`AM.<ticker>`) on the host the owner's settings choose, since Massive
+    lists thousands of stocks and only 624 crypto pairs (on 2026-11-10). Skips, quoting
+    Massive, when Massive refuses every topic. The test opens one
     connection, and every other live test closes its connections when it ends, so the frame
     competes with no other connection for the class's slot. Reading it: all 1,000 acknowledged
     confirms the frame size; a refusal or a closed connection means the per-frame cap must be
     lower.
     """
-    tier = live_plans.tiers["stocks"]
-    chosen = target(rows=False) if tier == "basic" else _stocks_target(tier)
-    market = "crypto" if chosen.cluster == "crypto" else "stocks"
+    chosen = _stocks_target(live_config)
     listed = live_rest.get(
         source(Transport.REST, "/v3/reference/tickers"),
         {},
-        {"market": market, "active": True, "limit": 1000},
+        {"market": "stocks", "active": True, "limit": 1000},
         bucket="other",
     ).rows
-    if chosen.cluster == "crypto":
-        names = {
-            f"XA.{p['base_currency_symbol']}-{p['currency_symbol']}"
-            for p in listed
-            if p.get("base_currency_symbol") and p.get("currency_symbol")
-        }
-    else:
-        names = {f"AM.{p['ticker']}" for p in listed if p.get("ticker")}
-    topics = sorted(names)[:1000]
+    topics = sorted({f"AM.{p['ticker']}" for p in listed if p.get("ticker")})[:1000]
     if len(topics) < 1000:
-        pytest.skip(f"only {len(topics)} {market} tickers listed; the frame would hold under 1,000")
+        pytest.skip(f"only {len(topics)} stock tickers listed; the frame would hold under 1,000")
     made = probe(chosen.cluster, _STATUSES, chosen.host)
     made.send("subscribe", topics)
     records = made.wait(lambda r: r.answered(topics), _WAIT)
@@ -561,10 +590,10 @@ def test_a_frame_of_one_thousand_topics_is_acknowledged(
     evidence(f"sent one frame of {len(topics)} topics; acknowledged {len(records.acked())}")
     evidence(f"ACK statuses: {acks}; other statuses: {others[:10]}")
     evidence(f"client states: {records.states}")
+    _skip_if_refused(records)
     assert topics
 
 
-@pytest.mark.needs("options:advanced")
 @pytest.mark.settles("11")
 @pytest.mark.integration_limits
 @pytest.mark.timeout(100)
@@ -583,9 +612,7 @@ def test_the_options_cap_counts_contracts_or_topics(
     count and record how the server answers. Two outcomes prove nothing and skip as
     inconclusive, after recording their evidence: a refusal for want of a plan, which is not
     the cap, and a reconnect with no status other than acknowledgements, which a network drop
-    causes as well. Needs an options plan with real-time trades and quotes on the WebSocket:
-    a plan that refuses every topic (a Business plan without the expansion) skips, naming the
-    plan.
+    causes as well. When Massive refuses every topic, the test skips, quoting Massive.
     """
     far = datetime.now(UTC).date() + timedelta(days=365)
     contracts = live_rest.get(
@@ -609,9 +636,9 @@ def test_the_options_cap_counts_contracts_or_topics(
     evidence(f"client states: {records.states}")
     plan_refusals = [message for message in others if _refuses_plan(message)]
     if not records.acked() and plan_refusals:
-        pytest.skip(f"not entitled: needs an options plan with trades and quotes ({others[:1]})")
+        pytest.skip(f"{summary.REFUSED}{plan_refusals[0]}")
     if plan_refusals:
-        pytest.skip(f"inconclusive: Massive refused topics for the plan ({plan_refusals[:1]})")
+        pytest.skip(f"inconclusive: Massive refused some topics ({plan_refusals[:1]})")
     reconnected = any(state.startswith(WsState.RECONNECTING.value) for state in records.states)
     if reconnected and not others:
         pytest.skip("inconclusive: the socket reconnected with no status saying why; run it again")
@@ -627,8 +654,8 @@ def test_a_wildcard_and_an_explicit_topic_deliver_an_event_once_or_twice(
     """Whether an event arrives twice under a wildcard and an explicit topic of one channel.
 
     While a channel's wildcard is acknowledged, the library takes its explicit topics off the
-    wire. Subscribes `XT.*` and `XT.BTC-USD` together for 30 s (or, on a key that streams
-    stocks but no currencies, `AM.*` and `AM.AAPL`, minute bars, for 75 s, so a minute's bars
+    wire. Subscribes `XT.*` and `XT.BTC-USD` together for 30 s (or, when Massive refuses the
+    key the crypto stream, `AM.*` and `AM.AAPL`, minute bars, for 75 s, so a minute's bars
     arrive, while they are due) and counts the symbol's events delivered more than once (the
     same values in every field). Reading it: duplicates confirm the library's handling is
     needed; none means it is harmless.
@@ -651,4 +678,6 @@ def test_a_wildcard_and_an_explicit_topic_deliver_an_event_once_or_twice(
         f"{len(repeated)}"
     )
     evidence(f"examples: {list(repeated.items())[:5]}")
+    _skip_if_refused(records)
+    _skip_quiet_delayed(chosen, events)
     assert events

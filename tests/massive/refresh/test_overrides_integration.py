@@ -28,7 +28,6 @@ pytestmark = pytest.mark.integration
 Evidence: TypeAlias = "Callable[[str], None]"
 
 
-@pytest.mark.needs("stocks:starter")
 @pytest.mark.settles("84")
 @pytest.mark.requests(1)
 @pytest.mark.timeout(60)
@@ -42,7 +41,6 @@ def test_todays_change_is_the_change_from_the_previous_close(
     assert all(same_field.todays_change(live_rest, evidence).rows)
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.settles("84")
 @pytest.mark.requests(1)
 @pytest.mark.timeout(60)
@@ -66,21 +64,18 @@ def test_chain_day_change_is_the_change_from_the_previous_close(
             same_field.V2_STOCKS,
             same_field.STOCKS,
             "stocks",
-            marks=pytest.mark.needs("stocks:starter"),
             id="stocks",
         ),
         pytest.param(
             same_field.V2_FOREX,
             same_field.FOREX_PAIRS,
             same_field.FX,
-            marks=pytest.mark.needs("currencies:starter"),
             id="forex",
         ),
         pytest.param(
             same_field.V2_CRYPTO,
             same_field.CRYPTO_PAIRS,
             same_field.FX,
-            marks=pytest.mark.needs("currencies:starter"),
             id="crypto",
         ),
     ],
@@ -105,7 +100,6 @@ def test_updated_is_the_unified_snapshot_s_last_updated(
     assert all(outcome.rows)
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.settles("86")
 @pytest.mark.requests(24)
 @pytest.mark.timeout(120)

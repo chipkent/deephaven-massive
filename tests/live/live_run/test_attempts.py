@@ -27,7 +27,7 @@ from tests._live.live_run import attempts, children, outcomes
 from tests._live.live_run import state as run_state
 from tests._live.live_run.context import RunContext, RunMemory
 from tests._live.live_run.secret_scrub import SecretFilter
-from tests._live.live_run.state import Attempt, RunState, check_of, entitlement_id, record
+from tests._live.live_run.state import Attempt, RunState, check_of, record
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,8 +43,6 @@ NOW = datetime(2026, 11, 4, 12, tzinfo=NEW_YORK)
 
 S3_PAIR = ("PLANTED-access-id", "PLANTED-s3-value")
 
-BASIC = dict.fromkeys(("stocks", "options", "indices", "currencies", "futures"), "basic")
-
 
 def _no_probe() -> ProbeResult:
     pytest.fail("no probe expected")
@@ -55,7 +53,7 @@ def _no_machine(_folder: Path, _offset: float | None) -> tuple[list[Item], dict[
 
 
 class Harness:
-    """A context on the fake child, its echoed lines, and a state on Basic."""
+    """A context on the fake child, its echoed lines, and a fresh state."""
 
     def __init__(self, tmp_path: Path) -> None:
         wrapper = tmp_path / "python"
@@ -84,7 +82,6 @@ class Harness:
         )
         self.ctx.out.mkdir()
         self.state = RunState(commit="c")
-        self.state.current = entitlement_id(self.state, BASIC, [])
         self.memory = RunMemory()
 
     def now(self) -> datetime:
@@ -120,17 +117,14 @@ def _phase(phase: str, outcome: str, *, reason: str = "", error_type: str = "") 
     return {"phase": phase, "outcome": outcome, "reason": reason, "error_type": error_type}
 
 
-def _run(harness: Harness, group: str = "evidence", *, until: datetime | None = None) -> list[str]:
-    probes: list[str] = []
+def _run(harness: Harness, group: str = "evidence", *, until: datetime | None = None) -> None:
     attempts.run_pytest_group(
         harness.ctx,
         harness.state,
         harness.memory,
         group=group,
         until=until or NOW + timedelta(hours=1),
-        reprobe=lambda: probes.append("probed"),
     )
-    return probes
 
 
 def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harness) -> None:
@@ -141,27 +135,36 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
         print=[f"collecting with {PLANTED_KEY}", "Server started on port 1"],
         evidence="evidence line\n",
         collection={
-            A: {"items": ["21"], "requests": 12},
-            B: {"items": [], "requests": 10},
-            C: {"items": ["22"], "requests": 10},
+            A: {"items": ["21"]},
+            B: {"items": []},
+            C: {"items": ["22"]},
         },
         outcomes={
             A: PASS,
-            B: [_phase("setup", "skipped", reason="needs Stocks Starter ($29/month)")],
+            B: [_phase("setup", "skipped", reason="no LULD frame arrived")],
         },
     )
     (harness.root / "live-evidence-20261103T120000Z.log").write_text("left by a run before\n")
-    assert _run(harness) == []
+    _run(harness)
     folder = harness.ctx.out / "evidence" / "2026-11-04-1"
     argv = json.loads((folder / "argv.json").read_text())
     assert argv[:4] == ["-m", "pytest", "-p", outcomes.__name__]
     assert argv[-2:] == [A, B]  # the passed test is not due
-    assert argv[-7:-2] == ["-m", "integration", "-k", "not luld", "--tb=short"]
+    assert argv[-9:-2] == [
+        "-m",
+        "integration",
+        "-k",
+        "not luld",
+        "--tb=short",
+        "--live-outcomes",
+        str(folder / "outcomes.jsonl"),
+    ]
+    assert (folder / "collection.json").exists()  # its file came on the command line too
     assert harness.check("evidence", A).status == "passed"
     assert harness.check("evidence", A).items == ["21"]
     assert (harness.check("evidence", B).status, harness.check("evidence", B).reason) == (
         "skipped",
-        "needs Stocks Starter ($29/month)",
+        "no LULD frame arrived",
     )
     assert harness.state.known["evidence"] == [A, B, C]
     orphan = harness.ctx.out / "orphans" / "live-evidence-20261103T120000Z.log"
@@ -173,17 +176,14 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
     assert all(PLANTED_KEY not in line for line in harness.lines)
     assert "Server started on port 1" in log  # the server's chatter is logged, not shown
     assert not any("Server started" in line for line in harness.lines)
-    assert any(
-        "evidence: 2 checks; on Basic, up to 4 minutes of requests" in line
-        for line in harness.lines
-    )
+    assert any(line.endswith("evidence: 2 checks") for line in harness.lines)
     assert harness.state.attempts[-1].status == "finished"
     assert harness.memory.finished_since_pack
     assert run_state.load(harness.ctx.out) == harness.state
 
 
 def test_a_test_that_left_no_record_stays_due_without_a_failure(harness: Harness) -> None:
-    harness.script(collection={A: {"items": [], "requests": 10}}, exit=1)
+    harness.script(collection={A: {"items": []}}, exit=1)
     _run(harness)
     check = harness.check("evidence", A)
     assert (check.status, check.failures) == ("not run", 0)
@@ -191,7 +191,7 @@ def test_a_test_that_left_no_record_stays_due_without_a_failure(harness: Harness
 
 def test_a_test_that_started_and_never_finished_is_an_error(harness: Harness) -> None:
     started = [_phase("setup", "passed")]
-    harness.script(collection={A: {"items": [], "requests": 10}}, outcomes={A: started}, exit=1)
+    harness.script(collection={A: {"items": []}}, outcomes={A: started}, exit=1)
     _run(harness)
     check = harness.check("evidence", A)
     assert (check.status, check.reason, check.failures) == ("error", "did not finish", 1)
@@ -199,7 +199,7 @@ def test_a_test_that_started_and_never_finished_is_an_error(harness: Harness) ->
 
 def test_a_group_with_nothing_due_runs_no_tests(harness: Harness) -> None:
     record(harness.state, harness.check("smoke", A), status="passed", reason="", day="")
-    harness.script(collection={A: {"items": [], "requests": 10}})
+    harness.script(collection={A: {"items": []}})
     _run(harness, "smoke")
     folder = harness.ctx.out / "smoke" / "2026-11-04-1"
     assert not (folder / "argv.json").exists()
@@ -213,33 +213,15 @@ def test_a_failed_collection_leaves_the_known_tests_unchanged(harness: Harness) 
     assert harness.state.known["smoke"] == [A]
 
 
-def test_a_refusal_of_an_allowed_test_reprobes_and_is_recorded_refused(harness: Harness) -> None:
-    refused = [_phase("setup", "passed"), _phase("call", "failed", error_type="EntitlementError")]
-    harness.script(collection={A: {"items": [], "requests": 1}}, outcomes={A: refused})
-    assert _run(harness) == ["probed"]
-    assert harness.check("evidence", A).status == "refused"
-
-
-def test_a_refusal_after_which_a_tier_fell_stays_due(harness: Harness) -> None:
-    refused = [_phase("call", "failed", error_type="WireEntitlementError")]
-    harness.script(collection={A: {"items": [], "requests": 1}}, outcomes={A: refused})
-    record(harness.state, harness.check("evidence", A), status="passed", reason="", day="")
-    harness.state.current = entitlement_id(harness.state, BASIC | {"stocks": "starter"}, [])
-
-    def fall() -> None:
-        harness.state.current = entitlement_id(harness.state, BASIC, [])
-
-    attempts.run_pytest_group(
-        harness.ctx,
-        harness.state,
-        harness.memory,
-        group="evidence",
-        until=NOW + timedelta(hours=1),
-        reprobe=fall,
-    )
+def test_a_test_massive_refused_is_recorded_refused_with_its_subscription(
+    harness: Harness,
+) -> None:
+    refusal = "refused: HTTP 403 from GET /v3/quotes/AAPL on h (request_id 1): not entitled"
+    refused = [_phase("setup", "passed"), _phase("call", "skipped", reason=refusal)]
+    harness.script(collection={A: {"items": []}}, outcomes={A: refused})
+    _run(harness)
     check = harness.check("evidence", A)
-    assert check.status == "passed"  # not recorded: it runs again under the lower tier
-    assert harness.state.current == "e1"
+    assert (check.status, check.reason, check.subscription) == ("refused", refusal, "stocks")
 
 
 def test_half_day_checks_carry_their_half_day(
@@ -247,13 +229,13 @@ def test_half_day_checks_carry_their_half_day(
 ) -> None:
     monday = datetime(2026, 11, 30, 12, tzinfo=NEW_YORK)
     monkeypatch.setattr(harness.ctx, "now", lambda: monday)
-    harness.script(collection={A: {"items": [], "requests": 1}}, outcomes={A: PASS})
+    harness.script(collection={A: {"items": []}}, outcomes={A: PASS})
     _run(harness, "half-day", until=monday + timedelta(hours=1))
     assert harness.check("half-day", f"{A} after 2026-11-27").status == "passed"
 
 
 def test_a_child_running_past_its_stop_is_stopped_and_its_tests_stay_due(harness: Harness) -> None:
-    harness.script(collection={A: {"items": [], "requests": 1}}, hang=True)
+    harness.script(collection={A: {"items": []}}, hang=True)
     _run(harness, until=NOW + timedelta(seconds=1))
     check = harness.check("evidence", A)
     assert (check.status, check.failures) == ("not run", 0)
@@ -274,7 +256,7 @@ def test_a_child_that_ignores_the_interrupt_is_killed(harness: Harness) -> None:
     harness.ctx.echo = echo
     harness.ctx.now = lambda: until if ignoring.is_set() else NOW
     harness.ctx.stop_grace = 0.0
-    harness.script(collection={A: {"items": [], "requests": 1}}, hang=True, ignore_interrupt=True)
+    harness.script(collection={A: {"items": []}}, hang=True, ignore_interrupt=True)
     _run(harness, until=until)
     assert harness.state.attempts[-1].exit_code == -signal.SIGKILL
 
@@ -305,7 +287,7 @@ def test_control_c_stops_the_child_and_records_the_attempt_interrupted(
 
     monkeypatch.setattr(children, "wait", wait)
     harness.ctx.echo = interrupt
-    harness.script(collection={A: {"items": [], "requests": 1}}, hang=True)
+    harness.script(collection={A: {"items": []}}, hang=True)
     with pytest.raises(KeyboardInterrupt):
         _run(harness)
     assert harness.state.attempts[-1].status == "interrupted"
@@ -352,7 +334,7 @@ def test_a_built_in_group_reports_through_its_results_file(harness: Harness) -> 
     folder = harness.ctx.out / "responses" / "2026-11-04-1"
     request = json.loads((folder / "request.json").read_text())
     assert "stream-forex-quotes" not in request["due"]  # --any-time leaves out the streams
-    assert request["tiers"] == BASIC
+    assert set(request) == {"group", "due", "until", "stream_folder", "stream_day"}
     assert json.loads((folder / "argv.json").read_text()) == [
         "fake.py", "_group", "--out", str(harness.ctx.out), "--attempt", "responses/2026-11-04-1",
         "--token", harness.state.attempts[-1].token,
@@ -364,14 +346,12 @@ def test_a_built_in_group_reports_through_its_results_file(harness: Harness) -> 
 def test_the_responses_child_gets_no_s3_pair(harness: Harness) -> None:
     harness.environ["MASSIVE_S3_ACCESS_KEY_ID"] = "PLANTED-access-id"
     folder = harness.ctx.out
-    env = attempts.environment(harness.ctx, harness.state, folder=folder, extra={}, with_s3=False)
+    env = attempts.environment(harness.ctx, folder=folder, with_s3=False)
     assert "MASSIVE_S3_ACCESS_KEY_ID" not in env
-    assert env["MASSIVE_LIVE_PLANS"].startswith("stocks=basic,options=basic")
     assert env["DEEPHAVEN_MASSIVE_LOG_FILE"] == str((folder / "debug.log").resolve())
 
 
 def test_a_stream_day_restarts_in_the_same_folder_and_is_remembered(harness: Harness) -> None:
-    harness.state.current = entitlement_id(harness.state, BASIC | {"stocks": "starter"}, [])
     harness.script(hang=True)
     for _ in range(2):
         attempts.run_built_in_group(
@@ -384,9 +364,7 @@ def test_a_stream_day_restarts_in_the_same_folder_and_is_remembered(harness: Har
     folders = [a.folder for a in harness.state.attempts]
     assert folders == ["stream-day/2026-11-04-1", "stream-day/2026-11-04-1"]
     assert harness.state.stream_days == ["2026-11-04"]
-    assert (
-        harness.check("stream-day", "stocks delayed").status == "not run"
-    )  # stopped, so still due
+    assert harness.check("stream-day", "stocks").status == "not run"  # stopped, so still due
     request = json.loads((harness.ctx.out / folders[0] / "request.json").read_text())
     assert request["stream_folder"] == str(harness.ctx.out / "stream-day/2026-11-04-1")
 
@@ -394,7 +372,6 @@ def test_a_stream_day_restarts_in_the_same_folder_and_is_remembered(harness: Har
 def test_a_stream_night_is_dated_by_its_evening_and_restarts_in_its_folder(
     harness: Harness,
 ) -> None:
-    harness.state.current = entitlement_id(harness.state, BASIC | {"currencies": "starter"}, [])
     harness.state.stream_night = "2026-11-03"  # this morning is the night's second day
     harness.script(hang=True)
     for _ in range(2):
@@ -409,9 +386,9 @@ def test_a_stream_night_is_dated_by_its_evening_and_restarts_in_its_folder(
         ("stream-night/2026-11-03-1", "2026-11-03")
     ] * 2
     assert harness.state.stream_nights == ["2026-11-03"]
-    assert harness.check("stream-night", "crypto real-time").status == "not run"
+    assert harness.check("stream-night", "crypto").status == "not run"
     request = json.loads((harness.ctx.out / "stream-night/2026-11-03-1/request.json").read_text())
-    assert (request["stream_day"], request["due"]) == ("2026-11-03", ["crypto real-time"])
+    assert (request["stream_day"], request["due"]) == ("2026-11-03", ["crypto", "futures"])
 
 
 def test_a_unit_no_night_reports_passed_is_reconciled_with_the_latest_night(
@@ -425,12 +402,12 @@ def test_a_unit_no_night_reports_passed_is_reconciled_with_the_latest_night(
     ]
     record(
         harness.state,
-        harness.check("stream-night", "crypto real-time"),
+        harness.check("stream-night", "crypto"),
         status="passed",
         reason="",
         day="2026-11-04",
     )
-    harness.script(results=[{"name": "crypto real-time", "status": "passed", "reason": ""}])
+    harness.script(results=[{"name": "crypto", "status": "passed", "reason": ""}])
     attempts.run_built_in_group(
         harness.ctx,
         harness.state,
@@ -441,8 +418,8 @@ def test_a_unit_no_night_reports_passed_is_reconciled_with_the_latest_night(
     folder = harness.ctx.out / "stream-night-reconcile" / "2026-11-04-1"
     request = json.loads((folder / "request.json").read_text())
     assert request["stream_folder"] == str(harness.ctx.out / "stream-night/2026-11-03-1")
-    assert (request["stream_day"], request["due"]) == ("2026-11-03", ["crypto real-time"])
-    assert harness.check("stream-night-reconcile", "crypto real-time").status == "passed"
+    assert (request["stream_day"], request["due"]) == ("2026-11-03", ["crypto"])
+    assert harness.check("stream-night-reconcile", "crypto").status == "passed"
 
 
 def test_a_late_night_reconciliation_compares_each_unit_with_its_own_night(
@@ -450,12 +427,12 @@ def test_a_late_night_reconciliation_compares_each_unit_with_its_own_night(
 ) -> None:
     # Night one passed crypto and night two futures; the reconciliation runs only after both.
     harness.state.stream_nights = ["2026-11-02", "2026-11-03"]
-    for night, unit in (("2026-11-02", "crypto real-time"), ("2026-11-03", "futures delayed")):
+    for night, unit in (("2026-11-02", "crypto"), ("2026-11-03", "futures")):
         night_folder = f"stream-night/{night}-1"
         (harness.ctx.out / night_folder).mkdir(parents=True)
         lines = [
             {"name": unit, "status": "passed", "reason": ""},
-            {"name": "options delayed", "status": "failed", "reason": "gaps 31"},
+            {"name": "options", "status": "failed", "reason": "gaps 31"},
         ]
         (harness.ctx.out / night_folder / "results.jsonl").write_text(
             "".join(json.dumps(line) + "\n" for line in lines)
@@ -465,7 +442,7 @@ def test_a_late_night_reconciliation_compares_each_unit_with_its_own_night(
         )
         check = harness.check("stream-night", unit)
         record(harness.state, check, status="passed", reason="", day=night)
-    harness.script(results=[{"name": "crypto real-time", "status": "passed", "reason": ""}])
+    harness.script(results=[{"name": "crypto", "status": "passed", "reason": ""}])
     attempts.run_built_in_group(
         harness.ctx,
         harness.state,
@@ -476,10 +453,10 @@ def test_a_late_night_reconciliation_compares_each_unit_with_its_own_night(
     folder = harness.ctx.out / "stream-night-reconcile" / "2026-11-04-1"
     request = json.loads((folder / "request.json").read_text())
     assert request["stream_folder"] == str(harness.ctx.out / "stream-night/2026-11-02-1")
-    assert (request["stream_day"], request["due"]) == ("2026-11-02", ["crypto real-time"])
-    assert harness.check("stream-night-reconcile", "crypto real-time").status == "passed"
+    assert (request["stream_day"], request["due"]) == ("2026-11-02", ["crypto"])
+    assert harness.check("stream-night-reconcile", "crypto").status == "passed"
     # The second night's unit stays due, for an attempt that compares the second night.
-    assert harness.check("stream-night-reconcile", "futures delayed").status == "not run"
+    assert harness.check("stream-night-reconcile", "futures").status == "not run"
 
 
 def test_attempts_are_numbered_per_group_and_day(harness: Harness) -> None:
@@ -533,14 +510,10 @@ def test_a_resume_kills_a_child_the_last_run_left_running(harness: Harness) -> N
             process.wait()
 
 
-@pytest.mark.parametrize(
-    ("group", "unit"), [("stream-day", "stocks delayed"), ("stream-night", "crypto real-time")]
-)
+@pytest.mark.parametrize(("group", "unit"), [("stream-day", "stocks"), ("stream-night", "crypto")])
 def test_a_stream_day_or_night_short_of_disk_waits_and_spends_no_start(
     harness: Harness, group: str, unit: str
 ) -> None:
-    tiers = BASIC | {"stocks": "starter", "currencies": "starter"}
-    harness.state.current = entitlement_id(harness.state, tiers, [])
     harness.state.stream_night = "2026-11-04"
     harness.ctx.free_disk = lambda _folder: 3 << 30
     harness.ctx.now = lambda: NOW
@@ -561,7 +534,7 @@ def test_a_stream_day_or_night_short_of_disk_waits_and_spends_no_start(
 
 
 def test_a_limits_group_names_its_file_only_to_collect(harness: Harness) -> None:
-    harness.script(collection={A: {"items": [], "requests": 1}}, outcomes={A: PASS})
+    harness.script(collection={A: {"items": []}}, outcomes={A: PASS})
     _run(harness, "limits-ws")
     argv = json.loads((harness.ctx.out / "limits-ws" / "2026-11-04-1" / "argv.json").read_text())
     assert "tests/massive/ws/test_client_integration.py" not in argv

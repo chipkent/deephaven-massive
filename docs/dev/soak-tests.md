@@ -10,7 +10,7 @@ marker, which the default `-m` expression deselects.
 
 ## What they do
 
-Each test runs for `MASSIVE_SOAK_SECONDS` seconds (20 by default) in rounds of at least two
+Each test runs for `--soak-seconds` seconds (20 by default) in rounds of at least two
 seconds. A fake feed sends stocks trades for 40 symbols as fast as the fake server writes
 them, in frames of 100, and numbers each symbol's trades 1, 2, 3, and so on. Each stream's
 table is summed per symbol (row count, lowest and highest number, the sum of the numbers, and
@@ -46,7 +46,7 @@ uv run pytest -m soak
 One test, for five minutes:
 
 ```bash
-MASSIVE_SOAK_SECONDS=300 uv run pytest -m soak \
+uv run pytest -m soak --soak-seconds=300 \
   "tests/ingest/test_ws.py::test_soak_every_stream_receives_every_row_of_a_fast_feed"
 ```
 
@@ -80,10 +80,10 @@ keep the output. With five tests that is close to four hours per build. On a Mac
 export SOAK_LOGS=~/massive-soak-$(date +%F)
 mkdir -p "$SOAK_LOGS"
 caffeinate -i bash -c '
-  MASSIVE_SOAK_SECONDS=2700 uv run pytest -m soak \
+  uv run pytest -m soak --soak-seconds=2700 \
     --junitxml="$SOAK_LOGS/standard.xml" 2>&1 | tee "$SOAK_LOGS/standard.log"
-  MASSIVE_SOAK_SECONDS=2700 PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t \
-    uv run --python 3.14t pytest -m soak \
+  PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t \
+    uv run --python 3.14t pytest -m soak --soak-seconds=2700 \
     --junitxml="$SOAK_LOGS/free-threaded.xml" 2>&1 | tee "$SOAK_LOGS/free-threaded.log"
 '
 ```
@@ -102,7 +102,7 @@ In the morning, read the summary lines and the result of each test:
   waiting on a lock the other holds, or a thread waiting on the update graph while holding a
   library lock.
 - **Growth** fails with the first round's figure and the run's. Rerun the one test with
-  `MASSIVE_SOAK_SECONDS` long enough to see the trend, and compare the summary lines: a leak
+  `--soak-seconds` long enough to see the trend, and compare the summary lines: a leak
   grows with the work done (`rows`, `streams_opened`, `results_opened`), not with time.
 - **A JVM crash** leaves an `hs_err_pid*.log` file, and a fatal JVM error a
   `jvm_fatal_pid*.log` file, in the repository root; either is a bug to investigate.

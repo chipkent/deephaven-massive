@@ -2217,7 +2217,7 @@ def test_streamed_futures_tickers_are_listed(
     live_rest: RestClient,
     *,
     table_rows: TableRows,
-    skip_if_not_entitled: Callable[[dm.MassiveSession, str], None],
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     evidence: Evidence,
 ) -> None:
     """Whether the contracts list or the snapshot holds every futures ticker that trades.
@@ -2263,7 +2263,7 @@ def test_streamed_futures_tickers_are_listed(
         seen = sorted({str(r["Symbol"]) for r in table_rows(board)})
         for row in table_rows(live_session.streams()):
             evidence(f"stream {row['Dataset']}: {row['State']}, error {row['Error']!r}")
-        skip_if_not_entitled(live_session, "the futures trades stream")
+        skip_if_not_entitled(live_session)
         failed = [
             row["Error"] for row in table_rows(live_session.streams()) if row["State"] == "FAILED"
         ]

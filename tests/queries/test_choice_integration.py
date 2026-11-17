@@ -29,7 +29,6 @@ pytestmark = pytest.mark.integration
 Evidence: TypeAlias = "Callable[[str], None]"
 
 
-@pytest.mark.needs("futures:basic")
 @pytest.mark.settles("100", "107")
 @pytest.mark.requests(2)
 def test_massive_answers_futures_bars_of_a_day(
@@ -47,7 +46,6 @@ def test_massive_answers_futures_bars_of_a_day(
     assert bad_values.ask_all(live_rest, bad_values.FUTURES_MULTIPLIER, evidence)
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("101")
 @pytest.mark.requests(1)
 def test_massive_answers_stock_bars_of_a_session(
@@ -61,7 +59,6 @@ def test_massive_answers_stock_bars_of_a_session(
     assert bad_values.ask_all(live_rest, bad_values.SESSION_OUTSIDE_FUTURES, evidence)
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.settles("102")
 @pytest.mark.requests(1)
 def test_massive_answers_a_bar_multiplier_of_0(

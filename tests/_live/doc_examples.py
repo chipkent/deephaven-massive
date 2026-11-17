@@ -64,8 +64,8 @@ FREE_SECTIONS: Final = (
     "drive-with-a-watchlist",
     "convert-symbols",
 )
-"""The README's Stocks Basic examples, which follow its hook: Examples 1 to 6, the conversion of
-Yahoo tickers that ends Example 6, and Example 13."""
+"""The README's examples that read stock history with no setting, which follow its hook:
+Examples 1 to 6, the conversion of Yahoo tickers that ends Example 6, and Example 13."""
 
 PAID_SECTIONS: Final = (
     "what-your-plan-allows",
@@ -75,7 +75,8 @@ PAID_SECTIONS: Final = (
     "backfill-then-live",
     "dashboard",
 )
-"""The README's Stocks Starter examples, 8 to 13, in the README's order."""
+"""The README's examples that load the settings file and stream stocks, 8 to 13, in the
+README's order."""
 
 UNRUN_SECTIONS: Final = {
     "massive-config": "it opens a session and reads nothing; tests/test_docs.py runs it",
@@ -203,8 +204,8 @@ def examples(page: Path) -> list[Example]:
 def settings_commands(page: Path, *, delayed: bool) -> str:
     """Return the README's shell commands that save the settings file for a kind of plan.
 
-    The section has one block of commands per kind of plan: first Starter and Developer's,
-    which accept the delayed feed, then Advanced and Business's, which are real-time.
+    The section has two blocks of commands: first the one for a key Massive serves stocks
+    delayed, which lists them in `delayed_subscriptions`, then the one for real-time data.
 
     Args:
         page: The README.

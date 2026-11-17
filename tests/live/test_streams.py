@@ -1,4 +1,4 @@
-"""Tests of when a delayed stream must deliver rows (`tests/_live/streams.py`)."""
+"""Tests of when a live stream must deliver rows (`tests/_live/streams.py`)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tests._live import plans, streams
+from tests._live import streams
 from tests._live.calendar import NEW_YORK
 
 _OPEN = datetime(2026, 10, 29, 9, 30, tzinfo=NEW_YORK)
@@ -15,30 +15,6 @@ _OPEN = datetime(2026, 10, 29, 9, 30, tzinfo=NEW_YORK)
 def test_the_index_session_opens_at_half_past_nine_in_new_york() -> None:
     now = datetime(2026, 10, 29, 15, 0, tzinfo=UTC)
     assert streams.index_session_open(now) == _OPEN
-
-
-@pytest.mark.parametrize(
-    ("declared", "name", "after", "due"),
-    [
-        ("indices=starter", "indices", timedelta(minutes=14, seconds=59), False),
-        ("indices=starter", "indices", timedelta(minutes=15), True),
-        ("indices=advanced", "indices", timedelta(0), True),
-        ("futures=starter", "futures", timedelta(minutes=9), False),
-        ("futures=developer", "futures", timedelta(minutes=9, seconds=59), False),
-        ("futures=developer", "futures", timedelta(minutes=10), True),
-        ("futures=advanced", "futures", timedelta(seconds=1), True),
-    ],
-)
-def test_rows_are_due_once_the_feed_delay_has_passed(
-    declared: str, name: str, *, after: timedelta, due: bool
-) -> None:
-    held = plans.declared_plans(declared)
-    assert streams.rows_due(held, name, opened=_OPEN, now=_OPEN + after) is due
-
-
-def test_no_rows_are_due_while_the_market_is_closed() -> None:
-    held = plans.declared_plans("indices=advanced")
-    assert not streams.rows_due(held, "indices", opened=None, now=_OPEN)
 
 
 _DAY = datetime(2026, 10, 29, 12, 0, tzinfo=NEW_YORK)
@@ -72,17 +48,12 @@ _MORNING = datetime(2026, 11, 9, 10, 0, tzinfo=NEW_YORK)
 
 @pytest.mark.parametrize("market", ["stocks", "options", "indices"])
 def test_no_regular_session_rows_are_due_after_the_close_whatever_the_status(market: str) -> None:
-    held = plans.declared_plans(f"{market}=advanced")
-    opened = streams.opened_at(market, "open", family="values", now=_AFTER_CLOSE)
-    assert opened is None
-    assert not streams.rows_due(held, market, opened=opened, now=_AFTER_CLOSE)
+    assert streams.opened_at(market, "open", family="values", now=_AFTER_CLOSE) is None
 
 
 def test_regular_session_rows_are_due_before_the_close() -> None:
-    held = plans.declared_plans("indices=starter")
     opened = streams.opened_at("indices", "open", family="values", now=_MORNING)
     assert opened == datetime(2026, 11, 9, 9, 30, tzinfo=NEW_YORK)
-    assert streams.rows_due(held, "indices", opened=opened, now=_MORNING)
 
 
 def test_stock_trades_stay_due_in_the_evening_extended_hours() -> None:
@@ -114,12 +85,6 @@ def test_a_futures_session_opens_when_its_status_says() -> None:
     since = datetime(2026, 10, 28, 18, 0, tzinfo=NEW_YORK)
     assert streams.opened_at("futures", "open", family="bars", now=_DAY, since=since) == since
     assert streams.opened_at("futures", "pause", family="bars", now=_DAY, since=since) is None
-
-
-def test_a_delayed_stock_plan_waits_out_its_delay() -> None:
-    held = plans.declared_plans("stocks=starter")
-    assert not streams.rows_due(held, "stocks", opened=_EARLY, now=_EARLY + timedelta(minutes=14))
-    assert streams.rows_due(held, "stocks", opened=_EARLY, now=_EARLY + timedelta(minutes=15))
 
 
 @pytest.mark.parametrize(
@@ -163,41 +128,26 @@ def _new_york(day: int, hour: int, minute: int) -> datetime:
     ],
 )
 def test_the_stock_session_follows_the_new_york_clock(now: datetime, session: str) -> None:
-    assert streams.stock_session(now.astimezone(UTC), timedelta(0)) == session
-
-
-def test_a_delayed_feed_is_in_the_session_of_its_own_time() -> None:
-    delay = timedelta(minutes=15)
-    assert streams.stock_session(_new_york(10, 9, 44), delay) == streams.PRE_MARKET
-    assert streams.stock_session(_new_york(10, 9, 45), delay) == streams.REGULAR
-    assert streams.stock_session(_new_york(10, 20, 14), delay) == streams.AFTER_HOURS
+    assert streams.stock_session(now.astimezone(UTC)) == session
 
 
 _EVENING = datetime(2026, 11, 10, 18, 40, tzinfo=NEW_YORK)
-_DELAYED = timedelta(minutes=15)
 
 
 @pytest.mark.parametrize(
-    ("market", "family", "now", "delay", "quiet"),
+    ("market", "family", "now", "quiet"),
     [
-        ("stocks", "quotes", _EVENING, timedelta(0), True),
-        ("stocks", "trades", datetime(2026, 11, 10, 8, 0, tzinfo=NEW_YORK), timedelta(0), True),
-        ("stocks", "quotes", _MORNING, timedelta(0), False),
-        ("stocks", "trades", datetime(2026, 11, 10, 20, 0, tzinfo=NEW_YORK), timedelta(0), False),
-        ("stocks", "trades", datetime(2026, 11, 10, 16, 14, tzinfo=NEW_YORK), _DELAYED, False),
-        ("stocks", "trades", datetime(2026, 11, 10, 16, 15, tzinfo=NEW_YORK), _DELAYED, True),
-        ("stocks", "bars", _EVENING, timedelta(0), False),
-        ("options", "trades", _EVENING, timedelta(0), False),
+        ("stocks", "quotes", _EVENING, True),
+        ("stocks", "trades", datetime(2026, 11, 10, 8, 0, tzinfo=NEW_YORK), True),
+        ("stocks", "quotes", _MORNING, False),
+        ("stocks", "trades", datetime(2026, 11, 10, 20, 0, tzinfo=NEW_YORK), False),
+        ("stocks", "trades", datetime(2026, 11, 10, 15, 59, tzinfo=NEW_YORK), False),
+        ("stocks", "trades", datetime(2026, 11, 10, 16, 0, tzinfo=NEW_YORK), True),
+        ("stocks", "bars", _EVENING, False),
+        ("options", "trades", _EVENING, False),
     ],
 )
-def test_one_stocks_ticks_may_go_quiet_only_in_the_extended_hours_of_its_feed(
-    market: str, family: str, *, now: datetime, delay: timedelta, quiet: bool
+def test_one_stocks_ticks_may_go_quiet_only_in_the_extended_hours(
+    market: str, family: str, *, now: datetime, quiet: bool
 ) -> None:
-    assert streams.may_go_quiet(market, family, now=now, delay=delay) is quiet
-
-
-@pytest.mark.parametrize(
-    ("declared", "delay"), [("stocks=starter", _DELAYED), ("stocks=advanced", timedelta(0))]
-)
-def test_a_feed_lags_by_its_plans_delay(declared: str, delay: timedelta) -> None:
-    assert streams.feed_delay(plans.declared_plans(declared), "stocks") == delay
+    assert streams.may_go_quiet(market, family, now=now) is quiet
