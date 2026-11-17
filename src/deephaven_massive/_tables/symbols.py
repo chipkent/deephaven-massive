@@ -92,13 +92,14 @@ def canonicalize_symbols(
     later converts as it arrives. Under `OnError.LOG`, the default, a bad row gets a null
     symbol, which every dataset ignores, and each bad value is logged once at WARNING, at most
     20 per table, so the table and every table made from it keep updating. Under
-    `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. When the returned
-    table is live and a dataset follows it, `m.problems()` lists each such value under the
-    cause `noncanonical_symbols` while a row holds it, and its row gets an `EndedAt` once you
-    fix or delete the row. Under
-    `OnError.RAISE`, a current bad value raises `ValueError` here, and a bad row added later
-    fails the live table, along with any dataset that follows it as a watchlist. This
-    function's `on_error` is its own: a session's `dm.ErrorPolicy` doesn't apply to it.
+    `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. A `fetch()`,
+    `history()`, or `poll()` of the returned table, or a stream of a live one, lists each such
+    value in `m.problems()` under the cause `noncanonical_symbols`. A live read lists it while
+    a row holds it, and its row gets an `EndedAt` once you fix or delete the row. A `fetch()`
+    or `history()` of a static table lists it once. Under `OnError.RAISE`, a current bad value
+    raises `ValueError` here, and a bad row added later fails the live table, along with any
+    dataset that follows it as a watchlist. This function's `on_error` is its own: a session's
+    `dm.ErrorPolicy` doesn't apply to it.
 
     Example:
         ::
