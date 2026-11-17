@@ -600,6 +600,6 @@ clarity and directness. A page passes when both graders pass it with a mean holi
 or more.
 
 A page ships only at a passing grade. One still short of the bar after patching is rewritten
-from its outline and graded again by fresh graders. If a few rounds can't pass it, the owner is
-asked for help with the specific obstacle, given the graders' score sheets, never for sign-off
-on failing text.
+from its outline and graded again by fresh graders, at most three times. If the third grade
+doesn't pass, the owner gets the failing passage and the graders' score sheets as a request
+for help, never as finished text.

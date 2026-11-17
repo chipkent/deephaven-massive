@@ -1,6 +1,6 @@
 ---
 name: writing-a-pr-description
-description: "Use this skill whenever you write or rewrite a pull request description, an issue body, a bug report to Massive or Deephaven (wrong data, a defect), or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, runs that page's self-edit checklist, and has a fresh editor grade it until it passes. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write or rewrite a pull request description, an issue body, a bug report to Massive or Deephaven (wrong data, a defect), or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, runs that page's self-edit checklist, and has a fresh editor grade it, at most three times. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner)."
 ---
 
 # Writing a PR description
@@ -78,9 +78,13 @@ would. Two passes help:
 
 ## 4. Grade
 
-The author reads its own text in the code's vocabulary, so a fresh editor grades it. Before
-the push that opens the PR or changes its description, spawn a grader with no other context.
-`<base>` is the PR's base: `origin/main`, or the branch below it in a stack.
+The author reads its own text in the code's vocabulary, so a fresh editor grades it. Spawn a
+grader with no other context when the PR opens, and again only when a push changes what the PR
+does. A push that only merges `main` or fixes review findings gets no new grade: update the
+affected lines yourself. An issue body or report is graded once it is written, before it is
+posted, against the sources it cites in place of a diff. A `test:`, `chore:`, or small `fix:` PR
+gets one grade. `<base>` is the PR's base branch: `origin/main`, or the branch below it in a
+stack. The three-dot diff leaves out what a merge of that base brought in.
 
 ```text
 Read <repo>/.claude/skills/writing-user-docs/agents/editor.md and follow it exactly, with its
@@ -88,9 +92,11 @@ section "Grading a PR description". Grade <worktree>/.git-pr-body.md against the
 `git diff <base>...HEAD` in <worktree>. Return the score sheet.
 ```
 
-Rewrite from its sheet and grade again with a fresh grader until the description passes. If a
-few rounds can't pass it, ask the owner for help with the specific obstacle
-(`writing-to-the-owner`), with the sheets; never ask for sign-off on failing text.
+Rewrite from its sheet and grade again with a fresh grader until the description passes, with
+at most three fresh grades, or one for a PR that gets one (decision 130). The limit is per PR,
+not per push: once a PR has had its grades, later pushes get none, and you update the affected
+lines yourself. When the last grade allowed doesn't pass, push the description anyway and send
+the grader's remaining objections to the owner verbatim (`writing-to-the-owner`).
 
 ## 5. Publish
 

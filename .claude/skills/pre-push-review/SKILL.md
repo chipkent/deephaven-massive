@@ -28,10 +28,14 @@ separate reviewer agent. That review comes in addition to this one, never instea
 
 Scope it to what is new. The push that opens the PR reviews the whole branch
 (`git diff origin/main...HEAD`, or the PR below in a stack); a later push reviews the commits
-since the last push and how they interact with the rest. Keep a findings list (file and line,
-what is wrong, the fix) as you go. Fix every finding inside the change before the push. A
-finding that would add work the request does not need (a feature, tooling, a refactor of code
-the change does not touch) goes under Follow-ups in the description, with an issue.
+since the last push and how they interact with the rest. A push whose only new content is a
+merge of `main` or the base reviews just the conflict resolutions and anything the merge forced
+you to change. It does not re-review the merged commits, re-grade the description, or rerun the
+full suite locally: the pre-push hook runs the changed files' tests, and CI runs the rest. Keep
+a findings list (file and line, what is wrong, the fix) as you go. Fix every finding inside the
+change before the push. A finding that would add work the request does not need (a feature,
+tooling, a refactor of code the change does not touch) goes under Follow-ups in the
+description, with an issue.
 
 A finding is a pattern, not a spot. Whoever made the mistake once made it wherever the same
 situation came up, so before fixing it, find every other instance in the diff and in the closed
@@ -135,6 +139,9 @@ look for:
   ticker's shape, an allowed parameter value, a valid combination) is a finding unless it is a
   wrong Python type, a value the library cannot express, or one with evidence that Massive
   would return wrong data silently (`AGENTS.md`, Massive owns its data and its rules); and an error that reinterprets or hides Massive's answer instead of reporting it with the call that caused it.
+- **A message that fails `writing-error-messages`**: in any `raise`, warning, or error log the
+  diff adds or changes, a semicolon chain, an internal name, no next step, or advice no test
+  runs.
 - **Docstrings that inventory.** Read the first paragraph of every docstring the diff adds or
   changes: it must say what the thing is for and when to use it, not list what it contains
   (`writing-docstrings`).
@@ -204,7 +211,8 @@ breaks fails in CI, after the push.
 ## 4. The PR description
 
 Write or rewrite it to the branch's final state with the `writing-a-pr-description` skill,
-and push no new or changed description until a fresh grader passes it (that skill, section 4). An
+and push no description until it has had the grades that skill's section 4 calls for: a
+description a merge or a review fix only touched up needs none. An
 open question in it ("should this return X?") is a finding: answer it from `AGENTS.md`,
 `docs/dev/decisions/`, and the code and record the answer under Decisions. If it is the owner's
 call, the work is not ready for a PR or for CI: ask the owner directly with
