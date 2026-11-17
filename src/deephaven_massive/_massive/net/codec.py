@@ -74,7 +74,7 @@ def _reject_constant(name: str) -> float:
     Raises:
         ValueError: Always, naming the literal.
     """
-    raise ValueError(f"JSON does not allow {name}")
+    raise ValueError(f"JSON does not allow {name}.")
 
 
 def _finite_float(text: str) -> float:
@@ -91,7 +91,7 @@ def _finite_float(text: str) -> float:
     """
     value = float(text)
     if not math.isfinite(value):
-        raise ValueError(f"JSON number {text} is too large for a double")
+        raise ValueError(f"The JSON number {text} is too large for a double.")
     return value
 
 
@@ -182,7 +182,7 @@ def loads(data: bytes | bytearray | str) -> object:
             text.encode("utf-8", "surrogatepass")
         )
     if too_deep:
-        raise ValueError(f"JSON nests deeper than {MAX_DEPTH} arrays and objects")
+        raise ValueError(f"The JSON nests deeper than {MAX_DEPTH} arrays and objects.")
     return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
 
 

@@ -156,6 +156,7 @@ __all__ = [
     "StreamUpdate",
     "as_row",
     "describe_symbols",
+    "diagnostics_died",
     "shown_query",
     "symbol_list_text",
     "thread_died",
@@ -704,7 +705,8 @@ class DriftRegistry:
             self._statuses.update((path, status) for status in new)
         for status in new:
             logger.warning(
-                "%s: undocumented response status %r; the rows are kept (schema drift)",
+                "Massive answered a request to %s with status %r, which Massive does not "
+                "document. Nothing to do: the library kept the rows Massive sent.",
                 path,
                 status,
             )
@@ -797,7 +799,9 @@ class _Batch:
             elif item is _RATE_LIMITS_CHANGED:
                 batch.pull = True
             else:
-                raise BrokenGuaranteeError(library_bug(f"the diagnostics queue holds {item!r}"))
+                raise BrokenGuaranteeError(
+                    library_bug(f"The diagnostics tables' queue holds an unknown item: {item!r}")
+                )
         return batch
 
 
@@ -881,7 +885,9 @@ class _KeyedTable:
                     batches.append(schema.to_arrow([one]))
                 except Exception:
                     logger.exception(
-                        "diagnostics: failed to write a %s row. %s", schema.name, LIBRARY_BUG
+                        "m.%s(): could not add a row, so the table lacks it. %s",
+                        schema.name,
+                        LIBRARY_BUG,
                     )
             if not batches:
                 return
@@ -934,7 +940,6 @@ class Diagnostics:
         "_connections",
         "_died",
         "_exec_ctx",
-        "_label",
         "_ledger",
         "_on_death",
         "_paused",
@@ -959,7 +964,6 @@ class Diagnostics:
         exec_ctx: ExecutionContext,
         name: str,
         *,
-        label: str,
         redactor: Redactor,
         release_later: Callable[[LivenessScope], None],
         on_death: Callable[[BaseException], None],
@@ -975,8 +979,6 @@ class Diagnostics:
             exec_ctx: The session's execution context, entered by the writer thread.
             name: The writer thread's name, for thread dumps, such as
                 `massive #1 diagnostics`; each table's publisher adds the table's name.
-            label: The session's label, such as `"MassiveSession #1"`, which the tables'
-                failure names if the writer dies.
             redactor: The session's secrets, which no `m.problems()` text may hold.
             release_later: Releases a scope on the session's reaper, under the update graph's
                 shared lock (`SessionCore.release_later`): for the blink tables' publishers,
@@ -986,7 +988,6 @@ class Diagnostics:
                 (`QueueWorker`).
         """
         self._exec_ctx = exec_ctx
-        self._label = label
         self._release_later = release_later
         self._on_death = on_death
         # What killed the writer, set once by the dying writer; guarded by `_release_lock`.
@@ -1163,7 +1164,7 @@ class Diagnostics:
         """
         with self._release_lock:
             if self._rate_pull is not None:
-                raise RuntimeError("the rate-limit rows already have a pull")
+                raise RuntimeError(library_bug("m.rate_limits() already has a source of rows"))
             self._rate_pull = pull
         self.rate_limits_changed()
 
@@ -1216,8 +1217,9 @@ class Diagnostics:
             done = added.wait(timeout)
         if not done:
             logger.warning(
-                "%s: the diagnostics writer did not add the queued rows within %.1f s",
-                self._writer.thread.name,
+                "The diagnostics tables did not take in their queued rows within %.1f s, so "
+                "m.streams() and the other diagnostics tables may not show them yet. Read them "
+                "again later.",
                 timeout,
             )
             return False
@@ -1262,7 +1264,8 @@ class Diagnostics:
             self._problems.add(self._ledger.apply(s for s in ended if s is not None))
         except Exception:  # a failed last row never costs the other tables theirs
             logger.exception(
-                "diagnostics: failed to end the open rate-limit pauses in the problems table. %s",
+                "m.problems(): could not end the open rate-limit pauses at the close, so they "
+                "may show as still open. %s",
                 LIBRARY_BUG,
             )
         finally:  # the scope is released whatever the last rows did
@@ -1284,7 +1287,7 @@ class Diagnostics:
         with self._release_lock:
             self._released = True  # nothing would ever take a row queued from now on
             self._died = death
-        error = thread_died(self._label, "diagnostics writer", death)
+        error = thread_died(death)
         try:
             self._on_death(death)
         finally:
@@ -1300,8 +1303,8 @@ class Diagnostics:
                     table.publisher.publish_failure(error)
                 except Exception:
                     logger.exception(
-                        "%s: could not fail the %s table. %s",
-                        self._writer.thread.name,
+                        "m.%s(): could not fail the table after a library thread died, so it "
+                        "stops updating with no error. %s",
                         table.schema.name,
                         LIBRARY_BUG,
                     )
@@ -1352,7 +1355,7 @@ class Diagnostics:
                     table.add(rows())
                 except Exception:
                     logger.exception(
-                        "diagnostics: failed to update the %s table. %s",
+                        "m.%s(): could not add the latest rows, so the table lacks them. %s",
                         table.schema.name,
                         LIBRARY_BUG,
                     )
@@ -1426,7 +1429,9 @@ class Diagnostics:
         if notice.ended:
             if self._pauses.pop(notice.bucket, None) is None:
                 logger.error(
-                    "diagnostics: the end of a pause never begun: %r. %s", notice, LIBRARY_BUG
+                    "m.problems(): a rate-limit pause ended that never began: %r. %s",
+                    notice,
+                    LIBRARY_BUG,
                 )
                 return []
             spans = self._paused.update(self._held_pauses(), at=at)
@@ -1477,23 +1482,51 @@ def _pause_detail(notice: PauseNotice) -> str:
     return f"bucket {notice.bucket} paused until {utc_text(notice.ends)}: {notice.refusal}"
 
 
-def thread_died(label: str, thread: str, death: BaseException) -> MassiveError:
+def thread_died(death: BaseException) -> MassiveError:
     """Return the error a session's tables fail with when one of its library threads died.
 
     Args:
-        label: The session's label, such as `"MassiveSession #1"`.
-        thread: The thread, as the message names it, such as `"reaper"`.
         death: What ended the thread.
 
     Returns:
-        Such as `MassiveError("MassiveSession #1: its reaper thread died (KeyboardInterrupt());
-        this table no longer updates; open a new dm.MassiveSession() to read again")`. A death
-        of an `Exception` is a bug, whose message says how to report it instead.
+        Such as `MassiveError("This table no longer updates because a library thread of its
+        session died: KeyboardInterrupt(). Open a new dm.MassiveSession() to read again.")`.
+        A death of an `Exception` is a bug, whose message says how to report it.
     """
-    source = source_of(death)
-    text = f"{label}: its {thread} thread died ({death!r}); this table no longer updates"
-    message = library_bug(text) if source is ErrorSource.LIBRARY else f"{text}. {NEW_SESSION}"
-    return MassiveError(message, source=source)
+    text = f"This table no longer updates because a library thread of its session died: {death!r}"
+    return MassiveError(_died(text, death), source=source_of(death))
+
+
+def diagnostics_died(death: BaseException) -> str:
+    """Return the message of a diagnostics view refused because a library thread died.
+
+    Args:
+        death: What ended the thread.
+
+    Returns:
+        Such as `"This session's diagnostics tables failed when a library thread died:
+        KeyboardInterrupt(). Open a new dm.MassiveSession() to read again."`. A death of an
+        `Exception` is a bug, whose message says how to report it.
+    """
+    text = f"This session's diagnostics tables failed when a library thread died: {death!r}"
+    return _died(text, death)
+
+
+def _died(text: str, death: BaseException) -> str:
+    """Return a message about a library thread's death, with its fix.
+
+    Args:
+        text: What failed and the death, as a sentence with no final period.
+        death: What ended the thread.
+
+    Returns:
+        For a bug (`source_of` gives `LIBRARY`): `text`, where the traceback is, how to report
+        it, and a new session to go on. Otherwise `text` and a new session to read again.
+    """
+    if source_of(death) is ErrorSource.LIBRARY:
+        reported = library_bug(f"{text}. The log holds the traceback")
+        return f"{reported} Open a new dm.MassiveSession() to go on."
+    return f"{text}. {NEW_SESSION}"
 
 
 def _pascal_case(name: str) -> str:

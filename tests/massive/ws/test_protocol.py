@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import re
 import ssl
 import statistics
 import sys
@@ -210,7 +211,8 @@ def test_handshake_status_tolerates_a_bare_object_and_odd_messages(
     "frame", ["[]", '[{"ev":"status"}]', '[{"ev":"status","status":1}]', "[1]"]
 )
 def test_handshake_status_refuses_a_frame_without_a_status(frame: str) -> None:
-    with pytest.raises(ValueError, match="expected a status object"):
+    expected = f"The frame holds no status object with a text status: {frame!r}."
+    with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         handshake_status(frame)
 
 
@@ -647,16 +649,16 @@ def test_set_required_replaces_the_earlier_choice(decoder: FrameDecoder) -> None
 @pytest.mark.parametrize(
     "case",
     [
-        ("Q", frozenset(), None, "no source for channel 'Q'"),
-        ("T", frozenset({"Bid", "Ticker"}), None, r"source 'stocks/T' has no columns \['Bid'\]"),
-        ("T", frozenset(), "Symbol", r"has no columns \['Symbol'\]"),
+        ("Q", frozenset(), None, "No source names the channel 'Q'."),
+        ("T", frozenset({"Bid", "Ticker"}), None, "Source 'stocks/T' has no columns ['Bid']."),
+        ("T", frozenset(), "Symbol", "Source 'stocks/T' has no columns ['Symbol']."),
     ],
 )
 def test_set_required_checks_its_names(
     decoder: FrameDecoder, case: tuple[str, frozenset[str], str | None, str]
 ) -> None:
     channel, keys, symbol, message = case
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         decoder.set_required(channel, keys, symbol=symbol)
 
 
@@ -673,7 +675,7 @@ def test_a_frame_that_is_not_json_is_dropped_and_logged(
             logging.WARNING,
             (
                 "Massive sent a frame from socket.massive.com/stocks that is not JSON, so the "
-                "library dropped it: '{oops'"
+                "library dropped it: '{oops'."
             ),
         )
     ]
@@ -691,8 +693,8 @@ def test_dropped_frames_log_a_bounded_number_of_warnings(
         [logging.WARNING] * (DROPPED_WARNING_LIMIT + 1) + [logging.DEBUG] * 5
     )
     assert ours[DROPPED_WARNING_LIMIT].getMessage() == (
-        f"socket.massive.com/stocks: {DROPPED_WARNING_LIMIT} dropped frames or elements were "
-        "logged; further ones are logged at DEBUG"
+        f"socket.massive.com/stocks: the library has warned of {DROPPED_WARNING_LIMIT} dropped "
+        "frames or elements, and it logs further ones at DEBUG."
     )
 
 
@@ -706,7 +708,7 @@ def test_an_element_without_ev_is_dropped_and_its_siblings_kept(
             logging.WARNING,
             (
                 "Massive sent an element of a frame from socket.massive.com/stocks with no text "
-                f"'ev', so the library dropped it: {item}"
+                f"'ev', so the library dropped it: {item}."
             ),
         )
         for item in ("5", "{'sym': 'A'}", "{'ev': 3}")
@@ -718,16 +720,29 @@ def test_an_unknown_channel_is_dropped_and_warned_once(
 ) -> None:
     for _ in range(2):
         assert decoder.decode(_frame({"ev": "XQ", "pair": "BTC-USD"})) == []
-    assert [r.levelno for r in caplog.records] == [logging.WARNING]
-    assert "'XQ'" in caplog.text
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "Massive sent objects of the channel 'XQ' from socket.massive.com/stocks, which "
+                "the library does not read, so it drops them."
+            ),
+        )
+    ]
 
 
 @pytest.mark.parametrize(
     ("sources", "message"),
     [
-        ([TRADES, TRADES], "two sources for channel 'T'"),
-        ([Source(key="stocks", transport=Transport.WS, fields=())], "not a WebSocket source"),
-        ([Source(key="stocks/T", transport=Transport.REST, fields=())], "not a WebSocket source"),
+        ([TRADES, TRADES], "Two sources name the channel 'T'."),
+        (
+            [Source(key="stocks", transport=Transport.WS, fields=())],
+            "Source 'stocks' is not a WebSocket source of the form '<cluster>/<channel>'.",
+        ),
+        (
+            [Source(key="stocks/T", transport=Transport.REST, fields=())],
+            "Source 'stocks/T' is not a WebSocket source of the form '<cluster>/<channel>'.",
+        ),
         (
             [
                 Source(
@@ -736,12 +751,12 @@ def test_an_unknown_channel_is_dropped_and_warned_once(
                     fields=(Field(wire_key="day.c", column="DayC", wire_type=WireType.DOUBLE),),
                 )
             ],
-            r"source 'stocks/T' has dotted wire keys \['day\.c'\]; a WebSocket object is flat",
+            "Source 'stocks/T' has dotted wire keys day.c, and a WebSocket object is flat.",
         ),
     ],
 )
 def test_the_sources_are_checked(sources: list[Source], message: str) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         FrameDecoder(sources, host=HOST, path=PATH)
 
 
@@ -812,7 +827,10 @@ def test_other_http_statuses_are_fatal(status: int) -> None:
     error = _classify(_status_error(status))
     assert isinstance(error, WireError)
     assert (error.status, error.host, error.path) == (status, HOST, PATH)
-    assert error.message == f"WebSocket connection to {HOST}{PATH} failed: HTTP {status}"
+    assert error.message == (
+        "Massive answered the WebSocket connection to socket.massive.com/stocks with "
+        f"HTTP {status}."
+    )
     assert error.kind is WireFailure.REFUSED  # the server answered the handshake
 
 
@@ -828,6 +846,9 @@ def test_a_proxy_failure_is_this_machines_to_fix(error: Exception) -> None:
     classified = _classify(error)
     assert isinstance(classified, WireError)
     assert classified.kind is WireFailure.LOCAL
+    assert classified.message.endswith(
+        ". Correct the proxy, and its user and password, in HTTPS_PROXY."
+    )
 
 
 @pytest.mark.parametrize(
@@ -847,12 +868,20 @@ def test_a_proxy_that_refuses_the_credentials_names_its_status() -> None:
     error = _classify(InvalidProxyStatus(Response(407, "x", Headers({}), b"")))
     assert isinstance(error, WireError)
     assert error.status == 407
+    assert error.message == (
+        "The WebSocket connection to socket.massive.com/stocks failed with HTTP 407. Correct the "
+        "proxy, and its user and password, in HTTPS_PROXY."
+    )
 
 
 def test_a_broken_handshake_is_the_servers_answer() -> None:
     error = _classify(InvalidMessage("did not receive a valid HTTP response"))
     assert isinstance(error, WireError)
     assert (error.status, error.kind) == (None, WireFailure.REFUSED)
+    assert error.message == (
+        "The WebSocket connection to socket.massive.com/stocks failed with InvalidMessage: did "
+        "not receive a valid HTTP response."
+    )
 
 
 def test_an_invalid_uri_is_fatal_without_a_status() -> None:
@@ -860,7 +889,8 @@ def test_an_invalid_uri_is_fatal_without_a_status() -> None:
     assert isinstance(error, WireError)
     assert error.status is None
     assert error.message == (
-        f"WebSocket connection to {HOST}{PATH} failed: InvalidURI: x isn't a valid URI: bad"
+        "The WebSocket connection to socket.massive.com/stocks failed with InvalidURI: x isn't a "
+        "valid URI: bad."
     )
     assert error.kind is WireFailure.CLIENT_DEFECT  # the client built the URI
 
@@ -871,10 +901,11 @@ def test_a_certificate_failure_is_fatal_and_names_ssl_cert_file() -> None:
     assert isinstance(error, WireError)
     assert error.status is None
     assert (error.host, error.path) == (HOST, PATH)
-    assert error.message.startswith(f"TLS certificate verification failed for {HOST}: ")
     assert error.kind is WireFailure.LOCAL  # SSL_CERT_FILE, on this machine, is the fix
-    assert error.message.endswith(
-        "; set SSL_CERT_FILE to a bundle that trusts the server's certificate"
+    assert error.message == (
+        "The TLS certificate of socket.massive.com did not verify for the WebSocket connection to "
+        "socket.massive.com/stocks: certificate verify failed. If a proxy or a private CA signs "
+        "it, set SSL_CERT_FILE to a bundle that trusts it."
     )
 
 

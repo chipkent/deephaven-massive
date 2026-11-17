@@ -350,14 +350,16 @@ class QueueWorker(Generic[_T]):
                     self._on_exit()
             except BaseException as death:
                 logger.exception(
-                    "%s died; its queue is no longer handled. %s", self.thread.name, LIBRARY_BUG
+                    "A library thread died, so its session's live tables fail. %s", LIBRARY_BUG
                 )
                 if self._on_death is not None:
                     try:
                         self._on_death(death)
                     except Exception:
                         logger.exception(
-                            "%s: handling its death failed. %s", self.thread.name, LIBRARY_BUG
+                            "Failing the live tables after a library thread died raised an "
+                            "error. %s",
+                            LIBRARY_BUG,
                         )
                 raise
 
@@ -392,9 +394,7 @@ class QueueWorker(Generic[_T]):
             try:
                 required(self._on_timeout, f"{self.thread.name}'s on_timeout")()
             except Exception:
-                logger.exception(
-                    "%s failed on a timed wake-up; continuing. %s", self.thread.name, LIBRARY_BUG
-                )
+                logger.exception("A timed wake-up failed. The library goes on. %s", LIBRARY_BUG)
             return True
         while item is not None:
             batch.append(item)
@@ -407,7 +407,7 @@ class QueueWorker(Generic[_T]):
                 self._handle(batch)
             except Exception:
                 logger.exception(
-                    "%s failed on a batch; continuing. %s", self.thread.name, LIBRARY_BUG
+                    "A batch of queued work failed. The library goes on. %s", LIBRARY_BUG
                 )
         return item is not None
 
@@ -477,7 +477,10 @@ def _run_jobs(jobs: list[Callable[[], None]]) -> None:
         try:
             job()
         except Exception:
-            logger.exception("massive reaper job failed; continuing. %s", LIBRARY_BUG)
+            logger.exception(
+                "Releasing a live table or its resources failed. The library goes on. %s",
+                LIBRARY_BUG,
+            )
 
 
 class ResultRegistry:

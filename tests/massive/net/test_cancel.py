@@ -51,7 +51,9 @@ def test_a_removed_callback_never_runs() -> None:
 def test_a_token_cannot_be_cleared() -> None:
     token = Cancel()
     token.set()
-    with pytest.raises(RuntimeError, match="cannot be cleared"):
+    with pytest.raises(
+        RuntimeError, match=r"^A Cancel token cannot be cleared\. Create a new one\.$"
+    ):
         token.clear()
     assert token.is_set()
 
