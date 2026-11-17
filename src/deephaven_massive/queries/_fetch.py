@@ -125,7 +125,8 @@ def _read_value_table(
         live: True for a verb that follows the table or re-reads it, which may start on a
             table with no row yet.
         call: The id of the static verb's call whose values these are: each skipped value is
-            listed in `m.problems()` as a problem of the call, before any error below; None
+            listed in `m.problems()` as a problem of the call, with the call's query, before
+            any error below; None
             for a live verb's read, whose table lists them.
 
     Returns:
@@ -140,6 +141,8 @@ def _read_value_table(
     with entered(core.exec_ctx):
         rows = read_symbols(rule, values.table, stream_id=None, reported=live or call is not None)
     if call is not None and rows.skipped:
+        # Named first: a call that raises below never reaches the read that names it.
+        core.diagnostics.name_read(call, query)
         where = f"the {values.argument} table of {query}"
         core.problems(
             rule.skipped_events(rows.skipped, stream_id=call, where=where, field=rule.column)

@@ -145,7 +145,8 @@ def _read_symbol_table(
             it as rows arrive.
         call: The id of the static verb's call whose symbols these are: each skipped value
             is listed in `m.problems()` as a `noncanonical_symbols` problem of the call
-            (`SymbolRowRule.skipped_events`), before any error below. None for a read the call
+            (`SymbolRowRule.skipped_events`), with the call's query, before any error below.
+            None for a read the call
             makes only to check the table, or a live verb's, whose table lists them.
 
     Returns:
@@ -167,6 +168,8 @@ def _read_symbol_table(
         rows = read_symbols(rule, symbols.table, stream_id=None, reported=live or call is not None)
         has_rows = symbols.table.size > 0
     if call is not None and rows.skipped:
+        # Named first: a call that raises below never reaches the read that names it.
+        core.diagnostics.name_read(call, query)
         where = f"the symbol table of {query}"
         core.problems(rule.skipped_events(rows.skipped, stream_id=call, where=where, field=None))
     if rows.skipped and not rows.symbols:

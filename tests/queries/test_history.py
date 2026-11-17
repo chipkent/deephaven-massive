@@ -339,6 +339,9 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
         match=r"^m\.stocks\.trades\(\): no row of the symbol table is a ticker this dataset",
     ):
         only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
+    # The call that raised still names its query on its problem.
+    failed = [r for r in problem_rows() if r["StreamId"] != skipped["StreamId"]]
+    assert [(r["Symbol"], r["Query"]) for r in failed] == [("msft", repr(only_bad))]
 
 
 def test_history_rejects_a_symbol_table_without_symbols(
