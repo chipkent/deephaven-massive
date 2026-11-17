@@ -1136,7 +1136,7 @@ def test_which_day_massive_counts_overnight_stock_trades_in(
     close = datetime.combine(day, streams.EXTENDED_CLOSE, _NEW_YORK)
     end = midnight + timedelta(days=1)
     params = {"stocksTicker": "SPY", "multiplier": 1, "timespan": "minute"}
-    params |= {"from": int(start.timestamp() * 1000), "to": int(end.timestamp() * 1000) - 1}
+    params |= {"from": start, "to": end - timedelta(milliseconds=1)}
     minutes = rest_rows(_RANGE, params, {"sort": "asc", "limit": 50_000, "adjusted": False})
     bars = [(int(bar["t"]), float(bar["o"]), float(bar["v"])) for bar in minutes]
     overnight = [t for t, _, _ in bars if t < opening.timestamp() * 1000]
