@@ -302,8 +302,8 @@ closes = m.stocks.previous_day_bar(watchlist).poll(60)
 ```
 
 `closes` has a row for each stock with its previous trading day's bar. Each poll sends one
-request per stock, so four stocks polled once a minute stay within Basic's five requests a
-minute.
+request per stock, so four stocks polled every 60 seconds send four requests a minute. Massive
+allows five a minute on the plan this example uses.
 
 `watchlist` is a Deephaven [input table](https://deephaven.io/core/docs/how-to-guides/input-tables/),
 which you edit by hand in its panel or in code. By hand, type a symbol into a new row of the
@@ -661,26 +661,30 @@ each on its own plan. Two settings match a session to your plans:
 
 | Setting | Set it when | What changes |
 |---|---|---|
-| `delayed_subscriptions` | A subscription's plan is delayed, as Stocks Starter and Developer are | Live tables and snapshots accept Massive's delayed feed. |
-| `rest_basic_subscriptions` | A subscription's plan is Basic | Its requests keep to Basic's five a minute from the first one, shared by every session in this server that uses your key. Without the setting, the session slows to that rate after Massive's first rate-limit error. |
+| `delayed_subscriptions` | A subscription's plan gets Massive's delayed feed | Live tables and snapshots accept the delayed data. |
+| `rest_requests_per_minute` | Massive limits a subscription's REST requests per minute | Its requests keep to your limit from the first one, with no pause to learn it. |
 
-This session is for an account that has bought only Stocks Starter. Every product you haven't
-bought is on its free Basic plan:
+This session is for an account whose stocks plan streams delayed data, and whose other
+subscriptions Massive limits to five requests a minute:
 
 ```python
 import deephaven_massive as dm
 
 config = dm.MassiveConfig(
     delayed_subscriptions={dm.Subscription.STOCKS},
-    rest_basic_subscriptions={
-        dm.Subscription.OPTIONS,
-        dm.Subscription.INDICES,
-        dm.Subscription.CURRENCIES,
-        dm.Subscription.FUTURES,
+    rest_requests_per_minute={
+        dm.Subscription.OPTIONS: 5,
+        dm.Subscription.INDICES: 5,
+        dm.Subscription.CURRENCIES: 5,
+        dm.Subscription.FUTURES: 5,
     },
 )
 m = dm.MassiveSession(config)
 ```
+
+Leave a limited subscription out, and the session learns its limit from Massive's first
+rate-limit error, after a pause. `m.rate_limits()` then shows the learned limit in
+`RequestsPerMinute`. Copy that number into the setting to skip the pause next time.
 
 `dm.MassiveConfig.from_file()` reads the same settings from a YAML file, as
 [Example 7](#what-your-plan-allows) shows. The [settings page](docs/configuration.md) lists every

@@ -244,11 +244,12 @@ class RateLimitState(StrEnum):
 
 
 class LimitSource(StrEnum):
-    """Why a bucket of `m.rate_limits()` is paced: the `LimitSource` column.
+    """Why a row of `m.rate_limits()` is paced: the `LimitSource` column.
 
-    `DECLARED`: a session that shares the bucket names the subscription in
-    `MassiveConfig.rest_basic_subscriptions`. `LEARNED`: Massive refused one of its requests
-    for exceeding the maximum requests per minute, the mark of the Basic tier.
+    `DECLARED`: a session in this server that uses the same API key gives the subscription's
+    limit in `MassiveConfig.rest_requests_per_minute`. `LEARNED`: Massive refused one of its
+    requests for exceeding the maximum requests per minute. The limit is the number of its
+    requests Massive answered in the minute of that refusal.
     """
 
     DECLARED = "DECLARED"
@@ -529,7 +530,7 @@ class RateLimitRow:
         bucket: The bucket: a `dm.Subscription` value, or `other` for reference data and the
             other datasets Massive assigns to no subscription, which it counts on their own.
         state: What a new request meets now.
-        requests_per_minute: The pace, 5 for a Basic subscription; null while unpaced.
+        requests_per_minute: The declared or learned limit; null while unpaced.
         limit_source: Why it is paced; null while unpaced.
         in_flight: Requests sent and not yet answered.
         waiting: Requests waiting for a slot or for the end of a pause.

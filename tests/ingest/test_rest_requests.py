@@ -553,3 +553,18 @@ def test_a_split_with_an_outcome_no_case_names_is_refused() -> None:
 def test_fetch_paths_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
     with pytest.raises(BrokenGuaranteeError, match="paths has no rule for a value of type object"):
         rest_requests.fetch_paths(MOVERS, object())  # type: ignore[arg-type]  # the point: refused at run time
+
+
+def test_a_capped_call_asks_only_for_the_rows_still_wanted() -> None:
+    path = _rest_path(INDEX_SNAPSHOT_PATH)
+    largest = rest_requests.page_size(INDEX_SNAPSHOTS, path)
+    call = rest_requests.Call({}, {"ticker.any_of": ("I:SPX",), "limit": largest})
+    capped = rest_requests.capped_call(INDEX_SNAPSHOTS, path, call, cap=3)
+    assert capped.query == {"ticker.any_of": ("I:SPX",), "limit": 3}
+    # A cap above the page size keeps the page size.
+    assert largest is not None
+    wide = rest_requests.capped_call(INDEX_SNAPSHOTS, path, call, cap=largest + 1)
+    assert wide.query["limit"] == largest
+    # A path without a page size sends the call as planned.
+    last = rest_requests.Call({"from": "BTC", "to": "USD"}, {})
+    assert rest_requests.capped_call(CRYPTO_LAST, _rest_path(CRYPTO_LAST_PATH), last, cap=3) is last

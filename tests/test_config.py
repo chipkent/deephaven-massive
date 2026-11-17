@@ -121,7 +121,7 @@ def test_defaults(base: MassiveConfig) -> None:
     assert base.max_outage == 300.0
     assert base.flat_file_symbol_threshold == 50
     assert base.max_concurrency == 8
-    assert base.rest_basic_subscriptions == frozenset()
+    assert base.rest_requests_per_minute == {}
     assert base.delayed_subscriptions == frozenset()
     assert base.flush_interval == 0.05
     assert base.rest_base_url == "https://api.massive.com"
@@ -307,49 +307,58 @@ def test_websocket_hosts_types(base: MassiveConfig) -> None:
         dataclasses.replace(base, websocket_hosts=["delayed.massive.com"])  # type: ignore[arg-type]  # the point: refused at run time
 
 
-def test_rest_basic_subscriptions_are_frozen_and_hashable(base: MassiveConfig) -> None:
-    declared = {Subscription.OPTIONS, Subscription.CURRENCIES}
-    cfg = dataclasses.replace(base, rest_basic_subscriptions=declared)
-    declared.add(Subscription.STOCKS)  # the configuration keeps its own copy
-    assert cfg.rest_basic_subscriptions == frozenset(
-        {Subscription.OPTIONS, Subscription.CURRENCIES}
-    )
-    assert isinstance(cfg.rest_basic_subscriptions, frozenset)
-    same = dataclasses.replace(
-        base, rest_basic_subscriptions=frozenset(cfg.rest_basic_subscriptions)
-    )
+def test_rest_requests_per_minute_is_frozen_and_hashable(base: MassiveConfig) -> None:
+    declared = {Subscription.OPTIONS: 5, Subscription.CURRENCIES: 10}
+    cfg = dataclasses.replace(base, rest_requests_per_minute=declared)
+    declared[Subscription.STOCKS] = 5  # the configuration keeps its own copy
+    assert cfg.rest_requests_per_minute == {Subscription.OPTIONS: 5, Subscription.CURRENCIES: 10}
+    same = dataclasses.replace(base, rest_requests_per_minute=dict(cfg.rest_requests_per_minute))
     assert cfg == same
     assert hash(cfg) == hash(same)
-    assert (
-        dataclasses.replace(base, rest_basic_subscriptions={}.keys()).rest_basic_subscriptions
-        == set()
+    assert repr(cfg.rest_requests_per_minute) == repr(
+        {Subscription.OPTIONS: 5, Subscription.CURRENCIES: 10}
     )
 
 
-def test_rest_basic_subscriptions_hold_subscriptions_only(base: MassiveConfig) -> None:
+def test_rest_requests_per_minute_holds_subscriptions_and_positive_counts(
+    base: MassiveConfig,
+) -> None:
     with pytest.raises(
         TypeError,
-        match=r"^rest_basic_subscriptions must be a set of dm\.Subscription, such as "
-        r"\{dm\.Subscription\.STOCKS\}, not list$",
+        match=r"^rest_requests_per_minute must be a mapping of dm\.Subscription to requests per "
+        r"minute, such as \{dm\.Subscription\.STOCKS: 5\}, not set$",
     ):
-        dataclasses.replace(base, rest_basic_subscriptions=[Subscription.STOCKS])  # type: ignore[arg-type]  # the point: refused at run time
+        dataclasses.replace(base, rest_requests_per_minute={Subscription.STOCKS})  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(
         TypeError,
-        match=r"^each rest_basic_subscriptions member must be dm\.Subscription, "
+        match=r"^each rest_requests_per_minute key must be dm\.Subscription, "
         r"e\.g\. dm\.Subscription\.OPTIONS$",
     ):
-        dataclasses.replace(base, rest_basic_subscriptions={"options"})  # type: ignore[arg-type]  # the point: refused at run time
+        dataclasses.replace(base, rest_requests_per_minute={"options": 5})  # type: ignore[dict-item]  # the point: refused at run time
     # An asset class names the subscription that covers it.
     with pytest.raises(TypeError, match=r"e\.g\. dm\.Subscription\.STOCKS$"):
-        dataclasses.replace(base, rest_basic_subscriptions={AssetClass.STOCKS})  # type: ignore[arg-type]  # the point: refused at run time
+        dataclasses.replace(base, rest_requests_per_minute={AssetClass.STOCKS: 5})  # type: ignore[dict-item]  # the point: refused at run time
     # Forex and crypto are one subscription, whichever way they are spelled.
     for currency in (AssetClass.FOREX, AssetClass.CRYPTO, "forex", "Crypto"):
         with pytest.raises(
             TypeError,
-            match=r"^rest_basic_subscriptions must hold dm\.Subscription members; forex and "
+            match=r"^rest_requests_per_minute must hold dm\.Subscription members; forex and "
             r"crypto are one subscription, dm\.Subscription\.CURRENCIES$",
         ):
-            dataclasses.replace(base, rest_basic_subscriptions={currency})  # type: ignore[arg-type]  # the point: refused at run time
+            dataclasses.replace(base, rest_requests_per_minute={currency: 5})  # type: ignore[dict-item]  # the point: refused at run time
+    for limit in (0, -5):
+        with pytest.raises(
+            ValueError, match=rf"^rest_requests_per_minute\[stocks\] must be positive, got {limit}$"
+        ):
+            dataclasses.replace(base, rest_requests_per_minute={Subscription.STOCKS: limit})
+    with pytest.raises(
+        TypeError, match=r"^rest_requests_per_minute\[stocks\] must be an int, not bool$"
+    ):
+        dataclasses.replace(base, rest_requests_per_minute={Subscription.STOCKS: True})
+    with pytest.raises(
+        TypeError, match=r"^rest_requests_per_minute\[stocks\] must be an int, not float$"
+    ):
+        dataclasses.replace(base, rest_requests_per_minute={Subscription.STOCKS: 5.0})  # type: ignore[dict-item]  # the point: refused at run time
 
 
 def test_delayed_subscriptions_are_frozen_and_hashable(base: MassiveConfig) -> None:
@@ -653,7 +662,9 @@ max_reconnect_backoff: 1e2
 max_outage: 0
 flat_file_symbol_threshold: 10
 max_concurrency: 4
-rest_basic_subscriptions: [stocks, currencies]
+rest_requests_per_minute:
+  stocks: 5
+  currencies: 10
 delayed_subscriptions:
   - options
 flush_interval: 0.25
@@ -681,7 +692,7 @@ connection_taken: reconnect
         max_outage=0.0,
         flat_file_symbol_threshold=10,
         max_concurrency=4,
-        rest_basic_subscriptions={Subscription.STOCKS, Subscription.CURRENCIES},
+        rest_requests_per_minute={Subscription.STOCKS: 5, Subscription.CURRENCIES: 10},
         delayed_subscriptions={Subscription.OPTIONS},
         flush_interval=0.25,
         rest_base_url="https://rest.example.com",
@@ -1007,20 +1018,27 @@ def test_an_unknown_key_suggests_the_closest(tmp_path: Path) -> None:
             ),
         ),
         (
-            "rest_basic_subscriptions: [forex]\n",
-            ", line 1, column 28: rest_basic_subscriptions 'forex' is not a subscription",
+            "delayed_subscriptions: [stocks, stocks]\n",
+            ", line 1, column 33: delayed_subscriptions lists 'stocks' twice",
         ),
         (
-            "rest_basic_subscriptions: [ON]\n",
-            ", line 1, column 28: rest_basic_subscriptions 'ON' is not a subscription",
+            "rest_requests_per_minute: {forex: 5}\n",
+            ", line 1, column 28: rest_requests_per_minute 'forex' is not a subscription",
         ),
         (
-            "rest_basic_subscriptions: [stocks, stocks]\n",
-            ", line 1, column 36: rest_basic_subscriptions lists 'stocks' twice",
+            "rest_requests_per_minute: {stocks: 5, stocks: 6}\n",
+            ", line 1, column 39: rest_requests_per_minute limits 'stocks' twice",
         ),
         (
-            "rest_basic_subscriptions: [[stocks]]\n",
-            ", line 1, column 28: rest_basic_subscriptions must be a subscription",
+            "rest_requests_per_minute: [stocks]\n",
+            (
+                ", line 1, column 27: rest_requests_per_minute must be a mapping of subscription "
+                "to requests per minute, such as {stocks: 5}, or {} for none"
+            ),
+        ),
+        (
+            "rest_requests_per_minute: {stocks: five}\n",
+            ", line 1, column 36: rest_requests_per_minute 'five' is not a whole number",
         ),
         # The durations.
         (
@@ -1348,7 +1366,7 @@ def test_every_value_forms_example_is_accepted_by_a_settings_file(tmp_path: Path
 def test_delayed_subscriptions_offers_only_what_it_accepts() -> None:
     form = _config._value_forms()["delayed_subscriptions"]
     assert "`currencies`" not in form
-    assert "`currencies`" in _config._value_forms()["rest_basic_subscriptions"]
+    assert "`currencies`" in _config._value_forms()["rest_requests_per_minute"]
 
 
 def test_the_reference_takes_each_entry_from_the_docstring_without_its_default() -> None:

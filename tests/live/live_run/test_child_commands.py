@@ -49,7 +49,7 @@ def test_the_group_child_watches_its_parent_then_runs_its_group(
 
 SETTINGS = """\
 delayed_subscriptions: [options]
-rest_basic_subscriptions: [stocks]
+rest_requests_per_minute: {stocks: 5}
 max_outage: 7
 """
 
@@ -59,7 +59,7 @@ def test_a_child_without_a_settings_file_takes_the_defaults(
 ) -> None:
     monkeypatch.setenv("MASSIVE_API_KEY", KEY)
     config = child_commands.session_config({}, declare_limits=True)
-    assert (config.delayed_subscriptions, config.rest_basic_subscriptions) == (set(), set())
+    assert (config.delayed_subscriptions, config.rest_requests_per_minute) == (set(), {})
 
 
 def test_a_childs_sessions_take_the_owners_settings_as_the_live_tests_do(
@@ -72,12 +72,12 @@ def test_a_childs_sessions_take_the_owners_settings_as_the_live_tests_do(
     environ = {"DEEPHAVEN_MASSIVE_CONFIG_FILE": str(settings)}
     config = child_commands.session_config(environ, declare_limits=True)
     assert {s.value for s in config.delayed_subscriptions} == {"options"}
-    assert {s.value for s in config.rest_basic_subscriptions} == {"stocks"}
+    assert {s.value: n for s, n in config.rest_requests_per_minute.items()} == {"stocks": 5}
     assert config.max_outage != 7
     upgrade = child_commands.session_config(environ, declare_limits=False)
-    assert ({s.value for s in upgrade.delayed_subscriptions}, upgrade.rest_basic_subscriptions) == (
+    assert ({s.value for s in upgrade.delayed_subscriptions}, upgrade.rest_requests_per_minute) == (
         {"options"},
-        set(),
+        {},
     )
 
 
@@ -106,7 +106,7 @@ def test_the_group_child_opens_its_sessions_and_names_the_delayed_subscriptions(
     )
     assert seen["delayed"] == frozenset({"options"})
     with seen["open_session"]() as session:
-        assert not session._core.config.rest_basic_subscriptions  # the upgrade check learns
+        assert not session._core.config.rest_requests_per_minute  # the upgrade check learns
 
 
 def test_a_group_child_ends_once_its_parent_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:

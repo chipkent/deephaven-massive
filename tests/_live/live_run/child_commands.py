@@ -60,12 +60,12 @@ def session_config(environ: Mapping[str, str], *, declare_limits: bool) -> Massi
     """Build a child's session configuration from the owner's settings file, as the live tests do.
 
     When `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the owner's settings file, its
-    `delayed_subscriptions`, `rest_basic_subscriptions`, and `websocket_hosts` are passed
+    `delayed_subscriptions`, `rest_requests_per_minute`, and `websocket_hosts` are passed
     through, and every other setting keeps its default; the key comes from the environment.
 
     Args:
         environ: The environment, which names the settings file.
-        declare_limits: Whether the file's `rest_basic_subscriptions` are passed through; False
+        declare_limits: Whether the file's `rest_requests_per_minute` is passed through; False
             for the upgrade check, whose sessions must learn the limit from Massive.
 
     Returns:
@@ -76,10 +76,10 @@ def session_config(environ: Mapping[str, str], *, declare_limits: bool) -> Massi
         bare: MassiveConfig = dm.MassiveConfig()
         return bare
     settings = dm.MassiveConfig.from_file(path)
-    limited = settings.rest_basic_subscriptions if declare_limits else frozenset()
+    limited = settings.rest_requests_per_minute if declare_limits else {}
     configured: MassiveConfig = dm.MassiveConfig(
         delayed_subscriptions=settings.delayed_subscriptions,
-        rest_basic_subscriptions=limited,
+        rest_requests_per_minute=limited,
         websocket_hosts=settings.websocket_hosts,
     )
     return configured
