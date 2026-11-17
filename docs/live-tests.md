@@ -32,15 +32,15 @@ The run takes three settings from the file and leaves every other setting at its
 | Setting | What to set | Without it |
 |---|---|---|
 | `delayed_subscriptions` | Each subscription Massive serves your key delayed | Every stream and snapshot test of those subscriptions skips, `not listed as delayed` |
-| `rest_requests_per_minute` | Each subscription Massive limits by the minute, and its limit | The rate-limit tests skip. Other tests pause at a subscription's first refused request while the library learns its limit. |
-| `websocket_hosts` | A host for an asset class, when Massive serves it there, such as `indices: business.massive.com` for index values ([`websocket_hosts`](configuration.md#setting-details)) | The library picks the host |
+| `rest_requests_per_minute` | Each subscription Massive limits by the minute, and its limit | The rate-limit tests skip, and other tests run slower |
+| `websocket_hosts` | The host Massive serves an asset class from, such as `indices: business.massive.com`. See [`websocket_hosts`](configuration.md#setting-details). | The library picks the host |
 
 A settings file the library refuses stops the run at the first test that loads it, with the
 library's message.
 
 <a id="run-order"></a>
 
-### Run the three commands in order
+### Run the tests in three steps
 
 Stop every other program that uses the key, then run these in order. Each command adds its
 output to `live-checks.log`, the file to attach to an issue.
@@ -51,8 +51,8 @@ output to `live-checks.log`, the file to attach to an issue.
    uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
    ```
 
-   It names all three markers, because `-m integration` alone leaves out every test that also
-   carries another marker:
+   It names all three markers, because `-m integration` alone leaves out the tests of the other
+   live markers:
 
    | Marker | What it runs |
    |---|---|
@@ -229,10 +229,12 @@ groups run these tests:
 | `stream-night-reconcile` | The night's minute bars against REST history |
 | `half-day` | The bar-stamp tests, on the trading day after a half day |
 
-The `stream-day` group also records how long a healthy stocks connection goes without a frame
-while no stock trades. In its debug log, read the stocks
-connection's `status` lines from 03:45 to 04:00 New York time. Open an issue with the longest
-gap between them, and with every `no frame for ... during ... trading hours` WARNING of the day.
+The `stream-day` group's debug log shows how long a healthy stocks connection goes without a
+message before stocks trade. Between 03:45 and 04:00 New York time, find the stocks
+connection's status lines, which read `wss://<host>/stocks status <KIND>: <message>`. Open an
+issue with the longest gap between them.
+
+Attach every `no frame for ... during ... trading hours` WARNING of the day to that issue too.
 
 <a id="live-run-reruns"></a>
 
