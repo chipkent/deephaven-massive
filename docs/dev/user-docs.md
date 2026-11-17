@@ -163,11 +163,11 @@ Each of these has a source. Check it again before you write:
 
 ### Teaching plan
 
-Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13 and the options
-example added on 2026-11-17. The Yahoo conversion became its own example on 2026-11-17, so that
+Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13, the problems
+table added before it on 2026-11-16, and the options example added on 2026-11-17. The Yahoo conversion became its own example on 2026-11-17, so that
 Example 6 keeps one idea. Each example adds one idea,
 in dependency order: the call pattern, static tables, charts, polling, watchlists, other sources'
-symbols, settings, streaming, options, then stopping. Each title names the idea, then what the
+symbols, settings, streaming, options, problems, then stopping. Each title names the idea, then what the
 example does.
 Each example's Plan line follows from the data it reads, and
 `tests/datasets/test_readme_plans.py` checks it against Massive's spec.
@@ -188,7 +188,8 @@ Each example's Plan line follows from the data it reads, and
 | 12 | Backfill: start with today's minute bars, then continue live | 3, 11 |
 | 13 | Dashboards: show a live chart and table together with deephaven.ui | 4, 10 |
 | 14 | Options: read one expiry of a stock's calls | 8 |
-| 15 | Stopping live tables: release one table or close the session | 5 |
+| 15 | Problems: see what went wrong in your tables | 1 |
+| 16 | Stopping live tables: release one table or close the session | 5 |
 
 The owner's decisions behind it:
 

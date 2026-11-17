@@ -8,9 +8,9 @@ This module holds both directions of that mapping, which every transport applies
 - **Reading.** `canonical_from_wire` reads every spelling the library knows into the canonical
   form, and `WireSymbols` applies it to a column of rows (`ReadSymbols`). A row whose spelling
   it cannot read is withheld by its reader (`withheld.withhold_rows`), whose
-  `unreadable_symbols` setting decides whether that fails the read and how loudly each
-  spelling is logged: a bounded WARNING record per spelling under `LOG` and a bounded DEBUG
-  record under `IGNORE` (`log_unreadable`). An index endpoint may send an index without its
+  `unreadable_symbols` setting decides whether that fails the read; the row is an
+  `unreadable_symbols` problem of the table, which the session's problem reporter logs. An
+  index endpoint may send an index without its
   `I:` prefix, so `canonical_from_wire` adds it there, from the endpoint's class alone: no
   conversion ever looks a name up.
 - **Writing.** `wire_spellings` lists every spelling a flat file may write, for its row
@@ -24,8 +24,7 @@ This module holds both directions of that mapping, which every transport applies
   code each row carries; `is_index_option` reads one CFI code.
 
 The grammar these read and write, and its checks and converters, are `symbols.py`'s. Every
-function here is pure and thread-safe and makes no Deephaven call; the one shared state is the
-process-wide bound on the records of unreadable spellings.
+function here is pure and thread-safe and makes no Deephaven call.
 """
 
 from __future__ import annotations
@@ -46,13 +45,11 @@ from deephaven_massive._datasets.symbols import (
     read_forex_pair,
     symbol_class,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
+from deephaven_massive._enums import AssetClass, ClassFromPrefix
 from deephaven_massive._errors import LIBRARY_BUG
-from deephaven_massive._log_limits import BoundedLog
-from deephaven_massive._on_error import effect_of
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Mapping
 
 
 __all__ = [
@@ -62,7 +59,6 @@ __all__ = [
     "contracts_underlying",
     "index_underlyings",
     "is_index_option",
-    "log_unreadable",
     "unreadable_symbol_reason",
     "wire_spellings",
     "ws_symbol",
@@ -254,17 +250,6 @@ def index_underlyings(underlyings: pa.Array, cfi: pa.Array) -> pa.Array:
     return pc.if_else(on_index, prefixed, underlyings)
 
 
-_UNREADABLE_LIMIT: Final = 100
-"""The most unreadable wire spellings logged per process; one record then says the rest are
-not."""
-
-_logged_spellings: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.WARNING)
-"""The spellings logged under `OnError.LOG`: at WARNING."""
-
-_ignored_spellings: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.DEBUG)
-"""The spellings logged under `OnError.IGNORE`: at DEBUG only."""
-
-
 def unreadable_symbol_reason(text: str) -> str:
     """Say why a row whose symbol the library cannot read is withheld.
 
@@ -297,8 +282,8 @@ class WireSymbols:
 
     Built once per transport plan (REST converter, WebSocket channel plan, flat-file
     transform); immutable and shared by every thread of the plan. Its reader withholds a row
-    whose spelling it cannot read, and each stream or read applies its own policy to it
-    (`log_unreadable`), since one WebSocket plan serves streams of several policies.
+    whose spelling it cannot read, and each stream or read applies its own policy to it, since
+    one WebSocket plan serves streams of several policies.
 
     Attributes:
         dataset: The dataset name, for messages.
@@ -339,28 +324,3 @@ class WireSymbols:
         missing = pc.call_function("is_null", [symbols])
         unread = pc.call_function("and", [missing, pc.call_function("is_valid", [raw])])
         return ReadSymbols(symbols, unread)
-
-
-def log_unreadable(dataset: str, spellings: Iterable[str], setting: OnError) -> None:
-    """Log each new spelling the library cannot read, at the level its readers' setting gives.
-
-    Each spelling is logged once per process, a bounded number of them: at WARNING with the
-    library-bug text under `LOG`, at DEBUG under `IGNORE`. A reader under `RAISE` fails instead
-    (`withheld.failure_of`) and calls this only for the readers that go on.
-
-    Args:
-        dataset: The dataset that received them.
-        spellings: The distinct texts, as sent.
-        setting: The setting of the rows' readers: `LOG`, or `IGNORE`; for a WebSocket batch
-            several streams read, the loudest among those that go on.
-    """
-    log = _logged_spellings if effect_of(setting).level > logging.DEBUG else _ignored_spellings
-    for text in spellings:
-        log.log(
-            f"{dataset}\0{text}",
-            "%s: Massive sent the symbol %r, a spelling the library cannot read; its rows are "
-            "withheld. %s",
-            dataset,
-            text,
-            LIBRARY_BUG,
-        )

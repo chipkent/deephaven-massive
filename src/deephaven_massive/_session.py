@@ -61,6 +61,7 @@ from deephaven_massive._tables.execution_context import (
     has_script_query_scope,
     refuse_update_graph_thread,
 )
+from deephaven_massive._tables.problem_ledger import PROBLEMS
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.symbol_read_rows import SYMBOL_READS
 from deephaven_massive.namespaces import (
@@ -496,12 +497,11 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `BufferedRows`: rows waiting to reach their tables. Past 1,000,000, a WARNING is
               logged.
             - `Reconnects`, `LastMessageAt`, `NextReconnectAt`, `UpdatedAt`, and `LastError`.
-            - `SchemaDrift`: how Massive's messages differed from its documentation.
-              `channel:field+` is a field the documentation lacks. `channel:field-` is a documented
-              field that was missing. `channel:field?` is a value that didn't fit its column, and
-              `channel:field~` a whole number past 2**53 that its column would round: their rows
-              were withheld. A live table's row in `m.streams()` also counts the rows the library
-              couldn't read whole, which no table holds, as `<transport>:<n> rows withheld`.
+              `LastError` is the latest error. A WebSocket connection keeps it after it
+              reconnects.
+
+            A connection's problems, such as an outage, are rows of `m.problems()`, one for each
+            live table on it.
 
         Raises:
             SessionClosedError: If the session is closed.
@@ -542,13 +542,11 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `Loading`: how many symbols a watchlist's read has yet to read.
             - `RequestsPerCycle`: the REST requests of the latest poll.
             - `State`: `RUNNING`, `LOADING`, `DONE`, `FAILED`, `RELEASED`, or `CLOSED`.
-            - `Error`: why it failed, or the warnings that leave it running. A connection that is
-              down is one such warning.
-            - `Gaps`: the latest five spans in which rows may be missing, as `<start> to <end>` in
-              UTC. A recovered outage leaves one. A gap stays listed after `Error` clears.
+            - `Error`: why it failed or closed; null while it runs.
             - `CreatedAt`: when it started.
-            - `SchemaDrift`: how Massive's data differed from its documentation, in the notation
-              `connections()` describes, with each entry named by transport.
+
+            The problems of a table that keeps running, such as rows the library withheld or
+            an outage, are rows of `m.problems()` with its `StreamId`.
 
         Raises:
             SessionClosedError: If the session is closed.
@@ -639,6 +637,68 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
                 failed = m.symbol_reads().where("State = `FAILED`")
         """
         return self._core.diagnostics_view(self._core.diagnostics.symbol_reads, SYMBOL_READS)
+
+    @raises_through(SessionCore.diagnostics_view)
+    def problems(self) -> Table:
+        """Return a live table of every problem with the session's data feed.
+
+        Start here when a table looks wrong. Each row is one problem of one table: rows the
+        library left out because it couldn't read them whole, a watchlist value that isn't
+        Massive's ticker, a symbol Massive has no data for, a connection outage, a rate-limit
+        pause, a failed table. Rows of a problem that happens again add up in place. A problem
+        that lasts, such as an outage or a skipped watchlist value, is a span: its row gets an
+        `EndedAt` when it clears, such as when you fix or delete the watchlist row. Valid data
+        is never a problem: a null Massive sent, or a symbol with no rows in the range, has no
+        row here. The rows stay for the session's life. Each call returns a new table, which
+        keeps its final rows after `close()`. Every cause, and what to do about it:
+        https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#problems.
+
+        Returns:
+            A live table keyed by `StreamId`, `Cause`, `Symbol`, `Field`, and `SpanStart`, with
+            these columns:
+
+            - `FirstSeen` and `LastSeen`: when the problem first and last happened.
+            - `SpanStart`: when a span began; null for a problem that is no span.
+            - `EndedAt`: when a span ended; null while it lasts, and for a problem that is no
+              span.
+            - `Dataset`: the dataset's name, such as `stocks.trades`; null for a rate-limit
+              pause, which is the session's.
+            - `StreamId`: the table's row in `m.streams()`, or a `wait=True` read's own id.
+            - `Query`: the call that made the table, such as `m.stocks.trades('AAPL')`.
+            - `Symbol`: the symbol the problem concerns, as Massive sent it or you gave it.
+            - `Field`: the column or field the problem concerns. For a flat-file line, the
+              file; for a rate-limit pause, its `Bucket` in `m.rate_limits()`; for a refused
+              exchange, its name.
+            - `Cause`: why, such as `unconvertible_values` or `outage`. A cause named for an
+              `dm.ErrorPolicy` setting follows that setting.
+            - `Action`: what the library did: `WITHHELD` rows of Massive's data, `SKIPPED` a
+              symbol, exchange, or file line, `FAILED`, `GAP` (rows may be missing over the
+              span), `DELAYED` (rows come late), `PUBLISHED` (rows published without a field
+              Massive's documentation lacks), or `OVERFLOW`: the problems of a cause past the
+              10,000 rows one table keeps of it, or past 1,000 in one batch of rows, added
+              up in one row.
+            - `Rows`: the rows it counts: rows withheld, lines skipped, or contracts deferred.
+            - `Occurrences`: how many times it happened.
+            - `Policy`: the setting of its cause that applied, `log`, `ignore`, or `raise`;
+              null for a cause with no setting.
+            - `Source`: whose problem it is: `massive`, `user` for your input, or `library`.
+            - `Detail`: what happened, with the value, Massive's answer, or the reason.
+
+        Raises:
+            SessionClosedError: If the session is closed.
+            MassiveError: If the session's diagnostics tables failed when their writer thread
+                died.
+
+        Example:
+            ::
+
+                problems = m.problems()
+                lasting = problems.where("!isNull(SpanStart) && isNull(EndedAt)")
+                per_table = m.streams().natural_join(
+                    problems.count_by("Problems", "StreamId"), "StreamId"
+                )
+        """
+        return self._core.diagnostics_view(self._core.diagnostics.problems, PROBLEMS)
 
     def release(self, table: Table) -> None:
         """Release one live table now, instead of waiting for Python to reclaim it.

@@ -11,8 +11,10 @@ fails instead. It takes its own `on_error` argument, a `dm.OnError` member, rath
 session's `dm.ErrorPolicy`, since it needs no session. Each row's verdict and the
 effect of `on_error` on it are the scalar converters' own (`strict_converter`, `refusal`,
 `convert_under`), so a value converts, or is refused with one reason, the same way in a cell
-and in `canonical_symbol`. The tables it returns are what the symbol-table check in
-`_tables/watchlist.py` (`read_symbols`, `SymbolWatch`) then accepts.
+and in `canonical_symbol`. For a live input, a watch keeps the values it refuses now
+(`refused_values.py`), so a live table that follows the result reports them in
+`m.problems()`. The tables it returns are what the symbol-table check in `_tables/watchlist.py`
+(`read_symbols`, `SymbolWatch`) then accepts.
 
 Every function here runs on the caller's thread, inside a Deephaven execution context, and the
 formula it installs is pure, so Deephaven may run it on several threads at once.
@@ -37,6 +39,8 @@ from deephaven_massive._datasets.symbols import (
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention, _require_enum
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._on_error import effect_of
+from deephaven_massive._tables.refused_values import ConversionRule, RefusedValues, track_refused
+from deephaven_massive._tables.watchlist import SymbolWatch
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -88,7 +92,10 @@ def canonicalize_symbols(
     later converts as it arrives. Under `OnError.LOG`, the default, a bad row gets a null
     symbol, which every dataset ignores, and each bad value is logged once at WARNING, at most
     20 per table, so the table and every table made from it keep updating. Under
-    `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. Under
+    `OnError.IGNORE` it gets a null symbol the same way, logged at DEBUG only. When the returned
+    table is live and a dataset follows it, `m.problems()` lists each such value under the
+    cause `noncanonical_symbols` while a row holds it, and its row gets an `EndedAt` once you
+    fix or delete the row. Under
     `OnError.RAISE`, a current bad value raises `ValueError` here, and a bad row added later
     fails the live table, along with any dataset that follows it as a watchlist. This
     function's `on_error` is its own: a session's `dm.ErrorPolicy` doesn't apply to it.
@@ -160,7 +167,55 @@ def canonicalize_symbols(
     )
     # Deephaven resolves the formula's function from this call's local variables, by the name
     # the helper gives it.
-    return table.update([f"{column} = {massive_canonical_symbol.__name__}({column})"])
+    converted = table.update([f"{column} = {massive_canonical_symbol.__name__}({column})"])
+    if table.is_refreshing and not effect.fails:
+        _track_refused(table, converted, column=column, mode=mode, convert=convert)
+    return converted
+
+
+def _track_refused(
+    table: Table, converted: Table, *, column: str, mode: OnError, convert: Callable[[str], str]
+) -> None:
+    """Keep the values a live input table holds now that the converter refuses.
+
+    A live table that follows `converted` reports each such value in `m.problems()` until its
+    rows are fixed or deleted (`refused_values.py`). A watch of the input table keeps them
+    current; `converted` keeps the watch alive, and the values are forgotten with it.
+
+    Args:
+        table: The input table, refreshing.
+        converted: The table `canonicalize_symbols` returns.
+        column: The input's column of symbols.
+        mode: The call's `on_error`, `LOG` or `IGNORE`.
+        convert: The class's strict verdict (`strict_converter`).
+    """
+
+    def why(value: str) -> str | None:
+        return refusal(value, convert)
+
+    refused = RefusedValues(mode, why=why)
+    watch = SymbolWatch(
+        ConversionRule("canonicalize_symbols", column, why),
+        table,
+        _no_change,
+        stream_id=0,
+        on_invalid=lambda _message: None,  # the converted table fails with its input on its own
+        on_skipped=refused.change,
+    )
+    watch.keep_alive_with(converted)
+    watch.start()
+    refused.keep(watch)
+    track_refused(converted, refused)
+
+
+def _no_change(added: frozenset[str], removed: frozenset[str]) -> None:
+    """Ignore the input's convertible values: only the refused ones are kept.
+
+    Args:
+        added: Unused.
+        removed: Unused.
+    """
+    del added, removed
 
 
 def _arguments(

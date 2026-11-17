@@ -21,11 +21,11 @@ from deephaven_massive._datasets.symbols import is_canonical
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._massive import (
     RestClient,
-    RowFault,
     Transport,
     WireEntitlementError,
     source,
 )
+from deephaven_massive._tables.problem_events import ProblemCause
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping, Sequence
@@ -92,7 +92,9 @@ def _withheld(session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> li
     spellings: list[str] = []
 
     def problems(events: Sequence[ProblemEvent]) -> None:
-        spellings.extend(str(e.symbol) for e in events if e.cause is RowFault.UNREADABLE_SYMBOLS)
+        spellings.extend(
+            str(e.symbol) for e in events if e.cause is ProblemCause.UNREADABLE_SYMBOLS
+        )
 
     monkeypatch.setattr(session._core, "problems", problems)
     return spellings

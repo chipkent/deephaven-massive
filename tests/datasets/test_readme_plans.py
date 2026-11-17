@@ -105,7 +105,7 @@ def test_a_plan_one_page_lists_gets_a_column_with_empty_cells_elsewhere() -> Non
     changed = _with_page(base, SNAPSHOTS, {**plans, newest: "Real-time"})
     rows = _lines(plans_table(CATALOG, changed))
     assert rows[0][-1] == newest
-    assert [row[-1] for row in rows[2:]] == ["", "", "", "", "Real-time"]
+    assert [row[-1] for row in rows[2:]] == ["", "", "", "", "", "Real-time"]
 
 
 def test_a_page_with_different_terms_for_one_plan_shows_both() -> None:

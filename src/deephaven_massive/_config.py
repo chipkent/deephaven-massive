@@ -329,9 +329,8 @@ class MassiveConfig:
             - Any other `fetch()` or `history()` without `wait=True` counts the time it waits
               out Massive's rate limits.
 
-            While a stream, a `poll()` table, or a watchlist waits, its `m.streams()` row shows
-            why in `Error`. A failed table stays failed, so call the method again for a new one.
-            See
+            Until the limit passes, `m.problems()` lists the problem with the time it began. A
+            failed table stays failed, so call the method again for a new one. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
         flat_file_symbol_threshold: Sets how many symbols in a list make a `history()` call read
             Massive's flat files instead of a request per symbol, when both can serve it. Defaults

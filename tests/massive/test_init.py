@@ -32,6 +32,7 @@ EXPECTED_INTERFACE = [
     "RETRYABLE_STATUSES",
     "ReadColumn",
     "ReadPlan",
+    "Redactor",
     "RequestGovernor",
     "RestClient",
     "RestPath",

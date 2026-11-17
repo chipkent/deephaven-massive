@@ -1,4 +1,4 @@
-"""Regenerate the generated user docs: `docs/datasets/`, configuration settings, README plans.
+"""Regenerate the generated docs: `docs/datasets/`, settings, problem causes, README plans.
 
 Run it from a source checkout:
 
@@ -16,11 +16,13 @@ what it does to each table.
 
 It also rewrites the generated part of `docs/configuration.md`, between its two marker lines,
 from `MassiveConfig`: each setting's settings-file key, docstring entry, values, and default.
-And it rewrites README.md's plans table, between its two marker lines, from the plan tables of
-Massive's pages. The rest of both pages is written by hand and kept as it is.
+The rest of that page is written by hand and kept as it is. It rewrites the table of problem
+causes in `docs/troubleshooting.md` the same way, from `problem_events.CAUSES`, and README.md's
+plans table, between its two marker lines, from the plan tables of Massive's pages.
 All the logic is in `deephaven_massive._datasets.column_reference`,
-`deephaven_massive._datasets.readme_plans`, and `deephaven_massive._config`, where the unit
-tests and the coverage gate reach it; this script only wires it up.
+`deephaven_massive._datasets.readme_plans`, `deephaven_massive._tables.cause_reference`, and
+`deephaven_massive._config`, where the unit tests and the coverage gate reach it; this script
+only wires it up.
 
 Exit status: 0 on success; 1 when rendering or syncing raises, after the interpreter has
 printed the traceback. The process leaves through `os._exit` once its output is flushed,
@@ -66,6 +68,9 @@ from deephaven_massive._datasets.column_reference import (  # noqa: E402 - needs
     sync,
 )
 from deephaven_massive._datasets.readme_plans import with_plans_table  # noqa: E402 - needs the server above
+from deephaven_massive._tables.cause_reference import (  # noqa: E402 - needs the server above
+    with_causes_reference,
+)
 
 _DIRECTORY = Path(__file__).resolve().parent.parent / "docs" / "datasets"
 """The dataset reference's directory, found from this script's place in the checkout."""
@@ -73,6 +78,8 @@ _DIRECTORY = Path(__file__).resolve().parent.parent / "docs" / "datasets"
 _CONFIGURATION_PAGE = _DIRECTORY.parent / "configuration.md"
 """The settings page, whose generated part this script rewrites."""
 
+_TROUBLESHOOTING_PAGE = _DIRECTORY.parent / "troubleshooting.md"
+"""The troubleshooting page, whose table of problem causes this script rewrites."""
 _README = _DIRECTORY.parent.parent / "README.md"
 """The README, whose plans table this script rewrites."""
 
@@ -97,27 +104,26 @@ def main() -> None:
     if not result.written and not result.deleted:
         sys.stdout.write(f"{shown}/ is up to date\n")
     _rewrite(_CONFIGURATION_PAGE, _config.with_settings_reference)
+    _rewrite(_TROUBLESHOOTING_PAGE, with_causes_reference)
     provenance = _massive.provenance()
     _rewrite(_README, lambda page: with_plans_table(page, _session.CATALOG, provenance))
 
 
-def _rewrite(path: Path, rendered: Callable[[str], str]) -> None:
+def _rewrite(path: Path, render_part: Callable[[str], str]) -> None:
     """Rewrite a page's generated part, and say whether it changed.
 
     Args:
         path: The page.
-        rendered: Returns the page's text with its generated part rendered again.
-
-    Side effects: writes the page when its text changed, and one line to standard output.
+        render_part: Returns the page with its generated part rendered again.
     """
     page = path.read_text(encoding="utf-8")
-    text = rendered(page)
-    shown = path.relative_to(_DIRECTORY.parent.parent)
-    if text == page:
-        sys.stdout.write(f"{shown} is up to date\n")
+    rendered = render_part(page)
+    shown_page = path.relative_to(_DIRECTORY.parent.parent)
+    if rendered == page:
+        sys.stdout.write(f"{shown_page} is up to date\n")
     else:
-        path.write_text(text, encoding="utf-8")
-        sys.stdout.write(f"wrote {shown}\n")
+        path.write_text(rendered, encoding="utf-8")
+        sys.stdout.write(f"wrote {shown_page}\n")
 
 
 if __name__ == "__main__":

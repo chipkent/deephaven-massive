@@ -127,6 +127,12 @@ ROWS: Final = (
         "News", "reference.news", (f"{_REST}/news.md",), ("follow-the-news", "stop-live-tables")
     ),
     PlansRow(
+        "Ticker details",
+        "reference.ticker_details",
+        (f"{_REST}/tickers/ticker-overview.md",),
+        ("see-problems",),
+    ),
+    PlansRow(
         "Snapshots",
         "stocks.snapshots",
         (f"{_REST}/snapshots/full-market-snapshot.md",),

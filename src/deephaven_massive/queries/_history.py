@@ -319,6 +319,7 @@ class HistoryQuery(Query):
                 symbols,
                 query=repr(self),
                 noncanonical=self._request.on_error.noncanonical_symbols,
+                call=call,
             )
         # A dataset with a path per symbol class takes its days from its symbols' class.
         request = replace(self._request, start=first, end=last, symbols=symbols)

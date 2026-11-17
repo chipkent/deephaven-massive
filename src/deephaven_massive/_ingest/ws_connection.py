@@ -10,12 +10,14 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   Massive and names the fix for the connection's feed (`_refused`); a connection never moves
   to another host. A fatal failure (a rejected key, a handshake error retrying cannot fix)
   fails every stream on it.
-- **Rows, drift, and its row.** Rows go to the flush thread; drift, and the rows the client
-  dropped because a key could not be read, are recorded on the connection's `SchemaDrift` and
-  handed to the flush thread, which logs them and counts the drops; a dropped row fails no
-  stream. The connection logs one WARNING per outage, and one
-  when it goes silent during its market's trading hours (`ws_silence.SilenceCheck`), each with its
-  recovery at INFO. The connection's `m.connections()` row is rewritten as its state changes, at
+- **Rows, drift, and its row.** Rows go to the flush thread, with the client's marks of the
+  rows it could not read; a field Massive's documentation lacks is handed to it too, and it
+  reports both as the streams' problems; a withheld row fails no stream unless its cause is
+  `RAISE`. Each stream's outage, quiet feed, options-cap deferral, and unacknowledged topics
+  are spans of its problems in `m.problems()` (`_report_spans`). The connection logs one
+  WARNING per outage, and one when it goes silent during its market's trading hours
+  (`ws_silence.SilenceCheck`), each with its recovery at INFO. The connection's `m.connections()`
+  row is rewritten as its state changes, at
   most once a second while messages flow, and its traffic is logged as a summary every
   `SUMMARY_INTERVAL` seconds.
 - **Outages and silence.** A live table never shows stale data as if it were current. While
@@ -61,7 +63,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Final, Protocol, assert_never
+from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, assert_never
 
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
@@ -104,13 +106,12 @@ from deephaven_massive._massive import (
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
-    DriftRegistry,
-    NotePart,
     StreamUpdate,
     describe_symbols,
     utc_text,
 )
 from deephaven_massive._tables.held_rows import HeldRows
+from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink
 
 if TYPE_CHECKING:
@@ -124,6 +125,7 @@ if TYPE_CHECKING:
     from deephaven_massive._ingest.ws import WsConnections
     from deephaven_massive._massive import RowMarks, Source, Status
     from deephaven_massive._tables.futures_dates import FuturesSessionDates
+    from deephaven_massive._tables.problem_events import Problem
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import HostDecision
 
@@ -189,6 +191,9 @@ _TAKEN_HELP: Final = (
     "#live-table-messages"
 )
 """The troubleshooting section the error of a taken connection points to."""
+
+_Current: TypeAlias = "Mapping[str, tuple[str | None, str | None, str, int]]"
+"""The spans of one cause that hold now for a stream, as `SpanTracker.update` takes them."""
 
 _BACKLOG_ROW_DELAY: Final = 1.0
 """Seconds after a connection's row showed buffered rows that it is written again."""
@@ -388,9 +393,10 @@ class _Episodes:
             `max_outage`, by id.
         gap_since: When each down stream's rows may have started to go missing (seconds since
             the epoch): the outage's start, or the stream's open when it opened during the
-            outage. Its recovery records the gap from then to now in its `Gaps`.
+            outage: its `outage` span's start.
         data_since_open: Whether a data frame arrived since the current socket opened.
-        down_note: The `Error` of a down stream during the outage under way, or None.
+        down_note: The detail of a down stream's `outage` span during the outage under way,
+            or None.
         last_frame_at: When the last frame of any kind arrived or the socket opened
             (nanoseconds since the epoch); data has the connection's own `_last_message_at`.
         failure: The error the outage fails its streams with, made at its first failure, so
@@ -457,7 +463,6 @@ class Connection:
         self.asset_class: Final = asset_class
         self.decision: Final = decision
         self.path: Final = f"/{asset_class.value}"
-        self._key: Final = (Transport.WS.value, asset_class.value, family.value)
         self.exec_ctx: Final = exec_ctx
         self._group = group
         self._lock: Final = group.lock
@@ -512,8 +517,8 @@ class Connection:
         self._streams: dict[int, ConnectionStream] = {}
         self._required: dict[str, frozenset[str]] = {}
         self._idle: Timer | None = None
-        # Each stream's notes as its `Error` shows them: its deferred options topics and its
-        # topics Massive has not acknowledged; a stream with neither has no entry.
+        # Each stream's deferred options topics and topics Massive has not acknowledged, as its
+        # spans last showed them; a stream with neither has no entry.
         self._notes_shown: dict[int, tuple[int, frozenset[str]]] = {}
         self._state = ConnectionState.WAITING  # until a stream wants a topic (`_after_change`)
         self._reconnects = 0
@@ -521,10 +526,11 @@ class Connection:
         self._message_row_at = 0
         self._next_reconnect_at: int | None = None
         self._last_error: str | None = None
-        self._drift: str | None = None
         self._summary: Timer | None = None
         self._traffic = _Traffic()
-        self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
+        # Each stream's span problems the connection reports (an outage, a quiet feed, the
+        # options cap, unacknowledged topics), by cause; loop-confined.
+        self._spans: dict[int, dict[ProblemCause, SpanTracker]] = {}
         self._ended = False
         self._episodes = _Episodes()
         self._silence = SilenceCheck(url, asset_class, on_note=self._show_silence_note)
@@ -556,16 +562,6 @@ class Connection:
         """
         self.leases -= 1
         self.users[owner] -= 1
-
-    @property
-    def key(self) -> tuple[str, str, str]:
-        """The connection's owner key in the drift registry: transport, class, and family.
-
-        Fixed when the connection is created, from the family of the stream that created it,
-        so a stream of another family that joins later (an FMV stream on a `business.`
-        connection opened for trades) never moves the connection's drift to a new owner.
-        """
-        return self._key
 
     # --- lifecycle (any thread) ----------------------------------------------------------------
 
@@ -748,6 +744,7 @@ class Connection:
             return
         self.flusher.routes.remove(stream_id)
         self._notes_shown.pop(stream_id, None)
+        self._end_spans(stream, self._spans.pop(stream_id, {}))
         self._release_down(stream_id)
         self._episodes.expired.discard(stream_id)
         self.subscriptions.remove(stream.topics, static=stream.static)
@@ -922,8 +919,8 @@ class Connection:
         # A channel's data in a frame holds at least one row.
         self.flusher.rows(channel, rows, marks, generation=generation)
         self._arm_backlog_row()  # the row write below may be throttled
-        if drift.fields_drifted:
-            self._record_drift(channel, drift)
+        if drift.extra:  # a field Massive's documentation lacks; the rest is the rows' marks
+            self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}")
         self._last_message_at = now
         if now - self._message_row_at >= _MESSAGE_ROW_NS:
             self._write_row()
@@ -996,7 +993,7 @@ class Connection:
         )
 
     def _show_silence_note(self) -> None:
-        """Show the silence's note on every stream, or clear it (`SilenceCheck.note`)."""
+        """Report the silence as every stream's `quiet_feed` span, or end it (`SilenceCheck`)."""
         self._show_outage_notes(list(self._streams))
 
     def _warn_down(self, *, waiting_slot: bool, at: float) -> None:
@@ -1072,6 +1069,7 @@ class Connection:
             self._cancel_outage_timers()
             self._streams.clear()
             self._notes_shown.clear()
+            self._spans.clear()  # each stream failed or closed, which ends its spans
 
     def _taken(self, next_at: float) -> None:
         """Apply `connection_taken` after another connection with the key took this one.
@@ -1338,19 +1336,6 @@ class Connection:
                 )
         return hint
 
-    def _record_drift(self, channel: str, drift: DriftReport) -> None:
-        """Add a frame's drift to the connection's row and hand it to the flush thread.
-
-        Args:
-            channel: The channel.
-            drift: Its drift in the frame.
-        """
-        text = self._drift_seen.record(self.key, channel, drift)
-        if text is not None:
-            self._drift = text
-            self._write_row()
-        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}")
-
     # --- loop thread: outages and notes --------------------------------------------------------
 
     def _slot_text(self) -> str:
@@ -1536,20 +1521,20 @@ class Connection:
             deferred=subscriptions.deferred,
         )
         recovered = [s for s in episodes.down if self._recovered(self._streams[s], topics)]
-        now = time.time_ns()
-        gaps = {s: (int(episodes.gap_since[s] * 1e9), now) for s in recovered}
+        starts = {s: episodes.gap_since[s] for s in recovered}
         for stream_id in recovered:
             self._release_down(stream_id)
         if recovered:
             logger.debug(
                 "%s: streams %s recovered: data again, their topics acknowledged, or, for a "
                 "stream that never received a row, each topic acknowledged or in NO_ACK; each "
-                "records the gap since its rows may have gone missing in Gaps: %s",
+                "ends its outage span in m.problems(), which began when its rows may have gone "
+                "missing: %s",
                 self.url,
                 bounded_list(recovered),
-                bounded_list(f"{s} from {utc_text(start / 1e9)}" for s, (start, _) in gaps.items()),
+                bounded_list(f"{s} from {utc_text(start)}" for s, start in starts.items()),
             )
-            self._show_outage_notes(recovered, gaps=gaps)
+            self._show_outage_notes(recovered)
         if episodes.down or not (episodes.data_since_open or self.subscriptions.acknowledged):
             return
         logger.log(
@@ -1572,36 +1557,78 @@ class Connection:
         for stream_id in list(self._episodes.down):
             self._release_down(stream_id)
 
-    def _show_outage_notes(
-        self, stream_ids: Iterable[int], *, gaps: Mapping[int, tuple[int, int]] | None = None
-    ) -> None:
-        """Write each stream's outage and silence parts of its `Error`, or clear them.
+    def _show_outage_notes(self, stream_ids: Iterable[int]) -> None:
+        """Report each stream's outage and quiet-feed spans, or end them.
 
-        Only these two parts change (`NotePart.OUTAGE`, `NotePart.QUIET`): a down stream shows
-        the outage's note, every stream the silence's while it lasts, and the other parts (the
-        options cap, a stale symbol) stay as their sources left them. A recovered stream's
-        outage note goes, and its gap is recorded in its `Gaps` in the same update, so the
-        record of the missing rows outlasts the note.
+        A down stream has an `outage` span from when its rows may have gone missing
+        (`_Episodes.gap_since`) until it recovers; every stream a `quiet_feed` span while the
+        connection hears nothing during trading hours. The other spans (the options cap, a
+        stale symbol) are their sources' own.
 
         Args:
-            stream_ids: The streams whose notes may have changed.
-            gaps: The gap each recovered stream records, `(start, end)` in epoch nanoseconds,
-                by stream id; None for none.
+            stream_ids: The streams whose spans may have changed.
         """
         episodes = self._episodes
-        ended = gaps or {}
-        self._update_streams(
-            {
-                stream_id: StreamUpdate(
-                    notes={
-                        NotePart.OUTAGE: episodes.down_note if stream_id in episodes.down else None,
-                        NotePart.QUIET: self._silence.note,
-                    },
-                    gap=ended.get(stream_id),
-                )
-                for stream_id in stream_ids
+        silence = self._silence
+        quiet = {} if silence.note is None else {"quiet": (None, None, silence.note, 0)}
+        changes: dict[int, dict[ProblemCause, tuple[_Current, int | None]]] = {}
+        for stream_id in stream_ids:
+            note = episodes.down_note if stream_id in episodes.down else None
+            since = episodes.gap_since.get(stream_id)
+            changes[stream_id] = {
+                ProblemCause.OUTAGE: (
+                    {} if note is None else {"outage": (None, None, note, 0)},
+                    None if since is None else int(since * 1e9),
+                ),
+                ProblemCause.QUIET_FEED: (quiet, silence.quiet_at),
             }
-        )
+        self._report_spans(changes)
+
+    def _report_spans(
+        self, changes: Mapping[int, Mapping[ProblemCause, tuple[_Current, int | None]]]
+    ) -> None:
+        """Hand each stream's changed spans to its own session, one call per session.
+
+        Args:
+            changes: Per stream, per cause, the spans that hold now (`SpanTracker.update`) and
+                when a span that holds anew began (None for now).
+        """
+        by_core: dict[SessionCore, list[Problem]] = {}
+        for stream_id, causes in changes.items():
+            # Every caller passes streams the connection holds: a stream held down leaves
+            # `_episodes.down` when it leaves `_streams`.
+            stream = self._streams[stream_id]
+            core = stream.sink.core()
+            if core is None:  # a freed session shows no problem
+                continue
+            trackers = self._spans.setdefault(stream_id, {})
+            for cause, (current, since) in causes.items():
+                tracker = trackers.get(cause)
+                if tracker is None:
+                    if not current:
+                        continue
+                    tracker = trackers[cause] = SpanTracker(
+                        cause, dataset=stream.plan.dataset, stream_id=stream_id, where=self.url
+                    )
+                spans = tracker.update(current, since=since)
+                if spans is not None:
+                    by_core.setdefault(core, []).append(spans)
+        for core, found in by_core.items():
+            core.problems(found)
+
+    def _end_spans(
+        self, stream: ConnectionStream, trackers: Mapping[ProblemCause, SpanTracker]
+    ) -> None:
+        """End the spans of a stream that leaves the connection.
+
+        Args:
+            stream: The stream.
+            trackers: Its spans, by cause.
+        """
+        core = stream.sink.core()
+        ended = [spans for t in trackers.values() if (spans := t.update({})) is not None]
+        if core is not None and ended:
+            core.problems(ended)
 
     @staticmethod
     def _no_ack_text(missing: frozenset[str]) -> str:
@@ -1623,7 +1650,7 @@ class Connection:
         )
 
     def _cap_text(self) -> str:
-        """Return the `Error` of an options stream whose contracts the cap defers.
+        """Return the `Detail` of an options stream's `options_cap` span.
 
         Returns:
             The text, with the topics wanted and deferred now.
@@ -1656,14 +1683,14 @@ class Connection:
         self._write_row()
 
     def _show_notes(self, *, opened: Collection[int] = ()) -> None:
-        """Publish the admitted options topics, and show each stream's notes in its `Error`.
+        """Publish the admitted options topics, and report each stream's cap and no-ack spans.
 
-        A stream's notes are its options topics the cap defers (with `Deferred`, the stream's
+        A stream's spans come from its options topics the cap defers (with `Deferred`, the stream's
         own deferred topics, one per contract since a stream reads one channel) and its topics
         Massive has not acknowledged after a re-send (`NO_ACK`). Neither fails the stream; each
-        is its own part of the `Error` (`NotePart.CAP`, `NotePart.NO_ACK`), shown beside the
-        stream's other warnings and never replacing them. A note is cleared once it no longer
-        holds: room frees, a late acknowledgement arrives, or a new generation starts. On
+        is a span of its problems (`options_cap`, `unacknowledged_topics`), opened and ended
+        alone. A span ends once it no longer holds: room frees, a late acknowledgement arrives,
+        or a new generation starts. On
         `/options`, the admitted set is published, and an opening stream's pending topics
         dropped, in one section of the group's lock, so a verb's cap check never sees the
         stream's topics in neither.
@@ -1682,6 +1709,7 @@ class Connection:
         if not deferred and not no_ack and not self._notes_shown:
             return
         updates: dict[int, StreamUpdate] = {}
+        spans: dict[int, dict[ProblemCause, tuple[_Current, int | None]]] = {}
         for stream in self._streams.values():
             count = len(stream.topics & deferred) if deferred else 0
             missing = stream.topics & no_ack if no_ack else frozenset()
@@ -1695,15 +1723,22 @@ class Connection:
             else:
                 self._notes_shown[stream.stream_id] = note
             self._log_note(stream, count=count, old_count=old_count, missing=missing)
-            # Two parts of the stream's `Error`, each set or cleared alone, beside its others.
-            notes = {
-                NotePart.CAP: self._cap_text() if count else None,
-                NotePart.NO_ACK: self._no_ack_text(missing) if missing else None,
+            # Two spans of the stream's problems, each opened or ended alone.
+            spans[stream.stream_id] = {
+                ProblemCause.OPTIONS_CAP: (
+                    {"cap": (None, None, self._cap_text(), count)} if count else {},
+                    None,
+                ),
+                ProblemCause.UNACKNOWLEDGED_TOPICS: (
+                    {"no_ack": (None, None, self._no_ack_text(missing), len(missing))}
+                    if missing
+                    else {},
+                    None,
+                ),
             }
-            update = StreamUpdate(notes=notes)
             if options:
-                update = replace(update, deferred=count)
-            updates[stream.stream_id] = update
+                updates[stream.stream_id] = StreamUpdate(deferred=count)
+        self._report_spans(spans)
         if updates:
             self._update_streams(updates)
 
@@ -1819,7 +1854,6 @@ class Connection:
                     next_reconnect_at=self._next_reconnect_at,
                     updated_at=now,
                     last_error=self._last_error,
-                    schema_drift=self._drift,
                 )
                 self._rows[family] = row
                 for owner, core in users:

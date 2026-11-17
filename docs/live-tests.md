@@ -141,7 +141,7 @@ prints up to four sections:
 
 | Section | What it holds |
 |---|---|
-| `smoke coverage` | The smoke tests that passed, passed with drift, were refused, were skipped, and failed. Refusals are grouped by subscription and call, with Massive's text once. Drift is a library WARNING or a `SchemaDrift`, each listed. |
+| `smoke coverage` | The smoke tests that passed, passed with drift, were refused, were skipped, and failed. Refusals are grouped by subscription and call, with Massive's text once. Drift is a library WARNING or a row of `m.problems()`, each listed. |
 | `open questions` | The questions the run touched, in groups: `verified`, `ran, evidence to read`, `refused by Massive`, `not listed as delayed`, and `not verified`. Under each refused or unlisted question, each distinct reason follows, Massive's refusal or the library's message quoted. |
 | `live debug log` | The path of the run's debug log |
 | `live evidence` | The evidence file's lines again |
@@ -168,7 +168,7 @@ one, the same section says where. Don't share that log, and open an issue that n
 
 ## Read the hand checks after each run
 
-Read the evidence of these five tests after every run, and open an issue as the table says.
+Read the evidence of these checks after every run, and open an issue as the table says.
 Find each one's lines under `live evidence` at the end of the run, or in
 `live-evidence-<UTC time>.log` ([Read the end of a run](#read-the-end-of-a-run)):
 
@@ -179,6 +179,9 @@ Find each one's lines under `live evidence` at the end of the run, or in
 | `test_index_day_windows_and_files_across_many_indices` | Is the library right to end index day bars at 01:00 New York time? | Always. Attach its verdict lines (a), (b), and (c). |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | Does each futures bar of a session or longer hold the whole sessions that open in its UTC days? | Always. Attach its `VERDICT` lines. |
 | `test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent` | Is `GreeksGamma` per $0.01, as Massive's description says? It compares each call with Black-Scholes gamma. | A call matches another unit. |
+| `test_what_massive_calls_the_overnight_stock_session` | What does `/v1/marketstatus/now` report during Massive's overnight stock session, beside SPY's snapshot `market_status`? Run it from 21:00 to 04:00 New York time on a night before a trading day. | The test fails on a status the tests don't know, or `market` reads `closed` while the snapshot says `overnight_trading`. |
+| `test_which_day_massive_counts_overnight_stock_trades_in` | Which trading day does Massive's SPY day bar count a 21:00 trade in? It compares the day bar's open with the first minute's open from 21:00, from midnight, and from 04:00. Run it after 20:00 on the trading day that follows an overnight session. | Always, once it no longer skips: the library dates a 21:00 trade by its calendar day until this is read. |
+| A quiet stocks connection, in the [`stream-day` group](#live-run-groups) of a tester's results | What does Massive send on a stocks connection while no stock trades? [Live-run groups](#live-run-groups) says what to read. | Always, with the longest gap between `status` lines. |
 
 To run one alone, use `-k` with part of its name:
 

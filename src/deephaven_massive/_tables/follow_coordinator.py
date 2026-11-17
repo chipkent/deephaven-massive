@@ -100,13 +100,13 @@ from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
     SYMBOLS_LISTED,
-    NotePart,
     StreamUpdate,
     symbol_list_text,
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import QueueWorker
 from deephaven_massive._tables.poll import SymbolRowError
+from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
@@ -119,6 +119,7 @@ if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._tables.followed_read import FollowPlan
     from deephaven_massive._tables.poll import PollClock
+    from deephaven_massive._tables.problem_events import Problem
     from deephaven_massive._tables.read_pool import ReadPool
     from deephaven_massive._tables.transports import SymbolOutcome
 
@@ -153,14 +154,11 @@ _FOLLOWING: Final = frozenset(
 _ENDED: Final = frozenset({SymbolReadState.FAILED, SymbolReadState.REMOVED, SymbolReadState.CLOSED})
 """The states a stop leaves as they are; every other becomes `STOPPED`."""
 
-_CAUSES_SHOWN: Final = 3
-"""The most causes one `Error` part of `m.streams()` names."""
-
-_SYMBOLS_SHOWN: Final = 5
-"""The most symbols one cause of an `Error` part lists."""
-
-_CAUSE_SHOWN: Final = 200
-"""The longest text of one cause in `Error`, in characters."""
+_TROUBLE_CAUSES: Final = {
+    SymbolReadState.RETRYING: ProblemCause.SYMBOL_READ_RETRYING,
+    SymbolReadState.FAILED: ProblemCause.SYMBOL_READ_FAILED,
+}
+"""The cause of each state whose symbols are spans of `m.problems()`."""
 
 
 class FollowedReadRows(Protocol):
@@ -202,6 +200,14 @@ class FollowingCore(Protocol):
 
         Args:
             rows: The rows.
+        """
+        ...
+
+    def problems(self, problems: Sequence[Problem], /) -> None:
+        """Report problems for `m.problems()` (`SessionCore.problems`).
+
+        Args:
+            problems: The problems.
         """
         ...
 
@@ -340,14 +346,6 @@ class _Changed:
 
 
 @dataclass(frozen=True, slots=True)
-class _Skipped:
-    """The table's values the result skips now, because they are not Massive's tickers."""
-
-    read: CoordinatedRead
-    text: str | None
-
-
-@dataclass(frozen=True, slots=True)
 class _Invalid:
     """A bad row under `noncanonical_symbols=RAISE`, or the symbol table's own failure."""
 
@@ -388,7 +386,7 @@ class _Wake:
 
 
 _Message: TypeAlias = (
-    "_Follow | _Baseline | _Changed | _Skipped | _Invalid | _Began | _Outcome | _Stop | _Wake"
+    "_Follow | _Baseline | _Changed | _Invalid | _Began | _Outcome | _Stop | _Wake"
 )
 
 
@@ -471,9 +469,8 @@ class _Progress:
         rows: Their rows in the result, in all.
         troubled: Of them, the `RETRYING` and `FAILED` ones, by state, then by cause.
         members_changed: Whether `members` changed since `symbols` was last made.
-        troubled_changed: Whether `troubled` changed since `notes` were last made.
+        troubled_changed: Whether `troubled` changed since its spans were last reported.
         symbols: The `SymbolCount` and `Symbols` shown (`symbol_list_text`).
-        notes: The `Error` parts shown (`FollowCoordinator._note`).
     """
 
     members: set[str] = field(default_factory=set)
@@ -485,7 +482,6 @@ class _Progress:
     members_changed: bool = True
     troubled_changed: bool = True
     symbols: tuple[int | None, str] = (0, "")
-    notes: dict[NotePart, str | None] = field(default_factory=dict)
 
     def count(self, name: str, symbol: _Symbol) -> None:
         """Replace what a symbol added to the progress with what it adds now.
@@ -538,7 +534,7 @@ class _Result:
         dirty: The symbols whose `m.symbol_reads()` row changed since it was last written.
         warned: The causes of failure already logged at WARNING for the result.
         transports: The sources its reads have used.
-        skipped: The text of its skipped symbol-table values, or None.
+        spans: Its `symbol_read_retrying` and `symbol_read_failed` spans of `m.problems()`.
         progress: Its `m.streams()` progress, kept current by `_show`.
         shown: The `m.streams()` progress last written, to skip an unchanged write.
         decided_at_step: The latest update cycle of the symbol table whose change the
@@ -564,7 +560,7 @@ class _Result:
     dirty: set[str] = field(default_factory=set)
     warned: set[str] = field(default_factory=set)
     transports: set[str] = field(default_factory=set)
-    skipped: str | None = None
+    spans: dict[SymbolReadState, SpanTracker] = field(default_factory=dict)
     progress: _Progress = field(default_factory=_Progress)
     shown: object = None
     call_time: dict[str, MassiveError | None] | None = None
@@ -808,15 +804,6 @@ class FollowCoordinator:
         """
         self.post(_Changed(read, added, removed, step))
 
-    def skipped(self, read: CoordinatedRead, text: str | None) -> None:
-        """Queue the text of the table's skipped values, or None once none is skipped.
-
-        Args:
-            read: The result.
-            text: As `skipped_rows_text` writes it, or None.
-        """
-        self.post(_Skipped(read, text))
-
     def invalid(self, read: CoordinatedRead, message: str) -> None:
         """Queue a bad row under `RAISE`, or the symbol table's failure: the result fails.
 
@@ -929,8 +916,6 @@ class FollowCoordinator:
         """
         if isinstance(message, (_Baseline, _Changed)):
             self._membership(result, message)
-        elif isinstance(message, _Skipped):
-            result.skipped = message.text
         elif isinstance(message, _Invalid):
             self._fail(result, SymbolRowError(message.message))
         elif isinstance(message, _Began):
@@ -1564,13 +1549,10 @@ class FollowCoordinator:
             progress.symbols = symbol_list_text(len(progress.members), first)
         if progress.troubled_changed:
             progress.troubled_changed = False
-            progress.notes = {
-                NotePart.RETRYING_SYMBOLS: self._note(result, SymbolReadState.RETRYING),
-                NotePart.FAILED_SYMBOLS: self._note(result, SymbolReadState.FAILED),
-            }
+            self._report_troubled(result)
         count, text = progress.symbols
-        loading, rows_now, notes = progress.loading, progress.rows, progress.notes
-        shown = (text, count, loading, rows_now, tuple(notes.items()), result.skipped)
+        loading, rows_now = progress.loading, progress.rows
+        shown = (text, count, loading, rows_now)
         if shown == result.shown:
             return
         result.shown = shown
@@ -1581,9 +1563,6 @@ class FollowCoordinator:
                 rows_published=rows_now,
                 symbol_count=count,
                 symbols=text,
-                notes=notes,
-                skipped=result.skipped,
-                clear_skipped=result.skipped is None,
                 loading=loading,
                 transport=transport,
             ),
@@ -1619,41 +1598,32 @@ class FollowCoordinator:
         )
 
     @staticmethod
-    def _note(result: _Result, state: SymbolReadState) -> str | None:
-        """Return the `Error` part of the table's symbols in one state, grouped by cause.
+    def _report_troubled(result: _Result) -> None:
+        """Report the result's `RETRYING` and `FAILED` symbols as spans of `m.problems()`.
 
-        Each cause shows the error text of its first symbol in name order, and its first
-        symbols by name.
+        Each symbol in one of those states is one span, `symbol_read_retrying` or
+        `symbol_read_failed`, with its latest error; a span ends when the symbol leaves the
+        state (it is read, retried, removed, or the result stops).
 
         Args:
-            result: The result's state, whose progress groups the symbols.
-            state: `RETRYING` or `FAILED`.
-
-        Returns:
-            Such as `"2 symbols failed (delete and re-add a row to read one again):
-            EntitlementError: HTTP 403 ...: AAPL, MSFT"`, or None when no symbol is in `state`.
+            result: The result's state.
         """
-        groups = result.progress.troubled[state]
-        if not groups:
-            return None
-        total = sum(len(names) for names in groups.values())
-        parts = []
-        for cause in sorted(groups)[:_CAUSES_SHOWN]:
-            names = heapq.nsmallest(_SYMBOLS_SHOWN, groups[cause])
-            shown = ", ".join(names)
-            hidden = len(groups[cause]) - _SYMBOLS_SHOWN
-            more = f" (+{hidden} more)" if hidden > 0 else ""
-            text = result.symbols[names[0]].error or ""
-            text = text if len(text) <= _CAUSE_SHOWN else text[: _CAUSE_SHOWN - 1] + "…"
-            parts.append(f"{text}: {shown}{more}")
-        if len(groups) > _CAUSES_SHOWN:
-            parts.append(f"{len(groups) - _CAUSES_SHOWN} more causes")
-        noun = "symbol" if total == 1 else "symbols"
-        if state is SymbolReadState.FAILED:
-            head = f"{total} {noun} failed (delete and re-add a row to read one again)"
-        else:
-            head = f"{total} {noun} retrying after a failure that may pass"
-        return f"{head}: {'; '.join(parts)}"
+        read = result.read
+        found = []
+        for state, cause in _TROUBLE_CAUSES.items():
+            tracker = result.spans.get(state)
+            if tracker is None:
+                tracker = result.spans[state] = SpanTracker(
+                    cause, dataset=read.dataset, stream_id=read.call, where=f"call {read.call}"
+                )
+            names = {name for names in result.progress.troubled[state].values() for name in names}
+            spans = tracker.update(
+                {name: (name, None, result.symbols[name].error or "", 0) for name in names}
+            )
+            if spans is not None:
+                found.append(spans)
+        if found:
+            read.core.problems(found)
 
     def _forget(self, result: _Result) -> None:
         """Forget a result once its blink table has shut down: no event of it matters any more.

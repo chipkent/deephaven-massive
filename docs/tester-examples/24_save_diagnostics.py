@@ -5,6 +5,7 @@ from deephaven.pandas import to_pandas
 diagnostics = os.path.expanduser("~/massive-test/diagnostics")
 os.makedirs(diagnostics, exist_ok=True)
 tables = {
+    "problems": m.problems(),
     "streams": m.streams(),
     "connections": m.connections(),
     "rate_limits": m.rate_limits(),

@@ -1024,13 +1024,23 @@ def test_the_streams_row_shows_loading_then_running(
     massive_session.release(result)
 
 
-def test_the_streams_error_groups_failed_and_retrying_symbols_by_cause(
+def troubled(problem_rows: Callable[[], list[dict[str, Any]]]) -> list[tuple[object, ...]]:
+    # The read's symbol-read spans as (cause, symbol, detail, ended), in a stable order.
+    return [
+        (r["Cause"], r["Symbol"], r["Detail"], r["EndedAt"] is not None)
+        for r in problem_rows()
+        if r["Cause"] in {"symbol_read_failed", "symbol_read_retrying"}
+    ]
+
+
+def test_failed_and_retrying_symbols_are_spans_with_their_errors(
     watchlist: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     clock: FakeClock,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
+    problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     script = Script(massive_session)
     names = ["A", "B", "C", "D", "E", "F", "G"]
@@ -1042,40 +1052,100 @@ def test_the_streams_error_groups_failed_and_retrying_symbols_by_cause(
     wait_state(massive_session, "R", SymbolReadState.RETRYING)
     for name in [*names, "H"]:
         wait_state(massive_session, name, SymbolReadState.FAILED)
+    expected = [
+        *[("symbol_read_failed", name, "HTTP 403: not in the plan", False) for name in names],
+        ("symbol_read_failed", "H", "HTTP 404: gone", False),
+        ("symbol_read_retrying", "R", "HTTP 503: busy", False),
+    ]
+    until(lambda: troubled(problem_rows) == expected)
+    # Neither fails the read: its Error names only why it stopped.
+    assert stream(massive_session, drain, dh_to_pylist)["Error"] is None
+    massive_session.release(result)
+
+
+def test_a_retrying_symbol_removed_from_the_watchlist_ends_its_span(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # AAPL waits for its retry when its row is deleted: no read of it is missing any more, so
+    # its span ends, and no failed span opens. MSFT lands, so the table lives on.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(503, "busy")]
+    wl = watchlist("AAPL", "MSFT")
+    result = follow(massive_session, wl, script)
+    wait_state(massive_session, "MSFT", SymbolReadState.DONE)
+    wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
     until(
-        lambda: "8 symbols failed" in (stream(massive_session, drain, dh_to_pylist)["Error"] or "")
+        lambda: (
+            troubled(problem_rows) == [("symbol_read_retrying", "AAPL", "HTTP 503: busy", False)]
+        )
     )
-    error = stream(massive_session, drain, dh_to_pylist)["Error"]
-    assert error == (
-        "1 symbol retrying after a failure that may pass: HTTP 503: busy: R; "
-        "8 symbols failed (delete and re-add a row to read one again): "
-        "HTTP 403: not in the plan: A, B, C, D, E (+2 more); HTTP 404: gone: H"
+    delete(wl, "AAPL")
+    wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
+    until(
+        lambda: troubled(problem_rows) == [("symbol_read_retrying", "AAPL", "HTTP 503: busy", True)]
     )
     massive_session.release(result)
 
 
-def test_the_streams_error_names_at_most_three_causes(
-    *,
+def test_a_retrying_symbol_s_span_ends_when_its_retry_lands(
     watchlist: Callable[..., InputTable],
+    *,
     massive_session: dm.MassiveSession,
-    drain: Callable[[], None],
-    dh_to_pylist: ToList,
+    clock: FakeClock,
+    problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     script = Script(massive_session)
-    statuses = {"A": 400, "B": 401, "C": 403, "D": 404, "E": 409}
-    for name, status in statuses.items():
-        script.answers[name] = [refused(status, "x" * 300)]
-    script.answers["B"] = [SymbolFailure(MassiveError("no status"))]
-    # One symbol with rows keeps the table: every call-time symbol failing would fail it.
-    result = follow(massive_session, watchlist(*statuses, "OK"), script)
-    for name in statuses:
-        wait_state(massive_session, name, SymbolReadState.FAILED)
-    until(
-        lambda: "5 symbols failed" in (stream(massive_session, drain, dh_to_pylist)["Error"] or "")
+    script.answers["AAPL"] = [refused(503, "busy"), SymbolRows(rows_of(massive_session, "AAPL", 1))]
+    result = follow(massive_session, watchlist("AAPL"), script)
+    wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+    retrying = ("symbol_read_retrying", "AAPL", "HTTP 503: busy")
+    until(lambda: troubled(problem_rows) == [(*retrying, False)])
+    clock.advance(RETRY_DELAYS[0])
+    massive_session._core.follows.wake()
+    wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+    # The span ends, and no failed span opens: the symbol was read.
+    until(lambda: troubled(problem_rows) == [(*retrying, True)])
+    massive_session.release(result)
+
+
+def test_a_retrying_symbol_that_gives_up_ends_its_span_and_opens_a_failed_one(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    clock: FakeClock,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(503, "busy")]
+    # MSFT lands, so the table outlives AAPL's failure.
+    result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
+    wait_state(massive_session, "MSFT", SymbolReadState.DONE)
+    # The retries run on their schedule until AAPL has failed for max_outage.
+    schedule: list[float] = []
+    while sum(schedule) < massive_session._core.config.max_outage:
+        schedule.append(
+            RETRY_DELAYS[len(schedule)] if len(schedule) < len(RETRY_DELAYS) else RETRY_EVERY
+        )
+    for attempt, delay in enumerate(schedule, start=1):
+        wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+        clock.advance(delay)
+        massive_session._core.follows.wake()
+        until(functools.partial(script.read_count_is, "AAPL", attempt + 1))
+    wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
+    # Each wait for a retry is a span of its own, ended once the retry starts; the last one
+    # gives up, and the failed span stays open.
+    gave_up = (
+        f"AAPL has failed for {sum(schedule):.0f} s, as long as MassiveConfig.max_outage allows "
+        f"({massive_session._core.config.max_outage:.0f} s); the latest error: HTTP 503: busy"
     )
-    error = stream(massive_session, drain, dh_to_pylist)["Error"]
-    assert error.endswith("; 2 more causes")
-    assert "…" in error  # a long cause is cut
+    expected = [
+        ("symbol_read_failed", "AAPL", gave_up, False),
+        *[("symbol_read_retrying", "AAPL", "HTTP 503: busy", True)] * len(schedule),
+    ]
+    until(lambda: troubled(problem_rows) == expected)
     massive_session.release(result)
 
 
@@ -1109,6 +1179,7 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
+    problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     script = Script(massive_session)
     script.answers["NVDA"] = [refused(403)]
@@ -1130,12 +1201,13 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     assert summary["Loading"] == sum(
         r["State"] in ("QUEUED", "LOADING", "RETRYING") for r in symbols
     )
-    assert "NVDA" in (summary["Error"] or "")
+    failed = ("symbol_read_failed", "NVDA", "HTTP 403: refused")
+    until(lambda: troubled(problem_rows) == [(*failed, False)])
     delete(wl, "AAPL", "NVDA")  # a landed and a failed symbol leave: so do their counts
     until(lambda: stream(massive_session, drain, dh_to_pylist)["SymbolCount"] == 2)
     after = stream(massive_session, drain, dh_to_pylist)
     assert (after["Symbols"], after["RowsPublished"], after["Loading"]) == ("MSFT, TSLA", 2, 1)
-    assert "NVDA" not in (after["Error"] or "")
+    until(lambda: troubled(problem_rows) == [(*failed, True)])  # its span ends with it
     gate.set()
     massive_session.release(result)
 
