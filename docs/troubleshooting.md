@@ -73,7 +73,7 @@ Each cause, and what to do about it:
 
 | `Cause` | `Source` | `Action` | Lasts | What happened | What to do |
 |---|---|---|---|---|---|
-| `noncanonical_symbols` | `user` | `SKIPPED` | yes | A value of a watchlist or other table you pass isn't Massive's exact ticker, so its row is skipped. | Fix or delete the row. Massive's lists, such as `m.reference.tickers()`, show its spelling. |
+| `noncanonical_symbols` | `user` | `SKIPPED` | yes | A value of a watchlist or other table you pass isn't Massive's exact ticker, so its row is skipped. A `fetch()` or `history()` of a static table lists it once. | Fix or delete the row. Massive's lists, such as `m.reference.tickers()`, show its spelling. |
 | `unreadable_symbols` | `library` | `WITHHELD` | no | Massive sent a row whose symbol the library can't read as Massive's ticker. The row is left out. | Report a [bug](#report-a-bug) with the row's `Detail`. |
 | `unavailable_symbols` | `massive` | `SKIPPED` | no | Massive has no data for the symbol. It answered HTTP 404, or the pair isn't on its crypto ticker list. | Look the symbol up in Massive's lists, such as `m.reference.tickers()`. |
 | `unreadable_keys` | `library` | `WITHHELD` | no | Massive sent a row whose symbol, time, or other key the library can't read. The row is left out. | Report a [bug](#report-a-bug) with the row's `Detail`. |

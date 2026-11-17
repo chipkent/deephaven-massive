@@ -778,7 +778,7 @@ def test_a_read_no_caller_waits_for_waits_out_max_outage_of_pauses(
     seconds = _Seconds(monkeypatch)
     q = query(session, RATINGS)
     assert isinstance(q, FetchQuery)
-    _endpoints(session).fetch(RATINGS, q._static_request(), call=1, stop=stop)
+    _endpoints(session).fetch(RATINGS, q._static_request(1), call=1, stop=stop)
     assert seconds.seen == [600.0 if stop is None else 300.0]
 
 

@@ -124,6 +124,7 @@ def _read_symbol_table(
     query: str,
     noncanonical: OnError,
     live: bool = False,
+    call: int | None = None,
 ) -> tuple[str, ...]:
     """Read a symbol table once, under the call's rule for a row that is not a ticker.
 
@@ -142,6 +143,10 @@ def _read_symbol_table(
         noncanonical: The call's `noncanonical_symbols` (`Request.on_error`).
         live: True for a live verb, which may start on a table with no row yet and follow
             it as rows arrive.
+        call: The id of the static verb's call whose symbols these are: each skipped value
+            is listed in `m.problems()` as a `noncanonical_symbols` problem of the call
+            (`SymbolRowRule.skipped_events`), before any error below. None for a read the call
+            makes only to check the table, or a live verb's, whose table lists them.
 
     Returns:
         The table's canonical symbols, sorted and de-duplicated; null and skipped rows are
@@ -159,8 +164,11 @@ def _read_symbol_table(
     """
     rule = SymbolRowRule.of(spec, noncanonical)
     with entered(core.exec_ctx):
-        rows = read_symbols(rule, symbols.table, stream_id=None, reported=live)
+        rows = read_symbols(rule, symbols.table, stream_id=None, reported=live or call is not None)
         has_rows = symbols.table.size > 0
+    if call is not None and rows.skipped:
+        where = f"the symbol table of {query}"
+        core.problems(rule.skipped_events(rows.skipped, stream_id=call, where=where, field=None))
     if rows.skipped and not rows.symbols:
         raise ValueError(
             f"{query}: no row of the symbol table is a ticker this dataset takes, so the result "
@@ -369,8 +377,11 @@ class Query:
             logger.debug("call %d done: %d rows in %.3f s", call, table.size, elapsed)
         return table
 
-    def _static_request(self) -> Request:
+    def _static_request(self, call: int) -> Request:
         """Return the request with a symbol table read once, for a static verb.
+
+        Args:
+            call: The verb's call id, whose problems list the table's skipped values.
 
         Returns:
             The request; for a symbol table, with its symbols (`_read_symbol_table`).
@@ -383,6 +394,7 @@ class Query:
                 request.symbols,
                 query=repr(self),
                 noncanonical=self._request.on_error.noncanonical_symbols,
+                call=call,
             )
             return replace(request, symbols=symbols)
         return request

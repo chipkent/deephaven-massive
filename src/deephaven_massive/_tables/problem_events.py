@@ -157,7 +157,7 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             action=ProblemAction.SKIPPED,
             span=True,
             summary="A value of a watchlist or other table you pass isn't Massive's exact ticker, "
-            "so its row is skipped.",
+            "so its row is skipped. A `fetch()` or `history()` of a static table lists it once.",
             fix="Fix or delete the row. Massive's lists, such as `m.reference.tickers()`, show "
             "its spelling.",
         ),

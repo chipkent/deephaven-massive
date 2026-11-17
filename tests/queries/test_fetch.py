@@ -718,7 +718,11 @@ def test_fetch_and_poll_refuse_a_bad_value_row_when_the_call_raises_and_the_sess
 
 
 def test_fetch_skips_a_bad_row_when_the_call_logs_and_the_session_raises(
-    *, massive_session: dm.MassiveSession, rest: Recorder, monkeypatch: pytest.MonkeyPatch
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    monkeypatch: pytest.MonkeyPatch,
+    problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     strict(massive_session, monkeypatch)
     logs = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.LOG)
@@ -730,6 +734,13 @@ def test_fetch_skips_a_bad_row_when_the_call_logs_and_the_session_raises(
     assert request.symbols == ("AAPL",)
     [(values, _, _)] = rest.valued
     assert values == ("ES",)
+    # Each skipped value is a problem of its call, with the call's setting.
+    assert [
+        (r["Cause"], r["Action"], r["Symbol"], r["Field"], r["Policy"]) for r in problem_rows()
+    ] == [
+        ("noncanonical_symbols", "SKIPPED", "msft", None, "log"),
+        ("noncanonical_symbols", "SKIPPED", " CL", "ProductCode", "log"),
+    ]
 
 
 def test_a_followed_fetch_fails_on_a_late_bad_row_when_the_call_raises_and_the_session_logs(

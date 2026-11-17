@@ -15,8 +15,8 @@ call's `noncanonical_symbols` setting, which `SymbolRowRule` carries:
 - `OnError.LOG` and `OnError.IGNORE`: the row is skipped and the result keeps following the
   others. Each skipped value is a `noncanonical_symbols` span of the result's problems in
   `m.problems()` until its rows are fixed or deleted (`SkippedValues`); the session's problem
-  reporter logs the first at WARNING under `LOG`. A verb's read before any result exists logs
-  each distinct value once, at WARNING under `LOG` and DEBUG under `IGNORE`.
+  reporter logs the first at WARNING under `LOG`. A static verb's read lists each skipped value
+  as a problem of its call (`SymbolRowRule.skipped_events`).
 
 Two pieces apply that rule:
 
@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol
@@ -68,7 +69,12 @@ from deephaven_massive._datasets.symbols import (
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._on_error import effect_of
-from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
+from deephaven_massive._tables.problem_events import (
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+    SpanTracker,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -384,6 +390,41 @@ class SymbolRowRule:
         """
         return f"{self.dataset}: {self._reason(symbol)}"
 
+    def skipped_events(
+        self, values: Iterable[str], *, stream_id: int, where: str, field: str | None
+    ) -> list[ProblemEvent]:
+        """Return the `noncanonical_symbols` problems of one read's skipped values.
+
+        A static verb reads its table once, so each skipped value is one problem of the call,
+        not a span: the table never changes after the read.
+
+        Args:
+            values: The distinct values the read skipped.
+            stream_id: The call's id, its `StreamId`.
+            where: The table the values came from, such as `the symbol table of <query>`.
+            field: None for the call's symbols; the column of a table of values.
+
+        Returns:
+            One `SKIPPED` event per value, with its reason and the call's setting.
+        """
+        at = time.time_ns()
+        return [
+            ProblemEvent(
+                cause=ProblemCause.NONCANONICAL_SYMBOLS,
+                action=ProblemAction.SKIPPED,
+                dataset=self.dataset,
+                stream_id=stream_id,
+                where=where,
+                symbol=value,
+                field=field,
+                rows=0,
+                detail=self.refusal(value),
+                at=at,
+                policy=self.noncanonical,
+            )
+            for value in values
+        ]
+
     def _reason(self, symbol: str) -> str:
         """Say why a row is refused, without the dataset's name.
 
@@ -405,23 +446,23 @@ class SymbolRowRule:
     def skip(self, symbol: str, *, stream_id: int | None, reported: bool = False) -> None:
         """Log a skipped row once per value: at DEBUG for a table, else as `LOG` or `IGNORE` say.
 
-        A table's skipped values are `noncanonical_symbols` problems of `m.problems()`, whose first
-        WARNING per table the session's problem reporter logs (`SkippedValues`), so a table's reader
-        logs each value at DEBUG only, and so does the check a live verb makes before its table
-        exists (`reported`). A static verb's read of the table has no problems row: it logs under
-        `LOG` at WARNING and under `IGNORE` at DEBUG. Each value is logged once per dataset, a
-        bounded number of values per process, so a table edited for weeks keeps the log and the
-        memory small. The record names the dataset and the stream that first met the value, such as
-        `stocks.quotes stream 7: ...; the row is skipped until it is fixed or deleted`. Never
-        called under `RAISE`.
+        A table's skipped values are `noncanonical_symbols` problems of `m.problems()`, whose
+        first WARNING per table the session's problem reporter logs (`SkippedValues`), so a
+        table's reader logs each value at DEBUG only. So do the check a live verb makes before
+        its table exists and a static verb's read, which lists its values itself (`reported`).
+        A read no problem row covers logs under `LOG` at WARNING and under `IGNORE` at DEBUG.
+        Each value is logged once per dataset, a bounded number of values per process, so a
+        table edited for weeks keeps the log and the memory small. The record names the dataset
+        and the stream that first met the value, such as `stocks.quotes stream 7: ...; the row
+        is skipped until it is fixed or deleted`. Never called under `RAISE`.
 
         Args:
             symbol: The row's symbol, which `accepts` refuses.
             stream_id: The stream or `poll()` table that read the row, or None for a verb's
                 read of the table before any stream exists (a static verb's, or the check a
                 live verb makes first).
-            reported: True for the check a live verb makes first, whose table then lists the
-                value in `m.problems()` and its first WARNING.
+            reported: True for a read whose value `m.problems()` lists, with its first WARNING:
+                the check a live verb makes first, and a static verb's read.
         """
         level = effect_of(self.noncanonical).level
         alarm = level > logging.DEBUG and stream_id is None and not reported
@@ -563,8 +604,9 @@ def read_symbols(
         table: The user's table with the rule's column (`Symbol`, or `ProductCode`).
         stream_id: The stream or `poll()` table the read is for, named in a skipped row's
             record; None for a verb's read before any stream exists.
-        reported: True for the check a live verb makes before its table exists, whose table
-            reports the skipped values itself (`SymbolRowRule.skip`).
+        reported: True for a read whose skipped values `m.problems()` lists: the check a live
+            verb makes before its table exists, whose table reports them, and a static verb's
+            read, which reports them as its call's (`SymbolRowRule.skip`).
 
     Returns:
         The table's canonical symbols and, under `LOG` and `IGNORE`, its skipped values; both
