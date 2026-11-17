@@ -407,6 +407,9 @@ class DatasetSpec:
             argument of their own. Every REST path of the dataset must take each one (the catalog's
             `wire parameters` gate), so a request never carries a parameter its path lacks.
             Each is reserved, with its whole family, from `filters`.
+        library_params: Query parameters the library sets itself on some requests only, by wire
+            name, such as the options snapshot's `type`, which only `dm.ALL` sends; they have no
+            argument of their own. Each is reserved, with its whole family, from `filters`.
         row_times: Which of the library's time columns the rows carry (`RowTimes`);
             `RowTimes.BY_KIND`, the default, derives it (`times`): `BAR` for a `bars` dataset,
             `TICK` for any other dataset in a kind, `NONE` otherwise. The indicators declare
@@ -485,6 +488,7 @@ class DatasetSpec:
     symbols_per_request: int | None = None
     page_size: int | None = None
     fixed_params: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+    library_params: frozenset[str] = frozenset()
     row_times: RowTimes = RowTimes.BY_KIND
     column_notes: Mapping[str, str] = field(default_factory=dict)
     symbols_as_written: bool = False
