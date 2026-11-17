@@ -488,8 +488,10 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `Recency`: `REALTIME`, `DELAYED`, or `UNKNOWN`. `UNKNOWN` means the library can't
               tell, and it never treats such data as real-time.
             - `Evidence`: what showed the library that recency.
-            - `State`: `RESOLVING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`, `RECONNECTING`,
-              `FAILED`, or `CLOSED`.
+            - `State`: `RESOLVING`, `WAITING`, `CONNECTING`, `CONNECTED`, `WAITING_SLOT`,
+              `RECONNECTING`, `FAILED`, or `CLOSED`. `WAITING` means the library hasn't connected,
+              because no live table on the connection has a symbol to stream yet. It connects at
+              the first symbol.
             - `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics`: the subscriptions sent,
               confirmed by Massive, waiting for confirmation, and never confirmed.
             - `BufferedRows`: rows waiting to reach their tables. Past 1,000,000, a WARNING is
@@ -590,9 +592,10 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
         A `history()` or `fetch()` of a watchlist reads each symbol you add and drops each one you
         delete. This table shows each symbol's read, so you can find the ones that failed and why.
 
-        A read that fails for a reason that can clear, such as a rate limit or a network error, is
-        `RETRYING`. It's tried again 1, 5, and 15 minutes later, then marked `FAILED`. Any other
-        failure is `FAILED` at once. To read a failed symbol again, delete its row from the
+        A read that fails with a temporary error, such as a rate limit or a network error, is
+        `RETRYING`. It's tried again 2, 8, and 30 seconds later, then every minute. It's `FAILED`
+        once it has failed for `MassiveConfig.max_outage` seconds. Any other failure is `FAILED`
+        at once. To read a failed symbol again, delete its row from the
         watchlist and add it back.
 
         The rows stay for the session's life. Each call returns a new table, which keeps its final

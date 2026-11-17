@@ -217,7 +217,10 @@ class FollowPlan:
             list parameter (`ticker.any_of`) names many symbols in one request. Ignored for
             flat files.
         read: Reads symbols and returns each one's outcome, given the symbols and the result's
-            stop token: over the call's window for `history()`
+            stop token, or None for the read of a call that waits for it, whose rate-limit
+            pauses are then waited out as its caller's (a stop token marks a read no caller
+            waits for, which waits out `MassiveConfig.max_outage`): over the call's window for
+            `history()`
             (`RestTransport.history_by_symbol`, `FlatFileTransport.history_by_symbol`), and as
             Massive answers now for `fetch()` (`RestTransport.fetch_by_symbol`). It raises
             what fails every symbol alike (a rejected key, a closed session).
@@ -226,7 +229,7 @@ class FollowPlan:
     transport: Transport
     one_scan: bool
     symbols_per_read: int
-    read: Callable[[tuple[str, ...], threading.Event], Mapping[str, SymbolOutcome]]
+    read: Callable[[tuple[str, ...], threading.Event | None], Mapping[str, SymbolOutcome]]
 
 
 class FollowedRead:

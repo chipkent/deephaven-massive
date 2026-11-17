@@ -31,9 +31,12 @@ diagnostics show. It owns:
   one scan in flight, since a scan downloads the same files whatever the number of symbols.
 
 **A symbol's life.** Added, it is `QUEUED`; a read of it makes it `LOADING`; its rows make it
-`DONE`. A failure that may pass (its error `is_retryable`) makes it `RETRYING`, read again 1, 5,
-and 15 minutes after the first, second, and third failure (`RETRY_DELAYS`), and `FAILED` after the
-fourth; any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
+`DONE`. A failure that may pass (its error `is_retryable`) makes it `RETRYING`, read again 2, 8,
+and 30 seconds after the first, second, and third failure (`RETRY_DELAYS`), then every
+`RETRY_EVERY`, until it has failed for `MassiveConfig.max_outage`: a failure that lands that long or
+longer after the first failure of its run makes it `FAILED`, with an error that names the
+limit (`_outage_failure`), as a `poll()` table fails after its cycles have failed that long.
+Any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
 an empty download replaces its rows in the result, freeing them, and a re-add reads it again;
 under `Reread.NEVER` its download is kept, so a re-add shows the
 earlier download at once, with no request. A `FAILED` symbol is read again on every re-add. Each add
@@ -86,6 +89,7 @@ from deephaven_massive._errors import (
     BrokenGuaranteeError,
     ErrorSource,
     MassiveError,
+    copy_error,
     every_symbol_failed,
     failure_text,
     library_bug,
@@ -122,6 +126,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CLOCK",
     "RETRY_DELAYS",
+    "RETRY_EVERY",
     "CoordinatedRead",
     "FirstRead",
     "FollowCoordinator",
@@ -134,9 +139,12 @@ logger = logging.getLogger(__name__)
 CLOCK: PollClock = poll.CLOCK
 """The coordinator's time source; tests replace it with a virtual clock."""
 
-RETRY_DELAYS: Final = (60.0, 300.0, 900.0)
-"""Seconds after a symbol's first, second, and third transient failure before it is read again;
-the fourth failure is final."""
+RETRY_DELAYS: Final = (2.0, 8.0, 30.0)
+"""Seconds after a symbol's first, second, and third transient failure before it is read again:
+soon, since most such failures (a rate-limit pause, a dropped connection) pass in seconds."""
+
+RETRY_EVERY: Final = 60.0
+"""Seconds between a symbol's later reads, until it has failed for `MassiveConfig.max_outage`."""
 
 _FOLLOWING: Final = frozenset(
     {SymbolReadState.QUEUED, SymbolReadState.LOADING, SymbolReadState.RETRYING}
@@ -394,6 +402,8 @@ class _Symbol:
         reading: The generation a read in flight was started for, or None.
         waiting: Whether it waits for a read slot (its result's queue).
         attempts: Reads begun since it was last added with a read queued.
+        failing_since: When the first failure of the run it is in landed (monotonic seconds):
+            its first failure since it was last added or last got rows; None before one.
         due: When its next read is due (monotonic seconds), while `RETRYING`.
         next_attempt_at: The same instant, epoch nanoseconds.
         added_at: When its row last entered the table, epoch nanoseconds.
@@ -416,6 +426,7 @@ class _Symbol:
     reading: int | None = None
     waiting: bool = False
     attempts: int = 0
+    failing_since: float | None = None
     due: float | None = None
     next_attempt_at: int | None = None
     read_at: int | None = None
@@ -581,6 +592,35 @@ def _cause(error: MassiveError) -> str:
     if error.is_bug:
         parts.append("bug")
     return " ".join(parts)
+
+
+def _outage_failure(
+    name: str, error: MassiveError, *, failing_for: float, limit: float
+) -> MassiveError:
+    """Return a symbol's final error once its failures have lasted `MassiveConfig.max_outage`.
+
+    A copy of the latest error (`copy_error`: its class, status, `request_id`, source, and
+    whether it is retryable or a bug) whose message says how long the symbol failed and the
+    limit, then quotes the latest error; chained to it, so its log record carries that error's
+    traceback too.
+
+    Args:
+        name: The symbol.
+        error: Its latest failure, one that may pass.
+        failing_for: Seconds since the run's first failure.
+        limit: `MassiveConfig.max_outage`, in seconds.
+
+    Returns:
+        The error, such as `"AAPL has failed for 340 s, as long as MassiveConfig.max_outage
+        allows (300 s); the latest error: HTTP 503: ..."`.
+    """
+    failure = copy_error(
+        error,
+        f"{name} has failed for {failing_for:.0f} s, as long as MassiveConfig.max_outage "
+        f"allows ({limit:g} s); the latest error: {error}",
+    )
+    failure.__cause__ = error
+    return failure
 
 
 def _transport(read: CoordinatedRead, outcome: SymbolOutcome) -> str:
@@ -1033,7 +1073,7 @@ class FollowCoordinator:
             return
         symbol.state = SymbolReadState.QUEUED
         symbol.attempts = 0
-        symbol.due = symbol.next_attempt_at = None
+        symbol.due = symbol.next_attempt_at = symbol.failing_since = None
         self._enqueue(result, name)
 
     def _remove(self, result: _Result, name: str) -> None:
@@ -1164,7 +1204,7 @@ class FollowCoordinator:
             symbol.read_at = began_at
             symbol.error = outcome.skipped  # why a read that succeeded gave it no rows, if so
             symbol.cause = None
-            symbol.due = symbol.next_attempt_at = None
+            symbol.due = symbol.next_attempt_at = symbol.failing_since = None
             logger.debug(
                 "call %d %s: %d rows in %.1f s from %s (download %d, decided at step %d)",
                 read.call,
@@ -1181,6 +1221,14 @@ class FollowCoordinator:
     def _failed(self, result: _Result, name: str, outcome: SymbolFailure) -> None:
         """Make a failed symbol `RETRYING` or `FAILED`, and log it.
 
+        A failure that may pass retries on `RETRY_DELAYS`, then every `RETRY_EVERY`, until one
+        lands `MassiveConfig.max_outage` seconds or more after the run's first failure landed.
+        A read's own time is not counted, since it may have spent most of it receiving pages.
+        The limit is a threshold checked as each failure lands, not a wall-clock bound: the
+        retry delays and each read's own length can carry a symbol past it before the failure
+        that ends it lands. That failure is final, and its error names the limit
+        (`_outage_failure`). Any other failure is final at once.
+
         Args:
             result: The result's state.
             name: The symbol.
@@ -1188,27 +1236,37 @@ class FollowCoordinator:
         """
         symbol = result.symbols[name]
         error = outcome.error
-        symbol.error = failure_text(error)
+        now = CLOCK.monotonic()
+        if symbol.failing_since is None:
+            symbol.failing_since = now
+        failing_for = now - symbol.failing_since
+        limit = result.read.core.config.max_outage
         symbol.cause = _cause(error)
         attempts = max(symbol.attempts, 1)
-        if error.is_retryable and attempts <= len(RETRY_DELAYS):
-            delay = RETRY_DELAYS[attempts - 1]
+        if error.is_retryable and failing_for < limit:
+            delay = RETRY_DELAYS[attempts - 1] if attempts <= len(RETRY_DELAYS) else RETRY_EVERY
+            symbol.error = failure_text(error)
             symbol.state = SymbolReadState.RETRYING
-            symbol.due = CLOCK.monotonic() + delay
+            symbol.due = now + delay
             heapq.heappush(
                 self._retries, (symbol.due, next(self._retry_numbers), id(result.read), name)
             )
             symbol.next_attempt_at = _now_ns() + int(delay * 1e9)
             logger.debug(
-                "call %d follow %s: attempt %d failed in a way that may pass; read again in "
-                "%.0f s: %s",
+                "call %d follow %s: attempt %d failed in a way that may pass, %.0f s into its "
+                "run of failures (max_outage %g s); read again in %.0f s: %s",
                 result.read.call,
                 name,
                 attempts,
+                failing_for,
+                limit,
                 delay,
                 symbol.error,
             )
             return
+        if error.is_retryable:  # final only for its run's length
+            error = _outage_failure(name, error, failing_for=failing_for, limit=limit)
+        symbol.error = failure_text(error)
         symbol.state = SymbolReadState.FAILED
         symbol.due = symbol.next_attempt_at = None
         first = symbol.cause not in result.warned

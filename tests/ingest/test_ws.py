@@ -1091,6 +1091,13 @@ def test_a_failed_open_returns_its_lease(
         ws_session.query(TRADES, ["AAPL"]).blink()
     assert ws_session.connection().leases == 0
     assert ws_session.connections.group.streams == {}
+    assert ws_session.opens == 0  # it never had a topic, so it opened no socket
+    # A later stream with a topic reuses the waiting connection and connects it.
+    monkeypatch.undo()
+    result = ws_session.query(TRADES, ["MSFT"]).blink()
+    ws_session.subscribed("T.MSFT")
+    assert (len(ws_session.urls), ws_session.opens) == (1, 1)
+    ws_session.session.release(result)
 
 
 def test_a_watch_that_cannot_start_releases_the_stream(
@@ -1173,10 +1180,12 @@ def test_a_start_after_a_start_or_a_close_does_nothing(ws_session: WsSession) ->
     assert ws_session.opens == 0
     started = spare_connection(ws_session, "once.test")
     started.start()
-    started.start()  # a second start does nothing
-    ws_session.wait(lambda s: s.opens == 1)
+    started.start()  # a second start does nothing: a second thread start would raise
+    # Its loop runs, but with no stream wanting a topic it opens no socket.
+    assert ws_session.on_loop(started, lambda: started._state) is ConnectionState.WAITING
     started.close()
     assert started.join(TIMEOUT)
+    assert ws_session.opens == 0
 
 
 def test_stress_concurrent_verbs_and_releases(ws_session: WsSession) -> None:
@@ -2244,8 +2253,8 @@ def test_a_pair_massive_has_no_data_for_fails_the_stream_under_raise_from_every_
         "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset method or to "
         "MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the settings file"
     )
-    sent = {json.loads(f)["params"] for f in ws_session.server.frames()}
-    assert not any("ETHT" in topic for topic in sent)
+    # The stream failed before it subscribed any pair, so its connection never opened a socket.
+    assert ws_session.opens == 0
 
 
 def test_a_watchlist_pair_with_no_data_is_looked_up_once(
@@ -2318,6 +2327,45 @@ def tries(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
     return [r for r in caplog.records if "the list is read again" in r.getMessage()]
 
 
+@pytest.mark.parametrize("first", ["static", "code"])
+def test_a_pair_in_code_waits_for_an_unread_list_in_a_stream_a_static_table_shares(
+    make_ws_session: Callable[..., WsSession],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    quick_retries: Callable[[WsSession], None],
+    *,
+    first: str,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # A static table and a list in code with the same pairs share one stream. Whichever opens
+    # it, a pair the unread list left unsplit waits in it and subscribes once the list reads,
+    # so the other call's table never lacks the pair for good.
+    ws_session = make_ws_session()
+    quick_retries(ws_session)
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
+        "HTTP 503: busy", status=503, is_retryable=True
+    )
+    second = "code" if first == "static" else "static"
+    results = [
+        ws_session.query(
+            CRYPTO,
+            crypto_watchlist(
+                ["X:BTCUSD", "X:DOTUSD"], source=source, dh_input_table=dh_input_table
+            ),
+        ).append_only()
+        for source in (first, second)
+    ]
+    ws_session.subscribed("XT.BTC-USD")
+    # One stream row: the second call shares the first call's stream, and the pair waits in it.
+    wait_for(lambda: waiting_pairs(ws_session, dh_to_pylist, 1) == ["X:DOTUSD"])
+    assert running(ws_session, dh_to_pylist)
+    with ws_session.cond:
+        ws_session.pair_answers["X:DOTUSD"] = ("DOT", "USD")
+    ws_session.subscribed("XT.DOT-USD")
+    wait_for(lambda: waiting_pairs(ws_session, dh_to_pylist, 1) == [])
+    for result in results:
+        ws_session.session.release(result)
+
+
 def test_an_unread_pair_list_fails_the_stream_after_max_outage(
     make_ws_session: Callable[..., WsSession],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
@@ -2348,6 +2396,32 @@ def test_a_max_outage_of_zero_fails_at_the_first_unread_list(
     result = ws_session.query(CRYPTO, ["X:DOTUSD"]).append_only()
     wait_for(lambda: failed_after_flush(ws_session, result))
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
+    # Its connection never had a topic, so it opened no socket.
+    assert ws_session.opens == 0
+
+
+@pytest.mark.parametrize("source", SOURCES)
+def test_a_crypto_stream_with_no_pair_massive_lists_opens_no_socket(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    source: str,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # Every pair has no data: the table opens, m.problems() lists the pair, and its connection
+    # waits for a topic without opening a socket.
+    pairs = crypto_watchlist(["X:ETHTUSD"], source=source, dh_input_table=dh_input_table)
+    result = ws_session.query(CRYPTO, pairs).append_only()
+    wait_for(lambda: problems_of(ws_session, dh_to_pylist) == [NO_DATA])
+    assert running(ws_session, dh_to_pylist)
+    [row] = [
+        r for r in dh_to_pylist(ws_session.session.connections()) if r["Transport"] == "WebSocket"
+    ]
+    assert row["State"] == "WAITING"
+    assert fake_ws_server.connections == []  # the server saw no URL opened
+    assert ws_session.opens == 0
+    ws_session.session.release(result)
 
 
 @pytest.mark.parametrize(

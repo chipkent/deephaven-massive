@@ -11,7 +11,7 @@ caller makes it again.
 The lookup is shared, but its rate-limit pauses are not: a waiting caller charges each pause of
 the lookup's governor bucket to its own patience (`RequestGovernor.charge_pause`), and gives up
 once a pause outlasts what that patience still covers. So a console command, which waits out
-90 s of pauses, never waits out the ten minutes of the caller it joined. When the maker stops
+90 s of pauses, never waits out the longer patience of the caller it joined. When the maker stops
 for a reason of its own (it gave up on a pause, was interrupted, or its background read was
 stopped), its waiters do not fail with that reason: each tries again with the patience it has
 left, and one of them makes the lookup. A failure from Massive reaches every waiter as a copy

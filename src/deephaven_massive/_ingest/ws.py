@@ -48,13 +48,15 @@ everything else belongs here:
   shows it, each stream reports to its own session, and a session's close takes only its own
   streams away. The options cap, refusals, and fatal failures are the
   connection's, so they act on every session's streams on it.
-- **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself
-  and leaves the registry. A fatal failure (a rejected key, a handshake error retrying cannot
-  fix) fails every stream on it, a stream opening at that moment included. `m.close()` removes
-  the session's streams from their connections, closes every connection no other session
-  leases, and waits a bounded time for its threads. While a connection is down
-  (`RECONNECTING` or `WAITING_SLOT`), each of its streams has an `outage` span in
-  `m.problems()`, and an outage longer than `MassiveConfig.max_outage` fails them
+- **Lifetime.** A connection opens its socket at the first topic any of its streams wants;
+  until then its `m.connections()` row reads `WAITING`. A connection with no stream attached
+  for `IDLE_GRACE` seconds closes itself and leaves the registry. A fatal failure (a rejected
+  key, a handshake error retrying cannot fix) fails every stream on it, a stream opening at
+  that moment included. `m.close()` removes the session's streams from their connections,
+  closes every connection no other session leases, and waits a bounded time for its threads.
+  While a connection is down (`RECONNECTING` or `WAITING_SLOT`), each of its streams has an
+  `outage` span in `m.problems()`, and an outage longer than `MassiveConfig.max_outage`
+  fails them
   (`Connection`).
 
 **Threads and locks.** Each connection's subscription state is confined to its client's loop
@@ -427,7 +429,9 @@ class WsConnections:
         resolution raises the `AuthenticationError`, `EntitlementError`, or `MassiveError` of
         `resolve_host`. A crypto stream of a symbol list opens with no topic, and its
         pairs go to the `symbol changes` worker once it is attached (`_change_pairs`), as a
-        symbol table's rows do, so nothing about a pair is decided at the call.
+        symbol table's rows do, so nothing about a pair is decided at the call. A connection
+        opens its socket only at the first topic of any of its streams
+        (`Connection._after_change`), so a stream with no topic opens none.
         """
         # The calling verb runs on the core, which is alive while the verb runs.
         core = required(self._core(), "the session")
@@ -451,10 +455,10 @@ class WsConnections:
             )
         connection, created = self._lease(core, spec, decision, stream_id=stream_id, topics=topics)
         try:
-            # Started first, so a failure or interrupt below leaves a running connection
-            # that `_abandon` retires once idle: a registered connection that never started
-            # would be reused by later streams and never connect. It subscribes nothing until
-            # `_attach`.
+            # Started first, so a failure or interrupt below leaves a running loop whose idle
+            # timer `_abandon` arms: a registered connection that never started would be
+            # reused by later streams and never run its loop, and so never connect. It
+            # subscribes nothing until `_attach`, and opens its socket at its first topic.
             if created:
                 connection.start()
             if asset_class is AssetClass.FUTURES and wanted:
@@ -894,12 +898,12 @@ class WsConnections:
         exception into the stream's failure), so a retry and a removal stay in order. Its only
         Deephaven call is the check, when a lookup starts or joins one already under way, of
         whether its thread holds the update graph's lock, which sets how long the lookup waits
-        out rate-limit pauses (`rate_limits.read_patience`; the worker never holds it, so 10
-        minutes). Each pair (`_split`) is subscribed, or skipped, or waits for the list
-        (`_wait`). A skipped pair Massive has no data for follows the stream's
-        `unavailable_symbols` (`_no_data`); one whose currencies the library cannot read, which
-        the lookup logged (or raised under `RAISE`), is an `unreadable_symbols` problem of the
-        stream (`_unreadable`).
+        out rate-limit pauses (`rate_limits.read_patience`; the worker never holds it, and no
+        caller waits for it, so `MassiveConfig.max_outage`). Each pair (`_split`) is
+        subscribed, or skipped, or waits for the list (`_wait`). A skipped pair Massive has no
+        data for follows the stream's `unavailable_symbols` (`_no_data`); one whose currencies
+        the library cannot read, which the lookup logged (or raised under `RAISE`), is an
+        `unreadable_symbols` problem of the stream (`_unreadable`).
 
         Args:
             stream_id: The stream.

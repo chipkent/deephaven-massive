@@ -139,6 +139,7 @@ def test_column_sets() -> None:
     assert [k.value for k in StreamKind] == ["stream", "poll", "read"]
     assert [s.value for s in ConnectionState] == [
         "RESOLVING",
+        "WAITING",
         "CONNECTING",
         "CONNECTED",
         "WAITING_SLOT",

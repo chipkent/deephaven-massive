@@ -135,6 +135,8 @@ class Recorder:
         self.outcomes: dict[str, SymbolOutcome] = {}
         # Each followed fetch() read: its symbols, its request, and its thread.
         self.fetched: list[tuple[tuple[str, ...], Request, str]] = []
+        # Whether each followed fetch() read was given a stop token: a read no caller waits for.
+        self.fetch_stopped: list[bool] = []
         # The gates that hold a followed fetch() read of a symbol, one per read, in turn.
         self.gates: dict[str, list[threading.Event]] = {}
         # A followed fetch() read's outcome of a symbol, one per read, in turn; then `outcomes`.
@@ -169,9 +171,9 @@ class Recorder:
         call: int,
         stop: threading.Event | None = None,
     ) -> dict[str, SymbolOutcome]:
-        del stop
         self.call_ids.append(call)
         self.fetched.append((tuple(symbols), request, threading.current_thread().name))
+        self.fetch_stopped.append(stop is not None)
         if self.raises is not None:
             raise self.raises
         for name in symbols:  # a held read waits for its gate

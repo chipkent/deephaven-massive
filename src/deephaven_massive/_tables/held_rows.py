@@ -30,7 +30,8 @@ What a ticker's rows come to, by its state:
 
 Held rows are copies of the flush's rows (`Table.take`), so a ticker's few rows never keep a
 whole flush alive, and a ticker's tables are merged once they pass `MERGE_AT`, so a long wait
-holds a few tables, not one per flush. Their buffers' size counts toward `HELD_BYTES_LIMIT`;
+holds a few tables, not one per flush. Their buffers' size counts toward
+`row_memory.HELD_BYTES_LIMIT`, the 1 GiB a connection keeps in rows waiting to be published;
 past it, the dataset holding the most fails with the reason (`Settled.overflow`), so a long
 outage of Massive's reference data never takes the server's memory. A WARNING at a tenth of it
 names the wait first.
@@ -49,6 +50,7 @@ import pyarrow.compute as pc
 from deephaven_massive._datasets.row_times import DATE, INSERT, time_column
 from deephaven_massive._errors import BrokenGuaranteeError, MassiveError, failure_text, library_bug
 from deephaven_massive._tables.futures_dates import LookupState, Readiness
+from deephaven_massive._tables.row_memory import HELD_BYTES_LIMIT
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -58,7 +60,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DELAYED_AFTER",
-    "HELD_BYTES_LIMIT",
     "MERGE_AT",
     "RECHECK_EVERY",
     "Delayed",
@@ -78,11 +79,6 @@ of magnitude above a lookup's usual two round trips, and below a hung request's 
 RECHECK_EVERY: Final = 1.0
 """Seconds between two reads of every held ticker's state when the calendar learned nothing:
 time alone moves a retry, a discard, or an outage's limit."""
-
-HELD_BYTES_LIMIT: Final = 2**30
-"""The most bytes of held rows one connection keeps: 1 GiB. Past it, the dataset holding the
-most fails, so its rows stop growing the server's memory while Massive's reference data is out
-of reach."""
 
 MERGE_AT: Final = 32
 """The held tables of one ticker past which they are merged into one."""

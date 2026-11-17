@@ -112,13 +112,15 @@ class Script:
     def __init__(self, m: dm.MassiveSession) -> None:
         self.m = m
         self.calls: list[tuple[str, ...]] = []
-        self.stops: list[threading.Event] = []
+        self.stops: list[threading.Event | None] = []
         self.gates: dict[str, threading.Event] = {}
         self.sizes: dict[str, int] = {}
         self.answers: dict[str, SymbolOutcome | BaseException] = {}
         self._lock = threading.Lock()
 
-    def read(self, names: tuple[str, ...], stop: threading.Event) -> Mapping[str, SymbolOutcome]:
+    def read(
+        self, names: tuple[str, ...], stop: threading.Event | None
+    ) -> Mapping[str, SymbolOutcome]:
         with self._lock:
             self.calls.append(names)
             self.stops.append(stop)
@@ -555,7 +557,9 @@ def test_release_marks_the_row_released_and_stops_the_reads(
     until(lambda: script.calls == [("AAPL",)])
     massive_session.release(result)
     del result
-    until(script.stops[0].is_set)  # nothing uses the result: its reads stop
+    stop = script.stops[0]
+    assert stop is not None  # a read no caller waits for has its result's token
+    until(stop.is_set)  # nothing uses the result: its reads stop
     gate.set()
     drain()
     (row,) = stream_rows()

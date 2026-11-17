@@ -735,11 +735,78 @@ def test_the_crypto_ticker_list_takes_one_patience_for_its_pages(
         "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
     )
     patiences = _Patiences(monkeypatch)
-    reader = _endpoints(session)._reader("crypto pairs", session._core.policy)
+    reader = _endpoints(session)._reader("crypto pairs", session._core.policy, background=True)
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the kept list takes no patience
     assert [bucket for bucket, _ in patiences.claims] == ["other", "other"]
     assert patiences.shared()
+
+
+class _Seconds:
+    """Record the patience, in seconds, every claim of the rate governor is opened with."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.seen: list[float] = []
+        admission = _massive.RequestGovernor.admission
+        seen = self.seen
+
+        def recording(
+            governor: _massive.RequestGovernor,
+            bucket: str,
+            *,
+            lane: object,
+            patience: _massive.Patience,
+        ) -> object:
+            seen.append(patience.seconds)
+            return admission(governor, bucket, lane=lane, patience=patience)
+
+        monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
+
+
+@pytest.mark.parametrize("stop", [None, Cancel()], ids=["waited", "background"])
+def test_a_read_no_caller_waits_for_waits_out_max_outage_of_pauses(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    stop: Cancel | None,
+) -> None:
+    # A background read has a stop token: its pauses are limited by max_outage (300 s by
+    # default), the time a live table may stay cut off from Massive. A read its caller waits
+    # for keeps ten minutes.
+    fake_rest.reply(RATINGS_PATH, Reply(envelope([])))
+    seconds = _Seconds(monkeypatch)
+    q = query(session, RATINGS)
+    assert isinstance(q, FetchQuery)
+    _endpoints(session).fetch(RATINGS, q._static_request(), call=1, stop=stop)
+    assert seconds.seen == [600.0 if stop is None else 300.0]
+
+
+def test_a_stream_s_lookups_wait_out_max_outage_and_a_host_decision_ten_minutes(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    snapshots: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The futures schedules and the crypto ticker list are read for a stream no caller waits
+    # on; a host decision is made by the call that opens the stream.
+    fake_rest.reply("/futures/v1/schedules", Reply(envelope([])))
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=true&limit=1000",
+        Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
+    )
+    seconds = _Seconds(monkeypatch)
+    transport = _endpoints(session)
+    transport.fetch_rows("/futures/v1/schedules", {}, bucket="futures", cancel=Cancel())
+    assert transport.crypto_pair("X:DOTUSD", session._core.policy) == ("DOT", "USD")
+    assert seconds.seen == [300.0, 300.0, 300.0]
+    del seconds.seen[:]
+    session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    assert seconds.seen == [600.0]
 
 
 def test_an_aware_datetime_on_an_inclusive_instant_filter_is_sent_as_given(
@@ -881,7 +948,7 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
             session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": date(2025, 3, 3)}
         )
         assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
-    reader = _endpoints(session)._reader("call-1", session._core.policy)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
     assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
     # It ends in BTC, which is a quote too; only the list says its quote is WBTC.
     assert reader.crypto_pair("X:ETHWBTC") == ("ETH", "WBTC")
@@ -951,7 +1018,7 @@ def _wait_for_pair(
 def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     *, session: dm.MassiveSession, outcome: str
 ) -> None:
-    reader = _endpoints(session)._reader("call-1", session._core.policy)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
     future = _WatchedFuture()
     results, waiter = _wait_for_pair(reader, future)
     refused = dm.EntitlementError("refused", status=403)
@@ -1059,7 +1126,7 @@ DELISTED_TARGET = "/v3/reference/tickers?market=crypto&active=false&limit=1000"
 
 def _split_dot(m: dm.MassiveSession) -> Callable[[], object]:
     # A call that splits X:DOTUSD from the session's crypto ticker list.
-    reader = _endpoints(m)._reader("crypto pairs", m._core.policy)
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, background=True)
     return functools.partial(reader.crypto_pair, "X:DOTUSD")
 
 
@@ -1084,7 +1151,8 @@ def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
     console: str,
 ) -> None:
     # Two callers need the list at once; `console` names the one inside a console command
-    # (90 s of pauses), the other waits out 600 s. Massive pauses the list twice for 60 s.
+    # (90 s of pauses), the other, a stream's lookup no caller waits for, waits out
+    # max_outage (300 s). Massive pauses the list twice for 60 s.
     m, clock = _manual_session(fake_rest, monkeypatch)
     listeners = _Listeners(monkeypatch)
     fake_rest.reply(LIST_TARGET, PAUSE, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
@@ -1113,7 +1181,7 @@ def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
         m.close()
     assert len(fake_rest.get_queries()) == 4  # the list's three attempts, then the delisted page
     assert (listeners.buckets, listeners.live) == (["other"], [])  # heard, then removed
-    patience = 90 if console == "joiner" else 600
+    patience = 90 if console == "joiner" else 300
     assert (
         f"{m._core.label}: waits for the crypto ticker list another caller is making, through "
         f"at most {patience} s of its pauses"
@@ -1177,7 +1245,7 @@ def test_a_stopped_read_stops_its_crypto_ticker_list_and_a_waiter_reads_it_itsel
     fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     stop = Cancel()
-    reader = _endpoints(m)._reader("crypto pairs", m._core.policy)
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, background=True)
     caplog.set_level(logging.INFO, LOGGER)
     caplog.set_level(logging.INFO, SHARED_LOGGER)
     try:
@@ -1226,7 +1294,7 @@ def test_a_refusal_as_the_maker_stops_is_copied_to_its_waiters(
         )
 
     monkeypatch.setattr(client, "pages", refused)
-    reader = _endpoints(m)._reader("crypto pairs", m._core.policy)
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, background=True)
     try:
         maker = _Caller(
             m, functools.partial(reader.crypto_pair, "X:DOTUSD", cancel=stop), console=False
@@ -1255,7 +1323,7 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
     fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     stop = Cancel()
-    reader = _endpoints(m)._reader("crypto pairs", m._core.policy)
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, background=True)
     try:
         maker = _Caller(m, _split_dot(m), console=False)
         clock.wait_for_deadlines([60.0])
@@ -1448,7 +1516,7 @@ def test_a_lookup_that_fails_as_a_late_caller_looks_is_made_again(
 def test_an_interrupt_before_a_lookup_leaves_nothing_claimed(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
-    def interrupted(_: object) -> NoReturn:  # Ctrl-C while asking Deephaven for the patience
+    def interrupted(*_: object, **__: object) -> NoReturn:  # Ctrl-C while asking Deephaven
         raise KeyboardInterrupt
 
     monkeypatch.setattr(rest, "read_patience", interrupted)
@@ -1547,7 +1615,7 @@ def test_a_poll_plans_a_pair_massive_does_not_list_as_a_call_with_no_data(
     # pair fails the table at its first cycle, in code or in a table, never at the call.
     serve_pairs(fake_rest)
     params = {"date": date(2025, 3, 3)}
-    reader = _endpoints(session)._reader("poll", session._core.policy)
+    reader = _endpoints(session)._reader("poll", session._core.policy, background=False)
     watch = SymbolTable(new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])]))
     request = Request(symbols=watch, params=(("date", date(2025, 3, 3)),))
     planned, left_out = reader._plan_cycle(
@@ -2977,7 +3045,7 @@ def test_a_read_fans_out_on_the_callers_pool(
             f"/v1/last/crypto/{pair}",
             Reply({"status": "success", "request_id": "r", "symbol": pair, "last": last}),
         )
-    reader = _endpoints(session)._reader("call-1", session._core.policy)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
     calls = rest_requests.plan_calls(
@@ -3026,7 +3094,7 @@ def test_a_parameter_one_path_refuses_leaves_no_cycle(
                 del refusal  # this frame must not hold its own error
 
     monkeypatch.setattr(rest, "shared_params", base)
-    reader = _endpoints(session)._reader("poll", session._core.policy)
+    reader = _endpoints(session)._reader("poll", session._core.policy, background=False)
     enabled = gc.isenabled()
     gc.disable()
     try:
@@ -3059,7 +3127,7 @@ def test_a_404_without_a_symbol_fails_the_call(
 def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without_data(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    reader = _endpoints(session)._reader("call-1", session._core.policy)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD",))
     calls = rest_requests.plan_calls(
@@ -3115,7 +3183,7 @@ def test_an_error_row_needs_only_its_symbol(
     )
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
-    reader = _endpoints(session)._reader("call-1", session._core.policy)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
     table, _ = reader.read_fetch(
         timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",), tally=ReadTally()
     )
@@ -3127,7 +3195,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"{}", status=401))
-    reader = _endpoints(session)._reader("call-1", session._core.policy)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
     calls = rest_requests.plan_calls(
@@ -3206,7 +3274,7 @@ def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
 
 
 def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> None:
-    reader = _endpoints(session)._reader("call-1", session._core.policy)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
     request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
     assert reader.plan_fetch(DIVIDENDS, request, ()) == []
     table, requests = reader.read_fetch(DIVIDENDS, request, symbols=(), tally=ReadTally())
@@ -3838,7 +3906,7 @@ def test_a_fan_out_raises_the_real_failure_not_a_call_it_cancelled(
     session: dm.MassiveSession,
 ) -> None:
     # The first call only fails because the second one's failure cancelled its wait.
-    reader = _endpoints(session)._reader("call-1", session._core.policy)
+    reader = _endpoints(session)._reader("call-1", session._core.policy, background=False)
     stop = _massive.Cancel()
 
     def run(call: rest_requests.Call) -> NoReturn:
@@ -5092,7 +5160,7 @@ def _value_cycle(m: dm.MassiveSession, values: tuple[str, ...]) -> poll.CycleRow
     with entered(m._core.exec_ctx):
         table = new_table([string_col("ProductCode", list(values))])
     boxed = ValueTable("product_code", "product_code", "ProductCode", underlying=False, table=table)
-    reader = _endpoints(m)._reader("poll", m._core.policy)
+    reader = _endpoints(m)._reader("poll", m._core.policy, background=False)
     with ThreadPoolExecutor(1) as pool:
         return reader.read_cycle(
             futures_ns.PRODUCTS,
@@ -5154,7 +5222,7 @@ def test_a_poll_cycle_of_an_empty_table_of_values_reads_nothing(
 def _not_found(
     m: dm.MassiveSession, error: _massive.WireError, *, symbol: str | None, requests: int
 ) -> object:
-    reader = _endpoints(m)._reader("call-1", m._core.policy)
+    reader = _endpoints(m)._reader("call-1", m._core.policy, background=False)
     return reader._not_found(
         error,
         spec=TRADES,
@@ -5246,7 +5314,11 @@ def test_page_recency_holds_no_row_whose_subscription_is_unknown() -> None:
 
 def test_a_call_with_no_data_is_never_counted_as_a_request(session: dm.MassiveSession) -> None:
     # A pair Massive's list does not hold is never sent, so pacing and announcements skip it.
-    path = _endpoints(session)._reader("call-1", session._core.policy).rest_path(CRYPTO_LAST_PATH)
+    path = (
+        _endpoints(session)
+        ._reader("call-1", session._core.policy, background=False)
+        .rest_path(CRYPTO_LAST_PATH)
+    )
     sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD")
     unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED)
     assert len(rest._buckets(CRYPTO_LAST, [(path, [sent, unsent])])) == 1
@@ -5276,7 +5348,7 @@ def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
     fake_rest.reply(TICKERS_PATH, Reply(envelope([unjoined])), Reply(envelope([])))
     events: list[ProblemEvent] = []
     monkeypatch.setattr(session._core, "problems", events.extend)
-    reader = _endpoints(session)._reader("poll", session._core.policy)
+    reader = _endpoints(session)._reader("poll", session._core.policy, background=False)
     request = Request(symbols=("X:DOTUSD",), params=(("date", date(2025, 3, 3)),))
     _, left_out = reader._plan_cycle(CRYPTO_OPEN_CLOSE, request, ("X:DOTUSD",), cancel=Cancel())
     assert left_out == [

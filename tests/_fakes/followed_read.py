@@ -101,7 +101,7 @@ class QuietRead:
         self.failed: MassiveError | None = None
 
     @staticmethod
-    def read(names: tuple[str, ...], stop: threading.Event) -> Mapping[str, SymbolOutcome]:
+    def read(names: tuple[str, ...], stop: threading.Event | None) -> Mapping[str, SymbolOutcome]:
         """Refuse to read: the pool has stopped, so nothing is read.
 
         Args:

@@ -446,7 +446,7 @@ class Query:
         """
         began_at = int(follow_coordinator.CLOCK.time() * 1e9)
         started = time.monotonic()
-        outcomes = plan.read(call_time, self._core.read_stop())
+        outcomes = plan.read(call_time, None)  # its caller waits: no stop token
         failed = {
             name: outcome
             for name, outcome in outcomes.items()

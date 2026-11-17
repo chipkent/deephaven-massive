@@ -32,7 +32,9 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   session remains; otherwise it closes (`_taken`). The setting is no connection setting, so
   sessions that differ only in it still share connections and never take them from each other.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
-- **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself.
+- **Lifetime.** A connection opens its socket only once one of its streams wants a topic; until
+  then its row's state is `WAITING`. Once open, it stays open while it has a stream, topics or
+  not, and a connection with no stream attached for `IDLE_GRACE` seconds closes itself.
 
 `ConnectionGroup` is what sessions share: sessions in one process with the same API key and
 equal connection settings (`CONNECTION_SETTINGS`, and the same Deephaven update graph) attach
@@ -215,6 +217,10 @@ class _Client(Sender, Protocol):
 
     def join(self, timeout: float) -> bool:
         """Wait a bounded time for the client's thread to end."""
+        ...
+
+    def connect(self) -> None:
+        """Let the client open its socket, from any thread; later calls do nothing."""
         ...
 
     def set_required(
@@ -514,7 +520,7 @@ class Connection:
         # Each stream's deferred options topics and topics Massive has not acknowledged, as its
         # spans last showed them; a stream with neither has no entry.
         self._notes_shown: dict[int, tuple[int, frozenset[str]]] = {}
-        self._state = ConnectionState.CONNECTING
+        self._state = ConnectionState.WAITING  # until a stream wants a topic (`_after_change`)
         self._reconnects = 0
         self._last_message_at: int | None = None
         self._message_row_at = 0
@@ -560,7 +566,11 @@ class Connection:
     # --- lifecycle (any thread) ----------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the flush thread and the client. Does nothing once closed or started."""
+        """Start the flush thread and the client. Does nothing once closed or started.
+
+        The client opens its socket once a stream wants a topic (`_after_change`); until then
+        the row shows `WAITING`.
+        """
         with self._start_lock:
             if self._closing or self._started:
                 return
@@ -821,6 +831,8 @@ class Connection:
         if self._taken_at is not None and self._settle_taken(None):
             return  # the last stream of a RECONNECT session left during the reconnect wait
         self.subscriptions.reconcile()
+        if self.subscriptions.wanted:  # the first topic opens the socket; later calls do nothing
+            self._client.connect()
         self._show_notes(opened=opened)
         if not self._streams and self._idle is None:
             self._idle = self._client.loop.call_later(IDLE_GRACE, self._idle_close)
@@ -1045,7 +1057,7 @@ class Connection:
         elif state is WsState.CLOSED:
             self.subscriptions.ended()
         elif state is WsState.CONNECTING:
-            pass  # only the row shows it: the socket is not yet open
+            pass  # only the row shows it: the socket is opening
         else:
             assert_never(state)  # a new state needs its rule here
         self._state = ConnectionState(state.value)

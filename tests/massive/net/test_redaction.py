@@ -334,6 +334,7 @@ def test_the_websocket_client_never_shows_the_api_key(
         clock=FakeClock(),
     )
     client.start()
+    client.connect()
     assert client.join(10.0)  # a rejected key is fatal, so the client ends by itself
     [(state, failure)] = [(s, d) for s, d in states if s is WsState.FAILED]
     assert isinstance(failure, WireAuthError)
@@ -390,6 +391,7 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         clock=FakeClock(),
     )
     client.start()
+    client.connect()
     try:
         fake_ws_server.wait_for(lambda server: len(server.connections) == 1)
         frame = (
