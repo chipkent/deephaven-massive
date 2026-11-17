@@ -23,8 +23,8 @@ from deephaven_massive._datasets.dates import bounds, parse_date_like
 from deephaven_massive._datasets.history_source import (
     HISTORY_TRANSPORTS,
     choose_source,
+    file_dates,
     history_window,
-    partition_dates,
     rest_history_problem,
     warn_unfilled,
 )
@@ -331,7 +331,7 @@ class HistoryQuery(Query):
             self._check_rest_history()
             note = "Read from REST: requested with source=dm.HistorySource.REST."
             return self._rest_history(call, request, window, wait=wait, note=note)
-        dates = partition_dates(spec, window)
+        dates = file_dates(spec, request, window)
         choice = choose_source(spec, request, requested=chosen, config=self._core.config)
         label = TRANSPORT_LABELS[HISTORY_TRANSPORTS[choice.source]]
         if chosen is HistorySource.AUTO:
@@ -412,7 +412,7 @@ class HistoryQuery(Query):
         else:
             choose_source(spec, request, requested=source, config=core.config)
             files = core.flat_file_transport()
-            dates = partition_dates(spec, window)
+            dates = file_dates(spec, request, window)
             forced = source is HistorySource.FLAT_FILES
             # The plan, and so the result, keeps what the call has logged across its reads.
             logged = LoggedKeys()
@@ -501,7 +501,7 @@ class HistoryQuery(Query):
             call: The call id.
             request: The request with static symbols and the parsed bounds.
             window: The call's window.
-            dates: The partition dates of the files the window needs.
+            dates: The dates of the files the window needs (`file_dates`).
             wait: As `history` takes it.
             note: The description's source sentence of the choice.
             forced: True for `source=FLAT_FILES`.

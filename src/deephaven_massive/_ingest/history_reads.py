@@ -47,9 +47,10 @@ from deephaven import merge
 
 from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._datasets.dates import DaySpan, day_start
+from deephaven_massive._datasets.dates import DaySpan, TimeRange, day_start
 from deephaven_massive._datasets.history_source import (
     PUBLICATION_NOTE,
+    file_days,
     history_window,
     rest_history_problem,
 )
@@ -111,7 +112,7 @@ class FlatFileScan(Protocol):
             spec: The dataset.
             request: The request.
             window: The call's window.
-            dates: The partition dates of the files the window needs.
+            dates: The dates of the files the window needs (`file_dates`).
             call: The call id.
             infer_holidays: True to take a missing weekday file for a holiday.
             logged: The facts the call has logged, each logged once per call.
@@ -146,7 +147,7 @@ def read_history(
         window: The call's window, which holds rows.
         core: The session's core: its REST transport, catalog, and execution context.
         files: The call's flat-file transport.
-        dates: The partition dates of the files the window needs.
+        dates: The dates of the files the window needs (`file_dates`).
         call: The call id.
         stop: A background read's stop token, or None for a blocking read.
         forced: True for `source=FLAT_FILES`, which never reads REST.
@@ -205,7 +206,7 @@ def read_history(
     )
     tally.check(spec.name)
     with entered(core.exec_ctx):
-        # The files' days and REST's tile (the files are trimmed to their own days), so
+        # The files' days and REST's tile (the files' rows REST also read are dropped), so
         # sorting by the time column puts every row in time order across the sources.
         merged = merge([read.empty, *(part for _, part in read.parts), *filled])
         table = merged.sort(time_column(spec.times))
@@ -245,7 +246,7 @@ def _scan(
         window: The call's window.
         core: The session's core.
         files: The call's flat-file transport.
-        dates: The partition dates of the files the window needs.
+        dates: The dates of the files the window needs (`file_dates`).
         call: The call id.
         logged: The facts the call has logged (`FlatFileHistory.history`).
         tally: The call's count of its rows and of those withheld, which the files add to.
@@ -407,15 +408,18 @@ def _uncertain_sessions(spec: DatasetSpec, sessions: Sequence[date]) -> str | No
 def _rest_day_reads(
     spec: DatasetSpec, request: Request, window: HistoryWindow, *, days: Sequence[date]
 ) -> list[tuple[Request, HistoryWindow, Table | None]]:
-    """Plan the REST reads of the days the flat files could not serve, within the call's range.
+    """Plan the REST reads of the files the flat-file read could not serve, within the range.
 
     Bars of a day or longer are read with the call's own request and window, which keep a bar
     only when its whole window fits the range, and then only the days asked for are kept, by
     their `Date` (for futures, the session label): an index day bar ends at 01:00 New York the
     next day and a futures session bar starts before its session opens, so a window of the
-    day's own instants would drop them. Every other dataset is read one day at a time, clipped
-    to the range: a range of days reads the whole day, and a range of instants the day's
-    instants inside it (for futures, its session's hours), which tile with the files' days.
+    day's own instants would drop them. Every other dataset is read one file at a time,
+    clipped to the range: a range of days reads the whole day, and a range of instants the
+    day's instants inside it (for futures, its session's hours), which tile with the files'
+    days. A file Massive cuts at midnight in another zone (`history_source.file_days`, an index
+    minute file's Chicago day) is read as the instants it holds inside the range, whether the
+    range is of days or instants, so REST returns exactly the rows the file would have.
     Each day's window is built for the call's instant (`HistoryWindow.now`), never the clock's,
     so a day read later keeps exactly the rows the call's own window would.
 
@@ -423,7 +427,7 @@ def _rest_day_reads(
         spec: The dataset.
         request: The request with static symbols and the parsed bounds.
         window: The call's window: whole days, or a range of instants.
-        days: The days (for futures, sessions), oldest first.
+        days: The dates of the files (for futures, sessions), oldest first.
 
     Returns:
         Each read's request and window, and the `Date` labels of the rows to keep from it as a
@@ -434,22 +438,43 @@ def _rest_day_reads(
     if spec.is_bars and timespan is not None and not intraday(timespan):
         labels = pa.table({"Date": [day.isoformat() for day in days]})
         return [(request, window, dh_arrow.to_table(labels))]
+    files = file_days(spec, request)
+    by_instants = isinstance(window.span, TimeRange) or files.zone is not None
     reads: list[tuple[Request, HistoryWindow, Table | None]] = []
     for day in days:
         start: date | datetime = day
         end: date | datetime | None = day
-        if not isinstance(window.span, DaySpan):
-            opens = day_start(spec.asset_class, day)
-            closes = day_start(spec.asset_class, day + _ONE_DAY)
-            first = required_instance(request.start, datetime, f"{spec.name}'s history start")
+        if by_instants:
+            first, last = _range_instants(spec, request, window.span)
+            opens, closes = files.start(day), files.start(day + _ONE_DAY)
             start = max(first, opens)
-            if request.end is not None:
-                end = min(required_instance(request.end, datetime, f"{spec.name}'s end"), closes)
-            else:
-                end = closes
+            end = closes if last is None else min(last, closes)
         one = replace(request, start=start, end=end)
         reads.append((one, history_window(spec, one, start=start, end=end, now=window.now), None))
     return reads
+
+
+def _range_instants(
+    spec: DatasetSpec, request: Request, span: TimeRange | DaySpan
+) -> tuple[datetime, datetime | None]:
+    """Return the instants a call's range covers, to clip a file's REST read to.
+
+    Args:
+        spec: The dataset, whose class's day rules give a range of days its instants.
+        request: The request with the parsed bounds, for a range of instants.
+        span: The call's bounds by kind.
+
+    Returns:
+        The first instant and the first instant excluded; None for a range of instants that
+        reads through now, which the read's own window ends.
+    """
+    if isinstance(span, DaySpan):
+        asset_class = spec.asset_class
+        return day_start(asset_class, span.first), day_start(asset_class, span.last + _ONE_DAY)
+    first = required_instance(request.start, datetime, f"{spec.name}'s history start")
+    if request.end is None:
+        return first, None
+    return first, required_instance(request.end, datetime, f"{spec.name}'s end")
 
 
 def _rest_days(
@@ -530,7 +555,7 @@ def read_history_by_symbol(
         core: The session's core.
         files: The call's flat-file transport.
         symbols: The canonical symbols; a repeated one is read once.
-        dates: The partition dates of the files the window needs.
+        dates: The dates of the files the window needs (`file_dates`).
         call: The call id.
         logged: The facts the call has logged, kept across its reads, so a refused futures
             venue is logged once per call (`refused_venues.RefusedVenues.report`).

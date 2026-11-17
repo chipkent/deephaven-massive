@@ -627,7 +627,7 @@ class FlatFileTransport(Protocol):
             spec: The dataset, with a flat-file prefix for the request.
             request: The normalized arguments, with static symbols and the parsed bounds.
             window: The call's window, which holds rows.
-            dates: The partition dates to read (`partition_dates`).
+            dates: The dates of the files to read (`file_dates`).
             call: The verb call's id.
             forced: True for `source=FLAT_FILES`, which never reads REST.
             stop: A background read's stop token, or None for a blocking read.
@@ -669,7 +669,7 @@ class FlatFileTransport(Protocol):
                 symbols (never a reactive table).
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
-            dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
+            dates: The dates of the files to read (`file_dates` in `_datasets/history_source.py`).
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
             infer_holidays: True when no other source can serve the call: a missing trading
@@ -729,7 +729,7 @@ class FlatFileTransport(Protocol):
             request: The normalized arguments, with the parsed bounds; its symbols are ignored.
             window: The call's window (`history_window`, built for the call's instant).
             symbols: The canonical symbols to read; a repeated one is read once.
-            dates: The partition dates to read (`partition_dates`).
+            dates: The dates of the files to read (`file_dates`).
             call: The verb call's id.
             forced: True for `source=FLAT_FILES`, which never reads REST.
             logged: The facts the call has logged (`LoggedKeys`), which the followed table

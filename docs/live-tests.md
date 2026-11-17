@@ -175,7 +175,7 @@ Find each one's lines under `live evidence` at the end of the run, or in
 | Test | The question | Open an issue when |
 |---|---|---|
 | `test_the_options_cap_counts_contracts_or_topics` | Does Massive's cap of 1,000 option contracts per connection count contracts, or channel subscriptions? A contract's trades and quotes are two, and the test subscribes both for 1,000 contracts. | Massive acknowledges all 2,000 channel subscriptions. |
-| `test_an_index_minute_file_holds_its_own_new_york_day` | Does an index minute file hold every minute that REST has for its New York day? | Its evidence lists any minute the file lacks. |
+| `test_an_index_minute_file_holds_its_chicago_day` | Does an index minute file hold every minute that REST has for its Chicago day? | Its evidence lists any minute the file lacks. |
 | `test_index_day_windows_and_files_across_many_indices` | Is the library right to end index day bars at 01:00 New York time? | Always. Attach its verdict lines (a), (b), and (c). |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | Does each futures bar of a session or longer hold the whole sessions that open in its UTC days? | Always. Attach its `VERDICT` lines. |
 | `test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent` | Is `GreeksGamma` per $0.01, as Massive's description says? It compares each call with Black-Scholes gamma. | A call matches another unit. |

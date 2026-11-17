@@ -141,9 +141,13 @@ import pyarrow.compute as pc
 from deephaven_massive._datasets.bar_periods import intraday
 from deephaven_massive._datasets.catalog import timespan_key
 from deephaven_massive._datasets.column_descriptions import OPTION_ROOT
-from deephaven_massive._datasets.dates import DaySpan, TimeRange, day_start, is_trading_day
+from deephaven_massive._datasets.dates import DaySpan, TimeRange, is_trading_day
 from deephaven_massive._datasets.epoch import epoch_ns
-from deephaven_massive._datasets.history_source import current_partition
+from deephaven_massive._datasets.history_source import (
+    FileDays,
+    current_partition,
+    file_days,
+)
 from deephaven_massive._datasets.row_times import (
     DATE,
     START,
@@ -343,11 +347,14 @@ def _tiles(spec: DatasetSpec, request: Request, window: HistoryWindow) -> bool:
 
     A range of instants keeps a file's rows by the call's range only, and a futures session
     a holiday folded into opens early, so its file holds hours that REST's read of the
-    holiday's session also returns. Dropping the files' rows that lie in the instants of a
-    day REST reads (`_outside_days`) makes the two sources tile exactly, and leaves every
-    other row where it is: a file may hold rows of a neighbouring session, which no other
-    source returns. Bars of a day or longer are not trimmed: a session bar starts before its
-    session's open, and REST serves those bars by their `Date` instead.
+    holiday's session also returns. A file Massive cuts at midnight in another zone than the
+    class's (`history_source.file_days`) holds an hour of the next day of the call's range,
+    whether it is named by days or instants. Dropping the files' rows that lie in the
+    instants of a file REST reads instead (`_outside_days`) makes the two sources tile
+    exactly, and leaves every other row where it is: a file may hold rows of a neighbouring
+    session, which no other source returns. Bars of a day or longer are not trimmed: a
+    session bar starts before its session's open, and REST serves those bars by their `Date`
+    instead.
 
     Args:
         spec: The dataset.
@@ -355,9 +362,10 @@ def _tiles(spec: DatasetSpec, request: Request, window: HistoryWindow) -> bool:
         window: The call's window.
 
     Returns:
-        True for a range of instants, except for bars of a day or longer.
+        True for a range of instants, or for files cut in another zone, except for bars of a
+        day or longer.
     """
-    if not isinstance(window.span, TimeRange):
+    if not isinstance(window.span, TimeRange) and file_days(spec, request).zone is None:
         return False
     timespan = request.timespan
     return not spec.is_bars or timespan is None or intraday(timespan)
@@ -367,30 +375,31 @@ def _outside_days(
     parts: Sequence[tuple[date, Table]],
     *,
     time_name: str,
-    tile: AssetClass,
+    tile: FileDays,
     days: Sequence[date],
     exec_ctx: ExecutionContext,
 ) -> list[tuple[date, Table]]:
-    """Drop the files' rows that lie in the instants of the days REST reads instead.
+    """Drop the files' rows that lie in the instants of the files REST reads instead.
 
-    A day's instants are `[day_start(day), day_start(day + 1))` in the class's day rules (for
-    futures, its session's hours): exactly what REST reads for it. Only those rows are
-    dropped, so a file's rows of a neighbouring day or session that was read stay.
+    A file's instants are `[start(day), start(day + 1))` of its days (`FileDays`: the class's
+    day rules, for futures its session's hours, or midnight in the zone Massive cuts the
+    files in): exactly what REST reads for it. Only those rows are dropped, so a file's rows
+    of a neighbouring day or session that was read stay.
 
     Args:
         parts: The kept files' tables, each with its file's day.
         time_name: The time column the instants are compared on (`Timestamp`, or a bar's
             `TimestampStart`).
-        tile: The asset class whose day rules apply.
-        days: The days REST reads.
+        tile: The instants each file holds.
+        days: The dates of the files REST reads instead.
         exec_ctx: The session's execution context, entered for the filter.
 
     Returns:
         The parts, each table filtered (a static `where`), in the same order.
     """
     excluded = " && ".join(
-        f"(epochNanos({time_name}) < {epoch_ns(day_start(tile, day))}L"
-        f" || epochNanos({time_name}) >= {epoch_ns(day_start(tile, day + _ONE_DAY))}L)"
+        f"(epochNanos({time_name}) < {epoch_ns(tile.start(day))}L"
+        f" || epochNanos({time_name}) >= {epoch_ns(tile.start(day + _ONE_DAY))}L)"
         for day in days
     )
     logger.debug("flat-file rows inside the days REST reads are dropped: %s", excluded)
@@ -952,7 +961,7 @@ class FlatFileHistory:
             request: The normalized arguments, with the raw `start` and `end` bounds, and
                 static symbols (the query reads a reactive symbol table before this call).
             window: The call's window (`history_window` in `_datasets/history_source.py`).
-            dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
+            dates: The dates of the files to read (`file_dates` in `_datasets/history_source.py`).
             call: The call's id (`SessionCore.next_stream_id`), which names its reader threads
                 (`"massive #1 call-9 files_0"`).
             infer_holidays: True when no other source can serve the call: a missing trading
@@ -1016,7 +1025,7 @@ class FlatFileHistory:
             prefix=prefix,
             roll=_ends_at_an_instant(spec, window),
             infer_holidays=infer_holidays,
-            tile=spec.single_class if tiled else None,
+            tile=file_days(spec, request) if tiled else None,
             threads=threads,
             stop=as_cancel(stop),
             refusals=refusals,
@@ -1157,7 +1166,7 @@ class FlatFileHistory:
         prefix: str,
         roll: bool = False,
         infer_holidays: bool = True,
-        tile: AssetClass | None = None,
+        tile: FileDays | None = None,
         threads: str,
         stop: Cancel | None = None,
         refusals: RefusedVenues | None = None,
@@ -1189,9 +1198,9 @@ class FlatFileHistory:
                 `infer_holidays` is set.
             infer_holidays: True to take a missing trading day with a later file for a day
                 without trading; False to report every missing trading day as unread.
-            tile: The asset class whose day rules give the instants of an unread day, which
-                REST reads: the kept files' rows inside them are dropped (`_outside_days`),
-                so the two sources never return a row twice. None to drop none.
+            tile: The instants each file holds, which REST reads for an unread file: the
+                kept files' rows inside them are dropped (`_outside_days`), so the two
+                sources never return a row twice. None to drop none.
             threads: The name prefix of the reader threads, such as `"massive #1 call-9 files"`.
             stop: A background read's stop token, which the call's cancel event follows; once
                 it is set, the call raises `MassiveError` naming the cancellation after the
