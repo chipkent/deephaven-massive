@@ -1,10 +1,11 @@
 name: CI
 
-# A pull request into main runs only the jobs its changes can affect. Every other run, a push to
-# main, the weekly run, a release, and a pull request into another branch, runs every job. The
-# lint job decides, from the files the pull request changes, and the ci-ok job, the single
-# required check, passes only when every job the change selected passed and every other job was
-# skipped.
+# A pull request into main runs only the jobs its changes can affect, and when its Python changes
+# touch only docstrings and comments, runs the suite on one Python version. Every other run, a
+# push to main, the weekly run, a release, and a pull request into another branch, runs every
+# job on every version. The lint job decides, from the files the pull request changes, and the
+# ci-ok job, the single required check, passes only when every job the change selected passed
+# and every other job was skipped.
 # Requiring the jobs themselves would not work: a skipped matrix job reports no status under
 # its entries' names, so a pull request that skips the tests would wait forever.
 
@@ -12,6 +13,10 @@ on:
   push:
     branches: [main]
   pull_request:
+    # The three default activity types, and closed: closing or merging a pull request starts a
+    # run whose only effect is to cancel the run still going for it (concurrency, below); every
+    # job of that run is skipped. The push to main that a merge makes runs every job as usual.
+    types: [opened, synchronize, reopened, closed]
   schedule:
     # Mondays at 07:23 UTC. With no lockfile, every run installs the newest releases, so a
     # release that breaks the library is caught within a week even when nothing reaches main
@@ -32,8 +37,10 @@ on:
 
 concurrency:
   # One run per pull request, and one per event kind on main: a new push cancels the run it
-  # replaces, and the weekly run never cancels a push's run or is cancelled by one.
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  # replaces, closing or merging a pull request cancels its run, and the weekly run never
+  # cancels a push's run or is cancelled by one. A pull request's group is keyed on its number,
+  # which every activity type carries, a close included.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -45,12 +52,17 @@ jobs:
     # none starts when it fails. GitHub bills each job by the whole minute, so a job of its own
     # for a decision that takes seconds would add a minute to every run; this job's runner
     # starts on every run anyway, and skips its own checks when the change cannot affect them.
+    # The run a pull request's close starts only cancels the run still going for it, so this
+    # job, and with it every job that needs it, is skipped there.
     name: lint
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       lint: ${{ steps.decide.outputs.lint }}
       test: ${{ steps.decide.outputs.test }}
+      # false when the suite runs on Python 3.14 alone, true when it runs on every version.
+      every-python: ${{ steps.decide.outputs.every-python }}
       build: ${{ steps.decide.outputs.build }}
       docs: ${{ steps.decide.outputs.docs }}
       site: ${{ steps.decide.outputs.site }}
@@ -125,7 +137,7 @@ jobs:
           done
           everything() {
             echo "Every job runs: $1."
-            printf '%s=true\n' lint test build site >> "$GITHUB_OUTPUT"
+            printf '%s=true\n' lint test every-python build site >> "$GITHUB_OUTPUT"
             # The whole suite includes the documentation tests.
             echo docs=false >> "$GITHUB_OUTPUT"
           }
@@ -149,9 +161,10 @@ jobs:
             everything "no rule covers $(head -n 3 <<< "$uncovered" | paste -sd ' ' -)"
             exit 0
           fi
+          # decide <job> <pattern> <paths>: whether any of the paths matches the job's pattern.
           decide() {
             status=0
-            grep -qE "$2" <<< "$paths" || status=$?
+            grep -qE "$2" <<< "$3" || status=$?
             case "$status" in
               0) echo "$1=true" ;;
               1) echo "$1=false" ;;
@@ -161,13 +174,45 @@ jobs:
                 ;;
             esac
           }
+          # When every changed Python file changes only docstrings and comments, as
+          # scripts/docstring_only_change.py judges it against a checkout of the base, and no
+          # other changed path needs the suite, the suite runs on Python 3.14 alone, with
+          # coverage, and the build job runs only when another changed path needs it. The 3.14
+          # suite still runs every check that reads docstrings; Python 3.13 and later strip a
+          # docstring's indentation from __doc__, a difference the full run on main catches. The script answers false for a
+          # new, deleted, or renamed file, one that does not parse, any other change, and any
+          # event but a pull request; a failure of the script or of the checkout counts as
+          # false, so the suite runs on every version. The base's copy of the script judges, so a
+          # pull request cannot change the script to judge its own change.
+          python=$(grep -E '\.py$' <<< "$paths" || [ $? -eq 1 ])
+          others=$(grep -vE '\.py$' <<< "$paths" || [ $? -eq 1 ])
+          only_docstrings=false
+          if [ -n "$python" ] && git worktree add --quiet --detach "$RUNNER_TEMP/base" HEAD^1; then
+            python_files=()
+            while IFS= read -r file; do python_files+=("$file"); done <<< "$python"
+            only_docstrings=$(python3 -I "$RUNNER_TEMP/base/scripts/docstring_only_change.py" "$EVENT" "$RUNNER_TEMP/base" "${python_files[@]}") \
+              || only_docstrings=false
+          fi
+          others_test=$(decide test "$test" "$others")
           # Every decision is made before any is written, so a failure leaves no partial output.
-          decisions=$(decide lint "$lint" && decide test "$test" && decide build "$build" && decide site "$site")
+          # Each one is its own assignment, so set -e stops the step when one fails.
+          if [ "$only_docstrings" = true ] && [ "$others_test" = test=false ]; then
+            echo "The Python files change only docstrings and comments: the suite runs on Python 3.14 alone."
+            test_decision=test=true
+            every_python=every-python=false
+            build_decision=$(decide build "$build" "$others")
+          else
+            test_decision=$(decide test "$test" "$paths")
+            every_python=every-python=true
+            build_decision=$(decide build "$build" "$paths")
+          fi
+          decisions=$(decide lint "$lint" "$paths" && decide site "$site" "$paths")
+          decisions+=$'\n'"$test_decision"$'\n'"$every_python"$'\n'"$build_decision"
           # The documentation tests run on their own only when the whole suite does not.
           if grep -qx 'test=true' <<< "$decisions"; then
             decisions+=$'\ndocs=false'
           else
-            decisions+=$'\n'$(decide docs "$docs")
+            decisions+=$'\n'$(decide docs "$docs" "$paths")
           fi
           tee -a "$GITHUB_OUTPUT" <<< "$decisions"
       - name: Install uv
@@ -203,8 +248,9 @@ jobs:
       fail-fast: false
       matrix:
         # 3.14t is the only free-threaded target: pyarrow, numpy, and pandas no longer publish
-        # cp313t wheels.
-        python-version: ["3.11", "3.12", "3.13", "3.14", "3.14t"]
+        # cp313t wheels. A pull request whose Python changes are only docstrings and comments
+        # runs 3.14 alone (the lint job's every-python output); anything but false runs all.
+        python-version: ${{ fromJSON(needs.lint.outputs.every-python == 'false' && '["3.14"]' || '["3.11", "3.12", "3.13", "3.14", "3.14t"]') }}
     env:
       # The free-threaded build runs with the GIL disabled; an empty value is ignored.
       PYTHON_GIL: ${{ matrix.python-version == '3.14t' && '0' || '' }}
@@ -262,9 +308,11 @@ jobs:
     # The other jobs resolve the newest versions, so a floor in pyproject.toml that is too low
     # never shows up there; a user whose environment pins an older version would find it. This
     # job installs every direct dependency at its declared floor and runs the suite.
+    # A pull request whose Python changes are only docstrings and comments skips it, since
+    # it runs only the 3.14 suite.
     name: test (3.11, lowest direct)
     needs: lint
-    if: needs.lint.outputs.test == 'true'
+    if: needs.lint.outputs.test == 'true' && needs.lint.outputs.every-python != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -519,9 +567,10 @@ jobs:
   ci-ok:
     # The single required check. It runs even when a job it needs failed or was cancelled, so
     # it always reports a status: a skipped required check would count as passed.
+    # The run a pull request's close starts, which only cancels the run still going, skips it.
     name: ci-ok
     needs: [lint, test, test-lowest, build, docs, site]
-    if: always()
+    if: always() && github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -535,14 +584,18 @@ jobs:
           SITE: ${{ needs.site.result }}
           RUN_LINT: ${{ needs.lint.outputs.lint }}
           RUN_TEST: ${{ needs.lint.outputs.test }}
+          EVERY_PYTHON: ${{ needs.lint.outputs.every-python }}
           RUN_BUILD: ${{ needs.lint.outputs.build }}
           RUN_DOCS: ${{ needs.lint.outputs.docs }}
           RUN_SITE: ${{ needs.lint.outputs.site }}
+          EVENT: ${{ github.event_name }}
         # The lint job runs on every run, since it makes the decision, so it must pass; it
         # skips its own checks when the change cannot affect them. The other jobs wait for it,
         # so they never start after a lint failure. Each decision must be exactly true or
         # false; anything else fails. A matrix job's result is success only when every entry
         # passed, the free-threaded 3.14t entry included.
+        # Only a pull request may run the suite on one Python version; every other run, a push
+        # to main included, must run it on all of them.
         run: |
           set -euo pipefail
           failed=0
@@ -566,12 +619,19 @@ jobs:
           wanted() { if [ "$1" = true ]; then echo success; else echo skipped; fi; }
           decision lint "$RUN_LINT"
           decision test "$RUN_TEST"
+          decision every-python "$EVERY_PYTHON"
+          if [ "$EVENT" != pull_request ] && [ "$EVERY_PYTHON" != true ]; then
+            echo "::error::a $EVENT run must run the suite on every Python version"
+            failed=1
+          fi
+          lowest=false
+          if [ "$RUN_TEST" = true ] && [ "$EVERY_PYTHON" = true ]; then lowest=true; fi
           decision build "$RUN_BUILD"
           decision docs "$RUN_DOCS"
           decision site "$RUN_SITE"
           expect lint success "$LINT"
           expect test "$(wanted "$RUN_TEST")" "$TEST"
-          expect test-lowest "$(wanted "$RUN_TEST")" "$TEST_LOWEST"
+          expect test-lowest "$(wanted "$lowest")" "$TEST_LOWEST"
           expect build "$(wanted "$RUN_BUILD")" "$BUILD"
           expect docs "$(wanted "$RUN_DOCS")" "$DOCS"
           expect site "$(wanted "$RUN_SITE")" "$SITE"
