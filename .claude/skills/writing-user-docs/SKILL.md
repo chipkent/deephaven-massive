@@ -91,6 +91,8 @@ every FALSE or UNSOURCED claim before grading.
 Then spawn one pair of fresh, independent graders, which haven't seen your draft being written,
 each with this brief, scoped to the changed sections, and give them the approved version of any
 revised hook to compare against:
+The scope is the sections the change touched, unless the request itself is a review of the
+whole page. Older text outside the scope is never graded or rewritten.
 
 ```text
 Read <repo>/.claude/skills/writing-user-docs/agents/editor.md and follow it exactly. Grade

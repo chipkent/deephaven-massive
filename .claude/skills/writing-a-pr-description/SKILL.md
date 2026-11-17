@@ -78,9 +78,12 @@ would. Two passes help:
 
 ## 4. Grade
 
-The author reads its own text in the code's vocabulary, so a fresh editor grades it. Before
-the push that opens the PR or changes its description, spawn a grader with no other context.
-`<base>` is the PR's base: `origin/main`, or the branch below it in a stack.
+The author reads its own text in the code's vocabulary, so a fresh editor grades it. Spawn a
+grader with no other context when the PR opens, and again only when a push changes what the PR
+does. A push that only merges `main` or fixes review findings gets no new grade: update the
+affected lines yourself. A `test:`, `chore:`, or small `fix:` PR gets one grade. `<base>` is the
+PR's base: `origin/main`, or the branch below it in a stack. The three-dot diff leaves out what
+a merge of `main` brought in.
 
 ```text
 Read <repo>/.claude/skills/writing-user-docs/agents/editor.md and follow it exactly, with its

@@ -28,10 +28,14 @@ separate reviewer agent. That review comes in addition to this one, never instea
 
 Scope it to what is new. The push that opens the PR reviews the whole branch
 (`git diff origin/main...HEAD`, or the PR below in a stack); a later push reviews the commits
-since the last push and how they interact with the rest. Keep a findings list (file and line,
-what is wrong, the fix) as you go. Fix every finding inside the change before the push. A
-finding that would add work the request does not need (a feature, tooling, a refactor of code
-the change does not touch) goes under Follow-ups in the description, with an issue.
+since the last push and how they interact with the rest. A push whose only new content is a
+merge of `main` or the base reviews just the conflict resolutions and anything the merge forced
+you to change. It does not re-review the merged commits, re-grade the description, or rerun the
+full suite locally: the pre-push hook runs the changed files' tests, and CI runs the rest. Keep
+a findings list (file and line, what is wrong, the fix) as you go. Fix every finding inside the
+change before the push. A finding that would add work the request does not need (a feature,
+tooling, a refactor of code the change does not touch) goes under Follow-ups in the
+description, with an issue.
 
 A finding is a pattern, not a spot. Whoever made the mistake once made it wherever the same
 situation came up, so before fixing it, find every other instance in the diff and in the closed

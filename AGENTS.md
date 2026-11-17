@@ -344,7 +344,8 @@ These protect the owner's repository, money, and secrets.
 - Merge `main` or your base branch only to resolve a merge conflict, or after an open PR that
   renames a public name lands (a text merge can't catch the old name in your new code; rerun the
   tests). Read both sides of each merge conflict, never take one wholesale, regenerate a
-  generated file instead of merging it, and say in the PR body how you resolved it.
+  generated file instead of merging it, and say in the PR body how you resolved it. A merge push
+  is reviewed only for its conflict resolutions (`pre-push-review`).
 - **A decision record is the evidence behind a rule, not the rule.** Rules live here, in the
   user docs and docstrings, and in the `docs/dev/` page on their subject; a record holds the
   owner's ruling that set one, and the rule links it (`decision N`). A verification item is a
