@@ -208,14 +208,37 @@ def test_the_skipped_rows_text_counts_and_lists_the_first_five() -> None:
     )
 
 
-def test_the_message_of_a_dataset_that_spans_classes_names_no_class() -> None:
+def test_the_message_of_a_dataset_that_spans_classes_names_each_conversion() -> None:
     message = invalid_row_message(ClassFromPrefix.ANY, "aapl")
     assert "tickers are case-sensitive" in message
     assert message.endswith(
-        "Fix the row, or convert each row with dm.canonical_symbol(text, asset_class) and the "
-        "row's own class, since this dataset's rows may mix classes. If Massive itself writes "
+        "Fix the row, or convert each row with dm.canonical_symbol(text, asset_class) and that "
+        "row's class (dm.AssetClass.FOREX for 'EUR/USD'), since this table's rows may mix "
+        "classes. A stock in another source's spelling also needs that source's convention: "
+        "dm.canonical_symbol('BRK-B', dm.AssetClass.STOCKS, "
+        "convention=dm.SymbolConvention.YAHOO) gives 'BRK.B'. If Massive itself writes "
         f"'aapl', the library does not know its form yet: report it at {ISSUES_URL}"
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "asset_class", "convention", "converted"),
+    [
+        ("EUR/USD", AssetClass.FOREX, dm.SymbolConvention.MASSIVE, "C:EURUSD"),
+        ("BRK-B", AssetClass.STOCKS, dm.SymbolConvention.YAHOO, "BRK.B"),
+    ],
+)
+def test_the_conversions_a_mixed_class_message_names_convert_refused_rows(
+    *, text: str, asset_class: AssetClass, convention: dm.SymbolConvention, converted: str
+) -> None:
+    # Each refused row converts as the message says; without its convention BRK-B does not.
+    mixed = spanning()
+    assert not mixed.accepts(text)
+    assert dm.canonical_symbol(text, asset_class, convention=convention) == converted
+    assert mixed.accepts(converted)
+    if convention is not dm.SymbolConvention.MASSIVE:
+        with pytest.raises(ValueError, match="convention="):
+            dm.canonical_symbol(text, asset_class)
 
 
 # --- SymbolWatch ---------------------------------------------------------------------------------

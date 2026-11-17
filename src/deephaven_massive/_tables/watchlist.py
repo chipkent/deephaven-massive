@@ -137,12 +137,12 @@ def invalid_row_message(
         the rows it cannot convert and, with `on_error=dm.OnError.RAISE`, fails on them, so a
         caller who chose to fail on a bad row keeps failing; for a dataset that spans classes,
         whose rows may mix them, it is `dm.canonical_symbol` per row with each row's class. For
-        stocks the remedy names `convention=`, since under the default, Massive's own spelling,
-        no ticker with another source's separators converts. For values kept as Massive writes
-        them (a third party's global tickers, futures product codes) the remedy is only to fix
-        the row: the converters follow a class's ticker grammar, so they refuse a product code
-        such as `ES`, and they refuse surrounding whitespace and a class prefix, the faults such
-        a row has, so they would null every one.
+        stocks, alone or among other classes, the remedy names `convention=`, since under the
+        default, Massive's own spelling, no ticker with another source's separators converts.
+        For values kept as Massive writes them (a third party's global tickers, futures product
+        codes) the remedy is only to fix the row: the converters follow a class's ticker
+        grammar, so they refuse a product code such as `ES`, and they refuse surrounding
+        whitespace and a class prefix, the faults such a row has, so they would null every one.
     """
     refusal = ""
     try:
@@ -158,8 +158,11 @@ def invalid_row_message(
     reason = f" ({refusal})" if refusal else ""
     if asset_class is ClassFromPrefix.ANY:
         remedy = (
-            "convert each row with dm.canonical_symbol(text, asset_class) and the row's own "
-            "class, since this dataset's rows may mix classes"
+            "convert each row with dm.canonical_symbol(text, asset_class) and that row's class "
+            "(dm.AssetClass.FOREX for 'EUR/USD'), since this table's rows may mix classes. A "
+            "stock in another source's spelling also needs that source's "
+            "convention: dm.canonical_symbol('BRK-B', dm.AssetClass.STOCKS, "
+            "convention=dm.SymbolConvention.YAHOO) gives 'BRK.B'"
         )
     else:
         convention = (
