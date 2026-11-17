@@ -26,6 +26,8 @@ from deephaven_massive._datasets.history_source import (
     SourceChoice,
     choose_source,
     current_partition,
+    file_dates,
+    file_days,
     flat_file_prefix,
     history_window,
     partition_dates,
@@ -331,6 +333,46 @@ def test_futures_bars_by_instants_request_them_exactly() -> None:
     assert bars_window.requested == exact
     assert bars_window.times == exact
     assert partition_dates(FUTURES_BARS, bars_window) == (date(2025, 3, 4),)
+
+
+# --- file_dates ------------------------------------------------------------------------------
+
+INDEX_BARS = CATALOG.by_name["indices.bars"]
+MINUTES = Request(timespan=Timespan.MINUTE, multiplier=1)
+
+
+def test_index_minute_files_hold_the_chicago_day() -> None:
+    files = file_days(INDEX_BARS, MINUTES)
+    assert files.zone is CHICAGO
+    # Midnight in Chicago is 01:00 New York, in winter and in summer.
+    assert files.start(date(2025, 3, 4)) == datetime(2025, 3, 4, 1, tzinfo=NEW_YORK)
+    assert files.start(date(2025, 7, 1)) == datetime(2025, 7, 1, 1, tzinfo=NEW_YORK)
+    days = Request(timespan=Timespan.DAY, multiplier=1)
+    assert file_days(INDEX_BARS, days).zone is None
+    assert file_days(STOCK_BARS, MINUTES).zone is None
+
+
+def test_index_minute_days_read_the_file_before_the_first_day() -> None:
+    days = window(INDEX_BARS, "2025-03-04", "2025-03-05", timespan=Timespan.MINUTE)
+    assert file_dates(INDEX_BARS, MINUTES, days) == (
+        date(2025, 3, 3),
+        date(2025, 3, 4),
+        date(2025, 3, 5),
+    )
+    # From 01:00 New York the first day's rows all lie in its own file.
+    late = datetime(2025, 3, 4, 1, tzinfo=NEW_YORK)
+    hour = window(INDEX_BARS, late, late + timedelta(hours=1), timespan=Timespan.MINUTE)
+    assert file_dates(INDEX_BARS, MINUTES, hour) == (date(2025, 3, 4),)
+    empty = window(INDEX_BARS, late, late, timespan=Timespan.MINUTE)
+    assert file_dates(INDEX_BARS, MINUTES, empty) == ()
+
+
+def test_other_files_hold_their_class_s_days() -> None:
+    days = window(STOCK_BARS, "2025-03-04", "2025-03-05", timespan=Timespan.MINUTE)
+    assert file_dates(STOCK_BARS, MINUTES, days) == partition_dates(STOCK_BARS, days)
+    assert file_days(STOCK_BARS, MINUTES).start(date(2025, 3, 4)) == datetime(
+        2025, 3, 4, tzinfo=NEW_YORK
+    )
 
 
 # --- partition_dates -------------------------------------------------------------------------
