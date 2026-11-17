@@ -254,6 +254,25 @@ def test_events_give_one_per_group_of_the_streams_rows() -> None:
     assert event.at > 0
 
 
+def test_each_event_records_the_setting_of_its_own_cause() -> None:
+    groups = (
+        WithheldGroup(VALUES, "A", "A", "Price", 2, "price"),
+        WithheldGroup(KEYS, "B", "B", "Timestamp", 1, "time"),
+    )
+    withheld = Withheld(pa.table({}), groups, "price")
+    found = withheld.events(
+        dataset="stocks.trades",
+        transport=Transport.REST,
+        where="GET /v3/trades",
+        stream_id=None,
+        policy=policy(unconvertible_values=dm.OnError.IGNORE, unreadable_keys=dm.OnError.RAISE),
+    )
+    assert [(e.cause, e.policy) for e in found] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, dm.OnError.IGNORE),
+        (ProblemCause.UNREADABLE_KEYS, dm.OnError.RAISE),
+    ]
+
+
 def test_events_past_the_cap_are_one_overflow_event_per_fault() -> None:
     shown = [
         WithheldGroup(VALUES, f"S{i}", f"S{i}", "Price", 1, f"price {i}")

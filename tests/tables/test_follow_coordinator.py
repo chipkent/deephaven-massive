@@ -942,6 +942,55 @@ def test_failed_and_retrying_symbols_are_spans_with_their_errors(
     massive_session.release(result)
 
 
+def test_a_retrying_symbol_s_span_ends_when_its_retry_lands(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    clock: FakeClock,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(503, "busy"), SymbolRows(rows_of(massive_session, "AAPL", 1))]
+    result = follow(massive_session, watchlist("AAPL"), script)
+    wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+    retrying = ("symbol_read_retrying", "AAPL", "HTTP 503: busy")
+    until(lambda: troubled(problem_rows) == [(*retrying, False)])
+    clock.advance(RETRY_DELAYS[0])
+    massive_session._core.follows.wake()
+    wait_state(massive_session, "AAPL", SymbolReadState.DONE)
+    # The span ends, and no failed span opens: the symbol was read.
+    until(lambda: troubled(problem_rows) == [(*retrying, True)])
+    massive_session.release(result)
+
+
+def test_a_retrying_symbol_that_gives_up_ends_its_span_and_opens_a_failed_one(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    clock: FakeClock,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    script = Script(massive_session)
+    script.answers["AAPL"] = [refused(503, "busy")]
+    # MSFT lands, so the table outlives AAPL's failure.
+    result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
+    wait_state(massive_session, "MSFT", SymbolReadState.DONE)
+    for attempt, delay in enumerate(RETRY_DELAYS, start=1):
+        wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
+        clock.advance(delay)
+        massive_session._core.follows.wake()
+        until(functools.partial(script.read_count_is, "AAPL", attempt + 1))
+    wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
+    # Each wait for a retry is a span of its own, ended once the retry starts; the last one
+    # gives up, and the failed span stays open.
+    expected = [
+        ("symbol_read_failed", "AAPL", "HTTP 503: busy", False),
+        *[("symbol_read_retrying", "AAPL", "HTTP 503: busy", True)] * len(RETRY_DELAYS),
+    ]
+    until(lambda: troubled(problem_rows) == expected)
+    massive_session.release(result)
+
+
 def test_the_flat_files_and_rest_label(
     *,
     watchlist: Callable[..., InputTable],

@@ -2494,6 +2494,34 @@ def test_a_cycle_with_odd_rows_keeps_the_table_and_lists_the_withheld_rows(
     del table
 
 
+def test_an_odd_row_read_again_each_cycle_adds_its_rows_to_one_problem_row(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Each cycle reads the same two odd rows again: one event per cycle, of two rows, adds
+    # to the same m.problems() row.
+    rows = [
+        {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0},
+        {"ticker": "AAPL", "id": "b", "frequency": 5.5, "cash_amount": 2.0},
+        {"ticker": "AAPL", "id": "c", "frequency": 4, "cash_amount": 3.0},
+    ]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"])
+    table = q.poll(60)
+    for cycle in (1, 2, 3):
+        if cycle > 1:
+            next_cycle(clock)
+        clock.wait_for_sleepers(1)
+        (withheld,) = problems_of(rest_session, dh_to_pylist, ProblemCause.UNCONVERTIBLE_VALUES)
+        found = (withheld["Symbol"], withheld["Field"], withheld["Rows"], withheld["Occurrences"])
+        assert found == ("AAPL", "Frequency", 2 * cycle, cycle)
+    assert [r["Id"] for r in dh_to_pylist(table)] == ["c"]
+    del table
+
+
 def test_a_failure_while_publishing_keeps_the_poller(
     *,
     massive_session: dm.MassiveSession,
