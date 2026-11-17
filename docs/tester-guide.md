@@ -312,8 +312,9 @@ print(dm.__version__)
 print(m)
 ```
 
-You should see the library's version without its leading `v`, such as `0.1.0rc1`, then a line
-such as `<MassiveSession #12 open>`. The number counts the sessions this server has opened.
+You should see the library's version, such as `0.1.0rc1`, with no leading `v`. The next line
+is like `<MassiveSession #12 open>`, where the number counts the sessions this server has
+opened.
 
 #### 2. Find datasets and their columns
 
