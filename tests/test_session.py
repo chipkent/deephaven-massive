@@ -27,7 +27,7 @@ from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
-from deephaven_massive._errors import NEW_SESSION, session_closed
+from deephaven_massive._errors import session_closed
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._tables import session_core as _core
@@ -500,11 +500,17 @@ def test_close_marks_streams_closed_and_warns_once(
         massive_session.close()
         massive_session.close()
     assert caplog.messages == [
-        f"{massive_session._core.label} closed; 1 live tables failed, streams 1 [1]"
+        (
+            "The session closed and failed its live tables, listed in m.streams() by StreamId: "
+            "1. Open a new dm.MassiveSession() to read again."
+        )
     ]
     # Only the stream still in the registry is closed; the shut-down one keeps its last row.
     rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
-    closed = f"{label(massive_session)} was closed; this table no longer updates. " + NEW_SESSION
+    closed = (
+        "This session was closed, so this table no longer updates. Open a new "
+        "dm.MassiveSession() to read again."
+    )
     assert [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed), ("RELEASED", None)]
     assert fake_streams.failed == {1: closed}
     assert isinstance(fake_streams.errors[1], dm.SessionClosedError)
@@ -643,7 +649,10 @@ def test_close_fails_derived_tables_and_marks_their_stream_closed(
     streams = massive_session.streams()
     massive_session.close()
     rows = dh_arrow.to_arrow(streams).to_pylist()
-    closed = f"{label(massive_session)} was closed; this table no longer updates. " + NEW_SESSION
+    closed = (
+        "This session was closed, so this table no longer updates. Open a new "
+        "dm.MassiveSession() to read again."
+    )
     assert [(r["State"], r["HeldResults"], r["Error"]) for r in rows] == [("CLOSED", 0, closed)]
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # the failure shut the stream down
     wait_until(lambda: bool(derived.j_table.isFailed()))
@@ -660,7 +669,7 @@ def test_close_with_no_live_tables_logs_info(
     with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.session_core"):
         massive_session.close()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.INFO, f"{massive_session._core.label} closed; 0 live tables failed, streams 0 []")
+        (logging.INFO, f"{massive_session._core.label} closed with no live table to fail")
     ]
 
 
@@ -897,7 +906,10 @@ def test_close_in_a_console_command_returns_without_waiting_for_a_cycle(
     rows_when(view, lambda rows: [r["State"] for r in rows] == ["RUNNING"])
     writer = massive_session._core.diagnostics.thread
     console_command(massive_session.close)
-    closed = f"{label(massive_session)} was closed; this table no longer updates. " + NEW_SESSION
+    closed = (
+        "This session was closed, so this table no longer updates. Open a new "
+        "dm.MassiveSession() to read again."
+    )
     rows_when(view, lambda rows: [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed)])
     writer.join(TIMEOUT)
     assert not writer.is_alive()
