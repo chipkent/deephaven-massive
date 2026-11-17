@@ -4039,7 +4039,7 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
     assert (
         "stocks.dividends poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
         "per minute, so a cycle takes at least 37 s, longer than the 30 s interval, and cycles "
-        "run late. To keep them on time, pass poll() an interval of 37 s or more."
+        "run late. To keep them on time, call poll(37) or a longer interval."
     ) in caplog.messages
 
 
@@ -4253,7 +4253,7 @@ def test_a_404_after_the_first_page_means_the_data_was_cut_short(
     assert str(info.value) == (
         "stocks.trades: the rows of AAPL were cut short after 1 page arrived. Massive answered "
         'GET /v3/trades/AAPL?cursor=gone on 127.0.0.1 with HTTP 404: "{"status":"NOT_FOUND"}". '
-        "Call the method again."
+        "Call m.stocks.trades again to read AAPL from the start."
     )
     assert info.value.status == 404
     # Unlike any other 404: a new call starts over with a new cursor.
@@ -4297,7 +4297,7 @@ def test_every_page_of_bars_must_echo_the_requested_adjustment(
         dm.MassiveError,
         match=r"^stocks\.bars: Massive answered with bars of adjusted=False, and the call asked "
         r"for adjusted=True\. The table would mix split-adjusted and as-traded prices, so the "
-        r"read stopped\. Call the method again\.$",
+        r"read stopped\. Call m\.stocks\.bars again\.$",
     ) as mixed:
         daily_bars(session, adjusted=True)
     assert mixed.value.is_retryable  # the next answer may agree with the request
@@ -5492,7 +5492,7 @@ def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSe
     with pytest.raises(
         CutShortError,
         match=rf"^stocks\.trades: the rows of AAPL were cut short after 2 pages arrived\. "
-        rf"{re.escape(answer)} Call the method again\.$",
+        rf"{re.escape(answer)} Call m\.stocks\.trades again to read AAPL from the start\.$",
     ) as info:
         _not_found(session, error, symbol="AAPL", requests=2)
     assert info.value.request_id == "r1"

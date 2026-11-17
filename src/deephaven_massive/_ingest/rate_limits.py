@@ -780,7 +780,7 @@ class PaceCheck:
             logger.warning(
                 "%s: each cycle makes %d %s requests, but they are paced at %d per minute, so a "
                 "cycle takes at least %.0f s, longer than the %g s interval, and cycles run "
-                "late. To keep them on time, pass poll() an interval of %.0f s or more.",
+                "late. To keep them on time, call poll(%.0f) or a longer interval.",
                 self._read,
                 count,
                 bucket,

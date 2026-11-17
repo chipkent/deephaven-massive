@@ -167,16 +167,16 @@ class RefusedVenues:
             An `EntitlementError` naming the venues and the first one's refusal, with its status
             and request id, such as `"futures.trades: Massive refused the flat files of every
             venue the read asked for, CME and NYMEX. Massive answered ... To read from REST
-            instead, pass contract tickers such as 'ESZ6' in place of dm.ALL, with
-            source=dm.HistorySource.REST."`.
+            instead, pass source=dm.HistorySource.REST and contract tickers such as 'ESH5'
+            in place of dm.ALL."`.
         """
         refused = self._refused()
         first = refused[0][1]
         names = prose_list((venue.name for venue, _ in refused), "venues", shown=len(refused))
         return EntitlementError(
             f"{dataset}: Massive refused the flat files of every venue the read asked for, "
-            f"{names}. {first.message} To read from REST instead, pass contract tickers such "
-            "as 'ESZ6' in place of dm.ALL, with source=dm.HistorySource.REST.",
+            f"{names}. {first.message} To read from REST instead, pass "
+            "source=dm.HistorySource.REST and contract tickers such as 'ESH5' in place of dm.ALL.",
             status=first.status,
             request_id=first.request_id,
         )

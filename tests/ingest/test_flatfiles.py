@@ -2842,7 +2842,7 @@ def test_a_read_that_leaves_venues_out_fails_when_every_venue_is_refused(
     # The advice works: contract tickers with source=dm.HistorySource.REST read from REST.
     rest = RestRecorder()
     monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
-    contracts = session.futures.trades(["ESZ6"])
+    contracts = session.futures.trades(["ESH5"])
     t = contracts.history("2025-03-04", "2025-03-04", source=HistorySource.REST, wait=True)
     assert pick(t, "Symbol") == [("from REST",)]
 
@@ -3108,8 +3108,9 @@ def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
                 r"asked for, CME and NYMEX\. Massive answered the read of "
                 r"s3://flatfiles/us_futures_cme/trades_v1/2025/03/2025-03-04\.csv\.gz at "
                 rf"https://files\.massive\.com with HTTP 403 \(request_id {REQUEST_ID}\): "
-                r'"AccessDenied: No"\. To read from REST instead, pass contract tickers such as '
-                r"'ESZ6' in place of dm\.ALL, with source=dm\.HistorySource\.REST\.$"
+                r'"AccessDenied: No"\. To read from REST instead, pass '
+                r"source=dm\.HistorySource\.REST and contract tickers such as 'ESH5' in place of "
+                r"dm\.ALL\.$"
             ),
         ) as info:
             q.history("2025-03-04", "2025-03-04", wait=True)

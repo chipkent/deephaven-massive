@@ -488,7 +488,7 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns_once(
         (
             "stocks.snapshots poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
             "per minute, so a cycle takes at least 37 s, longer than the 30 s interval, and cycles "
-            "run late. To keep them on time, pass poll() an interval of 37 s or more."
+            "run late. To keep them on time, call poll(37) or a longer interval."
         )
     ]
     # The advice works: a poll at the interval the warning names keeps its cycles on time.

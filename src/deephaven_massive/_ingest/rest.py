@@ -1603,7 +1603,7 @@ class RestReader:
             pages = "1 page" if requests == 1 else f"{requests} pages"
             raise CutShortError(
                 f"{spec.name}: the rows of {call.symbol} were cut short after {pages} arrived. "
-                f"{error.message} Call the method again.",
+                f"{error.message} Call m.{spec.name} again to read {call.symbol} from the start.",
                 status=error.status,
                 request_id=error.request_id,
             ) from error
@@ -1977,7 +1977,7 @@ class RestReader:
             raise MassiveError(
                 f"{spec.name}: Massive answered with bars of adjusted={echoed}, and the call "
                 f"asked for adjusted={sent}. The table would mix split-adjusted and as-traded "
-                "prices, so the read stopped. Call the method again.",
+                f"prices, so the read stopped. Call m.{spec.name} again.",
                 is_retryable=True,
             )
 
@@ -1992,7 +1992,7 @@ class RestReader:
         """Log a page's error rows: each at DEBUG, and one WARNING for the tickers new to it.
 
         The WARNING lists each ticker not warned about before in the session, with Massive's
-        error and message, through `bounded_list`, so a page of thousands of error rows logs
+        error and message, through `prose_list`, so a page of thousands of error rows logs
         one short line. The rows are kept, with their `Error` and `Message` columns.
 
         Args:
