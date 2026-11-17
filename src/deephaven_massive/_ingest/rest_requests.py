@@ -481,7 +481,7 @@ def _caller_params(
 
     Raises:
         ValueError: If a typed parameter or a filter the caller set is not a parameter of the
-            path (for example a filter of a dataset's list path on its per-symbol path), or
+            path (for example a filter of a dataset's fetch path on one of its per-class paths), or
             `order` is set where the path has neither `order` nor `sort`.
     """
     params = {p.name: p for p in rest_path.params}
@@ -678,10 +678,8 @@ def fetch_paths(
 ) -> list[tuple[str, tuple[str, ...] | AllSymbols | None]]:
     """Return the REST paths a `fetch()` or `poll()` cycle reads, each with its symbols.
 
-    A dataset with a per-symbol detail path (`DatasetSpec.detail_path`, such as one option
-    contract's reference data) reads it once per symbol when the call names symbols, and its
-    list path (`fetch_path`) otherwise. A dataset that serves some asset classes on paths of
-    their own (`DatasetSpec.fetch_paths_by_class`) sends each symbol to its class's path
+    A dataset reads its `fetch_path`. One that serves some asset classes on paths of their own
+    (`DatasetSpec.fetch_paths_by_class`) sends each symbol to its class's path
     (`symbol_class`), and every other symbol to `fetch_path`.
 
     Args:
@@ -702,8 +700,6 @@ def fetch_paths(
             return [(default, symbols)]
         case _:
             raise BrokenGuaranteeError(unmatched_form("a REST call's paths", symbols))
-    if spec.detail_path is not None:
-        return [(spec.detail_path, symbols)]
     if not spec.fetch_paths_by_class:
         return [(default, symbols)]
     groups: dict[str, list[str]] = {}

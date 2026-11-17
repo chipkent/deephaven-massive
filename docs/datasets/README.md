@@ -88,7 +88,8 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | [`m.options.admin_messages`](options.admin_messages.md) | OPRA's administrative messages, including FLEX trade notices, live and past. | `blink()`, `append_only()`, `ring()`, `history()` |
 | [`m.options.chain`](options.chain.md) | The snapshot of every contract in one underlying's option chain. | `fetch()`, `poll()` |
 | [`m.options.snapshots`](options.snapshots.md) | The current snapshot of each requested options contract, with its greeks. | `fetch()`, `poll()` |
-| [`m.options.contracts`](options.contracts.md) | Reference data on options contracts: type, exercise style, expiration, and strike. | `fetch()`, `poll()` |
+| [`m.options.contracts`](options.contracts.md) | Options contracts by underlying: call or put, exercise style, expiration, and strike. | `fetch()`, `poll()` |
+| [`m.options.contract_details`](options.contract_details.md) | The options contracts you name: call or put, exercise style, expiration, and strike. | `fetch()`, `poll()` |
 | [`m.options.daily_open_close`](options.daily_open_close.md) | The open, high, low, close, and volume of each options contract on one day. | `fetch()`, `poll()` |
 | [`m.options.open_interest`](options.open_interest.md) | The open interest of each US-listed options contract at the end of each trading day. | `fetch()`, `poll()` |
 | [`m.options.unusual_trades`](options.unusual_trades.md) | Large trades and sweeps of US-listed options contracts, flagged by Massive. | `fetch()`, `poll()` |
