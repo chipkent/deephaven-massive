@@ -129,7 +129,7 @@ from deephaven_massive._datasets.futures_sessions import (
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._errors import library_bug, required
-from deephaven_massive._log_limits import log_once
+from deephaven_massive._log_limits import log_once, prose_list
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -807,10 +807,10 @@ class TimeRule:
         )
         required(self.warnings, f"{self.dataset} daily warnings").log(
             f"day not in UTC {self.dataset}",
-            "%s: Massive sent the day summary of %s for %s with isUTC false, which names no "
-            "zone. The row keeps Date and IsUtc, but its window widens to the date's day in "
-            "every zone, TimestampStart %s to TimestampEnd %s, so no join on TimestampEnd "
-            "attaches it early. Report the row at %s so its day can be settled.",
+            "%s: Massive sent the day summary of %s for %s with isUTC false, so the library "
+            "cannot tell which zone's day it covers. The row keeps Date and IsUtc, with "
+            "TimestampStart %s and TimestampEnd %s, the span of that date in every zone. Report "
+            "the row at %s so its day can be settled.",
             self.dataset,
             _column(rows, "Symbol")[first].as_py(),
             labels[first].as_py(),
@@ -1148,9 +1148,9 @@ class StampRule:
         unit = self.timespan.value if self.multiplier == 1 else f"{self.timespan.value}s"
         self.warnings.log(
             f"unexpected bar stamp {label} {zone} {self.multiplier} {self.timespan.value} {form}",
-            "%s: Massive sent %s %s of %s stamped %s%s, a stamp it is not known to use for bars "
-            "of %d %s, which it stamps at %s. The row is withheld, since the library cannot "
-            "tell which day it covers. Report the stamp at %s so the day cut can be settled.",
+            "%s: Massive sent %s %s of %s stamped %s%s. Massive is known to stamp bars of %d %s "
+            "at %s, so the library cannot tell which day this one covers and withholds it. "
+            "Report the stamp at %s so the library can learn which day such bars cover.",
             label,
             article,
             self.what,
@@ -1440,11 +1440,12 @@ def _expected(
         months: The months whose 1st is expected, or empty for any day.
 
     Returns:
-        Such as `"00:00:00.000, 16:00:00.000 in America/New_York"` or
+        Such as `"00:00:00.000 and 16:00:00.000 in America/New_York"` or
         `"00:00:00.000 in UTC, on a Sunday"`.
 
     """
-    times = ", ".join(t.isoformat("milliseconds") for t in sorted({time(0), *known}))
+    stamps = [t.isoformat("milliseconds") for t in sorted({time(0), *known})]
+    times = prose_list(stamps, "times", shown=len(stamps))
     text = f"{times} in {zone}"
     if weekdays:
         text += ", on a " + " or ".join(_WEEKDAY_NAMES[day] for day in sorted(weekdays))

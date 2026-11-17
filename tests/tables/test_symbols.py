@@ -73,10 +73,12 @@ def test_a_convention_names_case_whitespace_and_emptiness_per_row(
             table, AssetClass.STOCKS, convention=SymbolConvention.YAHOO, on_error=OnError.RAISE
         )
     assert str(raised.value) == (
-        "canonicalize_symbols cannot convert 3 values of Symbol to stock tickers. '' is empty, "
+        "canonicalize_symbols cannot convert 3 values of the Symbol column to stock tickers. '' "
+        "is empty, "
         "not a ticker. 'BRK-B ' has surrounding whitespace. Pass 'BRK-B'. 'brk-b' is not a "
         "YAHOO ticker. The YAHOO convention writes tickers in upper case. If you mean 'BRK-B', "
-        "pass 'BRK-B'. Pass on_error=dm.OnError.LOG to give their rows a null symbol instead."
+        "pass 'BRK-B'. Correct those values, or pass on_error=dm.OnError.LOG to give their rows "
+        "a null symbol."
     )
 
 
@@ -84,7 +86,8 @@ def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: ExecutionContext) -> 
     table = new_table([string_col("Symbol", ["BRK-B", "b1", "b2", "b3", "b4", "b5", "b6"])])
     with pytest.raises(
         ValueError,
-        match=r"^canonicalize_symbols cannot convert 7 values of Symbol to stock tickers\. The "
+        match=r"^canonicalize_symbols cannot convert 7 values of the Symbol column to stock "
+        r"tickers\. The "
         r"first 5: 'BRK-B' is not a Massive stock ticker\. ",
     ) as raised:
         dm.canonicalize_symbols(table, AssetClass.STOCKS, on_error=OnError.RAISE)
@@ -92,7 +95,7 @@ def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: ExecutionContext) -> 
     assert "'b4'" in message  # the first five in sorted order
     assert "'b5'" not in message
     assert message.endswith(
-        "Pass on_error=dm.OnError.LOG to give their rows a null symbol instead."
+        "Correct those values, or pass on_error=dm.OnError.LOG to give their rows a null symbol."
     )
     # The advice works: under LOG the bad rows get a null symbol and the table is made.
     logged = dm.canonicalize_symbols(table, AssetClass.STOCKS, on_error=OnError.LOG)
@@ -157,7 +160,8 @@ def test_a_bad_initial_row_of_a_refreshing_table_raises(
         scope.open(),
         pytest.raises(
             ValueError,
-            match=r"^canonicalize_symbols cannot convert 1 value of Symbol to crypto tickers\. "
+            match=r"^canonicalize_symbols cannot convert 1 value of the Symbol column to crypto "
+            r"tickers\. "
             r"'no pe!' is not a crypto pair\. ",
         ),
     ):

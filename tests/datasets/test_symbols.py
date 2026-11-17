@@ -464,7 +464,8 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
 
 STOCK_CONVENTIONS_FIX = (
     "If it is Yahoo's spelling, pass convention=dm.SymbolConvention.YAHOO to dm.canonical_symbol "
-    "or dm.canonicalize_symbols, or NASDAQ or CMS for those conventions."
+    "or dm.canonicalize_symbols, or dm.SymbolConvention.NASDAQ or dm.SymbolConvention.CMS for "
+    "those conventions."
 )
 """The fix that ends the refusal of a stock ticker with another convention's separator."""
 STOCK_FORMS = (
@@ -779,8 +780,8 @@ def test_a_converter_log_record_names_the_value_its_result_and_the_fix(
         (
             "canonical_symbol: 'BRK-B' becomes None. 'BRK-B' is not a Massive stock ticker. If it "
             "is Yahoo's spelling, pass convention=dm.SymbolConvention.YAHOO to "
-            "dm.canonical_symbol or dm.canonicalize_symbols, or NASDAQ or CMS for those "
-            "conventions."
+            "dm.canonical_symbol or dm.canonicalize_symbols, or dm.SymbolConvention.NASDAQ or "
+            "dm.SymbolConvention.CMS for those conventions."
         )
     ]
 

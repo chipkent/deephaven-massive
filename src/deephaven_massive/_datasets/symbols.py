@@ -550,7 +550,8 @@ def _convert_stock(text: str) -> str:
         raise ValueError(
             f"{text!r} is not a Massive stock ticker. If it is Yahoo's spelling, pass "
             "convention=dm.SymbolConvention.YAHOO to dm.canonical_symbol or "
-            "dm.canonicalize_symbols, or NASDAQ or CMS for those conventions."
+            "dm.canonicalize_symbols, or dm.SymbolConvention.NASDAQ or dm.SymbolConvention.CMS "
+            "for those conventions."
         )
     if text == text.lower() != text.upper():
         raise ValueError(

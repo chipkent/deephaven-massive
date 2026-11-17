@@ -632,10 +632,10 @@ def test_a_day_summary_not_in_utc_gets_its_dates_widest_window_and_one_warning()
     assert key == "day not in UTC crypto.daily_open_close"
     assert message % tuple(args) == (
         "crypto.daily_open_close: Massive sent the day summary of X for 2025-03-04 with isUTC "
-        "false, which names no zone. The row keeps Date and IsUtc, but its window widens to the "
-        "date's day in every zone, TimestampStart 2025-03-03T10:00:00+00:00 to TimestampEnd "
-        "2025-03-05T12:00:00+00:00, so no join on TimestampEnd attaches it early. Report the row "
-        "at https://github.com/chipkent/deephaven-massive/issues so its day can be settled."
+        "false, so the library cannot tell which zone's day it covers. The row keeps Date and "
+        "IsUtc, with TimestampStart 2025-03-03T10:00:00+00:00 and TimestampEnd "
+        "2025-03-05T12:00:00+00:00, the span of that date in every zone. Report the row at "
+        "https://github.com/chipkent/deephaven-massive/issues so its day can be settled."
     )
     # A batch whose rows are all in UTC, or whose flags are unknown, keeps the UTC day and
     # warns of nothing.
@@ -794,22 +794,21 @@ def test_an_unexpected_stamp_is_returned_to_withhold_with_one_warning_per_form(
     assert moved == [datetime(2024, 11, 27, tzinfo=NEW_YORK), odd, None]
     assert odd_stamps(rule, [close, odd, None]) == [False, True, False]
     withheld = (
-        "The row is withheld, since the library cannot tell which day it covers. Report the "
-        "stamp at https://github.com/chipkent/deephaven-massive/issues so the day cut can be "
-        "settled."
+        "so the library cannot tell which day this one covers and withholds it. Report the "
+        "stamp at https://github.com/chipkent/deephaven-massive/issues so the library can learn "
+        "which day such bars cover."
     )
     week_text = (
         "Massive sent a bar of AAPL stamped 2025-03-01T05:00:00+00:00 "
-        "(2025-03-01T00:00:00-05:00 in America/New_York), a stamp it is not known to use for "
-        "bars of 2 weeks, which it stamps at 00:00:00.000 in America/New_York, on a Sunday. "
-        f"{withheld}"
+        "(2025-03-01T00:00:00-05:00 in America/New_York). Massive is known to stamp bars of 2 "
+        f"weeks at 00:00:00.000 in America/New_York, on a Sunday, {withheld}"
     )
     assert stamp_warnings(caplog) == [
         (
             "stocks.bars: Massive sent a 1-day bar of AAPL stamped 2024-11-29T19:30:00+00:00 "
-            "(2024-11-29T14:30:00-05:00 in America/New_York), a stamp it is not known to use for "
-            "bars of 1 day, which it stamps at 00:00:00.000, 04:00:00.000, 13:00:00.000, "
-            f"16:00:00.000 in America/New_York. {withheld}"
+            "(2024-11-29T14:30:00-05:00 in America/New_York). Massive is known to stamp bars of "
+            "1 day at 00:00:00.000, 04:00:00.000, 13:00:00.000, and 16:00:00.000 in "
+            f"America/New_York, {withheld}"
         ),
         f"stocks.bars: {week_text}",
         f"options.bars: {week_text}",
@@ -1000,7 +999,7 @@ def test_a_longer_bar_is_expected_on_the_1st_of_its_period(
     rule = StampRule(NEW_YORK, frozenset(), "bar", T.MONTH, 1, log, months=months)
     stamped(rule, [first + DAY_NS], label="x.bars")
     _, message, *args = log.log.call_args.args
-    assert f"on the 1st of {named}. The row is withheld" in message % tuple(args)
+    assert f"on the 1st of {named}, so the library cannot tell" in message % tuple(args)
 
 
 def test_repeated_stamps_are_converted_once_and_kept_in_order() -> None:

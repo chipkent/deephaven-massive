@@ -781,8 +781,9 @@ def test_an_unfilled_warning_names_the_choice_the_columns_and_the_source_to_pass
         warn_unfilled(spec, choice, catalog=CATALOG, warnings=warnings)
     assert caplog.messages == [
         (
-            "stocks.bars history: AUTO read flat files for every symbol, and that read leaves Otc "
-            "and Vwap null, which REST fills. Pass source=dm.HistorySource.REST to fill them."
+            "stocks.bars history: source=dm.HistorySource.AUTO read flat files for every symbol, "
+            "and that read leaves Otc and Vwap null, which REST fills. Pass "
+            "source=dm.HistorySource.REST to fill them."
         )
     ]
     # The advice works: REST fills the columns the flat files leave null.

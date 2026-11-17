@@ -731,7 +731,8 @@ def warn_unfilled(
     columns = ", ".join(sorted(missing))
     warnings.log(
         f"history source {spec.name} {choice.source.name}: {columns}",
-        "%s history: AUTO read %s for %s, and that read leaves %s null, which %s "
+        "%s history: source=dm.HistorySource.AUTO read %s for %s, and that read leaves %s "
+        "null, which %s "
         "fills. Pass source=dm.HistorySource.%s to fill them.",
         spec.name,
         TRANSPORT_LABELS[HISTORY_TRANSPORTS[choice.source]],

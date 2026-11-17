@@ -162,8 +162,8 @@ def canonicalize_symbols(
         shown = " ".join(refused[value] for value in sorted(refused)[:_SHOWN])
         raise ValueError(
             f"canonicalize_symbols cannot convert {count} {'value' if count == 1 else 'values'} "
-            f"of {column} to {CLASS_NOUNS[resolved]} tickers.{first} {shown} Pass "
-            "on_error=dm.OnError.LOG to give their rows a null symbol instead."
+            f"of the {column} column to {CLASS_NOUNS[resolved]} tickers.{first} {shown} Correct "
+            "those values, or pass on_error=dm.OnError.LOG to give their rows a null symbol."
         )
     consequence = f"becomes a null {column}"
     for value in sorted(refused):  # logged here, in sorted order; the formula repeats none

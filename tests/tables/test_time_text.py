@@ -65,7 +65,7 @@ def test_text_neither_reads_names_both_forms(text: str) -> None:
 def test_a_refusal_keeps_deephaven_s_reason_and_names_the_zones_it_reads() -> None:
     message = (
         "start='2025-03-03T09:30 EST' is neither ISO-8601 text nor Deephaven date or time text, "
-        "and Deephaven says: No matching time zone: EST. Pass text such as '2025-03-03', "
+        "and Deephaven says \"No matching time zone: EST\". Pass text such as '2025-03-03', "
         "'2025-03-03T09:30:00-05:00', or '2025-03-03T09:30 America/New_York', in a zone "
         "Deephaven reads, such as ET, CT, UTC, or America/New_York."
     )

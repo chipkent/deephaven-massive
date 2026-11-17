@@ -91,7 +91,7 @@ def deephaven_time_text(value: object, name: str) -> object:
         return java
     raise ValueError(
         f"{name}={value!r} is neither ISO-8601 text nor Deephaven date or time text, and "
-        f"Deephaven says: {reason.rstrip('.')}. Pass text such as '2025-03-03', "
+        f"Deephaven says \"{reason.rstrip('.')}\". Pass text such as '2025-03-03', "
         "'2025-03-03T09:30:00-05:00', or '2025-03-03T09:30 America/New_York', in a zone "
         "Deephaven reads, such as ET, CT, UTC, or America/New_York."
     ) from unread
