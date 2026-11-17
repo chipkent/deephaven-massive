@@ -734,8 +734,9 @@ def test_the_row_error_is_permanent() -> None:
 # `log_failure` call. Every function body, and the module body, that holds one is a scope, and
 # every string literal in the scope is a message's, except docstrings and the literals of
 # `debug`, `info`, and DEBUG or INFO `log` calls; a nested function is its own scope. The limit
-# applies per site: the literals under its expression, plus those of every local variable or
-# module constant the expression names, resolved within the scope.
+# and the `bounded_list` fault apply per site: to what its expression holds, plus what every local
+# variable or module constant it names holds, resolved within the scope. A name bound to a dict or
+# a set is not resolved: a message renders its keys or one entry, never its literal text whole.
 
 SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src" / "deephaven_massive"
 """The library's package, whose modules the layout check reads."""
@@ -756,13 +757,14 @@ EXEMPT_MODULES = frozenset(
         "_datasets/readme_plans.py",
         "_datasets/schema.py",
         "_datasets/source_columns.py",
+        "_tables/cause_reference.py",
         "_massive/refresh/",
         "_massive/spec/",
     }
 )
 """The modules the layout check leaves out: developer and contract checks that fail at import or
-in scripts/refresh.py; their reader holds the source. Each is a path under
-`src/deephaven_massive/`, and a trailing slash names a package."""
+in scripts/refresh.py or scripts/render_reference.py; their reader holds the source. Each is a
+path under `src/deephaven_massive/`, and a trailing slash names a package."""
 
 _LOG_CALLEES = frozenset({"warning", "error", "exception", "log", "log_once", "log_failure"})
 """The callee names that make a call a log record at WARNING or above (`log` unless quiet)."""
@@ -907,34 +909,54 @@ def _assigned(scope: ast.AST) -> dict[str, list[ast.expr]]:
     return found
 
 
-def _site_literals(
-    expression: ast.AST, assigned: Sequence[dict[str, list[ast.expr]]]
-) -> set[_Literal]:
-    """Return the literals a site renders: under its expression, and in the names it uses.
+_UNRENDERED_VALUES = (ast.Dict, ast.DictComp, ast.Set, ast.SetComp)
+"""The values whose literals a message never renders whole: it renders a key or one entry."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _Rendered:
+    """What one message site renders: its literal text and its `bounded_list` calls."""
+
+    literals: frozenset[_Literal]
+    lists: frozenset[ast.Call]
+
+
+def _site_rendered(expression: ast.AST, assigned: Sequence[dict[str, list[ast.expr]]]) -> _Rendered:
+    """Return what a site renders: under its expression, and in the names it uses.
 
     A name assigned more than once in its scope (one message per branch) contributes the
-    assignment with the most literal text, since a message renders one of them.
+    literals of the assignment with the most literal text, since a message renders one of them,
+    and the `bounded_list` calls of every assignment, since any of them may be the one rendered.
+    A name bound to a dict or a set contributes nothing.
 
     Args:
         expression: The site's expression.
         assigned: The assignments of the site's scope, then of the module.
 
     Returns:
-        The literals.
+        The literals and the `bounded_list` calls.
     """
     names: set[str] = set()
 
-    def gather(node: ast.AST) -> set[_Literal]:
+    def gather(node: ast.AST) -> _Rendered:
         literals = set(_string_literals(node))
+        lists = {
+            call
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and _callee(call) == "bounded_list"
+        }
         for name in ast.walk(node):
             if not isinstance(name, ast.Name) or name.id in names:
                 continue
             names.add(name.id)  # each name once per site, so a cycle of names ends
             values = next((a[name.id] for a in assigned if name.id in a), [])
-            choices = [gather(value) for value in values]
+            choices = [
+                gather(value) for value in values if not isinstance(value, _UNRENDERED_VALUES)
+            ]
             if choices:
-                literals |= max(choices, key=_text_length)
-        return literals
+                literals |= max((choice.literals for choice in choices), key=_text_length)
+                lists |= {call for choice in choices for call in choice.lists}
+        return _Rendered(frozenset(literals), frozenset(lists))
 
     return gather(expression)
 
@@ -960,7 +982,7 @@ def message_faults(source: str, file: str) -> list[MessageFault]:
 
     Returns:
         The faults in order of line: a `;` or a newline in a message's literal, a
-        `bounded_list` call in a message's scope, and a site whose literals pass
+        `bounded_list` call a message site renders, and a site whose literals pass
         `MESSAGE_LITERAL_LIMIT` characters.
     """
     tree = ast.parse(source)
@@ -973,7 +995,6 @@ def message_faults(source: str, file: str) -> list[MessageFault]:
         if not sites:
             continue
         quiet_calls = [node for node in nodes if isinstance(node, ast.Call) and _is_quiet(node)]
-        quiet_nodes = {id(found) for call in quiet_calls for found in ast.walk(call)}
         quiet = {literal for call in quiet_calls for literal in _string_literals(call)}
         docstrings = {
             literal
@@ -985,11 +1006,13 @@ def message_faults(source: str, file: str) -> list[MessageFault]:
         literals = (
             {literal for node in nodes for literal in _string_literals(node)} - quiet - docstrings
         )
+        lists: set[ast.Call] = set()
         for site in sites:
             expression = _site_expression(site)
-            rendered = _site_literals(expression, assigned)
-            literals |= rendered
-            total = _text_length(rendered)
+            rendered = _site_rendered(expression, assigned)
+            literals |= rendered.literals
+            lists |= rendered.lists
+            total = _text_length(rendered.literals)
             if total > MESSAGE_LITERAL_LIMIT:
                 faults.append(
                     MessageFault(
@@ -1005,11 +1028,7 @@ def message_faults(source: str, file: str) -> list[MessageFault]:
             if "\n" in literal.text:
                 faults.append(MessageFault(file, literal.line, "newline", literal.text))
         faults.extend(
-            MessageFault(file, node.lineno, "bounded_list", ast.unparse(node))
-            for node in nodes
-            if isinstance(node, ast.Call)
-            and _callee(node) == "bounded_list"
-            and id(node) not in quiet_nodes
+            MessageFault(file, call.lineno, "bounded_list", ast.unparse(call)) for call in lists
         )
     return sorted(faults, key=lambda fault: (fault.line, fault.fault, fault.text))
 
@@ -1049,6 +1068,7 @@ def test_the_fixture_shows_each_fault_once_and_passes_every_other_case() -> None
             "fixture:34: 419 characters of literal text, over 400: ValueError(f'{dataset}: "
             "Massive sent rows the library cannot"
         ),
+        "fixture:48: bounded_list: bounded_list(symbols)",
     ]
 
 
@@ -1060,3 +1080,15 @@ def test_the_exempt_modules_exist_and_nothing_else_is_exempt() -> None:
     assert not any(is_exempt(module) for module in read)
     assert is_exempt("_massive/spec/types.py")
     assert not is_exempt("_massive/rest/response.py")
+
+
+def test_every_message_in_the_library_is_sentences_within_the_limit() -> None:
+    # Every message a user or an agent reads is one line of sentences: a semicolon chain, a
+    # newline, a `bounded_list` count-and-brackets list, or a tutorial past the limit fails here,
+    # with each fault's module, line, and text, so the next message written keeps the form.
+    faults = [
+        str(fault)
+        for module, source in library_modules()
+        for fault in message_faults(source, module)
+    ]
+    assert faults == []

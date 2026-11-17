@@ -44,6 +44,11 @@ def a_semicolon_in_a_module_constant(symbol: str) -> None:
     raise ValueError(f"{symbol!r} is not a ticker. {_FIX}")
 
 
+def a_list_rendered_by_bounded_list_through_a_local(symbols: list[str]) -> None:
+    named = bounded_list(symbols)
+    raise ValueError(f"Massive has no data for {named}.")
+
+
 # The cases that pass.
 
 
@@ -55,6 +60,30 @@ def bounded_list_in_a_quiet_record(symbols: list[str]) -> None:
     logger.debug("subscribed %s; %s", bounded_list(symbols), "a; b")
     logger.log(logging.INFO, "subscribed %s", bounded_list(symbols))
     raise ValueError("No symbols were subscribed.")
+
+
+def bounded_list_for_a_quiet_record_in_a_scope_that_raises(symbols: object) -> str:
+    if isinstance(symbols, list):
+        return bounded_list(symbols)
+    raise TypeError("symbols must be a list.")
+
+
+_SETTINGS = {
+    "first": (
+        "A long description of the first setting, which a message never renders whole: a site "
+        "that names this dict renders its keys, so the check leaves its values out of the "
+        "site's literal text, though the two descriptions together pass the limit."
+    ),
+    "second": (
+        "A long description of the second setting, which a message never renders whole: a site "
+        "that names this dict renders its keys, so the check leaves its values out of the "
+        "site's literal text, though the two descriptions together pass the limit."
+    ),
+}
+
+
+def a_site_naming_a_dict_renders_only_its_keys(name: str) -> None:
+    raise ValueError(f"{name!r} is not a setting. Write one of {sorted(_SETTINGS)}.")
 
 
 def a_long_text_split_over_two_sites(first: bool) -> None:
