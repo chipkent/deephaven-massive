@@ -130,7 +130,7 @@ class OptionRootKinds:
         known = self._lookup.known(root)
         if known is RootKind.UNKNOWN and self._lookup.retire(root, known, REREAD_AFTER):
             logger.info(
-                "%s: Massive's contracts reference could not classify option root %s; asking "
+                "%s: Massive's Contract Overview could not classify option root %s; asking "
                 "again, since the answer is an hour old or more",
                 self._label,
                 root,
@@ -151,7 +151,7 @@ class OptionRootKinds:
             named = copy_error(
                 public,
                 f"option root {root!r} cannot be classified as an index or not: reading "
-                f"Massive's contracts reference of {contract} failed: {public}",
+                f"Massive's Contract Overview of {contract} failed: {public}",
             )
             raise named from public
 
@@ -204,7 +204,7 @@ class OptionRootKinds:
         except WireError as error:
             if error.status == HTTPStatus.NOT_FOUND:
                 logger.debug(
-                    "%s: Massive's contracts reference has no %s as of %s (HTTP 404)",
+                    "%s: Massive's Contract Overview has no %s as of %s (HTTP 404)",
                     self._label,
                     contract,
                     day,
@@ -214,7 +214,7 @@ class OptionRootKinds:
             public = reader.public_error(error)
             stopped = cancel is not None and cancel.is_set() and error.status is None
             logger.debug(
-                "%s: asking the contracts reference about option root %s failed (status %s, "
+                "%s: asking Massive's Contract Overview about option root %s failed (status %s, "
                 "stop set %s); its waiters %s: %s",
                 self._label,
                 root,
@@ -229,7 +229,7 @@ class OptionRootKinds:
             self._lookup.fail(claim, error, "the request failed")
             if source_of(error) is ErrorSource.LIBRARY:
                 logger.exception(
-                    "%s: reading the contracts reference of %s failed. %s",
+                    "%s: reading Massive's Contract Overview of %s failed. %s",
                     self._label,
                     contract,
                     LIBRARY_BUG,
@@ -336,7 +336,7 @@ def _canonical(
             case RootKind.UNKNOWN:
                 _unknown_roots.log(
                     root,
-                    "%s: Massive's contracts reference has no CFI code for option root %s (asked "
+                    "%s: Massive's Contract Overview gives no CFI code for option root %s (asked "
                     "about %s as of %s), so its rows keep the underlying as Massive sent it, "
                     "without an index's I: prefix",
                     dataset,

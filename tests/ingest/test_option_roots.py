@@ -89,7 +89,7 @@ def test_a_failed_lookup_raises_massive_s_error_naming_the_root_and_is_retried(
     with pytest.raises(
         dm.EntitlementError,
         match=rf"^option root 'SPXW' cannot be classified as an index or not: reading Massive's "
-        rf"contracts reference of {SPXW} failed",
+        rf"Contract Overview of {SPXW} failed",
     ) as raised:
         reader.root_kind("SPXW", SPXW, "2026-11-13")
     assert raised.value.status == 403
@@ -186,7 +186,7 @@ def test_an_unclassified_root_keeps_the_bare_ticker_with_one_warning(
             assert out.column("Underlying").to_pylist() == ["SPX"]
     [record] = caplog.records
     assert record.getMessage().startswith(
-        "options.open_interest: Massive's contracts reference has no CFI code for option root "
+        "options.open_interest: Massive's Contract Overview gives no CFI code for option root "
         f"SPXW (asked about {SPXW} as of 2026-11-13)"
     )
 
