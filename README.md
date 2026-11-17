@@ -738,7 +738,7 @@ and what `raise` does to each kind of read.
 ## Next steps
 
 - Call `help()` on any object for its full documentation, such as `help(m.stocks.bars)`.
-- The [dataset index](docs/datasets/README.md) has a page for each of the 112 datasets, with its
+- The [dataset index](docs/datasets/README.md) has a page for each dataset, with its
   arguments, its columns, and the plans that include it. `dm.datasets()` lists them in the
   console.
 - [Troubleshooting](docs/troubleshooting.md) covers the problems whose message doesn't say how

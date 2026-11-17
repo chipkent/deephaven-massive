@@ -46,7 +46,8 @@ Add the variable to your shell's startup file, beside your keys, and open a new 
 export DEEPHAVEN_MASSIVE_CONFIG_FILE="$HOME/massive/settings.yaml"
 ```
 
-A settings file the library refuses stops the run before any test, with the library's message.
+A settings file the library refuses stops the run at the first test that loads it, with the
+library's message.
 
 <a id="run-order"></a>
 
@@ -68,7 +69,7 @@ The connection-limit tests run last and alone, because they disturb the key's co
    indices, currencies, and stocks. They skip when the file lists none of these.
 
    The command also runs every README example as written and checks it against its text. Its
-   streaming examples check the most from 09:50 to 15:55 New York time.
+   streaming examples check the most in the regular session, 09:30 to 16:00 New York time.
 
 3. Run the connection-limit tests, one command after the other:
 
@@ -134,8 +135,7 @@ subscription 24 requests runs for about five minutes. Each test's time limit gro
 requests it declares, and a line counts down the requests left while one waits.
 
 A limited subscription your settings file doesn't list costs a pause more. Its first request
-past Massive's minute is refused, and its requests wait for the refusal's `Retry-After`, or up
-to a minute, while the library learns the limit. List it in `rest_requests_per_minute` with
+past Massive's minute is refused, and its requests pause while the library learns the limit. List it in `rest_requests_per_minute` with
 its limit, and its requests are paced from the first.
 
 <a id="read-the-end-of-a-run"></a>
@@ -175,8 +175,9 @@ one, the same section says where. Don't share that log, and open an issue that n
 
 ## Read six checks by hand
 
-Read each one's evidence. The index minute-file check fails when its file disagrees with the New
-York day or with REST, and the others pass whatever Massive answers:
+Read each one's evidence, because a pass doesn't answer its question. The index minute-file
+check fails when a file row falls outside the New York day, or when the file has a minute REST
+lacks. A minute REST has and the file lacks doesn't fail it:
 
 | Check | Data it reads | What to read | Open an issue when |
 |---|---|---|---|

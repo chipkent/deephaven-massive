@@ -214,7 +214,8 @@ uv run python scripts/tester.py examples
 
 The runner gives examples 17, 18, and 22 a copy of your settings file's
 `delayed_subscriptions`, and prints it as `settings:`. It prints a line per example as it runs,
-then `no example failed`, or `failed:` and the examples' names. Each example's output is in
+and another for an example whose stream failed afterward. Then it prints where it saved the
+output, and `no example failed`, or `failed:` and the examples' names. Each example's output is in
 `~/massive-test/examples-output/`, and `summary.txt` there gives each one's verdict:
 
 | Verdict | What you do |
@@ -310,8 +311,8 @@ You should see the library's version without its leading `v`, such as `0.1.0rc1`
 such as `<MassiveSession #12 open>`. The number counts the sessions this server has opened.
 
 The examples open their sessions as the README's do. When Massive limits a subscription's
-requests, a session slows to five requests a minute after Massive's first rate-limit error, as
-the README's [MassiveConfig](../README.md#massive-config) table says, and example 7 checks it.
+requests, a session learns the limit from Massive's first rate-limit error, as the README's
+[MassiveConfig](../README.md#massive-config) section says, and example 7 checks it.
 
 #### 2. Find datasets and their columns
 
@@ -452,7 +453,7 @@ import deephaven_massive as dm
 
 m = dm.MassiveSession()
 
-# 12 Stocks requests a minute: six stocks every 30 seconds, against a limit of 5.
+# 12 Stocks requests a minute: six stocks every 30 seconds.
 paced = m.stocks.previous_day_bar(["AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM"]).poll(30)
 rate_limits = m.rate_limits()
 streams = m.streams()
@@ -462,9 +463,10 @@ m.release(paced)
 ```
 
 Watch `rate_limits` and `paced` for two minutes. When Massive limits your Stocks requests, it
-refuses one. The `stocks` row of `rate_limits` then shows `RequestsPerMinute` 5 and
-`LimitSource` `LEARNED`: the library learned the limit from Massive's refusal. The row reads
-`PACED` while requests wait for a free slot. `paced` gets its six rows either way. When
+refuses one. The `stocks` row of `rate_limits` then reads `PAUSED` until its `PausedUntil`.
+After that, `RequestsPerMinute` shows the limit and `LimitSource` shows `LEARNED`: the library
+learned the limit from Massive's refusal. The row reads `PACED` while requests wait for a free
+slot. `paced` gets its six rows either way. When
 Massive doesn't limit your Stocks requests, nothing is refused.
 
 Then close the `paced` panel. The table stops, and the `stocks` row returns to `READY`.
@@ -1027,7 +1029,7 @@ You should see three lines like these, with your own session numbers and a row c
 
 ```text
 <MassiveSession #7 closed>
-MassiveError: MassiveSession #7 is closed
+MassiveError: MassiveSession #7 is closed; open a new dm.MassiveSession() to read again
 <MassiveSession #8 closed> 5
 ```
 

@@ -1,8 +1,9 @@
 # Configuration
 
-Every `dm.MassiveConfig` setting is here: what it does, the values it takes, its default, and
-when to change it. Keep your choices in a settings file, and every console and script loads the
-same ones. [Every setting in one file](#example-settings-file) shows each setting in place.
+Every `dm.MassiveConfig` setting a settings file holds is here: what it does, the values it
+takes, its default, and when to change it. Keep your choices in a settings file, and every
+console and script loads the same ones. [Every setting in one file](#example-settings-file)
+shows each setting in place.
 
 <a id="write-a-settings-file"></a>
 
@@ -475,8 +476,8 @@ The library opens a stream from a host set here whatever Massive's label says. I
 - `REALTIME`: Massive labels the data `REAL-TIME`.
 - `UNKNOWN`: Massive gave no label the library knows.
 
-The first stream of each asset class in a session makes one REST request to read the
-label. A subscription listed in `delayed_subscriptions` makes none.
+Reading the label costs one REST request, when the first stream of a class set here
+opens in a session. A subscription listed in `delayed_subscriptions` costs none.
 
 #### subscription_confirmation_timeout
 

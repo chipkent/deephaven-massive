@@ -67,7 +67,7 @@ and keep numbers out of it unless you cite where they come from.
 | Reader | Pain | What the library changes |
 |---|---|---|
 | Quant researcher | Months go into data infrastructure before an idea is tested, and research code is rewritten for live trading | One query gives history and a live table with the same columns, and the same Deephaven code runs on both |
-| Quant researcher | Finding affordable data and making it usable | 112 datasets, listed by `dm.datasets()`, each with documented columns |
+| Quant researcher | Finding affordable data and making it usable | Over a hundred datasets, listed by `dm.datasets()`, each with documented columns |
 | Quantitative trader | A signal waits on live infrastructure before it trades; screeners don't compute their own signal, live | Their own signal on their own stocks is a live table, a few lines in a browser console |
 | Vibe coder | The assistant builds the prototype but not the real-time parts | Live tables, reconnects, and watchlist-driven subscriptions are already built; the assistant writes table logic |
 | Software engineer | A real-time stack is several systems and most of a year of work | The feed, the processing, and the UI are one Python process of Deephaven tables |
