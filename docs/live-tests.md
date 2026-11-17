@@ -192,8 +192,8 @@ The options check skips when Massive refuses the topics, quoting the refusal. It
 inconclusive when the socket reconnects without saying why. Then run the first
 connection-limit command again.
 
-To run one of the test checks alone, use `-k` with a word of its name. The quiet-connection
-check comes only from a tester's results.
+The quiet-connection check comes only from a tester's results. To run one of the others alone,
+use `-k` with a word of its name:
 
 ```bash
 uv run pytest -m integration tests/namespaces/test_indices_integration.py -k minute_file 2>&1 | tee -a live-checks.log
