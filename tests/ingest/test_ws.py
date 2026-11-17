@@ -35,19 +35,18 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
-from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._error_policy import DEFAULT_POLICY, ResolvedPolicy
 from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, BrokenGuaranteeError
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.rest import RestReader
-from deephaven_massive._log_limits import BoundedLog
-from deephaven_massive._massive import RowFault, Status, StatusKind, Transport, WsState
-from deephaven_massive._tables import poll
+from deephaven_massive._massive import Status, StatusKind, Transport, WsState
+from deephaven_massive._tables import poll, problem_reporter
 from deephaven_massive._tables.diagnostics import ConnectionState, StreamUpdate
 from deephaven_massive._tables.execution_context import entered, update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
+from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive._tables.stream import open_stream_tables
 from deephaven_massive._tables.transports import HostDecision, Unsplit
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -190,7 +189,13 @@ STALL = (
     r"slot on socket\.test/options: another connection with this API key, perhaps from another "
     r"process, holds it; the account allows one connection per asset class"
 )
-"""A pattern of the `Error` of an options stream whose connection waits for a slot."""
+"""A pattern of the `outage` span's detail of an options stream whose connection waits for a
+slot."""
+
+CAP = ProblemCause.OPTIONS_CAP.value
+OUTAGE = ProblemCause.OUTAGE.value
+NONCANONICAL = ProblemCause.NONCANONICAL_SYMBOLS.value
+RETRYING = ProblemCause.SYMBOL_READ_RETRYING.value
 
 
 def streams_of(
@@ -199,6 +204,42 @@ def streams_of(
     settle(ws_session)
     assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
     return sorted(dh_to_pylist(ws_session.session.streams()), key=lambda r: r["StreamId"])
+
+
+def problems_of(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> list[tuple[object, ...]]:
+    # The session's problems as (cause, symbol, ended), in a stable order.
+    settle(ws_session)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
+    rows = dh_to_pylist(ws_session.session.problems())
+    return sorted(((r["Cause"], r["Symbol"], r["EndedAt"] is not None) for r in rows), key=str)
+
+
+def spans_of(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *causes: str,
+) -> list[tuple[object, ...]]:
+    # The session's spans of the causes as (stream, cause, symbol, detail, rows, ended), in a
+    # stable order.
+    settle(ws_session)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
+    return sorted(
+        (
+            (
+                r["StreamId"],
+                r["Cause"],
+                r["Symbol"],
+                r["Detail"],
+                r["Rows"],
+                r["EndedAt"] is not None,
+            )
+            for r in dh_to_pylist(ws_session.session.problems())
+            if r["Cause"] in causes
+        ),
+        key=str,
+    )
 
 
 def connections_of(
@@ -340,21 +381,30 @@ def test_publish_waits_for_every_channel_of_a_frame(
     rows_when(quotes, lambda rows: len(rows) == 1)
 
 
-DROP_LOGGER = "deephaven_massive._tables.diagnostics"
+def withheld_of(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> list[tuple[object, ...]]:
+    # The session's problems of withheld rows, as (stream, cause, symbol, field, rows), once the
+    # flush thread has handed them on.
+    settle(ws_session)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
+    rows = [r for r in dh_to_pylist(ws_session.session.problems()) if r["Action"] == "WITHHELD"]
+    return sorted(
+        ((r["StreamId"], r["Cause"], r["Symbol"], r["Field"], r["Rows"]) for r in rows), key=str
+    )
 
 
-def drop_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [
-        r.getMessage()
-        for r in caplog.records
-        if r.name == DROP_LOGGER and r.levelno == logging.WARNING and "withheld" in r.getMessage()
-    ]
+def details_of(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> list[str]:
+    # The Detail of each of the session's problems, by stream and cause.
+    rows = dh_to_pylist(ws_session.session.problems())
+    return [r["Detail"] for r in sorted(rows, key=lambda r: (r["StreamId"], r["Cause"]))]
 
 
 def test_a_row_without_its_time_is_withheld_and_fails_no_stream(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
-    caplog: pytest.LogCaptureFixture,
     *,
     rows_when: RowsWhen,
 ) -> None:
@@ -364,23 +414,38 @@ def test_a_row_without_its_time_is_withheld_and_fails_no_stream(
     ws_session.subscribed("T.AAPL", "T.MSFT", "T.*")
     bad = trade("MSFT")
     del bad["t"]  # a required key
-    with caplog.at_level(logging.WARNING, logger=DROP_LOGGER):
-        ws_session.send(bad, trade("AAPL"))
-        ws_session.flush()
-        rows_when(aapl, lambda rows: len(rows) == 1)
-        rows_when(every, lambda rows: len(rows) == 1)
+    ws_session.send(bad, trade("AAPL"))
+    ws_session.flush()
+    rows_when(aapl, lambda rows: len(rows) == 1)
+    rows_when(every, lambda rows: len(rows) == 1)
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING"] * 3
-    [warning] = drop_warnings(caplog)
-    assert warning.startswith("test.trades: withheld 1 WS row(s) the library cannot read whole")
-    assert "/stocks channel T: a T row for MSFT from 127.0.0.1/stocks: no SipTimestamp" in warning
+    # The streams that hold MSFT, by name or as every symbol, each count the row.
+    wait_for(
+        lambda: (
+            withheld_of(ws_session, dh_to_pylist)
+            == [
+                (2, "unreadable_keys", "MSFT", "SipTimestamp", 1),
+                (3, "unreadable_keys", "MSFT", "SipTimestamp", 1),
+            ]
+        )
+    )
+    assert (
+        details_of(ws_session, dh_to_pylist)
+        == [
+            (
+                "a T row for MSFT from 127.0.0.1/stocks: no SipTimestamp (wire key 't'), which "
+                "the dataset needs"
+            )
+        ]
+        * 2
+    )
     del msft
 
 
 def test_rows_without_a_symbol_are_withheld_and_the_all_stream_keeps_running(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
-    caplog: pytest.LogCaptureFixture,
     *,
     rows_when: RowsWhen,
 ) -> None:
@@ -391,20 +456,22 @@ def test_rows_without_a_symbol_are_withheld_and_the_all_stream_keeps_running(
     del nameless["sym"]
     unreadable = trade("not a symbol")
     del unreadable["t"]
-    with caplog.at_level(logging.WARNING, logger=DROP_LOGGER):
-        ws_session.send(nameless, unreadable, trade("MSFT"))
-        ws_session.flush()
-        shown = rows_when(every, lambda rows: len(rows) == 1)
+    ws_session.send(nameless, unreadable, trade("MSFT"))
+    ws_session.flush()
+    shown = rows_when(every, lambda rows: len(rows) == 1)
     assert [r["Symbol"] for r in shown] == ["MSFT"]
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "RUNNING"]
-    # One WARNING for the dataset, counting both rows and naming the first one's reason.
-    [warning] = drop_warnings(caplog)
-    assert warning.startswith("test.trades: withheld 2 WS row(s) the library cannot read whole")
-    assert warning.endswith(
-        "/stocks channel T: a T row from 127.0.0.1/stocks: no Ticker (wire key 'sym'), which "
-        "the dataset needs; such rows are withheld and counted: the running count is logged "
-        "at DEBUG and shown in the SchemaDrift of each live table that lost them"
+    # A row whose symbol could not be read could have been any stream's: each counts both.
+    both = [
+        ("unreadable_keys", "not a symbol", "SipTimestamp", 1),
+        ("unreadable_keys", None, "Ticker", 1),
+    ]
+    wait_for(
+        lambda: (
+            withheld_of(ws_session, dh_to_pylist)
+            == [(stream_id, *row) for stream_id in (1, 2) for row in both]
+        )
     )
     del aapl
 
@@ -425,13 +492,19 @@ def test_a_timestamp_out_of_bounds_withholds_its_row_and_fails_no_stream(
         rows_when(aapl, lambda rows: len(rows) == 1)
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "RUNNING"]
-    [warning] = drop_warnings(caplog)
-    assert "timestamp unit mismatch for test.trades.Timestamp: 5 ms" in warning
+    wait_for(
+        lambda: (
+            withheld_of(ws_session, dh_to_pylist)
+            == [(2, "unreadable_keys", "MSFT", "Timestamp", 1)]
+        )
+    )
+    (detail,) = details_of(ws_session, dh_to_pylist)
+    assert "timestamp unit mismatch for test.trades.Timestamp: 5 ms" in detail
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     del msft
 
 
-def test_drift_is_logged_once_and_shown(
+def test_drift_is_a_problem_of_the_stream_once_per_field(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     caplog: pytest.LogCaptureFixture,
@@ -442,11 +515,19 @@ def test_drift_is_logged_once_and_shown(
         ws_session.send(trade("AAPL", zz=1))
         ws_session.send(trade("AAPL", zz=2))
         ws_session.flush()
-    assert caplog.text.count("field 'zz' is not in the schema") == 1
-    [connection] = connections_of(ws_session, dh_to_pylist)
-    assert connection["SchemaDrift"] == "T:zz+"
-    [stream] = streams_of(ws_session, dh_to_pylist)
-    assert stream["SchemaDrift"] == "WebSocket:zz+"
+        settle(ws_session)
+        assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
+    # One WARNING, the table's first schema_drift, points at m.problems().
+    warned = [r.getMessage() for r in caplog.records if r.name == problem_reporter.__name__]
+    assert len(warned) == 1
+    assert warned[0].startswith("test.trades table 1: schema_drift: ")
+    (drift,) = dh_to_pylist(ws_session.session.problems())
+    assert (drift["StreamId"], drift["Cause"], drift["Field"], drift["Action"]) == (
+        1,
+        "schema_drift",
+        "zz",
+        "PUBLISHED",
+    )
     ws_session.session.release(result)
 
 
@@ -658,22 +739,15 @@ def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
     watchlist.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
-    skipped = (
-        "skipping 1 symbol-table value this dataset does not take: 'msft'; fix or delete that "
-        f"row, or report it at {ISSUES_URL} if Massive itself writes it"
-    )
-
-    def error() -> object:
-        ws_session.flush()
-        (row,) = streams_of(ws_session, dh_to_pylist)
-        return row["Error"]
-
-    wait_for(lambda: error() == skipped)
-    watchlist.delete(new_table([string_col("Symbol", ["msft"])]))  # fixed: the text clears
+    skipped = ("noncanonical_symbols", "msft", False)
+    wait_for(lambda: problems_of(ws_session, dh_to_pylist) == [skipped])
+    watchlist.delete(new_table([string_col("Symbol", ["msft"])]))  # fixed: the span ends
     watchlist.add(new_table([string_col("Symbol", ["MSFT"])]))
     ws_session.subscribed("T.MSFT")
-    wait_for(lambda: error() is None)
+    ended = ("noncanonical_symbols", "msft", True)
+    wait_for(lambda: problems_of(ws_session, dh_to_pylist) == [ended])
     (row,) = streams_of(ws_session, dh_to_pylist)
+    assert row["Error"] is None
     assert row["State"] != "FAILED"
     sent = {json.loads(f)["params"] for f in fake_ws_server.frames()}
     assert "T.msft" not in ",".join(sent)  # the bad row never became a topic
@@ -751,17 +825,26 @@ def test_a_default_canonicalized_watchlist_skips_a_late_bad_row_and_keeps_follow
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     # One bad row never fails the table: by default canonicalize_symbols nulls a late bad row
-    # and logs it once, and both it and the stream that follows it keep updating.
+    # and logs it once, and both it and the stream that follows it keep updating; the stream's
+    # first problem of the cause warns once more, pointing at m.problems().
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["AAPL"])]))
     watchlist = dm.canonicalize_symbols(source, AssetClass.STOCKS)
     result = ws_session.query(TRADES, watchlist).append_only()
     ws_session.subscribed("T.AAPL")
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive._tables.symbols"):
+    converter = "deephaven_massive._tables.symbols"
+
+    def logged(name: str) -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.name == name]
+
+    with caplog.at_level(logging.WARNING, logger=converter):
         source.add(new_table([string_col("Symbol", ["BRK-B"])]))
-        wait_for(lambda: len(caplog.records) == 1)  # logged on an update-graph thread
-    assert [r.levelname for r in caplog.records] == ["WARNING"]
-    assert "'BRK-B'" in caplog.records[0].getMessage()
+        # Logged on an update-graph thread.
+        wait_for(lambda: len(logged(converter)) == len(logged(problem_reporter.__name__)) == 1)
+    assert [r.levelname for r in logged(converter)] == ["WARNING"]
+    assert "'BRK-B'" in logged(converter)[0].getMessage()
+    (alarm,) = logged(problem_reporter.__name__)
+    assert alarm.getMessage().startswith("test.trades table 1: noncanonical_symbols: BRK-B: ")
     source.add(new_table([string_col("Symbol", ["MSFT"])]))
     ws_session.subscribed("T.MSFT")
     assert [r["Symbol"] for r in dh_to_pylist(watchlist)] == ["AAPL", None, "MSFT"]
@@ -769,6 +852,9 @@ def test_a_default_canonicalized_watchlist_skips_a_late_bad_row_and_keeps_follow
     assert not failed  # pytest cannot describe a Java method
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "RUNNING"
+    # The value the converter refused is the stream's problem while its row stays.
+    refused = ("noncanonical_symbols", "BRK-B", False)
+    wait_for(lambda: problems_of(ws_session, dh_to_pylist) == [refused])
 
 
 def stream_blink(ws_session: WsSession) -> Table:
@@ -873,7 +959,7 @@ def test_a_frame_symbol_the_library_cannot_read_is_withheld_by_default(
     assert "RawSymbol" not in every.column_names
     wait_for(lambda: len(events) == 1)
     assert [(e.cause, e.symbol, e.rows) for e in events] == [
-        (RowFault.UNREADABLE_SYMBOLS, "BRK/B", 1)
+        (ProblemCause.UNREADABLE_SYMBOLS, "BRK/B", 1)
     ]
 
 
@@ -945,16 +1031,16 @@ def test_reactive_options_beyond_the_cap_are_deferred(
     connection = ws_session.connection("wss://socket.test/options")
     ws_session.on_loop(connection, lambda: None)
     [row] = streams_of(ws_session, dh_to_pylist)
-    assert (row["State"], row["Deferred"], row["Error"]) == (
-        "RUNNING",
-        1,
-        "over capacity: 2/1; 1 deferred",
-    )
+    assert (row["State"], row["Deferred"], row["Error"]) == ("RUNNING", 1, None)
+    # The deferred contract is an options_cap span that counts it.
+    cap = (1, "options_cap", None, "over capacity: 2/1; 1 deferred", 1)
+    assert spans_of(ws_session, dh_to_pylist, CAP) == [(*cap, False)]
     watchlist.delete(new_table([string_col("Symbol", ["O:SPY251219C00600000"])]))
     ws_session.subscribed("T.O:SPY251219C00610000")
     ws_session.on_loop(connection, lambda: None)
     [row] = streams_of(ws_session, dh_to_pylist)
     assert (row["Deferred"], row["Error"]) == (0, None)
+    assert spans_of(ws_session, dh_to_pylist, CAP) == [(*cap, True)]  # room freed: it ends
     del result
 
 
@@ -1466,44 +1552,52 @@ def test_a_stream_waiting_for_a_slot_says_so(
     capped = ws_session.query(OPTIONS, watchlist).blink()
     ws_session.subscribed("T.O:SPY251219C00600000")
     cap = "over capacity: 2/1; 1 deferred"
-    wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Error"] == cap)
+    wait_for(lambda: open_spans(ws_session, dh_to_pylist) == {(1, CAP, cap)})
     fake_ws_server.hold_slot(held=True)  # until the watchlist has changed during the wait
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
     ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
 
-    # The stall and the options cap are two parts of the Error: both show, the stall first.
-    capped_stall = f"{STALL}; {re.escape(cap)}"
-
-    def stalled(*patterns: str) -> bool:
-        errors = [r["Error"] or "" for r in streams_of(ws_session, dh_to_pylist)]
-        return len(errors) == len(patterns) and all(
-            re.fullmatch(p, e) for p, e in zip(patterns, errors, strict=True)
+    # The stall and the options cap are two spans: both show, neither hides the other.
+    def stalled(cap_text: str, *streams: int) -> bool:
+        spans = open_spans(ws_session, dh_to_pylist)
+        outages = sorted((stream, str(d)) for stream, c, d in spans if c == OUTAGE)
+        return (
+            (1, CAP, cap_text) in spans
+            and [stream for stream, _ in outages] == list(streams)
+            and all(re.fullmatch(STALL, d) for _, d in outages)
         )
 
-    wait_for(lambda: stalled(capped_stall))
+    wait_for(lambda: stalled(cap, 1))
     every = ws_session.query(OPTION_QUOTES, dm.ALL).blink()  # opens during the wait
-    wait_for(lambda: stalled(capped_stall, STALL))
-    # A contract added during the wait is counted, and its cap note follows beside the wait.
+    wait_for(lambda: stalled(cap, 1, 2))
+    # A contract added during the wait is counted, and its cap span changes beside the wait.
     watchlist.add(new_table([string_col("Symbol", ["O:SPY251219C00620000"])]))
-    more = f"{STALL}; {re.escape('over capacity: 3/1; 2 deferred')}"
+    more = "over capacity: 3/1; 2 deferred"
 
     def counted() -> bool:
         deferred = [r["Deferred"] for r in streams_of(ws_session, dh_to_pylist)]
-        return deferred == [2, 0] and stalled(more, STALL)
+        return deferred == [2, 0] and stalled(more, 1, 2)
 
     wait_for(counted)
     fake_ws_server.hold_slot(held=False)
     ws_session.wait(lambda h: h.opens == 2)  # the slot is free again
-    cap = "over capacity: 3/1; 2 deferred"
-    wait_for(lambda: [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [cap, None])
+    wait_for(lambda: open_spans(ws_session, dh_to_pylist) == {(1, CAP, more)})
+    assert [r["Error"] for r in streams_of(ws_session, dh_to_pylist)] == [None, None]
     del capped, every
 
 
-SKIPPED_SPY = (
-    "skipping 1 symbol-table value this dataset does not take: 'spy'; fix or delete that "
-    f"row, or report it at {ISSUES_URL} if Massive itself writes it"
-)
-"""The `Error` text of a stream whose options watchlist holds the bad row `spy`."""
+def open_spans(
+    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
+) -> set[tuple[object, ...]]:
+    # The session's spans that hold now, as (stream, cause, symbol or detail): a span of a
+    # symbol by its symbol, another by its detail.
+    settle(ws_session)
+    assert ws_session.session._core.diagnostics.wait_until_shown(TIMEOUT)
+    return {
+        (r["StreamId"], r["Cause"], r["Symbol"] or r["Detail"])
+        for r in dh_to_pylist(ws_session.session.problems())
+        if ProblemCause(r["Cause"]).traits.span and r["EndedAt"] is None
+    }
 
 
 def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
@@ -1522,31 +1616,32 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
     watchlist.add(new_table([string_col("Symbol", contracts)]))
     capped = ws_session.query(OPTIONS, watchlist).blink()
     ws_session.subscribed("T.O:SPY251219C00600000")
-
-    def error() -> object:
-        return streams_of(ws_session, dh_to_pylist)[0]["Error"]
-
-    cap = "over capacity: 2/1; 1 deferred"
-    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    cap = (1, CAP, "over capacity: 2/1; 1 deferred")
+    skipped = (1, NONCANONICAL, "spy")
+    wait_for(lambda: open_spans(ws_session, dh_to_pylist) == {cap, skipped})
     fake_ws_server.hold_slot(held=True)  # until the watchlist has changed during the wait
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
     ws_session.wait(lambda h: WsState.WAITING_SLOT in h.states)
-    skipped = f"; {re.escape(SKIPPED_SPY)}"
 
-    def stalled(suffix: str) -> bool:
-        pattern = f"{STALL}; {re.escape(cap)}{suffix}"  # each source keeps its own part
-        text = error()
-        assert text is None or isinstance(text, str)
-        return re.fullmatch(pattern, text or "") is not None
+    def stalled(*others: tuple[object, ...]) -> bool:
+        # Each source keeps its own span: the stall, the cap, and any skipped row.
+        spans = open_spans(ws_session, dh_to_pylist)
+        outages = [str(d) for _, c, d in spans if c == OUTAGE]
+        rest = {span for span in spans if span[1] != OUTAGE}
+        return (
+            len(outages) == 1
+            and re.fullmatch(STALL, outages[0]) is not None
+            and (rest == {cap, *others})
+        )
 
     wait_for(lambda: stalled(skipped))  # the stall keeps the skipped row
     watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
-    wait_for(lambda: stalled(""))  # fixing the row keeps the stall
+    wait_for(stalled)  # fixing the row keeps the stall
     watchlist.add(new_table([string_col("Symbol", ["spy"])]))
     wait_for(lambda: stalled(skipped))
     fake_ws_server.hold_slot(held=False)
-    ws_session.wait(lambda h: h.opens == 2)  # the slot is free again: the stall clears alone
-    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    ws_session.wait(lambda h: h.opens == 2)  # the slot is free again: the stall ends alone
+    wait_for(lambda: open_spans(ws_session, dh_to_pylist) == {cap, skipped})
     del capped
 
 
@@ -1566,19 +1661,20 @@ def test_skipped_rows_and_the_options_cap_neither_hide_nor_clear_each_other(
     ws_session.subscribed("T.O:SPY251219C00600000")
     connection = ws_session.connection("wss://socket.test/options")
 
-    def error() -> object:
+    def spans() -> set[tuple[object, ...]]:
         ws_session.on_loop(connection, lambda: None)
-        return streams_of(ws_session, dh_to_pylist)[0]["Error"]
+        return open_spans(ws_session, dh_to_pylist)
 
-    cap = "over capacity: 2/1; 1 deferred"
-    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    cap = (1, CAP, "over capacity: 2/1; 1 deferred")
+    skipped = (1, NONCANONICAL, "spy")
+    wait_for(lambda: spans() == {cap, skipped})
     watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
-    wait_for(lambda: error() == cap)  # fixing the row keeps the cap's warning
+    wait_for(lambda: spans() == {cap})  # fixing the row keeps the cap's span
     watchlist.add(new_table([string_col("Symbol", ["spy"])]))
-    wait_for(lambda: error() == f"{cap}; {SKIPPED_SPY}")
+    wait_for(lambda: spans() == {cap, skipped})
     watchlist.delete(new_table([string_col("Symbol", ["O:SPY251219C00600000"])]))
     ws_session.subscribed("T.O:SPY251219C00610000")
-    wait_for(lambda: error() == SKIPPED_SPY)  # the cap frees up and keeps the skipped row
+    wait_for(lambda: spans() == {skipped})  # the cap frees up and keeps the skipped row
     del result
 
 
@@ -2110,7 +2206,6 @@ AMBIGUOUS = {
 }
 
 
-@pytest.mark.usefixtures("fresh_pair_logs")
 def test_a_skipped_pair_s_rows_stay_out_of_its_stream_under_another_s_wildcard(
     ws_session: WsSession, *, rows_when: RowsWhen
 ) -> None:
@@ -2208,24 +2303,14 @@ def test_every_pair_is_looked_up_off_the_callers_thread(
         ws_session.session.release(table)
 
 
-NO_DATA_ERROR = "skipped 1 [X:ETHTUSD (Massive's crypto ticker list does not hold it)]"
+NO_DATA = ("unavailable_symbols", "X:ETHTUSD", False)
+"""The problem of a stream holding the pair `X:ETHTUSD`, which Massive's list lacks."""
 
 
-@pytest.fixture
-def fresh_pair_logs(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The skipped-pair logs remember each pair for the process: start each test with none seen.
-    for name, level in (("_logged_pairs", logging.WARNING), ("_ignored_pairs", logging.DEBUG)):
-        monkeypatch.setattr(ws, name, BoundedLog(ws.logger, limit=100, level=level))
-
-
-def stream_error(
-    ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]
-) -> str | None:
+def running(ws_session: WsSession, dh_to_pylist: Callable[[Table], list[dict[str, Any]]]) -> bool:
+    # Whether the session's only stream runs with no Error.
     (row,) = streams_of(ws_session, dh_to_pylist)
-    assert row["State"] == "RUNNING"
-    text = row["Error"]
-    assert text is None or isinstance(text, str)
-    return text
+    return (row["State"], row["Error"]) == ("RUNNING", None)
 
 
 def crypto_watchlist(
@@ -2247,7 +2332,6 @@ SOURCES = ["code", "static", "reactive"]
 
 @pytest.mark.parametrize("source", SOURCES)
 @pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.IGNORE])
-@pytest.mark.usefixtures("fresh_pair_logs")
 def test_a_pair_massive_has_no_data_for_is_skipped_and_shown_from_every_source(
     make_ws_session: Callable[..., WsSession],
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
@@ -2258,25 +2342,26 @@ def test_a_pair_massive_has_no_data_for_is_skipped_and_shown_from_every_source(
     dh_input_table: Callable[..., InputTable],
 ) -> None:
     # A pair Massive's list does not hold has no data: the stream follows the other pairs,
-    # lists it in its Error, and logs it once, at WARNING under LOG and DEBUG under IGNORE.
+    # lists it in m.problems() with its setting, and warns of it once under LOG only.
     ws_session = make_ws_session(on_error=dm.ErrorPolicy(unavailable_symbols=setting))
     pairs = crypto_watchlist(
         ["X:BTCUSD", "X:ETHTUSD"], source=source, dh_input_table=dh_input_table
     )
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
+    with caplog.at_level(logging.DEBUG, logger=problem_reporter.__name__):
         result = ws_session.query(CRYPTO, pairs).append_only()
         ws_session.subscribed("XT.BTC-USD")
-        wait_for(lambda: stream_error(ws_session, dh_to_pylist) == NO_DATA_ERROR)
-    skipped = [r for r in caplog.records if "it is skipped" in r.getMessage()]
-    assert [(r.levelno, r.getMessage()) for r in skipped] == [
-        (
-            logging.WARNING if setting is dm.OnError.LOG else logging.DEBUG,
-            (
-                "crypto stream 1: Massive has no data for X:ETHTUSD (Massive's crypto ticker list "
-                "does not hold it); it is skipped"
-            ),
-        )
-    ]
+        wait_for(lambda: problems_of(ws_session, dh_to_pylist) == [NO_DATA])
+    assert running(ws_session, dh_to_pylist)
+    (row,) = dh_to_pylist(ws_session.session.problems())
+    assert (row["StreamId"], row["Action"], row["Policy"], row["Detail"]) == (
+        1,
+        "SKIPPED",
+        setting,
+        "Massive has no data for it (Massive's crypto ticker list does not hold it); it is skipped",
+    )
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warned) == (1 if setting is dm.OnError.LOG else 0)
+    assert all("X:ETHTUSD" in message and "m.problems()" in message for message in warned)
     sent = {json.loads(f)["params"] for f in ws_session.server.frames()}
     assert not any("ETHT" in topic for topic in sent)
     (connection,) = ws_session.connections.group.connections.values()
@@ -2313,8 +2398,7 @@ def test_a_pair_massive_has_no_data_for_fails_the_stream_under_raise_from_every_
     assert not any("ETHT" in topic for topic in sent)
 
 
-@pytest.mark.usefixtures("fresh_pair_logs")
-def test_deleting_a_watchlist_row_of_a_pair_with_no_data_clears_the_error(
+def test_a_watchlist_pair_with_no_data_is_looked_up_once(
     ws_session: WsSession,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     dh_input_table: Callable[..., InputTable],
@@ -2324,11 +2408,13 @@ def test_deleting_a_watchlist_row_of_a_pair_with_no_data_clears_the_error(
     )
     assert isinstance(watchlist, InputTable)
     result = ws_session.query(CRYPTO, watchlist).append_only()
-    wait_for(lambda: stream_error(ws_session, dh_to_pylist) == NO_DATA_ERROR)
+    wait_for(lambda: problems_of(ws_session, dh_to_pylist) == [NO_DATA])
     # One lookup: a pair the list does not hold is not tried again on its own.
     assert [symbol for symbol, _ in lookups(ws_session)].count("X:ETHTUSD") == 1
-    watchlist.delete(new_table([string_col("Symbol", ["X:ETHTUSD"])]))
-    wait_for(lambda: stream_error(ws_session, dh_to_pylist) is None)
+    watchlist.add(new_table([string_col("Symbol", ["X:SOLUSD"])]))  # a later change
+    ws_session.subscribed("XT.SOL-USD")
+    assert [symbol for symbol, _ in lookups(ws_session)].count("X:ETHTUSD") == 1
+    assert running(ws_session, dh_to_pylist)
     ws_session.session.release(result)
 
 
@@ -2349,9 +2435,12 @@ def test_an_unread_pair_list_is_an_outage_the_stream_rides_out_from_every_source
     *,
     source: str,
     dh_input_table: Callable[..., InputTable],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The stream opens with the pairs that split; the others wait, its Error says why, and
-    # they subscribe once the list reads, as a dropped connection's streams recover.
+    # The stream opens with the pairs that split; the others wait, each a span that says why,
+    # and they subscribe once the list reads, as a dropped connection's streams recover. The
+    # outage warns once, at its first try; the later tries log at INFO.
+    caplog.set_level(logging.INFO, logger="deephaven_massive._ingest.ws")
     ws_session = make_ws_session()
     quick_retries(ws_session)
     busy = dm.MassiveError("HTTP 503: busy", status=503, is_retryable=True)
@@ -2359,17 +2448,26 @@ def test_an_unread_pair_list_is_an_outage_the_stream_rides_out_from_every_source
     pairs = crypto_watchlist(["X:BTCUSD", "X:DOTUSD"], source=source, dh_input_table=dh_input_table)
     result = ws_session.query(CRYPTO, pairs).append_only()
     ws_session.subscribed("XT.BTC-USD")
-    wait_for(
-        lambda: (stream_error(ws_session, dh_to_pylist) or "").startswith(
-            "crypto pairs 1 [X:DOTUSD] wait for Massive's crypto ticker list, which could not be "
-            "read (HTTP 503: busy); retrying"
-        )
+    why = (
+        "waits for Massive's crypto ticker list, which could not be read (HTTP 503: busy); retrying"
     )
+    waiting = (1, RETRYING, "X:DOTUSD", why, 0)
+    wait_for(lambda: spans_of(ws_session, dh_to_pylist, RETRYING) == [(*waiting, False)])
+    assert running(ws_session, dh_to_pylist)
+    wait_for(lambda: len(tries(caplog)) > 1)
     with ws_session.cond:
         ws_session.pair_answers["X:DOTUSD"] = ("DOT", "USD")
     ws_session.subscribed("XT.DOT-USD")
-    wait_for(lambda: stream_error(ws_session, dh_to_pylist) is None)
+    wait_for(lambda: spans_of(ws_session, dh_to_pylist, RETRYING) == [(*waiting, True)])
+    assert running(ws_session, dh_to_pylist)
     ws_session.session.release(result)
+    levels = [record.levelno for record in tries(caplog)]
+    assert levels[0] == logging.WARNING
+    assert set(levels[1:]) == {logging.INFO}
+
+
+def tries(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "the list is read again" in r.getMessage()]
 
 
 def test_an_unread_pair_list_fails_the_stream_after_max_outage(
@@ -2433,12 +2531,12 @@ def test_a_pair_whose_currencies_do_not_join_is_skipped_but_is_not_a_missing_sym
     ws_session.pair_answers["X:DOTUSD"] = Unsplit("its currencies do not join", no_data=False)
     result = ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
     ws_session.subscribed("XT.BTC-USD")
-    wait_for(
-        lambda: (
-            stream_error(ws_session, dh_to_pylist)
-            == "skipped 1 [X:DOTUSD (its currencies do not join)]"
-        )
-    )
+    wait_for(lambda: "X:DOTUSD" in [symbol for symbol, _ in lookups(ws_session)])
+    ws_session.flush()
+    assert running(ws_session, dh_to_pylist)
+    assert problems_of(ws_session, dh_to_pylist) == []  # the lookup's own problem, not this
+    sent = {json.loads(f)["params"] for f in ws_session.server.frames()}
+    assert not any("DOT" in topic for topic in sent)
     ws_session.session.release(result)
 
 
@@ -2486,11 +2584,14 @@ def test_a_pair_removed_while_it_waits_is_never_subscribed(
     ws_session.subscribed("XT.BTC-USD")
     watchlist.add(new_table([string_col("Symbol", ["X:DOTUSD"])]))
     watchlist.add(new_table([string_col("Symbol", ["X:ADAUSD"])]))
-    wait_for(
-        lambda: "2 [X:ADAUSD, X:DOTUSD] wait" in (stream_error(ws_session, dh_to_pylist) or "")
-    )
+
+    def waiting() -> list[tuple[object, ...]]:
+        return [(s[2], s[5]) for s in spans_of(ws_session, dh_to_pylist, RETRYING)]
+
+    wait_for(lambda: waiting() == [("X:ADAUSD", False), ("X:DOTUSD", False)])
     watchlist.delete(new_table([string_col("Symbol", ["X:DOTUSD", "X:ADAUSD"])]))
-    wait_for(lambda: stream_error(ws_session, dh_to_pylist) is None)
+    wait_for(lambda: waiting() == [("X:ADAUSD", True), ("X:DOTUSD", True)])
+    assert running(ws_session, dh_to_pylist)
     with ws_session.cond:
         ws_session.pair_answers["X:DOTUSD"] = ("DOT", "USD")
     seen = len(lookups(ws_session))
@@ -2511,20 +2612,18 @@ def test_pair_bookkeeping_of_a_stream_that_ended_changes_nothing(
     connections._post_change(999, frozenset({"X:DOTUSD"}), frozenset())
     connections._schedule_retry(999, 0.0)
     connections._fail(999, dm.MassiveError("gone"))
-    state = ws._PairState(DEFAULT_POLICY)
-    assert connections._wait(999, state, skipped={}, waiting=[], failure=None) is None
-    assert ws._PairState(DEFAULT_POLICY).note() is None
+    state = ws._PairState("crypto.trades", DEFAULT_POLICY)
+    assert connections._wait(999, state, waiting=[], failure=None) is None
     result = ws_session.query(CRYPTO, ["X:BTCUSD"]).append_only()
     ws_session.subscribed("XT.BTC-USD")
     (stream_id,) = connections._mine
-    updates: list[object] = []
-    monkeypatch.setattr(ws_session.session._core, "update_streams", updates.append)
+    problems: list[object] = []
+    monkeypatch.setattr(ws_session.session._core, "problems", problems.append)
     monkeypatch.setattr(connections, "_core", lambda: None)
-    connections._show_pairs(
-        stream_id, ws._PairState(DEFAULT_POLICY, skipped={"X:ETHTUSD": "not listed"})
-    )
+    pairs = {"X:ETHTUSD": "not listed"}
+    assert connections._no_data(stream_id, pairs, reader="r", state=state)  # a freed session
     monkeypatch.undo()
-    assert updates == []
+    assert problems == []
     ws_session.session.release(result)
 
 
@@ -3611,8 +3710,8 @@ def test_calls_that_differ_only_in_their_policy_are_separate_streams(
 @pytest.mark.parametrize(
     ("cause", "bad"),
     [
-        (RowFault.UNREADABLE_SYMBOLS, trade("BRK/B")),
-        (RowFault.UNCONVERTIBLE_VALUES, trade("AAPL", p="bad")),
+        (ProblemCause.UNREADABLE_SYMBOLS, trade("BRK/B")),
+        (ProblemCause.UNCONVERTIBLE_VALUES, trade("AAPL", p="bad")),
     ],
     ids=["unreadable-symbol", "unfit-value"],
 )
@@ -3621,7 +3720,7 @@ def test_a_stream_applies_its_own_call_s_setting_to_a_withheld_row(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
     *,
-    cause: RowFault,
+    cause: ProblemCause,
     bad: dict[str, object],
 ) -> None:
     # Two streams of one channel share the conversion of a batch; the withheld row fails only
@@ -3640,10 +3739,12 @@ def test_a_stream_applies_its_own_call_s_setting_to_a_withheld_row(
     assert sorted(states.values()) == ["FAILED", "RUNNING"]
     wait_for(lambda: kept.size == 1)
     assert [r["Symbol"] for r in dh_to_pylist(kept.view("Symbol"))] == ["AAPL"]
-    # Each stream's session records the row, the failed stream's too.
-    assert sorted((e.cause, e.stream_id, e.rows) for e in events) == [
-        (cause, stream_id, 1) for stream_id in sorted(states)
-    ]
+    # Each stream's session records the row, the failed stream's too, and that stream's failure.
+    (failed_id,) = [stream_id for stream_id, state in states.items() if state == "FAILED"]
+    assert sorted((e.cause, e.stream_id, e.rows) for e in events) == sorted(
+        [(cause, stream_id, 1) for stream_id in states]
+        + [(ProblemCause.STREAM_FAILED, failed_id, 0)]
+    )
 
 
 def test_a_crypto_stream_splits_its_pairs_under_its_call_s_policy(

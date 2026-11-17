@@ -41,7 +41,12 @@ class ErrorPolicy:
 
     - `dm.OnError.RAISE` fails the call or the live table that met it.
     - `dm.OnError.LOG` skips it, keeps going, and logs a warning.
-    - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
+    - `dm.OnError.IGNORE` does the same, logging only at `DEBUG`.
+
+    `m.problems()` lists each problem a table met, with its cause and the setting
+    that applied. Under `RAISE`, the error that fails the call names the problem. Under `LOG`,
+    the first problem of each cause on each table logs one warning that points to
+    `m.problems()`; the later ones log at `DEBUG` only.
 
     A row of Massive's data the library can't read whole is never published, whatever the
     setting: its cause's setting decides only whether the table fails and how loudly the log
@@ -142,10 +147,10 @@ class ErrorPolicy:
             Set `dm.OnError.RAISE` when a `history()` read from flat files must have every row
             of each file it reads.
 
-            - `dm.OnError.LOG` skips the line, keeps the file's other rows, and logs one warning
-              per file with the count of such lines and the first one's row number. The warning
-              never quotes the line.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
+            - `dm.OnError.LOG` skips the line, keeps the file's other rows, and logs one
+              warning. `m.problems()` gives each file's count of such lines and the first
+              one's row number, never the line itself.
+            - `dm.OnError.IGNORE` does the same, logging only at `DEBUG`.
             - `dm.OnError.RAISE` makes `history()` raise `MassiveError`, naming the file and the
               first such line's row. A `history()` of a live table instead marks every symbol
               of the read `FAILED` in `m.symbol_reads()`.
@@ -164,12 +169,9 @@ class ErrorPolicy:
 
             - `dm.OnError.RAISE` makes `history()` raise `EntitlementError`, naming the
               exchange and the setting.
-            - `dm.OnError.LOG` skips every file of each refused exchange over the whole range,
-              logs one warning with Massive's status and text, and names the exchanges in the
-              table's description. For a watchlist, each symbol's `Transport` in
-              `m.symbol_reads()` names them instead.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log and the
-              description or `m.symbol_reads()` name them.
+            - `dm.OnError.LOG` skips every file of each refused exchange over the whole range and
+              logs one warning. `m.problems()` lists the exchanges with Massive's status and text.
+            - `dm.OnError.IGNORE` does the same, logging only at `DEBUG`.
 
             It applies only when REST can't serve the call: `dm.ALL`, or
             `source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive

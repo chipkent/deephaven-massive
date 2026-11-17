@@ -103,7 +103,11 @@ from deephaven_massive._massive.net.errors import (
     WireFailure,
 )
 from deephaven_massive._massive.net.origins import origin_of
-from deephaven_massive._massive.net.redaction import without_userinfo, without_userinfo_or_query
+from deephaven_massive._massive.net.redaction import (
+    Redactor,
+    without_userinfo,
+    without_userinfo_or_query,
+)
 from deephaven_massive._massive.net.retry import RETRYABLE_STATUSES
 from deephaven_massive._massive.rest.batch import to_batch
 from deephaven_massive._massive.rest.client import RestClient
@@ -152,6 +156,7 @@ __all__ = [
     "Provenance",
     "ReadColumn",
     "ReadPlan",
+    "Redactor",
     "RequestGovernor",
     "RestClient",
     "RestPath",

@@ -484,10 +484,10 @@ class OnError(StrEnum):
       with `wait=True`. A live table fails. A watchlist read by `fetch()` or `history()` fails
       only the symbols it met, and `m.symbol_reads()` shows them `FAILED`. A bad watchlist row
       under `noncanonical_symbols` is the exception: it fails the whole result.
-    - `LOG`: skip the value and keep going. Each distinct value is logged once, up to a fixed
-      number of values: at WARNING, or at ERROR for a library defect to report. A stream or `poll()`
-      table names each value it skips in its `Error` in `m.streams()`. A row of Massive's data
-      the library can't read whole is never published, under any setting.
+    - `LOG`: skip the value and keep going. `m.problems()` lists each problem, and the first
+      of each cause on each table logs one WARNING that points there; the rest log at DEBUG.
+      A row of Massive's data the library can't read whole is never published, under any
+      setting.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
 
     Each cause has its own setting in `dm.ErrorPolicy`, set for the session

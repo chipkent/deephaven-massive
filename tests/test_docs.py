@@ -915,6 +915,32 @@ def test_the_news_example_lists_the_newest_first(
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_problems_example_lists_the_ticker_massive_does_not_know(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    fixture = Path(__file__).parent / "data" / "namespaces" / "reference" / "ticker_details.json"
+    readme_server.reply(
+        "/v3/reference/tickers/AAPL", Reply(json.loads(fixture.read_text(encoding="utf-8")))
+    )
+    readme_server.reply("/v3/reference/tickers/ZZZZ", Reply(status=404))
+    console = Console(tmp_path, console_command)
+    ran = console.run(section_blocks(README, "see-problems"), "problems", "details")
+    _wait_for_rows(ran["details"], lambda rows: len(rows) == 1, dh_to_pylist)
+    rows = _wait_for_rows(ran["problems"], lambda rows: len(rows) == 1, dh_to_pylist)
+    # The row the README describes: its cause, its symbol, and Massive's answer.
+    assert [(r["Cause"], r["Symbol"], r["Action"]) for r in rows] == [
+        ("unavailable_symbols", "ZZZZ", "SKIPPED")
+    ]
+    assert "HTTP 404" in rows[0]["Detail"]
+    ran.clear()
+    console.close()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
 def test_the_stopping_example_runs_alone_releases_a_table_and_closes_the_session(
     *,
     readme_server: FakeRestServer,

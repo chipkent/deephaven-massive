@@ -20,8 +20,8 @@ columns. No human reads anything:
   without a tick then. In the regular session, no row fails the case.
 
 A dataset the key's plan does not include is a skip, "not entitled: needs <plan>", never a
-failure. Each case also notes every WARNING the library logged and every `SchemaDrift` the
-session's `streams()` and `connections()` show; a pass with any of them is counted "passed with
+failure. Each case also notes every WARNING the library logged and every row of the session's
+`problems()`; a pass with any of them is counted "passed with
 drift" in the coverage that ends the terminal summary (passed, not entitled, otherwise skipped,
 failed), which lists each one and groups the skips by the plan or the reason.
 
@@ -506,7 +506,7 @@ class _Case:
     record_property: Callable[[str, object], None]
 
     def drift(self) -> list[str]:
-        """Return what the case saw drift: the library's warnings and any `SchemaDrift`.
+        """Return what the case saw drift: the library's warnings and the session's problems.
 
         The notice that an `AUTO` history read chose a source leaving some columns null
         (`_SOURCE_CHOICE`) is the documented behavior of a small read, not drift: it is
@@ -514,8 +514,8 @@ class _Case:
 
         Returns:
             One line per WARNING or worse a `deephaven_massive` logger emitted during the
-            case, the source-choice notice excepted, and per non-empty `SchemaDrift` of the
-            session's streams and connections.
+            case, the source-choice notice excepted, and per row of the session's
+            `problems()`.
         """
         found = []
         for record in self.caplog.records:
@@ -526,10 +526,10 @@ class _Case:
                 self.evidence(f"source choice: {message}")
                 continue
             found.append(f"{record.levelname} {record.name}: {message}")
-        for view in (self.session.streams(), self.session.connections()):
-            found.extend(
-                f"SchemaDrift {r['SchemaDrift']}" for r in self.table_rows(view) if r["SchemaDrift"]
-            )
+        found.extend(
+            f"problem {r['Cause']} {r['Symbol'] or ''} {r['Field'] or ''}: {r['Detail']}"
+            for r in self.table_rows(self.session.problems())
+        )
         return found
 
     def failure(self) -> str | None:
@@ -783,7 +783,7 @@ def test_every_dataset_and_verb_returns_its_columns(
     events), and when a stock's trades or quotes sent no row in the extended hours. "Not
     entitled: needs <plan>" is a skip, and so is a history the request cannot be served
     without S3 credentials; anything else fails. Every library
-    WARNING and every `SchemaDrift` the case saw is recorded, and counted in the coverage.
+    WARNING and every problem the case saw is recorded, and counted in the coverage.
     """
     spec = CATALOG.by_name[name]
     plan = _plan(name, spec, verb)

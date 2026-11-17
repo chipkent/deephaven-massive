@@ -42,6 +42,7 @@ from deephaven_massive._ingest.symbol_reads import (
     symbol_outcomes,
 )
 from deephaven_massive._massive import Transport
+from deephaven_massive._tables import problem_reporter
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
@@ -58,6 +59,17 @@ if TYPE_CHECKING:
 
 LOGGER = "deephaven_massive._ingest.symbol_reads"
 REST_LOGGER = "deephaven_massive._ingest.rest"
+
+
+def alarms(caplog: pytest.LogCaptureFixture) -> list[str]:
+    # The problem reporter's WARNINGs: the first problem of each cause on each read.
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == problem_reporter.__name__ and r.levelno == logging.WARNING
+    ]
+
+
 R = Transport.REST
 NS = 10**9
 
@@ -346,7 +358,7 @@ def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_ra
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A pair Massive has no data for, as a 404 is: no rows under LOG and IGNORE, logged once at
-    # WARNING or DEBUG; its own failure under RAISE.
+    # DEBUG and warned of under LOG only; its own failure under RAISE.
     core = session._core
     replaced = dataclasses.replace(
         core.config, on_error=dm.ErrorPolicy(unavailable_symbols=setting)
@@ -360,20 +372,26 @@ def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_ra
         "last": {"price": 90000.5, "timestamp": 1741000000000},
     }
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
-    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
+    with caplog.at_level(logging.DEBUG, logger=REST_LOGGER):
         out = _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
     assert [r["Symbol"] for r in _rows(out["X:BTCUSD"])] == ["X:BTCUSD"]
     skipped = [
         (r.levelno, r.getMessage()) for r in caplog.records if "are left out" in r.getMessage()
     ]
+    warned = alarms(caplog)
+    assert len(warned) == (1 if setting is dm.OnError.LOG else 0)
+    assert all(
+        "unavailable_symbols: X:NOPEUSD: Massive has no data for it (Massive's crypto ticker "
+        "list does not hold it)" in message
+        for message in warned
+    )
     if setting is dm.OnError.RAISE:
         assert skipped == []
     else:
         assert _rows(out["X:NOPEUSD"]) == []
-        level = logging.WARNING if setting is dm.OnError.LOG else logging.DEBUG
         assert skipped == [
             (
-                level,
+                logging.DEBUG,
                 (
                     "crypto.last: Massive has no data for 1 [X:NOPEUSD (Massive's crypto "
                     "ticker list does not hold it)], so they are left out"
@@ -475,14 +493,14 @@ def test_each_symbol_s_history_ends_in_its_own_outcome(
     assert isinstance(_failure(out["AMZN"]).error, CutShortError)
     assert "AMZN's data was cut short" in str(_failure(out["AMZN"]).error)
     assert str(_failure(out["WMT"]).error).startswith("rate limited: ")
-    # MSFT's missing data warns as history() warns it; no failure warns.
+    # MSFT's missing data warns as history() warns it, as a problem; no failure warns.
     warned = [r for r in caplog.records if r.name in {LOGGER, REST_LOGGER}]
-    assert [r.getMessage() for r in warned if r.levelno >= logging.WARNING] == [
-        (
-            "stocks.trades: Massive has no data for 1 [MSFT (HTTP 404 from "
-            "/v3/trades/{stockTicker})], so they are left out"
-        )
-    ]
+    assert [r.getMessage() for r in warned if r.levelno >= logging.WARNING] == []
+    (alarm,) = alarms(caplog)
+    assert (
+        "unavailable_symbols: MSFT: Massive has no data for it (HTTP 404 from "
+        "/v3/trades/{stockTicker})"
+    ) in alarm
 
 
 def test_a_history_read_made_after_the_clock_moved_keeps_the_call_s_rows(

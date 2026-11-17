@@ -134,7 +134,7 @@ def _read_value_table(
     """
     rule = SymbolRowRule.for_values(spec, values, noncanonical)
     with entered(core.exec_ctx):
-        rows = read_symbols(rule, values.table, stream_id=None)
+        rows = read_symbols(rule, values.table, stream_id=None, reported=live)
     if rows.skipped and not rows.symbols:
         raise ValueError(
             f"{query}: no row of the {values.argument} table is a value this dataset takes, so "
@@ -499,8 +499,8 @@ class FetchQuery(Query):
         A news or filings feed needs a `start` or a `limit`. Without either, each poll would read
         Massive's whole archive.
 
-        A failed poll logs a WARNING and shows in `Error` of `m.streams()`, and the next poll runs
-        as usual. The table fails and stops polling if its polls keep failing for
+        A failed poll logs a WARNING and shows in `m.problems()`, and the next poll runs as
+        usual. The table fails and stops polling if its polls keep failing for
         `MassiveConfig.max_outage`, 300 seconds by default. It also fails on a failure no later poll
         can fix, such as a rejected key.
 

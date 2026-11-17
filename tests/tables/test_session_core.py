@@ -26,15 +26,14 @@ import deephaven_massive as dm
 from deephaven_massive._datasets import catalog as _catalog
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars
-from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION
-from deephaven_massive._massive import DriftReport, Transport
+from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, MassiveError, required
+from deephaven_massive._massive import Redactor, Transport
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import transports as _transports
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     Diagnostics,
-    NotePart,
     StreamUpdate,
 )
 from deephaven_massive._tables.execution_context import entered, wait_for_update_cycle
@@ -45,9 +44,9 @@ from deephaven_massive._tables.liveness import (
     new_scope,
     release_scope,
 )
+from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive.namespaces._query_building import build_query
 from deephaven_massive.queries import StreamQuery
-from tests._fakes.stream import transport_of
 
 if TYPE_CHECKING:
     # Type only: the instance comes from the `fake_streams` fixture.
@@ -57,8 +56,6 @@ if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
     from deephaven.table import Table
 
-    from deephaven_massive._datasets.request import Request
-    from deephaven_massive._tables.transports import StreamHandle
     from tests._fakes.stream import FakeStreamTransport
 
 TIMEOUT = 30.0
@@ -419,13 +416,13 @@ def test_update_streams_reaches_every_stream_still_registered(
     assert fake_streams.shutdown[1].wait(TIMEOUT)
     core.update_streams(
         {
-            1: StreamUpdate(rows_published=5, notes={NotePart.QUIET: "slow consumer"}),
+            1: StreamUpdate(rows_published=5),
             99: StreamUpdate(rows_published=1),  # left the registry: ignored
         }
     )
     columns = ("StreamId", "State", "RowsPublished", "Host", "Error")
     assert [tuple(r[c] for c in columns) for r in stream_rows()] == [
-        (1, "RUNNING", 5, "socket.test", "slow consumer")  # an update never fails a stream
+        (1, "RUNNING", 5, "socket.test", None)  # an update never fails a stream
     ]
     massive_session.release(result)
     drain()
@@ -523,82 +520,30 @@ def test_the_transport_hooks_ask_the_attached_ports(dh_exec_ctx: ExecutionContex
         core.close()
 
 
-# Schema drift of streams.
+# Problems of streams.
 
 
-HALTED = DriftReport(extra=frozenset({"halted"}))
-
-
-def test_stream_drift_reaches_the_row_and_is_forgotten_when_the_stream_leaves(
+def test_a_failed_stream_is_a_problem_and_its_spans_end(
     massive_session: dm.MassiveSession,
     fake_streams: FakeStreamTransport,
     *,
-    drain: Callable[[], None],
-    stream_rows: Callable[[], list[dict[str, Any]]],
+    problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     core = massive_session._core
     result = stream_query(massive_session).append_only()
-    core.record_stream_drift(1, Transport.WS, HALTED)
-    core.record_stream_drift(1, Transport.WS, HALTED)  # nothing new: the row is not rewritten
-    core.record_stream_drift(1, Transport.WS, DriftReport(missing=frozenset({"trfi"})))
-    core.record_stream_drift(99, Transport.WS, HALTED)  # not in the registry: ignored, not kept
-    assert [(r["StreamId"], r["SchemaDrift"], r["Error"]) for r in stream_rows()] == [
-        (1, "WebSocket:halted+, WebSocket:trfi-", None)
+    quiet = SpanTracker(ProblemCause.QUIET_FEED, dataset="test.trades", stream_id=1, where="w")
+    core.problems([required(quiet.update({"quiet": (None, None, "no data", 0)}), "a span")])
+    core.fail_stream(1, MassiveError("boom"))
+    core.fail_stream(99, MassiveError("not registered"))  # left the registry: no problem
+    columns = ("StreamId", "Cause", "Action", "Detail", "Dataset")
+    rows = problem_rows()
+    assert [tuple(r[c] for c in columns) for r in rows] == [
+        (1, "quiet_feed", "DELAYED", "no data", "test.trades"),
+        (1, "stream_failed", "FAILED", "boom", SPEC.name),
     ]
-    # Nothing was kept for 99.
-    assert core.drift.record(99, "WebSocket", HALTED) == "WebSocket:halted+"
-    # Released, then shut down: the record leaves the registry at the shutdown.
+    assert rows[0]["EndedAt"] is not None  # a failed table's spans end
+    assert {r["Query"] for r in rows} == {repr(stream_query(massive_session))}
     massive_session.release(result)
-    drain()
-    assert fake_streams.shutdown[1].wait(TIMEOUT)
-    assert core.streams._streams == {}
-    # Forgotten, so new again; the last row keeps its text.
-    assert core.drift.record(1, "WebSocket", HALTED) == "WebSocket:halted+"
-    assert [r["SchemaDrift"] for r in stream_rows()] == ["WebSocket:halted+, WebSocket:trfi-"]
-
-
-def test_stream_drift_is_forgotten_when_the_last_hold_of_a_shut_down_stream_goes(
-    massive_session: dm.MassiveSession,
-    fake_streams: FakeStreamTransport,
-    *,
-    drain: Callable[[], None],
-) -> None:
-    core = massive_session._core
-    result = stream_query(massive_session).append_only()
-    core.record_stream_drift(1, Transport.WS, HALTED)
-    # Shut down while held: the record stays until the hold is released.
-    fake_streams.publishers[1].publish_failure(RuntimeError("gone"))
-    assert fake_streams.shutdown[1].wait(TIMEOUT)
-    assert core.drift.record(1, "WebSocket", HALTED) is None  # still remembered
-    massive_session.release(result)
-    drain()
-    assert core.streams._streams == {}
-    assert core.drift.record(1, "WebSocket", HALTED) == "WebSocket:halted+"
-
-
-def test_stream_drift_recorded_during_the_open_is_kept(
-    massive_session: dm.MassiveSession,
-    fake_streams: FakeStreamTransport,
-    *,
-    monkeypatch: pytest.MonkeyPatch,
-    stream_rows: Callable[[], list[dict[str, Any]]],
-) -> None:
-    core = massive_session._core
-
-    def open_stream(
-        spec: DatasetSpec, request: Request, channel: str, *, stream_id: int
-    ) -> StreamHandle:
-        handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
-        core.record_stream_drift(stream_id, Transport.WS, HALTED)  # the row is not written yet
-        return handle
-
-    monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
-    result = stream_query(massive_session).append_only()
-    assert [(r["StreamId"], r["SchemaDrift"]) for r in stream_rows()] == [(1, "WebSocket:halted+")]
-    massive_session.release(result)
-
-
-# --- Failing on close, diagnostics views, and dying threads -----------------------------------
 
 
 class _Fatal(BaseException):
@@ -865,6 +810,7 @@ def test_a_writer_dying_as_it_releases_its_tables_leaves_the_scope_alone(
         dh_exec_ctx,
         "dying diagnostics",
         label="TestSession",
+        redactor=Redactor(),
         release_later=handed.append,
         on_death=deaths.append,
     )
@@ -873,7 +819,7 @@ def test_a_writer_dying_as_it_releases_its_tables_leaves_the_scope_alone(
         diagnostics.release()
     assert [type(death) for death in deaths] == [_Fatal]
     assert diagnostics._scope not in handed
-    assert len(handed) == 3  # the three other tables' unused pins: they were destroyed
+    assert len(handed) == 4  # the four other tables' unused pins: they were destroyed
     assert f"could not fail the connections table. {LIBRARY_BUG}" in caplog.text
     for scope in handed:
         release_scope(dh_exec_ctx, scope)

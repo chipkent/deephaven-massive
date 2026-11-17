@@ -36,6 +36,7 @@ from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.problem_events import (
     EVENTS_PER_PAYLOAD,
     ProblemAction,
+    ProblemCause,
     ProblemEvent,
 )
 
@@ -332,6 +333,7 @@ class Withheld:
         transport: Transport,
         where: str,
         stream_id: int | None,
+        policy: ResolvedPolicy,
         holds: Callable[[str], bool] | None = None,
     ) -> tuple[ProblemEvent, ...]:
         """Return the payload's events: one per fault, symbol as sent, and field.
@@ -343,7 +345,9 @@ class Withheld:
             dataset: The dataset.
             transport: The transport.
             where: The request, the WebSocket URL and channel, or the file.
-            stream_id: The live table the events are for, or None.
+            stream_id: The table or read the events are for (`ProblemEvent.stream_id`).
+            policy: The table's or read's policy, whose setting of each fault's cause the
+                event records.
             holds: For a live table that receives some symbols only, whether it holds a
                 canonical symbol; None for every row (`counts`).
 
@@ -356,17 +360,17 @@ class Withheld:
             group: WithheldGroup | None, fault: RowFault, *, rows: int, reason: str
         ) -> ProblemEvent:
             return ProblemEvent(
-                cause=fault,
+                cause=ProblemCause(fault.value),
                 action=ProblemAction.OVERFLOW if group is None else ProblemAction.WITHHELD,
                 dataset=dataset,
-                transport=transport,
                 stream_id=stream_id,
-                where=where,
+                where=f"{transport.value} {where}",
                 symbol=None if group is None else group.sent,
                 field=None if group is None else group.field,
                 rows=rows,
-                reason=reason,
+                detail=reason,
                 at=at,
+                policy=setting_of(policy, fault),
             )
 
         groups = self._groups_for(holds)

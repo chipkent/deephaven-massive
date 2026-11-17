@@ -257,15 +257,16 @@ def _listeners(table: Table) -> int:
 def test_canonicalizing_a_refreshing_table_leaves_no_hidden_table(
     dh_exec_ctx: object, dh_input_table: Callable[..., InputTable]
 ) -> None:
-    # The pre-check reads the rows without a derived table, so the source's only child is the
-    # result's own formula, and none is left once the scope is released.
+    # The pre-check reads the rows without a derived table, so the source's children are the
+    # result's own formula and the watch of the values it refuses, which the result keeps; none
+    # is left once the scope is released.
     source = dh_input_table({"Symbol": dtypes.string})
     source.add(new_table([string_col("Symbol", ["EUR/USD", "EUR/USD"])]))
     assert _listeners(source) == 0
     scope = new_scope()
     with scope.open():
         result = dm.canonicalize_symbols(source, AssetClass.FOREX)
-    assert _listeners(source) == 1
+    assert _listeners(source) == 2
     assert values(result) == ["C:EURUSD", "C:EURUSD"]
     scope.release()
     assert _listeners(source) == 0

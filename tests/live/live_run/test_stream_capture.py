@@ -587,25 +587,34 @@ def test_a_sampled_throughput_hour_passes_and_an_unsampled_one_fails(
     assert seen == [("stocks delayed", "failed", "the measured hour was not sampled without a gap")]
 
 
-def test_the_throughput_summary_gives_rates_peaks_and_drift(tmp_path: Path) -> None:
+def test_the_throughput_summary_gives_rates_peaks_and_problems(tmp_path: Path) -> None:
     def at(seconds: int) -> str:
         return (START + timedelta(seconds=seconds)).isoformat()
 
     stream_capture.append_csv(
         tmp_path / "samples-streams.csv",
         [
-            {"time": at(0), "Dataset": "stocks.bars", "RowsPublished": "0", "SchemaDrift": ""},
-            {"time": at(10), "Dataset": "stocks.bars", "RowsPublished": "100", "SchemaDrift": ""},
-            {"time": at(20), "Dataset": "stocks.bars", "RowsPublished": "400", "SchemaDrift": "x"},
-            {"time": at(10), "Dataset": "forex.quotes", "RowsPublished": "", "SchemaDrift": ""},
-            {"time": at(999), "Dataset": "stocks.bars", "RowsPublished": "9", "SchemaDrift": ""},
+            {"time": at(0), "Dataset": "stocks.bars", "RowsPublished": "0"},
+            {"time": at(10), "Dataset": "stocks.bars", "RowsPublished": "100"},
+            {"time": at(20), "Dataset": "stocks.bars", "RowsPublished": "400"},
+            {"time": at(10), "Dataset": "forex.quotes", "RowsPublished": ""},
+            {"time": at(999), "Dataset": "stocks.bars", "RowsPublished": "9"},
         ],
     )
     stream_capture.append_csv(
         tmp_path / "samples-connections.csv",
         [
-            {"time": at(0), "BufferedRows": "7", "Reconnects": "", "SchemaDrift": "y"},
-            {"time": at(20), "BufferedRows": "", "Reconnects": "2", "SchemaDrift": ""},
+            {"time": at(0), "BufferedRows": "7", "Reconnects": ""},
+            {"time": at(20), "BufferedRows": "", "Reconnects": "2"},
+        ],
+    )
+    stream_capture.append_csv(
+        tmp_path / "samples-problems.csv",
+        [
+            {"time": at(0), "Cause": "schema_drift"},
+            {"time": at(20), "Cause": "outage"},
+            {"time": at(20), "Cause": "schema_drift"},
+            {"time": at(999), "Cause": "stale_symbol"},  # outside the hour
         ],
     )
     stream_capture.append_csv(
@@ -622,7 +631,7 @@ def test_the_throughput_summary_gives_rates_peaks_and_drift(tmp_path: Path) -> N
     }
     assert summary["covered"] is True
     assert (summary["peak_buffered_rows"], summary["reconnects"]) == (7, 2)
-    assert summary["schema_drift"] == ["x", "y"]
+    assert summary["problems"] == ["outage", "schema_drift"]
     assert (summary["peak_heap_used_mb"], summary["cpu_seconds"]) == (30.0, 2.5)
 
 

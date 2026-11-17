@@ -25,10 +25,12 @@ from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
+from deephaven_massive._tables.problem_events import Problem, ProblemSpans
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import (
     CURRENT_STEP,
     CurrentSymbols,
+    SkippedValues,
     SymbolRowRule,
     SymbolWatch,
     _SymbolCounter,
@@ -171,11 +173,24 @@ def test_a_skipped_row_read_before_any_stream_names_the_call(
     assert record.startswith(f"forex.quotes a call's read: a symbol table holds {bad!r}")
 
 
-@pytest.mark.parametrize(("mode", "level"), [(OnError.LOG, "WARNING"), (OnError.IGNORE, "DEBUG")])
-def test_read_symbols_skips_a_row_that_is_not_canonical(
-    dh_exec_ctx: object, *, caplog: pytest.LogCaptureFixture, mode: OnError, level: str
+def test_a_live_verbs_first_read_logs_a_skipped_row_at_debug(
+    dh_exec_ctx: object, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A value of its own per mode: each value is logged once per dataset and process.
+    # The live table the verb makes lists the value in m.problems() and warns once; a WARNING
+    # from the check before it would be a second one.
+    bad = "EUR/USD live"
+    table = new_table([string_col("Symbol", [bad])])
+    with caplog.at_level("DEBUG", logger=WATCHLIST_LOG):
+        read_symbols(rule(mode=OnError.LOG), table, stream_id=None, reported=True)
+    assert [r.levelname for r in caplog.records if bad in r.getMessage()] == ["DEBUG"]
+
+
+@pytest.mark.parametrize("mode", [OnError.LOG, OnError.IGNORE])
+def test_read_symbols_skips_a_row_that_is_not_canonical(
+    dh_exec_ctx: object, *, caplog: pytest.LogCaptureFixture, mode: OnError
+) -> None:
+    # A value of its own per mode: each value is logged once per dataset and process. A table's
+    # reader logs it at DEBUG only, whatever the mode: its problem's reporter warns.
     bad = f"EUR/USD {mode.value}"
     table = new_table([string_col("Symbol", ["C:EURUSD", bad, bad, None])])
     with caplog.at_level("DEBUG", logger=WATCHLIST_LOG):
@@ -184,7 +199,7 @@ def test_read_symbols_skips_a_row_that_is_not_canonical(
         )
         read_symbols(rule(mode=mode), table, stream_id=7)  # a second read logs nothing more
     records = [r for r in caplog.records if bad in r.getMessage()]
-    assert [r.levelname for r in records] == [level]
+    assert [r.levelname for r in records] == ["DEBUG"]
     assert (
         records[0].getMessage().startswith(f"forex.quotes stream 7: a symbol table holds {bad!r}")
     )
@@ -928,3 +943,33 @@ def test_a_watchlist_filter_takes_one_failure_when_both_of_its_tables_fail(
     for pin in pins:
         release_scope(dh_exec_ctx, pin)
     release_scope(dh_exec_ctx, scope)
+
+
+def test_skipped_values_report_both_sources_in_order_across_threads() -> None:
+    # The table's own reader and a converted watchlist's listener report on their own threads;
+    # the lock keeps each snapshot whole and in order, so the last one shows both sources.
+    rule = SymbolRowRule(
+        "test.trades", AssetClass.STOCKS, as_written=False, noncanonical=OnError.LOG
+    )
+    reported: list[Problem] = []
+    skipped = SkippedValues(rule, stream_id=7, report=reported.extend)
+    start = threading.Barrier(2)
+
+    def own() -> None:
+        start.wait()
+        for n in range(200):
+            skipped.update((f"v{n % 3}",))
+
+    def refused() -> None:
+        start.wait()
+        for n in range(200):
+            skipped.refused_changed({f"r{n % 3}": "no"}, OnError.LOG)
+
+    threads = [threading.Thread(target=own), threading.Thread(target=refused)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    last = reported[-1]
+    assert isinstance(last, ProblemSpans)
+    assert sorted(last.spans) == ["refused r1", "v1"]  # each source's last value, 199 % 3

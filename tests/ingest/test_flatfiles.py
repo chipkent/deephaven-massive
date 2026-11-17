@@ -68,10 +68,10 @@ from deephaven_massive._massive import (
     WireUnit,
 )
 from deephaven_massive._session import CATALOG
-from deephaven_massive._tables import columns
+from deephaven_massive._tables import columns, problem_reporter
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.columns import col_defs
-from deephaven_massive._tables.problem_events import ProblemEvent
+from deephaven_massive._tables.problem_events import ProblemCause, ProblemEvent
 from deephaven_massive._tables.transports import (
     SymbolFailure,
     SymbolOutcome,
@@ -293,6 +293,37 @@ def capture_problems(
     events: list[ProblemEvent] = []
     monkeypatch.setattr(session._core, "problems", events.extend)
     return events
+
+
+def record_problems(m: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> list[ProblemEvent]:
+    # The problem events the session receives, in order; they still reach its reporter, which
+    # logs the alarm, and m.problems().
+    events: list[ProblemEvent] = []
+    report = m._core.problems
+
+    def recorded(found: Sequence[ProblemEvent]) -> None:
+        events.extend(found)
+        report(found)
+
+    monkeypatch.setattr(m._core, "problems", recorded)
+    return events
+
+
+def alarms(caplog: pytest.LogCaptureFixture) -> list[str]:
+    # The problem reporter's WARNINGs: the first problem of each cause on each read.
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == problem_reporter.__name__ and r.levelno == logging.WARNING
+    ]
+
+
+def alarm(cause: str, head: str, detail: str, *, where: str, read: int = 1) -> str:
+    # The WARNING of a read's first problem of a cause.
+    return (
+        f"stocks.trades table {read}: {cause}: {head}{detail} (at {where}); m.problems() lists "
+        f"it and every later {cause} problem of this table, which the log shows at DEBUG only"
+    )
 
 
 def problems(events: list[ProblemEvent]) -> list[tuple[object, ...]]:
@@ -595,6 +626,7 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
         request=request(timespan=Timespan.DAY, adjusted=False),
         window=window,
         warnings=WARNINGS,
+        call=1,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -630,6 +662,7 @@ def test_a_bar_outside_the_whole_bar_window_is_neither_withheld_nor_counted(
         request=request(timespan=Timespan.DAY, adjusted=False),
         window=window,
         warnings=WARNINGS,
+        call=1,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -673,6 +706,7 @@ def test_an_unreadable_spelling_is_withheld_beside_a_readable_row() -> None:
         request=request(dm.ALL, on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)),
         window=whole_days(SYNTHETIC, "2025-03-03"),
         warnings=WARNINGS,
+        call=1,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -703,6 +737,7 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
         request=request(dm.ALL),
         window=window,
         warnings=WARNINGS,
+        call=1,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -738,6 +773,7 @@ def test_a_size_beyond_2_53_widened_to_a_double_is_withheld_and_reported() -> No
         request=request(dm.ALL),
         window=whole_days(SYNTHETIC, "2025-03-03"),
         warnings=WARNINGS,
+        call=1,
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -768,21 +804,21 @@ def test_milliseconds_in_a_nanosecond_column_withhold_their_row_with_a_warning(
     # Milliseconds in a column documented in nanoseconds land in January 1970: never served.
     row = trade(1, 1741012200000000000, participant=1741012200000)
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row + trade(2, 1741012200000000001)))
-    events = capture_problems(session, monkeypatch)
+    events = record_problems(session, monkeypatch)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+    with caplog.at_level(logging.WARNING):
         t = q.history("2025-03-03", "2025-03-03", wait=True)
     assert pick(t, "Id", "ParticipantTimestamp") == [("2", 1741012200000000001)]
-    assert problems(events) == [(RowFault.UNCONVERTIBLE_VALUES, "AAPL", "ParticipantTimestamp", 1)]
-    warnings = [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER]
-    assert warnings == [
-        withheld_count(
-            1,
-            "timestamp unit mismatch for stocks.trades.ParticipantTimestamp: 1741012200000 ns is "
-            "outside 1990 to 2100",
-        ),
-        unconvertible_header("participant_timestamp", "1741012200000"),
+    assert problems(events) == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "ParticipantTimestamp", 1)
     ]
+    why = (
+        "timestamp unit mismatch for stocks.trades.ParticipantTimestamp: 1741012200000 ns is "
+        "outside 1990 to 2100"
+    )
+    assert events[0].detail == why
+    where = f"FLAT_FILES {LOCATION.format(TRADES_0303)}"
+    assert alarms(caplog) == [alarm("unconvertible_values", "1 rows of AAPL, ", why, where=where)]
 
 
 def test_a_wrong_unit_in_the_time_column_withholds_its_row_with_a_count(
@@ -801,21 +837,20 @@ def test_a_wrong_unit_in_the_time_column_withholds_its_row_with_a_count(
         + trade(3, 5, participant=good)
     )
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    events = capture_problems(session, monkeypatch)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
         t = query(session, STOCK_TRADES, symbols=dm.ALL).history(
             "2025-03-03", "2025-03-03", wait=True
         )
     assert pick(t, "Id") == [("2",)]
-    assert problems(events) == [(RowFault.UNREADABLE_KEYS, "AAPL", "Timestamp", 2)]
-    [warning] = [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER]
-    assert warning == (
-        f"stocks.trades: withheld 2 FLAT_FILES row(s) the library cannot read whole, the first "
-        f"at {LOCATION.format(TRADES_0303)}: timestamp unit mismatch for "
-        "stocks.trades.Timestamp: 1741012200000 ns is outside 1990 to 2100; such rows are "
-        "withheld and counted: the running count is logged at DEBUG and shown in the "
-        "SchemaDrift of each live table that lost them"
+    assert problems(events) == [(ProblemCause.UNREADABLE_KEYS, "AAPL", "Timestamp", 2)]
+    why = (
+        "timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000 ns is outside 1990 "
+        "to 2100"
     )
+    assert events[0].detail == why
+    where = f"FLAT_FILES {LOCATION.format(TRADES_0303)}"
+    assert alarms(caplog) == [alarm("unreadable_keys", "2 rows of AAPL, ", why, where=where)]
 
 
 def test_a_wrong_unit_in_the_time_column_fails_the_read_under_raise(
@@ -842,39 +877,42 @@ MALFORMED_ROWS = (
 ).encode() + trade(4, 1741012200000000004, "SECR\xe9T").encode("latin-1")
 """Two rows between a line with too few fields, one with too many, and one not UTF-8 text."""
 
-MALFORMED_LOG = (
-    f"stocks.trades: skipped 3 malformed line(s) of {LOCATION.format(TRADES_0303)}, the first: "
-    "row 2 after the header has 2 fields where the header has 13; the file's other rows are kept"
+MALFORMED = (
+    f"skipped 3 malformed line(s) of {LOCATION.format(TRADES_0303)}, the first: row 2 after the "
+    "header has 2 fields where the header has 13; the file's other rows are kept"
 )
+"""The detail of the one `malformed_rows` problem of the file that holds `MALFORMED_ROWS`."""
 
 
-@pytest.mark.parametrize(
-    ("setting", "level"), [(dm.OnError.LOG, logging.WARNING), (dm.OnError.IGNORE, logging.DEBUG)]
-)
-def test_malformed_lines_are_skipped_with_one_line_per_file_logged_by_the_setting(
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.IGNORE])
+def test_malformed_lines_are_skipped_as_one_problem_per_file_warned_by_the_setting(
     *,
     fake_s3: FakeS3,
     clock: Callable[[datetime], None],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
     setting: dm.OnError,
-    level: int,
 ) -> None:
-    # Each malformed line loses only itself; the log line names the first one's row and fault,
-    # never its text, at WARNING under LOG and only at DEBUG under IGNORE.
+    # Each malformed line loses only itself; the file's one problem names the first one's row
+    # and fault, never its text, and warns under LOG only.
     fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
     with (
         dm.MassiveSession(
             dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=setting))
         ) as m,
-        caplog.at_level(logging.DEBUG, logger=flatfiles.__name__),
+        caplog.at_level(logging.DEBUG),
     ):
+        events = record_problems(m, monkeypatch)
         t = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
         assert pick(t, "Id") == [("1",), ("2",)]
-    logged = [(r.levelno, r.getMessage()) for r in caplog.records if "malformed" in r.getMessage()]
-    assert logged == [(level, MALFORMED_LOG)]
+    assert [(e.cause, e.rows, e.detail, e.policy) for e in events] == [
+        (ProblemCause.MALFORMED_ROWS, 3, MALFORMED, setting)
+    ]
     assert "SECRET" not in caplog.text
     warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warned == ([MALFORMED_LOG] if setting is dm.OnError.LOG else [])
+    where = LOCATION.format(TRADES_0303)
+    expected = alarm("malformed_rows", "3 rows, ", MALFORMED, where=where)
+    assert warned == ([expected] if setting is dm.OnError.LOG else [])
 
 
 def test_a_malformed_line_fails_the_read_under_raise(
@@ -1040,7 +1078,7 @@ def test_a_file_whose_rows_are_all_unreadable_beside_a_file_read_whole_fails_not
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04", wait=True)
     assert pick(t, "Id") == [("2",)]
     assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
-        (RowFault.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)
     ]
 
 
@@ -1140,7 +1178,7 @@ def test_a_ticker_the_library_cannot_read_is_withheld_by_default(
         )
         assert pick(t, "Symbol", "Id") == [("AAPL", "2")]
         assert "RawSymbol" not in t.column_names
-    assert problems(events) == [(RowFault.UNREADABLE_SYMBOLS, "BRK/B", "Symbol", 1)]
+    assert problems(events) == [(ProblemCause.UNREADABLE_SYMBOLS, "BRK/B", "Symbol", 1)]
 
 
 @pytest.mark.parametrize("ticker", ["NA", "NULL"])
@@ -2555,7 +2593,20 @@ SKIPPED_NYMEX = (
     rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com "
     r"\(AccessDenied: Access Denied\)"
 )
-"""The record of a read that skipped NYMEX after S3 refused `REFUSED_0305`."""
+"""The DEBUG record of a read that skipped NYMEX after S3 refused `REFUSED_0305`."""
+
+NYMEX_ALARM = (
+    r"futures\.trades table \d+: refused_venues: skipping the flat files of NYMEX for the whole "
+    "range, since Massive refused them; name only the exchanges the plan includes in venues= to "
+    r"request none of them\. S3 refused: NYMEX: HTTP 403 for "
+    rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com "
+    r"\(AccessDenied: Access Denied\) \(at [^)]*call-\d+\); "
+    r"m\.problems\(\) lists it and every later refused_venues problem of this table, which the "
+    r"log shows at DEBUG only"
+)
+"""The WARNING of the read's `refused_venues` problem after S3 refused `REFUSED_0305`."""
+
+VENUES_LOGGER = "deephaven_massive._ingest.refused_venues"
 
 
 def test_a_read_that_leaves_venues_out_skips_a_refused_venue_whatever_the_setting(
@@ -2564,8 +2615,8 @@ def test_a_read_that_leaves_venues_out_skips_a_refused_venue_whatever_the_settin
     two_days_of_venues: Callable[[], None],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Left out, venues reads every exchange the plan allows: a refused one is skipped with one
-    # WARNING, even where the call and the session say RAISE.
+    # Left out, venues reads every exchange the plan allows: a refused one is skipped as one
+    # problem, with one WARNING, even where the call and the session say RAISE.
     m = dm.MassiveSession(
         dataclasses.replace(
             CONFIG, max_concurrency=1, on_error=dm.ErrorPolicy(refused_venues=OnError.RAISE)
@@ -2575,13 +2626,13 @@ def test_a_read_that_leaves_venues_out_skips_a_refused_venue_whatever_the_settin
         two_days_of_venues()
         fake_s3.refuse(REFUSED_0305, status=403, code="AccessDenied", message="Access Denied")
         q = m.futures.trades(dm.ALL, on_error=dm.ErrorPolicy(refused_venues=OnError.RAISE))
-        with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.refused_venues"):
+        with caplog.at_level(logging.WARNING):
             t = q.history("2025-03-04", "2025-03-05", wait=True)
         assert pick(t, "ReportSequence") == [(40,), (41,), (43,), (50,), (51,), (53,)]
         assert "Massive refused the flat files of NYMEX" in t.attributes()["TableDescription"]
         (report,) = caplog.records
         assert report.levelno == logging.WARNING
-        assert re.fullmatch(SKIPPED_NYMEX, report.getMessage())
+        assert re.fullmatch(NYMEX_ALARM, report.getMessage())
     finally:
         m.close()
 
@@ -2600,19 +2651,17 @@ def test_a_read_that_leaves_venues_out_fails_when_every_venue_is_refused(
         q.history("2025-03-04", "2025-03-04", wait=True)
 
 
-@pytest.mark.parametrize(
-    ("policy", "level"), [(OnError.LOG, logging.WARNING), (OnError.IGNORE, logging.DEBUG)]
-)
+@pytest.mark.parametrize("policy", [OnError.LOG, OnError.IGNORE])
 def test_a_venue_refused_on_one_day_is_skipped_for_the_whole_range(
     policy: OnError,
-    level: int,
     *,
     fake_s3: FakeS3,
     two_days_of_venues: Callable[[], None],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # S3 refuses NYMEX's second day only: its first day's file is dropped too, so the table
-    # has no NYMEX row on any day, and the refusal is logged once with S3's answer.
+    # has no NYMEX row on any day, and the refusal is logged once with S3's answer, and warned
+    # of under LOG only.
     m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
     try:
         two_days_of_venues()
@@ -2620,15 +2669,22 @@ def test_a_venue_refused_on_one_day_is_skipped_for_the_whole_range(
         q = m.futures.trades(
             dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=policy)
         )
-        with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.refused_venues"):
+        with caplog.at_level(logging.DEBUG, logger=VENUES_LOGGER):
             t = q.history("2025-03-04", "2025-03-05", wait=True)
         assert pick(t, "ReportSequence") == [(40,), (41,), (43,), (50,), (51,), (53,)]
         assert t.attributes()["TableDescription"].endswith(
             "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange."
         )
-        (report,) = [r for r in caplog.records if "for the whole range" in r.getMessage()]
-        assert report.levelno == level
+        (report,) = [
+            r
+            for r in caplog.records
+            if r.name == VENUES_LOGGER and "for the whole range" in r.getMessage()
+        ]
+        assert report.levelno == logging.DEBUG
         assert re.fullmatch(SKIPPED_NYMEX, report.getMessage())
+        warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warned) == (1 if policy is OnError.LOG else 0)
+        assert all(re.fullmatch(NYMEX_ALARM, message) for message in warned)
     finally:
         m.close()
 
@@ -2757,16 +2813,13 @@ def test_a_refused_venues_rows_of_other_sessions_leave_no_session_uncertain(
         m.close()
 
 
-@pytest.mark.parametrize(
-    ("policy", "level"), [(OnError.LOG, logging.WARNING), (OnError.IGNORE, logging.DEBUG)]
-)
+@pytest.mark.parametrize("policy", [OnError.LOG, OnError.IGNORE])
 def test_a_read_by_symbol_names_the_skipped_venue_and_logs_it_once_per_call(
     *,
     fake_s3: FakeS3,
     two_days_of_venues: Callable[[], None],
     caplog: pytest.LogCaptureFixture,
     policy: OnError,
-    level: int,
 ) -> None:
     # A table that follows a live symbol table has its description before any read, so each
     # symbol's source names the skipped venue; reading again in the same call logs nothing new.
@@ -2804,10 +2857,15 @@ def test_a_read_by_symbol_names_the_skipped_venue_and_logs_it_once_per_call(
         assert isinstance(rows, SymbolRows)
         assert rows.source == "flat files without NYMEX (refused)"
         assert pick(rows.table, "ReportSequence") == [(40,), (41,), (43,)]
-    skipped = [r for r in caplog.records if "skipping the flat files" in r.getMessage()]
+    skipped = [r for r in caplog.records if r.name == VENUES_LOGGER]
     calls = [re.search(r"call-\d+", r.getMessage()) for r in skipped]
     assert [match.group() for match in calls if match] == ["call-7", "call-8", "call-7"]
-    assert {r.levelno for r in skipped} == {level}
+    assert {r.levelno for r in skipped} == {logging.DEBUG}
+    # Under LOG the first problem of each call's id warns, once in the session.
+    warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [w.split(":")[0] for w in warned] == (
+        ["futures.trades table 7", "futures.trades table 8"] if policy is OnError.LOG else []
+    )
 
 
 def test_a_refused_venue_is_not_requested_again_in_the_call(
@@ -3502,6 +3560,7 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         request=request(dm.ALL),
         window=window,
         warnings=WARNINGS,
+        call=1,
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = _massive.Cancel()
@@ -3531,6 +3590,7 @@ def test_a_read_stopped_while_it_waits_for_a_connection_is_cancelled_not_missing
             request=request(dm.ALL),
             window=whole_days(STOCK_TRADES, "2025-03-03"),
             warnings=WARNINGS,
+            call=1,
         )
         key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
         client = flat_file_client(m)
@@ -4050,8 +4110,6 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
 
 # Schema drift: headers are matched by name; extra and missing headers warn once.
 
-DRIFT_LOGGER = "deephaven_massive._tables.diagnostics"
-
 
 def csv_rows(
     load_fixture: Callable[[str, str], bytes], name: str
@@ -4064,21 +4122,17 @@ def csv_rows(
 
 
 def extra_header(name: str) -> str:
-    dropped = "it is dropped (schema drift)"
-    return f"stocks.trades: FLAT_FILES field {name!r} is not in the schema; {dropped}"
+    # The detail of the `schema_drift` problem of a header Massive's docs lack.
+    return (
+        f"Massive sent the field {name!r}, which its documentation lacks; the rows are "
+        "published without it"
+    )
 
 
-def missing_header(name: str) -> str:
-    return f"stocks.trades: FLAT_FILES field {name!r} is missing; it reads as null (schema drift)"
-
-
-def drift_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    # Each WARNING ends with the file that showed the drift first, which for a call of several
-    # files depends on which reader finished first; the file is checked where only one is read.
+def drift_of(events: list[ProblemEvent]) -> list[tuple[object, ...]]:
+    # Each `schema_drift` event as (read, field, detail).
     return [
-        r.getMessage().split(" at s3://", 1)[0]
-        for r in caplog.records
-        if r.name == DRIFT_LOGGER and r.levelno == logging.WARNING
+        (e.stream_id, e.field, e.detail) for e in events if e.cause is ProblemCause.SCHEMA_DRIFT
     ]
 
 
@@ -4087,26 +4141,26 @@ def test_reordered_headers_give_identical_results(
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     fake_s3.put_csv(TRADES_0303, names, data)
     expected = rows(q.history("2025-03-03", "2025-03-03", wait=True))
     assert len(expected) == 4
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        for order in (list(reversed(names)), sorted(names, key=lambda n: n[::-1])):
-            fake_s3.put_csv(TRADES_0303, order, data)
-            assert rows(q.history("2025-03-03", "2025-03-03", wait=True)) == expected
-    assert drift_warnings(caplog) == []
+    events = capture_problems(session, monkeypatch)
+    for order in (list(reversed(names)), sorted(names, key=lambda n: n[::-1])):
+        fake_s3.put_csv(TRADES_0303, order, data)
+        assert rows(q.history("2025-03-03", "2025-03-03", wait=True)) == expected
+    assert events == []
 
 
-def test_an_extra_header_is_dropped_and_warned_once_per_session(
+def test_an_extra_header_is_dropped_and_a_problem_of_each_read(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, first = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     _, second = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-05.csv")
@@ -4114,29 +4168,32 @@ def test_an_extra_header_is_dropped_and_warned_once_per_session(
     fake_s3.put_csv(TRADES_0303, wider, [{**row, "halted": "true"} for row in first])
     fake_s3.put_csv(TRADES_0305, wider, [{**row, "halted": "false"} for row in second])
     q = query(session, STOCK_TRADES, symbols=["AAPL"])
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        t = q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
-        assert pick(t, "Id") == [("1",), ("3",), ("9",)]
-        assert "Halted" not in {c.name for c in t.columns}
-        # Two files, then a second call: still one warning for the session.
-        q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
-    assert drift_warnings(caplog) == [extra_header("halted")]
+    events = capture_problems(session, monkeypatch)
+    t = q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
+    assert pick(t, "Id") == [("1",), ("3",), ("9",)]
+    assert "Halted" not in {c.name for c in t.columns}
+    # Two files, then a second call: each file of each call is a problem of its call.
+    q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
+    assert sorted(drift_of(events)) == [
+        (read, "halted", extra_header("halted")) for read in (1, 1, 2, 2)
+    ]
 
 
-def test_a_missing_header_is_null_and_warned_once(
+def test_a_missing_header_is_null_and_no_problem(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A documented field a file lacks is Massive's null, which is valid data.
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     narrower = [name for name in names if name not in {"trf_id", "participant_timestamp"}]
     fake_s3.put_csv(TRADES_0303, narrower, data)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        t = q.history("2025-03-03", "2025-03-03", wait=True)
-        q.history("2025-03-03", "2025-03-03", wait=True)
+    events = capture_problems(session, monkeypatch)
+    t = q.history("2025-03-03", "2025-03-03", wait=True)
+    q.history("2025-03-03", "2025-03-03", wait=True)
     assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     assert pick(t, "Id", "TrfId", "ParticipantTimestamp", "TrfTimestamp") == [
         ("1", None, None, None),
@@ -4144,10 +4201,7 @@ def test_a_missing_header_is_null_and_warned_once(
         ("3", None, None, 1741013999999999000),
         ("4", None, None, None),
     ]
-    assert drift_warnings(caplog) == [
-        missing_header("participant_timestamp"),
-        missing_header("trf_id"),
-    ]
+    assert events == []
 
 
 @pytest.mark.parametrize("key_header", ["ticker", "sip_timestamp"])
@@ -4186,20 +4240,8 @@ def test_a_futures_file_without_its_session_header_is_a_massive_error(
         q.history("2025-03-04", "2025-03-04", wait=True)
 
 
-def unconvertible_header(name: str, value: str) -> str:
-    return (
-        f"stocks.trades: FLAT_FILES field {name!r} held a value that does not fit its type; its "
-        f"row is withheld (schema drift) at {LOCATION.format(TRADES_0303)}; first value {value}"
-    )
-
-
-def withheld_count(count: int, reason: str) -> str:
-    return (
-        f"stocks.trades: withheld {count} FLAT_FILES row(s) the library cannot read whole, the "
-        f"first at {LOCATION.format(TRADES_0303)}: {reason}; such rows are withheld and counted: "
-        "the running count is logged at DEBUG and shown in the SchemaDrift of each live table "
-        "that lost them"
-    )
+WHERE = f"FLAT_FILES {LOCATION.format(TRADES_0303)}"
+"""Where a read of `TRADES_0303` found a withheld row, as its problem's WARNING names it."""
 
 
 def test_an_unconvertible_value_withholds_its_row_and_warns_once(
@@ -4212,20 +4254,23 @@ def test_an_unconvertible_value_withholds_its_row_and_warns_once(
 ) -> None:
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     fake_s3.put_csv(TRADES_0303, names, [*data[:2], {**data[2], "size": "lots"}, data[3]])
-    events = capture_problems(session, monkeypatch)
+    events = record_problems(session, monkeypatch)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+    with caplog.at_level(logging.WARNING):
         t = q.history("2025-03-03", "2025-03-03", wait=True)
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert pick(t, "Id", "Size") == [("1", 100.0), ("2", 50.0), ("4", 10.0)]
-    # The second read logs its count at DEBUG.
-    assert [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER] == [
-        withheld_count(1, "size holds 'lots', which is not double"),
-        unconvertible_header("size", "lots"),
-    ]
-    assert [(e.cause, e.field, e.rows) for e in events] == [
-        (RowFault.UNCONVERTIBLE_VALUES, "Size", 1)
+    why = "size holds 'lots', which is not double"
+    assert [(e.cause, e.field, e.rows, e.detail) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Size", 1, why)
     ] * 2
+    # Each read is its own table: each warns of its first.
+    assert alarms(caplog) == [
+        alarm(
+            "unconvertible_values", f"1 rows of {events[0].symbol}, ", why, where=WHERE, read=read
+        )
+        for read in (1, 2)
+    ]
 
 
 def test_an_unconvertible_list_withholds_its_row_and_warns(
@@ -4234,16 +4279,21 @@ def test_an_unconvertible_list_withholds_its_row_and_warns(
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     fake_s3.put_csv(TRADES_0303, names, [{**data[0], "conditions": "12,abc"}, *data[1:]])
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
         t = q.history("2025-03-03", "2025-03-03", wait=True)
     assert [row[0] for row in pick(t, "Id")] == ["2", "3", "4"]
-    assert [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER] == [
-        withheld_count(1, "conditions holds '12,abc', which is not string"),
-        unconvertible_header("conditions", "12,abc"),
+    why = "conditions holds '12,abc', which is not string"
+    assert [(e.cause, e.field, e.rows, e.detail) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Conditions", 1, why)
+    ]
+    assert alarms(caplog) == [
+        alarm("unconvertible_values", f"1 rows of {events[0].symbol}, ", why, where=WHERE)
     ]
 
 
@@ -4253,16 +4303,19 @@ def test_a_file_with_a_header_and_no_rows_still_reports_its_drift(
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, _ = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     fake_s3.put_csv(TRADES_0303, [*names, "halted"], [])
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
         t = q.history("2025-03-03", "2025-03-03", wait=True)
     assert rows(t) == []
-    assert drift_warnings(caplog) == [extra_header("halted")]
+    assert drift_of(events) == [(1, "halted", extra_header("halted"))]
     # The WARNING names the file, so the log says where to look.
-    assert caplog.messages == [f"{extra_header('halted')} at {LOCATION.format(TRADES_0303)}"]
+    where = LOCATION.format(TRADES_0303)
+    assert caplog.messages == [alarm("schema_drift", "", extra_header("halted"), where=where)]
 
 
 def test_an_empty_file_is_a_massive_error(*, session: dm.MassiveSession, fake_s3: FakeS3) -> None:
@@ -4423,7 +4476,7 @@ def test_a_price_a_double_would_round_withholds_its_row(
     t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     assert [row[0] for row in pick(t, "Id", "Size")] == ["1", "3", "4"]
     assert [(e.cause, e.field, e.rows) for e in events] == [
-        (RowFault.UNCONVERTIBLE_VALUES, "Price", 1)
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Price", 1)
     ]
 
 
@@ -4437,16 +4490,14 @@ def test_an_ignored_unconvertible_value_withholds_its_row_with_no_warning(
 ) -> None:
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     fake_s3.put_csv(TRADES_0303, names, [*data[:2], {**data[2], "size": "lots"}, data[3]])
-    events = capture_problems(session, monkeypatch)
+    events = record_problems(session, monkeypatch)
     quiet = dm.ErrorPolicy(unconvertible_values=dm.OnError.IGNORE)
     q = query(session, STOCK_TRADES, symbols=dm.ALL, on_error=quiet)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
+    with caplog.at_level(logging.WARNING):
         t = q.history("2025-03-03", "2025-03-03", wait=True)
     assert [row[0] for row in pick(t, "Id", "Size")] == ["1", "2", "4"]
-    # The header's drift still warns once; the withheld count does not.
-    assert [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER] == [
-        unconvertible_header("size", "lots")
+    # The row's problem still reaches the session, with its setting; nothing warns.
+    assert [(e.cause, e.field, e.rows, e.policy) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Size", 1, dm.OnError.IGNORE)
     ]
-    assert [(e.cause, e.field, e.rows) for e in events] == [
-        (RowFault.UNCONVERTIBLE_VALUES, "Size", 1)
-    ]
+    assert caplog.records == []

@@ -77,22 +77,20 @@ a trade without a TRF), so in every `Instant` column except `Timestamp` a `0` be
 value is then scaled to nanoseconds by its field's unit, with an overflow check, and must lie in
 1990 to 2100, so a value in another unit than documented is never served as a wrong instant.
 
-Schema drift is reported, not raised: a header the dataset does not document is dropped, and
-a documented header the file lacks becomes a column of nulls; each logs one WARNING per
-(dataset, transport, header) through the session's `DriftRegistry`. A row the library cannot
-read whole is withheld (`withheld.withhold_rows`) and counted (`DriftRegistry` logs one WARNING
-per dataset with the running count): a key (its ticker, its time, or for futures its session)
-that is empty, does not parse, or fails the routine; a ticker spelling it cannot read; a value
-that does not parse as its type, an `Instant` other than the time column that fails the
-routine, or a whole number its `double` column would round. A malformed line, one that is not
-UTF-8 text or does not split into the header's fields (too few or too many, or a quote that
-does not close), follows `ErrorPolicy.malformed_rows`: under `LOG`, the default, it is skipped
-and each file that had one logs one WARNING with the count and the first one's row number,
-never its text; under `IGNORE` that line is at DEBUG; under `RAISE` the call fails with
-`RowDataError`. A file that lacks a key header fails the call with `MassiveError`, and so does a
-file whose every row is malformed; a file whose rows of the read's symbols and window the
-library could read none of whole fails it with `RowDataError`, the sign of a change in the
-file's format rather than of one odd row.
+Schema drift is reported, not raised: a header the dataset does not document is dropped, and a
+documented header the file lacks becomes a column of nulls; each extra header is a `schema_drift`
+problem of the session's `m.problems()`. A row the library cannot read whole is withheld
+(`withheld.withhold_rows`) and reported there with its cause and count: a key (its ticker, its time,
+or for futures its session) that is empty, does not parse, or fails the routine; a ticker spelling
+it cannot read; a value that does not parse as its type, an `Instant` other than the time column
+that fails the routine, or a whole number its `double` column would round. A malformed line, one
+that is not UTF-8 text or does not split into the header's fields (too few or too many, or a quote
+that does not close), follows `ErrorPolicy.malformed_rows`: under `LOG`, the default, and `IGNORE`
+it is skipped, and each file that had one is a `malformed_rows` problem with the count and the first
+one's row number, never its text; under `RAISE` the call fails with `RowDataError`. A file that
+lacks a key header fails the call with `MassiveError`, and so does a file whose every row is
+malformed; a file whose rows of the read's symbols and window the library could read none of whole
+fails it with `RowDataError`, the sign of a change in the file's format rather than of one odd row.
 
 Futures files are published per venue (`us_futures_cme/trades_v1`, ...): the dataset's prefix holds
 the placeholder `{venue}`, `venues` (all four when the call left it out) picks the venues read,
@@ -164,7 +162,6 @@ from deephaven_massive._datasets.timestamps import (
 )
 from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
-    log_unreadable,
     unreadable_symbol_reason,
     wire_spellings,
 )
@@ -205,6 +202,12 @@ from deephaven_massive._massive import (
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.problem_events import (
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+    drift_events,
+)
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import FlatFileRead
 from deephaven_massive._tables.withheld import (
@@ -537,6 +540,7 @@ class _Transform:
         symbols: How the files' tickers become canonical (`WireSymbols`).
         policy: The call's resolved policy (`Request.on_error`): what a ticker spelling the
             library cannot read, and a malformed line, do.
+        call: The call's id, the `StreamId` its problems carry.
         times: How the rows' time columns are filled (`row_times.TimeRule`).
         time_name: The dataset's time column, `Timestamp` or a bar's `TimestampStart`.
         bars: For a dataset of bars, the window its bars must lie in (`HistoryWindow.bars`);
@@ -562,6 +566,7 @@ class _Transform:
     time_name: str
     symbols: WireSymbols
     policy: ResolvedPolicy
+    call: int
     bars: BarBounds | None = None
     seen: _OtherSessions = field(default_factory=_OtherSessions)
     tally: ReadTally = field(default_factory=ReadTally)
@@ -576,6 +581,7 @@ class _Transform:
         request: Request,
         window: HistoryWindow,
         warnings: BoundedLog,
+        call: int,
     ) -> _Transform:
         """Prepare the transform of a request from the prefix's generated source.
 
@@ -598,6 +604,7 @@ class _Transform:
                 `HistoryWindow.sessions`, by each row's own session.
             warnings: The session's once-per-session warnings, which the time rule logs to
                 (`row_times.time_rule`): that of a daily summary, and its bars' stamp rule.
+            call: The call's id, the `StreamId` its problems carry.
 
         Returns:
             The transform.
@@ -654,6 +661,7 @@ class _Transform:
             time_name=time_name,
             symbols=WireSymbols(spec.name, spec.asset_class, spec.symbols_as_written),
             policy=request.on_error,
+            call=call,
             bars=window.bars,
         )
 
@@ -982,6 +990,7 @@ class FlatFileHistory:
             request=request,
             window=window,
             warnings=self._core.warnings,
+            call=call,
         )
         tiled = not infer_holidays and _tiles(spec, request, window)
         keys = _keys(prefix, request.venues, dates)
@@ -1206,7 +1215,7 @@ class FlatFileHistory:
             # A look past the range's end may have met a refusal of a venue not refused before.
             keys, parts = _without_refused(keys, parts, refusals=refusals)
             missing = [key for key in missing if key.venue not in refusals]
-            refusals.report(spec.name)
+            refusals.report(spec.name, problems=self._core.problems, stream_id=transform.call)
         trading = sorted({key.day for key in missing if is_trading_day(spec.asset_class, key.day)})
         if infer_holidays:
             unread = () if unpublished is None else (unpublished,)
@@ -1640,16 +1649,14 @@ class FlatFileHistory:
 
         Each block's rows the library cannot read whole are withheld (`_Transform.apply`):
         under a cause the call's policy sets to `RAISE` the read fails at that block
-        (`withheld.failure_of`); otherwise, once the file is read, they count in its drift,
-        give the session their problem events, and log each unreadable ticker spelling once.
-        Once the file is read, reports its drift (the blocks' drift and their timestamps')
-        to the session's `DriftRegistry`, which logs a WARNING the first time the dataset's
-        flat files show each extra, missing, or unconvertible header, and counts the rows
-        withheld. A read that a dropped connection ends reports nothing, so a file read again
-        is counted once. A file with malformed lines (not UTF-8 text, or not the
-        header's fields) follows the call's `malformed_rows` (`_log_malformed`): under `LOG`, it
-        logs one WARNING with their count and the first one's row number and fault
-        (`FlatFile.malformed_reason`), and under `IGNORE` the same line at DEBUG. Then logs
+        (`withheld.failure_of`); otherwise, once the file is read, they are the session's
+        problem events (`_report_withheld`). Once the file is read, its drift (the blocks'
+        drift and their timestamps') becomes `schema_drift` events. A read that a dropped
+        connection ends reports nothing, so a file read again is counted once. A file with
+        malformed lines (not UTF-8 text, or not the header's fields) follows the call's
+        `malformed_rows`: under `LOG` and `IGNORE` it is one `malformed_rows` event with
+        their count and the first one's row number and fault (`FlatFile.malformed_reason`),
+        whose first WARNING per call the session's problem reporter logs. Then logs
         one DEBUG line with the rows after each step: read, of the requested symbols, kept by
         the window (and a readable key), and kept as whole bars of the requested sessions, so
         an empty table can be traced to the step that emptied it.
@@ -1711,9 +1718,17 @@ class FlatFileHistory:
         if every.groups:
             self._report_withheld(transform, every, where=file.location)
         transform.tally.add(asked, every)
-        self._core.drift.report(transform.dataset, Transport.FLAT_FILES, found, where=file.location)
+        if found.extra:
+            self._core.problems(
+                drift_events(
+                    found,
+                    dataset=transform.dataset,
+                    stream_id=transform.call,
+                    where=file.location,
+                )
+            )
         if file.malformed_lines:
-            _log_malformed(transform.dataset, file, setting)
+            self._core.problems([_malformed_event(transform, file, setting)])
         logger.debug(
             "%s: %s: %d rows read, %d of the requested symbols, %d in the window, %d withheld, %d "
             "kept as whole bars",
@@ -1735,16 +1750,13 @@ class FlatFileHistory:
             withheld: The file's withheld rows, every block's.
             where: The file's location.
         """
-        dataset = transform.dataset
-        if logs_withheld(withheld.counts(), transform.policy):
-            self._core.drift.report(dataset, Transport.FLAT_FILES, withheld.drift, where=where)
-        spellings = sorted(
-            {g.sent for g in withheld.groups if g.fault is RowFault.UNREADABLE_SYMBOLS and g.sent}
-        )
-        log_unreadable(dataset, spellings, transform.policy.unreadable_symbols)
         self._core.problems(
             withheld.events(
-                dataset=dataset, transport=Transport.FLAT_FILES, where=where, stream_id=None
+                dataset=transform.dataset,
+                transport=Transport.FLAT_FILES,
+                where=where,
+                stream_id=transform.call,
+                policy=transform.policy,
             )
         )
 
@@ -1788,32 +1800,42 @@ class FlatFileHistory:
                     dataset=transform.dataset,
                     transport=Transport.FLAT_FILES,
                     where=where,
-                    stream_id=None,
+                    stream_id=transform.call,
+                    policy=transform.policy,
                 )
             )
             raise RowDataError(f"{failure} (in {where})")
         return merged((before, withheld))
 
 
-def _log_malformed(dataset: str, file: FlatFile, setting: OnError) -> None:
-    """Log the malformed lines of a file read to its end, under `malformed_rows` `LOG` or `IGNORE`.
+def _malformed_event(transform: _Transform, file: FlatFile, setting: OnError) -> ProblemEvent:
+    """Return the `malformed_rows` problem of a file read to its end with malformed lines.
 
-    The line gives the lines' count and the first one's row number and fault
+    Its detail gives the lines' count and the first one's row number and fault
     (`FlatFile.malformed_reason`), never a line's text. Under `RAISE`, the read failed at the
     first block after such a line, so no file with one is read to its end.
 
     Args:
-        dataset: The dataset read, such as `stocks.trades`.
+        transform: The read's block transform, for its dataset and call.
         file: The file, with at least one malformed line.
-        setting: The call's `malformed_rows`: WARNING under `LOG`, DEBUG under `IGNORE`.
+        setting: The call's `malformed_rows`, `LOG` or `IGNORE`.
+
+    Returns:
+        The event, counting the lines as rows, with the file as its field.
     """
-    logger.log(
-        effect_of(setting).level,  # never RAISE here: that read failed at the line
-        "%s: skipped %d malformed line(s) of %s, the first: %s; the file's other rows are kept",
-        dataset,
-        file.malformed_lines,
-        file.location,
-        file.malformed_reason,
+    return ProblemEvent(
+        cause=ProblemCause.MALFORMED_ROWS,
+        action=ProblemAction.SKIPPED,
+        dataset=transform.dataset,
+        stream_id=transform.call,
+        where=file.location,
+        symbol=None,
+        field=file.location,
+        rows=file.malformed_lines,
+        detail=f"skipped {file.malformed_lines} malformed line(s) of {file.location}, the "
+        f"first: {file.malformed_reason}; the file's other rows are kept",
+        at=time.time_ns(),
+        policy=setting,
     )
 
 

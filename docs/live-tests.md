@@ -152,7 +152,7 @@ prints up to four sections:
 
 | Section | What it holds |
 |---|---|
-| `smoke coverage` | The smoke tests that passed, passed with drift, weren't entitled, were skipped, and failed. Drift is a library WARNING or a `SchemaDrift`, each listed. |
+| `smoke coverage` | The smoke tests that passed, passed with drift, weren't entitled, were skipped, and failed. Drift is a library WARNING or a row of `m.problems()`, each listed. |
 | `open questions` | The `plans:` line, then the questions the run touched, in groups: verified, ran with evidence to read, needing a plan you lack, and not verified |
 | `live debug log` | The path of the run's debug log |
 | `live evidence` | The evidence file's lines again |

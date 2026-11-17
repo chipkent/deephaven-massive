@@ -98,12 +98,12 @@ of three values:
 
 | Value | What it does |
 |---|---|
-| `log` | Skips the symbol or row, keeps the rest, and logs a warning. |
+| `log` | Skips the symbol or row, keeps the rest, and logs a warning for the first problem of each cause on each table. |
 | `ignore` | Does the same, logging only at `DEBUG`. |
 | `raise` | Fails whatever met the problem. |
 
-Under `log` and `ignore`, a stream or `poll()` table names each symbol it skips in its `Error`
-in `m.streams()`.
+`m.problems()` lists each problem a table met, with its cause and the setting that
+applied. Under `raise`, the error that fails the call names the problem.
 
 The library never publishes a row of Massive's data it can't read whole: it leaves the row
 out. Three causes cover such rows: `unreadable_keys`, `unreadable_symbols`, and
@@ -121,8 +121,10 @@ or range are ignored for this rule:
 | A `fetch()` or `history()` that follows a symbol table | The rows of one of its reads. The symbols of that read fail, and the table goes on. |
 | A `poll()` table | The rows of one cycle's read. |
 | A `dm.ALL` stream | 100 consecutive rows of its channel. |
-| A stream of named symbols | 100 consecutive rows of one of its symbols. |
 | A stream of named symbols | 100 consecutive rows whose symbol the library can't read. |
+
+A stream of named symbols keeps running when one symbol's last 100 rows were all left out.
+`m.problems()` lists that symbol under `stale_symbol` until one of its rows is published.
 
 Two reads are still judged in parts
 ([#704](https://github.com/chipkent/deephaven-massive/issues/704)). An `AUTO` `history()` that
@@ -285,9 +287,9 @@ limit is shared by every session in this server that uses your key.
 
 Raise it to ride out longer outages, or set `0` to fail at the first one. A stream
 counts the time its connection is down, and a `poll()` table counts the time its
-polls keep failing or stop arriving. Until the limit passes, the table's
-`m.streams()` row shows the problem in `Error`. A failed table stays failed, so call
-the method again for a new one. See
+polls keep failing or stop arriving. Until the limit passes, `m.problems()` lists
+the problem with the time it began. A failed table stays failed, so call the method
+again for a new one. See
 [Live table messages](troubleshooting.md#live-table-messages).
 
 #### flush_interval
@@ -391,10 +393,10 @@ value it can't read.
 Set `raise` when a `history()` read from flat files must have every row
 of each file it reads.
 
-- `log` skips the line, keeps the file's other rows, and logs one warning
-  per file with the count of such lines and the first one's row number. The warning
-  never quotes the line.
-- `ignore` does the same with no warning: only the `DEBUG` log names it.
+- `log` skips the line, keeps the file's other rows, and logs one
+  warning. `m.problems()` gives each file's count of such lines and the first
+  one's row number, never the line itself.
+- `ignore` does the same, logging only at `DEBUG`.
 - `raise` makes `history()` raise `MassiveError`, naming the file and the
   first such line's row. A `history()` of a live table instead marks every symbol
   of the read `FAILED` in `m.symbol_reads()`.
@@ -412,12 +414,9 @@ read the ones it does.
 
 - `raise` makes `history()` raise `EntitlementError`, naming the
   exchange and the setting.
-- `log` skips every file of each refused exchange over the whole range,
-  logs one warning with Massive's status and text, and names the exchanges in the
-  table's description. For a watchlist, each symbol's `Transport` in
-  `m.symbol_reads()` names them instead.
-- `ignore` does the same with no warning: only the `DEBUG` log and the
-  description or `m.symbol_reads()` name them.
+- `log` skips every file of each refused exchange over the whole range and
+  logs one warning. `m.problems()` lists the exchanges with Massive's status and text.
+- `ignore` does the same, logging only at `DEBUG`.
 
 It applies only when REST can't serve the call: `dm.ALL`, or
 `source=dm.HistorySource.FLAT_FILES`. Otherwise `history()` reads REST when Massive

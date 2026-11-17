@@ -133,6 +133,7 @@ def test_the_session_exposes_no_introspection_attributes(
         "indices",
         "options",
         "partners",
+        "problems",
         "rate_limits",
         "reference",
         "release",

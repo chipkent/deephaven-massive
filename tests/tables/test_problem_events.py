@@ -1,57 +1,143 @@
-"""Tests for the problem events of the rows the library withholds, and their logging sink."""
+"""Tests for the plain-data problems, their causes, span snapshots, and drift events."""
 
 import dataclasses
-import logging
 
-import pytest
-
-from deephaven_massive._massive import RowFault, Transport
-from deephaven_massive._tables import problem_events
-from deephaven_massive._tables.problem_events import LoggedProblems, ProblemAction, ProblemEvent
+import deephaven_massive as dm
+from deephaven_massive._error_policy import ErrorPolicy
+from deephaven_massive._massive import DriftReport, DriftSample, RowFault
+from deephaven_massive._tables.problem_events import (
+    CAUSES,
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+    ProblemSource,
+    Span,
+    SpanTracker,
+    drift_events,
+)
 
 EVENT = ProblemEvent(
-    cause=RowFault.UNCONVERTIBLE_VALUES,
+    cause=ProblemCause.UNCONVERTIBLE_VALUES,
     action=ProblemAction.WITHHELD,
     dataset="stocks.trades",
-    transport=Transport.REST,
     stream_id=None,
-    where="GET /v3/trades/{stockTicker}",
+    where="REST GET /v3/trades/{stockTicker}",
     symbol="AAPL",
     field="Price",
     rows=2,
-    reason="Price holds 'x', not a double",
+    detail="Price holds 'x', not a double",
     at=1,
+    policy=dm.OnError.LOG,
 )
 
 
 def test_an_event_is_frozen_and_slotted() -> None:
-    found = EVENT
-    assert hash(found) == hash(dataclasses.replace(found))  # frozen, so hashable by value
-    assert not hasattr(found, "__dict__")
+    assert hash(EVENT) == hash(dataclasses.replace(EVENT))  # frozen, so hashable by value
+    assert not hasattr(EVENT, "__dict__")
 
 
-def test_logged_problems_logs_one_debug_line_per_event(caplog: pytest.LogCaptureFixture) -> None:
-    overflow = dataclasses.replace(
-        EVENT,
-        action=ProblemAction.OVERFLOW,
-        transport=Transport.WS,
-        stream_id=7,
-        symbol=None,
-        field=None,
-        rows=9,
-        where="wss://h/stocks channel T",
+def test_every_cause_has_traits_and_names_a_real_policy_field() -> None:
+    assert list(CAUSES) == list(ProblemCause)
+    fields = {f.name for f in dataclasses.fields(ErrorPolicy)}
+    for cause in ProblemCause:
+        traits = cause.traits
+        assert traits.policy is None or traits.policy == cause.value
+        assert traits.policy is None or traits.policy in fields
+        assert traits.summary.endswith(".")
+    # Every field of the policy is a cause, so `Policy` always names its own cause's setting.
+    assert fields <= {cause.value for cause in ProblemCause}
+
+
+def test_every_row_fault_is_a_withheld_cause_of_the_library() -> None:
+    for fault in RowFault:
+        cause = ProblemCause(fault.value)
+        assert cause.traits.action is ProblemAction.WITHHELD
+        assert cause.traits.source is ProblemSource.LIBRARY
+
+
+def test_a_span_tracker_keeps_each_span_s_start_and_reports_only_changes() -> None:
+    tracker = SpanTracker(
+        ProblemCause.NONCANONICAL_SYMBOLS, dataset="stocks.trades", stream_id=7, where="here"
     )
-    with caplog.at_level(logging.DEBUG, logger=problem_events.__name__):
-        LoggedProblems()([EVENT, overflow])
-        LoggedProblems()([])
-    assert [r.levelno for r in caplog.records] == [logging.DEBUG] * 2
-    assert [r.getMessage() for r in caplog.records] == [
-        (
-            "stocks.trades REST GET /v3/trades/{stockTicker}: withheld 2 rows of AAPL, "
-            "unconvertible_values (stream None): Price holds 'x', not a double"
-        ),
-        (
-            "stocks.trades WS wss://h/stocks channel T: overflow 9 rows of None, "
-            "unconvertible_values (stream 7): Price holds 'x', not a double"
-        ),
+    before = tracker.holds
+    first = tracker.update({"aapl": ("aapl", None, "bad", 0)}, at=10)
+    assert first is not None
+    assert (before, tracker.holds) == (False, True)
+    assert first.spans == {"aapl": Span(symbol="aapl", detail="bad", since=10)}
+    assert (first.cause, first.stream_id, first.at) == (ProblemCause.NONCANONICAL_SYMBOLS, 7, 10)
+    assert tracker.update({"aapl": ("aapl", None, "bad", 0)}, at=20) is None  # unchanged
+    both = tracker.update(
+        {"aapl": ("aapl", None, "bad", 0), "msft!": ("msft!", None, "worse", 0)}, at=30
+    )
+    assert both is not None
+    assert {name: span.since for name, span in both.spans.items()} == {"aapl": 10, "msft!": 30}
+    ended = tracker.update({}, at=40)
+    assert ended is not None
+    assert (ended.spans, ended.at) == ({}, 40)
+    assert tracker.update({}, at=50) is None
+
+
+def test_a_span_tracker_takes_a_start_the_emitter_knows() -> None:
+    tracker = SpanTracker(ProblemCause.OUTAGE, dataset="d", stream_id=1, where="w")
+    spans = tracker.update({"outage": (None, None, "down", 0)}, at=100, since=60)
+    assert spans is not None
+    assert spans.spans["outage"].since == 60
+    later = tracker.update({"outage": (None, None, "down; waiting", 0)}, at=200, since=150)
+    assert later is not None
+    assert later.spans["outage"].since == 60  # a span that still holds keeps its start
+    assert tracker.update({"outage": (None, None, "down; waiting", 0)}) is None
+
+
+def test_drift_events_report_only_fields_the_documentation_lacks() -> None:
+    drift = DriftReport(
+        extra=frozenset({"z", "halted"}),
+        missing=frozenset({"m"}),
+        unconvertible=frozenset({"x"}),
+        samples={"halted": DriftSample("AAPL", "true")},
+    )
+    found = drift_events(drift, dataset="stocks.trades", stream_id=7, where="GET /v3/trades")
+    assert [(e.cause, e.action, e.field, e.symbol, e.stream_id) for e in found] == [
+        (ProblemCause.SCHEMA_DRIFT, ProblemAction.PUBLISHED, "halted", None, 7),
+        (ProblemCause.SCHEMA_DRIFT, ProblemAction.PUBLISHED, "z", None, 7),
+    ]
+    assert found[0].detail == (
+        "Massive sent the field 'halted', which its documentation lacks; the rows are "
+        "published without it; first sent for AAPL; first value true"
+    )
+    assert found[1].detail.endswith("published without it")
+    missing = DriftReport(missing=frozenset({"m"}))
+    assert drift_events(missing, dataset="d", stream_id=None, where="w") == ()
+
+
+def test_the_causes_are_pinned() -> None:
+    # Each value is a cell users query: a change here is a public change.
+    assert [cause.value for cause in ProblemCause] == [
+        "noncanonical_symbols",
+        "unreadable_symbols",
+        "unavailable_symbols",
+        "unreadable_keys",
+        "unconvertible_values",
+        "malformed_rows",
+        "refused_venues",
+        "stale_symbol",
+        "schema_drift",
+        "outage",
+        "quiet_feed",
+        "options_cap",
+        "unacknowledged_topics",
+        "rate_limited",
+        "poll_cycle_failed",
+        "poll_cycle_late",
+        "symbol_read_retrying",
+        "symbol_read_failed",
+        "stream_failed",
+    ]
+    assert [action.value for action in ProblemAction] == [
+        "WITHHELD",
+        "SKIPPED",
+        "FAILED",
+        "GAP",
+        "DELAYED",
+        "PUBLISHED",
+        "OVERFLOW",
     ]

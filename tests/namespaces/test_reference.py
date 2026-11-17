@@ -861,6 +861,7 @@ class _Statuses:
     def __call__(
         self,
         *,
+        stream_id: int,
         symbols: object,
         values: object,
         record: Callable[[DriftReport], None],

@@ -903,13 +903,23 @@ def test_the_streams_row_shows_loading_then_running(
     massive_session.release(result)
 
 
-def test_the_streams_error_groups_failed_and_retrying_symbols_by_cause(
+def troubled(problem_rows: Callable[[], list[dict[str, Any]]]) -> list[tuple[object, ...]]:
+    # The read's symbol-read spans as (cause, symbol, detail, ended), in a stable order.
+    return [
+        (r["Cause"], r["Symbol"], r["Detail"], r["EndedAt"] is not None)
+        for r in problem_rows()
+        if r["Cause"] in {"symbol_read_failed", "symbol_read_retrying"}
+    ]
+
+
+def test_failed_and_retrying_symbols_are_spans_with_their_errors(
     watchlist: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     clock: FakeClock,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
+    problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     script = Script(massive_session)
     names = ["A", "B", "C", "D", "E", "F", "G"]
@@ -921,40 +931,14 @@ def test_the_streams_error_groups_failed_and_retrying_symbols_by_cause(
     wait_state(massive_session, "R", SymbolReadState.RETRYING)
     for name in [*names, "H"]:
         wait_state(massive_session, name, SymbolReadState.FAILED)
-    until(
-        lambda: "8 symbols failed" in (stream(massive_session, drain, dh_to_pylist)["Error"] or "")
-    )
-    error = stream(massive_session, drain, dh_to_pylist)["Error"]
-    assert error == (
-        "1 symbol retrying after a failure that may pass: HTTP 503: busy: R; "
-        "8 symbols failed (delete and re-add a row to read one again): "
-        "HTTP 403: not in the plan: A, B, C, D, E (+2 more); HTTP 404: gone: H"
-    )
-    massive_session.release(result)
-
-
-def test_the_streams_error_names_at_most_three_causes(
-    *,
-    watchlist: Callable[..., InputTable],
-    massive_session: dm.MassiveSession,
-    drain: Callable[[], None],
-    dh_to_pylist: ToList,
-) -> None:
-    script = Script(massive_session)
-    statuses = {"A": 400, "B": 401, "C": 403, "D": 404, "E": 409}
-    for name, status in statuses.items():
-        script.answers[name] = [refused(status, "x" * 300)]
-    script.answers["B"] = [SymbolFailure(MassiveError("no status"))]
-    # One symbol with rows keeps the table: every call-time symbol failing would fail it.
-    result = follow(massive_session, watchlist(*statuses, "OK"), script)
-    for name in statuses:
-        wait_state(massive_session, name, SymbolReadState.FAILED)
-    until(
-        lambda: "5 symbols failed" in (stream(massive_session, drain, dh_to_pylist)["Error"] or "")
-    )
-    error = stream(massive_session, drain, dh_to_pylist)["Error"]
-    assert error.endswith("; 2 more causes")
-    assert "…" in error  # a long cause is cut
+    expected = [
+        *[("symbol_read_failed", name, "HTTP 403: not in the plan", False) for name in names],
+        ("symbol_read_failed", "H", "HTTP 404: gone", False),
+        ("symbol_read_retrying", "R", "HTTP 503: busy", False),
+    ]
+    until(lambda: troubled(problem_rows) == expected)
+    # Neither fails the read: its Error names only why it stopped.
+    assert stream(massive_session, drain, dh_to_pylist)["Error"] is None
     massive_session.release(result)
 
 
@@ -988,6 +972,7 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     massive_session: dm.MassiveSession,
     drain: Callable[[], None],
     dh_to_pylist: ToList,
+    problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     script = Script(massive_session)
     script.answers["NVDA"] = [refused(403)]
@@ -1009,12 +994,13 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     assert summary["Loading"] == sum(
         r["State"] in ("QUEUED", "LOADING", "RETRYING") for r in symbols
     )
-    assert "NVDA" in (summary["Error"] or "")
+    failed = ("symbol_read_failed", "NVDA", "HTTP 403: refused")
+    until(lambda: troubled(problem_rows) == [(*failed, False)])
     delete(wl, "AAPL", "NVDA")  # a landed and a failed symbol leave: so do their counts
     until(lambda: stream(massive_session, drain, dh_to_pylist)["SymbolCount"] == 2)
     after = stream(massive_session, drain, dh_to_pylist)
     assert (after["Symbols"], after["RowsPublished"], after["Loading"]) == ("MSFT, TSLA", 2, 1)
-    assert "NVDA" not in (after["Error"] or "")
+    until(lambda: troubled(problem_rows) == [(*failed, True)])  # its span ends with it
     gate.set()
     massive_session.release(result)
 

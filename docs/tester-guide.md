@@ -886,6 +886,7 @@ import deephaven_massive as dm
 
 m = dm.MassiveSession()
 streams = m.streams()
+problems = m.problems()
 
 pairs = new_table({"Symbol": ["X:ETHUSD", "X:LINKUSD"]})
 crypto_watchlist = input_table(init_table=pairs, key_cols="Symbol")
@@ -893,18 +894,18 @@ latest_trades = m.crypto.trades(crypto_watchlist).last_by()
 ```
 
 You should see `crypto_watchlist` with two pairs, and `latest_trades` with a row per pair after
-its first trade. Then edit the watchlist, and watch `latest_trades` and the `crypto.trades` row
-of `streams`:
+its first trade. Then edit the watchlist, and watch `latest_trades`, `problems`, and the
+`crypto.trades` row of `streams`:
 
 1. Add `X:SOLUSD`. An `X:SOLUSD` row joins `latest_trades` with its first trade, and the
    stream's `Symbols` lists it.
 2. Delete `X:SOLUSD`. Its row leaves `latest_trades` at once, and `Symbols` drops it.
-3. Add `btcusd`, in lower case. No row appears, and the stream's `Error` names `btcusd` among the
-   values it skips. The other pairs keep streaming.
-4. Delete `btcusd` and add `X:BTCUSD`. The `Error` clears, and an `X:BTCUSD` row arrives with
-   its first trade.
-5. Add `X:ZZZZUSD`, a pair Massive doesn't list. No row appears, and the `Error` names it. Delete
-   it, and the `Error` clears.
+3. Add `btcusd`, in lower case. No row appears, and `problems` gets a
+   `noncanonical_symbols` row for `btcusd`. The other pairs keep streaming.
+4. Delete `btcusd` and add `X:BTCUSD`. The `btcusd` row of `problems` gets an `EndedAt`, and an
+   `X:BTCUSD` row arrives with its first trade.
+5. Add `X:ZZZZUSD`, a pair Massive doesn't list. No row appears, and `problems` gets an
+   `unavailable_symbols` row for it.
 
 #### 22. Stream the trades of the top gainers
 
@@ -961,7 +962,7 @@ row for each. Then edit `watchlist`:
 
 #### 24. Save the diagnostics tables
 
-Save the four diagnostics tables of the session in `m` as files, for a bug report. `m` holds the
+Save the five diagnostics tables of the session in `m` as files, for a bug report. `m` holds the
 session the last example opened:
 
 ```python
@@ -972,6 +973,7 @@ from deephaven.pandas import to_pandas
 diagnostics = os.path.expanduser("~/massive-test/diagnostics")
 os.makedirs(diagnostics, exist_ok=True)
 tables = {
+    "problems": m.problems(),
     "streams": m.streams(),
     "connections": m.connections(),
     "rate_limits": m.rate_limits(),

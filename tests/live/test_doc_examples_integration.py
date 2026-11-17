@@ -10,11 +10,11 @@ running after the session that made it is no longer reachable.
 These tests assert what only Massive can show: that the tables fill with real data, with
 plausible counts; that Basic's rate limit and a delayed plan behave as the README says; and
 what each stock session sends. What the library does with the data, such as Example 2's ranking
-or Example 13's closed-session error, `tests/test_docs.py` checks against the fake servers. The
+or Example 14's closed-session error, `tests/test_docs.py` checks against the fake servers. The
 groups follow the README:
 
-- the hook and Examples 1 to 6 and 13, on a main key on Stocks Basic, or paced at Basic's
-  rate on a paid one;
+- the hook and Examples 1 to 6, 13, and 14, on a main key on Stocks Basic, or paced at
+  Basic's rate on a paid one;
 - Examples 7 to 12, which load the settings file Example 7 saves, checked against what the
   stock session of the moment sends: pre-market, regular, after hours, or overnight;
 - Example 7 without its setting, on a delayed Stocks plan;
@@ -192,7 +192,7 @@ def _console(tmp_path: Path, console_command: ConsoleCommand, evidence: Evidence
     return _Run(doc_examples.Console(tmp_path, command), evidence)
 
 
-# --- The hook and Examples 1 to 6 and 13 ----------------------------------------------------------
+# --- The hook and Examples 1 to 6, 13, and 14 ---------------------------------------------------
 
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
@@ -206,7 +206,7 @@ def test_the_free_examples_fill_on_stocks_basic(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 6 and 13 fill on Stocks Basic, by a free reader's path.
+    """Whether the hook and Examples 1 to 6, 13, and 14 fill on Stocks Basic, by a reader's path.
 
     Runs them back to back in one console with the main key on Stocks Basic and no setting, as
     a free reader does. Their sessions get a rate governor of their own, as in a new server,
@@ -241,7 +241,7 @@ def test_the_free_examples_fill_back_to_back_at_basics_pace(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 6 and 13 fill with real data, at Basic's pace.
+    """Whether the hook and Examples 1 to 6, 13, and 14 fill with real data, at Basic's pace.
 
     A check of their content on a paid Stocks key. Runs them back to back in one console while
     a session that declares Stocks Basic (`rest_basic_subscriptions`) holds the key's rate
@@ -267,15 +267,16 @@ def test_the_free_examples_fill_back_to_back_at_basics_pace(
 
 
 def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) -> None:
-    """Run the hook and Examples 1 to 6 and 13 in one console, and check what Massive sent.
+    """Run the hook and Examples 1 to 6, 13, and 14 in one console, and check what Massive sent.
 
     Checks: the hook's year of Apple's bars; Example 1's five daily bars with their columns;
     Example 2's day of more than 1,000 stocks, none over the counter, and its top 20;
     Example 3's three returns; Example 4's year of Nvidia's bars; Example 5's headlines for
     each of its stocks, at most ten each, the limit Massive applies per ticker; Example 6's
     four previous closes, and the previous closes of the three Yahoo tickers that end it,
-    under Massive's spellings. Example 13 and Example 6's edit run as written; what they do is
-    the library's, which `tests/test_docs.py` checks.
+    under Massive's spellings; Example 13's Apple row, and its `ZZZZ` problem row quoting
+    Massive's HTTP 404. Example 14 and Example 6's edit run as written; what they do is the
+    library's, which `tests/test_docs.py` checks.
     """
     ran = {"hook": run.paste(doc_examples.intro_blocks(README), "hook", "apple")}
     keep = {
@@ -301,7 +302,35 @@ def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) 
     filled = _wait(lambda: _symbols(table_rows(yahoo)) == converted, _FILL_WAIT)
     evidence(f"example 6, Yahoo tickers: {sorted(_symbols(table_rows(yahoo)))}, filled: {filled}")
     assert filled, f"the Yahoo tickers' closes did not fill within {_FILL_WAIT:.0f} s"
+    problems = run.section("see-problems", "problems", "details")
+    _check_problems(problems, table_rows=table_rows, evidence=evidence)
     run.section("stop-live-tables")
+
+
+def _check_problems(ran: Names, *, table_rows: TableRows, evidence: Evidence) -> None:
+    """Check Example 13: Apple's details, and `ZZZZ` as an `unavailable_symbols` row.
+
+    Massive answers a ticker it doesn't list with HTTP 404 on ticker details, which the README
+    states; the row's `Detail` quotes that answer.
+    """
+
+    def missing() -> list[dict[str, Any]]:
+        return [
+            row
+            for row in table_rows(ran["problems"])
+            if row["Cause"] == "unavailable_symbols" and row["Symbol"] == "ZZZZ"
+        ]
+
+    def apple() -> set[str]:
+        return _symbols(table_rows(ran["details"]))
+
+    found = _wait(lambda: bool(missing()) and apple() == {"AAPL"}, _FILL_WAIT)
+    rows = missing()
+    evidence(f"example 13: details {sorted(apple())}, problems {rows}, found: {found}")
+    assert found, f"Example 13's rows did not appear within {_FILL_WAIT:.0f} s"
+    [row] = rows
+    assert row["Action"] == "SKIPPED"
+    assert "HTTP 404" in row["Detail"]
 
 
 def _check_history_examples(

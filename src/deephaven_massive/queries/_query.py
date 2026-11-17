@@ -159,7 +159,7 @@ def _read_symbol_table(
     """
     rule = SymbolRowRule.of(spec, noncanonical)
     with entered(core.exec_ctx):
-        rows = read_symbols(rule, symbols.table, stream_id=None)
+        rows = read_symbols(rule, symbols.table, stream_id=None, reported=live)
         has_rows = symbols.table.size > 0
     if rows.skipped and not rows.symbols:
         raise ValueError(
@@ -412,7 +412,8 @@ class Query:
         Returns:
             The static result, or the refreshing one a background read fills.
         """
-        if wait:
+        if wait:  # no `m.streams()` row names its query: its problems take it from here
+            self._core.diagnostics.name_read(call, repr(self))
             return self._described(run(None), note=note)
         return open_read(
             self._core,

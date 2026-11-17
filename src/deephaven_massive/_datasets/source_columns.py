@@ -305,8 +305,8 @@ class RoundedFields:
     Each transport converts a payload (a REST page, a WebSocket flush, a flat-file block)
     column by column with one of these, marks the rows of `failures()` so they are withheld
     (a whole number beyond 2**53 that a `double` column holds only rounded is not Massive's
-    value), and merges `drift()` into the payload's drift, so the field is reported like any
-    other schema drift: a WARNING once per field, and an entry in the stream's `SchemaDrift`.
+    value), and merges `drift()` into the payload's drift; the withheld rows are reported as
+    `unconvertible_values` problems of the table that would have received them.
     Created per payload on the converting thread; not shared, so it takes no lock.
 
     Example:

@@ -19,9 +19,10 @@ measures the library as users run it:
   row's arrival delay: `TimestampInsert` minus the event's own time (`Timestamp` for ticks,
   `TimestampEnd` for bars), less the documented delay of a delayed unit. Each hour's 50th, 90th,
   and 99th percentiles and maximum go to `latency.csv`.
-- **Samples.** Every 10 seconds the sampler appends one row per stream and per connection, from
-  snapshots of `m.streams()` and `m.connections()`, to `samples-streams.csv` and
-  `samples-connections.csv`, and one row of CPU seconds and JVM heap to `samples-process.csv`.
+- **Samples.** Every 10 seconds the sampler appends one row per stream, per connection, and per
+  problem, from snapshots of `m.streams()`, `m.connections()`, and `m.problems()`, to
+  `samples-streams.csv`, `samples-connections.csv`, and `samples-problems.csv`, and one row of
+  CPU seconds and JVM heap to `samples-process.csv`.
 - **Gaps.** A child that starts again on the same day appends to the same files and records
   the time since the last sample in `gaps.csv`; more than 30 minutes of gaps fails the day.
 - **Rows.** A unit whose streams recorded no row all day fails, once its class's session has
@@ -31,8 +32,9 @@ measures the library as users run it:
 `throughput` holds, from 09:15, the busiest streams of every symbol (`dm.ALL`) as `last_by()`
 tables: second bars of every stock, every crypto trade, and every forex quote. Its samples give
 the rows a second of each stream over the measured hour (09:45 to 10:45 for delayed stocks,
-09:30 to 10:30 otherwise), the peak `BufferedRows`, heap, CPU, reconnects, and any
-`SchemaDrift`, in `summary.json`; it passes when it sampled the whole hour without a gap.
+09:30 to 10:30 otherwise), the peak `BufferedRows`, heap, CPU, reconnects, and the causes of
+any problem in `m.problems()`, in `summary.json`; it passes when it sampled the whole hour
+without a gap.
 
 The overnight group (`stream_night`) reuses the recorder, the sampler, the gap records, and
 the stream holding (`held_streams`) of the stream day.
@@ -620,7 +622,7 @@ def process_sample(now: datetime) -> dict[str, Any]:
 
 
 def _sample(m: MassiveSession, folder: Path, now: datetime) -> None:
-    """Append one sample of the streams, the connections, and the process.
+    """Append one sample of the streams, the connections, the problems, and the process.
 
     Args:
         m: The session.
@@ -630,8 +632,10 @@ def _sample(m: MassiveSession, folder: Path, now: datetime) -> None:
     stamp = {"time": now.isoformat()}
     streams = [stamp | _plain(r) for r in diagnostics_rows(m, m.streams())]
     connections = [stamp | _plain(r) for r in diagnostics_rows(m, m.connections())]
+    problems = [stamp | _plain(r) for r in diagnostics_rows(m, m.problems())]
     append_csv(folder / "samples-streams.csv", streams)
     append_csv(folder / "samples-connections.csv", connections)
+    append_csv(folder / "samples-problems.csv", problems)
     append_csv(folder / "samples-process.csv", [process_sample(now)])
 
 
@@ -999,13 +1003,15 @@ def summarize_throughput(folder: Path, window: tuple[datetime, datetime]) -> dic
 
     Returns:
         Per stream the mean rows a second and the peak over one sample interval, and for the
-        process and connections the peaks of heap, CPU, `BufferedRows`, reconnects, and any
-        `SchemaDrift`; `covered` tells whether samples span the hour with no gap.
+        process and connections the peaks of heap, CPU, `BufferedRows`, and reconnects, and the
+        causes of the problems `m.problems()` held; `covered` tells whether samples span the
+        hour with no gap.
     """
     first, last = window
     streams = _inside(folder / "samples-streams.csv", window)
     connections = _inside(folder / "samples-connections.csv", window)
     process = _inside(folder / "samples-process.csv", window)
+    problems = _inside(folder / "samples-problems.csv", window)
     stamps = sorted({datetime.fromisoformat(r["time"]) for r in process})
     covered = (
         bool(stamps) and stamps[0] - first <= GAP_THRESHOLD and last - stamps[-1] <= GAP_THRESHOLD
@@ -1035,9 +1041,7 @@ def summarize_throughput(folder: Path, window: tuple[datetime, datetime]) -> dic
         "streams": rates,
         "peak_buffered_rows": max((int(r["BufferedRows"] or 0) for r in connections), default=0),
         "reconnects": max((int(r["Reconnects"] or 0) for r in connections), default=0),
-        "schema_drift": sorted(
-            {r["SchemaDrift"] for r in connections + streams if r.get("SchemaDrift")}
-        ),
+        "problems": sorted({r["Cause"] for r in problems}),
         "peak_heap_used_mb": max((float(r["heap_used_mb"]) for r in process), default=0.0),
         "cpu_seconds": (
             round(float(process[-1]["cpu_seconds"]) - float(process[0]["cpu_seconds"]), 2)

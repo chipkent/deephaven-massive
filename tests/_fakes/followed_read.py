@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._errors import MassiveError
     from deephaven_massive._tables.diagnostics import StreamUpdate
+    from deephaven_massive._tables.problem_events import Problem
     from deephaven_massive._tables.symbol_read_rows import SymbolReadRow
     from deephaven_massive._tables.transports import SymbolOutcome
 
@@ -34,6 +35,7 @@ class QuietCore:
 
     Attributes:
         progress: The `Loading` count of each progress update, in order.
+        reported: The problems reported, in order.
     """
 
     closed = False
@@ -42,6 +44,7 @@ class QuietCore:
     def __init__(self) -> None:
         """Start with no progress shown."""
         self.progress: list[int | None] = []
+        self.reported: list[Problem] = []
         self.workers = self
 
     def write_symbol_reads(self, rows: Sequence[SymbolReadRow], /) -> None:
@@ -51,6 +54,14 @@ class QuietCore:
             rows: The rows.
         """
         del rows
+
+    def problems(self, problems: Sequence[Problem], /) -> None:
+        """Keep the problems reported for `m.problems()`.
+
+        Args:
+            problems: The problems.
+        """
+        self.reported.extend(problems)
 
     def update_followed_read(
         self, stream_id: int, update: StreamUpdate, /, *, loading: bool

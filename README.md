@@ -148,7 +148,8 @@ each example's plan, and Examples 8 to 12 read the settings file that Example 7 
 | 10 | [Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started](#table-shapes) | Stocks Starter or higher |
 | 11 | [Backfill: start with today's minute bars, then continue live](#backfill-then-live) | Stocks Starter or higher |
 | 12 | [Dashboards: show a live chart and table together with deephaven.ui](#dashboard) | Stocks Starter or higher |
-| 13 | [Stopping live tables: release one table or close the session](#stop-live-tables) | Stocks Basic |
+| 13 | [Problems: see what went wrong in your tables](#see-problems) | Stocks Basic |
+| 14 | [Stopping live tables: release one table or close the session](#stop-live-tables) | Stocks Basic |
 
 <a id="read-daily-bars"></a>
 
@@ -557,6 +558,33 @@ Deephaven's guide to
 [creating dashboards](https://deephaven.io/core/ui/docs/creating-layouts/creating-dashboards/)
 shows more layouts.
 
+Next, where the library lists the symbols it skipped and why.
+
+<a id="see-problems"></a>
+
+### Problems: see what went wrong in your tables
+
+Find out why a read gave fewer rows than you asked for, on Stocks Basic. This asks for the
+details of Apple and of `ZZZZ`, a ticker Massive doesn't list:
+
+```python
+import deephaven_massive as dm
+
+m = dm.MassiveSession()
+problems = m.problems()
+details = m.reference.ticker_details(["AAPL", "ZZZZ"]).fetch()
+```
+
+`details` holds Apple's row. Massive answers the ticker-details request for `ZZZZ` with HTTP 404,
+so `problems` gets a row whose `Cause` is `unavailable_symbols` and `Symbol` is `ZZZZ`. Its
+`Detail` says Massive has no data for it, with the HTTP 404 and the request. On most other
+datasets, Massive answers an unlisted ticker with no rows. That empty answer is Massive's, not a
+problem, so it gets no row in `problems`.
+
+A skipped symbol is a row of `m.problems()`, with its cause and the reason.
+[Read the problems table](docs/troubleshooting.md#problems) says what each problem means and
+what to do about it.
+
 Next, how to stop live tables when you're done with them.
 
 <a id="stop-live-tables"></a>
@@ -663,8 +691,7 @@ setting, its values, and its default, with an example settings file.
 ### Bad symbols and rows
 
 By default, one bad symbol or row never stops a table. The library skips it, reads the rest, and
-logs a warning. A stream or `poll()` table also names each symbol it skips in its `Error` in
-`m.streams()`.
+logs a warning. `m.problems()` lists each one, as [Example 13](#see-problems) shows.
 
 Each kind of problem is a cause. For example, `noncanonical_symbols` is a watchlist row that
 isn't Massive's exact ticker. A `dm.ErrorPolicy` gives each cause one of three settings:

@@ -14,7 +14,7 @@ core weakly. Every entry point that can change what keeps the session alive (`tr
 `_shut_down`, `finish_read`) holds the core in a local variable until it returns and updates the
 live set (`live_set.sync`) in the same `registry_lock` section as the change. The core reads and
 changes the rows through the by-id methods (`row`, `change_row`, `live_fails`, `close_rows`, and
-`in`), always under `registry_lock`, when a transport reports a row change, a failure, or drift by
+`in`), always under `registry_lock`, when a transport reports a row change or a failure by
 stream id, and when the session closes.
 """
 
@@ -138,8 +138,8 @@ class WorkerTables:
         """Create the empty registry of a core, which it refers to weakly.
 
         Args:
-            core: The session's core, with its `registry_lock`, result registry, diagnostics,
-                and drift registry already created.
+            core: The session's core, with its `registry_lock`, result registry, and diagnostics
+                already created.
         """
         self._core: Final = weakref.ref(core)
         self._lock: Final = core.registry_lock
@@ -147,7 +147,6 @@ class WorkerTables:
         self._exec_ctx: Final = core.exec_ctx
         self._results: Final = core.results
         self._diagnostics: Final = core.diagnostics
-        self._drift: Final = core.drift
         # The worker tables, by stream id; they have no key and no handle.
         self._workers: dict[int, _WorkerState] = {}
 
@@ -271,7 +270,7 @@ class WorkerTables:
         key, is never reused, and its one result is its only hold. Its record stays in the
         registry, keeping the session alive and taking its thread's updates
         (`SessionCore.update_streams`, `SessionCore.fail_stream`,
-        `SessionCore.record_stream_drift`, `finish_read`), until its result is released
+        `finish_read`), until its result is released
         (`release`) and its blink table has shut down (`_shut_down`), in either
         order; a background read's leaves as soon as it is `DONE` and its result released,
         since nothing of it needs the session then. One short critical section under
@@ -309,7 +308,7 @@ class WorkerTables:
         the table, so the thread runs on until the table's blink table shuts down
         (`_shut_down`); if it already has, or the row is a background read's `DONE`
         (its rows are in the table, and no thread or close acts on it any more), the record
-        leaves the registry now and the drift registry forgets it. Runs on the reaper thread
+        leaves the registry now. Runs on the reaper thread
         when the result is released, or on the caller thread when the verb fails after
         registering the row; each table is released once. No Deephaven call, no wait.
 
@@ -362,14 +361,14 @@ class WorkerTables:
     def _forget(self, stream_id: int) -> None:
         """Take a worker table's record out of the registry; `registry_lock` is held.
 
-        Its last row stays in `m.streams()`, and the drift registry forgets the table. The
+        Its last row stays in `m.streams()`. The
         caller updates the live set (`live_set.sync`).
 
         Args:
             stream_id: The table's `StreamId`, which must be registered.
         """
         del self._workers[stream_id]
-        self._drift.forget(stream_id)
+        self._diagnostics.stream_gone(stream_id)
 
     def finish_read(self, stream_id: int, rows: int) -> None:
         """Record that a background read's rows have landed: its row becomes `DONE`.
