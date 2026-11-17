@@ -360,8 +360,10 @@ DAILY_OPEN_CLOSE: Final = DatasetSpec(
 
 _ROOT_UNDERLYING_NOTE: Final = (
     "Massive's `root` is the `OptionRoot` column. An index has its `I:` prefix (`I:SPX`), as "
-    "in `m.options.contracts()`. If Massive's Contract Overview can't say whether a root is an "
-    "index, its rows are left out and listed in `m.problems()` as `unreadable_symbols`."
+    "in `m.options.contracts()`. If Massive's "
+    "[Contract Overview](https://massive.com/docs/rest/options/contracts/contract-overview) "
+    "can't say whether a root is an index, the library leaves its rows out and lists them in "
+    "`m.problems()` as `unreadable_symbols`."
 )
 """The note on `Underlying` of the datasets whose rows name it bare, with no CFI code."""
 
