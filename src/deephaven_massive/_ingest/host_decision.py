@@ -11,7 +11,7 @@ connection to try:
 
 - the FMV family always uses the one host its class's FMV page lists (`feeds.fmv_host`);
 - a TICK host pinned in `MassiveConfig.websocket_hosts` is used as is (the configuration has checked
-  it against `delayed_subscriptions`);
+  it against `delayed_subscriptions`), and its recency is what Massive says (`_pinned`);
 - a listed subscription uses `delayed.massive.com`, with no request: the user asked for the
   delayed feed, so no answer from Massive changes the host;
 - forex and crypto have one documented host, `socket.massive.com`, so no request is made;
@@ -28,9 +28,11 @@ stream: the FMV family's host is its page's, and the others follow their class's
 Massive serves it there is Massive's answer, so a refused subscription fails the stream with
 Massive's text and the documented host (`refusal_note`), and the library never refuses it first.
 
-Recency follows the feed Massive's pages give the host (`recency_of`): a `Real-Time` or
-`Business` host is shown real-time, a `Delayed` host delayed, and any other pinned host
-`UNKNOWN`, which is never shown as real-time.
+Recency comes from Massive's answers and the user's settings, never from a host's name: the
+real-time feed is shown real-time once the snapshot raises no delayed label, the delayed feed
+delayed, and a pinned host as its class's snapshot labels the key's data. A pinned host whose
+snapshot gives no documented label (no label, an undocumented one, a refusal, or a failed
+read) is `UNKNOWN`, which is never shown as real-time.
 
 `decide` is pure apart from logging: the REST request itself is made by the caller's `fetch`
 callable, which the REST transport (`_ingest/rest.py`) supplies, so every HTTP error has
@@ -44,11 +46,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
-from deephaven_massive._config import DELAYED_HOST, DELAYED_PREFIX, REALTIME_HOST
+from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._datasets.column_reference import page_url
-from deephaven_massive._datasets.feeds import dataset_hosts, fmv_host, host_feed
+from deephaven_massive._datasets.feeds import dataset_hosts, fmv_host
 from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
@@ -56,7 +58,7 @@ from deephaven_massive._enums import (
     Subscription,
     subscription_of,
 )
-from deephaven_massive._errors import EntitlementError
+from deephaven_massive._errors import EntitlementError, ErrorSource, MassiveError
 from deephaven_massive._ingest.recency_labels import (
     RecencyLabels,
     delayed_refusal,
@@ -73,14 +75,13 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
 
 __all__ = [
-    "FEED_RECENCY",
     "FUTURES_PROBE_CONTRACTS",
     "ONE_FEED_NOTES",
     "SNAPSHOT_PROBES",
     "SnapshotAnswer",
     "SnapshotProbe",
     "decide",
-    "recency_of",
+    "pinned",
     "refusal_note",
     "refused_snapshot",
     "unlabelled",
@@ -130,9 +131,14 @@ SNAPSHOT_PROBES: Final[Mapping[AssetClass, SnapshotProbe]] = {
     AssetClass.FUTURES: SnapshotProbe(
         "/futures/v1/snapshot", {}, {"product_code": "ES", "limit": FUTURES_PROBE_CONTRACTS}
     ),
+    AssetClass.FOREX: SnapshotProbe("/v3/snapshot", {}, {"ticker.any_of": ("C:EURUSD",)}),
+    AssetClass.CRYPTO: SnapshotProbe("/v3/snapshot", {}, {"ticker.any_of": ("X:BTCUSD",)}),
 }
-"""The snapshot each class's TICK host is checked against: the unified snapshot of two liquid
-stocks, one contract of the SPY option chain, the S&P 500 index, and the E-mini S&P contracts.
+"""The snapshot that shows each class's recency: the unified snapshot of two liquid stocks,
+one contract of the SPY option chain, the S&P 500 index, the E-mini S&P contracts, and the
+unified snapshot of EUR/USD and of BTC/USD, whose `fx` and `crypto` rows carry the same
+`last_trade` and `last_quote` timeframes in Massive's spec. Forex and crypto have one
+documented host and no delayed feed, so only a host pinned for them reads theirs.
 
 The futures snapshot lists a product's contracts by ticker, so far-dated contracts that do not
 trade yet come first (`ESH0`, `ESH1`, ...), and only a contract that trades carries a
@@ -184,35 +190,24 @@ def refused_snapshot(evidence: str) -> bool:
     )
 
 
-FEED_RECENCY: Final[Mapping[Feed, Recency]] = {
-    Feed.REAL_TIME: Recency.REALTIME,
-    Feed.DELAYED: Recency.DELAYED,
-    # The fair-market-value channels' feed, which Massive's FMV pages document only in real
-    # time. A host pinned to it for another channel is shown real-time too, though the label
-    # does not say so: Massive's index value page lists only this feed, yet gives one plan
-    # those values 15 minutes late, and such a key's pinned index values still show REALTIME.
-    Feed.BUSINESS: Recency.REALTIME,
-}
-"""The recency a host's data is shown with, by the feed Massive's pages give the host."""
+_PINNED: Final = "websocket_hosts"
+"""The evidence of a pinned host's decision, alone or before what Massive's snapshot said."""
 
 
-def recency_of(host: str) -> Recency:
-    """Return the recency of a WebSocket host's data.
+def pinned(evidence: str) -> bool:
+    """Return whether a host decision's evidence is of a host pinned in `websocket_hosts`.
+
+    A pinned decision's evidence is `websocket_hosts`, or `websocket_hosts, ` and what set its
+    recency, so none of `unlabelled`, `refused_snapshot`, or `recency_labels.shows_real_time`
+    matches it.
 
     Args:
-        host: The hostname.
+        evidence: The decision's evidence, such as `"websocket_hosts, timeframe=DELAYED"`.
 
     Returns:
-        The recency of the feed Massive's pages give the host (`FEED_RECENCY`); for a host
-        no page lists, `DELAYED` for a delayed feed (a name that starts with `delayed.`) and
-        `UNKNOWN` for any other (a pinned host the library does not know).
+        True for the evidence of a pinned host.
     """
-    feed = host_feed(host)
-    if feed is not None:
-        return FEED_RECENCY[feed]
-    if host.startswith(DELAYED_PREFIX):
-        return Recency.DELAYED
-    return Recency.UNKNOWN
+    return evidence == _PINNED or evidence.startswith(f"{_PINNED}, ")
 
 
 def _websocket_hosts_hint(asset_class: AssetClass) -> str:
@@ -309,10 +304,11 @@ def decide(
     """Decide the WebSocket host of an asset class and channel family.
 
     The rules, in order: the FMV family uses the host its class's FMV page lists, whatever the
-    settings; a TICK
-    host pinned in
-    `websocket_hosts` is used, with its host's recency; a subscription in `delayed_subscriptions`
-    uses `delayed.massive.com` with no request; forex and crypto use `socket.massive.com` with no
+    settings; a TICK host pinned in `websocket_hosts` is used, with the recency Massive's
+    snapshot gives it (`_pinned`), and any failure of that snapshot but a library defect
+    leaves the recency `UNKNOWN` instead of raising, since the snapshot only labels a host the
+    user already chose; a subscription in `delayed_subscriptions` uses `delayed.massive.com`
+    with no request; forex and crypto use `socket.massive.com` with no
     request; every other class reads its snapshot (`SNAPSHOT_PROBES`) once through `fetch`,
     drops the per-ticker rows that carry an `error` (a ticker Massive refuses counts as
     absent), and streams from the real-time feed unless a label says delayed
@@ -336,11 +332,12 @@ def decide(
         The decision.
 
     Raises:
-        DelayedDataError: If the subscription is not in `delayed_subscriptions` and Massive
-            labels its snapshot delayed; the message names the label and the fix. It is an
-            `EntitlementError`.
-        AuthenticationError: If `fetch` raises it (a rejected key).
-        MassiveError: If `fetch` fails otherwise (a transport failure, a server error).
+        DelayedDataError: If the subscription is not in `delayed_subscriptions`, no host is
+            pinned for its class, and Massive labels its snapshot delayed; the message names
+            the label and the fix. It is an `EntitlementError`.
+        AuthenticationError: If `fetch` raises it (a rejected key) and no host is pinned.
+        MassiveError: If `fetch` fails otherwise (a transport failure, a server error) and no
+            host is pinned; for a pinned host, only a library defect (`_pinned_recency`).
     """
     subscription = subscription_of(asset_class)
     listed = subscription in delayed_subscriptions
@@ -348,9 +345,9 @@ def decide(
         return HostDecision(
             fmv_host(asset_class), Recency.REALTIME, "FMV channel's documented host"
         )
-    pinned = websocket_hosts.get(asset_class)
-    if pinned is not None:
-        return HostDecision(pinned, recency_of(pinned), "websocket_hosts")
+    host = websocket_hosts.get(asset_class)
+    if host is not None:
+        return _pinned(asset_class, host, listed=listed, fetch=fetch)
     if asset_class in (AssetClass.FOREX, AssetClass.CRYPTO):
         return HostDecision(REALTIME_HOST, Recency.REALTIME, "single documented host")
     if listed:
@@ -388,15 +385,192 @@ def _from_snapshot(
         answer = fetch(probe)
     except EntitlementError as error:
         return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, error))
+    labels = _labels(answer)
+    if isinstance(labels, str):
+        return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, labels))
+    return _from_labels(asset_class, subscription=subscription, labels=labels)
+
+
+def _labels(answer: SnapshotAnswer) -> RecencyLabels | str:
+    """Read a snapshot's recency labels from the rows Massive did not refuse.
+
+    Args:
+        answer: The snapshot.
+
+    Returns:
+        The labels of the rows that carry no `error` (a ticker Massive refuses counts as
+        absent); or, when every row carries one, Massive's refusal, such as
+        `"NOT_ENTITLED: Not entitled to this data"`.
+    """
     entitled = [row for row in answer.rows if not is_error_row(row)]
     if answer.rows and not entitled:
         # Massive can refuse a whole snapshot with HTTP 200 and an error on every row (such as
         # `NOT_ENTITLED`), which is a refusal like a 403.
         first = answer.rows[0]
-        refusal = f"{first.get('error')}: {first.get('message', '')}".rstrip(": ")
-        return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, refusal))
-    labels = read_labels(answer.status, entitled)
-    return _from_labels(asset_class, subscription=subscription, labels=labels)
+        return f"{first.get('error')}: {first.get('message', '')}".rstrip(": ")
+    return read_labels(answer.status, entitled)
+
+
+_FAILED_SNAPSHOT: Final = "the host check's snapshot ({}) failed: {}"
+"""The evidence of a pinned host whose snapshot read failed, by its path and the error."""
+
+
+@dataclass(frozen=True, slots=True)
+class _PinnedRecency:
+    """What set a pinned host's recency (`_pinned_recency`).
+
+    Attributes:
+        recency: The recency.
+        why: What set it, such as `"timeframe=DELAYED"`; the evidence after `websocket_hosts, `.
+        warn: True when the snapshot gave no usable answer (an undocumented label, a refusal,
+            or a failed read), which is logged at WARNING.
+    """
+
+    recency: Recency
+    why: str
+    warn: bool = False
+
+
+def _pinned(
+    asset_class: AssetClass,
+    host: str,
+    *,
+    listed: bool,
+    fetch: Callable[[SnapshotProbe], SnapshotAnswer],
+) -> HostDecision:
+    """Decide a TICK host pinned in `websocket_hosts`: the pinned host, with Massive's recency.
+
+    The user chose the host, so it is used whatever Massive's snapshot says, and nothing here
+    raises: a snapshot labelled delayed shows the stream `DELAYED` (no other host serves the
+    data the user pinned, such as index values), and a snapshot Massive refuses, or whose
+    read fails, leaves the recency `UNKNOWN`, as a refusal of the stream itself says what
+    Massive serves there. The recency never comes from the host's name.
+
+    Args:
+        asset_class: The class of the stream.
+        host: The pinned host.
+        listed: Whether the class's subscription is in `delayed_subscriptions`.
+        fetch: Sends the class's snapshot request, as `decide` takes it.
+
+    Returns:
+        The pinned host, with the recency `_pinned_recency` gives it and evidence
+        `websocket_hosts, ` and what set it; logged at INFO, or at WARNING when the snapshot
+        gave no usable answer.
+
+    Raises:
+        MassiveError: If the snapshot's read fails with a library defect
+            (`_pinned_recency`).
+    """
+    found = _pinned_recency(asset_class, listed=listed, fetch=fetch)
+    evidence = f"{_PINNED}, {found.why}"
+    if found.warn:
+        logger.warning(
+            "%s WebSocket host: %s (%s); streaming from the pinned host with its recency %s "
+            "(a new session reads Massive's label again)",
+            asset_class.value,
+            host,
+            evidence,
+            found.recency,
+        )
+    else:
+        logger.info(
+            "%s WebSocket host: %s, %s (%s)", asset_class.value, host, found.recency, evidence
+        )
+    return HostDecision(host, found.recency, evidence)
+
+
+def _pinned_recency(
+    asset_class: AssetClass, *, listed: bool, fetch: Callable[[SnapshotProbe], SnapshotAnswer]
+) -> _PinnedRecency:
+    """Return a pinned host's recency, from the settings or from Massive's snapshot.
+
+    Args:
+        asset_class: The class of the stream.
+        listed: Whether the class's subscription is in `delayed_subscriptions`, so the user
+            asked for Massive's delayed data (the configuration has checked that the pin is a
+            `delayed.` host).
+        fetch: Sends the class's snapshot request.
+
+    Returns:
+        `DELAYED` for a listed subscription, with no request; otherwise what the class's
+        snapshot (`SNAPSHOT_PROBES`) shows (`_pinned_labels`), or `UNKNOWN` when Massive
+        refuses it or its read fails other than with a library defect.
+
+    Raises:
+        MassiveError: If the read fails with a library defect (`_leaves_recency_unknown`).
+    """
+    if listed:
+        return _PinnedRecency(Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
+    probe = SNAPSHOT_PROBES[asset_class]
+    try:
+        answer = fetch(probe)
+    except EntitlementError as error:
+        return _PinnedRecency(
+            Recency.UNKNOWN, _REFUSED_SNAPSHOT.format(probe.path, error), warn=True
+        )
+    except MassiveError as error:
+        if not _leaves_recency_unknown(error):
+            raise
+        # Unlike the unpinned path, which propagates this error: the host is already chosen and
+        # the snapshot only labels it, and a pinned stream never needed REST before, so a
+        # failed read leaves the recency unknown, shown with the error, instead of failing it.
+        return _PinnedRecency(
+            Recency.UNKNOWN, _FAILED_SNAPSHOT.format(probe.path, error), warn=True
+        )
+    labels = _labels(answer)
+    if isinstance(labels, str):
+        return _PinnedRecency(
+            Recency.UNKNOWN, _REFUSED_SNAPSHOT.format(probe.path, labels), warn=True
+        )
+    return _pinned_labels(asset_class, labels)
+
+
+def _leaves_recency_unknown(error: MassiveError) -> bool:
+    """Return whether a failed snapshot read leaves a pinned host's recency unknown.
+
+    A stream from a pinned host made no REST request before its recency was read, so no
+    failure of the read fails it: Massive's refusal or error, no answer, a rate-limit pause
+    the caller's patience could not cover, and a stop of the caller's own (such as a closed
+    session, which then fails the stream where it would have anyway). Only a library defect
+    propagates.
+
+    Args:
+        error: The read's error.
+
+    Returns:
+        False for a `LIBRARY` error; True for any other.
+    """
+    source = error.source
+    if source is ErrorSource.MASSIVE or source is ErrorSource.NETWORK or source is ErrorSource.USER:
+        return True
+    if source is ErrorSource.LIBRARY:
+        return False
+    assert_never(source)  # a new source decides here whether it leaves the recency unknown
+
+
+def _pinned_labels(asset_class: AssetClass, labels: RecencyLabels) -> _PinnedRecency:
+    """Return the recency a snapshot's labels give a pinned host.
+
+    Args:
+        asset_class: The class, for the evidence of a snapshot without a label.
+        labels: The snapshot's labels.
+
+    Returns:
+        `DELAYED` for any delayed label; `UNKNOWN` for an undocumented label, even beside a
+        `REAL-TIME` one; `REALTIME` for a `REAL-TIME` label alone; `UNKNOWN` for no label.
+    """
+    if labels.delayed is not None:
+        return _PinnedRecency(Recency.DELAYED, labels.delayed)
+    if labels.unknown is not None:
+        field, value = labels.unknown
+        return _PinnedRecency(
+            Recency.UNKNOWN,
+            f"{field}={value!r}, neither DELAYED nor REAL-TIME, in the snapshot",
+            warn=True,
+        )
+    if labels.real_time is not None:
+        return _PinnedRecency(Recency.REALTIME, labels.real_time)
+    return _PinnedRecency(Recency.UNKNOWN, _NO_TIMEFRAME.format(asset_class))
 
 
 ONE_FEED_NOTES: Final[Mapping[Feed, str]] = {

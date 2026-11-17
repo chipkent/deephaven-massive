@@ -2952,6 +2952,65 @@ def test_a_listed_subscription_decides_the_delayed_feed(
         m.close()
 
 
+@pytest.mark.parametrize(
+    ("reply", "recency", "evidence"),
+    [
+        (
+            Reply(envelope([{"ticker": "I:SPX", "value": 5900.25}])),
+            "UNKNOWN",
+            "websocket_hosts, no timeframe in the indices snapshot",
+        ),
+        (
+            Reply(envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}])),
+            "DELAYED",
+            "websocket_hosts, timeframe=DELAYED",
+        ),
+        (
+            Reply(envelope([{"ticker": "I:SPX", "timeframe": "REAL-TIME"}])),
+            "REALTIME",
+            "websocket_hosts, timeframe=REAL-TIME",
+        ),
+        (
+            Reply(b'{"status":"ERROR","request_id":"x1"}', status=401),
+            "UNKNOWN",
+            "websocket_hosts, the host check's snapshot (/v3/snapshot/indices) failed: ",
+        ),
+    ],
+    ids=["no label", "delayed", "real-time", "failed"],
+)
+def test_a_pinned_host_s_row_shows_massive_s_label(
+    *,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    reply: Reply,
+    recency: str,
+    evidence: str,
+) -> None:
+    # A pinned business.massive.com never shows real-time by its name; a failed read leaves
+    # it UNKNOWN, decided and connected, never a failed decision.
+    m = dm.MassiveSession(
+        dm.MassiveConfig(
+            api_key="test-key",
+            rest_base_url=fake_rest.url,
+            websocket_hosts={AssetClass.INDICES: "business.massive.com"},
+        )
+    )
+    try:
+        fake_rest.reply(INDEX_SNAPSHOT_PATH, reply)
+        decision = m._core.rest_transport().resolve_host(AssetClass.INDICES, ChannelFamily.TICK)
+        assert (decision.host, decision.recency) == ("business.massive.com", Recency(recency))
+        (row,) = connection_rows(m, dh_to_pylist)
+        assert (row["Host"], row["Recency"], row["State"]) == (
+            "business.massive.com",
+            recency,
+            "CONNECTED",
+        )
+        assert row["Evidence"].startswith(evidence)
+        assert row["LastError"] is None
+    finally:
+        m.close()
+
+
 def test_a_failed_decision_is_not_cached(
     *,
     session: dm.MassiveSession,

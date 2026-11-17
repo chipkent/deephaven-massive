@@ -3699,14 +3699,11 @@ def test_soak_sessions_close_under_load_without_disturbing_a_shared_connection(
     [
         (
             HostDecision("delayed.massive.com", Recency.DELAYED, "delayed_subscriptions"),
-            (
-                "Live data from Massive's delayed feed (delayed.massive.com), 15 minutes behind "
-                "(10 for futures)."
-            ),
+            "Live delayed data from delayed.massive.com, 15 minutes behind (10 for futures).",
         ),
         (
             HostDecision("socket.massive.com", Recency.REALTIME, "timeframe=REAL-TIME"),
-            "Live data from Massive's real-time feed (socket.massive.com).",
+            "Live real-time data from socket.massive.com.",
         ),
     ],
 )

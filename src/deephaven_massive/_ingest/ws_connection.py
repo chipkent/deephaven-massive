@@ -82,7 +82,7 @@ from deephaven_massive._errors import (
     wire_source,
 )
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar
-from deephaven_massive._ingest.host_decision import refused_snapshot, unlabelled
+from deephaven_massive._ingest.host_decision import pinned, refused_snapshot, unlabelled
 from deephaven_massive._ingest.recency_labels import shows_real_time
 from deephaven_massive._ingest.subscriptions import (
     Sender,
@@ -1279,7 +1279,7 @@ class Connection:
         """
         subscription = subscription_of(self.asset_class)
         evidence = self.decision.evidence
-        if evidence == "websocket_hosts":
+        if pinned(evidence):
             hint = (
                 f"MassiveConfig.websocket_hosts[AssetClass.{self.asset_class.name}] pins this "
                 "host; the key's plan may not include this data there"

@@ -12,20 +12,26 @@ from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.column_reference import page_url
 from deephaven_massive._datasets.feeds import channel_hosts, fmv_host
-from deephaven_massive._enums import AssetClass, ChannelFamily, Recency, Subscription
+from deephaven_massive._enums import (
+    AssetClass,
+    ChannelFamily,
+    Recency,
+    Subscription,
+    subscription_of,
+)
 from deephaven_massive._ingest.host_decision import (
-    FEED_RECENCY,
     FUTURES_PROBE_CONTRACTS,
     ONE_FEED_NOTES,
     SNAPSHOT_PROBES,
     SnapshotAnswer,
     SnapshotProbe,
     decide,
-    recency_of,
+    pinned,
     refusal_note,
     refused_snapshot,
     unlabelled,
 )
+from deephaven_massive._ingest.recency_labels import shows_real_time
 from deephaven_massive._massive import Feed, Transport, source
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces._indices import VALUES as INDEX_VALUES
@@ -34,6 +40,7 @@ from deephaven_massive.namespaces._stocks import FMV as STOCKS_FMV
 from deephaven_massive.namespaces._stocks import TRADES as STOCKS_TRADES
 
 TICK, FMV = ChannelFamily.TICK, ChannelFamily.FMV
+INDICES = AssetClass.INDICES
 # The host the stocks FMV page documents, as the generated channel carries it.
 FMV_HOST = fmv_host(AssetClass.STOCKS)
 PAGES = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
@@ -82,23 +89,27 @@ def run(
     )
 
 
+def run_pinned(
+    asset_class: AssetClass,
+    fetch: Fetch,
+    host: str,
+    *,
+    delayed: frozenset[Subscription] = frozenset(),
+) -> HostDecision:
+    return decide(
+        asset_class,
+        TICK,
+        websocket_hosts={asset_class: host},
+        delayed_subscriptions=delayed,
+        fetch=fetch,
+    )
+
+
 def test_every_probe_is_a_generated_path_with_its_parameters() -> None:
     for probe in SNAPSHOT_PROBES.values():
         path = source(Transport.REST, probe.path)
         names = {param.name for param in path.params}
         assert set(probe.path_params) | set(probe.query) <= names
-
-
-def test_every_feed_has_a_recency() -> None:
-    assert set(FEED_RECENCY) == set(Feed)
-
-
-def test_recency_follows_the_feed_the_pages_give_the_host() -> None:
-    assert recency_of(REALTIME_HOST) is Recency.REALTIME
-    assert recency_of(FMV_HOST) is Recency.REALTIME
-    assert recency_of(DELAYED_HOST) is Recency.DELAYED
-    assert recency_of("delayed.example.com") is Recency.DELAYED
-    assert recency_of("fullmarket-business.massive.com") is Recency.UNKNOWN
 
 
 def test_fmv_is_always_its_documented_host() -> None:
@@ -157,20 +168,232 @@ def test_every_feed_has_a_note() -> None:
     assert set(ONE_FEED_NOTES) == set(Feed)
 
 
-def test_a_pinned_tick_host_needs_no_request() -> None:
-    fetch = Snapshot()
-    decision = run(AssetClass.OPTIONS, fetch, options="opts.example.com")
-    assert decision == HostDecision("opts.example.com", Recency.UNKNOWN, "websocket_hosts")
-    assert fetch.probes == []
+PINNED_HOSTS = (FMV_HOST, REALTIME_HOST, "opts.example.com")
+"""Hosts a user may pin: the FMV channels' Business host (index values' one documented host),
+the real-time host, and one no page lists. None of their names sets a recency."""
+
+DELAYABLE = (AssetClass.STOCKS, AssetClass.OPTIONS, AssetClass.INDICES, AssetClass.FUTURES)
+"""The classes with a delayed feed, which `delayed_subscriptions` may list."""
+
+REFUSED_ROW = {"ticker": "AAPL", "error": "NOT_ENTITLED", "message": "Not entitled."}
 
 
-def test_a_pinned_delayed_host_is_delayed() -> None:
-    fetch = Snapshot()
-    decision = run(
-        AssetClass.STOCKS, fetch, delayed=frozenset({Subscription.STOCKS}), stocks=DELAYED_HOST
+def answering(status: str, *rows: Mapping[str, object]) -> Callable[[], Fetch]:
+    return lambda: Snapshot(rows, status)
+
+
+def raising(error: BaseException) -> Callable[[], Fetch]:
+    def fail(probe: SnapshotProbe) -> SnapshotAnswer:
+        raise error
+
+    return lambda: fail
+
+
+# Each event a pinned host's snapshot read can meet: (a maker of the fetch, the recency, what
+# set it, whether it is logged at WARNING).
+# `{path}` and `{name}` stand for the class's probe path and value.
+PINNED_EVENTS: dict[str, tuple[Callable[[], Fetch], Recency, str, bool]] = {
+    "real-time label": (
+        answering("OK", {"timeframe": "REAL-TIME"}),
+        Recency.REALTIME,
+        "timeframe=REAL-TIME",
+        False,
+    ),
+    "nested real-time label": (
+        answering("OK", {"last_trade": {"timeframe": "REAL-TIME"}}),
+        Recency.REALTIME,
+        "last_trade.timeframe=REAL-TIME",
+        False,
+    ),
+    "delayed label": (
+        answering("OK", {"timeframe": "DELAYED"}),
+        Recency.DELAYED,
+        "timeframe=DELAYED",
+        False,
+    ),
+    "delayed status beside a real-time label": (
+        answering("DELAYED", {"timeframe": "REAL-TIME"}),
+        Recency.DELAYED,
+        "status=DELAYED",
+        False,
+    ),
+    "a delayed row beside a real-time one": (
+        answering("OK", {"timeframe": "REAL-TIME"}, {"last_minute": {"timeframe": "DELAYED"}}),
+        Recency.DELAYED,
+        "last_minute.timeframe=DELAYED",
+        False,
+    ),
+    "undocumented label": (
+        answering("OK", {"timeframe": "SOON"}),
+        Recency.UNKNOWN,
+        "timeframe='SOON', neither DELAYED nor REAL-TIME, in the snapshot",
+        True,
+    ),
+    "undocumented label beside a real-time one": (
+        answering("OK", {"timeframe": "REAL-TIME"}, {"last_quote": {"timeframe": "SOON"}}),
+        Recency.UNKNOWN,
+        "last_quote.timeframe='SOON', neither DELAYED nor REAL-TIME, in the snapshot",
+        True,
+    ),
+    "no label": (
+        answering("OK", {"ticker": "X"}),
+        Recency.UNKNOWN,
+        "no timeframe in the {name} snapshot",
+        False,
+    ),
+    "no rows": (answering("OK"), Recency.UNKNOWN, "no timeframe in the {name} snapshot", False),
+    "a refused row beside a labelled one": (
+        answering("OK", REFUSED_ROW, {"timeframe": "REAL-TIME"}),
+        Recency.REALTIME,
+        "timeframe=REAL-TIME",
+        False,
+    ),
+    "every row refused": (
+        answering("OK", REFUSED_ROW),
+        Recency.UNKNOWN,
+        "the host check's snapshot ({path}) was refused: NOT_ENTITLED: Not entitled.",
+        True,
+    ),
+    "HTTP 403": (
+        raising(dm.EntitlementError("HTTP 403: not entitled", status=403)),
+        Recency.UNKNOWN,
+        "the host check's snapshot ({path}) was refused: HTTP 403: not entitled",
+        True,
+    ),
+    "HTTP 401": (
+        raising(dm.AuthenticationError("HTTP 401: bad key", status=401)),
+        Recency.UNKNOWN,
+        "the host check's snapshot ({path}) failed: HTTP 401: bad key",
+        True,
+    ),
+    "HTTP 503": (
+        raising(dm.MassiveError("HTTP 503: unavailable", status=503)),
+        Recency.UNKNOWN,
+        "the host check's snapshot ({path}) failed: HTTP 503: unavailable",
+        True,
+    ),
+    "no answer": (
+        raising(dm.MassiveError("connection refused", source=dm.ErrorSource.NETWORK)),
+        Recency.UNKNOWN,
+        "the host check's snapshot ({path}) failed: connection refused",
+        True,
+    ),
+    # A pinned stream never waited on REST before, so a rate-limit pause it gave up on, or a
+    # session closed meanwhile, leaves the recency unknown instead of failing the stream.
+    "a rate-limit pause given up on": (
+        raising(dm.MassiveError("rate limited past the patience", status=429)),
+        Recency.UNKNOWN,
+        "the host check's snapshot ({path}) failed: rate limited past the patience",
+        True,
+    ),
+    "closed session": (
+        raising(dm.SessionClosedError("MassiveSession #1 is closed")),
+        Recency.UNKNOWN,
+        "the host check's snapshot ({path}) failed: MassiveSession #1 is closed",
+        True,
+    ),
+}
+
+
+@pytest.mark.parametrize("host", PINNED_HOSTS)
+@pytest.mark.parametrize("asset_class", list(AssetClass))
+@pytest.mark.parametrize("event", PINNED_EVENTS)
+def test_a_pinned_host_s_recency_is_massive_s_label(
+    caplog: pytest.LogCaptureFixture, *, host: str, asset_class: AssetClass, event: str
+) -> None:
+    # The pinned host is used whatever the snapshot says, and its recency is only what Massive
+    # labels the key's data: never what the host's name suggests, and never a refusal.
+    make, recency, why, warned = PINNED_EVENTS[event]
+    fetch = make()
+    probe = SNAPSHOT_PROBES[asset_class]
+    with caplog.at_level(logging.INFO, LOGGER):
+        decision = run_pinned(asset_class, fetch, host)
+    evidence = "websocket_hosts, " + why.format(path=probe.path, name=asset_class.value)
+    assert decision == HostDecision(host, recency, evidence)
+    if isinstance(fetch, Snapshot):
+        assert fetch.probes == [probe]
+    assert pinned(decision.evidence)
+    (record,) = caplog.records
+    assert record.levelno == (logging.WARNING if warned else logging.INFO)
+    assert host in record.getMessage()
+    assert evidence in record.getMessage()
+
+
+def test_a_pinned_business_host_without_a_label_is_never_real_time() -> None:
+    # The issue's case: index values pinned to business.massive.com, whose snapshot carries
+    # no timeframe, were shown real-time by the host's name.
+    (only,) = {h for c in INDEX_VALUES.channels.values() for h in channel_hosts(INDICES, c)}
+    assert only.host == FMV_HOST
+    decision = run(INDICES, Snapshot([{"ticker": "I:SPX"}]), indices=FMV_HOST)
+    assert decision.recency is Recency.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "error",
+    [dm.MassiveError("a defect", source=dm.ErrorSource.LIBRARY), KeyError("a defect")],
+    ids=["library defect", "unexpected"],
+)
+def test_a_pinned_host_s_read_propagates_only_a_defect(error: Exception) -> None:
+    with pytest.raises(type(error)) as info:
+        run(AssetClass.INDICES, raising(error)(), indices=FMV_HOST)
+    assert info.value is error
+
+
+@pytest.mark.parametrize("source", list(dm.ErrorSource))
+def test_every_error_source_is_decided(source: dm.ErrorSource) -> None:
+    # A source either leaves a pinned host's recency unknown or propagates; none falls through.
+    error = dm.MassiveError("a failure", status=500, source=source)
+    fetch = raising(error)()
+    if source is not dm.ErrorSource.LIBRARY:
+        assert run_pinned(INDICES, fetch, FMV_HOST).recency is Recency.UNKNOWN
+    else:
+        with pytest.raises(dm.MassiveError):
+            run_pinned(INDICES, fetch, FMV_HOST)
+
+
+def test_an_unplanned_error_source_is_refused() -> None:
+    error = dm.MassiveError("a failure", source="bogus")  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(AssertionError):
+        run_pinned(INDICES, raising(error)(), FMV_HOST)
+
+
+@pytest.mark.parametrize("asset_class", DELAYABLE)
+def test_a_listed_subscription_s_pinned_host_is_delayed_with_no_request(
+    asset_class: AssetClass,
+) -> None:
+    # The user asked for Massive's delayed data; the configuration made the pin a delayed. host.
+    fetch = Snapshot([{"timeframe": "REAL-TIME"}])
+    decision = run_pinned(
+        asset_class,
+        fetch,
+        "delayed.example.com",
+        delayed=frozenset({subscription_of(asset_class)}),
     )
-    assert decision == HostDecision(DELAYED_HOST, Recency.DELAYED, "websocket_hosts")
+    assert decision == HostDecision(
+        "delayed.example.com",
+        Recency.DELAYED,
+        "websocket_hosts, MassiveConfig.delayed_subscriptions",
+    )
     assert fetch.probes == []
+
+
+def test_every_class_has_a_snapshot_to_label_a_pinned_host() -> None:
+    # So no pinned host's recency is decided without Massive's label.
+    assert set(SNAPSHOT_PROBES) == set(AssetClass)
+
+
+def test_only_a_pinned_host_s_evidence_is_pinned() -> None:
+    assert pinned("websocket_hosts")
+    assert pinned("websocket_hosts, timeframe=DELAYED")
+    assert not pinned("websocket_hosts_x")
+    assert not pinned("timeframe=REAL-TIME")
+    # The other readers of the evidence never take a pinned host's for their own.
+    for why in ("timeframe=REAL-TIME", "no timeframe in the stocks snapshot"):
+        assert not shows_real_time(f"websocket_hosts, {why}")
+        assert not unlabelled(f"websocket_hosts, {why}")
+    refused = "the host check's snapshot (/v3/snapshot) was refused: HTTP 403"
+    assert refused_snapshot(refused)
+    assert not refused_snapshot(f"websocket_hosts, {refused}")
 
 
 @pytest.mark.parametrize("asset_class", [AssetClass.FOREX, AssetClass.CRYPTO])
