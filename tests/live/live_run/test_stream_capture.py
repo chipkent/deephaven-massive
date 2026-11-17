@@ -742,7 +742,9 @@ def test_a_units_verdict_tells_massives_refusal_from_a_failure() -> None:
 
 def test_a_unit_with_an_acknowledged_stream_and_no_row_fails_though_another_was_refused() -> None:
     """Massive's refusal of some of a unit's streams does not excuse the others' silence."""
-    refusal = "the WebSocket server refused the subscription to T.AAPL; Massive said: no"
+    refusal = (
+        'Massive answered the subscription to T.AAPL on wss://socket.massive.com/stocks: "no".'
+    )
     why = "no rows during its session's hours"
     assert _verdict(failures=(refusal,), streams=3, rows=0) == ("failed", why)
     assert _verdict(failures=(refusal,), streams=3, rows=0, late=False) == (
@@ -752,14 +754,13 @@ def test_a_unit_with_an_acknowledged_stream_and_no_row_fails_though_another_was_
 
 
 def test_the_librarys_wording_of_a_refused_topic_marks_a_refusal_on_every_feed() -> None:
-    """The library's stored error of a refused topic starts the same on every feed.
+    """The library's stored error of a refused subscription starts the same on every feed.
 
-    On the delayed feed its hint names `delayed_subscriptions` and none of the other marks.
+    On the delayed feed it carries none of the other marks.
     """
     delayed = (
-        "the WebSocket server delayed.massive.com/stocks refused the subscription to T.AAPL; "
-        "Massive said: not authorized; MassiveConfig.delayed_subscriptions lists "
-        "dm.Subscription.STOCKS, so its streams use Massive's delayed feed"
+        "Massive answered the subscription to T.AAPL on wss://delayed.massive.com/stocks: "
+        '"not authorized".'
     )
     assert stream_capture.is_refusal(delayed)
     assert not stream_capture.is_refusal("the WebSocket connection to x failed: reset")

@@ -103,17 +103,15 @@ def is_not_listed_text(text: object) -> bool:
 
 
 _ENTITLEMENT_MARKS: Final = (
-    "refused the subscription to",
+    "Massive answered the subscription to",
     "HTTP 403",
     "NOT_AUTHORIZED",
     "not entitled",
-    "may not include this data",
-    "(FMV) data needs",
 )
-"""Text that marks a stream's or a poll's error as a refusal: the library's wording of a topic
-Massive's WebSocket server refused (`the WebSocket server <host> refused the subscription to
-<topics>; Massive said: <its message>; <the feed's hint>`), an HTTP 403, a `NOT_AUTHORIZED`
-envelope, and the hints of a refused topic, including a fair-market-value (FMV) topic's."""
+"""Text that marks a stream's or a poll's error as a refusal: the library's wording of a
+subscription Massive's WebSocket server refused (`Massive answered the subscription to
+<subscriptions> on <url>: "<its message>".`, then the feed's hint), an HTTP 403, a
+`NOT_AUTHORIZED` envelope, and Massive's own "not entitled"."""
 
 
 def is_entitlement_text(text: object) -> bool:

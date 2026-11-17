@@ -985,7 +985,9 @@ def test_the_stopping_example_runs_alone_releases_a_table_and_closes_the_session
             break
         pace.wait(0.02)
     # Closing fails the session's live tables, which keep their rows; `kept` is a static copy.
-    assert "was closed; this table no longer updates. " + NEW_SESSION in str(closed.text())
+    assert "This session was closed, so this table no longer updates. " + NEW_SESSION in str(
+        closed.text()
+    )
     assert dh_to_pylist(live["headlines"]) == rows
     assert dh_to_pylist(stopped["kept"]) == rows
     assert stopped["m"]._core.closed

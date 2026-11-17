@@ -99,7 +99,7 @@ REFUSAL_WAIT: Final = 15.0
 """Seconds the run waits after the last example for Massive's answers to the examples'
 streams: a refused subscription fails its stream seconds after the example returned."""
 
-STREAM_REFUSAL: Final = "refused the subscription"
+STREAM_REFUSAL: Final = "Massive answered the subscription to"
 """The words of a stream's `Error` when Massive's WebSocket server refused its subscription;
 the connection writes them (`ws_connection`, `_refused`)."""
 
