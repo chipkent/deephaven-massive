@@ -258,9 +258,10 @@ class Direction(StrEnum):
 
 
 class ContractType(StrEnum):
-    """The type of an options contract, as `options.chain` and `options.contracts` filter it.
+    """The type of an options contract, for the `contract_type` argument of the options datasets.
 
-    Its values are the `contract_type` values both endpoints accept: calls and puts.
+    The chain, the contracts, and the open interest filter by it. Its values are the
+    `contract_type` values those endpoints accept: calls and puts.
 
     Example:
         ::

@@ -14,6 +14,7 @@ import functools
 import inspect
 import json
 import logging
+import threading
 from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -34,17 +35,19 @@ from deephaven_massive._datasets.filters import filter_keys
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ChannelFamily, HistorySource, Recency
+from deephaven_massive._errors import RowDataError
 from deephaven_massive._ingest.recency_labels import delayed_refusal
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import Transport, to_batch
+from deephaven_massive._massive import RowFault, Transport, to_batch
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces import _options as options
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import (
     FetchQuery,
     HistoryQuery,
-    NoSymbolStreamQuery,
+    NoSymbolStreamHistoryQuery,
     Query,
     StreamHistoryQuery,
     StreamQuery,
@@ -61,6 +64,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
+    from deephaven_massive._tables.problem_events import ProblemEvent
     from tests._fakes.rest import FakeRestServer
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
@@ -79,7 +83,10 @@ NAMES = (
     "chain",
     "snapshots",
     "contracts",
+    "contract_details",
     "daily_open_close",
+    "open_interest",
+    "unusual_trades",
 )
 
 
@@ -151,12 +158,15 @@ def test_each_dataset_reads_its_sources() -> None:
         "options.chain": None,
         "options.snapshots": None,
         "options.contracts": None,
+        "options.contract_details": None,
         "options.daily_open_close": None,
+        "options.open_interest": None,
+        "options.unusual_trades": None,
     }
-    # Every dataset but the chain, which takes its underlying instead, and the admin messages,
-    # whose rows name no contract, takes contracts.
+    # Every dataset but the chain and the contracts list, which take an underlying instead, and
+    # the admin messages, whose rows name no contract, takes contracts.
     takes = {spec.name for spec in options.DATASETS if CATALOG.takes_symbols(spec)}
-    no_contracts = {"options.chain", "options.admin_messages"}
+    no_contracts = {"options.chain", "options.contracts", "options.admin_messages"}
     assert takes == {spec.name for spec in options.DATASETS} - no_contracts
     assert options.LAST_TRADE.sources == ((R, "/v2/last/trade/{optionsTicker}"),)
     assert options.PREVIOUS_DAY_BAR.sources == ((R, "/v2/aggs/ticker/{optionsTicker}/prev"),)
@@ -179,14 +189,19 @@ def test_each_dataset_reads_its_sources() -> None:
     )
     assert options.FMV.sources == ((Transport.WS, "options/FMV"),)
     assert options.FMV.channel_family is dm._enums.ChannelFamily.FMV
-    assert options.ADMIN_MESSAGES.sources == ((Transport.WS, "options/AD"),)
+    assert options.ADMIN_MESSAGES.sources == (
+        (R, "/options/v1/admin-messages"),
+        (Transport.WS, "options/AD"),
+    )
     assert options.CHAIN.sources == ((R, "/v3/snapshot/options/{underlyingAsset}"),)
     assert options.SNAPSHOTS.sources == ((R, "/v3/snapshot"),)
-    assert options.CONTRACTS.sources == (
-        (R, "/v3/reference/options/contracts"),
+    assert options.CONTRACTS.sources == ((R, "/v3/reference/options/contracts"),)
+    assert options.CONTRACT_DETAILS.sources == (
         (R, "/v3/reference/options/contracts/{options_ticker}"),
     )
     assert options.DAILY_OPEN_CLOSE.sources == ((R, "/v1/open-close/{optionsTicker}/{date}"),)
+    assert options.OPEN_INTEREST.sources == ((R, "/options/v1/open-interest"),)
+    assert options.UNUSUAL_TRADES.sources == ((R, "/options/v1/unusual-trades"),)
 
 
 @pytest.mark.parametrize(
@@ -198,11 +213,14 @@ def test_each_dataset_reads_its_sources() -> None:
         (options.BARS, HistoryQuery),
         (options.PREVIOUS_DAY_BAR, FetchQuery),
         (options.FMV, StreamQuery),
-        (options.ADMIN_MESSAGES, NoSymbolStreamQuery),
+        (options.ADMIN_MESSAGES, NoSymbolStreamHistoryQuery),
         (options.CHAIN, FetchQuery),
         (options.SNAPSHOTS, FetchQuery),
         (options.CONTRACTS, FetchQuery),
+        (options.CONTRACT_DETAILS, FetchQuery),
         (options.DAILY_OPEN_CLOSE, FetchQuery),
+        (options.OPEN_INTEREST, FetchQuery),
+        (options.UNUSUAL_TRADES, FetchQuery),
     ],
 )
 def test_query_class_of_each_dataset(spec: DatasetSpec, expected: type) -> None:
@@ -224,11 +242,14 @@ def test_page_sizes_are_the_largest_each_endpoint_returns() -> None:
         "options.bars": 50_000,
         "options.previous_day_bar": None,
         "options.fmv": None,
-        "options.admin_messages": None,
+        "options.admin_messages": 50_000,
         "options.chain": 250,
         "options.snapshots": 250,
         "options.contracts": 1_000,
+        "options.contract_details": None,
         "options.daily_open_close": None,
+        "options.open_interest": 50_000,
+        "options.unusual_trades": 50_000,
     }
 
 
@@ -355,6 +376,8 @@ def test_required_keys_are_the_row_keys_of_each_path() -> None:
         ("contracts.json", "/v3/reference/options/contracts"),
         ("contract.json", "/v3/reference/options/contracts/{options_ticker}"),
         ("open_close.json", "/v1/open-close/{optionsTicker}/{date}"),
+        ("open_interest.json", "/options/v1/open-interest"),
+        ("unusual_trades.json", "/options/v1/unusual-trades"),
     ],
 )
 def test_fixtures_are_shaped_like_the_generated_fields(
@@ -480,7 +503,8 @@ def test_chain_and_contracts_take_a_table_of_underlyings(
 ) -> None:
     underlyings = new_table([string_col("Symbol", ["AAPL", "I:SPX"])])
     chain = massive_session.options.chain(underlyings, contract_type=dm.ContractType.PUT)
-    contracts = massive_session.options.contracts(underlying=underlyings)
+    contracts = massive_session.options.contracts(underlyings)
+    assert contracts._request == massive_session.options.contracts(underlying=underlyings)._request
     for query, parameter in ((chain, "underlyingAsset"), (contracts, "underlying_ticker")):
         values = query._request.value_table
         assert values is not None
@@ -568,10 +592,10 @@ def test_snapshots_restrict_the_unified_snapshot_to_options(
         snapshots(dm.ALL, filters={"ticker_any_of": [CONTRACT]})
 
 
-def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
+def test_contracts_list_contracts_by_underlying(massive_session: dm.MassiveSession) -> None:
     contracts = massive_session.options.contracts
     listed = contracts(
-        underlying="NVDA",
+        "NVDA",
         contract_type=dm.ContractType.CALL,
         as_of="2025-01-02",
         expired=True,
@@ -588,15 +612,29 @@ def test_contracts_list_or_describe(massive_session: dm.MassiveSession) -> None:
         },
         "filters": {"expiration_date_lte": date(2026, 1, 16), "strike_price_gte": 100},
     }
-    described = contracts([CONTRACT])
-    assert request_of(described) == {"symbols": (CONTRACT,), "params": {}, "filters": {}}
-    assert request_of(contracts(symbols=[CONTRACT])) == request_of(described)
+    assert request_of(contracts(underlying="NVDA")) == request_of(contracts("NVDA"))
     assert request_of(contracts()) == {"symbols": None, "params": {}, "filters": {}}
-    # False, the default, is Massive's own, so it is not sent, also beside named contracts.
+    # False, the default, is Massive's own, so it is not sent.
     assert request_of(contracts(expired=False)) == request_of(contracts())
     # The request keeps the canonical index; only the wire gets the bare one.
-    assert request_of(contracts(underlying="I:SPX"))["params"] == {"underlying_ticker": "I:SPX"}
-    assert request_of(contracts([CONTRACT], expired=False)) == request_of(described)
+    assert request_of(contracts("I:SPX"))["params"] == {"underlying_ticker": "I:SPX"}
+
+
+def test_contract_details_read_named_contracts(massive_session: dm.MassiveSession) -> None:
+    details = massive_session.options.contract_details
+    described = details([CONTRACT])
+    assert type(described) is FetchQuery
+    assert request_of(described) == {"symbols": (CONTRACT,), "params": {}, "filters": {}}
+    assert request_of(details(symbols=CONTRACT)) == request_of(described)
+    assert request_of(details(CONTRACT, as_of="2025-01-02")) == {
+        "symbols": (CONTRACT,),
+        "params": {"as_of": date(2025, 1, 2)},
+        "filters": {},
+    }
+    watch = new_table([string_col("Symbol", [CONTRACT])])
+    symbols = details(watch)._request.symbols
+    assert isinstance(symbols, SymbolTable)
+    assert symbols.table is watch
 
 
 def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
@@ -604,26 +642,14 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
     # Massive lists no contracts of a pair and answers with no rows, so a pair is refused.
     for pair in ("C:EURUSD", "X:BTCUSD"):
         with pytest.raises(ValueError, match=rf"^underlying='{pair}' is a currency or crypto"):
-            contracts(underlying=pair)
+            contracts(pair)
     # What Massive answers to a contract as the underlying is for it to judge.
     contract = "O:AAPL250117C00150000"
-    assert request_of(contracts(underlying=contract))["params"]["underlying_ticker"] == contract
-    with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) without symbols"):
-        contracts(symbols=dm.ALL)
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"^'AAPL' is an underlying, not an options contract: list its contracts with "
-            r"m\.options\.contracts\(underlying='AAPL'\)$"
-        ),
-    ):
-        contracts("AAPL")
-    with pytest.raises(ValueError, match=r"'I:SPX' is an underlying"):
-        contracts("I:SPX")
-    with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
-        contracts("aapl")  # not canonical: the symbol check explains it
+    assert request_of(contracts(contract))["params"]["underlying_ticker"] == contract
     with pytest.raises(TypeError, match=r"^underlying must be one ticker, a str, not dm\.ALL$"):
-        contracts(underlying=dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
+        contracts(dm.ALL)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
+        contracts("aapl")
     with pytest.raises(TypeError, match="expired must be a bool, not int"):
         contracts(expired=1)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match="needs a timezone"):
@@ -636,8 +662,48 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
     ):
         with pytest.raises(ValueError, match=f"^{key} is set through its own argument"):
             contracts(filters={key: "x"})
-    with pytest.raises(ValueError, match=r"^ticker is set through symbols=, not filters"):
-        contracts(filters={"ticker": CONTRACT})
+    # Massive's list takes `ticker` too, but a contract is named through contract_details(),
+    # where it gets the canonical check.
+    for key in ("ticker", "ticker_any_of"):
+        with pytest.raises(
+            ValueError,
+            match=(
+                rf"^{key} is not a filter of options\.contracts; read named contracts with "
+                r"m\.options\.contract_details\(\)$"
+            ),
+        ):
+            contracts(filters={key: CONTRACT})
+
+
+def test_contract_details_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
+    details = massive_session.options.contract_details
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^'AAPL' is an underlying, not an options contract: list its contracts with "
+            r"m\.options\.contracts\('AAPL'\)$"
+        ),
+    ):
+        details("AAPL")
+    with pytest.raises(ValueError, match=r"^'I:SPX' is an underlying, .*contracts\('I:SPX'\)$"):
+        details("I:SPX")
+    with pytest.raises(ValueError, match=r"use m\.options\.contracts\(\) to list contracts"):
+        details(dm.ALL)
+    with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
+        details("aapl")  # not canonical: the symbol check explains it
+    with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
+        details([])
+    with pytest.raises(ValueError, match=r"^options\.contract_details needs symbols, got None"):
+        details(None)  # type: ignore[arg-type]  # the point: refused at run time
+    # In a list, an underlying meets the symbol check, which names it an underlying too.
+    with pytest.raises(ValueError, match=r"^'AAPL' is an underlying, not an OCC option symbol"):
+        details(["AAPL"])
+    with pytest.raises(
+        ValueError, match=r"^options\.contract_details: as_of=.* is a calendar date"
+    ):
+        details(CONTRACT, as_of=datetime(2025, 1, 3, 2, 0, tzinfo=UTC))
+    with pytest.raises(TypeError):
+        details(CONTRACT, underlying="AAPL")  # type: ignore[call-arg]  # the point: refused at run time
 
 
 def test_as_of_and_date_refuse_a_time(massive_session: dm.MassiveSession) -> None:
@@ -692,6 +758,12 @@ def test_enum_arguments_reject_plain_strings(massive_session: dm.MassiveSession)
         m.options.snapshots(CONTRACT, order=desc)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         m.options.contracts(order=desc)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(TypeError, match=r"contract_type must be dm\.ContractType"):
+        m.options.open_interest(contract_type=call)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(TypeError, match=r"order must be dm\.Order"):
+        m.options.open_interest(order=desc)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(TypeError, match=r"order must be dm\.Order"):
+        m.options.unusual_trades(order=desc)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 # --- Docstrings ------------------------------------------------------------------------------
@@ -1041,7 +1113,7 @@ def test_snapshots_keep_the_error_row_of_a_contract(
     assert (missing["Error"], missing["Message"]) == ("NOT_FOUND", "Ticker not found.")
 
 
-def test_contracts_list_or_read_each_contract(
+def test_contracts_list_and_contract_details_read_each_contract(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -1050,7 +1122,7 @@ def test_contracts_list_or_read_each_contract(
     fake_rest.reply("/v3/reference/options/contracts", Reply(body(load_fixture, "contracts.json")))
     listed = rows(
         rest_session.options.contracts(
-            underlying="AAPL",
+            "AAPL",
             contract_type=dm.ContractType.CALL,
             as_of=date(2021, 11, 1),
             expired=True,
@@ -1085,7 +1157,9 @@ def test_contracts_list_or_read_each_contract(
     fake_rest.reply(
         wire(f"/v3/reference/options/contracts/{one}"), Reply(body(load_fixture, "contract.json"))
     )
-    described = rows(rest_session.options.contracts(one, as_of="2021-11-01").fetch(wait=True))
+    described = rows(
+        rest_session.options.contract_details(one, as_of="2021-11-01").fetch(wait=True)
+    )
     assert fake_rest.get_queries()[-1] == (
         f"/v3/reference/options/contracts/{one}",
         {"as_of": ["2021-11-01"]},
@@ -1093,6 +1167,29 @@ def test_contracts_list_or_read_each_contract(
     assert [(r["Symbol"], r["Underlying"], r["ExpirationDate"]) for r in described] == [
         (one, "AAPL", "2021-11-19")
     ]
+
+
+def test_a_poll_of_a_table_of_contracts_reads_each_one_s_details(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    rows_when: Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]],
+) -> None:
+    # A table of contracts is read on the per-contract path, which takes `as_of`, so the poll
+    # opens and each cycle asks for each contract the table holds.
+    one = "O:AAPL211119C00085000"
+    fake_rest.reply(
+        wire(f"/v3/reference/options/contracts/{one}"), Reply(body(load_fixture, "contract.json"))
+    )
+    watch = new_table([string_col("Symbol", [one])])
+    table = rest_session.options.contract_details(watch, as_of="2021-11-01").poll(60)
+    (row,) = rows_when(table, bool)
+    assert (row["Symbol"], row["Underlying"]) == (one, "AAPL")
+    assert fake_rest.get_queries()[0] == (
+        f"/v3/reference/options/contracts/{one}",
+        {"as_of": ["2021-11-01"]},
+    )
 
 
 def test_an_index_underlyings_contracts_are_listed_by_its_bare_ticker(
@@ -1225,16 +1322,6 @@ def test_an_index_contract_without_a_cfi_code_keeps_the_bare_ticker_and_warns_on
     ]
 
 
-def test_a_list_argument_with_named_contracts_fails_before_any_request(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    # The per-contract path takes only `as_of`; a list-only argument cannot be honored there.
-    q = rest_session.options.contracts(symbols=[CONTRACT], underlying="AAPL")
-    with pytest.raises(ValueError, match=r"does not take \['underlying_ticker'\]"):
-        q.fetch(wait=True)
-    assert fake_rest.get_queries() == []
-
-
 def test_daily_open_close_reads_one_day_per_contract(
     *,
     rest_session: dm.MassiveSession,
@@ -1256,6 +1343,426 @@ def test_daily_open_close_reads_one_day_per_contract(
     assert [(r["TimestampStart"], r["TimestampEnd"]) for r in out] == [
         (ny_midnight_ns(date(2023, 1, 9)), ny_midnight_ns(date(2023, 1, 10)))
     ]
+
+
+def test_open_interest_sends_its_filters_and_reads_each_contract_s_day(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    path = "/options/v1/open-interest"
+    fake_rest.reply(path, Reply(body(load_fixture, "open_interest.json")))
+    serve_indices(fake_rest, "SPX")
+    out = rows(
+        rest_session.options.open_interest(
+            ["O:SPY260123P00687000", "O:SPY260123C00687000"],
+            root=["SPY", "SPXW"],
+            contract_type=dm.ContractType.PUT,
+            start=date(2026, 1, 20),
+            end="2026-01-22",
+            sort="open_interest",
+            order=dm.Order.DESC,
+            filters={"expiration_date_lte": "2026-01-23"},
+        ).fetch(wait=True)
+    )
+    assert fake_rest.get_queries(one_value=True) == [
+        (
+            path,
+            {
+                "ticker.any_of": "O:SPY260123C00687000,O:SPY260123P00687000",
+                "root.any_of": "SPY,SPXW",
+                "contract_type": "put",
+                "date.gte": "2026-01-20",
+                "date.lte": "2026-01-22",
+                "expiration_date.lte": "2026-01-23",
+                "sort": "open_interest.desc",
+                "limit": "50000",
+            },
+        ),
+        # SPY is no listed index, so its root is a stock's, with no further request.
+        (INDEX_LIST, {"market": "indices", "active": "true", "limit": "1000"}),
+        (INDEX_LIST, {"market": "indices", "active": "false", "limit": "1000"}),
+    ]
+    picked = ("Symbol", "OptionRoot", "Date", "ContractType", "OpenInterest")
+    assert [tuple(r[c] for c in picked) for r in out] == [
+        ("O:SPY260123P00687000", "SPY", "2026-01-22", "put", 9871),
+        ("O:SPY260123C00687000", "SPY", "2026-01-22", "call", 15234),
+    ]
+    assert (out[0]["ExpirationDate"], out[0]["StrikePrice"], out[0]["Underlying"]) == (
+        "2026-01-23",
+        687.0,
+        "SPY",
+    )
+
+
+INDEX_LIST = "/v3/reference/tickers"
+
+
+def serve_indices(server: FakeRestServer, *names: str) -> None:
+    # Massive's index ticker list, one page, which the library reads once per session.
+    rows = [{"ticker": f"I:{name}", "market": "indices"} for name in names]
+    server.reply(INDEX_LIST, Reply({"status": "OK", "results": rows}))
+
+
+def contract_reference(cfi: str) -> Reply:
+    # Massive's contracts reference of one contract, by the CFI code that says its underlying.
+    return Reply({"status": "OK", "results": {"cfi": cfi}})
+
+
+def test_open_interest_sends_one_root_as_root(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/options/v1/open-interest", Reply({"status": "OK", "results": []}))
+    rest_session.options.open_interest(root="SPXW").fetch(wait=True)
+    assert fake_rest.get_queries(one_value=True) == [
+        ("/options/v1/open-interest", {"root": "SPXW", "limit": "50000"})
+    ]
+
+
+@pytest.mark.parametrize("spec", [options.OPEN_INTEREST, options.UNUSUAL_TRADES])
+def test_option_root_is_massive_s_root_where_the_rows_carry_one(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, spec: DatasetSpec
+) -> None:
+    # A root unlike the symbol's shows the value is Massive's, not read from `Symbol`.
+    row = {
+        "ticker": "O:SPY260123C00687000",
+        "root": "XYZ",
+        "date": "2026-01-22",
+        "sip_timestamp": 1761751432123456800,
+        "sequence_number": 1,
+    }
+    path = spec.rest_paths[0]
+    fake_rest.reply(path, Reply({"status": "OK", "results": [row]}))
+    query = (
+        rest_session.options.open_interest()
+        if spec is options.OPEN_INTEREST
+        else rest_session.options.unusual_trades()
+    )
+    [out] = rows(query.fetch(wait=True))
+    assert (out["Symbol"], out["OptionRoot"]) == ("O:SPY260123C00687000", "XYZ")
+    assert "Root" not in out
+    [column] = [c for c in CATALOG.dataset_schema(spec).columns if c.name == "OptionRoot"]
+    assert column.description.startswith("The OCC root symbol of the contract (e.g., SPXW).")
+
+
+def test_unusual_trades_read_each_trade_at_its_sip_time(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    path = "/options/v1/unusual-trades"
+    fake_rest.reply(path, Reply(body(load_fixture, "unusual_trades.json")))
+    spxw = "/v3/reference/options/contracts/O:SPXW261218C06000000"
+    serve_indices(fake_rest, "SPX")
+    fake_rest.reply(wire(spxw), contract_reference("OCEICS"))
+    start = datetime(2025, 10, 29, 15, tzinfo=UTC)
+    out = rows(
+        rest_session.options.unusual_trades(
+            "O:SPY260123C00687000", start=start, end=datetime(2025, 10, 29, 16, tzinfo=UTC)
+        ).fetch(wait=True)
+    )
+    [(sent_path, sent), *references] = fake_rest.get_queries(one_value=True)
+    assert sent_path == path
+    # The index list once; then only SPXW, whose SPX is a listed index, is asked about, as of
+    # its trade's New York trading day.
+    assert references == [
+        (INDEX_LIST, {"market": "indices", "active": "true", "limit": "1000"}),
+        (INDEX_LIST, {"market": "indices", "active": "false", "limit": "1000"}),
+        (spxw, {"as_of": "2025-10-29"}),
+    ]
+    assert sent["ticker.any_of"] == "O:SPY260123C00687000"
+    assert {"sip_timestamp.gte", "sip_timestamp.lt", "limit"} <= sent.keys()
+    picked = ("Symbol", "Date", "Timestamp", "OptionRoot", "Price", "Size", "Flags")
+    assert [tuple(r[c] for c in picked) for r in out] == [
+        (
+            "O:SPY260123C00687000",
+            "2025-10-29",
+            1761751432123456800,
+            "SPY",
+            15.25,
+            120,
+            ["block_premium"],
+        ),
+        (
+            "O:SPXW261218C06000000",
+            "2025-10-29",
+            1761751431987654400,
+            "SPXW",
+            42.1,
+            25,
+            ["block_premium", "iso"],
+        ),
+    ]
+    # SPXW's contracts are options on an index, so their underlying is `I:SPX`.
+    assert [(r["Underlying"], r["Conditions"], r["Exchange"]) for r in out] == [
+        ("SPY", [227], 316),
+        ("I:SPX", [219], 304),
+    ]
+
+
+def test_one_bare_underlying_is_a_stock_or_an_index_by_each_root(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A stock and an index can share a bare ticker; each root's own contracts say which.
+    stock, index = "O:DJT261218C00030000", "O:DJTW261218C00030000"
+    page = [
+        {"ticker": stock, "root": "DJT", "date": "2026-11-13", "underlying_ticker": "DJT"},
+        {"ticker": index, "root": "DJTW", "date": "2026-11-13", "underlying_ticker": "DJT"},
+    ]
+    fake_rest.reply("/options/v1/open-interest", Reply({"status": "OK", "results": page}))
+    serve_indices(fake_rest, "DJT")
+    fake_rest.reply(wire(f"/v3/reference/options/contracts/{stock}"), contract_reference("OCASPS"))
+    fake_rest.reply(wire(f"/v3/reference/options/contracts/{index}"), contract_reference("OCEICS"))
+    with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.option_roots"):
+        out = rows(rest_session.options.open_interest().fetch(wait=True))
+    assert [(r["OptionRoot"], r["Underlying"]) for r in out] == [("DJT", "DJT"), ("DJTW", "I:DJT")]
+    assert caplog.records == []  # each root is classified, so none warns
+
+
+UNCLASSIFIED = ["O:SPXW261218C06000000", "O:SPXW261218P06000000"]
+"""Two contracts of a root whose underlying, SPX, is a listed index."""
+AAPL_CALL = "O:AAPL261218C00200000"
+"""A stock's contract, whose root needs no lookup."""
+
+
+def serve_unclassified(server: FakeRestServer) -> None:
+    # A page of SPXW's two contracts and a stock's, whose reference gives SPXW no CFI code.
+    page = [
+        {"ticker": t, "root": "SPXW", "date": "2026-11-13", "underlying_ticker": "SPX"}
+        for t in UNCLASSIFIED
+    ]
+    page.append(
+        {"ticker": AAPL_CALL, "root": "AAPL", "date": "2026-11-13", "underlying_ticker": "AAPL"}
+    )
+    server.reply("/options/v1/open-interest", Reply({"status": "OK", "results": page}))
+    serve_indices(server, "SPX")
+    server.reply(
+        wire(f"/v3/reference/options/contracts/{UNCLASSIFIED[0]}"),
+        Reply({"status": "OK", "results": {}}),
+    )
+
+
+def test_the_rows_of_a_root_the_reference_cannot_classify_are_withheld(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    serve_unclassified(fake_rest)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    out = rows(rest_session.options.open_interest().fetch(wait=True))
+    # SPX may be an index's ticker without its I:, so SPXW's rows are left out and listed.
+    assert [(r["Symbol"], r["Underlying"]) for r in out] == [(AAPL_CALL, "AAPL")]
+    [event] = events
+    assert (event.cause, event.action, event.symbol, event.field, event.rows) == (
+        ProblemCause.UNREADABLE_SYMBOLS,
+        ProblemAction.WITHHELD,
+        "SPX",
+        "Underlying",
+        2,
+    )
+    assert event.stream_id is not None
+    assert event.policy is dm.OnError.LOG
+    assert event.detail.startswith(
+        "Massive's Contract Overview gives no CFI code for option root SPXW (asked about "
+        f"{UNCLASSIFIED[0]} as of 2026-11-13)"
+    )
+
+
+def test_a_read_of_an_unclassified_root_alone_fails_whatever_the_setting(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    page = [
+        {"ticker": t, "root": "SPXW", "date": "2026-11-13", "underlying_ticker": "SPX"}
+        for t in UNCLASSIFIED
+    ]
+    fake_rest.reply("/options/v1/open-interest", Reply({"status": "OK", "results": page}))
+    serve_indices(fake_rest, "SPX")
+    fake_rest.reply(
+        wire(f"/v3/reference/options/contracts/{UNCLASSIFIED[0]}"),
+        Reply({"status": "OK", "results": {}}),
+    )
+    # Every row the read would return is withheld, so it fails under the default LOG too.
+    with pytest.raises(RowDataError, match=r"none of the 2 rows.*option root SPXW"):
+        rest_session.options.open_interest(root="SPXW").fetch(wait=True)
+
+
+def test_the_rows_of_an_unclassified_root_fail_the_read_under_raise(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    serve_unclassified(fake_rest)
+    strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
+    with pytest.raises(RowDataError, match=r"2 under unreadable_symbols.*option root SPXW"):
+        rest_session.options.open_interest(on_error=strict).fetch(wait=True)
+
+
+def test_a_poll_of_unusual_trades_names_an_index_underlying_from_its_first_cycle(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    trade = {**LIST_ROW, "ticker": "O:SPXW261218C06000000", "root": "SPXW"}
+    fake_rest.reply(
+        "/options/v1/unusual-trades",
+        Reply({"status": "OK", "results": [{**trade, "underlying_ticker": "SPX"}]}),
+    )
+    reference = "/v3/reference/options/contracts/O:SPXW261218C06000000"
+    serve_indices(fake_rest, "SPX")
+    fake_rest.reply(wire(reference), contract_reference("OCEICS"))
+    table = rest_session.options.unusual_trades(limit=10).poll(60)
+    pace = threading.Event()  # never set; only paces the bounded wait for the first cycle
+    found: list[dict[str, Any]] = []
+    for _ in range(500):
+        found = rows(table)
+        if found:
+            break
+        pace.wait(0.02)
+    rest_session.release(table)
+    assert [(r["Symbol"], r["Underlying"]) for r in found] == [("O:SPXW261218C06000000", "I:SPX")]
+    # The poll asked about the root once, as of the trade's New York day.
+    assert [q for q in fake_rest.get_queries(one_value=True) if q[0] == reference] == [
+        (reference, {"as_of": "2025-10-29"})
+    ]
+
+
+@pytest.mark.parametrize("refused", ["index list", "contract"])
+def test_a_refused_root_lookup_fails_the_read_with_massive_s_refusal(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, refused: str
+) -> None:
+    fake_rest.reply(
+        "/options/v1/open-interest",
+        Reply({"status": "OK", "results": [{**LIST_ROW, "underlying_ticker": "SPY"}]}),
+    )
+    refusal = Reply(
+        {"status": "NOT_AUTHORIZED", "message": "You are not entitled to this data."}, status=403
+    )
+    if refused == "index list":
+        fake_rest.reply(INDEX_LIST, refusal)
+    else:
+        serve_indices(fake_rest, "SPY")  # as if SPY named an index, so its root is asked about
+        fake_rest.reply(wire(f"/v3/reference/options/contracts/{LIST_ROW['ticker']}"), refusal)
+    with pytest.raises(dm.EntitlementError, match="option root 'SPY' cannot be classified"):
+        rest_session.options.open_interest().fetch(wait=True)
+
+
+def list_query(m: dm.MassiveSession, spec: DatasetSpec) -> FetchQuery:
+    # The query of one of the two options list datasets, with every argument left out.
+    if spec is options.OPEN_INTEREST:
+        return m.options.open_interest()
+    return m.options.unusual_trades()
+
+
+LIST_ROW = {
+    "ticker": "O:SPY260123C00687000",
+    "root": "SPY",
+    "date": "2026-01-22",
+    "sip_timestamp": 1761751432123456800,
+    "sequence_number": 1,
+}
+"""A row each of the two list datasets reads whole: the one's keys and the other's."""
+
+BAD_LIST_ROWS = [
+    (RowFault.UNREADABLE_SYMBOLS, {**LIST_ROW, "ticker": "SPY 260123C00687000"}),
+    (RowFault.UNCONVERTIBLE_VALUES, {**LIST_ROW, "strike_price": "x", "price": "x"}),
+]
+"""A row of each kind both list datasets withhold, with its cause."""
+
+
+@pytest.mark.parametrize("spec", [options.OPEN_INTEREST, options.UNUSUAL_TRADES])
+@pytest.mark.parametrize(("cause", "bad"), BAD_LIST_ROWS)
+@pytest.mark.parametrize("policy", [dm.OnError.LOG, dm.OnError.IGNORE])
+def test_a_list_dataset_withholds_a_row_it_cannot_read_whole(
+    *,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    spec: DatasetSpec,
+    cause: RowFault,
+    bad: dict[str, object],
+    policy: dm.OnError,
+) -> None:
+    fake_rest.reply(spec.rest_paths[0], Reply({"status": "OK", "results": [bad, LIST_ROW]}))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(**{cause.value: policy}),
+    )
+    with dm.MassiveSession(config) as m:
+        events: list[ProblemEvent] = []
+        monkeypatch.setattr(m._core, "problems", events.extend)
+        out = rows(list_query(m, spec).fetch(wait=True))
+    # No trace of the bad row; the whole one beside it lands, and the call has its problem.
+    assert [(r["Symbol"], r["OptionRoot"]) for r in out] == [("O:SPY260123C00687000", "SPY")]
+    # The rows carry both datasets' keys, so each dataset also lists the other's as drift.
+    withheld = [e for e in events if e.cause is not ProblemCause.SCHEMA_DRIFT]
+    assert [(e.cause, e.rows, e.stream_id is not None) for e in withheld] == [
+        (ProblemCause(cause.value), 1, True)
+    ]
+
+
+@pytest.mark.parametrize("spec", [options.OPEN_INTEREST, options.UNUSUAL_TRADES])
+@pytest.mark.parametrize(("cause", "bad"), BAD_LIST_ROWS)
+def test_a_list_dataset_fails_on_a_row_it_cannot_read_whole_under_raise(
+    *, fake_rest: FakeRestServer, spec: DatasetSpec, cause: RowFault, bad: dict[str, object]
+) -> None:
+    fake_rest.reply(spec.rest_paths[0], Reply({"status": "OK", "results": [bad, LIST_ROW]}))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(**{cause.value: dm.OnError.RAISE}),
+    )
+    with dm.MassiveSession(config) as m, pytest.raises(RowDataError, match=f"1 under {cause}"):
+        list_query(m, spec).fetch(wait=True)
+
+
+def test_an_unusual_trade_without_its_sip_time_is_withheld(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    timeless = {k: v for k, v in LIST_ROW.items() if k != "sip_timestamp"}
+    fake_rest.reply(
+        "/options/v1/unusual-trades", Reply({"status": "OK", "results": [timeless, LIST_ROW]})
+    )
+    out = rows(rest_session.options.unusual_trades().fetch(wait=True))
+    assert [r["Timestamp"] for r in out] == [1761751432123456800]
+
+
+@pytest.mark.parametrize("spec", [options.OPEN_INTEREST, options.UNUSUAL_TRADES])
+def test_a_row_without_massive_s_root_has_a_null_option_root(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, spec: DatasetSpec
+) -> None:
+    # Massive's `root` is optional: its absence is null, never the root read from `Symbol`.
+    rootless = {k: v for k, v in LIST_ROW.items() if k != "root"}
+    fake_rest.reply(spec.rest_paths[0], Reply({"status": "OK", "results": [rootless]}))
+    [out] = rows(list_query(rest_session, spec).fetch(wait=True))
+    assert (out["Symbol"], out["OptionRoot"]) == ("O:SPY260123C00687000", None)
+
+
+def test_unusual_trades_poll_as_a_feed(rest_session: dm.MassiveSession) -> None:
+    # Without a start or a limit, each poll would read Massive's whole archive.
+    with pytest.raises(ValueError, match=r"poll\(\) needs a start or a limit"):
+        rest_session.options.unusual_trades().poll(60)
+    assert options.UNUSUAL_TRADES.is_feed
+    assert options.UNUSUAL_TRADES.poll_keys == ("Symbol", "Timestamp", "SequenceNumber")
+
+
+def test_the_list_datasets_take_only_option_contracts_and_refuse_all(
+    massive_session: dm.MassiveSession,
+) -> None:
+    m = massive_session
+    for factory in (m.options.open_interest, m.options.unusual_trades):
+        assert factory()._request.symbols is None
+        with pytest.raises(ValueError, match="leave symbols out, which returns every contract"):
+            factory(dm.ALL)
+        with pytest.raises(ValueError, match="is an underlying, not an OCC option symbol"):
+            factory("AAPL")
+    with pytest.raises(ValueError, match="root is empty; pass None for every root"):
+        m.options.open_interest(root=[])
+    with pytest.raises(TypeError, match="root must be a str, a sequence of str, or None"):
+        m.options.open_interest(root=5)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(ValueError, match="calendar date; pass dates"):
+        m.options.open_interest(start=datetime(2026, 1, 20, tzinfo=UTC))
+    with pytest.raises(ValueError, match="root_any_of is set through its own argument, root="):
+        m.options.open_interest(filters={"root_any_of": "SPY"})
 
 
 # --- End to end: WebSocket -------------------------------------------------------------------
@@ -1409,7 +1916,7 @@ def test_admin_messages_take_no_symbols_and_have_no_last_by(
     massive_session: dm.MassiveSession,
 ) -> None:
     query = massive_session.options.admin_messages()
-    assert type(query) is NoSymbolStreamQuery
+    assert type(query) is NoSymbolStreamHistoryQuery
     assert query._request.symbols is None
     assert repr(query) == "m.options.admin_messages()"
     with pytest.raises(TypeError):
@@ -1586,6 +2093,132 @@ def test_admin_messages_on_delayed_options_data_raise_the_delayed_data_error(
     )
     assert "plan" not in str(info.value)
     assert session.urls == []
+
+
+ADMIN_ARCHIVE = "/options/v1/admin-messages"
+ADMIN_DAY = date(2026, 11, 5)  # the day of Massive's sample messages
+
+
+def test_admin_message_history_reads_every_exchange_s_archive_by_time(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+) -> None:
+    fake_rest.reply(ADMIN_ARCHIVE, Reply(body(load_fixture, "admin_messages.json")))
+    query = rest_session.options.admin_messages()
+    out = rows(query.history(ADMIN_DAY, ADMIN_DAY, wait=True))
+    # One request, by time alone: no ticker and no exchange, ascending, at the largest page.
+    assert fake_rest.get_queries(one_value=True) == [
+        (
+            ADMIN_ARCHIVE,
+            {
+                "timestamp.gte": str(ny_midnight_ns(ADMIN_DAY)),
+                "timestamp.lt": str(ny_midnight_ns(date(2026, 11, 6))),
+                "sort": "timestamp.asc",
+                "limit": "50000",
+            },
+        )
+    ]
+    picked = ("Date", "Timestamp", "MessageId", "Exchange", "Message", "Retransmission")
+    assert [tuple(r[c] for c in picked) for r in out] == [
+        (
+            "2026-11-05",
+            1793911442930568200,
+            "1793911442930568079-4043826282",
+            302,
+            "FLEX AAPL 20270115 C 00200000 PRINT 150 @ 12.35",
+            None,  # Massive omits the flag on an original message
+        ),
+        (
+            "2026-11-05",
+            1793911460115302100,
+            "1793911460115302244-4043826283",
+            300,
+            "OPRA SYSTEM NORMAL",
+            True,
+        ),
+    ]
+    # The archive and the stream give one table shape.
+    live_columns = CATALOG.dataset_schema(options.ADMIN_MESSAGES).column_names
+    assert tuple(
+        dh_arrow.to_arrow(query.history(ADMIN_DAY, ADMIN_DAY, wait=True)).column_names
+    ) == (live_columns)
+
+
+def test_an_empty_admin_message_archive_is_no_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(ADMIN_ARCHIVE, Reply({"status": "OK", "results": []}))
+    out = rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
+    assert out.size == 0
+
+
+def test_admin_message_history_has_no_flat_files(rest_session: dm.MassiveSession) -> None:
+    with pytest.raises(ValueError, match="flat files"):
+        rest_session.options.admin_messages().history(
+            ADMIN_DAY, ADMIN_DAY, source=HistorySource.FLAT_FILES
+        )
+
+
+def unreadable_admin_messages(load_fixture: Callable[[str, str], bytes]) -> Reply:
+    # Massive's first sample message without its required SIP time, beside the second, whole.
+    sample = json.loads(load_fixture(OWNER, "admin_messages.json"))["results"]
+    page = [{k: v for k, v in sample[0].items() if k != "timestamp"}, sample[1]]
+    return Reply({"status": "OK", "results": page})
+
+
+def test_an_unreadable_admin_message_in_the_archive_is_withheld(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    fake_rest.reply(ADMIN_ARCHIVE, unreadable_admin_messages(load_fixture))
+    out = rows(rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True))
+    # No trace of the unreadable message; the whole one beside it lands.
+    assert [r["MessageId"] for r in out] == ["1793911460115302244-4043826283"]
+    assert [(e.cause, e.rows, e.stream_id is not None) for e in events] == [
+        (ProblemCause.UNREADABLE_KEYS, 1, True)
+    ]
+
+
+def test_an_unreadable_admin_message_under_raise_fails_the_history(
+    fake_rest: FakeRestServer, load_fixture: Callable[[str, str], bytes]
+) -> None:
+    fake_rest.reply(ADMIN_ARCHIVE, unreadable_admin_messages(load_fixture))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.RAISE),
+    )
+    with (
+        dm.MassiveSession(config) as m,
+        pytest.raises(RowDataError, match="1 under unreadable_keys"),
+    ):
+        m.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
+
+
+def test_an_archive_read_with_no_readable_message_fails_as_a_format_change(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Under the default LOG, a read with rows but none whole fails rather than read empty.
+    page = [{"id": "1-1", "exchange": 300, "message": "OPRA SYSTEM NORMAL", "sequence_number": 1}]
+    fake_rest.reply(ADMIN_ARCHIVE, Reply({"status": "OK", "results": page}))
+    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+        rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
+
+
+def test_a_refused_admin_message_archive_raises_massive_s_refusal(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    refusal = {"status": "NOT_AUTHORIZED", "message": "You are not entitled to this data."}
+    fake_rest.reply(ADMIN_ARCHIVE, Reply(refusal, status=403))
+    with pytest.raises(dm.EntitlementError, match="You are not entitled to this data"):
+        rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
 
 
 # --- End to end: flat files ------------------------------------------------------------------

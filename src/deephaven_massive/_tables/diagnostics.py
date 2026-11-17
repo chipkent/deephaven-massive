@@ -1260,6 +1260,11 @@ class Diagnostics:
                 at = min(now, round(notice.ends * 1e9))
                 ended.append(self._paused.update(self._held_pauses(), at=at))
             self._problems.add(self._ledger.apply(s for s in ended if s is not None))
+        except Exception:  # a failed last row never costs the other tables theirs
+            logger.exception(
+                "diagnostics: failed to end the open rate-limit pauses in the problems table. %s",
+                LIBRARY_BUG,
+            )
         finally:  # the scope is released whatever the last rows did
             self._scope_released = True
             release_scope(self._exec_ctx, self._scope)

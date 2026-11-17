@@ -24,6 +24,8 @@ from deephaven import dtypes, new_table
 from deephaven.column import string_col
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.wire_symbols import is_index_option
+from deephaven_massive._ingest.rate_limits import OTHER
 from deephaven_massive._massive import (
     RestClient,
     Transport,
@@ -339,14 +341,14 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
         if rows:
             ticker = str(rows[0]["ticker"])
             outcome = _library(
-                partial(live_session.options.contracts, symbols=ticker, as_of=listed), table_rows
+                partial(live_session.options.contract_details, ticker, as_of=listed), table_rows
             )
             shown = (
                 outcome
                 if isinstance(outcome, str)
                 else [{k: r.get(k) for k in _DELIVERABLE_COLUMNS} for r in outcome]
             )
-            evidence(f"    library contracts({ticker}): {shown}")
+            evidence(f"    library contract_details({ticker}): {shown}")
     assert found
     assert not listed_extra, f"standard contracts with further deliverables: {listed_extra[:5]}"
 
@@ -1085,7 +1087,307 @@ def test_massive_answers_contract_details_of_a_stock_ticker(
 ) -> None:
     """What the contract overview answers for `AAPL`, a stock rather than a contract.
 
-    `m.options.contracts` refuses an underlying passed as `symbols` and names
-    `underlying=`. DATA counts the rows describing a contract named `AAPL`.
+    `m.options.contract_details` refuses an underlying passed as `symbols` and names
+    `m.options.contracts`. DATA counts the rows describing a contract named `AAPL`.
     """
     assert bad_values.ask_all(live_rest, bad_values.CONTRACT_SYMBOL, evidence)
+
+
+_OPEN_INTEREST = "/options/v1/open-interest"
+_UNUSUAL_TRADES = "/options/v1/unusual-trades"
+_CONTRACT = "/v3/reference/options/contracts/{options_ticker}"
+_SAMPLE_ROOTS = ("SPY", "SPXW", "AMCR1")
+"""A standard, a weekly, and an adjusted root: Massive's own examples of roots that differ from
+their underlying."""
+
+
+def _page(client: RestClient, path: str, query: Mapping[str, object]) -> list[dict[str, Any]]:
+    """Read the raw rows of one page of a path that takes no path parameters.
+
+    Returns:
+        The rows.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key access to the path; the live-test
+            hook skips, quoting it.
+    """
+    return client.get(source(Transport.REST, path), {}, query, bucket="options").rows
+
+
+_STANDING_ROOTS = ("SPY", "SPXW")
+"""The sample roots whose contracts always have open interest; an adjusted root's may have
+none on the day read."""
+
+
+def _root_samples(client: RestClient, evidence: Evidence) -> dict[str, list[dict[str, Any]]]:
+    """Read one page of the latest open interest of each sample root, each root on its own.
+
+    A shared page could hold one root's rows alone, so each root gets its own request. Records
+    each root's row count; an adjusted root with no rows is recorded, not failed.
+
+    Returns:
+        Each sample root's rows.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key access to the open interest; the
+            live-test hook skips, quoting it.
+    """
+    samples = {
+        root: _page(client, _OPEN_INTEREST, {"root": root, "limit": 100}) for root in _SAMPLE_ROOTS
+    }
+    evidence(f"open interest rows per root: { {k: len(v) for k, v in samples.items()} }")
+    return samples
+
+
+@pytest.mark.verifies("140")
+@pytest.mark.requests(5)
+def test_root_is_the_ticker_s_occ_root(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Massive's `root` of the open interest and unusual trades is each ticker's OCC root.
+
+    Reads one page of open interest of each of the roots `SPY`, `SPXW`, and `AMCR1`, one page of
+    the latest unusual trades of any root, and the library's open interest of `SPXW`, and
+    records the roots and counts. Fails when `SPY`, `SPXW`, or the library's read has no row,
+    since the check would then rest on nothing, and on any row whose `root` is not its ticker's
+    root: the two datasets then can't give Massive's `root` the name `OptionRoot`. A refusal
+    skips the test, quoting Massive.
+    """
+    samples = _root_samples(live_rest, evidence)
+    trades = _page(live_rest, _UNUSUAL_TRADES, {"limit": 300})
+    rows = [row for found in samples.values() for row in found] + trades
+    differ = [(r.get("ticker"), r.get("root")) for r in rows if r.get("root") != _root(r["ticker"])]
+    roots = sorted({str(r.get("root")) for r in trades})
+    evidence(f"{len(trades)} unusual trades of roots {roots[:30]}")
+    evidence(f"rows whose root is unlike the ticker's: {differ[:10]}")
+    library = table_rows(live_session.options.open_interest(root="SPXW", limit=5).fetch(wait=True))
+    evidence(f"library SPXW: {[(r['Symbol'], r['OptionRoot']) for r in library]}")
+    assert all(samples[root] for root in _STANDING_ROOTS)
+    assert library
+    assert not differ
+    assert all(r["OptionRoot"] == _root(r["Symbol"]) for r in library)
+
+
+_UNDERLYING_ROOTS = ("SPX", "SPXW", "NDX", "VIX", "RUT", "DJT", "AMCR1", "AAPL")
+"""Roots whose underlying the two new datasets must name as the contracts reference does: index
+roots and their weeklies, the stock `DJT` (a bare ticker an index could share), an adjusted
+root, and a plain stock."""
+
+_PER_ROOT = 2
+"""Contracts compared per root and dataset."""
+
+
+def _contracts_underlying(
+    session: dm.MassiveSession, ticker: str, *, day: str, table_rows: TableRows
+) -> str | None:
+    """Read one contract's canonical `Underlying` from `m.options.contract_details()` as of a day.
+
+    Returns:
+        The contract's `Underlying`, or None when the reference has no row for it.
+    """
+    found = table_rows(session.options.contract_details(ticker, as_of=day).fetch(wait=True))
+    return str(found[0]["Underlying"]) if found else None
+
+
+@pytest.mark.verifies("141")
+@pytest.mark.requests(95)
+@pytest.mark.timeout(600)
+def test_underlying_matches_the_contracts_reference(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Both new datasets name each contract's underlying as `m.options.contract_details()` does.
+
+    For the roots `SPX`, `SPXW`, `NDX`, `VIX`, `RUT`, `DJT`, `AMCR1`, and `AAPL`, reads up to
+    two contracts each from one page of open interest per root and from one page of the latest
+    unusual trades, and two expired `SPXW` contracts from a year earlier. Then it reads each
+    contract's `Underlying` from `m.options.contract_details()` as of the row's day. It checks two
+    things for every contract read:
+
+    - Massive's own `underlying_ticker` equals the reference's `Underlying` apart from an
+      index's `I:` prefix, so Massive folds weekly and adjusted roots as the reference does;
+    - the library's `Underlying` on `m.options.open_interest()` and `m.options.unusual_trades()`
+      of those contracts equals the reference's exactly, `I:SPX` included.
+
+    Records every comparison and the roots no row was found for. Fails on any mismatch, or
+    when `SPX` and `AAPL` give no open-interest row, since an index and a stock must both be
+    compared. A refusal skips the test, quoting Massive.
+    """
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for root in _UNDERLYING_ROOTS:
+        found = _page(live_rest, _OPEN_INTEREST, {"root": root, "limit": 50})
+        rows += [("open interest", r) for r in found[:_PER_ROOT]]
+    # Expired contracts, a year back, which the reference must find as of their day.
+    year_ago = (datetime.now(_NEW_YORK).date() - timedelta(days=365)).isoformat()
+    expired = _page(live_rest, _OPEN_INTEREST, {"root": "SPXW", "date.lte": year_ago, "limit": 2})
+    rows += [("open interest", r) for r in expired]
+    trades = _page(live_rest, _UNUSUAL_TRADES, {"limit": 1000})
+    for root in _UNDERLYING_ROOTS:
+        rows += [("unusual trades", r) for r in trades if r.get("root") == root][:_PER_ROOT]
+    seen = {str(r.get("root")) for _, r in rows}
+    evidence(f"roots with rows: {sorted(seen)}; without: {sorted(set(_UNDERLYING_ROOTS) - seen)}")
+    folded: list[str] = []
+    wrong: list[str] = []
+    for source_name, row in rows:
+        ticker = str(row["ticker"])
+        day = (
+            str(row.get("date") or "")
+            or datetime.fromtimestamp(int(row["sip_timestamp"]) / 1e9, _NEW_YORK).date().isoformat()
+        )
+        reference = _contracts_underlying(live_session, ticker, day=day, table_rows=table_rows)
+        sent = row.get("underlying_ticker")
+        library = (
+            live_session.options.open_interest(ticker, start=day, end=day)
+            if source_name == "open interest"
+            else live_session.options.unusual_trades(ticker, start=day, end=day)
+        )
+        published = [r["Underlying"] for r in table_rows(library.fetch(wait=True))]
+        evidence(
+            f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r}, "
+            f"library {sorted(set(map(str, published)))}"
+        )
+        if reference is None:
+            continue
+        if sent != reference.removeprefix("I:"):
+            folded.append(f"{ticker}: {sent!r} vs {reference!r}")
+        if any(value != reference for value in published):
+            wrong.append(f"{source_name} {ticker}: {published[:3]} vs {reference!r}")
+    assert {"SPX", "AAPL"} <= {str(r.get("root")) for s, r in rows if s == "open interest"}
+    assert not folded, folded
+    assert not wrong, wrong
+
+
+@pytest.mark.verifies("142")
+@pytest.mark.requests(1)
+def test_unusual_trade_prices_are_per_share(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """An unusual trade's `price` is per share of the underlying, not per contract.
+
+    Reads one page of unusual trades and checks Massive's own rule for `block_premium`, a
+    notional premium of price x size x 100 of $100,000 or more, on the trades of standard roots
+    that carry a price and a size: every flagged trade meets it and every other trade falls
+    short. Fails when either set breaks the rule, which would mean
+    the price is not per share and the column's corrected description is wrong. A refusal
+    skips the test, quoting Massive.
+    """
+    rows = _page(live_rest, _UNUSUAL_TRADES, {"limit": 1000})
+    # A trade without a price or size can't be checked; an adjusted root (`AAPL1`) may have
+    # another multiplier than the 100 shares Massive's rule assumes, so only standard roots
+    # are judged.
+    judged = [
+        r
+        for r in rows
+        if r.get("price") is not None
+        and r.get("size") is not None
+        and not any(c.isdigit() for c in _root(str(r["ticker"])))
+    ]
+    premium = {id(r): float(r["price"]) * float(r["size"]) * 100 for r in judged}
+    flagged = [r for r in judged if "block_premium" in (r.get("flags") or [])]
+    others = [r for r in judged if "block_premium" not in (r.get("flags") or [])]
+    low = [(r["ticker"], r["price"], r["size"]) for r in flagged if premium[id(r)] < 100_000]
+    high = [(r["ticker"], r["price"], r["size"]) for r in others if premium[id(r)] >= 100_000]
+    evidence(
+        f"{len(rows)} trades, {len(judged)} judged: {len(flagged)} block_premium, "
+        f"{len(others)} other; flagged under $100,000 {low[:5]}; unflagged at $100,000 or "
+        f"more {high[:5]}"
+    )
+    assert flagged
+    assert not low
+    assert not high
+
+
+@pytest.mark.requests(1)
+def test_admin_message_history_reads_a_day_of_every_exchange(
+    live_session: dm.MassiveSession,
+    *,
+    previous_trading_day: date,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """`history()` of the admin messages reads a past day's archive with the stream's columns.
+
+    Reads the last trading day before the run and records how many messages each exchange sent,
+    with one message's text. Fails when the call fails or its columns are not the stream's; a
+    day with no message passes, since OPRA sends admin messages only with FLEX activity or an
+    exchange's notice. A refusal skips the test, quoting Massive.
+    """
+    query = live_session.options.admin_messages()
+    table = query.history(previous_trading_day, previous_trading_day, wait=True)
+    found = table_rows(table)
+    exchanges = sorted({int(r["Exchange"]) for r in found})
+    first = repr(found[0]["Message"]) if found else "none"
+    evidence(
+        f"{previous_trading_day}: {len(found)} messages from exchanges {exchanges}; first {first}"
+    )
+    assert list(table.column_names) == [str(r["Name"]) for r in table_rows(query.columns())]
+    assert all(r["Date"] == previous_trading_day.isoformat() for r in found)
+
+
+_INDEX_UNDERLYINGS = ("I:SPX", "I:NDX", "I:VIX", "I:RUT", "I:XSP", "I:DJX", "I:OEX")
+"""Indices with listed options, whose contracts' underlyings must be on Massive's index list."""
+
+
+@pytest.mark.verifies("143")
+@pytest.mark.requests(60)
+@pytest.mark.timeout(600)
+def test_index_option_underlyings_are_on_the_index_list(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Every sampled option on an index names an index on Massive's index list.
+
+    Reads Massive's whole index list, active and retired, then up to 20 contracts each of
+    `I:SPX`, `I:NDX`, `I:VIX`, `I:RUT`, `I:XSP`, `I:DJX`, and `I:OEX` from
+    `m.options.contracts()`. For every contract whose CFI code marks an option on an index:
+
+    - its bare underlying must be on the list;
+    - the bare underlying one whole-market page of open interest gives its root, the value the
+      open interest's and unusual trades' pre-filter reads, must be on the list too.
+
+    An underlying Massive lists no contract for is recorded, not failed. Also records the list's
+    pages and how many distinct roots of that page name a listed index: the Contract Overview
+    requests a first whole-market read sends. The `requests` marker assumes the list fits in
+    50 pages of 1,000. A refusal skips the test, quoting Massive.
+    """
+    tickers = source(Transport.REST, "/v3/reference/tickers")
+    listed: set[str] = set()
+    pages = 0
+    for active in ("true", "false"):
+        query = {"market": "indices", "active": active, "limit": 1000}
+        for found in live_rest.pages(tickers, {}, query, bucket=OTHER):
+            pages += 1
+            listed |= {str(r["ticker"]).removeprefix("I:") for r in found.rows if r.get("ticker")}
+    evidence(f"index list: {len(listed)} indices in {pages} pages")
+    market = _page(live_rest, _OPEN_INTEREST, {"limit": 50000})
+    roots = {str(r.get("root")): str(r.get("underlying_ticker")) for r in market}
+    off_list: list[str] = []
+    compared = 0
+    for underlying in _INDEX_UNDERLYINGS:
+        rows = table_rows(
+            live_session.options.contracts(underlying=underlying, limit=20).fetch(wait=True)
+        )
+        on_index = [r for r in rows if is_index_option(str(r.get("Cfi") or ""))]
+        compared += len(on_index)
+        named = sorted({str(r["Underlying"]) for r in on_index})
+        evidence(f"{underlying}: {len(rows)} contracts, {len(on_index)} on an index: {named}")
+        off_list += [n for n in named if n.removeprefix("I:") not in listed]
+        for root in sorted({str(r["OptionRoot"]) for r in on_index} & roots.keys()):
+            evidence(f"open interest of root {root} names {roots[root]!r}")
+            if roots[root] not in listed:
+                off_list.append(f"open interest root {root}: {roots[root]!r}")
+    index_named = sorted(root for root, under in roots.items() if under in listed)
+    evidence(
+        f"one whole-market page of open interest: {len(market)} rows, {len(roots)} roots, "
+        f"{len(index_named)} naming a listed index {index_named[:40]}"
+    )
+    assert compared
+    assert not off_list, off_list

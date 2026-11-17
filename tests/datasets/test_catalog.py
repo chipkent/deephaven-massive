@@ -1180,6 +1180,13 @@ def test_wire_parameters_gate() -> None:
             "/stocks/v1/dividends"
         ),
     )
+    elsewhere = dataclasses.replace(DIVIDENDS, symbol_params_elsewhere={"tickers": "use X"})
+    assert problems(elsewhere) == (
+        (
+            "wire parameters: stocks.dividends: symbol parameter 'tickers' is not a parameter of "
+            "/stocks/v1/dividends"
+        ),
+    )
     wrong = {
         **STOCK_TRADES.keys,
         (R, "/v3/trades/{stockTicker}"): keys(request("ticker"), "SipTimestamp"),
@@ -1322,18 +1329,7 @@ class Deferral:
     issue: int
 
 
-DEFERRED: Mapping[tuple[Transport, str], Deferral] = {
-    (Transport.REST, path): Deferral(
-        "Massive documented it on 2026-11-16; its dataset needs a public design: the call, its "
-        "arguments, and its columns.",
-        729,
-    )
-    for path in (
-        "/options/v1/open-interest",
-        "/options/v1/unusual-trades",
-        "/options/v1/admin-messages",
-    )
-}
+DEFERRED: Mapping[tuple[Transport, str], Deferral] = {}
 """Generated sources no dataset reads yet, by `(transport, source key)`.
 
 A source key is the generated key the catalog uses: a REST path template, a WebSocket
@@ -1640,9 +1636,16 @@ def test_a_dataset_serves_current_data_or_computes_from_it_not_both() -> None:
         )
 
 
-def test_the_indicators_latest_values_are_checked_as_current_data() -> None:
+def test_the_latest_indicator_values_and_unusual_trades_are_checked_as_current_data() -> None:
+    # Each one's latest rows Massive computes from the market's current data.
     latest = {spec.name for spec in CATALOG.by_name.values() if spec.latest_is_current}
-    assert latest == {"indicators.ema", "indicators.macd", "indicators.rsi", "indicators.sma"}
+    assert latest == {
+        "indicators.ema",
+        "indicators.macd",
+        "indicators.rsi",
+        "indicators.sma",
+        "options.unusual_trades",
+    }
 
 
 def test_only_datasets_of_current_data_are_checked_for_delayed_labels() -> None:
@@ -1686,13 +1689,20 @@ def test_each_refused_alternative_is_a_dataset_that_fetches() -> None:
 
 # --- Streams whose rows name no symbol --------------------------------------------------------
 
+_ADMIN_ARCHIVE = "/options/v1/admin-messages"
+
 ADMIN = DatasetSpec(
     name="options.admin_messages",
     summary="A dataset for the tests.",
     asset_class=AssetClass.OPTIONS,
     kind="admin_messages",
+    history_path=_ADMIN_ARCHIVE,
     channels={NotBars.ANY: "AD"},
-    keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+    keys={
+        (R, _ADMIN_ARCHIVE): SourceKeys(time=KeySpec("SipTimestamp")),
+        (W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp")),
+    },
+    time_axis=("timestamp.gte", "timestamp.lt"),
     names_symbols=False,
 )
 
@@ -1706,6 +1716,10 @@ def test_a_stream_without_symbols_takes_none_and_passes_the_gates() -> None:
 
 def test_a_stream_without_symbols_needs_its_time_key() -> None:
     assert problems(dataclasses.replace(ADMIN, keys={})) == (
+        (
+            "declared keys: options.admin_messages: REST /options/v1/admin-messages declares no "
+            "time key"
+        ),
         "declared keys: options.admin_messages: WS options/AD declares no time key",
     )
 
@@ -1716,16 +1730,42 @@ def test_a_stream_without_symbols_needs_its_time_key() -> None:
         lambda: dataclasses.replace(
             ADMIN, channels={}, fetch_path="/v3/snapshot", kind=None, keys={}
         ),
+        lambda: dataclasses.replace(ADMIN, fetch_path="/v3/snapshot"),
         lambda: dataclasses.replace(
             ADMIN, flat_file_prefixes={NotBars.ANY: "us_options_opra/trades_v1"}
         ),
-        lambda: dataclasses.replace(ADMIN, history_path="/v3/trades/{optionsTicker}"),
     ],
-    ids=["fetch", "flat files", "history"],
+    ids=["no stream", "fetch", "flat files"],
 )
-def test_a_dataset_without_symbols_is_a_stream_alone(changed: Callable[[], DatasetSpec]) -> None:
-    with pytest.raises(ValueError, match="no symbol is a stream alone"):
+def test_a_dataset_without_symbols_is_a_stream_with_at_most_its_archive(
+    changed: Callable[[], DatasetSpec],
+) -> None:
+    with pytest.raises(ValueError, match="no symbol is a stream, with at most a REST history"):
         changed()
+
+
+def test_a_stream_without_symbols_needs_no_archive() -> None:
+    stream = dataclasses.replace(
+        ADMIN,
+        history_path=None,
+        keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+        time_axis=None,
+        kind=None,
+    )
+    assert problems(stream) == ()
+
+
+def test_a_dataset_without_symbols_reads_its_archive_by_time_alone() -> None:
+    by_ticker = dataclasses.replace(
+        ADMIN,
+        history_path="/v3/trades/{optionsTicker}",
+        keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+        kind=None,
+    )
+    assert (
+        "symbol-free archive: options.admin_messages: its history path takes ['optionsTicker']; "
+        "a dataset whose rows name no symbol reads its archive whole"
+    ) in problems(by_ticker)
 
 
 def test_a_stream_without_symbols_declares_no_symbol_key() -> None:
@@ -1799,3 +1839,16 @@ def test_history_columns_refuse_a_transport_history_never_reads() -> None:
     # as the flat files.
     with pytest.raises(BrokenGuaranteeError, match=r"^history\(\) never reads by WS\."):
         CATALOG.history_columns(CATALOG.by_name["stocks.trades"], Transport.WS)
+
+
+def test_only_an_options_rest_dataset_classifies_its_underlyings_by_root() -> None:
+    with pytest.raises(ValueError, match="underlying_by_root is for an options REST dataset"):
+        dataclasses.replace(
+            ADMIN,
+            underlying_by_root=True,
+            history_path=None,
+            keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+            time_axis=None,
+        )
+    with pytest.raises(ValueError, match="underlying_by_root is for an options REST dataset"):
+        dataclasses.replace(EXCHANGES, underlying_by_root=True)

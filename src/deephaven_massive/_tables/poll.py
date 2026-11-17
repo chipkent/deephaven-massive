@@ -227,7 +227,7 @@ class SymbolRowError(PermanentError):
     Raised only under `noncanonical_symbols=RAISE` (under `LOG` and
     `IGNORE` the row is skipped and listed in the row's `Error`), or for a symbol table that
     has failed. The table fails with it, since every later cycle would read the same row; its
-    message names `dm.canonicalize_symbols`, which converts such a table. The table is the
+    message names the row and how to fix it (`invalid_row_message`). The table is the
     caller's, so its source is `ErrorSource.USER`, and it is a bug.
     """
 

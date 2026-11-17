@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -222,14 +223,37 @@ def test_the_skipped_rows_text_counts_and_lists_the_first_five() -> None:
     )
 
 
-def test_the_message_of_a_dataset_that_spans_classes_names_no_class() -> None:
+def test_the_message_of_a_dataset_that_spans_classes_names_each_conversion() -> None:
     message = invalid_row_message(ClassFromPrefix.ANY, "aapl")
     assert "tickers are case-sensitive" in message
     assert message.endswith(
-        "Fix the row, or convert each row with dm.canonical_symbol(text, asset_class) and the "
-        "row's own class, since this dataset's rows may mix classes. If Massive itself writes "
+        "Fix the row, or convert each row with dm.canonical_symbol(text, asset_class) and that "
+        "row's class (dm.AssetClass.FOREX for 'EUR/USD'), since this table's rows may mix "
+        "classes. A stock in another source's spelling also needs that source's convention: "
+        "dm.canonical_symbol('BRK-B', dm.AssetClass.STOCKS, "
+        "convention=dm.SymbolConvention.YAHOO) gives 'BRK.B'. If Massive itself writes "
         f"'aapl', the library does not know its form yet: report it at {ISSUES_URL}"
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "asset_class", "convention", "converted"),
+    [
+        ("EUR/USD", AssetClass.FOREX, dm.SymbolConvention.MASSIVE, "C:EURUSD"),
+        ("BRK-B", AssetClass.STOCKS, dm.SymbolConvention.YAHOO, "BRK.B"),
+    ],
+)
+def test_the_conversions_a_mixed_class_message_names_convert_refused_rows(
+    *, text: str, asset_class: AssetClass, convention: dm.SymbolConvention, converted: str
+) -> None:
+    # Each refused row converts as the message says; without its convention BRK-B does not.
+    mixed = spanning()
+    assert not mixed.accepts(text)
+    assert dm.canonical_symbol(text, asset_class, convention=convention) == converted
+    assert mixed.accepts(converted)
+    if convention is not dm.SymbolConvention.MASSIVE:
+        with pytest.raises(ValueError, match="convention="):
+            dm.canonical_symbol(text, asset_class)
 
 
 # --- SymbolWatch ---------------------------------------------------------------------------------
@@ -357,12 +381,21 @@ def test_a_table_of_underlyings_takes_only_stock_and_index_tickers(dh_exec_ctx: 
     option = "O:AAPL250117C00150000"
     for refused in (option, "X:BTCUSD", "aapl"):
         assert not underlyings().accepts(refused)
-    with pytest.raises(
-        ValueError,
-        match=r"^options\.chain: a table of underlyings holds 'O:AAPL250117C00150000', which is "
-        r"not a stock or index ticker such as 'AAPL' or 'I:SPX'\. Fix the row, or convert it with "
-        r"dm\.canonical_symbol\(text, asset_class\)$",
-    ):
+    advice = (
+        "options.chain: a table of underlyings holds 'O:AAPL250117C00150000', which is not a "
+        "stock or index ticker such as 'AAPL' or 'I:SPX'. Fix or delete the row. If your stock "
+        "tickers use another source's spelling, such as Yahoo's 'BRK-B', convert every row but "
+        "the index rows: converting the whole table as stocks nulls index rows such as 'I:SPX'. "
+        "With t the table you passed as underlying=:\n"
+        "    from deephaven import merge\n"
+        "    stocks = dm.canonicalize_symbols("
+        't.where("isNull(Symbol) || !Symbol.startsWith(`I:`)"), '
+        "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)\n"
+        '    underlying = merge([stocks, t.where("!isNull(Symbol) && '
+        'Symbol.startsWith(`I:`)")])\n'
+        "Use YAHOO, NASDAQ, or CMS, whichever source the tickers come from"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(advice)}$"):
         read_symbols(underlyings(), new_table([string_col("Symbol", [option])]), stream_id=7)
 
 
@@ -385,6 +418,53 @@ def test_a_table_of_product_codes_is_read_from_its_product_code_column(
     assert read_symbols(product_codes(), table, stream_id=7).symbols == ("6E", "ES", "NQ")
     with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
         read_symbols(product_codes(), new_table([string_col("ProductCode", [" ES"])]), stream_id=7)
+
+
+def test_a_refused_product_code_names_no_converter(dh_exec_ctx: object) -> None:
+    # The converters follow a ticker grammar: they null a product code such as ES, so naming
+    # dm.canonicalize_symbols would send the caller to a table of nulls.
+    message = invalid_row_message(AssetClass.FUTURES, " ES", as_written=True)
+    assert message.endswith(
+        "Fix the row to the value Massive writes, or delete it. Don't convert the table with "
+        "dm.canonicalize_symbols: it applies ticker rules these values don't follow, so it "
+        "nulls correct ones too"
+    )
+    assert "canonicalize_symbols(table" not in message
+    with pytest.raises(ValueError, match=f"^{re.escape(f'futures.products: {message}')}$"):
+        read_symbols(product_codes(), new_table([string_col("ProductCode", [" ES"])]), stream_id=7)
+    codes = new_table([string_col("ProductCode", ["ES", " ES"])])
+    converted = dm.canonicalize_symbols(codes, AssetClass.FUTURES, column="ProductCode")
+    assert values(converted, "ProductCode") == [None, None]
+
+
+def test_a_refused_row_of_a_dataset_kept_as_written_names_no_converter() -> None:
+    message = invalid_row_message(AssetClass.STOCKS, " x", as_written=True)
+    assert message == (
+        "a symbol table holds ' x': ' x' is not a ticker as Massive writes it (not empty, no "
+        "surrounding whitespace, no control character, no class prefix). Fix the row to "
+        "the value Massive writes, or delete it. Don't convert the table with "
+        "dm.canonicalize_symbols: it applies ticker rules these values don't follow, so it "
+        "nulls correct ones too"
+    )
+
+
+def test_a_refused_underlying_names_conversions_that_convert_it(dh_exec_ctx: object) -> None:
+    # Under Massive's own convention no refused underlying converts, so the advice names the
+    # conversion; followed, it gives a table every row of which the chain takes.
+    t = new_table([string_col("Symbol", ["BRK-B", "I:SPX", None])])
+    with pytest.raises(ValueError, match=r"convention=dm\.SymbolConvention\.YAHOO\)"):
+        read_symbols(underlyings(), t, stream_id=7)
+    index = "!isNull(Symbol) && Symbol.startsWith(`I:`)"
+    stocks = dm.canonicalize_symbols(
+        t.where("isNull(Symbol) || !Symbol.startsWith(`I:`)"),
+        dm.AssetClass.STOCKS,
+        convention=dm.SymbolConvention.YAHOO,
+    )
+    converted = merge([stocks, t.where(index)])
+    assert read_symbols(underlyings(), converted, stream_id=7) == CurrentSymbols(("BRK.B", "I:SPX"))
+    # Converting the whole table as stocks nulls the index, as the advice warns.
+    whole = dm.canonicalize_symbols(t, AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)
+    assert values(whole) == ["BRK.B", None, None]
 
 
 def test_a_watch_of_product_codes_reports_changes_of_its_codes(
@@ -998,6 +1078,7 @@ def test_skipped_values_report_both_sources_in_order_across_threads() -> None:
         thread.start()
     for thread in threads:
         thread.join(30)
+        assert not thread.is_alive()  # a deadlock fails here, not as a wrong snapshot
     last = reported[-1]
     assert isinstance(last, ProblemSpans)
     assert sorted(last.spans) == [

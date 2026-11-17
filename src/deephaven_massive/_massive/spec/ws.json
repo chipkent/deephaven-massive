@@ -231,7 +231,7 @@
     {"column": "Retransmission", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "rt"}
    ],
    "memberships": [
-    {"group": "options", "kind": "admin_messages", "position": 0, "projection": null}
+    {"group": "options", "kind": "admin_messages", "position": 1, "projection": null}
    ]
   },
   {
