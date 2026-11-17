@@ -1025,6 +1025,34 @@ def test_a_watchlist_filter_takes_one_failure_when_both_of_its_tables_fail(
     release_scope(dh_exec_ctx, scope)
 
 
+def test_one_text_skipped_in_two_tables_is_two_spans() -> None:
+    # The same text skipped in the symbol table and in the table of values, and refused by
+    # the converter too, is three problems: no source's span hides another's.
+    rule = SymbolRowRule(
+        "test.trades", AssetClass.STOCKS, as_written=False, noncanonical=OnError.LOG
+    )
+    values = SymbolRowRule(
+        "test.trades",
+        AssetClass.STOCKS,
+        as_written=False,
+        noncanonical=OnError.LOG,
+        column="Symbol",
+        underlying=True,
+    )
+    reported: list[Problem] = []
+    skipped = SkippedValues(rule, stream_id=7, report=reported.extend, values=values)
+    skipped.update(("aapl",), values=("aapl",))
+    skipped.refused_changed({"aapl": "no"}, OnError.LOG)
+    last = reported[-1]
+    assert isinstance(last, ProblemSpans)
+    found = sorted(
+        (span.field or "", span.detail.startswith("canonicalize_symbols"))
+        for span in last.spans.values()
+    )
+    assert found == [("", False), ("", True), ("Symbol", False)]
+    assert {span.symbol for span in last.spans.values()} == {"aapl"}
+
+
 def test_skipped_values_report_both_sources_in_order_across_threads() -> None:
     # The table's own reader and a converted watchlist's listener report on their own threads;
     # the lock keeps each snapshot whole and in order, so the last one shows both sources.
@@ -1053,4 +1081,7 @@ def test_skipped_values_report_both_sources_in_order_across_threads() -> None:
         assert not thread.is_alive()  # a deadlock fails here, not as a wrong snapshot
     last = reported[-1]
     assert isinstance(last, ProblemSpans)
-    assert sorted(last.spans) == ["refused r1", "v1"]  # each source's last value, 199 % 3
+    assert sorted(last.spans) == [
+        "refused None 'r1'",
+        "skipped None 'v1'",
+    ]  # each source's last value, 199 % 3

@@ -670,7 +670,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
               file; for a rate-limit pause, its `Bucket` in `m.rate_limits()`; for a refused
               exchange, its name.
             - `Cause`: why, such as `unconvertible_values` or `outage`. A cause named for an
-              `dm.ErrorPolicy` setting follows that setting.
+              `dm.ErrorPolicy` setting follows that setting. A value `dm.canonicalize_symbols`
+              couldn't convert follows that call's `on_error` instead.
             - `Action`: what the library did: `WITHHELD` rows of Massive's data, `SKIPPED` a
               symbol, exchange, or file line, `FAILED`, `GAP` (rows may be missing over the
               span), `DELAYED` (rows come late), `PUBLISHED` (rows published without a field

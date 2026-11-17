@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
 from deephaven.stream import blink_to_append_only
@@ -31,11 +31,18 @@ from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.shared_streams import SharedStreams
 from deephaven_massive._tables.transports import StreamTransport
 from deephaven_massive._tables.watchlist import (
+    SymbolRowRule,
     latest_rows_since_added,
     read_symbols,
     watched_rows,
 )
-from deephaven_massive.queries._query import Query, _read_symbol_table, _verb
+from deephaven_massive.queries._query import (
+    Query,
+    _read_symbol_rows,
+    _read_symbol_table,
+    _verb,
+    table_problems,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,6 +50,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._tables.transports import StreamHandle
 
 __all__ = ["MAX_RING_CAPACITY", "NoSymbolStreamQuery", "StreamQuery"]
 
@@ -50,6 +58,21 @@ logger = logging.getLogger(__name__)
 
 MAX_RING_CAPACITY: Final = 2**31 - 1
 """The largest `ring()` capacity Deephaven accepts (a Java `int`)."""
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamRequest:
+    """The request a stream opens for, and what the read of a static symbol table skipped.
+
+    Attributes:
+        request: The request; a static table's symbols are already read into a tuple.
+        static: The static symbol table read at the call, or None.
+        skipped: The values that read skipped.
+    """
+
+    request: Request
+    static: SymbolTable | None = None
+    skipped: tuple[str, ...] = ()
 
 
 class _StreamShapes(Query):
@@ -72,7 +95,7 @@ class _StreamShapes(Query):
         """
         return self._spec.channels[timespan_key(self._request.timespan)]
 
-    def _stream_request(self) -> Request:
+    def _stream_request(self) -> _StreamRequest:
         """Return the request the stream is opened for, with a static symbol table read once.
 
         The request of a stream whose rows name no symbol (`DatasetSpec.names_symbols` False),
@@ -81,29 +104,35 @@ class _StreamShapes(Query):
         (`_read_symbol_table`), and becomes the sorted tuple of its symbols; a refreshing table
         stays reactive. A static table with no symbol, with only rows that are not canonical,
         or with any such row under `noncanonical_symbols=RAISE`, raises the `ValueError` of
-        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped.
+        `_read_symbol_table`; under `LOG` and `IGNORE` such a row is skipped, and listed in
+        `m.problems()` as a problem of the stream once it has one (`_stream`).
 
         Returns:
-            The request.
+            The request, and what the read of a static table skipped.
         """
         request = self._request
         symbols = request.symbols
         if not self._spec.names_symbols:
             # A stream whose rows name no symbol subscribes its channel's every topic, so its
             # stream is keyed as dm.ALL's would be.
-            return replace(request, symbols=ALL)
+            return _StreamRequest(replace(request, symbols=ALL))
         if isinstance(symbols, SymbolTable) and not symbols.table.is_refreshing:
-            read = _read_symbol_table(
+            rows = _read_symbol_rows(
                 self._core,
                 self._spec,
                 symbols,
                 query=repr(self),
                 noncanonical=self._request.on_error.noncanonical_symbols,
+                listed=True,
             )
-            return replace(request, symbols=read)
-        return request
+            return _StreamRequest(
+                replace(request, symbols=rows.symbols), static=symbols, skipped=rows.skipped
+            )
+        return _StreamRequest(request)
 
-    def _stream(self, shape: Callable[[Table], Table], request: Request, *, verb: str) -> Table:
+    def _stream(
+        self, shape: Callable[[Table], Table], opened: _StreamRequest, *, verb: str
+    ) -> Table:
         """Shape a live result from this query's stream, creating the stream if needed.
 
         The result is the shape, described last (`describe`): an append-only or ring table
@@ -117,7 +146,9 @@ class _StreamShapes(Query):
         Args:
             shape: Turns the stream's blink table into the result's shape; the identity for
                 `blink()`, whose described copy is then a new table of its own.
-            request: The request from `_stream_request`.
+            opened: The request from `_stream_request`, with what a static table's read
+                skipped: each skipped or refused value is listed in `m.problems()` as a problem
+                of the stream, once, since the table never changes (`table_problems`).
             verb: The verb's name, such as `"last_by"`, for the log line of a stream's open.
 
         Returns:
@@ -127,6 +158,7 @@ class _StreamShapes(Query):
         `ValueError` of `_read_symbol_table`.
         """
         spec = self._spec
+        request = opened.request
         symbols = request.symbols  # a static table is already read: never read it twice
         if isinstance(symbols, SymbolTable):
             _read_symbol_table(
@@ -138,19 +170,34 @@ class _StreamShapes(Query):
                 live=True,
             )
         schema = self._core.dataset_schema(spec)
-        return self._core.streams.result(
-            spec,
-            request,
-            channel=self._channel,
-            query=repr(self),
-            verb=verb,
-            build=lambda handle: describe(
+        streams: list[int] = []  # the stream the result reads, which the build learns
+
+        def build(handle: StreamHandle) -> Table:
+            streams.append(handle.stream_id)
+            return describe(
                 shape(handle.blink),
                 spec,
                 schema,
                 note=recency_note(handle.recency, host=handle.host),
-            ),
+            )
+
+        result = self._core.streams.result(
+            spec, request, channel=self._channel, query=repr(self), verb=verb, build=build
         )
+        if opened.static is not None:
+            rule = SymbolRowRule.of(spec, self._request.on_error.noncanonical_symbols)
+            [stream_id] = streams
+            problems = table_problems(
+                spec,
+                opened.static,
+                rule,
+                skipped=opened.skipped,
+                stream_id=stream_id,
+                query=repr(self),
+            )
+            if problems:
+                self._core.problems(problems)
+        return result
 
     @_verb
     @raises_through(
@@ -405,7 +452,7 @@ class StreamQuery(_StreamShapes):
         """
         keys = self._last_by_keys(by)
         request = self._stream_request()
-        symbols = request.symbols
+        symbols = request.request.symbols
         if not isinstance(symbols, SymbolTable):
             return self._stream(lambda blink: blink.last_by(list(keys)), request, verb="last_by")
         watch = symbols.table
