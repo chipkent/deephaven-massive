@@ -497,6 +497,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `BufferedRows`: rows waiting to reach their tables. Past 1,000,000, a WARNING is
               logged.
             - `Reconnects`, `LastMessageAt`, `NextReconnectAt`, `UpdatedAt`, and `LastError`.
+              `LastError` is the latest error. A WebSocket connection keeps it after it
+              reconnects.
 
             A connection's problems, such as an outage, are rows of `m.problems()`, one for each
             live table on it.
@@ -664,8 +666,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             - `StreamId`: the table's row in `m.streams()`, or a `wait=True` read's own id.
             - `Query`: the call that made the table, such as `m.stocks.trades('AAPL')`.
             - `Symbol`: the symbol the problem concerns, as Massive sent it or you gave it.
-            - `Field`: the column or field the problem concerns; for a flat-file line, the
-              file, and for a rate-limit pause, its `Bucket` in `m.rate_limits()`.
+            - `Field`: the column or field the problem concerns. For a flat-file line, the
+              file; for a rate-limit pause, its `Bucket` in `m.rate_limits()`; for a refused
+              exchange, its name.
             - `Cause`: why, such as `unconvertible_values` or `outage`. A cause named for an
               `dm.ErrorPolicy` setting follows that setting. A value `dm.canonicalize_symbols`
               couldn't convert follows that call's `on_error` instead.

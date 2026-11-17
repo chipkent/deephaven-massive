@@ -94,6 +94,8 @@ def test_a_report_gives_each_venue_once_for_the_call_that_keeps_the_record(
     assert [(e.cause, e.action, e.stream_id, e.policy) for e in events] == [
         (ProblemCause.REFUSED_VENUES, ProblemAction.SKIPPED, 2, OnError.IGNORE)
     ] * 3
+    # Each exchange is its own row of m.problems(): a later refusal never merges into another.
+    assert [e.field for e in events] == ["CME", "NYMEX", "CME"]
     assert [e.detail.split("S3 refused: ")[1] for e in events] == [
         "CME: CME denied",
         "NYMEX: NYMEX denied",

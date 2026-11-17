@@ -390,6 +390,10 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 `TodaysChangePerc`. On Starter or Developer without the setting, the `snapshot` table fails with
 an error that names the setting to change.
 
+To check whether your data is real-time or delayed, run `m.connections()` in the next example's
+session. Its `Recency` is `DELAYED` with the Starter file and `REALTIME` with the Advanced one.
+[The problems example](#see-problems) shows the call.
+
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file. [Configuration](#configuration)
 covers the environment variables and the settings a new user needs, and the
@@ -588,16 +592,16 @@ Four more live tables show what the session is doing:
 
 ```python continues
 streams = m.streams()  # each live table and background read: its State, and Error if it failed
-connections = m.connections()  # each feed: Host, Recency, and State, such as CONNECTED or WAITING
+# each streaming connection: its Host, State, and Recency, REALTIME or DELAYED
+connections = m.connections().view(["Transport", "AssetClass", "Host", "State", "Recency"])
 rate_limits = m.rate_limits()  # each subscription's rate-limit State: READY, PACED, or PAUSED
 symbol_reads = m.symbol_reads()  # each watchlist symbol read: its State, and Error if it failed
 ```
 
 Here `streams` has one row, for the ticker-details read, whose `State` ends `DONE`.
-`symbol_reads` stays empty, because this example reads no watchlist.
-
-`Recency` says whether a feed's data is `REALTIME` or `DELAYED`. `UNKNOWN` means the library
-can't tell, and it never treats that data as real-time.
+`symbol_reads` stays empty, because this example reads no watchlist. `connections` stays empty
+too, because a `fetch()` doesn't stream. Once a table streams, `connections` gets a row for each
+connection.
 
 Troubleshooting's [diagnostics section](docs/troubleshooting.md#diagnostics) says when to check
 each table. For a table's columns, run `help()` on its method, such as

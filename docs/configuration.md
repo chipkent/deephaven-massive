@@ -268,9 +268,12 @@ minutes late, or 10 for futures. Fair market value (FMV) streams always use
 `currencies`, the one subscription for forex and crypto: Massive has
 no delayed feed for it.
 
-Leave a delayed subscription out, and a stream of its current data raises
-`EntitlementError`. Its message gives the line of Python to add. A `fetch()` or
-`poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
+Leave a delayed subscription out, and a call for its current data fails with
+`EntitlementError`. The message gives the line of Python to add. A stream and
+`fetch(wait=True)` raise it at the call. A `fetch()` or `poll()` table fails with it.
+A stream from a host you set in `websocket_hosts` is the exception. It opens, and its
+`Recency` in `m.connections()` shows Massive's label, `DELAYED`.
+
 `history()` and other past data don't depend on this setting.
 
 #### rest_requests_per_minute
@@ -367,14 +370,12 @@ written together. Under `log` or `ignore` it gets no rows, and
 
 #### on_error.unavailable_symbols
 
-Set `raise` when a missing symbol means your list is wrong.
+Set `raise` when a missing symbol means your list is wrong. Under
+`log` and `ignore`, the call skips the symbol and reads the
+others, and `m.problems()` lists it.
 
 A symbol Massive answers with no rows and no error has no rows, whatever this
 setting says.
-
-This setting also covers a watchlist symbol a `poll()` can't request with your
-arguments. For example, an indicator poll with `adjusted=False` can't request a
-crypto pair. Passed in code, such a symbol raises `ValueError` at the call.
 
 #### on_error.unreadable_keys
 
@@ -483,6 +484,17 @@ class, except Fair Market Value (FMV) streams, which always use
 An entry must agree with `delayed_subscriptions`. Give a class a host whose name
 starts with `delayed.` exactly when its subscription is listed there, and never give
 one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
+
+The library opens a stream from a host set here whatever Massive's label says. Its
+`Recency` in `m.connections()` shows the label:
+
+- `DELAYED`: Massive labels the data `DELAYED`, or `delayed_subscriptions` lists its
+  subscription.
+- `REALTIME`: Massive labels the data `REAL-TIME`.
+- `UNKNOWN`: Massive gave no label the library knows.
+
+The first stream of each asset class in a session makes one REST request to read the
+label. A subscription listed in `delayed_subscriptions` makes none.
 
 #### subscription_confirmation_timeout
 

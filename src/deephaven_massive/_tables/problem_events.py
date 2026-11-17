@@ -106,7 +106,7 @@ class ProblemCause(StrEnum):
     UNLISTED_CONTRACTS = "unlisted_contracts"
     UNSCHEDULED_PRODUCTS = "unscheduled_products"
     UNDATED_ROWS = "undated_rows"
-    STALE_SYMBOL = "stale_symbol"
+    STALE_SYMBOL_DATA = "stale_symbol_data"
     SCHEMA_DRIFT = "schema_drift"
     OUTAGE = "outage"
     QUIET_FEED = "quiet_feed"
@@ -245,7 +245,7 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             fix="Nothing, unless it lasts. The table fails once the wait passes "
             "[`max_outage`](configuration.md#settings-reference).",
         ),
-        _C.STALE_SYMBOL: CauseTraits(
+        _C.STALE_SYMBOL_DATA: CauseTraits(
             policy=None,
             source=_LIBRARY,
             action=ProblemAction.GAP,

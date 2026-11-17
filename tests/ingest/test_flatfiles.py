@@ -3002,10 +3002,15 @@ def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
         ) as info:
             q.history("2025-03-04", "2025-03-04", wait=True)
         assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
-        [refused] = events
-        assert (refused.cause, refused.policy) == (ProblemCause.REFUSED_VENUES, OnError.IGNORE)
-        assert "CME" in refused.detail
-        assert "NYMEX" in refused.detail
+        # One row per refused exchange, so a later refusal never merges into an earlier one.
+        assert [(e.cause, e.policy, e.field) for e in events] == [
+            (ProblemCause.REFUSED_VENUES, OnError.IGNORE, "CME"),
+            (ProblemCause.REFUSED_VENUES, OnError.IGNORE, "NYMEX"),
+        ]
+        assert ["S3 refused: CME" in events[0].detail, "S3 refused: NYMEX" in events[1].detail] == [
+            True,
+            True,
+        ]
     finally:
         m.close()
 

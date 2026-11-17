@@ -268,7 +268,8 @@ class FetchQuery(Query):
             TypeError: If `wait` isn't a `bool`.
             ValueError: At the call, before any request, if:
                 - it runs on a Deephaven update-graph thread;
-                - the endpoint doesn't take one of the query's parameters or filters;
+                - the endpoint doesn't take one of the query's parameters or filters, or, for a
+                  watchlist, one of the endpoints its symbols could need doesn't;
                 - a static `symbols`, `underlying=`, or `product_code=` table is empty;
                 - no row of a table of symbols is Massive's exact ticker.
             AuthenticationError: With `wait=True`, if Massive rejects your API key.
@@ -335,11 +336,13 @@ class FetchQuery(Query):
         """Run a `fetch()` call that follows a refreshing symbol table.
 
         The table's current rows are checked now, as a live verb checks them, and the request's
-        parameters with them. Every symbol, at the call or added later, is read with the
-        requests `fetch()` makes for it (`RestTransport.fetch_by_symbol`), as Massive answers
-        at that read, and is read again whenever it returns to the table. With `wait=True`
-        the call-time symbols are read now, as one read; the call raises only when every one
-        of them failed, and logs one WARNING when some did.
+        parameters against every path a symbol of the table could reach, so a parameter one of
+        them lacks raises `ValueError` now, as for a list. Every symbol, at the call or added
+        later, is read with the requests `fetch()` makes for it
+        (`RestTransport.fetch_by_symbol`), as Massive answers at that read, and is read again
+        whenever it returns to the table. With `wait=True` the call-time symbols are read now,
+        as one read; the call raises only when every one of them failed, and logs one WARNING
+        when some did.
 
         Args:
             call: The call id.
@@ -360,8 +363,8 @@ class FetchQuery(Query):
         )
         request = replace(self._request, symbols=call_time)
         rest = core.rest_transport()
-        if call_time:  # a parameter error raises now; with none, the first read checks them
-            rest.check_fetch(spec, request)
+        # A parameter any path of a symbol the table may hold lacks raises now, as for a list.
+        rest.check_fetch(spec, self._request)
         plan = FollowPlan(
             Transport.REST,
             one_scan=False,

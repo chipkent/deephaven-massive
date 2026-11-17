@@ -91,8 +91,9 @@ class HostDecision:
 
     Attributes:
         host: The hostname, such as `"delayed.massive.com"`.
-        recency: Whether the host serves real-time or delayed data (`host_decision.recency_of`),
-            or `UNKNOWN` for a pinned host the library does not know.
+        recency: Whether Massive serves the host's data real-time or delayed, as Massive's
+            answers and the session's settings show it (`host_decision.decide`), or `UNKNOWN`
+            when nothing shows it.
         evidence: Why: a human-readable account of the decision, shown in `m.connections()`.
     """
 
@@ -291,14 +292,16 @@ class RestTransport(Protocol):
         """Check that `fetch` can plan its requests for the request, before any data request.
 
         A background `fetch()` calls it on the caller thread, so a parameter a path does not
-        take raises there, at the call, as `fetch` raises it before its first request.
+        take raises there, at the call, as `fetch` raises it before its first request. A
+        `fetch()` that follows a symbol table calls it with the table, and every path a symbol
+        of the table could reach is checked.
 
         Args:
             spec: The dataset.
-            request: The normalized arguments, with static symbols.
+            request: The normalized arguments, with static symbols or a symbol table.
 
         Raises:
-            ValueError: The request sets a parameter a path of the call does not take.
+            ValueError: The request sets a parameter a path the call could read does not take.
         """
         ...
 
@@ -405,8 +408,7 @@ class RestTransport(Protocol):
             ValueError: Before the table exists, if a path the call reads does not take a
                 parameter or filter the request sets, even when another of its paths does.
                 Over a reactive symbol table, whose symbols choose the paths at each cycle,
-                only a parameter that no fetch path takes raises here; one the cycle's path
-                lacks fails the table then.
+                a parameter that any of the dataset's fetch paths lacks raises here.
             SessionClosedError: If the session is closed. A cycle's failure later fails the
                 table instead of raising.
         """

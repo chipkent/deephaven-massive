@@ -947,6 +947,7 @@ def test_the_problems_example_lists_the_ticker_massive_does_not_know(
     )
     assert streams[0]["Query"].startswith("m.reference.ticker_details(")
     assert dh_to_pylist(ran["symbol_reads"]) == []
+    assert dh_to_pylist(ran["connections"]) == []  # the example opens no stream
     ran.clear()
     console.close()
 

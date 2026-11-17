@@ -49,7 +49,7 @@ from deephaven_massive._tables import held_rows, problem_reporter, stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.futures_dates import LookupState, Readiness
-from deephaven_massive._tables.held_rows import DELAYED_AFTER, HeldRows
+from deephaven_massive._tables.held_rows import DELAYED_AFTER, Delayed, HeldRows, Settled
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.problem_events import (
     Problem,
@@ -1333,6 +1333,23 @@ def test_a_waiting_ticker_s_rows_grow_on_its_span(futures_flush: FuturesFlush) -
     assert later.spans["NQM5"].since == first.spans["NQM5"].since
 
 
+def test_a_wait_whose_older_rows_were_discarded_holds_on_while_newer_rows_wait(
+    futures_flush: FuturesFlush,
+) -> None:
+    # Settling discards one of NQM5's rows, but the hold still has a reported wait of it: the
+    # dataset's open wait keeps its reason and counts the rows left.
+    flush = futures_flush
+    reported = Settled(None, delayed={"NQM5": Delayed(3, "its product is being looked up")})
+    assert flush.flusher._open_waits(flush.plan, reported, {"NQM5": 3}) == {
+        "NQM5": (3, "its product is being looked up")
+    }
+    discarded = Settled(None, discarded={Readiness.UNSCHEDULED: {"NQM5": (1, "no session")}})
+    assert flush.flusher._open_waits(flush.plan, discarded, {"NQM5": 2}) == {
+        "NQM5": (2, "its product is being looked up")
+    }
+    assert flush.flusher._open_waits(flush.plan, Settled(None), {}) == {}
+
+
 def test_a_later_report_of_a_waiting_ticker_updates_its_rows_and_keeps_its_start(
     futures_flush: FuturesFlush,
 ) -> None:
@@ -1617,12 +1634,12 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
 
 
 def stale_spans(problems: list[Problem], stream_id: int) -> list[dict[str, str]]:
-    # Each `stale_symbol` snapshot of one stream, as its symbols and their details.
+    # Each `stale_symbol_data` snapshot of one stream, as its symbols and their details.
     return [
         {name: span.detail for name, span in p.spans.items()}
         for p in problems
         if isinstance(p, ProblemSpans)
-        and p.cause is ProblemCause.STALE_SYMBOL
+        and p.cause is ProblemCause.STALE_SYMBOL_DATA
         and p.stream_id == stream_id
     ]
 
@@ -1755,7 +1772,7 @@ def test_a_stale_symbol_whose_run_reaches_the_limit_again_updates_its_detail_in_
     first, later = (
         p.spans["ILLQ"]
         for p in problems
-        if isinstance(p, ProblemSpans) and p.cause is ProblemCause.STALE_SYMBOL
+        if isinstance(p, ProblemSpans) and p.cause is ProblemCause.STALE_SYMBOL_DATA
     )
     assert first.detail.startswith(f"the last {limit} rows were withheld; the first: timestamp")
     assert later.detail == (

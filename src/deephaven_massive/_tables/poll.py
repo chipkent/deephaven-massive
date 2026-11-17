@@ -44,13 +44,11 @@ reactive table. Its problems are rows of `m.problems()`: a run of failed cycles 
 `poll_cycle_failed` span, cycles that end after their interval a `poll_cycle_late` span, and a
 symbol-table value it skips a `noncanonical_symbols` span.
 
-**Symbols left out.** By default one symbol never fails a whole table. A symbol of a reactive
-table that routes to a path lacking a parameter the poll sends (`adjusted=False` on a crypto
-indicator), and a symbol Massive answers with HTTP 404, follow
-`ErrorPolicy.unavailable_symbols`: under `LOG`, the default, and `IGNORE` they have no rows in
-the cycle (a `REPLACE` table drops their rows), and the REST reader reports each, with the
-reason, as an `unavailable_symbols` problem of the table every cycle that leaves it out, so the
-table never loses rows without saying why. Under `RAISE` the REST
+**Symbols left out.** By default one symbol never fails a whole table. Symbols Massive answers
+with HTTP 404 follow `ErrorPolicy.unavailable_symbols`: under `LOG`, the default, and `IGNORE`
+they have no rows in the cycle (a `REPLACE` table drops their rows), and the REST reader
+reports each, with the reason, as an `unavailable_symbols` problem of the table every cycle
+that leaves it out, so the table never loses rows without saying why. Under `RAISE` the REST
 reader raises `UnavailableSymbolError`, a `PermanentError`, which fails the table.
 
 **Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
@@ -331,7 +329,7 @@ class CycleRows:
         patience: The most seconds of rate-limit pauses the cycle's reads would wait out (their
             patience), for the cycle's log line.
         left_out: The symbols the cycle has no rows for, each with why, such as
-            `"X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take ['adjusted'])"` or
+            `"X:FOOUSD (its currencies cannot be read)"` or
             `"AAPL1 (HTTP 404 from /v3/trades/{stockTicker})"`, in the order found; empty for
             none, for the cycle's log line. The REST reader reports each in `m.problems()`.
     """

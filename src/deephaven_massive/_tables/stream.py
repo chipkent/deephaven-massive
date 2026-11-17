@@ -205,7 +205,7 @@ of it published between them, every stream of the dataset on the channel fails, 
 first dropped row's reason. A published row starts the count again. Each symbol has the same
 run of its own, which other symbols' rows do not end: once this many of one symbol's rows in a
 row have been dropped, with none of its rows published, every stream that holds the symbol (by
-name, or `dm.ALL`) marks it stale, a `stale_symbol` span of `m.problems()`, without failing,
+name, or `dm.ALL`) marks it stale, a `stale_symbol_data` span of `m.problems()`, without failing,
 until a row of the symbol is published again. So a symbol Massive stopped sending readably
 never freezes a table without a word, and never fails the other symbols' rows.
 """
@@ -1214,7 +1214,7 @@ class Flusher:
         # `SYMBOL_CACHE_LIMIT` spellings each after a flush.
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
         # Flush-lock state: per stream, the symbols whose recent rows were all withheld, with
-        # the first reason, and their `stale_symbol` spans (`DROPPED_RUN_LIMIT`).
+        # the first reason, and their `stale_symbol_data` spans (`DROPPED_RUN_LIMIT`).
         self._stale: dict[int, tuple[dict[str, str], SpanTracker]] = {}
         # Flush-lock state: per routed plan, the rows dropped in a row with none published,
         # and the first one's reason (`DROPPED_RUN_LIMIT`).
@@ -1838,22 +1838,23 @@ class Flusher:
     ) -> dict[str, tuple[int, str]]:
         """Update a dataset's reported waits that still hold; return them.
 
-        A wait joins when settling reports it (`Settled.delayed`), and leaves when its rows
-        publish (`Settled.resumed`) or are discarded, or once the hold no longer has the
-        ticker's rows (a watchlist dropped it, or its lookup failed). Each wait counts the
-        rows the hold has of its ticker now.
+        A wait joins when settling reports it (`Settled.delayed`), and leaves once the hold
+        no longer has a reported wait of the ticker: its rows published or were discarded, a
+        watchlist dropped it, or its lookup failed. A wait whose older rows were discarded
+        while newer ones still wait holds on. Each wait counts the rows the hold has of its
+        ticker now.
 
         Args:
             plan: The dataset's plan for the channel.
             settled: What settling decided.
-            held: The tickers whose rows the dataset still holds, with how many each holds.
+            held: The tickers whose reported wait the hold still has, with their rows
+                (`HeldRows.waiting`).
 
         Returns:
             Each ticker whose reported wait holds, with its rows and reason.
         """
-        ended = settled.resumed.union(*settled.discarded.values())
         found = self._waits.get(plan, {})
-        waits = {t: (held[t], why) for t, (_, why) in found.items() if t in held and t not in ended}
+        waits = {t: (held[t], why) for t, (_, why) in found.items() if t in held}
         waits.update({t: (delay.rows, delay.reason) for t, delay in settled.delayed.items()})
         if waits:
             self._waits[plan] = waits
@@ -2148,7 +2149,7 @@ class Flusher:
         whose every row is withheld would leave its streams frozen without a word. Each symbol
         therefore has a run of its own: a published row of the symbol ends it, and once
         `DROPPED_RUN_LIMIT` of its rows in a row have been withheld, every stream that holds the
-        symbol (by name, or `dm.ALL`) marks it stale: a `stale_symbol` span of `m.problems()`,
+        symbol (by name, or `dm.ALL`) marks it stale: a `stale_symbol_data` span of `m.problems()`,
         which ends when a row of the symbol is published again. No stream fails for one
         symbol; the run starts over.
 
@@ -2182,7 +2183,7 @@ class Flusher:
         *,
         published: AbstractSet[str],
     ) -> None:
-        """Update one stream's stale symbols, and queue its `stale_symbol` spans if they changed.
+        """Update one stream's stale symbols; queue its `stale_symbol_data` spans if they changed.
 
         The symbols it holds that became stale join; the published ones leave. The ones it
         no longer holds leave at every flush (`_end_unheld_stale`).
@@ -2201,7 +2202,7 @@ class Flusher:
             if not held:
                 return
             tracker = SpanTracker(
-                ProblemCause.STALE_SYMBOL,
+                ProblemCause.STALE_SYMBOL_DATA,
                 dataset=plan.dataset,
                 stream_id=sink.stream_id,
                 where=f"{self._thread.name} channel {plan.channel}",
@@ -2216,7 +2217,7 @@ class Flusher:
             self._events.append((sink, (spans,)))
 
     def _end_unheld_stale(self, routed: list[StreamSink]) -> None:
-        """End the `stale_symbol` spans of symbols their streams no longer hold.
+        """End the `stale_symbol_data` spans of symbols their streams no longer hold.
 
         A symbol whose watchlist row was deleted can never publish to the stream again, so its
         span would hold until the stream closed. Runs at every flush, rows or not, so emptying a

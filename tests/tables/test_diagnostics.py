@@ -1044,7 +1044,7 @@ def test_a_table_that_left_its_registry_ends_its_open_spans(
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
     tracker = SpanTracker(
-        ProblemCause.STALE_SYMBOL, dataset="stocks.trades", stream_id=7, where="w"
+        ProblemCause.STALE_SYMBOL_DATA, dataset="stocks.trades", stream_id=7, where="w"
     )
     spans = tracker.update({"X": ("X", None, "stale", 0)}, at=5, since=1)
     assert spans is not None
