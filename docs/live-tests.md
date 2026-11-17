@@ -53,7 +53,8 @@ library's message.
 
 ### Run the commands in order
 
-The connection-limit tests run last and alone, because they disturb the key's connections:
+Run the connection-limit tests after the others, and alone, because they disturb the key's
+connections:
 
 1. Stop every other program that uses the key.
 2. Run the question, smoke, and rate-limit tests:
@@ -62,14 +63,14 @@ The connection-limit tests run last and alone, because they disturb the key's co
    uv run pytest -m "integration_rate_limits or integration or integration_smoke" 2>&1 | tee -a live-checks.log
    ```
 
-   A weekday run in market hours covers more, because a stream test checks rows only while its
-   market is open. The rate-limit tests spend a subscription your settings file lists in
-   `rest_requests_per_minute`, whatever order the file lists them in: the first listed of
-   indices, futures, options, stocks, and currencies, or, for the ticker-lookup test, of
-   indices, currencies, and stocks. They skip when the file lists none of these.
+   The command also runs every README example as written and checks it against its text. Run it
+   on a weekday from 09:30 to 16:00 New York time, because stream tests, the README's streaming
+   examples among them, check rows only while their market trades.
 
-   The command also runs every README example as written and checks it against its text. Its
-   streaming examples check the most in the regular session, 09:30 to 16:00 New York time.
+   The rate-limit tests use up the request limit of one subscription in
+   `rest_requests_per_minute`. They take the first the file lists of indices, futures, options,
+   stocks, and currencies. The ticker-lookup test takes the first of indices, currencies, and
+   stocks. They skip when the file lists none of them.
 
 3. Run the connection-limit tests, one command after the other:
 
@@ -131,12 +132,12 @@ answer. Both kinds name their questions by number.
 ### Pace a limited subscription
 
 A subscription Massive limits costs time. At five requests a minute, a test that sends a
-subscription 24 requests runs for about five minutes. Each test's time limit grows with the
-requests it declares, and a line counts down the requests left while one waits.
+subscription 24 requests runs for about five minutes. While a request waits, a line counts
+down the requests left.
 
-A limited subscription your settings file doesn't list costs a pause more. Its first request
-past Massive's minute is refused, and its requests pause while the library learns the limit. List it in `rest_requests_per_minute` with
-its limit, and its requests are paced from the first.
+List each subscription Massive limits in `rest_requests_per_minute`, with its limit, so its
+requests are paced from the first. An unlisted one also waits out a pause after its first
+refusal.
 
 <a id="read-the-end-of-a-run"></a>
 
@@ -175,29 +176,30 @@ one, the same section says where. Don't share that log, and open an issue that n
 
 ## Read six checks by hand
 
-Read each one's evidence, because a pass doesn't answer its question. The index minute-file
-check fails when a file row falls outside the New York day, or when the file has a minute REST
-lacks. A minute REST has and the file lacks doesn't fail it:
+A pass doesn't settle these checks. Read each one's evidence, and open an issue as its row
+says:
 
 | Check | Data it reads | What to read | Open an issue when |
 |---|---|---|---|
 | `test_the_options_cap_counts_contracts_or_topics` | Option quote and trade streams | Whether Massive acknowledges all 2,000 topics of 1,000 contracts | Massive acknowledges them all, since the library assumes the cap counts topics |
-| `test_an_index_minute_file_holds_its_own_new_york_day` | Index minute bars, over REST and in the flat files | The minutes REST has that the file lacks | Any minute is missing |
-| `test_index_day_windows_and_files_across_many_indices` | Index day and minute bars, over REST and in the flat files | Its verdict lines (a), (b), and (c) | Always: index day bars end at 01:00 New York time until this answer is read |
+| `test_an_index_minute_file_holds_its_own_new_york_day` | Index minute bars, over REST and in the flat files | The minutes REST has that the file lacks | Any minute is missing. The test still passes, since it fails only on a file row outside the New York day or a minute REST doesn't have. |
+| `test_index_day_windows_and_files_across_many_indices` | Index day and minute bars, over REST and in the flat files | Its verdict lines (a), (b), and (c) | Always. The library ends index day bars at 01:00 New York time, and this answer says whether that's right. |
 | `test_futures_bar_buckets_against_the_bars_inside_them` | Futures bars | Its `VERDICT` lines | A line differs from the library's model: each bar holds the whole sessions that open in its UTC days |
 | `test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent` | Option chain snapshots | Each call's ratio of `GreeksGamma` to Black-Scholes gamma, and the unit it matches | A unit isn't per $0.01, as Massive's description says |
 | A quiet connection, in the [`stream-day` group](#live-run-groups) of a tester's results | Stock streams | In that group's debug log, the stocks connection's `status` lines from 03:45 to 04:00 New York time, and every `no frame for ... during ... trading hours` WARNING | Always, with the longest gap between `status` lines |
 
 The options check skips when Massive refuses the topics, quoting the refusal. It also skips as
-inconclusive when the socket reconnects without saying why, and then needs the first
-connection-limit command run again.
+inconclusive when the socket reconnects without saying why. Then run the first
+connection-limit command again.
 
-To run one of the other checks alone, use `-k` with a word of its name:
+To run one of the test checks alone, use `-k` with a word of its name. The quiet-connection
+check comes only from a tester's results.
 
 ```bash
 uv run pytest -m integration tests/namespaces/test_indices_integration.py -k minute_file 2>&1 | tee -a live-checks.log
 uv run pytest -m integration tests/namespaces/test_indices_integration.py -k many_indices 2>&1 | tee -a live-checks.log
 uv run pytest -m integration tests/namespaces/test_futures_integration.py -k bar_buckets 2>&1 | tee -a live-checks.log
+uv run pytest -m integration tests/namespaces/test_options_integration.py -k gamma 2>&1 | tee -a live-checks.log
 ```
 
 <a id="index-hosts"></a>
