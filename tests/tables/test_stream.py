@@ -957,8 +957,15 @@ def test_a_futures_second_bar_ends_at_massive_s_end(
     ends = batch.column("TimestampEnd").cast(pa.int64()).to_pylist()
     assert ends == [(start + 60_000) * 10**6, (start + 1_000) * 10**6]
     # Massive's `e` is kept, and an end that is not one second on is logged.
-    [notice] = [r for r in caplog.records if "is not its start plus its length" in r.getMessage()]
-    assert notice.levelno == logging.WARNING
+    [notice] = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert (notice.levelno, notice.getMessage()) == (
+        logging.WARNING,
+        (
+            "futures.bars: Massive sent a bar that ends at 2025-03-07T22:31:00+00:00, not at its "
+            "start plus its length, 2025-03-07T22:30:01+00:00. Nothing to do: TimestampEnd "
+            "keeps the end Massive sent, so this bar's window is not its length."
+        ),
+    )
 
 
 def test_every_row_takes_the_arrival_of_its_frame(

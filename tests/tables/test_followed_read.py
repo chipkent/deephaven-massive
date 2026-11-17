@@ -536,8 +536,11 @@ def test_a_defect_of_a_read_fails_the_table_naming_it(
     until(lambda: bool(result.j_table.isFailed()))
     until(lambda: stream_rows()[0]["State"] == "FAILED")
     error = stream_rows()[0]["Error"]
-    assert "ZeroDivisionError: oops" in error
-    assert "This is a bug in deephaven-massive" in error
+    assert error == (
+        "test.trades: the read of AAPL failed: ZeroDivisionError('oops'). This is a bug in "
+        "deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and report it with "
+        "the log and m.streams() at https://github.com/chipkent/deephaven-massive/issues."
+    )
 
 
 # --- Lifetime ---------------------------------------------------------------------------------

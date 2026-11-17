@@ -527,10 +527,13 @@ def test_auto_without_any_source_raises_before_any_request(
     m = dm.MassiveSession(NO_S3)
     try:
         q = query(m, INDEX_VALUES_SPEC, symbols=["I:SPX"])
-        with pytest.raises(
-            ValueError,
-            match=r"indices\.values history has no possible source\. Flat files: no S3 credentials",
-        ):
+        refused = (
+            "indices.values history has no source. Flat files cannot serve it, since no S3 "
+            "credentials are set. REST cannot serve it, since indices.values has no REST "
+            "history. Set s3_access_key_id and s3_secret_access_key in dm.MassiveConfig, or the "
+            "environment variables MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY."
+        )
+        with pytest.raises(ValueError, match=rf"^{re.escape(refused)}$"):
             q.history("2025-03-03", "2025-03-03", wait=True)
     finally:
         m.close()
@@ -1459,9 +1462,9 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
         "stocks.bars history: AUTO chose FLAT_FILES (every symbol)",
         # REST's grouped-daily bars could have served it, with the columns the file lacks.
         (
-            "stocks.bars history: AUTO read flat files (every symbol); the read leaves Otc, "
-            "Vwap null, which the other source, REST, fills: pass "
-            "source=dm.HistorySource.REST to get them (logged once per session)"
+            "stocks.bars history: source=dm.HistorySource.AUTO read flat files for every "
+            "symbol, and that read leaves Otc and Vwap null, which REST fills. Pass "
+            "source=dm.HistorySource.REST to fill them."
         ),
         "stocks.bars history: source=S3 files=1 skipped=none unread=none",
     ]
@@ -1992,7 +1995,10 @@ def test_auto_delegates_few_symbols_to_rest(
     assert (req.start, req.end) == (date(2025, 3, 3), date(2025, 3, 4))
     assert window.span == DaySpan(date(2025, 3, 3), date(2025, 3, 4))
     assert caplog.messages == [
-        "stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)"
+        (
+            "stocks.trades history: AUTO chose REST (2 symbols, fewer than "
+            "flat_file_symbol_threshold=50)"
+        )
     ]
     assert fake_s3.requests == []
 
@@ -2597,7 +2603,12 @@ def test_mixed_futures_bounds_are_refused_before_any_read(
     *, session: dm.MassiveSession, fake_s3: FakeS3
 ) -> None:
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
+    refused = (
+        "start=datetime.date(2024, 12, 17) and end=datetime.datetime(2024, 12, 17, 16, 0, "
+        "tzinfo=zoneinfo.ZoneInfo(key='America/Chicago')) mix a date and a datetime. Pass two "
+        "dates for whole days, or two datetimes for exact instants."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refused)}$"):
         q.history(
             "2024-12-17",
             datetime(2024, 12, 17, 16, tzinfo=CHICAGO),
@@ -4619,7 +4630,12 @@ def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
         venues={FuturesVenue.CME},
         filters={"session_end_date": "2025-01-21"},
     )
-    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
+    refused = (
+        "futures.trades: history() with dates sets session_end_date itself, so it takes no "
+        "session_end_date filter. Leave the filter out, or pass datetimes as start and end to "
+        "combine it with a time range."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refused)}$"):
         q.history("2025-01-21", "2025-01-21", source=HistorySource.FLAT_FILES, wait=True)
     assert fake_s3.requests == []
 

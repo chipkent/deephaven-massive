@@ -2179,7 +2179,7 @@ def test_a_bad_parameter_fails_poll_at_once(
     q = build_query(
         rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"], params={"bogus": 1}
     )
-    with pytest.raises(ValueError, match=r"does not take \['bogus'\]"):
+    with pytest.raises(ValueError, match=r"^stocks\.dividends does not take bogus\.$"):
         q.poll(60)
     assert fake_rest.requests == []
 
@@ -2234,6 +2234,8 @@ def test_a_poll_fails_on_a_late_bad_row_when_its_call_raises_and_the_session_log
 
 SMA_STOCK = "/v1/indicators/sma/{stockTicker}"
 SMA_CRYPTO = "/v1/indicators/sma/{cryptoTicker}"
+SMA_MSFT_404 = "(HTTP 404 from GET /v1/indicators/sma/MSFT)"
+"""Why MSFT is left out of an SMA read: Massive answered its request with HTTP 404."""
 SMA = DatasetSpec(
     summary="A dataset for the tests.",
     name="indicators.sma",
@@ -2361,9 +2363,10 @@ def test_a_parameter_one_fetch_path_lacks_fails_a_watchlist_poll_as_a_list_at_th
         symbols=watch,
         params={"window": 20},
     )
-    with pytest.raises(ValueError, match=r"macd/\{cryptoTicker\} does not take \['window'\]"):
+    refused = r"^indicators\.windowed does not take window\.$"
+    with pytest.raises(ValueError, match=refused):
         q.poll(60)
-    with pytest.raises(ValueError, match=r"macd/\{cryptoTicker\} does not take \['window'\]"):
+    with pytest.raises(ValueError, match=refused):
         build_query(
             routed_session._core,
             WINDOWED,
@@ -2421,7 +2424,7 @@ def test_a_replace_poll_lists_a_symbol_massive_has_no_data_for(
     clock.wait_for_sleepers(1)
     (row,) = streams_of(routed_session, dh_to_pylist)
     assert (row["State"], row["Error"]) == ("RUNNING", None)
-    no_data = ("MSFT", "SKIPPED", 1, f"Massive has no data for it (HTTP 404 from {SMA_STOCK})")
+    no_data = ("MSFT", "SKIPPED", 1, f"Massive has no data for it {SMA_MSFT_404}")
     assert unavailable(routed_session, dh_to_pylist) == [no_data]
     next_cycle(clock)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL", "MSFT"])
@@ -2487,7 +2490,7 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
         (row,) = streams_of(ignoring_session, dh_to_pylist)
     assert (row["State"], row["Error"]) == ("RUNNING", None)
     assert unavailable(ignoring_session, dh_to_pylist) == [
-        ("MSFT", "SKIPPED", 1, f"Massive has no data for it (HTTP 404 from {SMA_STOCK})"),
+        ("MSFT", "SKIPPED", 1, f"Massive has no data for it {SMA_MSFT_404}"),
     ]
     policies = {r["Policy"] for r in problems_of(ignoring_session, dh_to_pylist, UNAVAILABLE)}
     assert policies == {"ignore"}
@@ -2516,8 +2519,7 @@ def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
     until(lambda: streams_of(raising_session, dh_to_pylist)[0]["State"] == "FAILED")
     (row,) = streams_of(raising_session, dh_to_pylist)
     assert row["Error"] == (
-        f"indicators.sma: Massive has no data for 1 [MSFT (HTTP 404 from {SMA_STOCK})]. "
-        "Remove the symbol; to leave it out and read the others, pass "
+        "indicators.sma: Massive has no data for MSFT. Remove it, or, to read the others, pass "
         "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call or to "
         "dm.MassiveConfig."
     )
@@ -2544,8 +2546,8 @@ def test_a_cycle_reports_its_pages_drift(
         1,
     )
     assert drift["Detail"] == (
-        "Massive sent the field 'brand_new', which its documentation lacks; the rows are "
-        "published without it; first value 1"
+        "Massive sent the field 'brand_new', which its documentation lacks, so the rows are "
+        "published without it. Its first value: 1."
     )
     del table
 

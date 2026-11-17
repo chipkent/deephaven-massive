@@ -1921,7 +1921,7 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
     ]
     assert caplog.messages == [
         no_data_alarm(
-            "crypto.last", 1, "X:ETHUSD", why="(HTTP 404 from /v1/last/crypto/{from}/{to})"
+            "crypto.last", 1, "X:ETHUSD", why="(HTTP 404 from GET /v1/last/crypto/ETH/USD)"
         )
     ]
 
@@ -2824,7 +2824,7 @@ def test_a_futures_session_without_data_is_left_out_as_its_own_problem(
         )
     assert [r["Timestamp"] for r in out] == [trade["timestamp"]]
     # A problem for each session, and one WARNING for the read, naming the first.
-    why = "(HTTP 404 from /futures/v1/trades/{ticker})"
+    why = "(HTTP 404 from GET /futures/v1/trades/ESH5)"
     assert [(e.cause, e.symbol, e.detail) for e in events] == [
         (
             ProblemCause.UNAVAILABLE_SYMBOLS,
@@ -2888,7 +2888,12 @@ def test_a_session_end_date_filter_needs_datetimes(
 ) -> None:
     q = query(session, FUTURES_TRADES, symbols=["ESH5"], filters={"session_end_date": "2025-01-21"})
     assert isinstance(q, HistoryQuery)
-    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
+    refused = (
+        "futures.trades: history() with dates sets session_end_date itself, so it takes no "
+        "session_end_date filter. Leave the filter out, or pass datetimes as start and end to "
+        "combine it with a time range."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refused)}$"):
         q.history("2025-01-21", "2025-01-21", source=HistorySource.REST, wait=True)
     assert fake_rest.get_queries() == []
     # With datetimes, the filter and the time range travel together.
@@ -3188,7 +3193,7 @@ def test_a_missing_symbol_warns_once_per_read_and_an_error_row_once_per_session(
             (row,) = fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
             assert (row["Symbol"], row["Error"]) == ("I:VIX", "NOT_ENTITLED")
     # Each read is its own table in m.problems(), so each warns of its first missing symbol.
-    why = "(HTTP 404 from /v1/last/crypto/{from}/{to})"
+    why = "(HTTP 404 from GET /v1/last/crypto/ETH/USD)"
     assert alarms(caplog) == [
         no_data_alarm("crypto.last", read, "X:ETHUSD", why=why) for read in (1, 3)
     ]
@@ -3283,7 +3288,7 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
         )
     assert "has no data" not in caplog.text  # the symbol is not dropped as missing
     assert (
-        f"crypto.last: HTTP 404 for X:BTCUSD from {CRYPTO_LAST_PATH} arrived after "
+        "crypto.last: HTTP 404 for X:BTCUSD from GET /v1/last/crypto/BTC/USD arrived after "
         f"{session._core.label} closed; the call reports the close"
     ) in caplog.messages
 
@@ -3588,12 +3593,16 @@ def test_a_long_grouped_daily_download_of_a_paced_subscription_is_announced(
     ) in caplog.messages
 
 
+ISSUES = "https://github.com/chipkent/deephaven-massive/issues"
+"""Where an unexpected bar stamp's WARNING asks for it to be reported."""
+
+
 def unexpected_stamps(caplog: pytest.LogCaptureFixture) -> list[str]:
     """Return the WARNINGs of bars stamped where Massive is not known to stamp one."""
     return [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+        if r.levelno == logging.WARNING and "cannot tell which day this one covers" in r.message
     ]
 
 
@@ -3671,11 +3680,11 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
         "stamped at 2025-03-03T05:00:00+00:00, which Massive is not known to use for a 1-day bar"
     )
     [warning] = unexpected_stamps(caplog)
-    assert warning.startswith(
-        "forex.bars: a 1-day bar of C:EURUSD from /v2/aggs/grouped/locale/global/market/fx/{date} "
-        "is stamped 2025-03-03T05:00:00+00:00, which is not a stamp Massive is known to use for "
-        "such a bar (00:00:00.000, 23:59:59.999 in UTC). The library cannot tell which day it "
-        "covers, so the row is withheld"
+    assert warning == (
+        "forex.bars: Massive sent a 1-day bar of C:EURUSD stamped 2025-03-03T05:00:00+00:00. "
+        "Massive is known to stamp bars of 1 day at 00:00:00.000 and 23:59:59.999 in UTC, so the "
+        "library cannot tell which day this one covers and withholds it. Report the stamp at "
+        f"{ISSUES} so the library can learn which day such bars cover."
     )
 
 
@@ -3719,12 +3728,11 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     with pytest.raises(RowDataError, match="could read none of the 1 rows"):
         crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
     [warning] = unexpected_stamps(caplog)
-    assert warning.startswith(
-        "crypto.bars: a bar of X:BTCUSD from /v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/"
-        "{timespan}/{from}/{to} is stamped 2025-03-03T05:00:00+00:00, which is not a stamp "
-        "Massive is known to use for such a bar (00:00:00.000 in UTC). The library cannot tell "
-        "which day it covers, so the row is withheld rather than published at a guessed day "
-        "(bars of 2 days)"
+    assert warning == (
+        "crypto.bars: Massive sent a bar of X:BTCUSD stamped 2025-03-03T05:00:00+00:00. Massive "
+        "is known to stamp bars of 2 days at 00:00:00.000 in UTC, so the library cannot tell "
+        f"which day this one covers and withholds it. Report the stamp at {ISSUES} so the "
+        "library can learn which day such bars cover."
     )
     caplog.clear()
     # Massive stamps a crypto week at 00:00 UTC on its Sunday (2026-10-11 in the live check),
@@ -3747,10 +3755,12 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     with pytest.raises(RowDataError, match="could read none of the 1 rows"):
         crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
     [warning] = unexpected_stamps(caplog)
-    assert (
-        "is stamped 2026-10-12T00:00:00+00:00, which is not a stamp Massive is known to use for "
-        "such a bar (00:00:00.000 in UTC, on a Sunday)"
-    ) in warning
+    assert warning == (
+        "crypto.bars: Massive sent a bar of X:BTCUSD stamped 2026-10-12T00:00:00+00:00. Massive "
+        "is known to stamp bars of 1 week at 00:00:00.000 in UTC, on a Sunday, so the library "
+        f"cannot tell which day this one covers and withholds it. Report the stamp at {ISSUES} "
+        "so the library can learn which day such bars cover."
+    )
     caplog.clear()
 
     # A month bar must be stamped on its 1st.
@@ -3772,8 +3782,12 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     with pytest.raises(RowDataError, match="could read none of the 1 rows"):
         crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
     [warning] = unexpected_stamps(caplog)
-    assert "is stamped 2025-03-02T00:00:00+00:00" in warning
-    assert "on the 1st of a month)" in warning
+    assert warning == (
+        "crypto.bars: Massive sent a bar of X:BTCUSD stamped 2025-03-02T00:00:00+00:00. Massive "
+        "is known to stamp bars of 1 month at 00:00:00.000 in UTC, on the 1st of a month, so the "
+        "library cannot tell which day this one covers and withholds it. Report the stamp at "
+        f"{ISSUES} so the library can learn which day such bars cover."
+    )
 
 
 def test_forex_grouped_daily_keeps_its_sunday_but_not_its_saturday(
@@ -4234,7 +4248,7 @@ def test_a_symbol_with_no_data_returns_no_rows(
         )
     assert out == []
     assert caplog.messages == [
-        no_data_alarm("stocks.trades", 1, "ZZZZ", why="(HTTP 404 from /v3/trades/{stockTicker})")
+        no_data_alarm("stocks.trades", 1, "ZZZZ", why="(HTTP 404 from GET /v3/trades/ZZZZ)")
     ]
 
 
@@ -4993,14 +5007,19 @@ def test_the_missing_symbols_of_a_read_warn_once_and_each_is_a_problem(
                 end="2025-03-03",
                 symbols=["MSFT", "YYYY", "ZZZZ"],
             )
-    why = "(HTTP 404 from /v3/trades/{stockTicker})"
+    why = {symbol: f"(HTTP 404 from GET /v3/trades/{symbol})" for symbol in ("YYYY", "ZZZZ")}
     assert alarms(caplog) == [
-        no_data_alarm("stocks.trades", read, "YYYY", why=why) for read in (1, 2)
+        no_data_alarm("stocks.trades", read, "YYYY", why=why["YYYY"]) for read in (1, 2)
     ]
     # Each symbol of each read is a problem, logged at DEBUG, and the read names them
     # together at DEBUG.
     assert [(e.cause, e.stream_id, e.symbol, e.detail) for e in events] == [
-        (ProblemCause.UNAVAILABLE_SYMBOLS, read, symbol, f"Massive has no data for it {why}")
+        (
+            ProblemCause.UNAVAILABLE_SYMBOLS,
+            read,
+            symbol,
+            f"Massive has no data for it {why[symbol]}",
+        )
         for read in (1, 2)
         for symbol in ("YYYY", "ZZZZ")
     ]
@@ -5009,7 +5028,8 @@ def test_the_missing_symbols_of_a_read_warn_once_and_each_is_a_problem(
     assert len(each) == 4  # each symbol of each read
     assert all(m.startswith("stocks.trades: ") and "HTTP 404 from" in m for m in each)
     together = [m for m in debug if "Massive has no data for" in m]
-    left_out = f"stocks.trades: Massive has no data for 2 [YYYY {why}, ZZZZ {why}], so they are"
+    pair = f"[YYYY {why['YYYY']}, ZZZZ {why['ZZZZ']}]"
+    left_out = f"stocks.trades: Massive has no data for 2 {pair}, so they are"
     assert together == [f"{left_out} left out"] * 2
 
 
@@ -5039,7 +5059,7 @@ def test_a_symbol_without_data_is_listed_when_another_request_fails_the_read(
     monkeypatch.setattr(rest.RestReader, "_call", gating(rest.RestReader._call))
     with pytest.raises(dm.MassiveError, match="HTTP 500"):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "ZZZZ"])
-    why = "(HTTP 404 from /v3/trades/{stockTicker})"
+    why = "(HTTP 404 from GET /v3/trades/ZZZZ)"
     assert [(e.cause, e.symbol, e.detail) for e in events] == [
         (ProblemCause.UNAVAILABLE_SYMBOLS, "ZZZZ", f"Massive has no data for it {why}")
     ]
@@ -5067,7 +5087,7 @@ def test_a_symbol_without_data_is_listed_when_a_later_path_fails_a_poll_cycle(
             cancel=Cancel(),
             pace=rate_limits.PaceCheck("indicators.sma poll()", 60.0),
         )
-    why = f"(HTTP 404 from {SMA_STOCK})"
+    why = "(HTTP 404 from GET /v1/indicators/sma/ZZZZ)"
     assert [(e.cause, e.symbol, e.detail) for e in events] == [
         (ProblemCause.UNAVAILABLE_SYMBOLS, "ZZZZ", f"Massive has no data for it {why}")
     ]
@@ -5407,7 +5427,7 @@ def test_a_poll_cycle_reads_each_value_and_leaves_out_one_massive_has_no_data_fo
         read = _value_cycle(rest_session, ("ES", "NQ"))
     assert read.rows.column("ProductCode").to_pylist() == ["ES"]
     assert read.requests == 1
-    assert read.left_out == ("NQ (HTTP 404 from /futures/v1/products)",)
+    assert read.left_out == ("NQ (HTTP 404 from GET /futures/v1/products?product_code=NQ)",)
     assert [query["product_code"] for _, query in fake_rest.get_queries()] == [["ES"], ["NQ"]]
     assert any("NQ" in message and "no data" in message for message in caplog.messages)
 
@@ -5479,9 +5499,9 @@ def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
         "not found", status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
     )
     outcome = _not_found(session, error, symbol="ZZZZ", requests=0)
-    missing = rest._Missing("ZZZZ", "(HTTP 404 from /v3/trades/{stockTicker})")
+    missing = rest._Missing("ZZZZ", "(HTTP 404 from GET /v3/trades/ZZZZ)")
     assert outcome == rest._Outcome((), 1, missing=missing)
-    assert str(missing) == "ZZZZ (HTTP 404 from /v3/trades/{stockTicker})"
+    assert str(missing) == "ZZZZ (HTTP 404 from GET /v3/trades/ZZZZ)"
 
 
 def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:

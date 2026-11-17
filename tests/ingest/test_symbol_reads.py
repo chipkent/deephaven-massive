@@ -505,10 +505,11 @@ def test_each_symbol_s_history_ends_in_its_own_outcome(
     warned = [r for r in caplog.records if r.name in {LOGGER, REST_LOGGER}]
     assert [r.getMessage() for r in warned if r.levelno >= logging.WARNING] == []
     (alarm,) = alarms(caplog)
-    assert (
-        "unavailable_symbols: MSFT: Massive has no data for it (HTTP 404 from "
-        "/v3/trades/{stockTicker})"
-    ) in alarm
+    assert alarm == (
+        "stocks.trades table 7: unavailable_symbols: MSFT: Massive has no data for it (HTTP 404 "
+        "from GET /v3/trades/MSFT) (at stocks.trades). m.problems() lists it and every later "
+        "unavailable_symbols problem of this table, which the log shows at DEBUG only."
+    )
 
 
 def test_a_history_read_made_after_the_clock_moved_keeps_the_call_s_rows(
