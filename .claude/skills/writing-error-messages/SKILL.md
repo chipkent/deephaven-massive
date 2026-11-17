@@ -12,9 +12,9 @@ happened, whose answer it is, and what to do next.
 
 The wording is not the public contract: the exception classes and their attributes are, and the
 `_errors.py` docstring tells users to branch on `status` instead of parsing messages. A rewording
-lists itself in the PR and updates every `docs/troubleshooting.md` row that quotes it. Many
-messages and builders on `main` predate this rubric and are being rewritten (#758): write new
-text to the rubric, never in an older message's form.
+lists itself in the PR and updates every `docs/troubleshooting.md` row that quotes it.
+`tests/test_errors.py` checks every message site's layout (no semicolon, newline, or
+`bounded_list`, at most 400 literal characters); the rest of the rubric is the grader's.
 
 ## The rubric
 

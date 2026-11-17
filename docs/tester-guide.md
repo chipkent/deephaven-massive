@@ -1037,7 +1037,7 @@ You should see three lines like these, with your own session numbers and a row c
 
 ```text
 <MassiveSession #7 closed>
-MassiveError: MassiveSession #7 is closed; open a new dm.MassiveSession() to read again
+MassiveError: This session is closed. Open a new dm.MassiveSession() to read again.
 <MassiveSession #8 closed> 5
 ```
 
