@@ -390,8 +390,9 @@ snapshot = m.stocks.snapshots(["AAPL", "MSFT", "NVDA"]).fetch()
 `TodaysChangePerc`. On Starter or Developer without the setting, the `snapshot` table fails with
 an error that names the setting to change.
 
-Once a table streams, as in the next example, `Recency` in `m.connections()` says whether its
-data is real-time or delayed. [The problems example](#see-problems) shows the check.
+To check whether your data is real-time or delayed, run `m.connections()` in the next example's
+session. Its `Recency` is `DELAYED` with the Starter file and `REALTIME` with the Advanced one.
+[The problems example](#see-problems) shows the call.
 
 Settings belong to `dm.MassiveConfig`, and a file keeps them in one place for every console and
 script. Your keys stay in the environment, never in the file. [Configuration](#configuration)
@@ -592,17 +593,14 @@ Four more live tables show what the session is doing:
 ```python continues
 streams = m.streams()  # each live table and background read: its State, and Error if it failed
 # each streaming connection: its Host, State, and Recency, REALTIME or DELAYED
-feeds = m.connections().view(["Transport", "AssetClass", "Host", "State", "Recency"])
+connections = m.connections().view(["Transport", "AssetClass", "Host", "State", "Recency"])
 rate_limits = m.rate_limits()  # each subscription's rate-limit State: READY, PACED, or PAUSED
 symbol_reads = m.symbol_reads()  # each watchlist symbol read: its State, and Error if it failed
 ```
 
-Here `streams` has one row, for the ticker-details read, whose `State` ends `DONE`. `feeds`
-and `symbol_reads` stay empty, because this example opens no stream and reads no watchlist.
-
-Once a stream opens, `feeds` shows its connection, and `Recency` says whether its data is
-real-time or delayed. `UNKNOWN` means the library can't tell, and it never treats that data as
-real-time.
+Here `streams` has one row, for the ticker-details read, whose `State` ends `DONE`.
+`connections` and `symbol_reads` stay empty, because this example opens no stream and reads no
+watchlist. In a session that streams, `connections` gets a row for each stream's connection.
 
 Troubleshooting's [diagnostics section](docs/troubleshooting.md#diagnostics) says when to check
 each table. For a table's columns, run `help()` on its method, such as
