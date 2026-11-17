@@ -599,8 +599,10 @@ nearest_calls = nearest.view(
 ).sort("StrikePrice")
 ```
 
-`nearest_calls` has a row for each call of the nearest expiry. `calls` holds every expiry. With
-`wait=True`, `fetch()` returns once the chain has loaded, so `calls` is a static table.
+`nearest_calls` has a row for each call of the nearest expiry. `calls` holds every expiry.
+`wait=True` keeps `calls` static, which avoids a
+[Deephaven crash](docs/troubleshooting.md#live-table-messages) when `where_in` filters a live
+table by a table made from it.
 
 A chain is a snapshot of every contract of one underlying. Its arguments, such as
 `contract_type`, narrow it.
