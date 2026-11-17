@@ -477,11 +477,35 @@ def test_a_declared_base_is_used_before_the_open_pull_requests_are_searched(
         "<!-- base: feat/problems-table -->\n## Summary\n\nAdds a column.\n"
     )
     outputs = {
+        "git rev-list --count origin/feat/problems-table..HEAD": "2\n",
         "git diff origin/feat/problems-table...HEAD": "",
         "git diff --name-only origin/feat/problems-table...HEAD": "src/x.py\n",
     }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main([]) == 0
+
+
+def test_a_declared_base_that_already_holds_the_branch_is_ignored(
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Declaring the branch itself would diff it against itself and hide its rule edit.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git-pr-body.md").write_text(
+        "<!-- base: fix/mine -->\n## Summary\n\nRewords a skill.\n"
+    )
+    outputs = {
+        **_STACKED,
+        "git rev-list --count origin/fix/mine..HEAD": "0\n",
+        "git diff origin/feat/problems-table...HEAD": "",
+        "git diff --name-only origin/feat/problems-table...HEAD": ".claude/skills/x/SKILL.md\n",
+    }
+    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    assert check.main([]) == 1
+    assert "Ignoring the declared base origin/fix/mine" in capsys.readouterr().out
 
 
 def test_a_declaration_after_the_first_line_declares_nothing(check: ModuleType) -> None:

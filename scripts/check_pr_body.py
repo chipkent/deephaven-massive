@@ -423,7 +423,8 @@ def _base(body: str) -> tuple[str, str]:
     Returns:
         `origin/<branch>` and a phrase saying where it came from, the first that applies: the
         base of the branch's pull request; the branch the draft's first line declares,
-        `<!-- base: <branch> -->`; the open pull request's branch this one was cut from; else
+        `<!-- base: <branch> -->`, unless that branch already holds HEAD; the open pull
+        request's branch this one was cut from; else
         `origin/main`. A stacked branch is diffed against the branch below it, so the edits of
         that branch's own pull request are not counted as this one's.
     """
@@ -435,7 +436,11 @@ def _base(body: str) -> tuple[str, str]:
         return "origin/" + str(json.loads(view)["baseRefName"]), "its pull request's base"
     declared = DECLARED_BASE.match(body)
     if declared:
-        return "origin/" + declared.group("branch"), f"declared in {BODY_FILE}"
+        ref = "origin/" + declared.group("branch")
+        if _commits_ahead(ref) > 0:
+            return ref, f"declared in {BODY_FILE}"
+        # A branch that already holds HEAD would hide every edit of this one.
+        sys.stdout.write(f"Ignoring the declared base {ref}: it already holds this branch.\n")
     return _nearest_upstream()
 
 
