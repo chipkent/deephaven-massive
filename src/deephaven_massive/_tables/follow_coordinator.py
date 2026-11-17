@@ -1238,11 +1238,11 @@ class FollowCoordinator:
 
         A failure that may pass retries on `RETRY_DELAYS`, then every `RETRY_EVERY`, until one
         lands `MassiveConfig.max_outage` seconds or more after the run's first failure landed.
-        A read's own time is not counted: it may have spent most of it receiving pages, and a
-        read no caller waits for already gives up once its rate-limit pauses would pass
-        `max_outage`, so a symbol is final at most about twice that limit after its trouble
-        began. That failure is final, and its error names the limit (`_outage_failure`). Any
-        other failure is final at once.
+        A read's own time is not counted, since it may have spent most of it receiving pages.
+        The limit is a threshold checked as each failure lands, not a wall-clock bound: the
+        retry delays and each read's own length can carry a symbol past it before the failure
+        that ends it lands. That failure is final, and its error names the limit
+        (`_outage_failure`). Any other failure is final at once.
 
         Args:
             result: The result's state.
