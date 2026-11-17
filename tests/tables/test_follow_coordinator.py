@@ -1096,7 +1096,13 @@ def test_a_retrying_symbol_that_gives_up_ends_its_span_and_opens_a_failed_one(
     # MSFT lands, so the table outlives AAPL's failure.
     result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
     wait_state(massive_session, "MSFT", SymbolReadState.DONE)
-    for attempt, delay in enumerate(RETRY_DELAYS, start=1):
+    # The retries run on their schedule until AAPL has failed for max_outage.
+    schedule: list[float] = []
+    while sum(schedule) < massive_session._core.config.max_outage:
+        schedule.append(
+            RETRY_DELAYS[len(schedule)] if len(schedule) < len(RETRY_DELAYS) else RETRY_EVERY
+        )
+    for attempt, delay in enumerate(schedule, start=1):
         wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
         clock.advance(delay)
         massive_session._core.follows.wake()
@@ -1104,9 +1110,13 @@ def test_a_retrying_symbol_that_gives_up_ends_its_span_and_opens_a_failed_one(
     wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
     # Each wait for a retry is a span of its own, ended once the retry starts; the last one
     # gives up, and the failed span stays open.
+    gave_up = (
+        f"AAPL has failed for {sum(schedule):.0f} s, as long as MassiveConfig.max_outage allows "
+        f"({massive_session._core.config.max_outage:.0f} s); the latest error: HTTP 503: busy"
+    )
     expected = [
-        ("symbol_read_failed", "AAPL", "HTTP 503: busy", False),
-        *[("symbol_read_retrying", "AAPL", "HTTP 503: busy", True)] * len(RETRY_DELAYS),
+        ("symbol_read_failed", "AAPL", gave_up, False),
+        *[("symbol_read_retrying", "AAPL", "HTTP 503: busy", True)] * len(schedule),
     ]
     until(lambda: troubled(problem_rows) == expected)
     massive_session.release(result)
