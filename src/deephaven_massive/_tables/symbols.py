@@ -170,7 +170,28 @@ def canonicalize_symbols(
     converted = table.update([f"{column} = {massive_canonical_symbol.__name__}({column})"])
     if table.is_refreshing and not effect.fails:
         _track_refused(table, converted, column=column, mode=mode, convert=convert)
+    elif not effect.fails:  # a static input's refused values are the ones found above
+        _keep_refused(converted, tuple(refused), mode=mode, convert=convert)
     return converted
+
+
+def _keep_refused(
+    converted: Table, values: tuple[str, ...], *, mode: OnError, convert: Callable[[str], str]
+) -> None:
+    """Keep the values a static input table holds that the converter refuses.
+
+    A table that reads `converted` reports each one in `m.problems()` (`refused_values.py`);
+    the input never changes, so no watch keeps them current.
+
+    Args:
+        converted: The table `canonicalize_symbols` returns.
+        values: The input's refused values.
+        mode: The call's `on_error`, `LOG` or `IGNORE`.
+        convert: The class's strict verdict (`strict_converter`).
+    """
+    refused = RefusedValues(mode, why=lambda value: refusal(value, convert))
+    refused.change(values)
+    track_refused(converted, refused)
 
 
 def _track_refused(

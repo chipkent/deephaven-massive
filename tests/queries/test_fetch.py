@@ -743,6 +743,66 @@ def test_fetch_skips_a_bad_row_when_the_call_logs_and_the_session_raises(
     ]
 
 
+def test_a_one_time_read_lists_each_value_canonicalize_symbols_refused(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # The converted table holds a null for each refused value, which the read skips like any
+    # null; the call still lists the value once, with the converter's setting, as a live read
+    # would while the row holds it.
+    symbols = dm.canonicalize_symbols(
+        new_table([string_col("Symbol", ["AAPL", "no pe!"])]), dm.AssetClass.STOCKS
+    )
+    massive_session.stocks.last_trade(symbols).fetch(wait=True)
+    underlyings = dm.canonicalize_symbols(
+        new_table([string_col("Symbol", ["AAPL", "bad one"])]),
+        dm.AssetClass.STOCKS,
+        on_error=dm.OnError.IGNORE,
+    )
+    massive_session.options.chain(underlyings).fetch(wait=True)
+    assert [request.symbols for _, _, request, _ in rest.calls] == [("AAPL",)]
+    assert [values for values, _, _ in rest.valued] == [("AAPL",)]
+    rows = [
+        (r["Cause"], r["Action"], r["Symbol"], r["Field"], r["Policy"], r["EndedAt"])
+        for r in problem_rows()
+    ]
+    assert rows == [
+        ("noncanonical_symbols", "SKIPPED", "no pe!", None, "log", None),
+        ("noncanonical_symbols", "SKIPPED", "bad one", "Symbol", "ignore", None),
+    ]
+    assert all(r["Detail"].startswith("canonicalize_symbols refused it: ") for r in problem_rows())
+
+
+def test_a_followed_fetch_of_underlyings_names_their_column_in_field(
+    *,
+    live: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # As a poll() of the same table does: a value the read skips, and one the converter
+    # refused, each name the table's column.
+    raw = live("AAPL", "no pe!")
+    result = massive_session.options.chain(raw).fetch(wait=True)
+    source = live("MSFT", "bad one")
+    converted = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    other = massive_session.options.chain(converted).fetch(wait=True)
+
+    def fields() -> list[tuple[object, ...]]:
+        return sorted(
+            (r["Symbol"], r["Field"])
+            for r in problem_rows()
+            if r["Cause"] == "noncanonical_symbols"
+        )
+
+    until(lambda: fields() == [("bad one", "Symbol"), ("no pe!", "Symbol")])
+    massive_session.release(result)
+    massive_session.release(other)
+    follows(massive_session)
+
+
 def test_a_followed_fetch_fails_on_a_late_bad_row_when_the_call_raises_and_the_session_logs(
     *,
     live: Callable[..., InputTable],

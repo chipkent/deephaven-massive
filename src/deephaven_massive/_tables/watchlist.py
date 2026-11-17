@@ -75,6 +75,7 @@ from deephaven_massive._tables.problem_events import (
     ProblemEvent,
     SpanTracker,
 )
+from deephaven_massive._tables.refused_values import refused_detail
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -545,15 +546,36 @@ class SkippedValues:
             symbols: The symbol table's distinct values skipped now; empty once none is.
             values: The value table's, skipped by the `values` rule.
         """
+        # Named by the source and the value, quoted, as `refused_changed` names its spans, so
+        # one text skipped in both tables is two spans.
         own: dict[str, tuple[str | None, str | None, str, int]] = {
-            value: (value, None, self._rule.refusal(value), 0) for value in symbols
+            f"skipped {None!r} {value!r}": (value, None, self._rule.refusal(value), 0)
+            for value in symbols
         }
         if self._values is not None:
             rule = self._values
-            own.update({value: (value, rule.column, rule.refusal(value), 0) for value in values})
+            own.update(
+                {
+                    f"skipped {rule.column!r} {value!r}": (
+                        value,
+                        rule.column,
+                        rule.refusal(value),
+                        0,
+                    )
+                    for value in values
+                }
+            )
         with self._lock:
             self._own = dict(own)
             self._show()
+
+    def update_values(self, values: Iterable[str]) -> None:
+        """Take the values a table of values skips now, for a table that reads only that table.
+
+        Args:
+            values: Its distinct values skipped now, by the `values` rule; empty once none is.
+        """
+        self.update((), values=values)
 
     def refused_changed(
         self, refused: Mapping[str, str], policy: OnError, *, field: str | None = None
@@ -574,7 +596,7 @@ class SkippedValues:
             f"refused {field!r} {value!r}": (
                 value,
                 field,
-                f"canonicalize_symbols refused it: {why}",
+                refused_detail(why),
                 0,
             )
             for value, why in refused.items()

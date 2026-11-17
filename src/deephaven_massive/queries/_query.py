@@ -41,6 +41,7 @@ from deephaven_massive._tables.columns import (
 )
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.follow_coordinator import FirstRead
+from deephaven_massive._tables.refused_values import refused_values_of
 from deephaven_massive._tables.transports import (
     SymbolFailure,
 )
@@ -143,9 +144,11 @@ def _read_symbol_table(
         noncanonical: The call's `noncanonical_symbols` (`Request.on_error`).
         live: True for a live verb, which may start on a table with no row yet and follow
             it as rows arrive.
-        call: The id of the static verb's call whose symbols these are: each skipped value
-            is listed in `m.problems()` as a `noncanonical_symbols` problem of the call
-            (`SymbolRowRule.skipped_events`), with the call's query, before any error below.
+        call: The id of the static verb's call whose symbols these are: each skipped value,
+            and each value `dm.canonicalize_symbols` refused in the table it returned
+            (`RefusedValues.events`), is listed in `m.problems()` as a `noncanonical_symbols`
+            problem of the call (`SymbolRowRule.skipped_events`), with the call's query,
+            before any error below.
             None for a read the call
             makes only to check the table, or a live verb's, whose table lists them.
 
@@ -167,11 +170,16 @@ def _read_symbol_table(
     with entered(core.exec_ctx):
         rows = read_symbols(rule, symbols.table, stream_id=None, reported=live or call is not None)
         has_rows = symbols.table.size > 0
-    if call is not None and rows.skipped:
-        # Named first: a call that raises below never reaches the read that names it.
-        core.diagnostics.name_read(call, query)
+    if call is not None:
         where = f"the symbol table of {query}"
-        core.problems(rule.skipped_events(rows.skipped, stream_id=call, where=where, field=None))
+        events = rule.skipped_events(rows.skipped, stream_id=call, where=where, field=None)
+        refused = refused_values_of(symbols.table)  # a table `canonicalize_symbols` returned
+        if refused is not None:
+            events += refused.events(dataset=spec.name, stream_id=call, where=where, field=None)
+        if events:
+            # Named first: a call that raises below never reaches the read that names it.
+            core.diagnostics.name_read(call, query)
+            core.problems(events)
     if rows.skipped and not rows.symbols:
         raise ValueError(
             f"{query}: no row of the symbol table is a ticker this dataset takes, so the result "

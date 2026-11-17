@@ -11,7 +11,12 @@ from deephaven.column import string_col
 import deephaven_massive as dm
 from deephaven_massive._enums import AssetClass, OnError
 from deephaven_massive._tables.liveness import new_scope, release_scope
-from deephaven_massive._tables.problem_events import Problem, ProblemCause, ProblemSpans
+from deephaven_massive._tables.problem_events import (
+    Problem,
+    ProblemAction,
+    ProblemCause,
+    ProblemSpans,
+)
 from deephaven_massive._tables.refused_values import (
     ConversionRule,
     RefusedValues,
@@ -68,8 +73,8 @@ def test_a_follower_gets_the_values_now_and_each_change_beside_its_own() -> None
     refused.change(())  # fixed or deleted
     assert spans_of(problems) == [
         {"refused None '^GSPC'": ("^GSPC", OnError.IGNORE)},
-        {"refused None '^GSPC'": ("^GSPC", OnError.IGNORE), "btc": ("btc", None)},
-        {"btc": ("btc", None)},
+        {"refused None '^GSPC'": ("^GSPC", OnError.IGNORE), "skipped None 'btc'": ("btc", None)},
+        {"skipped None 'btc'": ("btc", None)},
     ]
     first = problems[0]
     assert isinstance(first, ProblemSpans)
@@ -182,11 +187,32 @@ def test_a_live_converted_table_keeps_its_refused_values_current(
     release_scope(dh_exec_ctx, scope)
 
 
-def test_a_static_or_failing_conversion_tracks_nothing(
+def test_a_static_conversion_keeps_its_refused_values_once() -> None:
+    # A static input never changes: its refused values are the ones found at the conversion,
+    # and a one-time read lists each as a problem of its call.
+    static = dm.canonicalize_symbols(
+        new_table([string_col("Symbol", ["^X", "X:BTCUSD"])]), AssetClass.CRYPTO
+    )
+    refused = refused_values_of(static)
+    assert refused is not None
+    problems: list[Problem] = []
+    refused.follow(SkippedValues(RULE, stream_id=7, report=problems.extend))
+    assert [list(found) for found in spans_of(problems)] == [["refused None '^X'"]]
+    [event] = refused.events(dataset="crypto.trades", stream_id=9, where="w", field="Symbol")
+    assert (event.cause, event.action, event.symbol, event.field, event.stream_id) == (
+        ProblemCause.NONCANONICAL_SYMBOLS,
+        ProblemAction.SKIPPED,
+        "^X",
+        "Symbol",
+        9,
+    )
+    assert event.detail.startswith("canonicalize_symbols refused it: ")
+    assert event.policy is OnError.LOG
+
+
+def test_a_failing_conversion_tracks_nothing(
     dh_exec_ctx: ExecutionContext, dh_input_table: Callable[..., InputTable]
 ) -> None:
-    static = dm.canonicalize_symbols(new_table([string_col("Symbol", ["^X"])]), AssetClass.CRYPTO)
-    assert refused_values_of(static) is None
     source = dh_input_table({"Symbol": dtypes.string})
     scope = new_scope()
     with scope.open():
