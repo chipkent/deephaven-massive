@@ -812,13 +812,23 @@ class RestReader:
         )
 
     def _underlyings(
-        self, spec: DatasetSpec, rows: list[pa.RecordBatch], *, stop: Cancel, patience: Patience
+        self,
+        spec: DatasetSpec,
+        rows: list[pa.RecordBatch],
+        *,
+        stop: Cancel,
+        patience: Patience,
+        where: str,
     ) -> list[pa.RecordBatch]:
         """Give a page's index underlyings their `I:` by option root, where the dataset asks.
 
         Only a dataset with `DatasetSpec.underlying_by_root` is changed
         (`option_roots.canonical_underlyings`); its rows' `Date` is filled by now, which dates
-        each root's lookup.
+        each root's lookup. The rows of a root Massive's contracts reference can't classify
+        are withheld as `unreadable_symbols` and reported as `_page_rows` reports its own
+        (`_report_withheld`). The read's `ReadTally` counts them as read whole, as they were:
+        a root the reference lacks is no sign that Massive's format changed, so a read whose
+        every row is such a root's returns no rows under `LOG` instead of failing.
 
         Args:
             spec: The dataset.
@@ -827,19 +837,27 @@ class RestReader:
             patience: The read's patience, taken on its own thread, which a lookup's pauses
                 are charged to: `_call` may run on a fan-out worker, whose own patience would
                 not know a console caller holds the update graph's lock.
+            where: The request template, for the events.
 
         Returns:
-            The rows.
+            The rows to publish.
+
+        Raises:
+            RowDataError: If rows are withheld and `unreadable_symbols` is `RAISE` in the
+                read's policy.
 
         A failed lookup raises the `MassiveError` of `root_kind`.
         """
-        if not spec.underlying_by_root:
+        if not spec.underlying_by_root or not rows:
             return rows
-        return canonical_underlyings(
+        withheld = canonical_underlyings(
             rows,
             functools.partial(self.root_kind, patience=patience, cancel=stop),
             dataset=spec.name,
         )
+        if withheld.groups:
+            self._report_withheld(spec, withheld, where=where)
+        return list(withheld.rows.to_batches())
 
     def root_kind(
         self,
@@ -1440,6 +1458,7 @@ class RestReader:
                         ),
                         stop=stop,
                         patience=patience,
+                        where=f"GET {template}",
                     )
                 )
         except WireError as error:

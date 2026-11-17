@@ -40,7 +40,7 @@ from deephaven_massive._ingest.recency_labels import delayed_refusal
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RowFault, Transport, to_batch
 from deephaven_massive._session import CATALOG
-from deephaven_massive._tables.problem_events import ProblemCause
+from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces import _options as options
 from deephaven_massive.namespaces._namespace import Namespace
@@ -1460,6 +1460,84 @@ def test_one_bare_underlying_is_a_stock_or_an_index_by_each_root(
         out = rows(rest_session.options.open_interest().fetch(wait=True))
     assert [(r["OptionRoot"], r["Underlying"]) for r in out] == [("DJT", "DJT"), ("DJTW", "I:DJT")]
     assert caplog.records == []  # each root is classified, so none warns
+
+
+UNCLASSIFIED = ["O:SPXW261218C06000000", "O:SPXW261218P06000000"]
+"""Two contracts of a root whose underlying, SPX, is a listed index."""
+AAPL_CALL = "O:AAPL261218C00200000"
+"""A stock's contract, whose root needs no lookup."""
+
+
+def serve_unclassified(server: FakeRestServer) -> None:
+    # A page of SPXW's two contracts and a stock's, whose reference gives SPXW no CFI code.
+    page = [
+        {"ticker": t, "root": "SPXW", "date": "2026-11-13", "underlying_ticker": "SPX"}
+        for t in UNCLASSIFIED
+    ]
+    page.append(
+        {"ticker": AAPL_CALL, "root": "AAPL", "date": "2026-11-13", "underlying_ticker": "AAPL"}
+    )
+    server.reply("/options/v1/open-interest", Reply({"status": "OK", "results": page}))
+    serve_indices(server, "SPX")
+    server.reply(
+        wire(f"/v3/reference/options/contracts/{UNCLASSIFIED[0]}"),
+        Reply({"status": "OK", "results": {}}),
+    )
+
+
+def test_the_rows_of_a_root_the_reference_cannot_classify_are_withheld(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    serve_unclassified(fake_rest)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    out = rows(rest_session.options.open_interest().fetch(wait=True))
+    # SPX may be an index's ticker without its I:, so SPXW's rows are left out and listed.
+    assert [(r["Symbol"], r["Underlying"]) for r in out] == [(AAPL_CALL, "AAPL")]
+    [event] = events
+    assert (event.cause, event.action, event.symbol, event.field, event.rows) == (
+        ProblemCause.UNREADABLE_SYMBOLS,
+        ProblemAction.WITHHELD,
+        "SPX",
+        "Underlying",
+        2,
+    )
+    assert event.stream_id is not None
+    assert event.policy is dm.OnError.LOG
+    assert event.detail.startswith(
+        "Massive's Contract Overview gives no CFI code for option root SPXW (asked about "
+        f"{UNCLASSIFIED[0]} as of 2026-11-13)"
+    )
+
+
+def test_a_read_of_an_unclassified_root_alone_returns_no_rows_under_log(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = [
+        {"ticker": t, "root": "SPXW", "date": "2026-11-13", "underlying_ticker": "SPX"}
+        for t in UNCLASSIFIED
+    ]
+    fake_rest.reply("/options/v1/open-interest", Reply({"status": "OK", "results": page}))
+    serve_indices(fake_rest, "SPX")
+    fake_rest.reply(
+        wire(f"/v3/reference/options/contracts/{UNCLASSIFIED[0]}"),
+        Reply({"status": "OK", "results": {}}),
+    )
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    # The rows were read whole; only the reference lacks an answer, so the read doesn't fail
+    # as one whose rows the library could not read.
+    assert rows(rest_session.options.open_interest(root="SPXW").fetch(wait=True)) == []
+    assert [(e.cause, e.rows) for e in events] == [(ProblemCause.UNREADABLE_SYMBOLS, 2)]
+
+
+def test_the_rows_of_an_unclassified_root_fail_the_read_under_raise(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    serve_unclassified(fake_rest)
+    strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
+    with pytest.raises(RowDataError, match=r"2 under unreadable_symbols.*option root SPXW"):
+        rest_session.options.open_interest(on_error=strict).fetch(wait=True)
 
 
 def test_a_poll_of_unusual_trades_names_an_index_underlying_from_its_first_cycle(
