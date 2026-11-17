@@ -20,22 +20,16 @@ checkout's root.
 Set your keys as the README's [Set your API keys](../README.md#set-your-api-keys) step shows.
 Without the S3 keys, the flat-file tests skip.
 
-Then point the run at your [settings file](configuration.md). Add this line to your shell's
-startup file, beside your keys, and open a new terminal:
-
-```bash
-export DEEPHAVEN_MASSIVE_CONFIG_FILE="$HOME/massive/settings.yaml"
-```
-
-The run takes three settings from the file and leaves every other setting at its default:
+Then save a [settings file](configuration.md) as `~/massive/settings.yaml`. The run takes three
+settings from it and leaves every other setting at its default:
 
 | Setting | What to set | Without it |
 |---|---|---|
 | `delayed_subscriptions` | Each subscription Massive serves your key delayed | Every stream and snapshot test of those subscriptions skips, `not listed as delayed` |
 | `rest_requests_per_minute` | Each subscription Massive limits by the minute, and its limit | The rate-limit tests skip, and other tests run slower |
-| `websocket_hosts` | The host Massive serves an asset class from, such as `indices: business.massive.com`. See [`websocket_hosts`](configuration.md#setting-details). | The library picks the host |
+| `websocket_hosts` | `indices: business.massive.com`, when Massive serves your index values there. See [`websocket_hosts`](configuration.md#setting-details). | The library picks the host, which may not serve your index values |
 
-A file that sets all three looks like this:
+Keep only the settings your key needs. A file that sets all three looks like this:
 
 ```yaml
 delayed_subscriptions: [stocks]   # Massive serves your stocks delayed
@@ -45,12 +39,19 @@ websocket_hosts:
   indices: business.massive.com   # Massive serves your index values from this host
 ```
 
+Point the run at the file. Add this line to your shell's startup file, beside your keys, and
+open a new terminal:
+
+```bash
+export DEEPHAVEN_MASSIVE_CONFIG_FILE="$HOME/massive/settings.yaml"
+```
+
 A settings file the library refuses stops the run at the first test that loads it, with the
 library's message.
 
 <a id="run-order"></a>
 
-### Run the tests in three steps
+### Run them in order
 
 Stop every other program that uses the key, then run these in order. Each command adds its
 output to `live-checks.log`, the file to attach to an issue.
@@ -164,9 +165,9 @@ one, the same section says where. Don't share that log, and open an issue that n
 
 ## Read the checks a pass doesn't settle
 
-Five tests record what Massive does for you to judge. Find each one's lines under
-`live evidence` at the end of the run, or in `live-evidence-<UTC time>.log`
-([Read the end of a run](#read-the-end-of-a-run)):
+Read the evidence of these five tests after every run, and open an issue as the table says.
+Find each one's lines under `live evidence` at the end of the run, or in
+`live-evidence-<UTC time>.log` ([Read the end of a run](#read-the-end-of-a-run)):
 
 | Test | The question | Open an issue when |
 |---|---|---|
@@ -240,12 +241,13 @@ groups run these tests:
 | `stream-night-reconcile` | The night's minute bars against REST history |
 | `half-day` | The bar-stamp tests, on the trading day after a half day |
 
-The `stream-day` group's debug log shows how long a healthy stocks connection goes without a
-message before stocks trade. Between 03:45 and 04:00 New York time, find the stocks
-connection's status lines, which read `wss://<host>/stocks status <KIND>: <message>`. Open an
-issue with the longest gap between them.
+The `stream-day` group also answers whether Massive sends any message on a stocks connection
+while no stock trades. The library warns when a connection gets no message for 5 minutes in
+trading hours, and this answer says whether that warning is right.
 
-Attach every `no frame for ... during ... trading hours` WARNING of the day to that issue too.
+The group connects at 03:45 New York time, before pre-market trading opens at 04:00. In its
+debug log, Massive's status messages read `wss://<host>/stocks status <KIND>: <message>`. Open
+an issue with the stocks lines between 03:45 and 04:00, or say there were none.
 
 <a id="live-run-reruns"></a>
 
