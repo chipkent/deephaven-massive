@@ -47,8 +47,12 @@ exception, goes through the `writing-user-docs` review before it is pushed:
   `.claude/skills/writing-user-docs/agents/editor.md` and its four readers, scoped to the
   changed docstrings. Only `__init__.py`, the front door, is graded as a landing page, with the
   twenty-second hook and job-level pains; class and method docstrings are graded as reference
-  text. Apply only the fixes both graders agree on, plus any false claim either finds. Grade at
-  most twice; a docstring still short of the bar goes to the owner with both sheets.
+  text. Apply only the fixes both graders agree on, plus any false claim either finds.
+- **Ship only at a passing grade.** Every grade uses fresh graders. When patching leaves a
+  docstring short of the bar, rewrite it from what the caller needs and grade it again. If a few
+  rewrite-and-grade rounds still can't pass it, ask the owner for help with the specific
+  obstacle (`writing-to-the-owner`), with the graders' sheets; never ask for sign-off on failing
+  text. Never call a failing docstring done.
 
 Private and internal docstrings keep the lighter rules on this page, with no review round.
 

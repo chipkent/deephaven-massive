@@ -2,8 +2,7 @@
 
 Every `dm.MassiveConfig` setting is here: what it does, the values it takes, its default, and
 when to change it. Keep your choices in a settings file, and every console and script loads the
-same ones. [Every setting in one file](#example-settings-file) shows each setting in place;
-change its plan lists to match your own plans.
+same ones. [Every setting in one file](#example-settings-file) shows each setting in place.
 
 <a id="write-a-settings-file"></a>
 
@@ -16,11 +15,12 @@ of three forms:
 - A single value: a word, a number, or a URL, such as `raise`, `600`, or
   `https://api.massive.com`. Write a word in lower case, exactly as
   [Values and defaults](#settings-table) shows it.
-- A list, in brackets: `[stocks, options]`, or `[]` for none. `delayed_subscriptions` and
-  `rest_basic_subscriptions` are the two lists.
-- A mapping, one `key: value` line per entry, indented under the setting's name.
-  `websocket_hosts` is the only mapping. Its keys are asset classes, and its values are
-  hostnames.
+- A list, in brackets: `[stocks, options]`, or `[]` for none. `delayed_subscriptions` is the
+  only list.
+- A mapping, one `key: value` line per entry, indented under the setting's name. A short
+  mapping also fits in braces on one line, such as `{stocks: 5}`, or `{}` for none. The
+  mappings are `websocket_hosts` (asset class to hostname), `rest_requests_per_minute`
+  (subscription to requests a minute), and `on_error` (cause to `raise`, `log`, or `ignore`).
 
 This file uses all three forms:
 
@@ -77,9 +77,9 @@ too, `HTTPS_PROXY`, and so are your company's certificate authorities and the lo
 
 ## Settings
 
-Most files start with your plans: `delayed_subscriptions` and `rest_basic_subscriptions`
-match the session to what you've bought. A file that leaves both out treats every
-subscription as bought on a real-time plan.
+Most files start with your plans: `delayed_subscriptions` and `rest_requests_per_minute`
+match the session to what you've bought. A file without `delayed_subscriptions` treats every
+subscription as real-time.
 
 Each setting is a name in the settings file and an argument of `dm.MassiveConfig`. In a file,
 write the values shown here. In code, pass the matching Python value: `{dm.Subscription.STOCKS}`
@@ -103,26 +103,7 @@ of three values:
 | `raise` | Fails whatever met the problem. |
 
 Under `log` and `ignore`, a stream or `poll()` table names each symbol it skips in its `Error`
-in `m.streams()`.
-
-The library never publishes a row of Massive's data it can't read whole: it leaves the row
-out. Three causes cover such rows: `unreadable_keys`, `unreadable_symbols`, and
-`unconvertible_values`. Their setting decides only whether the table fails and how loudly the
-log reports the row.
-
-Whatever the setting, a read or stream fails when the library can read none of the rows it
-would receive, since Massive's format has most likely changed. Rows outside the call's symbols
-or range are ignored for this rule:
-
-| Read or stream | Fails when the library can read none of |
-|---|---|
-| A `fetch()` or `history()` from REST | The rows of all its pages. |
-| A `history()` from flat files | The rows of all its files, and of the REST pages of any days REST fills. |
-| A `fetch()` or `history()` that follows a symbol table | The rows of one of its reads. The symbols of that read fail, and the table goes on. |
-| A `poll()` table | The rows of one cycle's read. |
-| A `dm.ALL` stream | 100 consecutive rows of its channel. |
-| A stream of named symbols | 100 consecutive rows of one of its symbols. |
-| A stream of named symbols | 100 consecutive rows whose symbol the library can't read. |
+in `m.streams()`. A symbol the library can't read logs an error instead of a warning.
 
 Under `raise`:
 
@@ -144,14 +125,16 @@ sets every cause at once.
 
 ### Every setting in one file
 
-This file sets every setting, and a line marked `# the default` can be left out. Its other values suit an account whose stocks and options data Massive serves delayed, whose index values Massive serves on business.massive.com, and whose Currencies and Futures subscriptions are on the free Basic plan:
+This file sets every setting, and a line marked `# the default` can be left out. Change the other values to match your account:
 
 ```yaml
 # Subscriptions whose data Massive serves you delayed, 15 minutes late.
 delayed_subscriptions: [options, stocks]
 
-# Subscriptions on the free Basic plan, held to five requests a minute.
-rest_basic_subscriptions: [currencies, futures]
+# REST requests a minute Massive allows each subscription it limits.
+rest_requests_per_minute:
+  currencies: 5
+  futures: 5
 
 # Seconds a live table waits out an outage before it fails; 0 fails at once.
 max_outage: 600
@@ -221,7 +204,7 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 | Setting | What it's for | Values | Default |
 |---|---|---|---|
 | `delayed_subscriptions` | Lists the subscriptions whose data Massive serves you delayed, so their streams use Massive's delayed feed and their snapshots accept its `DELAYED` label. | A list of any of `stocks`, `options`, `indices`, or `futures`, such as `[stocks]`, or `[]` for none | `[]` |
-| `rest_basic_subscriptions` | Lists the subscriptions on Massive's free Basic plan, so their requests keep to Basic's five a minute from the start. | A list of any of `stocks`, `options`, `indices`, `currencies`, or `futures`, such as `[options]`, or `[]` for none | `[]` |
+| `rest_requests_per_minute` | Gives each subscription's REST request limit on your plan, so its requests keep to it from the first one. | A mapping of any of `stocks`, `options`, `indices`, `currencies`, or `futures` to a positive whole number, such as `{options: 5}`, or `{}` for none | `{}` |
 | `max_outage` | Sets how many seconds a live table waits out an outage or Massive's rate limits before it fails. | A number of seconds, `0` or more, such as `600` | `300` |
 | `flush_interval` | Sets how many seconds pass between the batches of streamed rows added to live tables. | A positive number of seconds, such as `0.1` | `0.05` |
 | `flat_file_symbol_threshold` | Sets how many symbols in a list make a `history()` call read Massive's flat files instead of a request per symbol, when both can serve it. | A positive whole number, such as `100` | `50` |
@@ -268,17 +251,20 @@ Leave a delayed subscription out, and a stream of its current data raises
 `poll()` table of it fails with the same message, and `fetch(wait=True)` raises it.
 `history()` and other past data don't depend on this setting.
 
-#### rest_basic_subscriptions
+#### rest_requests_per_minute
 
-Each of the five subscriptions has a free Basic plan, and every subscription you
-haven't bought is on it: list each of those. Leave out each one you
-pay for, on any plan, Starter included: a listed subscription's requests are held to
-five a minute.
+List each subscription Massive limits, with its limit in requests a minute, such as
+5 for `stocks`. Leave out a subscription Massive doesn't limit.
+Massive's article on its request limits gives each limit:
+https://massive.com/knowledge-base/article/what-is-the-request-limit-for-massives-restful-apis.
 
-A Basic subscription you leave out runs at full speed until Massive first refuses
-one of its requests for the rate limit. From then on, it keeps to five a minute. The
-limit is shared by every session in this server that uses your key.
-`m.rate_limits()` shows each subscription's pace.
+Leave a limited subscription out, and the session learns its limit from Massive's
+first rate-limit error, after a pause. `m.rate_limits()` shows the limit a session
+learned. Copy it here to skip the pause next time. A limit you list wins over a
+learned one.
+
+Every session in this server that uses your key shares one limit per subscription.
+When sessions list different limits, the lowest applies.
 
 #### max_outage
 
@@ -322,8 +308,8 @@ of a live table reads REST whenever REST can serve it.
 Raise it to run more at once, or lower it to open fewer connections. Both limits
 cover all the session's calls together. It also sets how many downloads of
 `fetch()` and `history()` run at a time, counting each symbol of a watchlist read:
-the others wait their turn, and `m.streams()` shows them `LOADING`. A Basic
-subscription still keeps to five requests a minute.
+the others wait their turn, and `m.streams()` shows them `LOADING`. A subscription
+with a request limit still keeps to it.
 
 #### on_error
 

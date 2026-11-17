@@ -155,7 +155,7 @@ class CryptoTickerList:
         (`/v3/reference/tickers?market=crypto`, every page, first with `active=true` and then
         with `active=false`, so a delisted pair splits too), keeping each ticker's
         `base_currency_symbol` and `currency_symbol`, whose join must be the ticker. Its
-        requests count against Massive's limit on reference data, so on a Basic subscription
+        requests count against Massive's limit on reference data, so once that limit is paced
         they wait their turn. Blocks the calling thread for that read, or while another thread
         makes it, sharing that read rather than starting a second one; a caller that shares it
         still waits out no more of its pauses than its own patience covers
