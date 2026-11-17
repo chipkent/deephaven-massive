@@ -84,7 +84,7 @@ PYTHON_GIL=0 UV_PROJECT_ENVIRONMENT=.venv-314t uv run --python 3.14t pytest -q  
 These protect the owner's repository, money, and secrets.
 
 - **Agents never merge**: never commit or push to `main`, and never merge a PR in any way;
-  the hook `.claude/hooks/pre-bash-no-merge.sh` enforces it.
+  the project's Claude Code permission rules (`.claude/settings.json`) enforce it.
 - **Never bypass a hook or skip a failing check** (`--no-verify`, `core.hooksPath`); fix the
   cause.
 - **Never rewrite a pushed branch** (a force-push, a rebase, or `gh stack submit`, `gh stack
