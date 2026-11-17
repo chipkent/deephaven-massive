@@ -1087,6 +1087,26 @@ def test_a_paused_bucket_is_a_rate_limited_span_until_its_pause_ends(
     diagnostics.release()
 
 
+def test_a_pause_that_holds_at_release_ends_with_the_session(
+    dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
+) -> None:
+    # A session closed during a pause leaves no pause open in a view kept from before.
+    diagnostics = _diagnostics(dh_exec_ctx)
+    source = _RatePull()
+    source.rows = [_rate_row("stocks", RateLimitState.PAUSED)]
+    diagnostics.watch_rate_limits(source)
+    assert diagnostics.wait_until_shown(TIMEOUT)
+    keeper = new_scope()
+    keeper.manage(diagnostics.problems)
+    [row] = dh_to_pylist(diagnostics.problems)
+    assert row["EndedAt"] is None
+    diagnostics.release()
+    assert diagnostics.wait_until_shown(TIMEOUT)  # the kept table takes the last rows in
+    [ended] = dh_to_pylist(diagnostics.problems)
+    assert ended["EndedAt"] is not None
+    release_scope(dh_exec_ctx, keeper)
+
+
 def test_buckets_paused_in_one_pull_are_rows_of_their_own(
     dh_exec_ctx: ExecutionContext, dh_to_pylist: Rows
 ) -> None:

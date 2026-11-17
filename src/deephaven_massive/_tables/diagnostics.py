@@ -1223,9 +1223,18 @@ class Diagnostics:
             self._writer.thread.join()
 
     def _release_tables(self) -> None:
-        """The writer's last step (`on_exit`): release the tables' scope (`release_scope`)."""
-        self._scope_released = True
-        release_scope(self._exec_ctx, self._scope)
+        """The writer's last step (`on_exit`): end the open pauses, then release the scope.
+
+        A rate-limit pause belongs to no table, so no final stream row ends it: the session's
+        end does, so a view kept from before the release shows no pause still open.
+        """
+        try:
+            ended = self._paused.update({})
+            if ended is not None:
+                self._problems.add(self._ledger.apply([ended]))
+        finally:  # the scope is released whatever the last rows did
+            self._scope_released = True
+            release_scope(self._exec_ctx, self._scope)
 
     def _writer_died(self, death: BaseException) -> None:
         """The writer's `on_death`: fail the tables and hand their scope to the reaper.
