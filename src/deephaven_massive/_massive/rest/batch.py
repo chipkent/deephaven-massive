@@ -228,7 +228,7 @@ def to_batch(
         f.column for f in fields
     }
     if unknown:
-        raise ValueError(f"{rest_path.template} has no columns {sorted(unknown)}")
+        raise ValueError(f"The path {rest_path.template!r} has no columns {sorted(unknown)}.")
     objects = _prefixes(fields)
     marker = RowMarker()
     reading = _by_column(rows, fields, objects=objects, required=required)

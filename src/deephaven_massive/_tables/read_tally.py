@@ -137,7 +137,7 @@ class ReadTally:
         log_failure(
             logger,
             failure,
-            "%s by symbol: the read fails each symbol it gave rows: %s",
+            "%s by symbol: the read fails each symbol it gave rows. %s",
             dataset,
             expected=logging.DEBUG,
         )

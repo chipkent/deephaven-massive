@@ -98,7 +98,7 @@ class Cancel(threading.Event):
         Raises:
             RuntimeError: Always.
         """
-        raise RuntimeError("a Cancel token cannot be cleared; create a new one")
+        raise RuntimeError("A Cancel token cannot be cleared. Create a new one.")
 
     def on_set(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Run `callback` once when the token is set, or now if it already is.

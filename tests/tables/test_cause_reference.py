@@ -1,5 +1,6 @@
 """Tests for the troubleshooting page's table of problem causes."""
 
+import re
 from pathlib import Path
 
 import pytest
@@ -50,5 +51,9 @@ def test_a_rewrite_keeps_the_rest_of_the_page_and_is_stable() -> None:
     "page", ["no markers", CAUSES_REFERENCE_END + CAUSES_REFERENCE_START, CAUSES_REFERENCE_START]
 )
 def test_a_page_without_both_markers_in_order_is_refused(page: str) -> None:
-    with pytest.raises(ValueError, match="CAUSES_REFERENCE_START and CAUSES_REFERENCE_END"):
+    refused = (
+        "The troubleshooting page needs the lines CAUSES_REFERENCE_START and "
+        "CAUSES_REFERENCE_END, in that order, around its generated table."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(refused)}$"):
         with_causes_reference(page)

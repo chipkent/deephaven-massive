@@ -210,7 +210,8 @@ def _deliver(sink: Callable[[CapturedReply], None], reply: CapturedReply) -> Non
     except Exception:  # the sink's own defect, never the client's failure
         if _first_failure():
             logger.warning(
-                "the reply-capture sink raised; this and later failures of it are ignored",
+                "The reply-capture sink raised, and the library ignores this and its later "
+                "failures.",
                 exc_info=True,
             )
 
