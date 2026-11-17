@@ -49,7 +49,7 @@ from deephaven_massive._tables import held_rows, problem_reporter, stream
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.futures_dates import LookupState, Readiness
-from deephaven_massive._tables.held_rows import DELAYED_AFTER, Delayed, HeldRows, Settled
+from deephaven_massive._tables.held_rows import DELAYED_AFTER, HeldRows
 from deephaven_massive._tables.liveness import release_scope
 from deephaven_massive._tables.problem_events import (
     Problem,
@@ -1270,6 +1270,21 @@ def test_a_ticker_dropped_from_the_watchlist_ends_its_wait(futures_flush: Future
     assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"], []]
 
 
+def test_a_ticker_no_stream_receives_any_more_ends_its_wait(
+    futures_flush: FuturesFlush,
+) -> None:
+    # Its held rows are dropped, so nothing settles them again: the flush still ends the span.
+    flush = futures_flush
+    nqm5, _ = flush.sinks
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    flush.flusher.flush()
+    nqm5.set_symbols(frozenset({"GCM5"}))
+    flush.flusher.flush()
+    assert flush.held.rows_of(flush.plan) == 0
+    assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"], []]
+
+
 def test_a_stream_of_every_ticker_keeps_its_wait_across_flushes(
     massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1286,18 +1301,35 @@ def test_a_stream_of_every_ticker_keeps_its_wait_across_flushes(
         flush.flusher.stop()
 
 
+def test_a_stream_that_receives_a_waiting_ticker_later_shows_its_wait(
+    futures_flush: FuturesFlush,
+) -> None:
+    # Settling reports NQM5's wait once, to stream 1; stream 2's watchlist adds NQM5 later and
+    # shows the same wait from its next flush.
+    flush = futures_flush
+    _, esm5 = flush.sinks
+    flush.send("NQM5")
+    flush.now += DELAYED_AFTER
+    flush.flusher.flush()
+    assert undated_snapshots(flush, 2) == []
+    esm5.set_symbols(frozenset({"ESM5", "NQM5"}))
+    flush.flusher.flush()
+    assert [list(found.spans) for found in undated_snapshots(flush, 2)] == [["NQM5"]]
+    assert [list(found.spans) for found in undated_snapshots(flush, 1)] == [["NQM5"]]
+
+
 def test_a_later_report_of_a_waiting_ticker_updates_its_rows_and_keeps_its_start(
     futures_flush: FuturesFlush,
 ) -> None:
     # Driven through the stream's span bookkeeping directly: settling reports a wait once, so
-    # a second report for an open span takes a wait the stream's flushes cannot stage alone.
+    # the rows of an open span change only when the stream's waits are handed in again.
     flush = futures_flush
     sink = flush.sinks[0]
 
     def report(rows: int) -> ProblemSpans | None:
-        settled = Settled(None, delayed={"NQM5": Delayed(rows, "its product is being looked up")})
+        waits = {"NQM5": (rows, "its product is being looked up")}
         return flush.flusher._undated_spans(
-            flush.plan, settled, sink, where="test", receives=sink.holds
+            flush.plan, waits, sink, where="test", receives=sink.holds
         )
 
     first = report(1)

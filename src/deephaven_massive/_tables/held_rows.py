@@ -265,6 +265,17 @@ class HeldRows(Generic[_K]):
         """
         return sum(w.rows for w in self._held.get(key, {}).values())
 
+    def waiting(self, key: _K) -> frozenset[str]:
+        """Return the tickers whose rows a dataset holds.
+
+        Args:
+            key: The dataset's plan.
+
+        Returns:
+            The tickers.
+        """
+        return frozenset(self._held.get(key, {}))
+
     def keep(self, keys: Iterable[_K]) -> None:
         """Drop the held rows of every dataset not among `keys`: no stream receives them now.
 

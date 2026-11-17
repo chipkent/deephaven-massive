@@ -1138,6 +1138,7 @@ class Flusher:
         "_thread",
         "_undated",
         "_unrouted",
+        "_waits",
         "routes",
     )
 
@@ -1199,7 +1200,10 @@ class Flusher:
         self._events: list[tuple[StreamSink, Sequence[Problem]]] = []
         # Flush-lock state: whether this flush gave a stream rows of a newer socket generation.
         self._new_generation = False
-        # Flush-lock state: the (stream, futures cause) pairs already warned about.
+        # Flush-lock state: per futures dataset, each ticker whose reported wait still holds,
+        # with its rows and reason; `Settled.delayed` reports a wait once, so a stream that
+        # receives the ticker later learns of it here.
+        self._waits: dict[ChannelPlan, dict[str, tuple[int, str]]] = {}
         # Per futures stream, its tickers whose rows wait for their date, with its spans.
         self._undated: dict[int, tuple[dict[str, tuple[int, str]], SpanTracker]] = {}
         # Guarded by the backlog lock, a leaf lock.
@@ -1387,7 +1391,6 @@ class Flusher:
             routed = [sink for sinks in routes.values() for sink in sinks]
             self._forget(routed)
             self._end_unheld_stale(routed)
-            self._end_unheld_undated(routed)
             found, self._drift = self._drift, {}
             events, self._events = self._events, []
             new_generation, self._new_generation = self._new_generation, False
@@ -1453,6 +1456,8 @@ class Flusher:
             self._held.keep(plans)
         if self._undated:
             self._undated = {i: u for i, u in self._undated.items() if i in live}
+        if self._waits:
+            self._waits = {p: w for p, w in self._waits.items() if p in plans}
 
     def _fail_each(self, sinks: Iterable[StreamSink], error: MassiveError) -> None:
         """Fail streams one by one; a stream whose failure raises costs the others nothing.
@@ -1697,8 +1702,10 @@ class Flusher:
         if settled.overflow:
             failure = MassiveError(f"{plan.dataset}: {settled.overflow}")
             held.drop(plan, why=str(failure))
+            self._waits.pop(plan, None)
             self._fail_each(readers, failure)
             return []
+        waits = self._open_waits(plan, settled, held.waiting(plan))
         kept: list[StreamSink] = []
         for sink in readers:
             refused = next(
@@ -1708,23 +1715,58 @@ class Flusher:
             if refused is not None:
                 self._fail_each([sink], refused)
                 continue
-            if self._report_futures(plan, settled, sink):
+            if self._report_futures(plan, settled, sink, waits=waits):
                 kept.append(sink)
         return kept
 
-    def _report_futures(self, plan: ChannelPlan, settled: Settled, sink: StreamSink) -> bool:
+    def _open_waits(
+        self, plan: ChannelPlan, settled: Settled, held: frozenset[str]
+    ) -> dict[str, tuple[int, str]]:
+        """Update a dataset's reported waits that still hold; return them.
+
+        A wait joins when settling reports it (`Settled.delayed`), and leaves when its rows
+        publish (`Settled.resumed`) or are discarded, or once the hold no longer has the
+        ticker's rows (a watchlist dropped it, or its lookup failed).
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            held: The tickers whose rows the dataset still holds.
+
+        Returns:
+            Each ticker whose reported wait holds, with its rows and reason.
+        """
+        ended = settled.resumed.union(*settled.discarded.values())
+        found = self._waits.get(plan, {})
+        waits = {t: wait for t, wait in found.items() if t in held and t not in ended}
+        waits.update({t: (delay.rows, delay.reason) for t, delay in settled.delayed.items()})
+        if waits:
+            self._waits[plan] = waits
+        else:
+            self._waits.pop(plan, None)
+        return waits
+
+    def _report_futures(
+        self,
+        plan: ChannelPlan,
+        settled: Settled,
+        sink: StreamSink,
+        *,
+        waits: dict[str, tuple[int, str]],
+    ) -> bool:
         """Hand one stream its discarded tickers' events and its waiting tickers' spans.
 
         Rows discarded (`futures_problems.DISCARDS`) are events of their cause; under `RAISE`
         of that cause the stream then fails. A ticker whose rows waited
-        `held_rows.DELAYED_AFTER` is an `undated_rows` span of the stream until its rows
-        publish, are discarded, or fail (`_undated_spans`). The session's reporter logs the
-        first problem of each cause.
+        `held_rows.DELAYED_AFTER` is an `undated_rows` span of each stream that receives it,
+        however late the stream began to, until its rows publish, are discarded, or fail
+        (`_undated_spans`). The session's reporter logs the first problem of each cause.
 
         Args:
             plan: The dataset's plan for the channel.
             settled: What settling decided.
             sink: The stream.
+            waits: The dataset's reported waits that still hold (`_open_waits`).
 
         Returns:
             False when the stream failed: its setting of a discard's cause is `RAISE`.
@@ -1744,7 +1786,7 @@ class Flusher:
                 plan.dataset, sink.stream_id, where, discarded=discarded, policy=sink.policy
             )
         )
-        spans = self._undated_spans(plan, settled, sink, where=where, receives=receives)
+        spans = self._undated_spans(plan, waits, sink, where=where, receives=receives)
         if spans is not None:
             problems.append(spans)
         if problems:
@@ -1762,7 +1804,7 @@ class Flusher:
     def _undated_spans(
         self,
         plan: ChannelPlan,
-        settled: Settled,
+        waits: dict[str, tuple[int, str]],
         sink: StreamSink,
         *,
         where: str,
@@ -1770,14 +1812,15 @@ class Flusher:
     ) -> ProblemSpans | None:
         """Update one stream's tickers whose rows wait for their date; return its new spans.
 
-        A ticker joins when its wait passes `held_rows.DELAYED_AFTER` (`Settled.delayed`), and
-        leaves when its rows publish (`Settled.resumed`) or are discarded, or when the stream
-        stops receiving it (`_end_unheld_undated`). A ticker whose lookup fails fails every
-        stream that receives it, so its span ends with the stream.
+        The stream's waits are the dataset's reported waits that still hold (`_open_waits`)
+        of the tickers it receives, so a stream that receives a ticker after its wait was
+        reported shows it too. A ticker leaves when its wait ends, or when the stream stops
+        receiving it. A ticker whose lookup fails fails every stream that receives it, so its
+        span ends with the stream.
 
         Args:
             plan: The dataset's plan for the channel.
-            settled: What settling decided.
+            waits: The dataset's reported waits that still hold, by ticker.
             sink: The stream.
             where: The flush thread and channel.
             receives: Whether the stream receives a ticker.
@@ -1785,10 +1828,10 @@ class Flusher:
         Returns:
             The stream's `undated_rows` spans, or None when they did not change.
         """
-        delays = {t: found for t, found in settled.delayed.items() if receives(t)}
+        mine = {t: wait for t, wait in waits.items() if receives(t)}
         found = self._undated.get(sink.stream_id)
         if found is None:
-            if not delays:
+            if not mine:
                 return None
             tracker = SpanTracker(
                 ProblemCause.UNDATED_ROWS,
@@ -1798,10 +1841,8 @@ class Flusher:
             )
             found = self._undated[sink.stream_id] = ({}, tracker)
         waiting, tracker = found
-        ended = settled.resumed.union(*settled.discarded.values())
-        for ticker in ended & waiting.keys():
-            del waiting[ticker]
-        waiting.update({t: (delay.rows, delay.reason) for t, delay in delays.items()})
+        waiting.clear()
+        waiting.update(mine)
         return tracker.update({t: (t, None, why, rows) for t, (rows, why) in waiting.items()})
 
     def _withheld(
@@ -2057,32 +2098,6 @@ class Flusher:
         stale.update(held)
         spans = tracker.update({symbol: (symbol, None, why, 0) for symbol, why in stale.items()})
         if spans is not None:
-            self._events.append((sink, (spans,)))
-
-    def _end_unheld_undated(self, routed: list[StreamSink]) -> None:
-        """End the `undated_rows` spans of tickers their streams no longer receive.
-
-        A ticker dropped from a stream's watchlist can never publish to the stream again, so
-        its span would hold until the stream closed. Runs at every flush, after `_forget`, as
-        `_end_unheld_stale` does.
-
-        Args:
-            routed: The streams the flush routed.
-        """
-        if not self._undated:
-            return
-        sinks = {sink.stream_id: sink for sink in routed}
-        for stream_id, (waiting, tracker) in self._undated.items():
-            sink = sinks[stream_id]
-            if sink.receives_all:
-                continue
-            gone = [ticker for ticker in waiting if not sink.holds(ticker)]
-            if not gone:
-                continue
-            for ticker in gone:
-                del waiting[ticker]
-            spans = tracker.update({t: (t, None, why, rows) for t, (rows, why) in waiting.items()})
-            assert spans is not None  # the tracker held each ticker that just left
             self._events.append((sink, (spans,)))
 
     def _end_unheld_stale(self, routed: list[StreamSink]) -> None:
