@@ -30,7 +30,7 @@ settings from it and leaves every other setting at its default:
 | `websocket_hosts` | `indices: business.massive.com`, when Massive serves your index values from that host | The library picks the host, which may not serve your index values |
 
 Leave `websocket_hosts` out when you list `indices` in `delayed_subscriptions`. The library
-refuses that pair, and the run stops ([`websocket_hosts`](configuration.md#setting-details)).
+refuses that pair ([`websocket_hosts`](configuration.md#setting-details)).
 
 Keep only the settings your key needs. A file that sets all three looks like this:
 
@@ -54,7 +54,7 @@ library's message.
 
 <a id="run-order"></a>
 
-### Run them in order
+### Run the three test commands in order
 
 Stop every other program that uses the key, then run these in order. Each command adds its
 output to `live-checks.log`, the file to attach to an issue.
@@ -84,9 +84,9 @@ output to `live-checks.log`, the file to attach to an issue.
    uv run pytest -m integration_limits tests/ingest/test_ws_integration.py 2>&1 | tee -a live-checks.log
    ```
 
-3. To check that every futures contract Massive streams is on its contracts list, run the
-   all-symbols test while futures trade. It streams every futures trade for 10 minutes, and
-   takes over the key's futures connection meanwhile:
+3. While futures trade, run the all-symbols test. It checks that every futures contract Massive
+   streams is on its contracts list. It streams every futures trade for 10 minutes, and takes
+   over the key's futures connection meanwhile:
 
    ```bash
    uv run pytest -m integration_all_symbols tests/ingest/test_futures_calendar_integration.py 2>&1 | tee -a live-checks.log
@@ -191,7 +191,7 @@ uv run pytest -m integration tests/namespaces/test_options_integration.py -k gam
 ```
 
 When the options cap test skips because the socket reconnected without saying why, run it again.
-When it skips because Massive refused some channel subscriptions for want of a plan, your key
+When it skips because Massive refused some channel subscriptions because your plan doesn't include them, your key
 can't answer it.
 
 A tester's results hold one more hand check, of the [`stream-day` group](#live-run-groups).
@@ -248,12 +248,12 @@ groups run these tests:
 
 The `stream-day` group also answers whether Massive sends any message on a stocks connection
 while no stock trades. The library warns when a stocks connection gets no message for 5 minutes
-during the regular session, 09:30 to 16:00 New York time. If Massive sends nothing on a quiet
+during the regular session. If Massive sends nothing on a quiet
 connection, a healthy connection can trip that warning.
 
 The group connects at 03:45 New York time, before pre-market opens at 04:00. These 15 minutes
-show what Massive sends on a quiet stocks connection, until Massive starts its overnight stock
-session on 2026-12-07. The library logs each of Massive's status messages as
+show what Massive sends on a quiet stocks connection. The check works only until 2026-12-07,
+when Massive starts its overnight stock session. The library logs each of Massive's status messages as
 `wss://<host>/stocks status <KIND>: <message>`. In the debug log of the day's
 `stream-day/<date>-<n>/` folder, note each stocks status line from the subscriptions'
 acknowledgements to 04:00, and the longest stretch with no line. Put them, or "none", in a
