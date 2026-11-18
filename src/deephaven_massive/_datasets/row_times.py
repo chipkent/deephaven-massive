@@ -41,7 +41,7 @@ as sent, and the futures
   `Date` is the start's date, null when the bar ends on a later date; for futures it is the
   session as for ticks, null when the bar crosses 17:00 Chicago time.
 - **1-day bar.** 00:00 of the day to 00:00 of the next day, in the class's bar zone: the day
-  zone, but Chicago for indices, whose days Massive cuts there (`_BAR_ZONES`); `Date` is the
+  zone, but Chicago for indices, whose days Massive cuts there (`BAR_ZONES`); `Date` is the
   day.
 - **n-day, week, month, quarter, or year bar.** 00:00 of the window's first day (for stocks
   and options a period's first weekday, a week's Monday; for every other class its first
@@ -122,7 +122,8 @@ from deephaven_massive._datasets.bar_periods import (
     unit_ns,
 )
 from deephaven_massive._datasets.dates import (
-    NEW_YORK,
+    BAR_ZONES,
+    bar_zone,
     day_end,
     day_zone,
     midnight,
@@ -907,7 +908,7 @@ class TimeRule:
         """Fill a bar of a day or longer of a class with a day zone.
 
         Its start is 00:00 of its window's first day and its end 00:00 after its window's last
-        day (`bar_periods.bar_days`), both in the class's bar zone (`_BAR_ZONES`), so an index
+        day (`bar_periods.bar_days`), both in the class's bar zone (`BAR_ZONES`), so an index
         bar keeps Massive's stamp at midnight in Chicago; a 1-day bar's `Date` is its day, and
         every longer bar's is null.
 
@@ -919,7 +920,7 @@ class TimeRule:
         Returns:
             The batch with `Date`, `TimestampStart`, and `TimestampEnd`.
         """
-        zone = _bar_zone(self.asset_class)
+        zone = bar_zone(self.asset_class)
         single = timespan is Timespan.DAY and self.multiplier == 1
         ns = _to_int(rows.column(START))
         distinct = pc.unique(ns)
@@ -971,19 +972,6 @@ class TimeRule:
         if single:
             return rows
         return _set(rows, DATE, pa.nulls(rows.num_rows, pa.string()))
-
-
-def _bar_zone(asset_class: AssetClass | ClassFromPrefix) -> tzinfo:
-    """Return the zone whose days a class's bars of a day or longer cover (`_BAR_ZONES`).
-
-    Args:
-        asset_class: A class with a day zone, or `ClassFromPrefix.ANY`, whose days are New
-            York days.
-
-    Returns:
-        The zone.
-    """
-    return NEW_YORK if asset_class is ClassFromPrefix.ANY else _BAR_ZONES[asset_class]
 
 
 def _set(rows: _Rows, name: str, values: pa.Array) -> _Rows:
@@ -1048,7 +1036,7 @@ class StampRule:
     share it; `warnings` is thread-safe.
 
     Attributes:
-        zone: The class's bar zone (`_BAR_ZONES`); every bar is stamped at 00:00 there of the
+        zone: The class's bar zone (`BAR_ZONES`); every bar is stamped at 00:00 there of the
             day it starts on.
         known: The other wall-clock times of day, in `zone`, at which Massive is known to stamp
             the class's bars of this length on some source.
@@ -1219,7 +1207,7 @@ _ONE_DAY_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
     AssetClass.FOREX: frozenset({_LAST_MILLISECOND}),
     AssetClass.CRYPTO: frozenset({_LAST_MILLISECOND}),
 }
-"""Per class of `_BAR_ZONES`, the times of day in its bar zone besides 00:00 at which some
+"""Per class of `BAR_ZONES`, the times of day in its bar zone besides 00:00 at which some
 source stamps a 1-day bar: those of Massive's documented samples, the stock `/prev`'s 04:00
 seen live, and the closes of a short trading day and of index options, each of which lies
 inside its own day."""
@@ -1231,23 +1219,10 @@ _LONGER_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
     AssetClass.FOREX: frozenset(),
     AssetClass.CRYPTO: frozenset(),
 }
-"""Per class of `_BAR_ZONES`, the times of day in its bar zone besides 00:00 at which the
+"""Per class of `BAR_ZONES`, the times of day in its bar zone besides 00:00 at which the
 aggregates range stamps its bars: accepted for a bar of several days, a week, or longer, which
 only the range serves, and for an indicator value of a day or longer, which is computed over
 the range's bars. Every class's range stamps them at 00:00, so none has another."""
-
-_BAR_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
-    AssetClass.STOCKS: NEW_YORK,
-    AssetClass.OPTIONS: NEW_YORK,
-    AssetClass.INDICES: CHICAGO,
-    AssetClass.FOREX: UTC,
-    AssetClass.CRYPTO: UTC,
-}
-"""Per class with a day zone (`dates.DAY_ZONES`), the zone at whose midnight Massive starts the
-class's bars of a day or longer, and whose days those bars cover: the class day zone, except
-for indices, whose days Massive cuts at midnight in Chicago on every source (01:00 New York
-time, since the two zones change clocks together). `DAY_ZONES` still names the zone of `Date`
-and of a range's dates, which for an index bar's day is the same date."""
 
 _SUNDAY: Final = frozenset({calendar.SUNDAY})
 """The day a week bar must be stamped on, in every class: the Sunday Massive starts its week on
@@ -1276,7 +1251,7 @@ def stamp_rule(
 
     One `history()` call returns the same rows whichever source answers it, so every bar of a
     day or longer of a class with a day zone (`dates.DAY_ZONES`: every class but futures) is
-    stamped at 00:00 of the day it starts on in the class's bar zone (`_BAR_ZONES`: New York
+    stamped at 00:00 of the day it starts on in the class's bar zone (`BAR_ZONES`: New York
     for stocks and options, Chicago for indices, UTC for forex and crypto). Massive stamps a
     1-day bar at the day's start on the aggregates range (for indices, midnight in Chicago on
     every source, kept as sent) but at the session close (stocks, options, and the indices'
@@ -1316,10 +1291,10 @@ def stamp_rule(
         not (spec.holds_bars or indicator)
         or request.timespan not in _DAYS_OR_LONGER
         or not isinstance(cls, AssetClass)
-        or cls not in _BAR_ZONES
+        or cls not in BAR_ZONES
     ):
         return None
-    zone = _BAR_ZONES[cls]
+    zone = BAR_ZONES[cls]
     timespan = request.timespan
     single = timespan is Timespan.DAY and request.multiplier == 1
     if single and not indicator:

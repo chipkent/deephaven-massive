@@ -2,9 +2,10 @@
 
 A bar is kept only when its whole window lies inside the range (`bar_starts`): an intraday or
 1-day bar's window is its own interval. Massive starts a week on its Sunday, at 00:00 in the
-class day zone, and stamps the week's bar there. For stocks and options, which do not trade at
-weekends, a week's window is its Monday to Friday and months, quarters, and years are calendar
-periods less their leading and trailing weekend days. Indices (which can update around the
+class's bar zone (Chicago for indices, else the class day zone), and stamps the week's bar
+there. For stocks and options, which do not trade at weekends, a week's window is its Monday to
+Friday and months, quarters, and years are calendar periods less their leading and trailing
+weekend days. Indices (which can update around the
 clock), forex (which trades from Sunday evening UTC), and crypto keep their weekends: their
 weeks run Sunday to Saturday and their months, quarters, and years are whole calendar periods.
 A bar of several units spans that many. A bar of several days spans that many calendar days,
@@ -46,8 +47,7 @@ from typing import TYPE_CHECKING, Final
 from deephaven_massive._datasets.dates import (
     DaySpan,
     TimeRange,
-    day_start,
-    day_zone,
+    bar_zone,
     midnight,
     trades_at_weekends,
 )
@@ -284,7 +284,7 @@ class _Periods:
     timespan: Timespan
 
     def day_of(self, moment: datetime) -> date:
-        """Return the day an instant belongs to: its date in the class day zone.
+        """Return the day an instant belongs to: its date in the class's bar zone.
 
         Args:
             moment: An aware instant.
@@ -292,10 +292,10 @@ class _Periods:
         Returns:
             The day.
         """
-        return moment.astimezone(day_zone(self.asset_class)).date()
+        return moment.astimezone(bar_zone(self.asset_class)).date()
 
     def day_start(self, day: date) -> datetime:
-        """Return the instant a day starts: midnight in the class day zone.
+        """Return the instant a day starts: midnight in the class's bar zone.
 
         Args:
             day: The day.
@@ -303,7 +303,7 @@ class _Periods:
         Returns:
             The instant, in UTC.
         """
-        return day_start(self.asset_class, day)
+        return midnight(day, bar_zone(self.asset_class))
 
     def anchor(self, day: date) -> date:
         """Return the anchor of the period a day belongs to.
@@ -437,13 +437,15 @@ def bar_starts(
     its start belongs to (`_Periods`): days, weeks, or calendar months, quarters, and years. A
     week starts on its Sunday. A stock or option week covers Monday to Friday and its longer
     periods lose their leading and trailing weekend days, while indices, forex, and crypto keep
-    whole calendar weeks (Sunday to Saturday) and periods. Days are those of the class's day
-    zone. Futures bars of a session or longer are UTC-day buckets that this function does not
-    select: `history_source` keeps them by their filled window (`futures_bar_ended`).
+    whole calendar weeks (Sunday to Saturday) and periods. Days are those of the class's bar
+    zone (`dates.bar_zone`): Chicago for indices, whose bars Massive starts at midnight there,
+    else the class day zone. Futures bars of a session or longer are UTC-day buckets that this
+    function does not select: `history_source` keeps them by their filled window
+    (`futures_bar_ended`).
 
     Args:
-        asset_class: The class whose days apply (`day_class`), or `ClassFromPrefix.ANY` for New
-            York days; futures only for intraday bars.
+        asset_class: The class whose bar days apply (`day_class`), or `ClassFromPrefix.ANY`
+            for New York days; futures only for intraday bars.
         span: The range the bars must lie in. Pass an end no later than now, so a bar that
             has not finished yet is left out.
         timespan: The bar unit.

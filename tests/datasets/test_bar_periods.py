@@ -18,6 +18,7 @@ from deephaven_massive._datasets.dates import (
     NEW_YORK,
     DaySpan,
     TimeRange,
+    bar_zone,
 )
 from deephaven_massive._datasets.futures_sessions import (
     CHICAGO,
@@ -371,15 +372,37 @@ def test_an_index_month_keeps_its_weekend_days() -> None:
 
 
 def test_an_index_week_bar_needs_its_whole_calendar_week() -> None:
-    # Monday to Friday holds a stock week but not an index week, which runs Sunday to Saturday.
+    # Monday to Friday holds a stock week but not an index week, which runs Sunday to Saturday
+    # in Chicago, where Massive starts an index bar of a day or longer.
     weekdays = TimeRange(
         datetime(2025, 3, 3, tzinfo=NEW_YORK), datetime(2025, 3, 8, tzinfo=NEW_YORK)
     )
-    whole = TimeRange(datetime(2025, 3, 2, tzinfo=NEW_YORK), datetime(2025, 3, 9, tzinfo=NEW_YORK))
+    whole = TimeRange(datetime(2025, 3, 2, tzinfo=CHICAGO), datetime(2025, 3, 9, tzinfo=CHICAGO))
     week = Timespan.WEEK
     assert not bar_starts(AssetClass.STOCKS, weekdays, timespan=week, multiplier=1).empty
     assert bar_starts(AssetClass.INDICES, weekdays, timespan=week, multiplier=1).empty
     assert not bar_starts(AssetClass.INDICES, whole, timespan=week, multiplier=1).empty
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (datetime(2025, 6, 2, 5, tzinfo=UTC), datetime(2025, 6, 3, 5, tzinfo=UTC)),
+        (datetime(2025, 1, 6, 6, tzinfo=UTC), datetime(2025, 1, 7, 6, tzinfo=UTC)),
+    ],
+    ids=["daylight", "standard"],
+)
+def test_an_index_day_bar_fits_the_chicago_day_it_covers(start: datetime, end: datetime) -> None:
+    # Massive stamps an index day bar at midnight in Chicago (01:00 New York), so a range of
+    # exactly that Chicago day holds the bar; a stock's day is New York's, so the same range,
+    # which starts an hour into the New York day, holds no stock day bar.
+    day = TimeRange(start, end)
+    index = bar_starts(AssetClass.INDICES, day, timespan=Timespan.DAY, multiplier=1)
+    assert index == TimeRange(start, end)
+    assert bar_starts(AssetClass.STOCKS, day, timespan=Timespan.DAY, multiplier=1).empty
+    new_york = TimeRange(start - timedelta(hours=1), end - timedelta(hours=1))
+    stock = bar_starts(AssetClass.STOCKS, new_york, timespan=Timespan.DAY, multiplier=1)
+    assert stock == new_york
 
 
 @pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.OPTIONS, AssetClass.INDICES])
@@ -390,13 +413,16 @@ def test_bars_of_several_days_span_calendar_days_weekends_included(asset_class: 
     for day in stamps:
         covered = bar_days(asset_class, day, timespan=Timespan.DAY, multiplier=2)
         assert covered == (day, day + timedelta(days=2))
-    # Friday to Wednesday holds all three whole; Friday to Tuesday only the first two.
-    span = DaySpan(date(2026, 10, 16), date(2026, 10, 21)).instants(NEW_YORK)
+    # Friday to Wednesday holds all three whole; Friday to Tuesday only the first two. The
+    # days are those of the class's bar zone: Chicago for an index.
+    zone = bar_zone(asset_class)
+    midnights = [datetime(day.year, day.month, day.day, tzinfo=zone) for day in stamps]
+    span = DaySpan(date(2026, 10, 16), date(2026, 10, 21)).instants(zone)
     starts = bar_starts(asset_class, span, timespan=Timespan.DAY, multiplier=2)
-    assert [kept(starts, ny(day)) for day in stamps] == [True, True, True]
-    short = DaySpan(date(2026, 10, 16), date(2026, 10, 20)).instants(NEW_YORK)
+    assert [kept(starts, stamp) for stamp in midnights] == [True, True, True]
+    short = DaySpan(date(2026, 10, 16), date(2026, 10, 20)).instants(zone)
     starts = bar_starts(asset_class, short, timespan=Timespan.DAY, multiplier=2)
-    assert [kept(starts, ny(day)) for day in stamps] == [True, True, False]
+    assert [kept(starts, stamp) for stamp in midnights] == [True, True, False]
 
 
 def test_unit_ns_is_one_intraday_unit() -> None:
