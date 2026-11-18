@@ -319,11 +319,9 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
     warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
     assert warnings == [
         (
-            "A new MassiveSession uses the same API key as an open session but a different "
-            "subscription_confirmation_timeout and flush_interval, so the two cannot share "
-            "WebSocket connections. Massive keeps one connection per asset class for an account, "
-            "so when the new session connects, the live tables of the older one fail or reconnect "
-            "as its connection_taken says. Give both sessions the same "
+            "A new MassiveSession uses the same API key as an open session, with "
+            "subscription_confirmation_timeout=9 and flush_interval=0.5 where the open one has "
+            f"subscription_confirmation_timeout=5 and flush_interval=0.05, {_CANNOT_SHARE}"
             "subscription_confirmation_timeout and flush_interval, or close the older session."
         )
     ]
@@ -337,23 +335,69 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
     other.close()
 
 
+_CANNOT_SHARE = (
+    "so the two cannot share WebSocket connections. Massive keeps one connection per asset class "
+    "for an account, so when the new session connects, the older session's live tables fail or "
+    "reconnect as its connection_taken says. Give both sessions the same "
+)
+
+
 def test_the_same_key_warning_compares_with_the_oldest_session_and_warns_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     oldest = dm.MassiveSession(dm.MassiveConfig(api_key="ordered-key", max_outage=60.0))
-    newer = dm.MassiveSession(dm.MassiveConfig(api_key="ordered-key", flush_interval=0.5))
+    # The newer session differs from the next in max_outage, so a comparison with it instead of
+    # the oldest would name max_outage alone.
+    newer = dm.MassiveSession(
+        dm.MassiveConfig(api_key="ordered-key", flush_interval=0.5, max_outage=30.0)
+    )
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
         apart = dm.MassiveSession(dm.MassiveConfig(api_key="ordered-key", flush_interval=0.5))
     warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
-    assert len(warnings) == 1
-    assert "but a different max_outage and flush_interval," in warnings[0]
+    assert warnings == [
+        (
+            "A new MassiveSession uses the same API key as an open session, with max_outage=300 "
+            "and flush_interval=0.5 where the open one has max_outage=60 and flush_interval=0.05, "
+            f"{_CANNOT_SHARE}max_outage and flush_interval, or close the older session."
+        )
+    ]
     caplog.clear()
-    oldest.close()  # the message's fix: close the older session
+    oldest.close()  # the message's fix: close the older sessions
+    newer.close()
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
         same = dm.MassiveSession(dm.MassiveConfig(api_key="ordered-key", flush_interval=0.5))
     assert "same API key" not in caplog.text  # the other fix: the same settings share
-    for session in (newer, apart, same):
+    for session in (apart, same):
+        session.close()
+
+
+def test_the_same_key_warning_writes_hosts_and_urls_as_they_are_passed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    hosts = {dm.AssetClass.STOCKS: "h.test"}
+    first = dm.MassiveSession(dm.MassiveConfig(api_key="hosts-key"))
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+        second = dm.MassiveSession(
+            dm.MassiveConfig(
+                api_key="hosts-key", websocket_hosts=hosts, rest_base_url="https://r.test"
+            )
+        )
+    warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
+    assert warnings == [
+        (
+            "A new MassiveSession uses the same API key as an open session, with "
+            "websocket_hosts={dm.AssetClass.STOCKS: 'h.test'} and rest_base_url='https://r.test' "
+            "where the open one has websocket_hosts={} and "
+            f"rest_base_url='https://api.massive.com', {_CANNOT_SHARE}websocket_hosts and "
+            "rest_base_url, or close the older session."
+        )
+    ]
+    # The settings as written are ones MassiveConfig takes.
+    assert dm.MassiveConfig(
+        api_key="k", websocket_hosts={dm.AssetClass.STOCKS: "h.test"}
+    ).websocket_hosts == {dm.AssetClass.STOCKS: "h.test"}
+    for session in (first, second):
         session.close()
 
 

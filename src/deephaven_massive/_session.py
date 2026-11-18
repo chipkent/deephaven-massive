@@ -198,17 +198,38 @@ def _register(core: SessionCore) -> None:
     for config in others:
         differ = [n for n in CONNECTION_SETTINGS if getattr(config, n) != getattr(core.config, n)]
         if differ:
-            shown = prose_list(differ, "settings", shown=len(CONNECTION_SETTINGS))
+            shown = len(CONNECTION_SETTINGS)
             logger.warning(
-                "A new MassiveSession uses the same API key as an open session but a different "
-                "%s, so the two cannot share WebSocket connections. Massive keeps one connection "
-                "per asset class for an account, so when the new session connects, the live "
-                "tables of the older one fail or reconnect as its connection_taken says. Give both "
-                "sessions the same %s, or close the older session.",
-                shown,
-                shown,
+                "A new MassiveSession uses the same API key as an open session, with %s where the "
+                "open one has %s, so the two cannot share WebSocket connections. Massive keeps "
+                "one connection per asset class for an account, so when the new session "
+                "connects, the older session's live tables fail or reconnect as its "
+                "connection_taken says. Give both sessions the same %s, or close the older "
+                "session.",
+                prose_list([_setting(n, getattr(core.config, n)) for n in differ], "", shown=shown),
+                prose_list([_setting(n, getattr(config, n)) for n in differ], "", shown=shown),
+                prose_list(differ, "settings", shown=shown),
             )
             return
+
+
+def _setting(name: str, value: object) -> str:
+    """Write a connection setting as a user passes it to `dm.MassiveConfig`.
+
+    Args:
+        name: The setting, such as `"flush_interval"`.
+        value: Its value. The API key never differs between the sessions compared, so it is
+            never shown.
+
+    Returns:
+        Such as `flush_interval=0.5` or `websocket_hosts={dm.AssetClass.STOCKS: 'h.test'}`.
+    """
+    if isinstance(value, Mapping):  # websocket_hosts, keyed by dm.AssetClass
+        hosts = ", ".join(f"dm.AssetClass.{key.name}: {host!r}" for key, host in value.items())
+        return f"{name}={{{hosts}}}"
+    if isinstance(value, float):
+        return f"{name}={value:g}"
+    return f"{name}={value!r}"  # a URL: its repr is what the user types
 
 
 class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namespaces, cross-asset snapshots, four diagnostics tables, release/close and the context-manager protocol; each member delegates to the core
