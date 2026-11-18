@@ -609,13 +609,13 @@ def test_previous_day_bars_fetch_one_index_a_request(
     fake_rest.reply(quote("/v2/aggs/ticker/I:SPX/prev"), Reply(load_fixture(OWNER, "prev.json")))
     out = bar_rows(rest_session.indices.previous_day_bar("I:SPX").fetch(wait=True))
     assert fake_rest.get_queries() == [("/v2/aggs/ticker/I:SPX/prev", {})]
-    # The New York day, ending an hour late at 01:00 New York time (midnight in Chicago),
-    # since whether an index day bar covers the New York or the Chicago day is not verified.
+    # The Chicago day Massive stamps at its start, midnight in Chicago (01:00 New York time),
+    # to the next midnight there.
     assert out == [
         {
             "Symbol": "I:SPX",
             "Date": "2025-06-02",
-            "TimestampStart": MIDNIGHT_MS * MS,
+            "TimestampStart": (MIDNIGHT_MS + HOUR_MS) * MS,
             "TimestampEnd": (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
             "Open": 5896.68,
             "Close": 5935.94,
@@ -676,12 +676,12 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     ]
 
 
-def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
+def test_index_bars_of_a_day_or_longer_start_at_midnight_in_chicago(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING)
-    # The range stamps a day at midnight in Chicago (01:00 New York time), `/prev` at the
-    # 16:00 close; both mean the New York day, stamped at its start.
+    # The range stamps a day at midnight in Chicago (01:00 New York time), which the bar keeps;
+    # Massive's `/prev` sample stamps it at the 16:00 close, which moves to the same start.
     day = date(2025, 6, 2)
     day_path = f"/v2/aggs/ticker/I:SPX/range/1/day/{MIDNIGHT_MS}/{MIDNIGHT_MS + DAY_MS - 1}"
     fake_rest.reply(quote(day_path), bars_reply(MIDNIGHT_MS + HOUR_MS))
@@ -690,12 +690,14 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     )
     q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
     ranged = rows(q.history(day, day, source=dm.HistorySource.REST, wait=True))
-    assert [r["TimestampStart"] for r in ranged] == [MIDNIGHT_MS * MS]
+    assert [r["TimestampStart"] for r in ranged] == [(MIDNIGHT_MS + HOUR_MS) * MS]
     prev = rest_session.indices.previous_day_bar("I:SPX")
-    assert [r["TimestampStart"] for r in rows(prev.fetch(wait=True))] == [MIDNIGHT_MS * MS]
+    assert [r["TimestampStart"] for r in rows(prev.fetch(wait=True))] == [
+        (MIDNIGHT_MS + HOUR_MS) * MS
+    ]
     # Massive starts a week on its Sunday, so a week bar is stamped 01:00 (midnight in
     # Chicago) on its Sunday; since an index can update around the clock, the week holds its
-    # weekend: it starts at Sunday's midnight and ends an hour after the next Sunday's. A
+    # weekend: it starts at that stamp and ends at the next Sunday's midnight in Chicago. A
     # range must reach the Saturday.
     sunday = MIDNIGHT_MS - DAY_MS
     week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{sunday}/{MIDNIGHT_MS + 6 * DAY_MS - 1}"
@@ -708,7 +710,7 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     first, last = date(2025, 6, 1), date(2025, 6, 7)
     weeks = rows(week.history(first, last, source=dm.HistorySource.REST, wait=True))
     assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in weeks] == [
-        (None, sunday * MS, (MIDNIGHT_MS + 6 * DAY_MS + HOUR_MS) * MS)
+        (None, (sunday + HOUR_MS) * MS, (MIDNIGHT_MS + 6 * DAY_MS + HOUR_MS) * MS)
     ]
     # A range from the Monday holds no whole week, so it asks for none.
     assert rows(week.history(day, last, source=dm.HistorySource.REST, wait=True)) == []
@@ -727,9 +729,18 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
         "indices.bars: a 1-day bar of I:SPX from /v2/aggs/ticker/{indicesTicker}/range/"
     )
     assert (
-        " is stamped 2025-06-02T06:00:00+00:00 (2025-06-02T02:00:00-04:00 in America/New_York), "
+        " is stamped 2025-06-02T06:00:00+00:00 (2025-06-02T01:00:00-05:00 in America/Chicago), "
         "which is not a stamp Massive is known to use"
     ) in day_warning
+    # Midnight in New York, 23:00 the day before in Chicago, is a cut Massive is not known to
+    # use for an index either: the bar is withheld and warns. Placed as sent, it would start
+    # before the range, so the read leaves it out without counting it.
+    fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS))
+    assert rows(q.history(day, day, source=dm.HistorySource.REST, wait=True)) == []
+    assert (
+        " is stamped 2025-06-02T04:00:00+00:00 (2025-06-01T23:00:00-05:00 in America/Chicago)"
+        in stamp_warnings(caplog)[-1]
+    )
 
 
 @pytest.mark.parametrize(("minutes", "kept"), [(30, 0), (60, 1)], ids=["00:30", "01:00"])
@@ -943,14 +954,14 @@ def s3_session(fake_s3: FakeS3) -> Iterator[dm.MassiveSession]:
         ),
         (
             # The file stamps the day at midnight in Chicago, 01:00 New York time, as Massive's
-            # sample does; the bar starts at the New York day's start and ends an hour late.
+            # sample does; the bar keeps that start and ends at the next midnight there.
             "us_indices/day_aggs_v1",
             "us_indices_day_aggs_v1_2025-06-02.csv",
             [
                 (
                     "I:SPX",
                     "2025-06-02",
-                    MIDNIGHT_MS * MS,
+                    (MIDNIGHT_MS + HOUR_MS) * MS,
                     (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
                     5935.94,
                 )
@@ -994,7 +1005,7 @@ def test_every_index_from_a_day_file_at_an_unexpected_stamp_is_withheld_with_a_w
 ) -> None:
     caplog.set_level(logging.WARNING)
     odd = (MIDNIGHT_MS + 2 * 3_600_000) * MS  # 02:00 New York time
-    known = MIDNIGHT_MS * MS
+    known = (MIDNIGHT_MS + 3_600_000) * MS  # midnight in Chicago
     text = (
         f"ticker,open,close,high,low,window_start\nI:SPX,1,2,3,0.5,{odd}\nI:NDX,1,2,3,0.5,{known}\n"
     )

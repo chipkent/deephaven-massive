@@ -2,7 +2,7 @@
 
 Date: 2026-10-28
 
-Status: accepted
+Status: partly superseded: the New York day of an index bar by [132](0132-index-day-bar-timestamp-start-massive-stamp-chicago-midnight.md)
 
 ## Question
 

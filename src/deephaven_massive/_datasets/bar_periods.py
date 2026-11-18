@@ -490,7 +490,7 @@ def bar_days(
     since an index can update at weekends, as forex and crypto do (a week runs Sunday to
     Saturday). A bar of several days spans that many calendar days, weekends included, as
     Massive counts them. It gives a bar's `TimestampStart` and `TimestampEnd`, the midnights of
-    the two days in the class day zone.
+    the two days in the class's bar zone (Chicago for indices, else the class day zone).
 
     Args:
         asset_class: The class (`day_class`); not futures, whose bars are sessions.

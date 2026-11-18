@@ -448,12 +448,12 @@ def test_index_day_and_longer_bar_stamps_from_rest(
     rebuilt in both zones; the bars of the two whole months and quarters before the current ones and
     of the years from January 1 of last year, each read refused for the plan's history recorded as
     such; and the library's windows for the same requests. Reading it: a day bar matching the
-    Chicago rebuild means index days are Chicago days, and the library's 01:00 New York
-    `TimestampEnd` is right; matching the New York rebuild means the extra hour can go. A week bar
-    matching the whole-week rebuild of `I:AAVE100` means weekend values count, as the library
-    assumes; longer bars stamped 00:00 or 01:00 New York time on their period's first day are ones
-    the library accepts. For `I:SPX` both day rebuilds can agree, since it is computed only during
-    the stock session.
+    Chicago rebuild means index days are Chicago days, and the library's window, from Massive's
+    stamp at midnight in Chicago to the next, is right; matching the New York rebuild means the
+    windows must move. A week bar matching the whole-week rebuild of `I:AAVE100` means weekend
+    values count, as the library assumes; longer bars stamped at midnight in Chicago on their
+    period's first day are ones the library accepts. For `I:SPX` both day rebuilds can agree,
+    since it is computed only during the stock session.
     """
     days = stamp_days["day"]
     complete = {}

@@ -19,12 +19,11 @@ one bar of the requested `Symbol`: the bar's window, `TimestampStart` to the exc
 `TimestampEnd`, and its trading day, `Date`, in the day zone of the symbol's class (UTC for
 crypto and forex, New York otherwise), as for that class's bars. A value of a day or longer
 carries the stamp of the aggregate it is computed over, which the aggregates range puts at
-00:00 of the period's first day (01:00 New York time for indices), so it is labelled as that
-class's bars are. A value stamped otherwise is still returned, as Massive stamped it: it keeps
-that stamp, ends one period later, has a null `Date`, and logs one WARNING per dataset per
-session, since which day it covers is not known. `fetch()` and `poll()` return what Massive
-reports now, the current period's still-changing value included; a row whose `TimestampEnd`
-is after its `TimestampInsert` was read before its period ended.
+00:00 of the period's first day (midnight in Chicago for indices, 01:00 New York time), so it
+is labelled as that class's bars are. A value stamped otherwise is withheld and logs one
+WARNING per form of stamp per session, since which day it covers is not known. `fetch()` and
+`poll()` return what Massive reports now, the current period's still-changing value included;
+a row whose `TimestampEnd` is after its `TimestampInsert` was read before its period ended.
 
 Each dataset is one factory method on `IndicatorsNamespace` that validates its arguments and returns
 a `FetchQuery`; nothing touches the network until a verb is called on the query. This module owns

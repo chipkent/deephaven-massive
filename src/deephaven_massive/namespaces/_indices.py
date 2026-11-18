@@ -241,7 +241,9 @@ class IndicesNamespace(Namespace):
 
         Each row is one bar of one index. Index bars come from index levels, so they have no volume
         and no `adjusted` argument. A window in which the index didn't change has no bar. A bar of a
-        day or longer ends at 01:00 New York time after its last day.
+        day or longer covers Chicago days, as Massive cuts them: it starts at Massive's stamp,
+        midnight in Chicago (01:00 New York time), and ends at midnight in Chicago after its last
+        day.
 
         Args:
             symbols: Indices with the `I:` prefix, or `dm.ALL` for every index. `history()` reads
