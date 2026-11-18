@@ -1180,11 +1180,11 @@ def _gave_up_after_two_pauses(result: object) -> None:
     # pause takes it past that, after it spent 60 s.
     assert isinstance(result, dm.MassiveError)
     assert result.status == 429
-    # The governor's sentences say why the read gave up; the read adds where to watch the pace.
+    # The governor's sentences say why the read gave up.
     assert re.search(
         r'with HTTP 429: "slow down"\. The next request goes at .*, past the 90 s this read '
-        r"waits for Massive's pauses, of which it has already waited 60 s\. .* See each "
-        r"subscription's pace in m\.rate_limits\(\)\.$",
+        r"waits for Massive's pauses, of which it has already waited 60 s\. .* m\.rate_limits\(\) "
+        r"shows each subscription's pace\. .*\.$",
         str(result),
     )
 
@@ -1491,8 +1491,23 @@ def test_a_poll_with_a_max_outage_of_zero_fails_at_its_first_rate_limit_pause(
         (row,) = dh_to_pylist(m.streams())
     finally:
         m.close()
-    assert 'with HTTP 429: "slow down". The next request goes at ' in row["Error"]
-    assert "Pass a larger max_outage to dm.MassiveConfig to wait longer." in row["Error"]
+    # The pause outlasts max_outage, a setting of the user's, which the error names.
+    assert re.fullmatch(
+        r"stocks\.dividends poll\(\): every cycle since \S+Z has failed for 0 s, "
+        + re.escape(
+            "reaching max_outage=0 s, so this table stopped and the rows since then may be "
+            "missing. The latest error: Massive answered GET "
+            "/stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 with HTTP 429: "
+            '"slow down". The next request goes at 2027-01-15 08:01:00 UTC, past max_outage=0 s. '
+            "The usual cause is another program using the same Massive account, which shares "
+            "its limit, and m.rate_limits() shows each subscription's pace. Retry after that "
+            "time, stop the other program, or pass "
+            "rest_requests_per_minute={dm.Subscription.STOCKS: n} to dm.MassiveConfig, with "
+            "the limit n Massive gives you. Pass a larger max_outage to dm.MassiveConfig to "
+            "wait longer. Call m.stocks.dividends again for a new live table."
+        ),
+        row["Error"],
+    )
     assert len(fake_rest.get_queries()) == 1
 
 
@@ -2120,7 +2135,8 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
         ValueError,
         match=r"^m\.indices\.snapshots\(\): No row of the symbol table is a ticker this dataset "
         r"takes, so the result would follow nothing\. The table holds 'SPX'\. Fix or delete those "
-        r"rows\.$",
+        r"rows, or report them at https://github\.com/chipkent/deephaven-massive/issues if Massive "
+        r"itself writes them\.$",
     ):
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
     # Under RAISE, a bad row raises at once, naming the fix.
@@ -2431,9 +2447,10 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
             "Massive answered GET /stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 "
             'with HTTP 429 (request_id r7): "slow down". The next request goes at 2027-01-15 '
             "08:10:00 UTC, past the 300 s this read waits for Massive's pauses. The usual cause is "
-            "another program using the same Massive account, which shares its limit. Retry after "
-            "that time, stop the other program, or set rest_requests_per_minute in "
-            "dm.MassiveConfig to pace requests. See each subscription's pace in m.rate_limits()."
+            "another program using the same Massive account, which shares its limit, and "
+            "m.rate_limits() shows each subscription's pace. Retry after that time, stop the "
+            "other program, or pass rest_requests_per_minute={dm.Subscription.STOCKS: n} to "
+            "dm.MassiveConfig, with the limit n Massive gives you."
         )
         + "$"
     )
@@ -2448,14 +2465,13 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     warnings = [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.INFO and "request with HTTP 429. " in r.getMessage()
+        if r.levelno == logging.INFO and "pause and resume" in r.getMessage()
     ]
     assert len(warnings) == 1
     assert warnings[0] == (
-        "Massive refused a stocks request with HTTP 429. Massive answered GET "
-        "/stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 with HTTP 429 "
-        '(request_id r7): "slow down". Requests pause and resume. If this persists, send the '
-        "request_id to Massive's support."
+        "Massive answered GET /stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 "
+        'with HTTP 429 (request_id r7): "slow down". Stocks requests pause and resume by '
+        "themselves. If this persists, send request_id r7 to Massive's support."
     )
     assert "test-key" not in caplog.text
 

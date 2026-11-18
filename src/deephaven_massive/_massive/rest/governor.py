@@ -304,18 +304,22 @@ class Patience:
                 permit = admission.acquire(read)
     """
 
-    __slots__ = ("_advice", "_counted_until", "_seconds", "_spent")
+    __slots__ = ("_advice", "_counted_until", "_limit", "_seconds", "_spent")
 
-    def __init__(self, seconds: float, *, advice: str = "") -> None:
+    def __init__(self, seconds: float, *, advice: str = "", limit: str = "") -> None:
         """Start with nothing charged.
 
         Args:
             seconds: The most pause time the read waits out, in seconds; `math.inf` for none.
             advice: One more remedy the caller knows, which ends the message of a request that
                 gives up (`RequestGovernor` adds it after its own remedies); empty for none.
+            limit: How the message of a request that gives up names `seconds` when a setting
+                of the user's gives it, such as `"max_outage=300 s"`; empty for a limit of the
+                library's, which the message names by its seconds.
         """
         self._seconds = seconds
         self._advice = advice
+        self._limit = limit
         self._spent = 0.0
         # The end of the pause time already charged (monotonic): a pause several requests of
         # the read wait out together is charged once.
@@ -330,6 +334,11 @@ class Patience:
     def advice(self) -> str:
         """The caller's remedy that ends a give-up message; empty for none."""
         return self._advice
+
+    @property
+    def limit(self) -> str:
+        """The name of `seconds` in a give-up message, when a setting gives it; empty otherwise."""
+        return self._limit
 
     @property
     def spent(self) -> float:
@@ -569,6 +578,7 @@ class _Bucket:
         "lanes",
         "last_refusal",
         "learned",
+        "name",
         "open",
         "pause_refusal",
         "pause_started",
@@ -583,14 +593,16 @@ class _Bucket:
         "turns",
     )
 
-    def __init__(self, label: str, *, declarable: bool) -> None:
+    def __init__(self, name: str, label: str, *, declarable: bool) -> None:
         """Start unpaced, idle, and with no refusal.
 
         Args:
+            name: The bucket's name, such as `"stocks"`.
             label: How messages name the bucket's requests, such as `"stocks requests"`.
             declarable: Whether a limit may be declared for the bucket: False for one paced
                 only once it learns a limit.
         """
+        self.name = name
         self.label = label
         self.declarable = declarable
         self.declared: int | None = None
@@ -955,7 +967,7 @@ class RequestGovernor:
         self._clock = clock
         self._lock = threading.Lock()
         self._buckets = {
-            name: _Bucket(labels.get(name, f"{name} requests"), declarable=name not in fixed)
+            name: _Bucket(name, labels.get(name, f"{name} requests"), declarable=name not in fixed)
             for name in names
         }
         # Each listener, with the buckets whose changes it hears.
@@ -1729,7 +1741,8 @@ class RequestGovernor:
 
         Returns:
             The message: Massive's latest refusal; when the next request goes, in UTC; how long
-            the read waits for pauses and how long it has waited; the usual cause; and the
+            the read waits for pauses (the patience's `limit`, when it has one) and how long it
+            has waited; the usual cause, with where to watch each subscription's pace; and the
             remedies, declaring the limit only for a bucket that can be declared, then the
             patience's `advice`, a sentence of its own, when it has one.
         """
@@ -1740,18 +1753,21 @@ class RequestGovernor:
             else ""
         )
         remedies = (
-            "Retry after that time, stop the other program, or set rest_requests_per_minute in "
-            "dm.MassiveConfig to pace requests."
+            "Retry after that time, stop the other program, or pass "
+            f"rest_requests_per_minute={{dm.Subscription.{state.name.upper()}: n}} to "
+            "dm.MassiveConfig, with the limit n Massive gives you."
             if state.declarable
             else "Retry after that time, or stop the other program."
+        )
+        limit = (
+            patience.limit or f"the {patience.seconds:.0f} s this read waits for Massive's pauses"
         )
         advice = f" {patience.advice}" if patience.advice else ""
         return (
             f"{state.last_refusal} The next request goes at "
-            f"{goes.strftime('%Y-%m-%d %H:%M:%S')} UTC, past the {patience.seconds:.0f} s this "
-            f"read waits for Massive's pauses{waited}. The usual cause is "
-            "another program using the same Massive account, which shares its limit. "
-            f"{remedies}{advice}"
+            f"{goes.strftime('%Y-%m-%d %H:%M:%S')} UTC, past {limit}{waited}. The usual cause "
+            "is another program using the same Massive account, which shares its limit, and "
+            f"m.rate_limits() shows each subscription's pace. {remedies}{advice}"
         )
 
     def _notify(self, *changed: str) -> None:

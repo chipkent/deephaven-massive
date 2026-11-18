@@ -242,7 +242,9 @@ def read_patience(exec_ctx: ExecutionContext, *, max_outage: float, waiter: Wait
         case Waiter.LIVE_TABLE:
             if console:
                 return _massive.Patience(CONSOLE_PATIENCE)
-            return _massive.Patience(max_outage, advice=LIVE_TABLE_ADVICE)
+            return _massive.Patience(
+                max_outage, advice=LIVE_TABLE_ADVICE, limit=f"max_outage={max_outage:g} s"
+            )
         case _:
             assert_never(waiter)
 
@@ -557,14 +559,14 @@ class RateLimitNotices:
     def refused(self, bucket: str, error: WireError, *, per_minute: bool) -> None:
         """Log the session's INFO line for a bucket's first 429; later ones log nothing here.
 
-        The line says what the refusal means: a subscription the session declared a limit for
-        is refused because other sessions, processes, or keys of the account share its limit;
-        a refusal that names the per-minute maximum says Massive limits the requests per
-        minute, so once the pause ends they are paced at the number Massive answered in the
-        refusal's minute, if any (a subscription's limit could be declared; `OTHER`'s cannot);
-        a declared subscription's refusal means its limit is shared or declared too high; any other
-        refusal pauses the requests, and one that keeps coming is a matter for Massive's
-        support. The governor's own INFO line gives the number once it is learned.
+        The line gives Massive's answer, then what it means: a subscription the session
+        declared a limit for is refused because other sessions, processes, or keys of the
+        account share its limit, or its limit is declared too high; a refusal that names the
+        per-minute maximum says Massive limits the requests per minute, so once the pause ends
+        they are paced at the number Massive answered in the refusal's minute, if any (a
+        subscription's limit could be declared; `OTHER`'s cannot); any other refusal pauses the
+        requests, and one that keeps coming is a matter for Massive's support, with its
+        request_id. The governor's own INFO line gives the number once it is learned.
 
         Args:
             bucket: The refused request's bucket.
@@ -575,20 +577,19 @@ class RateLimitNotices:
             if bucket in self._warned:
                 return
             self._warned.add(bucket)
-        what = f"{'an' if bucket[0] in 'aeiou' else 'a'} {bucket} request"
-        if bucket == OTHER:
-            what = "a request outside Massive's subscriptions"
+        what = LABELS.get(bucket, f"{bucket} requests")  # as the governor names a subscription's
         learns = (
-            "Once the pause ends, they are paced at the number of them Massive answered of "
+            f"Once the pause ends, {what} are paced at the number of them Massive answered of "
             "those sent in the refusal's clock minute, if it answered any. The next log line "
             "and m.rate_limits() give it."
         )
         if bucket in self._declared:
             declared = self._declared[bucket]
             advice = (
-                f"Its requests are already paced at the {declared} per minute declared, so "
-                "either other sessions, processes, or API keys of the account share the limit, "
-                f"or {declared} is above Massive's limit. Requests pause and resume."
+                f"{what[:1].upper()}{what[1:]} are already paced at the {declared} per minute "
+                "declared, so either other sessions, processes, or API keys of the account "
+                f"share the limit, or {declared} is above Massive's limit. They pause and resume "
+                "by themselves."
             )
         elif per_minute and bucket == OTHER:
             advice = (
@@ -597,17 +598,23 @@ class RateLimitNotices:
             )
         elif per_minute:
             advice = (
-                f"Massive limits these requests per minute. {learns} To pace them from the "
-                "first request, pass rest_requests_per_minute="
+                f"Massive limits {what} per minute. {learns} To pace them from the first "
+                "request, pass rest_requests_per_minute="
                 f"{{dm.Subscription.{bucket.upper()}: n}} to dm.MassiveConfig, with the limit n "
                 "Massive gives you."
             )
         else:
-            advice = (
-                "Requests pause and resume. If this persists, send the request_id to Massive's "
-                "support."
+            # Massive may send no request_id.
+            support = (
+                f"send request_id {error.request_id} to Massive's support"
+                if error.request_id
+                else "tell Massive's support"
             )
-        logger.info("Massive refused %s with HTTP 429. %s %s", what, error, advice)
+            advice = (
+                f"{what[:1].upper()}{what[1:]} pause and resume by themselves. If this "
+                f"persists, {support}."
+            )
+        logger.info("%s %s", error, advice)
 
 
 def rate_limit_rows(governor: RequestGovernor) -> list[RateLimitRow]:

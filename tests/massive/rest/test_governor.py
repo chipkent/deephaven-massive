@@ -46,11 +46,13 @@ REFUSAL = (
     '"slow down".'
 )
 GIVE_UP_CAUSE = (
-    "The usual cause is another program using the same Massive account, which shares its limit."
+    "The usual cause is another program using the same Massive account, which shares its "
+    "limit, and m.rate_limits() shows each subscription's pace."
 )
 DECLARABLE_REMEDIES = (
-    "Retry after that time, stop the other program, or set rest_requests_per_minute in "
-    "dm.MassiveConfig to pace requests."
+    "Retry after that time, stop the other program, or pass "
+    "rest_requests_per_minute={dm.Subscription.STOCKS: n} to dm.MassiveConfig, with the limit n "
+    "Massive gives you."
 )
 LEARN_ONLY_REMEDIES = "Retry after that time, or stop the other program."
 UNKNOWN_CRYPTO = "Unknown bucket 'crypto'. The buckets are stocks, options, and other."
@@ -672,20 +674,20 @@ def test_a_read_waiting_on_another_reads_requests_charges_their_pauses_to_its_ow
     clock = FakeClock(manual=True)
     governor = _governor(clock)
     patience = Patience(90.0)
-    assert governor.charge_pause("other", patience) is None  # no pause: nothing to charge
+    assert governor.charge_pause("stocks", patience) is None  # no pause: nothing to charge
     assert patience.spent == 0.0
-    _refuse(governor, governor.admission("other", lane=object()).acquire(Cancel()), retry_after=60)
-    assert governor.charge_pause("other", patience) is None
-    assert governor.charge_pause("other", patience) is None  # the same pause counts once
+    _refuse(governor, governor.admission("stocks", lane=object()).acquire(Cancel()), retry_after=60)
+    assert governor.charge_pause("stocks", patience) is None
+    assert governor.charge_pause("stocks", patience) is None  # the same pause counts once
     assert patience.spent == 60.0
     clock.advance(60.0)
     _refuse(
         governor,
-        governor.admission("other", lane=object()).acquire(Cancel()),
+        governor.admission("stocks", lane=object()).acquire(Cancel()),
         retry_after=60,
         message=REFUSAL,
     )
-    failure = governor.charge_pause("other", patience)  # 120 s in all: more than it waits out
+    failure = governor.charge_pause("stocks", patience)  # 120 s in all: more than it waits out
     assert failure is not None
     assert failure.status == 429
     assert str(failure) == (
@@ -694,7 +696,7 @@ def test_a_read_waiting_on_another_reads_requests_charges_their_pauses_to_its_ow
         f"{GIVE_UP_CAUSE} {DECLARABLE_REMEDIES}"
     )
     assert patience.spent == 60.0  # nothing is charged for a pause it will not wait out
-    assert governor.charge_pause("other", Patience(600.0)) is None  # another read's own patience
+    assert governor.charge_pause("stocks", Patience(600.0)) is None  # another read's own patience
     with pytest.raises(ValueError, match=rf"^{re.escape(UNKNOWN_CRYPTO)}$"):
         governor.charge_pause("crypto", patience)
 
@@ -1350,10 +1352,10 @@ def test_an_interrupt_after_the_grant_hands_the_permit_back() -> None:
 
 
 def test_a_give_up_message_quotes_its_own_buckets_latest_refusal() -> None:
-    governor = RequestGovernor(("stocks", "other"), clock=FakeClock())
+    governor = RequestGovernor(("stocks", "options"), clock=FakeClock())
     refusals = {
-        "other": "Massive answered GET /v3/reference/tickers on api.massive.com with HTTP 429 "
-        '(request_id r2): "slow down".',
+        "options": "Massive answered GET /v3/snapshot/options/AAPL on api.massive.com with "
+        'HTTP 429 (request_id r2): "slow down".',
         "stocks": REFUSAL,
     }
     for bucket, refusal in refusals.items():
@@ -1367,7 +1369,7 @@ def test_a_give_up_message_quotes_its_own_buckets_latest_refusal() -> None:
         expected = (
             f"{refusal} The next request goes at 2027-01-15 08:10:00 UTC, past the 0 s this "
             f"read waits for Massive's pauses. {GIVE_UP_CAUSE} "
-            f"{DECLARABLE_REMEDIES}"
+            f"{DECLARABLE_REMEDIES.replace('STOCKS', bucket.upper())}"
         )
         with pytest.raises(WireError, match=rf"^{re.escape(expected)}$"):
             governor.admission(bucket, lane=object(), patience=Patience(0.0)).acquire(Cancel())
@@ -1408,7 +1410,7 @@ def test_a_late_shorter_refusal_leaves_a_longer_pause_alone() -> None:
 
 
 def test_an_interrupted_lane_change_leaves_a_state_the_bucket_repairs() -> None:
-    bucket = _Bucket("stocks requests", declarable=True)
+    bucket = _Bucket("stocks", "stocks requests", declarable=True)
     first, second = _Waiter("a"), _Waiter("b")
     bucket.join(first)
     bucket.join(second)

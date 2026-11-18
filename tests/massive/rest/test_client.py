@@ -1021,9 +1021,11 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
     assert str(caught.value) == (
         'Massive answered GET /v3/trades/AAPL on 127.0.0.1 with HTTP 429 (request_id r): "quota". '
         "The next request goes at 2027-01-15 08:05:01 UTC, past the 300 s this read waits "
-        "for Massive's pauses. The usual cause is another program using the same "
-        "Massive account, which shares its limit. Retry after that time, stop the other program, "
-        "or set rest_requests_per_minute in dm.MassiveConfig to pace requests."
+        "for Massive's pauses. The usual cause is another program using the same Massive "
+        "account, which shares its limit, and m.rate_limits() shows each subscription's pace. "
+        "Retry after that time, stop the other program, or pass "
+        "rest_requests_per_minute={dm.Subscription.STOCKS: n} to dm.MassiveConfig, with the "
+        "limit n Massive gives you."
     )
     assert caught.value.status == 429
     assert (caught.value.host, caught.value.path) == ("127.0.0.1", "/v3/trades/AAPL")

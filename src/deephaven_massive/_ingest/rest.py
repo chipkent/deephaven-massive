@@ -2046,9 +2046,9 @@ class RestReader:
 
         A closed session's error is `SessionClosedError("This session is closed. ...")`,
         whatever the request returned. A pause that outlasts the read's patience is a
-        `MassiveError` with status 429: the governor's message (Massive's answer, when the
-        next request goes, the usual cause, and the remedies), then where to watch the
-        subscriptions' pace. Every other error is `_errors.from_wire`'s.
+        `MassiveError` with status 429 and the governor's message (Massive's answer, when the
+        next request goes, the usual cause, and the remedies). Every other error is
+        `_errors.from_wire`'s.
 
         Args:
             error: The wire error.
@@ -2059,11 +2059,7 @@ class RestReader:
         if self.state.closed:
             return SessionClosedError(session_closed())
         if error.status == HTTPStatus.TOO_MANY_REQUESTS:
-            return MassiveError(
-                f"{error.message} See each subscription's pace in m.rate_limits().",
-                status=429,
-                request_id=error.request_id,
-            )
+            return MassiveError(error.message, status=429, request_id=error.request_id)
         return from_wire(error)
 
     def _dataset_error(self, spec: DatasetSpec, bucket: str, error: WireError) -> MassiveError:
