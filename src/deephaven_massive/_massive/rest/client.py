@@ -968,8 +968,8 @@ class RestClient:
         if is_certificate_failure(error):
             raise WireError(
                 f"The TLS certificate of {self._host} did not verify for GET {request.target}: "
-                f"{error}. If a proxy or a private CA signs it, set SSL_CERT_FILE to a bundle "
-                "that trusts it.",
+                f"{error}. If a proxy or a private certificate authority signs it, set "
+                "SSL_CERT_FILE to a bundle that trusts it.",
                 host=self._host,
                 path=request.target,
                 kind=WireFailure.LOCAL,

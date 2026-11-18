@@ -904,8 +904,8 @@ def test_a_certificate_failure_is_fatal_and_names_ssl_cert_file() -> None:
     assert error.kind is WireFailure.LOCAL  # SSL_CERT_FILE, on this machine, is the fix
     assert error.message == (
         "The TLS certificate of socket.massive.com did not verify for the WebSocket connection to "
-        "socket.massive.com/stocks: certificate verify failed. If a proxy or a private CA signs "
-        "it, set SSL_CERT_FILE to a bundle that trusts it."
+        "socket.massive.com/stocks: certificate verify failed. If a proxy or a private "
+        "certificate authority signs it, set SSL_CERT_FILE to a bundle that trusts it."
     )
 
 

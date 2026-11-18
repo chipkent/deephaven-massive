@@ -143,7 +143,9 @@ def test_a_failed_rows_refusal_is_the_skip_reason(
         (
             (
                 "Massive answered the subscription to AM.AAPL on wss://socket.massive.com/stocks: "
-                '"not authorized". websocket_hosts pins this host. Pass another, or remove the pin.'
+                '"not authorized". This host comes from websocket_hosts in dm.MassiveConfig. '
+                "Remove dm.AssetClass.STOCKS from websocket_hosts, or set it to a host Massive "
+                "gives you."
             ),
             True,
         ),

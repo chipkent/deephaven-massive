@@ -743,10 +743,14 @@ class FlatFileClient:
             raise refusal from cause
         except BotoCoreError as error:
             if is_certificate_failure(error):
+                # botocore's SSLError names the endpoint before OpenSSL's words; the message
+                # names the host already.
+                verified = error.kwargs["error"] if isinstance(error, SSLError) else error
                 raise WireError(
                     f"The TLS certificate of {self._host} did not verify for the {verb} of "
-                    f"{location}: {self._clean(error)}. If a proxy or a private CA signs it, set "
-                    "SSL_CERT_FILE to a bundle that trusts it.",
+                    f"s3://{self._bucket}/{key}: {self._clean(verified)}. If a proxy or a private "
+                    "certificate authority signs it, set SSL_CERT_FILE to a bundle that trusts "
+                    "it.",
                     host=self._host,
                     path=key,
                     kind=WireFailure.LOCAL,

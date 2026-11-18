@@ -69,7 +69,10 @@ KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
 CLOSED = (
     "The library closed its connections to https://files.massive.com before this request was sent."
 )
-TRUST_IT = ". If a proxy or a private CA signs it, set SSL_CERT_FILE to a bundle that trusts it."
+TRUST_IT = (
+    ". If a proxy or a private certificate authority signs it, set SSL_CERT_FILE to a bundle "
+    "that trusts it."
+)
 FUTURES_KEY = "us_futures_nymex/trades_v1/2025/03/2025-03-04.csv.gz"
 ACCESS_KEY = "AKIDFLATFILES"
 PRIVATE_KEY = "flat-file-secret"
@@ -716,7 +719,7 @@ def _handshake_refused(_key: str) -> None:
     [
         (
             _certificate_rejected,
-            "SSL validation failed for https://files.massive.com certificate verify failed",
+            "certificate verify failed",
         ),
         (
             _certificate_rejected_by_way_of_the_proxy,
@@ -744,8 +747,7 @@ def test_a_certificate_failure_is_never_retried(
         client.open(KEY)
     assert info.value.message == (
         f"The TLS certificate of files.massive.com did not verify for the read of "
-        f"s3://flatfiles/{KEY} at https://files.massive.com: {message}. If a proxy or a private "
-        "CA signs it, set SSL_CERT_FILE to a bundle that trusts it."
+        f"s3://flatfiles/{KEY}: {message}{TRUST_IT}"
     )
     assert (info.value.status, info.value.path) == (None, KEY)
     assert isinstance(info.value.__cause__, BotoCoreError)
@@ -1365,7 +1367,7 @@ def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(
             WireError,
             match=(
                 rf"^{re.escape('The TLS certificate of 127.0.0.1 did not verify for the read of ')}"
-                rf"{re.escape(f's3://flatfiles/{KEY} at {tls_server.url}: ')}.*CERTIFICATE_VERIFY"
+                rf"{re.escape(f's3://flatfiles/{KEY}: ')}.*CERTIFICATE_VERIFY"
                 rf".*{re.escape(TRUST_IT)}$"
             ),
         ):
@@ -1389,7 +1391,7 @@ def test_a_certificate_for_another_name_fails_at_once_over_the_network(
             WireError,
             match=(
                 rf"^{re.escape('The TLS certificate of localhost did not verify for the read of ')}"
-                rf"{re.escape(f's3://flatfiles/{KEY} at {endpoint_url}: ')}.*localhost.*"
+                rf"{re.escape(f's3://flatfiles/{KEY}: ')}.*localhost.*"
                 rf"{re.escape(TRUST_IT)}$"
             ),
         ) as info:

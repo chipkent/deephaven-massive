@@ -648,8 +648,8 @@ def test_a_certificate_failure_is_never_retried_and_names_ssl_cert_file(
     with pytest.raises(
         WireError,
         match=r"^The TLS certificate of 127\.0\.0\.1 did not verify for GET /v3/trades/AAPL: "
-        r".*certificate verify failed.*\. If a proxy or a private CA signs it, set "
-        r"SSL_CERT_FILE to a bundle that trusts it\.$",
+        r".*certificate verify failed.*\. If a proxy or a private certificate authority signs "
+        r"it, set SSL_CERT_FILE to a bundle that trusts it\.$",
     ) as caught:
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert "SSL_CERT_FILE" in caught.value.message
@@ -676,8 +676,8 @@ def test_a_certificate_for_another_name_is_never_retried(
         with pytest.raises(
             WireError,
             match=r"^The TLS certificate of localhost did not verify for GET /v3/trades/AAPL: "
-            r".*certificate verify failed.*\. If a proxy or a private CA signs it, set "
-            r"SSL_CERT_FILE to a bundle that trusts it\.$",
+            r".*certificate verify failed.*\. If a proxy or a private certificate authority "
+            r"signs it, set SSL_CERT_FILE to a bundle that trusts it\.$",
         ) as caught:
             rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     finally:

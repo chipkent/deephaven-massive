@@ -1299,17 +1299,17 @@ class Connection:
 
         Returns:
             First, for each refused channel whose page documents one host other than this
-            connection's (index values, say), that host. Then: on a pinned host, that
-            `websocket_hosts` pins it, and to pass another or remove the pin; on the delayed
-            feed, that `delayed_subscriptions` lists the subscription, and to remove it for the
-            real-time feed; on the real-time feed of a key whose snapshot Massive labelled
-            real-time, that label, so the delayed feed is no alternative; on the real-time feed
-            of a key whose snapshot carried no label, to pin another host or ask for the delayed
-            feed; on the real-time feed of a key whose snapshot Massive refused, that refusal,
-            and to read the data with REST instead; on the real-time feed otherwise, the usual
-            cause and how to use Massive's delayed feed; for fair-market-value topics, the one
-            host Massive documents for them, which `websocket_hosts` never changes; on another
-            host, how to choose one with `websocket_hosts`.
+            connection's (index values, say), that host. Then: on a host from `websocket_hosts`,
+            that it comes from there, and to remove it or set another; on the delayed feed, that
+            `delayed_subscriptions` lists the subscription, and to remove it for the real-time feed;
+            on the real-time feed of a key whose snapshot Massive labelled real-time, that label, so
+            the delayed feed is no alternative; on the real-time feed of a key whose snapshot
+            carried no label, to pin another host or ask for the delayed feed; on the real-time feed
+            of a key whose snapshot Massive refused, that refusal, and to read the data with REST
+            instead; on the real-time feed otherwise, the usual cause and how to use Massive's
+            delayed feed; for fair-market-value topics, the one host Massive documents for them,
+            which `websocket_hosts` never changes; on another host, how to choose one with
+            `websocket_hosts`.
         """
         subscription = subscription_of(self.asset_class)
         evidence = self.decision.evidence
@@ -1317,8 +1317,9 @@ class Connection:
         delayed = delayed_fix(subscription, purpose=f"To use Massive's delayed {subscription} feed")
         if pinned(evidence):
             hint = (
-                f"websocket_hosts pins this host for dm.AssetClass.{self.asset_class.name}. "
-                "Pass another host there, or remove the pin."
+                "This host comes from websocket_hosts in dm.MassiveConfig. Remove "
+                f"dm.AssetClass.{self.asset_class.name} from websocket_hosts, or set it to a "
+                "host Massive gives you."
             )
         elif self.decision.host.startswith(DELAYED_PREFIX):
             hint = (

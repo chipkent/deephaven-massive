@@ -435,16 +435,16 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
         (
             on_host("futures.example.com", "websocket_hosts"),
             (
-                "websocket_hosts pins this host for dm.AssetClass.FUTURES. Pass another host "
-                "there, or remove the pin."
+                "This host comes from websocket_hosts in dm.MassiveConfig. Remove "
+                "dm.AssetClass.FUTURES from websocket_hosts, or set it to a host Massive gives you."
             ),
         ),
         pytest.param(
             # A pinned real-time host keeps the pin's hint, whatever its snapshot said.
             on_host(REALTIME_HOST, "websocket_hosts, last_trade.timeframe=REAL-TIME"),
             (
-                "websocket_hosts pins this host for dm.AssetClass.FUTURES. Pass another host "
-                "there, or remove the pin."
+                "This host comes from websocket_hosts in dm.MassiveConfig. Remove "
+                "dm.AssetClass.FUTURES from websocket_hosts, or set it to a host Massive gives you."
             ),
             id="pinned real-time host",
         ),

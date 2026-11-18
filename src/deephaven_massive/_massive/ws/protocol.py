@@ -282,8 +282,8 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     if is_certificate_failure(error):
         return WireError(
             f"The TLS certificate of {host} did not verify for the WebSocket connection to "
-            f"{host}{path}: {error}. If a proxy or a private CA signs it, set SSL_CERT_FILE to a "
-            "bundle that trusts it.",
+            f"{host}{path}: {error}. If a proxy or a private certificate authority signs it, set "
+            "SSL_CERT_FILE to a bundle that trusts it.",
             host=host,
             path=path,
             kind=WireFailure.LOCAL,
