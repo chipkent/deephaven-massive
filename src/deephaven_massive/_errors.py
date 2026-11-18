@@ -31,8 +31,9 @@ Three more attributes tell code what to do about an error:
 `is_bug` sets the level a failure is logged at: ERROR for a bug, so that a broad `except` never
 hides one, and below ERROR otherwise (`_log_limits.log_failure`). `library_bug` and
 `user_defect` build the two kinds of bug message, `unmatched_form` builds the library's for a
-value of a form that no case of a `match` covers, `source_of` and `is_bug_of` read the source
-and the bug flag of any exception, and `failure_text` is the text a log record gives it.
+value of a form that no case of a `match` covers, `session_closed` builds the message of a
+call on a closed session, `source_of` and `is_bug_of` read the source and the bug flag of any
+exception, and `failure_text` is the text a log record gives it.
 `required` and `required_instance` return a value the library's design guarantees, such as a
 dataset's REST path or the session a caller holds, and raise `BrokenGuaranteeError`, a
 `LIBRARY` error, when it is missing or of another type.
@@ -103,9 +104,11 @@ __all__ = [
     "from_wire",
     "is_bug_of",
     "library_bug",
+    "new_live_table",
     "raises_through",
     "required",
     "required_instance",
+    "session_closed",
     "source_of",
     "unmatched_form",
     "user_defect",
@@ -119,14 +122,15 @@ _F = TypeVar("_F", bound="Callable[..., object]")
 _V = TypeVar("_V")
 
 
-NEW_SESSION: Final = "open a new dm.MassiveSession() to read again"
-"""What ends every message of a `SessionClosedError`: the fix for a closed session."""
+NEW_SESSION: Final = "Open a new dm.MassiveSession() to read again."
+"""The sentence that ends every message of a `SessionClosedError`: the fix for a closed
+session."""
 
 READ_STOPPED: Final = (
-    "the read was stopped when its table was released or its session closed; call the method "
-    "again for a new table"
+    "The read stopped because its table was released or its session closed. Call the method "
+    "again for a new table."
 )
-"""What ends the message of a read that was stopped before it finished: why, and the fix."""
+"""The sentences that end the message of a read stopped before it finished: why, and the fix."""
 
 
 LIBRARY_BUG: Final = (
@@ -435,8 +439,7 @@ def from_wire(error: WireError, *, source: ErrorSource | None = None) -> Massive
         `WireEntitlementError`, and `MassiveError` for any other `WireError`, with the wire
         error's message, `status`, `request_id`, and `source`, and retryable as
         `MassiveError` decides from them, or retryable when the wire error `means_retry`. The
-        message of a stopped request ends with
-        `READ_STOPPED`, which says why and what to do.
+        message of a stopped request ends with `READ_STOPPED`, which says why and what to do.
     """
     public: type[MassiveError]
     if isinstance(error, WireAuthError):
@@ -447,7 +450,7 @@ def from_wire(error: WireError, *, source: ErrorSource | None = None) -> Massive
         public = MassiveError
     message = error.message
     if error.kind is WireFailure.STOPPED:
-        message = f"{message}; {READ_STOPPED}"
+        message = f"{_sentence(message)} {READ_STOPPED}"
     return public(
         message,
         status=error.status,
@@ -566,6 +569,19 @@ def every_symbol_failed(errors: Sequence[MassiveError]) -> MassiveError:
     return copy_error(errors[0], is_retryable=all(e.is_retryable for e in errors))
 
 
+def _sentence(text: str) -> str:
+    """Return a message's text ended with a period, unless it already ends a sentence.
+
+    Args:
+        text: The text, such as `"the flush thread died"` or `"it died."`.
+
+    Returns:
+        `text` with a period added when it ends with no period, exclamation mark, or question
+        mark.
+    """
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
 def library_bug(message: str) -> str:
     """Return a message about a defect of the library, ended with how to report it.
 
@@ -576,8 +592,7 @@ def library_bug(message: str) -> str:
     Returns:
         `message` followed by `LIBRARY_BUG`.
     """
-    stop = "" if message.endswith((".", "!", "?")) else "."
-    return f"{message}{stop} {LIBRARY_BUG}"
+    return f"{_sentence(message)} {LIBRARY_BUG}"
 
 
 def unmatched_form(what: str, value: object) -> str:
@@ -659,15 +674,40 @@ def user_defect(problem: str, fix: str) -> str:
     It never asks for a bug report: the fix is the user's.
 
     Args:
-        problem: What failed and where, naming the user's table or code, such as `"the symbol
-            table failed upstream: <cause>"`.
-        fix: What the user does about it, such as `"fix that table and call the method
-            again"`.
+        problem: What failed and where, naming the user's table or code, such as `"The symbol
+            table you passed to stocks.quotes has failed, so this table can no longer follow
+            it"`; a trailing period is added when it ends without one.
+        fix: What the user does about it, as an imperative, such as `"Fix that table, then
+            call stocks.quotes again"`; a trailing period is added when it ends without one.
 
     Returns:
-        `"<problem>; <fix>"`.
+        `"<problem>. <fix>."`.
     """
-    return f"{problem}; {fix}"
+    return f"{_sentence(problem)} {_sentence(fix)}"
+
+
+def new_live_table(dataset: str) -> str:
+    """Return the sentence that ends the error of a failed live table: the call that makes it again.
+
+    Args:
+        dataset: The table's dataset, such as `"stocks.trades"`.
+
+    Returns:
+        `"Call m.stocks.trades again for a new live table."`.
+    """
+    return f"Call m.{dataset} again for a new live table."
+
+
+def session_closed() -> str:
+    """Return the message of a call that a closed session can no longer serve.
+
+    Every `SessionClosedError` raised at a call on the session carries it. The message names
+    no session: the traceback shows the call, which is on the session the user called.
+
+    Returns:
+        `"This session is closed. Open a new dm.MassiveSession() to read again."`.
+    """
+    return f"This session is closed. {NEW_SESSION}"
 
 
 def failure_text(error: BaseException) -> str:
@@ -782,9 +822,9 @@ class SessionClosedError(MassiveError):
 
     After `m.close()`, a query method such as `fetch()` raises it, and so do `m.streams()`
     and a call that the close cut short. A live table that was running when the session
-    closed fails with it. The message names the session and the fix, such as
-    `"MassiveSession #1 is closed; open a new dm.MassiveSession() to read again"`. Its
-    `source` is `ErrorSource.USER`, and `is_retryable` is False.
+    closed fails with it. The message says so and names the fix: `"This session is closed.
+    Open a new dm.MassiveSession() to read again."`. Its `source` is `ErrorSource.USER`, and
+    `is_retryable` is False.
 
     Example:
         ::

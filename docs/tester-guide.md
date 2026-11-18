@@ -632,7 +632,7 @@ converted = dm.canonicalize_symbols(
 ```
 
 You should see `C:EURUSD`, `X:BTCUSD`, `I:SPX`, and `BRK.B`, each on its own line, then a line
-that starts `ValueError: 'BRK-B' is not a Massive stock ticker; if it is Yahoo's spelling`,
+that starts `ValueError: 'BRK-B' is not a Massive stock ticker. If it is Yahoo's spelling`,
 then `None`: with `on_error=dm.OnError.LOG` the converter returns `None` for a
 value it cannot convert and logs it once, as `dm.canonicalize_symbols` does by default.
 `converted` holds `BRK.B`, `AAPL`, and a null `Symbol`, for the value no convention could
@@ -1037,7 +1037,7 @@ You should see three lines like these, with your own session numbers and a row c
 
 ```text
 <MassiveSession #7 closed>
-MassiveError: MassiveSession #7 is closed; open a new dm.MassiveSession() to read again
+MassiveError: This session is closed. Open a new dm.MassiveSession() to read again.
 <MassiveSession #8 closed> 5
 ```
 

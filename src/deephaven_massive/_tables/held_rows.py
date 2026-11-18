@@ -617,8 +617,9 @@ class HeldRows(Generic[_K]):
         if down <= self._max_outage:
             return None
         return MassiveError(
-            f"the rows of {ticker} have waited {down:.0f} s for its trading session, longer "
-            f"than MassiveConfig.max_outage ({self._max_outage:g} s): {state.reason}"
+            f"The rows of {ticker} have waited {down:.0f} s for their trading session, longer "
+            f"than max_outage={self._max_outage:g} s, so this table stopped. They wait because "
+            f"{state.reason.removesuffix('.')}."
         )
 
     def _delayed(self, held: dict[str, _Waiting], now: float) -> dict[str, Delayed]:
@@ -666,8 +667,9 @@ class HeldRows(Generic[_K]):
             self._warned = True
             logger.warning(
                 "%d MB of streamed futures rows wait for their trading sessions on one "
-                "connection, a tenth of the %d MB the library keeps; Massive's futures "
-                "reference data is slow or out of reach",
+                "connection, a tenth of the %d MB the library keeps for it. The usual cause "
+                "is that Massive's futures contracts and schedules are slow or out of reach. "
+                "m.problems() lists the waiting rows under undated_rows.",
                 total // 2**20,
                 HELD_BYTES_LIMIT // 2**20,
             )
@@ -676,9 +678,10 @@ class HeldRows(Generic[_K]):
         held = self._held[key]
         reasons = sorted({w.reason for w in held.values()})
         return (
-            f"{sum(w.rows for w in held.values())} streamed futures rows "
-            f"({sizes[key] // 2**20} MB) waited for their trading sessions, past the "
-            f"{HELD_BYTES_LIMIT // 2**20} MB the library keeps: {'; '.join(reasons[:3])}"
+            f"{sum(w.rows for w in held.values()):,} streamed futures rows, about "
+            f"{sizes[key] // 2**20} MB, waited for their trading sessions, past the "
+            f"{HELD_BYTES_LIMIT // 2**20} MB the library keeps for one connection, so this "
+            f"table stopped. The first waits because {reasons[0].removesuffix('.')}."
         )
 
 
@@ -853,7 +856,7 @@ def _refused(ticker: str, state: LookupState) -> MassiveError:
     if error is None:
         raise BrokenGuaranteeError(library_bug(f"the refused lookup of {ticker} has no refusal"))
     return MassiveError(
-        f"looking up the trading session of {ticker} failed: {failure_text(error)}",
+        f"Looking up the trading session of {ticker} failed. {failure_text(error)}",
         status=error.status,
         request_id=error.request_id,
         source=error.source,

@@ -58,7 +58,7 @@ def test_massive_answers_a_path_ticker_holding_an_encoded_slash(
     still covers.
     """
     trades = source(Transport.REST, "/v3/trades/{stockTicker}")
-    with pytest.raises(ValueError, match=r"contain '/', which Massive cannot read"):
+    with pytest.raises(ValueError, match=r"contains '/', which Massive cannot read"):
         request_target(trades, {"stockTicker": "BRK/B"}, {"limit": 1})
     pool = urllib3.PoolManager(ssl_context=new_ssl_context(), retries=False)
     try:

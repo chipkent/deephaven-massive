@@ -100,7 +100,7 @@ _BAR_COLUMNS: Final = ("Date", "Open", "High", "Low", "Close", "Volume")
 _CRYPTO_LINE: Final = re.compile(r"`(m\.crypto\.bars\([^`]*\)\.last_by\(\))`")
 """The streaming example's line for crypto, inline in its text."""
 
-_DELAYED_REFUSAL: Final = "is not in MassiveConfig.delayed_subscriptions"
+_DELAYED_REFUSAL: Final = "is not in delayed_subscriptions"
 """What the library's refusal of delayed data says about the setting that would accept it."""
 
 _STOCKS: Final = frozenset({"AAPL", "MSFT", "NVDA"})

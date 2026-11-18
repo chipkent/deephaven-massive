@@ -161,21 +161,20 @@ def delayed_refusal(
             streams to the delayed feed.
 
     Returns:
-        The error, for example: `options streams would be delayed (Massive reports
-        last_trade.timeframe=DELAYED), and dm.Subscription.OPTIONS is not in
-        MassiveConfig.delayed_subscriptions, so the library serves only real-time options
-        data. To use Massive's delayed options feed:
-        dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})`.
+        The error, for example: `options streams would be delayed, since Massive reports
+        last_trade.timeframe=DELAYED, and dm.Subscription.OPTIONS is not in
+        delayed_subscriptions, so the library serves only real-time options data. To use
+        Massive's delayed options feed, pass delayed_subscriptions={dm.Subscription.OPTIONS}
+        to dm.MassiveConfig.`
     """
-    remedy = (
+    purpose = (
         f"To use Massive's delayed {subscription} feed"
         if streams
-        else f"To accept delayed {subscription} data (its streams then use Massive's delayed "
-        "feed too)"
+        else f"To accept delayed {subscription} data, whose streams then use Massive's delayed "
+        "feed too"
     )
     return DelayedDataError(
-        f"{what} would be delayed (Massive reports {evidence}), and "
-        f"dm.Subscription.{subscription.name} is not in MassiveConfig.delayed_subscriptions, "
-        f"so the library serves only real-time {subscription} data. {remedy}: "
-        f"{delayed_fix(subscription)}"
+        f"{what} would be delayed, since Massive reports {evidence}, and "
+        f"dm.Subscription.{subscription.name} is not in delayed_subscriptions, so the library "
+        f"serves only real-time {subscription} data. {delayed_fix(subscription, purpose=purpose)}"
     )

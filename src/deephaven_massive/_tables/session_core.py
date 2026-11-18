@@ -3,7 +3,7 @@
 `MassiveSession` (in `_session.py`) is what users create; it delegates everything stateful to
 one `SessionCore`, which queries and namespaces share. The core owns:
 
-- the session's label (`MassiveSession #1`), used in error messages and log records, and its
+- the session's label (`MassiveSession #1`), used in DEBUG and INFO log records, and its
   thread prefix (`massive #1`), the start of the name of every thread the session owns, so each
   log line's thread says which session wrote it;
 - the configuration, the process's dataset `Catalog`, and the captured Deephaven
@@ -88,9 +88,10 @@ from deephaven_massive._errors import (
     MassiveError,
     SessionClosedError,
     library_bug,
+    session_closed,
     source_of,
 )
-from deephaven_massive._log_limits import BoundedLog, bounded_list
+from deephaven_massive._log_limits import BoundedLog, prose_list
 from deephaven_massive._massive import Redactor
 from deephaven_massive._tables import live_set
 from deephaven_massive._tables.diagnostics import (
@@ -99,6 +100,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
     StreamState,
     StreamUpdate,
+    diagnostics_died,
     thread_died,
 )
 from deephaven_massive._tables.execution_context import (
@@ -257,7 +259,10 @@ def _close_collected(label: str, closers: tuple[Callable[[], None], ...]) -> Non
         try:
             closer()
         except Exception:
-            logger.exception("%s: a transport failed to close. %s", label, LIBRARY_BUG)
+            logger.exception(
+                "A connection or poller of a session collected without close() failed to close. %s",
+                LIBRARY_BUG,
+            )
 
 
 def _unexpected(error: BaseException) -> bool:
@@ -317,7 +322,7 @@ class SessionCore:
         self._reaper = Reaper(
             exec_ctx,
             f"{thread_prefix} reaper",
-            on_death=functools.partial(SessionCore._thread_died, me, "reaper"),
+            on_death=functools.partial(SessionCore._thread_died, me),
         )
         self.results: Final = ResultRegistry(self.registry_lock, self._reaper, exec_ctx)
         # Queues work on the reaper, after everything queued before it, for callers that must
@@ -339,10 +344,9 @@ class SessionCore:
             self.diagnostics: Final = Diagnostics(
                 exec_ctx,
                 f"{thread_prefix} diagnostics",
-                label=label,
                 redactor=redactor,
                 release_later=self.release_later,
-                on_death=functools.partial(SessionCore._thread_died, me, "diagnostics writer"),
+                on_death=functools.partial(SessionCore._thread_died, me),
             )
         except BaseException:  # the reaper is running: stop it, or its thread runs forever
             self._reaper.stop()
@@ -470,9 +474,10 @@ class SessionCore:
                 # The caller receives the error; the log keeps which verb raised it, and why.
                 logger.debug("%s raised %s: %s", call, type(error).__name__, error)
                 raise
-            logger.exception("%s failed on an unexpected exception. %s", call, LIBRARY_BUG)
+            logger.exception("%s failed on an unexpected error. %s", call, LIBRARY_BUG)
             raise MassiveError(
-                library_bug(f"{call} failed: {error!r}"), source=ErrorSource.LIBRARY
+                library_bug(f"{call} failed on an unexpected error: {error!r}"),
+                source=ErrorSource.LIBRARY,
             ) from error
 
     def _guarded_verb(self, call: str, body: Callable[[], _T]) -> _T:
@@ -490,7 +495,7 @@ class SessionCore:
         """
         refuse_update_graph_thread(self.exec_ctx)
         if self.closed:
-            raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}")
+            raise SessionClosedError(session_closed())
         if not holds_update_graph_lock(self.exec_ctx):
             return body()
         began = time.monotonic()
@@ -519,10 +524,9 @@ class SessionCore:
             self._paused_cycle_warned = cycle
         logger.log(
             logging.WARNING if first else logging.DEBUG,
-            "%s: %s ran for %.0f s inside a Deephaven console command, which holds the "
-            "update graph's lock: live tables do not update until the command ends; leave "
-            "out wait=True to let fetch() or history() read in the background",
-            self.label,
+            "%s ran for %.0f s inside a Deephaven console command, and live tables do not "
+            "update until the command ends. Leave out wait=True so that fetch() or history() "
+            "reads in the background.",
             call,
             seconds,
         )
@@ -543,7 +547,7 @@ class SessionCore:
             RuntimeError: If ports are already attached.
         """
         if self._ports is not None:
-            raise RuntimeError(f"{self.label} already has its transports attached")
+            raise RuntimeError(library_bug("The session's connections are already attached"))
         self._ports = ports
 
     def _attached_ports(self) -> IngestPorts:
@@ -557,7 +561,7 @@ class SessionCore:
                 `MassiveSession`.
         """
         if self._ports is None:
-            raise RuntimeError(f"{self.label} has no transports attached")
+            raise RuntimeError(library_bug("The session has no connections attached"))
         return self._ports
 
     def rest_transport(self) -> RestTransport:
@@ -769,15 +773,14 @@ class SessionCore:
             The view: the schema's columns of `table`, the same rows.
 
         Raises:
-            SessionClosedError: If the session is closed (`"MassiveSession #1 is closed; ..."`),
-                also when the close ran while the view was built.
-            MassiveError: If the diagnostics writer died and failed the table
-                (`"MassiveSession #1: its diagnostics tables failed when their writer thread died
-                (...)"`).
+            SessionClosedError: If the session is closed (`session_closed`), also when the close
+                ran while the view was built.
+            MassiveError: If a library thread died and failed the diagnostics tables
+                (`diagnostics_died`).
         """
         with self.registry_lock:
             if self._closed:
-                raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}")
+                raise SessionClosedError(session_closed())
             self._views += 1
             live_set.sync(self)
         scope: LivenessScope | None = None
@@ -794,14 +797,10 @@ class SessionCore:
                 self._drop_view()
             died = self.diagnostics.died
             if isinstance(error, DHError) and self.closed:
-                raise SessionClosedError(f"{self.label} is closed; {NEW_SESSION}") from error
+                raise SessionClosedError(session_closed()) from error
             if isinstance(error, DHError) and died is not None:
                 logger.debug("%s: a diagnostics view of a failed table was refused", self.label)
-                raise MassiveError(
-                    f"{self.label}: its diagnostics tables failed when their writer thread died "
-                    f"({died!r}); see the ERROR logged then; {NEW_SESSION}",
-                    source=source_of(died),
-                ) from error
+                raise MassiveError(diagnostics_died(died), source=source_of(died)) from error
             raise
         return result
 
@@ -812,25 +811,22 @@ class SessionCore:
             live_set.sync(self)
 
     @staticmethod
-    def _thread_died(
-        core_ref: Callable[[], SessionCore | None], what: str, death: BaseException
-    ) -> None:
+    def _thread_died(core_ref: Callable[[], SessionCore | None], death: BaseException) -> None:
         """The `on_death` of a session's reaper or diagnostics writer: fail its live tables.
 
         Runs on the dying thread. A thread that dies leaves the session's tables frozen (no
-        release, or no diagnostics), so they fail instead, naming the thread and its cause. A
+        release, or no diagnostics), so they fail instead, naming the thread's cause. A
         dead reaper can no longer release results, so the session then stays in the live set
         until the process ends; only an interrupt raised inside the reaper kills it.
 
         Args:
             core_ref: Returns the session's core, or None once it is freed: a weak reference,
                 since the thread must not keep it alive.
-            what: The thread, as the message names it (`"reaper"`).
             death: What ended the thread.
         """
         core = core_ref()
         if core is not None:
-            SessionCore._fail_live(core, thread_died(core.label, what, death))
+            SessionCore._fail_live(core, thread_died(death))
 
     def _fail_live(self, error: MassiveError) -> int:
         """Fail every stream and worker table of the session that is still live.
@@ -879,8 +875,8 @@ class SessionCore:
                 fail(error)
             except Exception:
                 logger.exception(
-                    "%s: could not fail the table of stream %d. %s",
-                    self.label,
+                    "Could not fail the live table of stream %d, so it stops updating with no "
+                    "Error in m.streams(). %s",
                     stream_id,
                     LIBRARY_BUG,
                 )
@@ -911,8 +907,8 @@ class SessionCore:
         `m.symbol_reads()`, and gathers those whose tables still run. Then,
         outside every lock, verbs waiting for a stream that is still opening wake and raise
         `MassiveError` (the opener releases the stream when its open returns); every gathered
-        table fails with `MassiveError("MassiveSession #1 was closed; this table no longer
-        updates")`, and with it every table derived from it (a failed table keeps its rows for
+        table fails with `SessionClosedError("This session was closed, so this table no longer
+        updates. ...")`, and with it every table derived from it (a failed table keeps its rows for
         `snapshot()`, `to_pandas`, and `to_arrow`); the closers run (the session's streams leave
         their connections, connections no other session uses close, and the pollers stop; a
         background read's thread stops with its table's failure, and its requests with the session's
@@ -925,15 +921,15 @@ class SessionCore:
         held view shows them, once the caller releases the lock. There the closers join no thread
         either (`WsConnections.close`): while they would wait no live table updates, and the
         threads, daemons that never need the lock, end on their own. Results stay tracked, so
-        garbage collection and `release()` still free them. Logs "MassiveSession #1 closed; N
-        live tables failed, streams [...]", with the stream ids of the failed tables
-        (`bounded_list`): a WARNING when N > 0, INFO otherwise. On an update-graph thread it
+        garbage collection and `release()` still free them. Logs a WARNING that lists the
+        `StreamId` of each failed table (`prose_list`), or an INFO line when none failed. On an
+        update-graph thread it
         raises the `ValueError` of `refuse_update_graph_thread`, even when the session is
         already closed.
         """
         refuse_update_graph_thread(self.exec_ctx)
         locked = holds_update_graph_lock(self.exec_ctx)
-        text = f"{self.label} was closed; this table no longer updates; {NEW_SESSION}"
+        text = f"This session was closed, so this table no longer updates. {NEW_SESSION}"
         with self.registry_lock:
             if self._closed:
                 return
@@ -952,7 +948,10 @@ class SessionCore:
             try:
                 closer()
             except Exception:
-                logger.exception("%s: a transport failed to close. %s", self.label, LIBRARY_BUG)
+                logger.exception(
+                    "A connection or poller of the closing session failed to close. %s",
+                    LIBRARY_BUG,
+                )
         self.follows.stop()  # the events queued before it are handled; nothing is joined
         self.reads.stop()  # every read's table has failed: its waiting tasks are dropped
         # The writer releases the diagnostics scope under the update graph's shared lock, which
@@ -965,13 +964,15 @@ class SessionCore:
             # view (`m.streams().where(...)`) outlives the view's wrapper, which is collected
             # at once, and must show the final rows too.
             wait_for_update_cycle(self.exec_ctx, CLOSE_SHOWN_TIMEOUT)
-        level = logging.WARNING if failed else logging.INFO
-        logger.log(
-            level,
-            "%s closed; %d live tables failed, streams %s",
-            self.label,
-            len(failed),
-            bounded_list(failed),
+        if not failed:
+            logger.info("%s closed with no live table to fail", self.label)
+            return
+        # Every StreamId is listed: m.streams() raises once the session is closed.
+        logger.warning(
+            "The session closed and failed the live %s with StreamId %s. %s",
+            "table" if len(failed) == 1 else "tables",
+            prose_list(failed, "tables", shown=len(failed)),
+            NEW_SESSION,
         )
 
 

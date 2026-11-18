@@ -34,7 +34,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._errors import NEW_SESSION, BrokenGuaranteeError
+from deephaven_massive._errors import BrokenGuaranteeError, session_closed
 from deephaven_massive._tables import session_core as _core
 from deephaven_massive._tables import shared_streams as _streams
 from deephaven_massive._tables.columns import describe
@@ -393,12 +393,15 @@ def test_close_during_an_open_wakes_the_waiters(
         opener = pool.submit(q.blink)
         assert gated.entered.wait(TIMEOUT)
         helper = _when_waiting(core, monkeypatch, close_then_open)
-        with pytest.raises(dm.MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
+        with pytest.raises(dm.MassiveError, match="^" + re.escape(session_closed()) + "$"):
             q.append_only()
         error = opener.exception(TIMEOUT)
     helper.join(TIMEOUT)
     assert isinstance(error, dm.MassiveError)
-    assert "was closed while a stream was opening" in str(error)
+    assert str(error) == (
+        "This session was closed while a stream was opening. Open a new dm.MassiveSession() to "
+        "read again."
+    )
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # the opener released the new stream
     assert core.streams._streams == {}
 
@@ -418,7 +421,9 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
     ) -> StreamHandle:
         handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
         if stream_id == 1:
-            core.fail_stream(stream_id, dm.AuthenticationError("not authorized", status=401))
+            # A failure that names its dataset: the message names it once.
+            refusal = dm.AuthenticationError("test.trades: not authorized", status=401)
+            core.fail_stream(stream_id, refusal)
         return handle
 
     monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
@@ -434,7 +439,7 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
     second = q.blink()  # a fresh stream: the failed one is never reused
     rows = sorted(stream_rows(), key=lambda r: r["StreamId"])
     assert [(r["StreamId"], r["State"], r["Error"], r["HeldResults"]) for r in rows] == [
-        (1, "FAILED", "not authorized", 0),
+        (1, "FAILED", "test.trades: not authorized", 0),
         (2, "RUNNING", None, 1),
     ]
     assert fake_streams.shutdown[1].wait(TIMEOUT)
@@ -975,7 +980,7 @@ def test_a_verb_racing_close_does_not_reuse_the_closed_stream(
     monkeypatch.setattr(core, "run_verb", guard_then_close)
     with pytest.raises(
         dm.MassiveError,
-        match=f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$",
+        match="^" + re.escape(session_closed()) + "$",
     ):
         q.append_only()
     assert len(fake_streams.opened) == 1
@@ -1091,7 +1096,7 @@ def test_shaping_a_stream_that_failed_during_its_open_releases_the_hold(
 
     monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
     for verb in ("blink", "append_only"):
-        with pytest.raises(dm.MassiveError, match="failed: entitlement"):
+        with pytest.raises(dm.MassiveError, match=r"^test\.trades stream \d+ failed: entitlement$"):
             getattr(stream_query(massive_session), verb)()
     drain()
     assert core.results.held() == 0
@@ -1112,10 +1117,12 @@ def test_a_failure_while_the_shape_is_derived_is_named(
         blink = handle.blink
         fake_streams.publishers[1].publish_failure(RuntimeError("entitlement"))
         assert fake_streams.shutdown[1].wait(TIMEOUT)
-        core.fail_stream(1, dm.MassiveError("entitlement"))
+        core.fail_stream(1, dm.MassiveError("test.trades: entitlement"))
         return blink_to_append_only(blink)
 
-    with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
+    with pytest.raises(
+        dm.MassiveError, match=r"^test\.trades stream 1 failed: entitlement$"
+    ) as raised:
         core.streams.result(
             SPEC,
             q._request,
@@ -1144,7 +1151,7 @@ def test_a_close_while_the_shape_is_derived_raises_the_closed_session(
 
     with pytest.raises(
         dm.MassiveError,
-        match=rf"^{re.escape(core.label)} is closed; " + re.escape(NEW_SESSION) + "$",
+        match="^" + re.escape(session_closed()) + "$",
     ) as raised:
         core.streams.result(
             SPEC,
@@ -1177,7 +1184,7 @@ def test_a_close_the_streams_row_does_not_show_yet_raises_the_closed_session(
 
     with pytest.raises(
         dm.MassiveError,
-        match=rf"^{re.escape(core.label)} is closed; " + re.escape(NEW_SESSION) + "$",
+        match="^" + re.escape(session_closed()) + "$",
     ) as raised:
         core.streams.result(
             SPEC,
@@ -1207,7 +1214,9 @@ def test_a_failure_while_the_blink_copy_is_described_is_named(
         core.fail_stream(1, dm.MassiveError("entitlement"))
         return describe(blink, SPEC, schema)
 
-    with pytest.raises(dm.MassiveError, match=r"stream 1 failed: entitlement") as raised:
+    with pytest.raises(
+        dm.MassiveError, match=r"^test\.trades stream 1 failed: entitlement$"
+    ) as raised:
         core.streams.result(
             SPEC,
             q._request,
@@ -1350,7 +1359,7 @@ def test_a_verb_that_races_close_never_returns_its_table(
 
     with pytest.raises(
         dm.MassiveError,
-        match=f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$",
+        match="^" + re.escape(session_closed()) + "$",
     ):
         core.streams.result(
             spec,

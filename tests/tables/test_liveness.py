@@ -237,7 +237,12 @@ def test_reaper_runs_jobs_in_order_and_survives_failures(
         reaper.submit(done.set)
         assert done.wait(TIMEOUT)
     assert seen == [1, 2]
-    assert "massive reaper job failed" in caplog.text
+    assert [(r.threadName, r.getMessage()) for r in caplog.records] == [
+        (
+            "test-reaper",
+            "Releasing a live table or its resources failed. The library goes on. " + LIBRARY_BUG,
+        )
+    ]
     reaper.stop()
     reaper.thread.join(TIMEOUT)
     assert not reaper.thread.is_alive()
@@ -588,8 +593,9 @@ def test_queue_worker_logs_a_fatal_exit_before_dying(
         worker.thread.join(TIMEOUT)
     assert not worker.thread.is_alive()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.ERROR, f"fatal-worker died; its queue is no longer handled. {LIBRARY_BUG}")
+        (logging.ERROR, f"A library thread died, so its session's live tables fail. {LIBRARY_BUG}")
     ]
+    assert [r.threadName for r in caplog.records] == ["fatal-worker"]
     assert [args.exc_type for args in escaped] == [_Fatal]
 
 
@@ -618,7 +624,15 @@ def test_queue_worker_hands_its_death_to_its_owner(
             worker.thread.join(TIMEOUT)
         assert not worker.thread.is_alive()
     assert [type(death) for death in deaths] == [_Fatal, _Fatal]
-    assert "broken-worker: handling its death failed" in caplog.text
+    died = f"A library thread died, so its session's live tables fail. {LIBRARY_BUG}"
+    assert [(r.threadName, r.getMessage()) for r in caplog.records] == [
+        ("told-worker", died),
+        ("broken-worker", died),
+        (
+            "broken-worker",
+            "Failing the live tables after a library thread died raised an error. " + LIBRARY_BUG,
+        ),
+    ]
     assert [args.exc_type for args in escaped] == [_Fatal, _Fatal]  # still re-raised
 
 
@@ -638,7 +652,9 @@ def test_queue_worker_runs_on_exit_and_logs_batch_failures(
         worker.stop()
         worker.thread.join(TIMEOUT)
     assert exited.is_set()
-    assert "test-worker failed on a batch" in caplog.text
+    assert [(r.threadName, r.getMessage()) for r in caplog.records] == [
+        ("test-worker", f"A batch of queued work failed. The library goes on. {LIBRARY_BUG}")
+    ]
 
 
 def test_queue_worker_wakes_on_its_timeout_and_logs_a_failing_wake_up(
@@ -666,7 +682,9 @@ def test_queue_worker_wakes_on_its_timeout_and_logs_a_failing_wake_up(
         worker.stop()
         worker.thread.join(TIMEOUT)
     assert handled == [7]
-    assert "timed-worker failed on a timed wake-up; continuing" in caplog.text
+    assert [(r.threadName, r.getMessage()) for r in caplog.records] == [
+        ("timed-worker", f"A timed wake-up failed. The library goes on. {LIBRARY_BUG}")
+    ]
 
 
 def test_collection_removes_the_record_and_keeps_a_newer_one(

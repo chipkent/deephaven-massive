@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple, Protocol, TypeVar
 
 import yaml
 from typing_extensions import override
+from yaml.reader import ReaderError
 
 from deephaven_massive._enums import (
     AssetClass,
@@ -147,8 +148,8 @@ def environment_text(name: str) -> str | None:
         return None
     if value != value.strip():
         raise ValueError(
-            f"{name} has leading or trailing whitespace; set it without any (its value is "
-            "not shown, since it may be a secret)"
+            f"The environment variable {name} has leading or trailing whitespace. Set it "
+            "again with the whitespace removed."
         )
     return value
 
@@ -438,21 +439,26 @@ class MassiveConfig:
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
         if not self.api_key.strip():
             raise AuthenticationError(
-                "no Massive API key: pass MassiveConfig(api_key=...) or set MASSIVE_API_KEY",
+                "No Massive API key is set. Pass dm.MassiveConfig(api_key=...) or set "
+                "MASSIVE_API_KEY.",
                 source=ErrorSource.USER,
             )
         if self.api_key != self.api_key.strip():
             raise ValueError(
-                "api_key has leading or trailing whitespace; pass the key without any (the key "
-                "is not shown)"
+                "api_key has leading or trailing whitespace. Pass the key with the whitespace "
+                "removed."
             )
         check_api_key(self.api_key, setting="api_key")
         _check_s3_credential("s3_access_key_id", self.s3_access_key_id)
         _check_s3_credential("s3_secret_access_key", self.s3_secret_access_key)
         if (self.s3_access_key_id is None) != (self.s3_secret_access_key is None):
+            given = (
+                "s3_access_key_id" if self.s3_secret_access_key is None else "s3_secret_access_key"
+            )
             raise ValueError(
-                "flat files need both s3_access_key_id and s3_secret_access_key "
-                "(MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY)"
+                f"Flat files need both S3 credentials, and only {given} is set. Pass both "
+                "s3_access_key_id and s3_secret_access_key to dm.MassiveConfig, or set both "
+                "MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY."
             )
         for name in (
             "subscription_confirmation_timeout",
@@ -465,24 +471,28 @@ class MassiveConfig:
             require_positive_int(name, getattr(self, name))
         if self.reconnect_backoff < MIN_RECONNECT_BACKOFF:
             raise ValueError(
-                f"reconnect_backoff must be at least {MIN_RECONNECT_BACKOFF:g} s, not "
-                f"{self.reconnect_backoff:g}, which limits reconnect churn"
+                f"reconnect_backoff={self.reconnect_backoff:g} is below the minimum of "
+                f"{MIN_RECONNECT_BACKOFF:g} s. Pass reconnect_backoff={MIN_RECONNECT_BACKOFF:g} "
+                "or more."
             )
         if self.subscription_confirmation_timeout >= NO_ACK_RESEND:
             raise ValueError(
-                f"subscription_confirmation_timeout must be below {NO_ACK_RESEND:g} s, not "
-                f"{self.subscription_confirmation_timeout:g}: "
-                f"unacknowledged subscriptions are re-sent every {NO_ACK_RESEND:g} s, and each "
-                "re-send awaits its answer for subscription_confirmation_timeout"
+                f"subscription_confirmation_timeout={self.subscription_confirmation_timeout:g} "
+                f"is not below {NO_ACK_RESEND:g} s, the interval at which the library sends an "
+                f"unconfirmed subscription again. Pass a value below {NO_ACK_RESEND:g}."
             )
         if self.max_reconnect_backoff < self.reconnect_backoff:
-            raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
+            raise ValueError(
+                f"max_reconnect_backoff={self.max_reconnect_backoff:g} is below "
+                f"reconnect_backoff={self.reconnect_backoff:g}. Pass a max_reconnect_backoff "
+                f"of {self.reconnect_backoff:g} or more."
+            )
         object.__setattr__(self, "max_outage", _check_max_outage(self.max_outage))
         check_policy(self.on_error)
         _require_enum(self.connection_taken, ConnectionTaken, "connection_taken")
-        _check_url("rest_base_url", self.rest_base_url)
+        _check_url("rest_base_url", self.rest_base_url, example="https://api.massive.com")
         check_rest_base_url(self.rest_base_url, setting="rest_base_url")
-        _check_url("s3_endpoint_url", self.s3_endpoint_url)
+        _check_url("s3_endpoint_url", self.s3_endpoint_url, example="https://files.massive.com")
         _check_bucket(self.s3_bucket)
         object.__setattr__(self, "websocket_hosts", _validate_websocket_hosts(self.websocket_hosts))
         limits = _validate_request_limits(self.rest_requests_per_minute)
@@ -623,9 +633,9 @@ def require_positive_int(name: str, value: object, *, maximum: int | None = None
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an int, not {type(value).__name__}")
     if maximum is not None and not 1 <= value <= maximum:
-        raise ValueError(f"{name} must be between 1 and {maximum}, got {value}")
+        raise ValueError(f"{name}={value} is not between 1 and {maximum}.")
     if value < 1:
-        raise ValueError(f"{name} must be positive, got {value}")
+        raise ValueError(f"{name}={value} is not positive.")
     return value
 
 
@@ -653,10 +663,10 @@ def require_positive_number(name: str, value: object) -> float:
         number = float(value)
     except OverflowError:  # an int beyond the float range
         raise ValueError(
-            f"{name} must be positive and finite, got an int too large for a float"
+            f"{name} is an int too large to convert to a float. Pass a smaller number."
         ) from None
     if not (math.isfinite(number) and number > 0):
-        raise ValueError(f"{name} must be positive, got {value!r}")
+        raise ValueError(f"{name}={value!r} is not a positive, finite number.")
     return number
 
 
@@ -714,8 +724,8 @@ def _require_subscription(item: object, name: str, what: str) -> Subscription:
         and item.casefold() in _CURRENCY_CLASSES
     ):
         raise TypeError(
-            f"{name} must hold dm.Subscription members; forex and crypto "
-            "are one subscription, dm.Subscription.CURRENCIES"
+            f"{name} holds {str(item)!r}, but forex and crypto are one subscription. "
+            "Pass dm.Subscription.CURRENCIES in its place."
         )
     return _require_enum(item, Subscription, what)
 
@@ -772,8 +782,9 @@ def _check_delayed_subscriptions(
     """
     if Subscription.CURRENCIES in delayed:
         raise ValueError(
-            "delayed_subscriptions cannot hold dm.Subscription.CURRENCIES: Massive has no "
-            "delayed forex or crypto feed, so their streams are always real-time"
+            "delayed_subscriptions holds dm.Subscription.CURRENCIES, but Massive has no "
+            "delayed forex or crypto feed, so their streams are always real-time. Remove "
+            "dm.Subscription.CURRENCIES from delayed_subscriptions."
         )
     for asset_class, host in websocket_hosts.items():
         subscription = subscription_of(asset_class)
@@ -781,35 +792,47 @@ def _check_delayed_subscriptions(
         pins_delayed = host.startswith(DELAYED_PREFIX)
         if pins_delayed and subscription is Subscription.CURRENCIES:
             raise ValueError(
-                f"websocket_hosts pins {asset_class} to {host}, but Massive has no delayed forex "
-                "or crypto feed; remove the pin"
+                f"websocket_hosts pins {asset_class} to {host!r}, but Massive has no delayed "
+                f"forex or crypto feed. Remove the {asset_class} pin from websocket_hosts."
             )
         if pins_delayed and not listed:
+            purpose = f"To stream delayed {asset_class} data"
             raise ValueError(
-                f"websocket_hosts pins {asset_class} to the delayed feed {host}, but "
-                f"delayed_subscriptions does not list dm.Subscription.{subscription.name}; "
-                f"to use the delayed feed write {delayed_fix(subscription)}"
+                f"websocket_hosts pins {asset_class} to the delayed feed {host!r}, but "
+                f"delayed_subscriptions does not include dm.Subscription.{subscription.name}. "
+                f"{delayed_fix(subscription, purpose=purpose)}"
             )
         if listed and not pins_delayed:
             raise ValueError(
-                f"delayed_subscriptions lists dm.Subscription.{subscription.name}, "
-                f"whose streams use Massive's delayed feed {DELAYED_HOST}, but websocket_hosts "
-                f"pins {asset_class} to {host}; remove one of the two"
+                f"delayed_subscriptions includes dm.Subscription.{subscription.name}, whose "
+                f"streams use Massive's delayed feed {DELAYED_HOST!r}, but websocket_hosts pins "
+                f"{asset_class} to {host!r}. Remove dm.Subscription.{subscription.name} from "
+                f"delayed_subscriptions, or remove the {asset_class} pin from websocket_hosts."
             )
 
 
-def delayed_fix(subscription: Subscription) -> str:
-    """Return the configuration that asks for a subscription's delayed data, for messages.
+def delayed_fix(subscription: Subscription, *, purpose: str | None = None) -> str:
+    """Return the sentence that tells the user how to ask for a subscription's delayed data.
 
     The one place the setting's spelling appears in the library's messages.
 
     Args:
         subscription: The subscription.
+        purpose: What the setting achieves, as a clause that starts the sentence, such as
+            `"To use Massive's delayed options feed"`; None (absent) for a sentence that
+            starts with the imperative.
 
     Returns:
-        For example `dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})`.
+        `"Pass delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."`, or,
+        with a purpose, `"To use Massive's delayed options feed, pass
+        delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."`.
     """
-    return f"dm.MassiveConfig(delayed_subscriptions={{dm.Subscription.{subscription.name}}})"
+    advice = (
+        f"pass delayed_subscriptions={{dm.Subscription.{subscription.name}}} to dm.MassiveConfig."
+    )
+    if purpose is None:
+        return f"{advice[:1].upper()}{advice[1:]}"
+    return f"{purpose}, {advice}"
 
 
 def _check_max_outage(value: object) -> float:
@@ -832,11 +855,13 @@ def _check_max_outage(value: object) -> float:
     try:
         seconds = float(value)
     except OverflowError:  # an int beyond the float range
-        raise ValueError("max_outage must be finite, got an int too large for a float") from None
+        raise ValueError(
+            "max_outage is an int too large to convert to a float. Pass a smaller number."
+        ) from None
     if not (math.isfinite(seconds) and seconds >= 0):
         raise ValueError(
-            f"max_outage must be zero or more seconds, got {value!r}; 0 fails live tables at "
-            "the first disconnect"
+            f"max_outage={value!r} is not a finite number of seconds, zero or more. Pass 0 to "
+            "fail live tables at the first disconnect, or the seconds to wait out an outage."
         )
     return seconds
 
@@ -854,8 +879,8 @@ def _check_s3_credential(name: str, value: str | None) -> None:
     """
     if value is not None and (not value.strip() or value != value.strip()):
         raise ValueError(
-            f"{name} is blank or has leading or trailing whitespace; pass the credential "
-            "exactly, or None for no flat files (the value is not shown)"
+            f"{name} is blank or has leading or trailing whitespace. Pass the credential "
+            "with nothing around it, or None for no flat files."
         )
 
 
@@ -866,7 +891,7 @@ _HTTP_URL: Final = re.compile(
 password, a host name or bracketed IPv6 address, an optional port, and an optional path."""
 
 
-def _check_url(name: str, value: object) -> None:
+def _check_url(name: str, value: object, *, example: str) -> None:
     """Refuse a base URL that is not an `http` or `https` URL with a host.
 
     Every request the library makes is built on the URL, so a value such as `""`, `~`, or
@@ -875,6 +900,7 @@ def _check_url(name: str, value: object) -> None:
     Args:
         name: The field's name (`rest_base_url` or `s3_endpoint_url`), for the message.
         value: The field's value.
+        example: A valid value the message shows, the field's default.
 
     Raises:
         TypeError: If `value` is not a `str`.
@@ -887,8 +913,8 @@ def _check_url(name: str, value: object) -> None:
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")
     if not _HTTP_URL.fullmatch(value):
         raise ValueError(
-            f"{name} must be an http or https URL with a host, such as "
-            f"'https://api.massive.com', not {shown_setting(name, value)}"
+            f"{name}={shown_setting(name, value)} is not an http or https URL with a host, "
+            f"such as {example!r}."
         )
 
 
@@ -905,7 +931,7 @@ def _check_bucket(value: object) -> None:
     if not isinstance(value, str):
         raise TypeError(f"s3_bucket must be a str, not {type(value).__name__}")
     if not value.strip():
-        raise ValueError(f"s3_bucket must name a bucket, such as 'flatfiles', not {value!r}")
+        raise ValueError(f"s3_bucket={value!r} is not a bucket name, such as 'flatfiles'.")
 
 
 def _validate_websocket_hosts(websocket_hosts: object) -> Mapping[AssetClass, str]:
@@ -925,21 +951,26 @@ def _validate_websocket_hosts(websocket_hosts: object) -> Mapping[AssetClass, st
             a value that would be a hostname once trimmed and lower-cased names that form.
     """
     if not isinstance(websocket_hosts, Mapping):
-        raise TypeError("websocket_hosts must be a mapping of dm.AssetClass to hostname")
+        raise TypeError(
+            "websocket_hosts must be a mapping of dm.AssetClass to hostname, "
+            f"not {type(websocket_hosts).__name__}"
+        )
     hosts: dict[AssetClass, str] = {}
     for key, value in websocket_hosts.items():
         asset_class = _require_enum(key, AssetClass, "websocket_hosts key")
         if not isinstance(value, str):
-            raise TypeError(f"websocket_hosts[{asset_class}] must be a hostname str")
+            raise TypeError(
+                f"websocket_hosts[{asset_class}] must be a str, not {type(value).__name__}"
+            )
         if value != value.strip().lower() and _HOSTNAME.match(value.strip().lower()):
             raise ValueError(
-                f"websocket_hosts[{asset_class}]={value!r} must be written exactly as a lower-case "
-                f"hostname; write {value.strip().lower()!r}"
+                f"websocket_hosts[{asset_class}]={value!r} is not a lower-case hostname with "
+                f"nothing around it. Pass {value.strip().lower()!r}."
             )
         if not _HOSTNAME.match(value):
             raise ValueError(
-                f"websocket_hosts[{asset_class}] must be a bare hostname such as "
-                f"'delayed.massive.com', got {without_userinfo(value)!r}"
+                f"websocket_hosts[{asset_class}]={without_userinfo(value)!r} is not a bare "
+                "hostname, such as 'delayed.massive.com'."
             )
         hosts[asset_class] = value
     return FrozenMap(hosts)
@@ -1051,11 +1082,11 @@ def _place(file: Path, position: _Position | None) -> str:
         position: PyYAML's zero-based mark, or None.
 
     Returns:
-        For example `"settings file /home/me/settings.yaml, line 3, column 14"`.
+        For example `"Settings file /home/me/settings.yaml, line 3, column 14"`.
     """
     if position is None:
-        return f"settings file {file}"
-    return f"settings file {file}, line {position.line + 1}, column {position.column + 1}"
+        return f"Settings file {file}"
+    return f"Settings file {file}, line {position.line + 1}, column {position.column + 1}"
 
 
 _NESTING_LIMIT: Final = 10
@@ -1104,22 +1135,23 @@ class _SettingsLoader(yaml.BaseLoader):
         event = peek()
         if isinstance(event, yaml.CollectionStartEvent) and self._depth >= _NESTING_LIMIT:
             raise _SettingsFileError(
-                f"lists and mappings nest more than {_NESTING_LIMIT} deep here; a setting "
-                "needs two levels at most",
+                f"Lists and mappings nest more than {_NESTING_LIMIT} levels deep here. Write "
+                "each setting with two levels at most.",
                 event.start_mark,
             )
         if isinstance(event, yaml.AliasEvent):
             raise _SettingsFileError(
-                "an alias (*name) is not allowed; write the value out", event.start_mark
+                f"The alias *{event.anchor} is not allowed. Write the value out in full.",
+                event.start_mark,
             )
         if isinstance(event, yaml.NodeEvent) and event.anchor is not None:
             raise _SettingsFileError(
-                f"an anchor (&{event.anchor}) is not allowed; write each value out",
+                f"The anchor &{event.anchor} is not allowed. Write each value out in full.",
                 event.start_mark,
             )
         if isinstance(event, yaml.ScalarEvent | yaml.CollectionStartEvent) and event.tag:
             raise _SettingsFileError(
-                f"a tag ({event.tag}) is not allowed; write the plain value", event.start_mark
+                f"The tag {event.tag!r} is not allowed. Write the plain value.", event.start_mark
             )
         self._depth += 1
         try:
@@ -1151,14 +1183,16 @@ def _compose(text: str) -> yaml.MappingNode:
         node = None if loader.check_event(yaml.StreamEndEvent) else loader.compose_document()
         if not loader.check_event(yaml.StreamEndEvent):
             raise _SettingsFileError(
-                "a second document starts here; a settings file holds one",
+                "A second YAML document starts here, and a settings file holds one. Put "
+                "every setting in the first document.",
                 peek_event().start_mark,
             )
     finally:
         loader.dispose()
     if not isinstance(node, yaml.MappingNode):
         raise _SettingsFileError(
-            "the top level must be a mapping of setting names to values, such as 'max_outage: 600'",
+            "The file is not a mapping of setting names to values. Write one setting per "
+            "line, such as 'max_outage: 600'.",
             None if node is None else node.start_mark,
         )
     return node
@@ -1178,12 +1212,29 @@ def _scalar(node: yaml.Node, expected: str) -> str:
         _SettingsFileError: If the node is a list or a mapping.
     """
     if not isinstance(node, yaml.ScalarNode):
-        raise _SettingsFileError(f"must be {expected}, not a list or mapping", node.start_mark)
+        raise _SettingsFileError(
+            f"the value is a list or mapping, not {expected}.", node.start_mark
+        )
     text: str = node.value
     return text
 
 
 _Word = TypeVar("_Word", bound=StrEnum)
+
+
+def _one_of(words: list[str]) -> str:
+    """Return the words a message offers as choices: `a or b`, or `a, b, or c`.
+
+    Args:
+        words: At least two words, in the order to show them.
+
+    Returns:
+        The words joined as prose with "or".
+    """
+    *first, last = words
+    if len(first) == 1:
+        return f"{first[0]} or {last}"
+    return f"{', '.join(first)}, or {last}"
 
 
 def _word(node: yaml.Node, enum_type: type[_Word], what: str) -> _Word:
@@ -1204,13 +1255,13 @@ def _word(node: yaml.Node, enum_type: type[_Word], what: str) -> _Word:
         _SettingsFileError: If the node is not a scalar, or its text is no member's value; the
             message lists the valid spellings.
     """
-    spellings = ", ".join(member.value for member in enum_type)
-    text = _scalar(node, f"{what} ({spellings})")
+    text = _scalar(node, what)
     for member in enum_type:
         if member.value == text:
             return member
+    spellings = _one_of([member.value for member in enum_type])
     raise _SettingsFileError(
-        f"{text!r} is not {what}; write one of {spellings}, exactly as shown", node.start_mark
+        f"{text!r} is not {what}. Write {spellings}, exactly as shown.", node.start_mark
     )
 
 
@@ -1230,7 +1281,8 @@ def _on_error(node: yaml.Node) -> ErrorPolicy:
     causes = [f.name for f in fields(ErrorPolicy)]
     if not isinstance(node, yaml.MappingNode):
         raise _SettingsFileError(
-            "must be a mapping of cause to raise, log, or ignore, such as {malformed_rows: raise}",
+            "the value is not a mapping of each cause to raise, log, or ignore. Write one "
+            "such as {malformed_rows: raise}.",
             node.start_mark,
         )
     settings: dict[str, OnError] = {}
@@ -1238,11 +1290,11 @@ def _on_error(node: yaml.Node) -> ErrorPolicy:
         cause = _scalar(key, "a cause")
         if cause not in causes:
             raise _SettingsFileError(
-                f"has no cause {cause[:_SHOWN_KEY_LENGTH]!r}; the causes are {', '.join(causes)}",
+                f"{cause[:_SHOWN_KEY_LENGTH]!r} is not a cause. Write {_one_of(causes)}.",
                 key.start_mark,
             )
         if cause in settings:
-            raise _SettingsFileError(f"sets {cause!r} twice", key.start_mark)
+            raise _SettingsFileError(f"{cause!r} is set twice. Remove one.", key.start_mark)
         settings[cause] = _word(value, OnError, f"an error setting for {cause}")
     return ErrorPolicy(**settings)
 
@@ -1256,7 +1308,7 @@ def _connection_taken(node: yaml.Node) -> ConnectionTaken:
     Returns:
         The `ConnectionTaken` member.
     """
-    return _word(node, ConnectionTaken, "a connection_taken value")
+    return _word(node, ConnectionTaken, "a valid value")
 
 
 def _subscriptions(node: yaml.Node) -> frozenset[Subscription]:
@@ -1274,14 +1326,17 @@ def _subscriptions(node: yaml.Node) -> frozenset[Subscription]:
     """
     if not isinstance(node, yaml.SequenceNode):
         raise _SettingsFileError(
-            "must be a list of subscriptions, such as [stocks, options], or [] for none",
+            "the value is not a list of subscriptions. Write one such as [stocks, options], "
+            "or [] for none.",
             node.start_mark,
         )
     found: set[Subscription] = set()
     for item in node.value:
         subscription = _word(item, Subscription, "a subscription")
         if subscription in found:
-            raise _SettingsFileError(f"lists {subscription.value!r} twice", item.start_mark)
+            raise _SettingsFileError(
+                f"{subscription.value!r} is listed twice. Remove one.", item.start_mark
+            )
         found.add(subscription)
     return frozenset(found)
 
@@ -1301,15 +1356,17 @@ def _request_limits(node: yaml.Node) -> dict[Subscription, int]:
     """
     if not isinstance(node, yaml.MappingNode):
         raise _SettingsFileError(
-            "must be a mapping of subscription to requests per minute, such as {stocks: 5}, "
-            "or {} for none",
+            "the value is not a mapping of subscription to requests per minute. Write one "
+            "such as {stocks: 5}, or {} for none.",
             node.start_mark,
         )
     limits: dict[Subscription, int] = {}
     for key, value in node.value:
         subscription = _word(key, Subscription, "a subscription")
         if subscription in limits:
-            raise _SettingsFileError(f"limits {subscription.value!r} twice", key.start_mark)
+            raise _SettingsFileError(
+                f"{subscription.value!r} is set twice. Remove one.", key.start_mark
+            )
         limits[subscription] = _count(value)
     return limits
 
@@ -1329,14 +1386,17 @@ def _hosts(node: yaml.Node) -> dict[AssetClass, str]:
     """
     if not isinstance(node, yaml.MappingNode):
         raise _SettingsFileError(
-            "must be a mapping of asset class to hostname, such as {stocks: delayed.massive.com}",
+            "the value is not a mapping of asset class to hostname. Write one such as "
+            "{stocks: delayed.massive.com}.",
             node.start_mark,
         )
     hosts: dict[AssetClass, str] = {}
     for key, value in node.value:
         asset_class = _word(key, AssetClass, "an asset class")
         if asset_class in hosts:
-            raise _SettingsFileError(f"pins {asset_class.value!r} twice", key.start_mark)
+            raise _SettingsFileError(
+                f"{asset_class.value!r} is set twice. Remove one.", key.start_mark
+            )
         hosts[asset_class] = _scalar(value, "a hostname")
     return hosts
 
@@ -1364,7 +1424,7 @@ def _seconds(node: yaml.Node) -> float:
     number = float(text) if _DECIMAL.fullmatch(text) else math.nan
     if not math.isfinite(number):
         raise _SettingsFileError(
-            f"{text!r} is not a finite number of seconds; write one such as 300 or 0.5",
+            f"{text!r} is not a finite number of seconds. Write one such as 300 or 0.5.",
             node.start_mark,
         )
     return number
@@ -1386,13 +1446,13 @@ def _count(node: yaml.Node) -> int:
     text = _scalar(node, "a whole number")
     if not _WHOLE.fullmatch(text):
         raise _SettingsFileError(
-            f"{text!r} is not a whole number; write one such as 8", node.start_mark
+            f"{text!r} is not a whole number. Write one such as 8.", node.start_mark
         )
     try:
         return int(text)
     except ValueError:  # more digits than Python's integer conversion limit
         raise _SettingsFileError(
-            f"is a number of {len(text)} characters, too long to read; write one such as 8",
+            f"the number is {len(text)} characters long, too long to read. Write one such as 8.",
             node.start_mark,
         ) from None
 
@@ -1422,7 +1482,7 @@ def _text(node: yaml.Node) -> str:
     plain = isinstance(node, yaml.ScalarNode) and node.style is None
     if not text or (plain and text in _NULL_WORDS):
         raise _SettingsFileError(
-            "is empty; write the value, or leave the setting out for its default",
+            "the value is empty. Write a value, or leave the setting out to keep its default.",
             node.start_mark,
         )
     return text
@@ -1462,27 +1522,27 @@ _SHOWN_KEY_LENGTH: Final = 40
 """The most characters of an unknown key a message shows, so a pasted secret is cut short."""
 
 
-def _settings_path(path: str | os.PathLike[str] | None) -> tuple[Path, str]:
-    """Return the settings file's path, with `~` expanded, and where the path came from.
+def _settings_path(path: str | os.PathLike[str] | None) -> tuple[Path, bool]:
+    """Return the settings file's path, with `~` expanded, and whether it came from the variable.
 
     Args:
         path: The path passed to `from_file`, or None to read `CONFIG_FILE_VARIABLE`.
 
     Returns:
-        The path, and `""` or, for a path from the environment, a note naming the variable.
+        The path, and True for a path read from `CONFIG_FILE_VARIABLE`.
 
     Raises:
         ValueError: If `path` is None and the variable is unset, blank, or padded.
     """
     if path is not None:
-        return Path(path).expanduser(), ""
+        return Path(path).expanduser(), False
     text = environment_text(CONFIG_FILE_VARIABLE)
     if text is None:
         raise ValueError(
-            f"no settings file: pass its path to MassiveConfig.from_file, or set "
-            f"{CONFIG_FILE_VARIABLE} to it"
+            "No settings file was given. Pass its path to dm.MassiveConfig.from_file, or set "
+            f"{CONFIG_FILE_VARIABLE} to it."
         )
-    return Path(text).expanduser(), f" (from {CONFIG_FILE_VARIABLE})"
+    return Path(text).expanduser(), True
 
 
 def _settings_values(
@@ -1506,35 +1566,39 @@ def _settings_values(
     values: dict[str, Any] = {}
     positions: dict[str, _Position] = {}
     for key, value in root.value:
-        name = _scalar(key, "a setting name")
+        if not isinstance(key, yaml.ScalarNode):
+            raise _SettingsFileError(
+                "A setting name is a list or mapping here, not text.", key.start_mark
+            )
+        name: str = key.value
         place = _place(file, key.start_mark)
         if name in positions:
             raise ValueError(
-                f"{place}: {name} is set twice; set it once (it is first set on line "
-                f"{positions[name].line + 1})"
+                f"{place}: {name} is set twice, first on line {positions[name].line + 1}. "
+                "Remove one."
             )
         if name in _CREDENTIAL_VARIABLES:
             raise ValueError(
-                f"{place}: {name} is a credential, which a settings file may not hold; remove "
-                f"it and set {_CREDENTIAL_VARIABLES[name]} in the environment, or pass it in "
-                "code (the value is not shown)"
+                f"{place}: {name} is a credential, which a settings file may not hold. Remove "
+                f"it, and set {_CREDENTIAL_VARIABLES[name]} in the environment or pass "
+                f"dm.MassiveConfig({name}=...)."
             )
         convert = _CONVERTERS.get(name)
         if convert is None:
             known = [*_CONVERTERS, *_CREDENTIAL_VARIABLES]
             close = difflib.get_close_matches(name, known, n=1)
             hint = (
-                f"did you mean {close[0]!r}?"
+                f"Write {close[0]} if you meant that setting."
                 if close
-                else f"the settings are {', '.join(_CONVERTERS)}"
+                else f"Write one of {_one_of(list(_CONVERTERS))}."
             )
             shown = name if len(name) <= _SHOWN_KEY_LENGTH else name[:_SHOWN_KEY_LENGTH] + "…"
-            raise ValueError(f"{place}: unknown setting {shown!r}; {hint}")
+            raise ValueError(f"{place}: {shown!r} is not a setting. {hint}")
         try:
             values[name] = convert(value)
         except _SettingsFileError as problem:
             where = _place(file, problem.position)
-            raise ValueError(f"{where}: {name} {problem.problem}") from None
+            raise ValueError(f"{where}: In {name}, {problem.problem}") from None
         positions[name] = key.start_mark
     return values, positions
 
@@ -1552,23 +1616,35 @@ def _read_settings_file(path: str | os.PathLike[str] | None) -> MassiveConfig:
         ValueError: As `from_file` says.
         FileNotFoundError: If the file does not exist.
     """
-    file, source = _settings_path(path)
+    file, from_variable = _settings_path(path)
     try:
         text = file.read_text(encoding="utf-8")
     except FileNotFoundError:
-        raise FileNotFoundError(f"settings file {file} does not exist{source}") from None
+        fix = (
+            f"Set {CONFIG_FILE_VARIABLE} to the path of an existing file."
+            if from_variable
+            else "Pass the path of an existing file."
+        )
+        raise FileNotFoundError(f"Settings file {file} does not exist. {fix}") from None
     except UnicodeDecodeError as error:
         raise ValueError(
-            f"settings file {file} is not UTF-8 text: {error.reason} at byte {error.start}"
+            f"Settings file {file} is not UTF-8 text: {error.reason} at byte {error.start}. "
+            "Save it as UTF-8."
         ) from None
     try:
         values, positions = _settings_values(file, _compose(text))
     except _SettingsFileError as problem:
         raise ValueError(f"{_place(file, problem.position)}: {problem.problem}") from None
     except yaml.MarkedYAMLError as error:
-        raise ValueError(f"{_place(file, error.problem_mark)}: {error.problem}") from None
-    except yaml.YAMLError as error:
-        raise ValueError(f"settings file {file}: {error}") from None
+        raise ValueError(
+            f"{_place(file, error.problem_mark)}: The text is not valid YAML. The YAML parser "
+            f'says "{error.problem}".'
+        ) from None
+    except ReaderError as error:
+        raise ValueError(
+            f"Settings file {file} holds the character U+{error.character:04X} at offset "
+            f"{error.position}, which YAML does not allow. Remove it."
+        ) from None
     try:
         config = MassiveConfig(**values)
     except ValueError as error:
@@ -1580,6 +1656,7 @@ def _read_settings_file(path: str | os.PathLike[str] | None) -> MassiveConfig:
             raise
         where = _place(file, positions.get(match.group(1)))
         raise ValueError(f"{where}: {error}") from None
+    source = f" (from {CONFIG_FILE_VARIABLE})" if from_variable else ""
     logger.info("settings file %s%s set %s", file, source, ", ".join(values) or "no settings")
     return config
 
@@ -1622,7 +1699,7 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     ),
     "max_outage": _Example(
         600.0,
-        "Seconds a live table waits out an outage before it fails; 0 fails at once.",
+        "Seconds a live table waits out an outage before it fails, or 0 to fail at once.",
     ),
     "flush_interval": _Example(
         0.05, "Seconds between the batches of streamed rows added to live tables."
@@ -1655,7 +1732,7 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
         5.0, "Seconds Massive has to confirm a stream's channel before the library asks again."
     ),
     "reconnect_backoff": _Example(
-        30.0, "Shortest wait, in seconds, before reconnecting a dropped stream; at least 15."
+        30.0, "Shortest wait, in seconds, before reconnecting a dropped stream: 15 or more."
     ),
     "max_reconnect_backoff": _Example(
         120.0, "Longest wait, in seconds, before reconnecting a dropped stream."
@@ -1998,22 +2075,8 @@ def settings_reference() -> str:
 
     Returns:
         The Markdown that goes between `SETTINGS_REFERENCE_START` and `SETTINGS_REFERENCE_END`.
-
-    Raises:
-        ValueError: If `_EXAMPLE` does not hold every setting a file may hold, or
-            `_CAUSE_COMMENTS` every cause of `ErrorPolicy`.
     """
-    if sorted(_EXAMPLE) != sorted(_CONVERTERS):
-        raise ValueError(
-            f"the settings reference lists {sorted(_EXAMPLE)}, not every file setting "
-            f"once: {sorted(_CONVERTERS)}"
-        )
-    causes = asdict(ErrorPolicy.DEFAULTS)
-    if sorted(_CAUSE_COMMENTS) != sorted(causes):
-        raise ValueError(
-            f"the example file comments on {sorted(_CAUSE_COMMENTS)}, not every cause once: "
-            f"{sorted(causes)}"
-        )
+    causes = _check_reference_coverage()
     texts = _setting_texts()
     details = _setting_details()
     forms = _value_forms()
@@ -2071,6 +2134,30 @@ def settings_reference() -> str:
     return "\n".join(lines) + "\n"
 
 
+def _check_reference_coverage() -> dict[str, OnError]:
+    """Check that the settings reference covers every file setting and every cause once.
+
+    Returns:
+        The default setting of each cause of `ErrorPolicy`, in field order.
+
+    Raises:
+        ValueError: If `_EXAMPLE` does not hold every setting a file may hold, or
+            `_CAUSE_COMMENTS` every cause of `ErrorPolicy`.
+    """
+    if sorted(_EXAMPLE) != sorted(_CONVERTERS):
+        raise ValueError(
+            f"The settings reference lists {sorted(_EXAMPLE)}, not every file setting once. "
+            f"Give _EXAMPLE one entry for each of {sorted(_CONVERTERS)}."
+        )
+    causes: dict[str, OnError] = asdict(ErrorPolicy.DEFAULTS)
+    if sorted(_CAUSE_COMMENTS) != sorted(causes):
+        raise ValueError(
+            f"The example file comments on {sorted(_CAUSE_COMMENTS)}, not every cause once. "
+            f"Give _CAUSE_COMMENTS one entry for each of {sorted(causes)}."
+        )
+    return causes
+
+
 def with_settings_reference(page: str) -> str:
     """Return `docs/configuration.md` with its generated part replaced by `settings_reference()`.
 
@@ -2084,12 +2171,29 @@ def with_settings_reference(page: str) -> str:
         ValueError: If the page lacks `SETTINGS_REFERENCE_START`, or
             `SETTINGS_REFERENCE_END` after it.
     """
+    start, end = _reference_bounds(page)
+    head = page[: start + len(SETTINGS_REFERENCE_START)]
+    return f"{head}\n\n{settings_reference()}\n{page[end:]}"
+
+
+def _reference_bounds(page: str) -> tuple[int, int]:
+    """Return where the generated part of `docs/configuration.md` starts and ends.
+
+    Args:
+        page: The page's text.
+
+    Returns:
+        The index of `SETTINGS_REFERENCE_START`, and of `SETTINGS_REFERENCE_END` after it.
+
+    Raises:
+        ValueError: If the page lacks `SETTINGS_REFERENCE_START`, or
+            `SETTINGS_REFERENCE_END` after it.
+    """
     start = page.find(SETTINGS_REFERENCE_START)
     end = page.find(SETTINGS_REFERENCE_END, max(start, 0))
     if start < 0 or end < 0:
         raise ValueError(
-            "the configuration page needs the lines SETTINGS_REFERENCE_START and "
-            "SETTINGS_REFERENCE_END around its generated part"
+            "The configuration page lacks the line SETTINGS_REFERENCE_START, or "
+            "SETTINGS_REFERENCE_END after it. Put the two lines around its generated part."
         )
-    head = page[: start + len(SETTINGS_REFERENCE_START)]
-    return f"{head}\n\n{settings_reference()}\n{page[end:]}"
+    return start, end

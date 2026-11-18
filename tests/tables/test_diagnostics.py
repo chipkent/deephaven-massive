@@ -3,6 +3,7 @@
 import dataclasses
 import functools
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -52,6 +53,7 @@ from deephaven_massive._tables.diagnostics import (
     StreamUpdate,
     as_row,
     describe_symbols,
+    diagnostics_died,
     shown_query,
     thread_died,
 )
@@ -220,7 +222,6 @@ def _diagnostics(exec_ctx: ExecutionContext) -> Diagnostics:
     return Diagnostics(
         exec_ctx,
         "test diagnostics",
-        label="TestSession",
         redactor=Redactor("planted-key"),
         release_later=functools.partial(release_scope, exec_ctx),
         on_death=print,
@@ -362,7 +363,9 @@ def test_failed_writes_are_logged_and_the_writer_continues(
         )
         diagnostics.write(STREAM)
         assert diagnostics.wait_until_shown(TIMEOUT)
-    assert "failed to write a streams row" in caplog.text
+    assert caplog.messages == [
+        f"m.streams(): could not add a row, so the table lacks it. {LIBRARY_BUG}"
+    ]
     assert [r["StreamId"] for r in dh_to_pylist(diagnostics.streams)] == [7]
     diagnostics.release()
 
@@ -388,7 +391,9 @@ def test_a_failing_table_does_not_cost_the_other_its_rows(
         diagnostics.write(STREAM)
         diagnostics.write(connection)
         assert diagnostics.wait_until_shown(TIMEOUT)
-    assert "failed to update the streams table" in caplog.text
+    assert caplog.messages == [
+        f"m.streams(): could not add the latest rows, so the table lacks them. {LIBRARY_BUG}"
+    ]
     assert len(dh_to_pylist(diagnostics.connections)) == 1  # added despite the failure
     diagnostics.release()
 
@@ -459,7 +464,9 @@ def test_a_batch_of_rows_that_do_not_fit_adds_nothing(
             )
         )
         assert diagnostics.wait_until_shown(TIMEOUT)
-    assert "failed to write a streams row" in caplog.text
+    assert caplog.messages == [
+        f"m.streams(): could not add a row, so the table lacks it. {LIBRARY_BUG}"
+    ]
     assert counting.adds == []
     assert dh_to_pylist(diagnostics.streams) == []
     diagnostics.release()
@@ -533,7 +540,11 @@ def test_wait_until_shown_gives_up_after_its_timeout(
         assert not diagnostics.wait_until_shown(0.0)
         diagnostics.release(wait=False)
         assert not diagnostics.wait_until_shown(0.0)  # the writer has not ended either
-    assert caplog.text.count("did not add the queued rows within 0.0 s") == 2
+    late = (
+        "The diagnostics tables did not take in their queued rows within 0.0 s, so m.streams() "
+        "and the other diagnostics tables may not show them yet. Read them again later."
+    )
+    assert caplog.messages == [late, late]
     counting.gate.set()
     diagnostics.thread.join(TIMEOUT)
     assert not diagnostics.thread.is_alive()
@@ -670,8 +681,11 @@ def test_connection_rows_replace_by_their_key(
 DRIFT_LOGGER = "deephaven_massive._tables.diagnostics"
 
 
-def status(path: str, value: str) -> str:
-    return f"{path}: undocumented response status {value!r}; the rows are kept (schema drift)"
+def status(requested: str, value: str) -> str:
+    return (
+        f"stocks.trades: Massive answered {requested} with status {value!r}, which Massive does "
+        "not document. Nothing to do: the library kept the rows Massive sent."
+    )
 
 
 def drift_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -687,13 +701,16 @@ def test_drift_warns_once_per_path_and_undocumented_status(
 ) -> None:
     registry = DriftRegistry()
     with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        registry.report_statuses("/v3/trades/{stockTicker}", frozenset({"PARTIAL", "MAYBE"}))
-        registry.report_statuses("/v3/trades/{stockTicker}", frozenset({"PARTIAL"}))
-        registry.report_statuses("/v3/quotes/{stockTicker}", frozenset({"PARTIAL"}))
+        trades, quotes = "/v3/trades/{stockTicker}", "/v3/quotes/{stockTicker}"
+        report = functools.partial(registry.report_statuses, dataset="stocks.trades")
+        report(trades, frozenset({"PARTIAL", "MAYBE"}), requested="GET /v3/trades/AAPL")
+        report(trades, frozenset({"PARTIAL"}), requested="GET /v3/trades/MSFT")
+        report(quotes, frozenset({"PARTIAL"}), requested="GET /v3/quotes/AAPL")
+    # The path's template says whether a status is new; the WARNING names the request as sent.
     assert drift_warnings(caplog) == [
-        status("/v3/trades/{stockTicker}", "MAYBE"),
-        status("/v3/trades/{stockTicker}", "PARTIAL"),
-        status("/v3/quotes/{stockTicker}", "PARTIAL"),
+        status("GET /v3/trades/AAPL", "MAYBE"),
+        status("GET /v3/trades/AAPL", "PARTIAL"),
+        status("GET /v3/quotes/AAPL", "PARTIAL"),
     ]
 
 
@@ -760,7 +777,8 @@ def test_rate_limit_rows_are_pulled_from_their_source_when_told(
     )
     assert stocks["LastRefusal"] == "HTTP 429"
     assert rows["other"]["State"] == "READY"
-    with pytest.raises(RuntimeError, match="already have a pull"):
+    pulled = f"m.rate_limits() already has a source of rows. {LIBRARY_BUG}"
+    with pytest.raises(RuntimeError, match=f"^{re.escape(pulled)}$"):
         diagnostics.watch_rate_limits(source)
     diagnostics.release()
     diagnostics.rate_limits_changed()  # after release: ignored
@@ -866,7 +884,10 @@ def test_a_timed_pull_whose_source_fails_is_logged_and_not_retried_at_once(
         assert not source.pulled.acquire(timeout=0.2)
     diagnostics.release()
     assert source.pulls == 2
-    assert "failed to update the rate_limits table" in caplog.text
+    assert (
+        f"m.rate_limits(): could not add the latest rows, so the table lacks them. {LIBRARY_BUG}"
+        in caplog.messages
+    )
 
 
 def test_a_long_query_is_cut_like_the_symbol_list() -> None:
@@ -956,21 +977,47 @@ def test_the_tables_are_created_under_the_update_graphs_shared_lock(
 
 
 def test_a_thread_that_died_of_an_exception_is_a_library_bug() -> None:
-    died = thread_died("MassiveSession #1", "reaper", RuntimeError("boom"))
+    died = thread_died(RuntimeError("boom"))
     assert str(died) == (
-        "MassiveSession #1: its reaper thread died (RuntimeError('boom')); this table no longer "
-        f"updates. {LIBRARY_BUG}"
+        "This table no longer updates because a library thread of its session died: "
+        "RuntimeError('boom'). The log holds the traceback. This is a bug in deephaven-massive. "
+        "Turn on dm.enable_debug_logging(), reproduce it, and report it with the log and "
+        "m.streams() at https://github.com/chipkent/deephaven-massive/issues. Open a new "
+        "dm.MassiveSession() to go on."
     )
     assert (died.source, died.is_bug) == (dm.ErrorSource.LIBRARY, True)
     # An interrupt ends the thread too, but is no bug of the library.
-    interrupted = thread_died("MassiveSession #1", "reaper", KeyboardInterrupt())
+    interrupted = thread_died(KeyboardInterrupt())
+    assert str(interrupted) == (
+        "This table no longer updates because a library thread of its session died: "
+        "KeyboardInterrupt(). Open a new dm.MassiveSession() to read again."
+    )
     assert (interrupted.source, interrupted.is_bug) == (dm.ErrorSource.USER, False)
+
+
+def test_a_diagnostics_view_refused_after_a_thread_died_says_whose_death_it_was() -> None:
+    assert diagnostics_died(RuntimeError("boom")) == (
+        "This session's diagnostics tables failed when a library thread died: "
+        "RuntimeError('boom'). The log holds the traceback. This is a bug in deephaven-massive. "
+        "Turn on dm.enable_debug_logging(), reproduce it, and report it with the log and "
+        "m.streams() at https://github.com/chipkent/deephaven-massive/issues. Open a new "
+        "dm.MassiveSession() to go on."
+    )
+    assert diagnostics_died(KeyboardInterrupt()) == (
+        "This session's diagnostics tables failed when a library thread died: "
+        "KeyboardInterrupt(). Open a new dm.MassiveSession() to read again."
+    )
 
 
 def test_an_item_the_writer_has_no_rule_for_is_a_defect(dh_exec_ctx: ExecutionContext) -> None:
     # Only rows, events, and the rate-limit marker are queued; anything else raises, never pulls.
     diagnostics = _diagnostics(dh_exec_ctx)
-    with pytest.raises(BrokenGuaranteeError, match=r"^the diagnostics queue holds 'text'"):
+    expected = (
+        "The diagnostics tables' queue holds an unknown item: 'text'. This is a bug in "
+        "deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and report it with "
+        "the log and m.streams() at https://github.com/chipkent/deephaven-massive/issues."
+    )
+    with pytest.raises(BrokenGuaranteeError, match=rf"^{re.escape(expected)}$"):
         diagnostics._apply(["text"])
     diagnostics.release()
 
@@ -1237,8 +1284,9 @@ def test_a_failed_last_pause_row_costs_the_release_nothing(
         diagnostics.release()
     # The failure is logged as the library's, and the writer still ends cleanly: no table fails.
     [record] = caplog.records
-    assert record.getMessage().startswith(
-        "diagnostics: failed to end the open rate-limit pauses in the problems table."
+    assert record.getMessage() == (
+        "m.problems(): could not end the open rate-limit pauses at the close, so they may show "
+        f"as still open. {LIBRARY_BUG}"
     )
     assert diagnostics._scope_released
 
@@ -1248,8 +1296,11 @@ def test_the_end_of_a_pause_never_begun_is_logged_as_a_bug(
 ) -> None:
     diagnostics = _diagnostics(dh_exec_ctx)
     with caplog.at_level(logging.ERROR):
-        diagnostics.pause_changed(_pause(ended=True))
+        notice = _pause(ended=True)
+        diagnostics.pause_changed(notice)
         assert diagnostics.wait_until_shown(TIMEOUT)
-    assert "the end of a pause never begun" in caplog.text
+    assert caplog.messages == [
+        f"m.problems(): a rate-limit pause ended that never began: {notice!r}. {LIBRARY_BUG}"
+    ]
     assert dh_to_pylist(diagnostics.problems) == []
     diagnostics.release()

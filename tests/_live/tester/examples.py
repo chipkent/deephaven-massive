@@ -99,16 +99,19 @@ REFUSAL_WAIT: Final = 15.0
 """Seconds the run waits after the last example for Massive's answers to the examples'
 streams: a refused subscription fails its stream seconds after the example returned."""
 
-STREAM_REFUSAL: Final = "refused the subscription"
+STREAM_REFUSAL: Final = "Massive answered the subscription to"
 """The words of a stream's `Error` when Massive's WebSocket server refused its subscription;
 the connection writes them (`ws_connection`, `_refused`)."""
 
-READ_REFUSAL: Final = "does not include"
+READ_REFUSAL: Final = re.compile(
+    r"\w: Massive refused (?:this read for|its flat files\.|the flat files of) "
+)
 """The words of a background read's `Error` when Massive refused it with `EntitlementError`:
-the REST and flat-file refusals say what the key "does not include"
-(`RestReader._dataset_error`, `_ingest/flatfiles.py`)."""
+the dataset, then the REST refusal "Massive refused this read for" a subscription
+(`RestReader._dataset_error`) or the flat-file refusal "Massive refused its flat files" or
+"the flat files of" a venue (`_ingest/flatfiles.py`, `_ingest/refused_venues.py`)."""
 
-DELAYED_REFUSAL: Final = "MassiveConfig.delayed_subscriptions"
+DELAYED_REFUSAL: Final = "is not in delayed_subscriptions"
 """The words of a stream's or read's `Error` when the settings refused delayed data: the
 library's refusal names the setting that accepts it (`recency_labels.delayed_refusal`)."""
 
@@ -322,8 +325,10 @@ def stream_verdict(outcome: Outcome, errors: list[str]) -> Outcome:
     """
     if outcome.status != PASSED or not errors:
         return outcome
-    refusals = (STREAM_REFUSAL, READ_REFUSAL, DELAYED_REFUSAL)
-    if not all(any(words in error for words in refusals) for error in errors):
+    refusals = (STREAM_REFUSAL, DELAYED_REFUSAL)
+    if not all(
+        any(words in error for words in refusals) or READ_REFUSAL.search(error) for error in errors
+    ):
         status = FAILED
     elif any(DELAYED_REFUSAL in error for error in errors):
         status = NOT_LISTED

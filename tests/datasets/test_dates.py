@@ -70,27 +70,44 @@ def test_parse_date_like(value: str | date, expected: date) -> None:
 )
 def test_naive_times_are_rejected(value: str | datetime) -> None:
     # The message names the parameter, the value as passed, and the fix.
-    expected = f"start={value!r} needs a timezone: pass an aware datetime or a date"
+    expected = f"start={value!r} has no timezone. Pass an aware datetime or a date."
     with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
         parse_date_like(value, "start")
+    # The advice works: an aware datetime and a date both parse.
+    aware = datetime(2025, 3, 3, 9, 30, tzinfo=NEW_YORK)
+    assert parse_date_like(aware, "start") == aware
+    assert parse_date_like(date(2025, 3, 3), "start") == date(2025, 3, 3)
 
 
 def test_the_naive_time_message_names_the_parameter_and_the_fix() -> None:
-    with pytest.raises(ValueError, match="needs a timezone") as caught:
+    with pytest.raises(ValueError, match="has no timezone") as caught:
         parse_date_like(datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None), "start")
     assert str(caught.value) == (
-        "start=datetime.datetime(2025, 1, 2, 9, 30) needs a timezone: "
-        "pass an aware datetime or a date"
+        "start=datetime.datetime(2025, 1, 2, 9, 30) has no timezone. "
+        "Pass an aware datetime or a date."
     )
 
 
 def test_unparseable_and_wrong_types() -> None:
-    with pytest.raises(ValueError, match="start='tomorrow' is not an ISO-8601"):
+    message = (
+        "start='tomorrow' is not an ISO-8601 date or datetime. Pass a date such as "
+        "'2025-03-03', or a time with its offset such as '2025-03-03T09:30:00-05:00'."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         parse_date_like("tomorrow", "start")
     with pytest.raises(ValueError, match="ISO-8601"):
         parse_date_like("2025-13-45", "end")
-    with pytest.raises(TypeError, match=r"^end must be a str, date, datetime, Java Instant, "):
+    wrong_type = (
+        "end must be a str, date, datetime, numpy.datetime64, pandas.Timestamp, or Java "
+        "Instant, ZonedDateTime, or LocalDate, not int"
+    )
+    with pytest.raises(TypeError, match=f"^{re.escape(wrong_type)}$"):
         parse_date_like(20250303, "end")
+    # The advice works: both example forms parse.
+    assert parse_date_like("2025-03-03", "start") == date(2025, 3, 3)
+    assert parse_date_like("2025-03-03T09:30:00-05:00", "start") == datetime(
+        2025, 3, 3, 14, 30, tzinfo=UTC
+    )
 
 
 def test_day_zones() -> None:
@@ -202,17 +219,38 @@ def test_equal_dates_are_one_day_and_equal_datetimes_an_empty_range() -> None:
 )
 @pytest.mark.parametrize("asset_class", [AssetClass.STOCKS, AssetClass.FUTURES])
 def test_mixed_bounds_are_refused(start: DateLike, end: DateLike, asset_class: AssetClass) -> None:
-    with pytest.raises(ValueError, match=f"^{re.escape(MIXED_BOUNDS)}; got start="):
+    mixed = r"^start=\S+ is a date(time)? and end=\S+ is a date(time)?\. "
+    with pytest.raises(ValueError, match=mixed):
         bounds(_spec(asset_class), start, end, now=NOW)
 
 
+def test_the_mixed_bounds_message_names_both_bounds_and_the_fix() -> None:
+    message = (
+        "start=2025-03-03 is a date and end=2025-03-04T00:00:00+00:00 is a datetime. Pass two "
+        "dates for whole days, or two datetimes for exact instants."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        bounds(_spec(AssetClass.STOCKS), "2025-03-03", "2025-03-04T00:00:00Z", now=NOW)
+    assert message.endswith(MIXED_BOUNDS)
+    # The advice works: two dates and two datetimes are both ranges.
+    assert bounds(_spec(AssetClass.STOCKS), "2025-03-03", "2025-03-04", now=NOW) == DaySpan(
+        date(2025, 3, 3), date(2025, 3, 4)
+    )
+    start, end = datetime(2025, 3, 3, tzinfo=UTC), datetime(2025, 3, 4, tzinfo=UTC)
+    assert bounds(_spec(AssetClass.STOCKS), start, end, now=NOW) == TimeRange(start, end)
+
+
 def test_reversed_ranges_are_refused() -> None:
-    with pytest.raises(ValueError, match=r"^start \(.*\) must not be after end \(.*\)$"):
+    message = (
+        "start=datetime.date(2025, 3, 5) is after end=datetime.date(2025, 3, 3). Pass a start "
+        "no later than the end."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         bounds(_spec(AssetClass.FUTURES), "2025-03-05", "2025-03-03", now=NOW)
     later = datetime(2025, 3, 3, 12, 0, 0, 1, tzinfo=UTC)
-    with pytest.raises(ValueError, match="must not be after end"):
+    with pytest.raises(ValueError, match="is after end="):
         bounds(_spec(AssetClass.STOCKS), later, datetime(2025, 3, 3, 12, tzinfo=UTC), now=NOW)
-    with pytest.raises(ValueError, match=r"start='2025-03-03T09:30' needs a timezone"):
+    with pytest.raises(ValueError, match=r"start='2025-03-03T09:30' has no timezone"):
         bounds(_spec(AssetClass.STOCKS), "2025-03-03T09:30", "2025-03-04", now=NOW)
 
 
@@ -237,10 +275,18 @@ def test_an_open_end_reads_through_now() -> None:
 
 
 def test_a_start_after_now_with_an_open_end_is_refused() -> None:
-    with pytest.raises(ValueError, match=r"must not be after now .*; end=None reads through now$"):
+    message = (
+        "start=datetime.date(2025, 6, 19) is after now, 2025-06-18, and end=None reads up to "
+        "now. Pass a start no later than now."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         bounds(_spec(AssetClass.STOCKS), "2025-06-19", None, now=NOW)
-    with pytest.raises(ValueError, match="end=None reads through now"):
+    with pytest.raises(ValueError, match="and end=None reads up to now"):
         bounds(_spec(AssetClass.STOCKS), NOW + timedelta(microseconds=1), None, now=NOW)
+    # The advice works: a start of today reads through now.
+    assert bounds(_spec(AssetClass.STOCKS), "2025-06-18", None, now=NOW) == DaySpan(
+        date(2025, 6, 18), date(2025, 6, 18)
+    )
 
 
 def test_epoch_ns_of_a_mid_day_instant() -> None:
@@ -260,7 +306,7 @@ def test_time_axis_order_compares_instants_across_the_fall_back_hour() -> None:
     check_order(first, later)
     check_order(first, first)  # equal instants are an empty range, not an error
     check_order(date(2025, 3, 3), date(2025, 3, 3))
-    with pytest.raises(ValueError, match="must not be after end"):
+    with pytest.raises(ValueError, match="is after end="):
         check_order(later, first)
     with pytest.raises(ValueError, match=re.escape(MIXED_BOUNDS)):
         check_order(date(2025, 3, 3), later)
@@ -275,28 +321,30 @@ def test_calendar_day_refuses_a_datetime() -> None:
         AssetClass.FUTURES,
         ClassFromPrefix.ANY,
     ):
-        with pytest.raises(
-            ValueError, match=r"^x\.history: date=datetime\.datetime\(.* is a calendar date; pass"
-        ):
+        message = (
+            "x.history: date=datetime.datetime(2025, 3, 4, 2, 0, tzinfo=datetime.timezone.utc) "
+            "is a time, and date takes a calendar date. Pass a date such as '2025-03-03'."
+        )
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             calendar_day(_spec(asset_class), late, "date")
-    with pytest.raises(ValueError, match="is a calendar date"):
+    with pytest.raises(ValueError, match="takes a calendar date"):
         calendar_day(_spec(AssetClass.STOCKS), "2025-03-03T09:30:00Z", "date")
     # A Java instant names no calendar day either.
     for java in (
         _present(to_j_instant("2025-03-03T14:30:00Z")),
         _present(to_j_zdt("2025-03-03T09:30:00 America/New_York")),
     ):
-        with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date$"):
+        with pytest.raises(ValueError, match=r"date=.* is a time, and date takes a calendar"):
             calendar_day(_spec(AssetClass.STOCKS), java, "date")
     # The message shows what the caller passed when the value is its conversion.
-    with pytest.raises(ValueError, match=r"^x\.history: date='as passed' is a calendar date"):
+    with pytest.raises(ValueError, match=r"^x\.history: date='as passed' is a time, and"):
         calendar_day(_spec(AssetClass.STOCKS), late, "date", given="as passed")
 
 
 def test_calendar_day_keeps_a_date_as_given() -> None:
     assert calendar_day(_spec(AssetClass.CRYPTO), "2025-03-03", "date") == date(2025, 3, 3)
     assert calendar_day(_spec(AssetClass.STOCKS), date(2025, 3, 3), "date") == date(2025, 3, 3)
-    with pytest.raises(ValueError, match=r"date='2025-03-03T09:30' needs a timezone"):
+    with pytest.raises(ValueError, match=r"date='2025-03-03T09:30' has no timezone"):
         calendar_day(_spec(AssetClass.STOCKS), "2025-03-03T09:30", "date")
 
 
@@ -377,7 +425,7 @@ def test_every_iso_date_form_is_a_date(text: str) -> None:
 @pytest.mark.parametrize("text", [" 2025-03-03", "2025-03-03 ", "\t2025-03-03T09:30:00Z"])
 def test_date_text_with_surrounding_whitespace_is_refused(text: str) -> None:
     # Text is taken exactly as written; the message names the trimmed text to pass instead.
-    expected = f"start={text!r} has surrounding whitespace; write {text.strip()!r}"
+    expected = f"start={text!r} has surrounding whitespace. Pass {text.strip()!r}."
     with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
         parse_date_like(text, "start")
 
@@ -412,10 +460,22 @@ def test_an_instant_bound_keeps_a_whole_day_and_steps_back_one_unit() -> None:
     )
     instant = datetime(2025, 3, 3, 12, tzinfo=UTC)
     assert instant_bound(ClassFromPrefix.ANY, "t.lt", instant, unit=None, upper=True) == instant
-    with pytest.raises(ValueError, match=r"^t\.gt takes nanoseconds, so it cannot bound"):
+    message = "t.gt takes nanoseconds, so no day can end on it exactly. Use the .gte and .lt forms."
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         instant_bound(ClassFromPrefix.ANY, "t.gt", day, unit=WireUnit.NS, upper=False)
-    with pytest.raises(ValueError, match=r"^t\.lte takes ISO-8601 instants of no documented"):
+    message = (
+        "t.lte takes ISO-8601 instants of no documented precision, so no day can end on it "
+        "exactly. Use the .gte and .lt forms."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         instant_bound(ClassFromPrefix.ANY, "t.lte", day, unit=None, upper=True)
+    # The advice works: the .gte and .lt forms of the same day need no step.
+    assert instant_bound(ClassFromPrefix.ANY, "t.gte", day, unit=WireUnit.NS, upper=False) == (
+        datetime(2025, 3, 3, 5, tzinfo=UTC)
+    )
+    assert instant_bound(ClassFromPrefix.ANY, "t.lt", day, unit=None, upper=True) == (
+        datetime(2025, 3, 4, 5, tzinfo=UTC)
+    )
 
 
 def test_a_trading_day_is_a_weekday_a_forex_sunday_or_any_crypto_day() -> None:
@@ -531,7 +591,10 @@ def test_an_end_past_the_last_microsecond_of_9999_is_the_largest_datetime(
 
 def test_java_times_a_datetime_cannot_hold_are_refused() -> None:
     for java in (jpy.get_type("java.time.Instant").MAX, jpy.get_type("java.time.LocalDate").MAX):
-        with pytest.raises(ValueError, match=r"^start=.* is not a time from year 1 to 9999"):
+        with pytest.raises(
+            ValueError,
+            match=r"^start=.* is not a time from year 1 to 9999\. Pass a time in those years\.$",
+        ):
             parse_date_like(java, "start")
 
 
@@ -543,8 +606,14 @@ def test_a_numpy_day_is_a_date() -> None:
 def test_a_numpy_week_month_or_year_is_refused(value: np.datetime64) -> None:
     # As an end it would shrink the range to the period's first day, and a numpy week starts
     # on a Thursday.
-    with pytest.raises(ValueError, match=r"a numpy.datetime64 of a week, month, or year; pass a"):
+    message = (
+        f"end={value!r} is a week, month, or year, not a day or a time. Pass a day, such as "
+        "numpy.datetime64('2025-03-03')."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         parse_date_like(value, "end", upper=True)
+    # The advice works: a numpy day is a date.
+    assert parse_date_like(np.datetime64("2025-03-03"), "end", upper=True) == date(2025, 3, 3)
 
 
 _MORNING = datetime(2025, 3, 3, 9, 30, tzinfo=UTC)
@@ -614,9 +683,11 @@ def test_a_pandas_timestamp_without_a_zone_or_value_is_refused() -> None:
     # Like a naive datetime, a naive pandas.Timestamp cannot be placed: read as UTC, a New York
     # user's 09:30 would become 04:30.
     pd = importlib.import_module("pandas")  # untyped: pandas ships no stubs
-    with pytest.raises(ValueError, match=r"needs a timezone: pass an aware datetime or a date"):
+    with pytest.raises(ValueError, match=r"has no timezone\. Pass an aware datetime or a date\.$"):
         parse_date_like(pd.Timestamp("2025-03-03T09:30"), "start")
-    with pytest.raises(ValueError, match=r"^start=NaT is NaT, not a time$"):
+    with pytest.raises(
+        ValueError, match=r"^start=NaT is not a time\. Pass a date or an aware datetime\.$"
+    ):
         parse_date_like(pd.NaT, "start")
     # The message shows the value as passed, not its numpy form.
     late = pd.Timestamp(np.datetime64("10000-01-01T00:00", "s")).tz_localize("UTC")
@@ -624,12 +695,25 @@ def test_a_pandas_timestamp_without_a_zone_or_value_is_refused() -> None:
         parse_date_like(late, "start")
 
 
+def _whole(value: np.datetime64, problem: str) -> tuple[np.datetime64, str]:
+    """Pin the whole refusal of `value`, as this numpy version's repr shows the value.
+
+    Returns:
+        The value and the pattern that matches its whole message.
+    """
+    return value, f"^start={re.escape(repr(value))} {re.escape(problem)}$"
+
+
+_NO_TIME = "is not a time. Pass a date or an aware datetime."
+_PAST_9999 = "is not a time from year 1 to 9999. Pass a time in those years."
+
+
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        (np.datetime64("NaT", "D"), "is NaT, not a time"),
-        (np.datetime64("NaT", "ns"), "is NaT, not a time"),
-        (np.datetime64("10000-01-01"), "is not a time from year 1 to 9999"),
+        _whole(np.datetime64("NaT", "D"), _NO_TIME),
+        _whole(np.datetime64("NaT", "ns"), _NO_TIME),
+        _whole(np.datetime64("10000-01-01"), _PAST_9999),
         (np.datetime64("10000-01-01T00:00"), "is not a time from year 1 to 9999"),
     ],
 )
@@ -641,7 +725,7 @@ def test_a_numpy_value_that_is_no_time_a_datetime_holds_is_refused(
 
 
 def test_another_java_value_is_the_wrong_type() -> None:
-    with pytest.raises(TypeError, match=r"^start must be a str, date, datetime, Java Instant"):
+    with pytest.raises(TypeError, match=r"^start must be a str, date, datetime, numpy\.datetime64"):
         parse_date_like(_present(to_j_local_time("09:30")), "start")
 
 

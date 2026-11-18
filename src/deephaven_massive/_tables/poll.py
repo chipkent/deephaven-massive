@@ -88,7 +88,8 @@ rate-limit pause) leaves the table late: the first one of a run logs one WARNING
 `m.rate_limits()`, and the first cycle that ends in time again logs at INFO. A cycle blocks its
 poller's thread, so the session's poll watch thread (`Pollers`) checks the running cycles every
 `WATCH_INTERVAL` seconds: once one runs past its interval, the table's `poll_cycle_late` span
-says "cycle running since <start>; last good cycle at <time>" until a cycle ends in time. A
+says "A cycle has run since <start>. The last good cycle ran at <time>." until a cycle ends
+in time. A
 late cycle that has received
 no page for more than `max_outage` seconds (from its start, or from the start of the run of
 failing cycles it continues, and never less than `WATCH_INTERVAL`) fails the table the same
@@ -134,7 +135,6 @@ from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import PollMode, Recency
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    NEW_SESSION,
     AuthenticationError,
     BrokenGuaranteeError,
     EntitlementError,
@@ -146,7 +146,9 @@ from deephaven_massive._errors import (
     failure_text,
     is_bug_of,
     library_bug,
+    new_live_table,
     required,
+    session_closed,
     source_of,
     unmatched_form,
 )
@@ -428,11 +430,11 @@ class Pollers:
             poller: The new poller.
 
         Raises:
-            SessionClosedError: If the session has closed (`"MassiveSession #1 is closed; ..."`).
+            SessionClosedError: If the session has closed (`session_closed`).
         """
         with self._lock:
             if self._closed:
-                raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
+                raise SessionClosedError(session_closed())
             self._live.add(poller)
             watch = None
             if self._watch is None:
@@ -491,7 +493,8 @@ class Pollers:
                 poller.check_running()
             except Exception:
                 logger.exception(
-                    "%s: checking a poll()'s running cycle failed. %s", self._label, LIBRARY_BUG
+                    "A check of a poll() table's running cycle failed. The library goes on. %s",
+                    LIBRARY_BUG,
                 )
 
     def _end_watch(self, wake: threading.Event, reason: str) -> None:
@@ -650,7 +653,9 @@ class Poller:
                 `UPSERT`, or `APPEND`): the caller resolves `AUTO`, and a new mode needs a rule.
         """
         if mode not in _PUBLISHED_MODES:
-            raise BrokenGuaranteeError(library_bug(f"{spec.name} poll() has no rule for {mode}"))
+            raise BrokenGuaranteeError(
+                library_bug(f"{spec.name} poll() has no rule for mode {mode.name}")
+            )
         # Returns the core, or None once it is freed: a weak reference.
         self._core: Callable[[], SessionCore | None] = weakref.ref(core)
         self._exec_ctx = core.exec_ctx
@@ -858,8 +863,9 @@ class Poller:
         if late and not self._late:
             logger.warning(
                 "%s poll() stream %d: a cycle took %.0f s, longer than the %g s interval, so the "
-                "table updates late; m.rate_limits() shows whether its requests are paced or "
-                "paused by Massive's rate limit, and m.problems() lists the run",
+                "table updates late. m.problems() lists the run of late cycles. Read "
+                "m.rate_limits() to see whether Massive's rate limit paces or pauses the "
+                "requests.",
                 self._spec.name,
                 self._stream_id,
                 took,
@@ -944,15 +950,15 @@ class Poller:
 
         Called by the session's poll watch thread (`Pollers`), never by the poller's own
         thread, which the cycle blocks. A running cycle that has passed its interval opens the
-        table's `poll_cycle_late` span: "cycle running since <start>; last good cycle at
-        <time>", until a cycle ends in time. A cycle that has passed its interval and received no
-        page for more than `MassiveConfig.max_outage` seconds, and more than `WATCH_INTERVAL`
-        (counted from its start, or from the start of the run of failing cycles it continues,
-        until its first page), fails the table; with a `max_outage` of zero, no running cycle
-        fails here, only one that ends in a failure. Such a failure fails the
-        table with a `MassiveError` (`ErrorSource.NETWORK`) and stops the poller: its rows may
-        be missing while the table looks current. A cycle that keeps receiving pages, however
-        slowly its requests are paced or paused, never fails here.
+        table's `poll_cycle_late` span: "A cycle has run since <start>. The last good cycle
+        ran at <time>.", until a cycle ends in time. A cycle that has passed its interval and
+        received no page for more than `MassiveConfig.max_outage` seconds, and more than
+        `WATCH_INTERVAL` (counted from its start, or from the start of the run of failing
+        cycles it continues, until its first page), fails the table; with a `max_outage` of
+        zero, no running cycle fails here, only one that ends in a failure. Such a failure
+        fails the table with a `MassiveError` (`ErrorSource.NETWORK`) and stops the poller:
+        its rows may be missing while the table looks current. A cycle that keeps receiving
+        pages, however slowly its requests are paced or paused, never fails here.
         """
         now = self._clock.monotonic()
         with self._watch_lock:
@@ -970,7 +976,7 @@ class Poller:
             marking = not failing and not self._marked_late
             if marking:
                 self._marked_late = True
-                note = f"cycle running since {utc_text(began_at)}; {good}"
+                note = f"A cycle has run since {utc_text(began_at)}. {good}"
                 # Under the watch lock, so the cycle's own report follows it.
                 spans = self._late_spans.update(
                     {"late": (None, None, note, 0)},
@@ -998,10 +1004,10 @@ class Poller:
         if not failing:
             return
         error = MassiveError(
-            f"{self._spec.name} poll(): {good}; the cycle running since {utc_text(began_at)} "
-            f"has received nothing for {stalled:.0f} s, longer than MassiveConfig.max_outage "
-            f"({self._max_outage:g} s); the rows since then may be missing, so this table "
-            "stopped; call the verb again for a new live table",
+            f"{self._spec.name} poll(): the cycle running since {utc_text(began_at)} has "
+            f"received nothing for {stalled:.0f} s, longer than max_outage="
+            f"{self._max_outage:g} s, so this table stopped and the rows since then may be "
+            f"missing. {good} {new_live_table(self._spec.name)}",
             source=ErrorSource.NETWORK,
         )
         logger.debug(
@@ -1091,7 +1097,8 @@ class Poller:
         except Exception as error:  # a defect: logged with its trace, and the next cycle runs
             if not self._stop.is_set() and self._failing != _LIBRARY_BUGS:
                 logger.exception(
-                    "%s poll() stream %d: the cycle failed. %s",
+                    "%s poll() stream %d: a cycle failed on an unexpected error. The next cycle "
+                    "runs as scheduled. %s",
                     self._spec.name,
                     self._stream_id,
                     LIBRARY_BUG,
@@ -1182,7 +1189,8 @@ class Poller:
             self._fail_once(core, error)
         except Exception:
             logger.exception(
-                "%s poll() stream %d: could not fail its table with %s. %s",
+                "%s poll() stream %d: could not fail the table, so it stops updating with no "
+                "error. The error was: %s %s",
                 self._spec.name,
                 self._stream_id,
                 error,
@@ -1234,7 +1242,8 @@ class Poller:
             level = logging.ERROR if error.is_bug else logging.WARNING
             logger.log(
                 level,
-                "%s poll() stream %d: a cycle failed, and the next one runs as scheduled: %s",
+                "%s poll() stream %d: a cycle failed. %s Nothing to do: the next cycle runs as "
+                "scheduled.",
                 self._spec.name,
                 self._stream_id,
                 failure_text(error),
@@ -1242,7 +1251,7 @@ class Poller:
             )
         self._failing = run
         spans = self._failures.update(
-            {"failed": (None, None, f"{error}; {self._good_text()}", 0)},
+            {"failed": (None, None, f"{self._failed_after()}: {error}", 0)},
             at=int(self._clock.time() * 1e9),
             since=int(self._gap_from * 1e9),
         )
@@ -1250,16 +1259,28 @@ class Poller:
             core.problems([spans])
         return True
 
-    def _good_text(self) -> str:
-        """Name the last good cycle's time, or the poll's start before one.
+    def _failed_after(self) -> str:
+        """Name a failed cycle after the last good one, or after the poll's start before one.
 
         Returns:
-            The text, such as `"last good cycle at 2026-10-30T14:03:05Z"`.
+            The start of a `poll_cycle_failed` span's `Detail`, such as
+            `"A cycle failed after the last good one at 2026-10-30T14:03:05Z"`.
         """
         at = utc_text(self._good_at)
         if self._succeeded:
-            return f"last good cycle at {at}"
-        return f"no good cycle since the poll started at {at}"
+            return f"A cycle failed after the last good one at {at}"
+        return f"A cycle failed, and none has succeeded since the poll started at {at}"
+
+    def _good_text(self) -> str:
+        """Name the last good cycle's time, or the poll's start before one, as a sentence.
+
+        Returns:
+            The sentence, such as `"The last good cycle ran at 2026-10-30T14:03:05Z."`.
+        """
+        at = utc_text(self._good_at)
+        if self._succeeded:
+            return f"The last good cycle ran at {at}."
+        return f"No cycle has succeeded since the poll started at {at}."
 
     def _outage_failure(self, error: Exception, down: float) -> MassiveError:
         """Return the error the table fails with: its cycles have failed for `max_outage`.
@@ -1281,11 +1302,10 @@ class Poller:
             self._max_outage,
         )
         failure = MassiveError(
-            f"{self._spec.name} poll(): {self._good_text()}; every cycle since "
-            f"{utc_text(self._failing_at)} has failed, for {down:.0f} s, longer than "
-            f"MassiveConfig.max_outage ({self._max_outage:g} s); the rows since then may be "
-            "missing, so this table stopped; call the verb again for a new live table. The "
-            f"latest error: {error}",
+            f"{self._spec.name} poll(): every cycle since {utc_text(self._failing_at)} has "
+            f"failed for {down:.0f} s, reaching max_outage={self._max_outage:g} s, so this table "
+            f"stopped and the rows since then may be missing. The latest error: "
+            f"{str(error).removesuffix('.')}. {new_live_table(self._spec.name)}",
             source=source_of(error),
             is_retryable=isinstance(error, MassiveError) and error.is_retryable,
             is_bug=is_bug_of(error),
@@ -1396,7 +1416,7 @@ class Poller:
         if not withheld.rows.num_rows:
             raise RowDataError(
                 f"{dataset}: every one of the {table.num_rows} rows Massive sent this cycle has "
-                f"a null poll key, so the library withheld them all. "
+                "a null key column, so the library withheld them all. "
                 f"{reason_sentence(withheld.first_reason)} {WITHHELD_LISTED}"
             )
         return withheld.rows
@@ -1467,7 +1487,14 @@ class Poller:
         """
         name, stream_id = self._spec.name, self._stream_id
         if not isinstance(error, AuthenticationError | EntitlementError):
-            log_failure(logger, error, "%s poll() stream %d failed: %s", name, stream_id)
+            log_failure(
+                logger,
+                error,
+                "%s poll() stream %d failed: %s",
+                name,
+                stream_id,
+                named=f"{name} poll()",
+            )
             return
         log_failure(
             logger,
@@ -1476,11 +1503,12 @@ class Poller:
             name,
             stream_id,
             expected=logging.DEBUG,
+            named=f"{name} poll()",
         )
         core.warnings.log(
             f"poll refused\0{name}\0{type(error).__name__}\0{error.status}",
-            "%s poll() stream %d failed: %s (each later poll() table of %s refused this way "
-            "logs at DEBUG)",
+            "%s poll() stream %d failed: %s Later poll() tables of %s refused this way log at "
+            "DEBUG. See m.streams() for each failed table.",
             name,
             stream_id,
             failure_text(error),
@@ -1827,7 +1855,7 @@ def open_poll(
 
     Raises:
         MassiveError: If the session closed after the poll was registered but before its
-            poller started (`"MassiveSession #1 is closed; ..."`). One closed before the poll could
+            poller started (`session_closed`). One closed before the poll could
             be registered raises the `MassiveError` of `WorkerTables.track` or
             `Pollers.add`.
     """
@@ -1904,4 +1932,4 @@ def _null_key_reason(table: pa.Table, name: str, row: int) -> str:
     (values,) = table.slice(row, 1).to_pylist()
     text = repr({k: v for k, v in values.items() if v is not None and k != INSERT})
     text = text if len(text) <= _ROW_TEXT else text[: _ROW_TEXT - 3] + "..."
-    return f"row {row} of the cycle has a null poll key {name!r}: {text}"
+    return f"row {row} of the cycle has a null key column {name!r}: {text}"

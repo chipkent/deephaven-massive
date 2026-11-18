@@ -8,6 +8,7 @@ vendor's samples) and each factory's validation and the request it builds.
 import functools
 import inspect
 import json
+import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,12 @@ from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
     from deephaven_massive._datasets.filters import FilterValue
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 FIXTURES = "namespaces/partners"
 
@@ -382,19 +389,23 @@ def _class_of(name: str) -> str:
 @pytest.mark.parametrize("name", [*LIST_WITH_SYMBOLS, "partners.benzinga.news"])
 def test_all_is_refused_by_list_datasets(massive_session: dm.MassiveSession, name: str) -> None:
     make = factory(massive_session, name)
-    with pytest.raises(ValueError, match=r"does not accept dm\.ALL; leave symbols out"):
+    every = f"{name} does not take dm.ALL. Leave symbols out to read every ticker."
+    with pytest.raises(ValueError, match=whole(every)):
         make(symbols=dm.ALL)
+    assert make()._request.symbols is None  # the advice
 
 
 @pytest.mark.parametrize("name", LIST_WITH_SYMBOLS)
 def test_stock_datasets_refuse_another_class(massive_session: dm.MassiveSession, name: str) -> None:
     # The TMX calendar keeps tickers as written, but no class prefix passes there either.
     message = (
-        "is not a ticker as Massive writes it"
+        "starts with the class prefix 'X:', and Massive never writes a ticker that way. Pass "
+        "the value as Massive lists it."
         if name == "partners.tmx.corporate_events"
-        else "is a crypto ticker; this dataset takes stock tickers"
+        else "is a crypto ticker, and this dataset takes stock tickers. Pass a stock ticker, or "
+        "read crypto data through m.crypto."
     )
-    with pytest.raises(ValueError, match=rf"^'X:BTCUSD' {message}"):
+    with pytest.raises(ValueError, match=rf"^'X:BTCUSD' {re.escape(message)}$"):
         factory(massive_session, name)("X:BTCUSD")
 
 
@@ -420,7 +431,7 @@ def test_symbols_may_be_a_table(massive_session: dm.MassiveSession, name: str) -
 def test_an_exhausted_generator_is_refused(massive_session: dm.MassiveSession, name: str) -> None:
     symbols = (symbol for symbol in ["AAPL"])
     assert list(symbols) == ["AAPL"]
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         factory(massive_session, name)(symbols)
 
 
@@ -433,7 +444,8 @@ def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession
     assert spec.per_symbol
     assert spec.symbol_param is None
     assert spec.poll_keys == ("Symbol",)
-    with pytest.raises(ValueError, match="takes one ticker per request"):
+    every = "partners.benzinga.consensus_ratings does not take dm.ALL. Pass a list of tickers."
+    with pytest.raises(ValueError, match=whole(every)):
         massive_session.partners.benzinga.consensus_ratings(dm.ALL)
     # One row per stock: no sort, order, or limit; filters choose the ratings aggregated.
     assert list(
@@ -480,7 +492,10 @@ def test_news_selects_articles_by_ticker_and_time(massive_session: dm.MassiveSes
 def test_the_time_axis_is_set_only_by_start_and_end(
     massive_session: dm.MassiveSession, name: str, axis_filter: str
 ) -> None:
-    with pytest.raises(ValueError, match="through start= and end="):
+    refusal = (
+        f"The filter {axis_filter!r} sets the time range of {name}. Pass start= and end= instead."
+    )
+    with pytest.raises(ValueError, match=whole(refusal)):
         factory(massive_session, name)(filters={axis_filter: "2025-01-01"})
 
 
@@ -498,9 +513,9 @@ def test_a_range_must_not_end_before_it_starts(
     make = factory(massive_session, name)
     q = make(start="2025-07-01", end="2025-07-01")  # one whole day
     assert q._request.start == q._request.end == date(2025, 7, 1)
-    with pytest.raises(ValueError, match="must not be after end"):
+    with pytest.raises(ValueError, match="is after end="):
         make(start="2025-07-02", end="2025-07-01")
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         make(start="2025-07-01T09:30")
 
 
@@ -517,7 +532,8 @@ def test_a_range_must_not_end_before_it_starts(
 def test_the_symbol_parameter_is_set_only_by_symbols(
     massive_session: dm.MassiveSession, name: str, reserved: str
 ) -> None:
-    with pytest.raises(ValueError, match="is set through symbols=, not filters"):
+    refusal = f"The filter {reserved!r} sets the symbols of {name}. Pass symbols= instead."
+    with pytest.raises(ValueError, match=whole(refusal)):
         factory(massive_session, name)(filters={reserved: "AAPL"})
 
 
@@ -546,11 +562,15 @@ def test_filters_reach_the_endpoint_parameters(
 @pytest.mark.parametrize(
     "case",
     [
-        ("partners.fable.merchant_aggregates", {"channel": "mail"}, r"takes one of \['online'"),
+        (
+            "partners.fable.merchant_aggregates",
+            {"channel": "mail"},
+            r"is not one of its values\. Pass one of 'online'",
+        ),
         (
             "partners.fable.merchant_hierarchy",
             {"listing_status": "listed"},
-            r"takes one of \['public'",
+            r"is not one of its values\. Pass one of 'public'",
         ),
         ("partners.benzinga.earnings", {"importance": "high"}, "takes integer values"),
         ("partners.benzinga.analysts", {"ticker": "AAPL"}, "has no filter 'ticker'"),
@@ -574,7 +594,7 @@ def test_bad_types_are_refused(massive_session: dm.MassiveSession) -> None:
     ratings = massive_session.partners.benzinga.ratings
     with pytest.raises(TypeError, match="sort must be a str"):
         ratings(sort=1)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="limit must be positive"):
+    with pytest.raises(ValueError, match=whole("limit=0 is not positive.")):
         ratings(limit=0)
     with pytest.raises(TypeError, match="filters must be a mapping"):
         ratings(filters=[("date", "2025-01-01")])  # type: ignore[arg-type]  # the point: refused at run time

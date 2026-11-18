@@ -39,10 +39,12 @@ from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
 from deephaven_massive._errors import (
     BrokenGuaranteeError,
+    library_bug,
     required,
     required_instance,
     unmatched_form,
 )
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import ParamKind, Transport
 from deephaven_massive._tables.transports import Unsplit
 
@@ -267,7 +269,9 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]
     """
     asset_class = spec.asset_class
     if asset_class is not AssetClass.FOREX and asset_class is not AssetClass.CRYPTO:
-        raise ValueError(f"{spec.name}: only forex and crypto symbols are currency pairs")
+        raise ValueError(
+            library_bug(f"{spec.name} asked for a currency pair, which only forex and crypto have")
+        )
     if asset_class is AssetClass.CRYPTO:
         return split(symbol)
     return forex_codes(symbol)
@@ -387,7 +391,7 @@ def _symbol_parts(
         spread = _Spread.ONE
     if symbols is None or isinstance(symbols, AllSymbols):
         if spread is _Spread.PATH:
-            raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
+            raise ValueError(f"{spec.name} needs the symbols named. Pass them in place of dm.ALL.")
         return [(None, {}, {}, None)]
     explicit = symbols
     if not explicit:
@@ -505,7 +509,8 @@ def _caller_params(
         else:
             query[wire] = value
     if unknown:
-        raise ValueError(f"{spec.name}: {rest_path.template} does not take {sorted(set(unknown))}")
+        named = prose_list(sorted(set(unknown)), "arguments")
+        raise ValueError(f"{spec.name} does not take {named}.")
     return path, query
 
 
@@ -551,7 +556,9 @@ def largest_page(rest_path: RestPath) -> int:
     for param in rest_path.params:
         if param.name == "limit" and not param.in_path and param.maximum is not None:
             return param.maximum
-    raise ValueError(f"{rest_path.template} documents no maximum page size (`limit`)")
+    raise ValueError(
+        library_bug(f"Massive's documentation of {rest_path.template} gives no maximum limit")
+    )
 
 
 def _sent_value(name: str, value: object) -> object:
@@ -623,7 +630,7 @@ def shared_params(
     if "adjusted" in params and request.adjusted is not None:
         query["adjusted"] = request.adjusted
     elif request.adjusted is False and not _takes_crypto_pair(rest_path):
-        raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
+        raise ValueError(f"{spec.name} does not take adjusted=False.")
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
     if "limit" in params:

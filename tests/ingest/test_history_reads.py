@@ -202,8 +202,8 @@ def test_the_days_the_files_lack_are_read_from_rest_one_by_one(
     assert served == "Read from flat files, and from REST for 2025-03-04, whose files are missing."
     (message,) = caplog.messages
     assert message.startswith(
-        "stocks.trades history: AUTO read REST because the flat files are missing for these "
-        "days: 1 [2025-03-04]"
+        "stocks.trades history: Massive has no flat files for 2025-03-04. The read took those "
+        "rows from REST instead."
     )
 
 
@@ -242,38 +242,89 @@ def test_a_missing_day_read_later_keeps_the_call_s_instant(
     assert rest.nows == [call]
 
 
-@pytest.mark.parametrize(("spec", "forced"), [(TRADES, True), (VALUES, False)])
+@pytest.mark.parametrize(
+    ("spec", "forced", "remedy"),
+    [
+        (
+            TRADES,
+            True,
+            (
+                "Call history() again later, or pass source=dm.HistorySource.REST to read the day "
+                "from REST."
+            ),
+        ),
+        (
+            VALUES,
+            False,
+            (
+                "REST cannot serve this read, since indices.values has no REST history. Call "
+                "history() again later."
+            ),
+        ),
+    ],
+)
 def test_a_file_not_published_yet_raises_where_rest_may_not_serve_it(
-    *, massive_session: dm.MassiveSession, rest: _Rest, spec: DatasetSpec, forced: bool
+    *,
+    massive_session: dm.MassiveSession,
+    rest: _Rest,
+    spec: DatasetSpec,
+    forced: bool,
+    remedy: str,
 ) -> None:
     files = _files(massive_session, spec, unread=(TUESDAY,))
-    with pytest.raises(
-        dm.MassiveError, match=r"the flat file for 2025-03-04 is not published"
-    ) as info:
+    with pytest.raises(dm.MassiveError) as info:
         _read(massive_session, files, spec, forced=forced)
     assert files.inferred == [True]
-    remedy = "or read REST with" if forced else "REST cannot serve this read"
-    assert remedy in str(info.value)
+    assert str(info.value) == (
+        f"{spec.name}: Massive has not published the flat file for 2025-03-04 yet. Massive "
+        "usually publishes a day's flat files by about 11:00 ET the next day, but the time "
+        f"varies. {remedy}"
+    )
     assert rest.calls == []
 
 
-@pytest.mark.parametrize(("spec", "remedy"), [(TRADES, "read REST"), (VALUES, "end the range")])
+@pytest.mark.parametrize(
+    ("spec", "remedy"),
+    [
+        (
+            TRADES,
+            (
+                "Pass source=dm.HistorySource.REST to read them from REST, or end the range before "
+                "them."
+            ),
+        ),
+        (
+            VALUES,
+            (
+                "REST cannot serve this read, since indices.values has no REST history. End the "
+                "range before them."
+            ),
+        ),
+    ],
+)
 def test_files_that_will_never_appear_raise(
     *, massive_session: dm.MassiveSession, rest: _Rest, spec: DatasetSpec, remedy: str
 ) -> None:
     files = _files(massive_session, spec, absent=(TUESDAY,))
-    with pytest.raises(dm.MassiveError, match=r"no flat file exists for 2025-03-04") as info:
+    with pytest.raises(dm.MassiveError) as info:
         _read(massive_session, files, spec, forced=True)
-    assert f"To read them, {remedy}" in str(info.value)
+    assert str(info.value) == (
+        f"{spec.name}: Massive has no flat file for 2025-03-04, nor for any later day up to a "
+        "week after the range. Massive publishes a day's file the next day, so these files will "
+        f"not appear. {remedy}"
+    )
 
 
 def test_a_refusal_names_rest_when_rest_could_serve_the_read(
     massive_session: dm.MassiveSession, rest: _Rest
 ) -> None:
-    refused = dm.EntitlementError("no files", status=403, request_id="r1")
+    refused = dm.EntitlementError("Massive refused the files.", status=403, request_id="r1")
     with pytest.raises(dm.EntitlementError) as info:
         _read(massive_session, _Files(refused), forced=True)
-    assert str(info.value).startswith("no files; REST serves this read too")
+    assert str(info.value) == (
+        "Massive refused the files. To read from REST instead, pass source=dm.HistorySource.REST "
+        "to history()."
+    )
     assert (info.value.status, info.value.request_id) == (403, "r1")
     with pytest.raises(dm.EntitlementError) as unchanged:
         _read(massive_session, _Files(refused), VALUES)
@@ -302,7 +353,13 @@ def test_sessions_a_futures_read_may_miss_are_named(
     assert served is None
     assert lacks is not None
     assert lacks.startswith("Session(s) 2025-03-03 may be incomplete")
-    assert "rows of session(s) 2025-03-03 may sit in a file outside the range" in caplog.text
+    assert caplog.messages == [
+        (
+            "stocks.trades history: Massive's flat files hold rows of sessions other than their "
+            "own day's, so rows of 2025-03-03 may sit in a file outside the range and be missing. "
+            "To include them, read a wider range of dates, or by datetimes."
+        )
+    ]
 
 
 def test_days_taken_for_holidays_are_named_on_the_table(
@@ -426,7 +483,7 @@ def test_a_failed_scan_fails_every_symbol_with_one_error(
         massive_session, _monday_files(massive_session, unread=(TUESDAY,)), forced=True
     )
     assert {str(o.error)[:40] for o in late.values() if isinstance(o, SymbolFailure)} == {
-        "stocks.trades: the flat file for 2025-03"
+        "stocks.trades: Massive has not published"
     }
     assert rest.by_symbol == []
 

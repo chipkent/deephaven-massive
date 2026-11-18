@@ -1,20 +1,25 @@
 import ast
 import builtins
+import dataclasses
 import functools
 import importlib
 import inspect
 import pkgutil
 import re
 import textwrap
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from pathlib import Path
+from typing import TypeGuard
 
 import pytest
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     NEW_SESSION,
     RAISES_THROUGH,
+    READ_STOPPED,
     AuthenticationError,
     BrokenGuaranteeError,
     EntitlementError,
@@ -29,9 +34,11 @@ from deephaven_massive._errors import (
     from_wire,
     is_bug_of,
     library_bug,
+    new_live_table,
     raises_through,
     required,
     required_instance,
+    session_closed,
     source_of,
     user_defect,
 )
@@ -39,6 +46,12 @@ from deephaven_massive._massive import WireAuthError, WireEntitlementError, Wire
 from deephaven_massive._session import MassiveSession
 from deephaven_massive.namespaces._namespace import Namespace
 from deephaven_massive.queries import Query
+
+REFUSED = (
+    "Massive answered GET /v3/quotes/AAPL on api.massive.com with HTTP 403 (request_id r9): "
+    '"You are not entitled to this data".'
+)
+"""A wire error's message, as the REST response module words Massive's answer."""
 
 ALL_ERRORS = [
     MassiveError,
@@ -82,17 +95,29 @@ def test_from_wire_maps_each_wire_error(
     wire: Callable[..., WireError], public: type[MassiveError]
 ) -> None:
     converted = from_wire(
-        wire(
-            "HTTP 403 from GET /v3/quotes/AAPL (request_id r9): not entitled",
-            status=403,
-            host="api.massive.com",
-            path="/v3/quotes/AAPL",
-            request_id="r9",
-        )
+        wire(REFUSED, status=403, host="api.massive.com", path="/v3/quotes/AAPL", request_id="r9")
     )
     assert type(converted) is public
-    assert str(converted) == "HTTP 403 from GET /v3/quotes/AAPL (request_id r9): not entitled"
+    assert str(converted) == REFUSED
     assert (converted.status, converted.request_id) == (403, "r9")
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["stocks.trades history: the request was cancelled", "stocks.trades history: cancelled."],
+    ids=["without-a-period", "with-a-period"],
+)
+def test_a_stopped_read_says_why_it_stopped_and_what_to_do(message: str) -> None:
+    converted = from_wire(WireError(message, kind=WireFailure.STOPPED))
+    assert str(converted) == (
+        f"{message.rstrip('.')}. The read stopped because its table was released or its session "
+        "closed. Call the method again for a new table."
+    )
+    assert READ_STOPPED == (
+        "The read stopped because its table was released or its session closed. Call the method "
+        "again for a new table."
+    )
+    assert converted.source is ErrorSource.USER
 
 
 def test_from_wire_keeps_missing_context_as_none() -> None:
@@ -264,9 +289,27 @@ def test_from_wire_says_whether_the_call_may_succeed_later(
 
 def test_a_closed_session_error_is_public_the_users_and_never_retryable() -> None:
     assert dm.SessionClosedError is SessionClosedError
-    error = SessionClosedError("MassiveSession #1 is closed; " + NEW_SESSION)
+    error = SessionClosedError(session_closed())
     assert isinstance(error, dm.MassiveError)
     assert (error.source, error.is_bug, error.is_retryable) == (ErrorSource.USER, False, False)
+
+
+def test_a_closed_session_message_says_so_and_names_the_fix() -> None:
+    assert (
+        session_closed() == "This session is closed. Open a new dm.MassiveSession() to read again."
+    )
+    assert NEW_SESSION == "Open a new dm.MassiveSession() to read again."
+
+
+def test_a_new_session_reads_again_after_one_is_closed() -> None:
+    # The fix the message names: a call the closed session refuses, a new session serves.
+    config = dm.MassiveConfig(api_key="test-key")
+    closed = dm.MassiveSession(config)
+    closed.close()
+    with pytest.raises(dm.SessionClosedError):
+        closed.stocks.dividends("AAPL").fetch()
+    with dm.MassiveSession(config) as m:
+        assert m.stocks.dividends("AAPL") is not None
 
 
 def test_a_copy_keeps_the_class_and_every_attribute() -> None:
@@ -310,9 +353,26 @@ def test_a_library_bug_message_ends_with_how_to_report_it() -> None:
 
 
 def test_a_user_defect_message_names_the_fix_and_asks_for_no_report() -> None:
-    text = user_defect("the symbol table failed upstream: boom", "fix that table")
-    assert text == "the symbol table failed upstream: boom; fix that table"
+    problem = (
+        "The symbol table you passed to stocks.quotes has failed, so this table can no longer "
+        "follow it"
+    )
+    text = user_defect(problem, "Fix that table, then call stocks.quotes again")
+    assert text == (
+        "The symbol table you passed to stocks.quotes has failed, so this table can no longer "
+        "follow it. Fix that table, then call stocks.quotes again."
+    )
+    assert user_defect(f"{problem}.", "Fix that table, then call stocks.quotes again.") == text
     assert LIBRARY_BUG not in text
+    # A problem that already ends a sentence, as a question does, gets no period added.
+    assert user_defect("Is the table released?", "Pass a live table") == (
+        "Is the table released? Pass a live table."
+    )
+    assert user_defect("It failed!", "Pass a live table") == "It failed! Pass a live table."
+
+
+def test_a_failed_live_table_s_message_names_the_call_that_makes_a_new_one() -> None:
+    assert new_live_table("stocks.trades") == "Call m.stocks.trades again for a new live table."
 
 
 def test_required_returns_a_value_and_names_a_missing_one_a_library_defect() -> None:
@@ -669,3 +729,376 @@ def test_a_public_function_names_the_public_base_of_a_private_helper_error() -> 
 def test_the_row_error_is_permanent() -> None:
     # A poll() table fails on it rather than retrying every cycle.
     assert issubclass(RowDataError, PermanentError)
+
+
+# --- The layout of a message ----------------------------------------------------------------------
+#
+# A message a user reads is sentences: no semicolon, no newline, no list rendered by
+# `bounded_list`, and no site over `MESSAGE_LITERAL_LIMIT` characters of literal text. The check
+# reads each module with `ast` and judges only what the source spells, never a value Massive or
+# a user sends, so a `request_id` or a quoted answer can never trip it.
+#
+# A message site is a `raise`, a call that builds an exception (a callee whose name ends in
+# `Error`), a log call at WARNING or above (a callee ending in `warning`, `error`, `exception`, or
+# `log`, except `log(logging.DEBUG, ...)` and `log(logging.INFO, ...)`), and a `log_once` or
+# `log_failure` call. Every function body, and the module body, that holds one is a scope, and
+# every string literal in the scope is a message's, except docstrings and the literals of
+# `debug`, `info`, and DEBUG or INFO `log` calls; a nested function is its own scope. The limit
+# and the `bounded_list` fault apply per site: to what its expression holds, plus what every local
+# variable or module constant it names holds, resolved within the scope. A name bound to a dict or
+# a set is not resolved: a message renders its keys or one entry, never its literal text whole.
+
+SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src" / "deephaven_massive"
+"""The library's package, whose modules the layout check reads."""
+
+MESSAGE_FIXTURE = Path(__file__).resolve().parent / "data" / "messages_fixture.py.txt"
+"""Python source holding one instance of each fault and the cases that pass, read as text so
+that no tool imports or lints it as a module."""
+
+MESSAGE_LITERAL_LIMIT = 400
+"""The most characters of literal text one message site may hold: a longer message fails the
+rule that a message is sentences with the fix last, and its tutorial belongs in the docs."""
+
+EXEMPT_MODULES = frozenset(
+    {
+        "_dataset_list.py",
+        "_datasets/catalog.py",
+        "_datasets/column_reference.py",
+        "_datasets/readme_plans.py",
+        "_datasets/schema.py",
+        "_datasets/source_columns.py",
+        "_tables/cause_reference.py",
+        "_massive/refresh/",
+        "_massive/spec/",
+    }
+)
+"""The modules the layout check leaves out: developer and contract checks that fail at import or
+in scripts/refresh.py or scripts/render_reference.py; their reader holds the source. Each is a
+path under `src/deephaven_massive/`, and a trailing slash names a package."""
+
+_LOG_CALLEES = frozenset({"warning", "error", "exception", "log", "log_once", "log_failure"})
+"""The callee names that make a call a log record at WARNING or above (`log` unless quiet)."""
+
+_QUIET_CALLEES = frozenset({"debug", "info"})
+"""The callee names of a log record below WARNING, whose literals are not a message's."""
+
+_QUIET_LEVELS = frozenset({"DEBUG", "INFO"})
+"""The `logging` levels that make a `log(level, ...)` call quiet."""
+
+
+@dataclasses.dataclass(frozen=True)
+class MessageFault:
+    """One fault the layout check found: where, what, and the text.
+
+    Attributes:
+        file: The module, relative to the package, or the fixture's name.
+        line: The line of the literal or the site.
+        fault: What is wrong: `semicolon`, `newline`, `bounded_list`, or the characters over
+            the limit.
+        text: The literal, or the site's source for a fault of the site.
+    """
+
+    file: str
+    line: int
+    fault: str
+    text: str
+
+    @override
+    def __str__(self) -> str:
+        return f"{self.file}:{self.line}: {self.fault}: {self.text}"
+
+
+def _callee(call: ast.Call) -> str | None:
+    """Return the last name of a call's callee.
+
+    Args:
+        call: The call.
+
+    Returns:
+        `warning` for `logger.warning(...)` and `log_once` for `log_once(...)`; None for a
+        callee that is neither an attribute nor a name, such as `make()(...)`.
+    """
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    return None
+
+
+def _is_quiet(call: ast.Call) -> bool:
+    """Tell whether a call logs below WARNING, so its literals are not a message's.
+
+    Args:
+        call: The call.
+
+    Returns:
+        True for a `debug` or `info` call, and for `log(logging.DEBUG, ...)` or
+        `log(logging.INFO, ...)`.
+    """
+    name = _callee(call)
+    if name in _QUIET_CALLEES:
+        return True
+    if name != "log" or not call.args:
+        return False
+    level = call.args[0]
+    return isinstance(level, ast.Attribute) and level.attr in _QUIET_LEVELS
+
+
+def _is_site(node: ast.AST) -> TypeGuard[ast.Raise | ast.Call]:
+    """Tell whether a node is a message site.
+
+    Args:
+        node: The node.
+
+    Returns:
+        True for a `raise`, a call whose callee's name ends in `Error`, a `log_once` or
+        `log_failure` call, and a log call at WARNING or above.
+    """
+    if isinstance(node, ast.Raise):
+        return True
+    if not isinstance(node, ast.Call):
+        return False
+    name = _callee(node)
+    if name is None:
+        return False
+    return name.endswith("Error") or (name in _LOG_CALLEES and not _is_quiet(node))
+
+
+def _is_scope(node: ast.AST) -> bool:
+    """Return whether a node starts a scope of its own: a function or a lambda."""
+    return isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
+
+
+def _scope_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Yield the nodes of a scope, leaving out the nested scopes and their nodes."""
+    for child in ast.iter_child_nodes(scope):
+        if not _is_scope(child):
+            yield child
+            yield from _scope_nodes(child)
+
+
+def _scopes(tree: ast.Module) -> Iterator[ast.AST]:
+    """Yield the module and every function or lambda in it, at any depth."""
+    yield tree
+    yield from (node for node in ast.walk(tree) if _is_scope(node))
+
+
+@dataclasses.dataclass(frozen=True)
+class _Literal:
+    """One string literal of a module: where it is, and its text."""
+
+    line: int
+    column: int
+    text: str
+
+
+def _string_literals(node: ast.AST) -> Iterator[_Literal]:
+    """Yield the string literals under a node, the node included."""
+    for found in ast.walk(node):
+        if isinstance(found, ast.Constant) and isinstance(found.value, str):
+            yield _Literal(found.lineno, found.col_offset, found.value)
+
+
+def _assigned(scope: ast.AST) -> dict[str, list[ast.expr]]:
+    """Return the values assigned to each name in a scope, in order."""
+    found: dict[str, list[ast.expr]] = {}
+    for node in _scope_nodes(scope):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = node.targets
+            value: ast.expr | None = node.value
+        elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.NamedExpr):
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if value is None:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                found.setdefault(target.id, []).append(value)
+    return found
+
+
+_UNRENDERED_VALUES = (ast.Dict, ast.DictComp, ast.Set, ast.SetComp)
+"""The values whose literals a message never renders whole: it renders a key or one entry."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _Rendered:
+    """What one message site renders: its literal text and its `bounded_list` calls."""
+
+    literals: frozenset[_Literal]
+    lists: frozenset[ast.Call]
+
+
+def _site_rendered(expression: ast.AST, assigned: Sequence[dict[str, list[ast.expr]]]) -> _Rendered:
+    """Return what a site renders: under its expression, and in the names it uses.
+
+    A name assigned more than once in its scope (one message per branch) contributes the
+    literals of the assignment with the most literal text, since a message renders one of them,
+    and the `bounded_list` calls of every assignment, since any of them may be the one rendered.
+    A name bound to a dict or a set contributes nothing.
+
+    Args:
+        expression: The site's expression.
+        assigned: The assignments of the site's scope, then of the module.
+
+    Returns:
+        The literals and the `bounded_list` calls.
+    """
+    names: set[str] = set()
+
+    def gather(node: ast.AST) -> _Rendered:
+        literals = set(_string_literals(node))
+        lists = {
+            call
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and _callee(call) == "bounded_list"
+        }
+        for name in ast.walk(node):
+            if not isinstance(name, ast.Name) or name.id in names:
+                continue
+            names.add(name.id)  # each name once per site, so a cycle of names ends
+            values = next((a[name.id] for a in assigned if name.id in a), [])
+            choices = [
+                gather(value) for value in values if not isinstance(value, _UNRENDERED_VALUES)
+            ]
+            if choices:
+                literals |= max((choice.literals for choice in choices), key=_text_length)
+                lists |= {call for choice in choices for call in choice.lists}
+        return _Rendered(frozenset(literals), frozenset(lists))
+
+    return gather(expression)
+
+
+def _text_length(literals: Iterable[_Literal]) -> int:
+    """Return how many characters of text some literals hold."""
+    return sum(len(literal.text) for literal in literals)
+
+
+def _site_expression(node: ast.Raise | ast.Call) -> ast.AST:
+    """Return what a site renders: a `raise`'s exception, or the call itself."""
+    if isinstance(node, ast.Raise):
+        return node.exc if node.exc is not None else node
+    return node
+
+
+def message_faults(source: str, file: str) -> list[MessageFault]:
+    """Return the layout faults of a module's messages.
+
+    Args:
+        source: The module's source.
+        file: How to name it in each fault.
+
+    Returns:
+        The faults in order of line: a `;` or a newline in a message's literal, a
+        `bounded_list` call a message site renders, and a site whose literals pass
+        `MESSAGE_LITERAL_LIMIT` characters.
+    """
+    tree = ast.parse(source)
+    module_assigned = _assigned(tree)
+    faults: list[MessageFault] = []
+    for scope in _scopes(tree):
+        nodes = list(_scope_nodes(scope))
+        raised = {id(node.exc) for node in nodes if isinstance(node, ast.Raise)}
+        sites = [n for n in nodes if _is_site(n) and id(n) not in raised]
+        if not sites:
+            continue
+        quiet_calls = [node for node in nodes if isinstance(node, ast.Call) and _is_quiet(node)]
+        quiet = {literal for call in quiet_calls for literal in _string_literals(call)}
+        docstrings = {
+            literal
+            for node in nodes
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+            for literal in _string_literals(node.value)
+        }
+        assigned = [_assigned(scope), module_assigned] if scope is not tree else [module_assigned]
+        literals = (
+            {literal for node in nodes for literal in _string_literals(node)} - quiet - docstrings
+        )
+        lists: set[ast.Call] = set()
+        for site in sites:
+            expression = _site_expression(site)
+            rendered = _site_rendered(expression, assigned)
+            literals |= rendered.literals
+            lists |= rendered.lists
+            total = _text_length(rendered.literals)
+            if total > MESSAGE_LITERAL_LIMIT:
+                faults.append(
+                    MessageFault(
+                        file,
+                        site.lineno,
+                        f"{total} characters of literal text, over {MESSAGE_LITERAL_LIMIT}",
+                        ast.unparse(expression)[:60],
+                    )
+                )
+        for literal in literals:
+            if ";" in literal.text:
+                faults.append(MessageFault(file, literal.line, "semicolon", literal.text))
+            if "\n" in literal.text:
+                faults.append(MessageFault(file, literal.line, "newline", literal.text))
+        faults.extend(
+            MessageFault(file, call.lineno, "bounded_list", ast.unparse(call)) for call in lists
+        )
+    return sorted(faults, key=lambda fault: (fault.line, fault.fault, fault.text))
+
+
+def is_exempt(module: str) -> bool:
+    """Tell whether a module's messages are developer checks the layout check leaves out.
+
+    Args:
+        module: The module's path under `src/deephaven_massive/`, with `/` separators.
+
+    Returns:
+        True when `EXEMPT_MODULES` names it or a package it is in.
+    """
+    return module in EXEMPT_MODULES or any(
+        module.startswith(package) for package in EXEMPT_MODULES if package.endswith("/")
+    )
+
+
+def library_modules() -> list[tuple[str, str]]:
+    """Return each module the layout check reads, as its path under the package and its source."""
+    return [
+        (path.relative_to(SOURCE_ROOT).as_posix(), path.read_text(encoding="utf-8"))
+        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        if not is_exempt(path.relative_to(SOURCE_ROOT).as_posix())
+    ]
+
+
+def test_the_fixture_shows_each_fault_once_and_passes_every_other_case() -> None:
+    found = message_faults(MESSAGE_FIXTURE.read_text(encoding="utf-8"), "fixture")
+    assert [str(fault) for fault in found] == [
+        "fixture:13: semicolon: pass the spelling Massive uses; a module constant holds the fix.",
+        "fixture:17: semicolon:  is not a ticker; pass the spelling Massive uses.",
+        "fixture:21: newline: The first line.\nThe second line.",
+        "fixture:25: bounded_list: bounded_list(symbols)",
+        "fixture:29: semicolon: remove it; or pass on_error.",
+        (
+            "fixture:34: 419 characters of literal text, over 400: ValueError(f'{dataset}: "
+            "Massive sent rows the library cannot"
+        ),
+        "fixture:48: bounded_list: bounded_list(symbols)",
+    ]
+
+
+def test_the_exempt_modules_exist_and_nothing_else_is_exempt() -> None:
+    for module in EXEMPT_MODULES:
+        assert (SOURCE_ROOT / module).exists(), module
+    read = {module for module, _ in library_modules()}
+    assert "_errors.py" in read
+    assert not any(is_exempt(module) for module in read)
+    assert is_exempt("_massive/spec/types.py")
+    assert not is_exempt("_massive/rest/response.py")
+
+
+def test_every_message_in_the_library_is_sentences_within_the_limit() -> None:
+    # Every message a user or an agent reads is one line of sentences: a semicolon chain, a
+    # newline, a `bounded_list` count-and-brackets list, or a tutorial past the limit fails here,
+    # with each fault's module, line, and text, so the next message written keeps the form.
+    faults = [
+        str(fault)
+        for module, source in library_modules()
+        for fault in message_faults(source, module)
+    ]
+    assert faults == []

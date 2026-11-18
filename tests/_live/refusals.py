@@ -37,12 +37,12 @@ if TYPE_CHECKING:
 TIMEFRAME_PHRASE: Final = "doesn't include this data timeframe"
 """The phrase of Massive's refusal of a request beyond the key's history, in lower case."""
 
-NOT_LISTED_PHRASE: Final = "is not in MassiveConfig.delayed_subscriptions"
+NOT_LISTED_PHRASE: Final = "is not in delayed_subscriptions"
 """The library's words when the owner's settings refuse delayed data: Massive labels a
 subscription's data delayed and `MassiveConfig.delayed_subscriptions` does not list it
 (`recency_labels.delayed_refusal`)."""
 
-_REQUEST_TARGET: Final = re.compile(r" from GET (\S+) on ")
+_REQUEST_TARGET: Final = re.compile(r"Massive answered GET (\S+) on ")
 """Where a wire error's message names the request's target (path and query)."""
 
 _ISO_DATE: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -103,17 +103,15 @@ def is_not_listed_text(text: object) -> bool:
 
 
 _ENTITLEMENT_MARKS: Final = (
-    "refused the subscription to",
+    "Massive answered the subscription to",
     "HTTP 403",
     "NOT_AUTHORIZED",
     "not entitled",
-    "may not include this data",
-    "(FMV) data needs",
 )
-"""Text that marks a stream's or a poll's error as a refusal: the library's wording of a topic
-Massive's WebSocket server refused (`the WebSocket server <host> refused the subscription to
-<topics>; Massive said: <its message>; <the feed's hint>`), an HTTP 403, a `NOT_AUTHORIZED`
-envelope, and the hints of a refused topic, including a fair-market-value (FMV) topic's."""
+"""Text that marks a stream's or a poll's error as a refusal: the library's wording of a
+subscription Massive's WebSocket server refused (`Massive answered the subscription to
+<subscriptions> on <url>: "<its message>".`, then the feed's hint), an HTTP 403, a
+`NOT_AUTHORIZED` envelope, and Massive's own "not entitled"."""
 
 
 def is_entitlement_text(text: object) -> bool:
@@ -151,9 +149,9 @@ def failed_row_refusal(rows: Iterable[Mapping[str, object]]) -> str | None:
 def refused_request(error: BaseException) -> tuple[str | None, date | None]:
     """Read the class and the earliest day a refused REST request asked for.
 
-    The wire error's message reads `"<what> from GET <target> on <host>...: <detail>"`; the
-    class comes from the target's path (`classes.class_of_path`) and the day from the ISO dates
-    in the target.
+    The wire error's message reads `"Massive answered GET <target> on <host> with HTTP
+    <status>...: "<text>"."`; the class comes from the target's path (`classes.class_of_path`)
+    and the day from the ISO dates in the target.
 
     Args:
         error: The refusal.
@@ -174,9 +172,9 @@ def refusal_line(error: WireError | MassiveError) -> str:
     """Word Massive's refusal on one line: its status, its text, and the request.
 
     The message of a wire error, and of the library's error made from one, already names the
-    status, the request, and Massive's text, as `"HTTP 403 from GET <target> on <host>
-    (request_id ...): <text>"`; the line keeps it whole, its whitespace folded into single
-    spaces. A message that does not name the status (a WebSocket reply, an S3 answer) gets it
+    status, the request, and Massive's text, as `"Massive answered GET <target> on <host> with
+    HTTP 403 (request_id ...): "<text>"."`; the line keeps it whole, its whitespace folded into
+    single spaces. A message that does not name the status (a WebSocket reply, an S3 answer) gets it
     in front. A timeframe refusal ends with the earliest day its request asked for.
 
     Args:
@@ -184,9 +182,9 @@ def refusal_line(error: WireError | MassiveError) -> str:
             Massive.
 
     Returns:
-        Such as `"HTTP 403 from GET /v3/quotes/AAPL on api.massive.com (request_id 1): not
-        entitled"`, or for a timeframe refusal `"...: Your plan doesn't include this data
-        timeframe; earliest day asked: 2023-06-05"`.
+        Such as `"Massive answered GET /v3/quotes/AAPL on api.massive.com with HTTP 403
+        (request_id 1): "not entitled"."`, or for a timeframe refusal `"...: "Your plan doesn't
+        include this data timeframe"; earliest day asked: 2023-06-05"`.
     """
     line = " ".join(str(error).split())
     if error.status is not None and f"HTTP {error.status}" not in line:

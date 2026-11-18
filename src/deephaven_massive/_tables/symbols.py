@@ -37,7 +37,7 @@ from deephaven_massive._datasets.symbols import (
     strict_converter,
 )
 from deephaven_massive._enums import AssetClass, OnError, SymbolConvention, _require_enum
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._log_limits import BoundedLog, prose_list
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.refused_values import ConversionRule, RefusedValues, track_refused
 from deephaven_massive._tables.watchlist import SymbolWatch
@@ -157,15 +157,19 @@ def canonicalize_symbols(
     values = {row[0] for row in table.iter_tuple(cols=column) if row[0] is not None}
     refused = _refused(values, convert)
     if refused and effect.fails:
-        shown = "; ".join(refused[value] for value in sorted(refused)[:_SHOWN])
+        count = len(refused)
+        first = f" The first {_SHOWN}:" if count > _SHOWN else ""
+        shown = " ".join(refused[value] for value in sorted(refused)[:_SHOWN])
         raise ValueError(
-            f"{len(refused)} value(s) of {column} are not {CLASS_NOUNS[resolved]} tickers: "
-            f"{shown}. Pass on_error=dm.OnError.LOG to null them instead"
+            f"canonicalize_symbols cannot convert {count} {'value' if count == 1 else 'values'} "
+            f"of the {column} column to {CLASS_NOUNS[resolved]} tickers.{first} {shown} Correct "
+            "those values, or pass on_error=dm.OnError.LOG to give their rows a null symbol."
         )
+    consequence = f"becomes a null {column}"
     for value in sorted(refused):  # logged here, in sorted order; the formula repeats none
-        bad.log(value, "canonicalize_symbols: %s; its rows get a null %s", refused[value], column)
+        bad.log(value, "canonicalize_symbols: %r %s. %s", value, consequence, refused[value])
     massive_canonical_symbol = _row_converter(
-        convert, effect=effect, log=bad, consequence=f"its rows get a null {column}"
+        convert, effect=effect, log=bad, consequence=consequence
     )
     # Deephaven resolves the formula's function from this call's local variables, by the name
     # the helper gives it.
@@ -282,13 +286,17 @@ def _arguments(
         # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
         logger.debug("canonicalize_symbols refused: no column %r in %s", column, list(types))
         remedy = (
-            f"pass column={texts[0]!r}, or the name of another String column of symbols"
+            f"Pass column={texts[0]!r}, or the name of another String column of symbols."
             if texts
-            else "it has no String column to read symbols from"
+            else "Pass a table with a String column of symbols."
         )
-        raise ValueError(f"table has no column {column!r} (columns: {', '.join(types)}); {remedy}")
+        named = prose_list(types, "columns", shown=len(types))
+        raise ValueError(f"table has no column {column!r}. Its columns are {named}. {remedy}")
     if types[column] != dtypes.string:
-        raise ValueError(f"column {column!r} must be a String column of the table")
+        raise ValueError(
+            f"column={column!r} names a column of {types[column]}, not of String. Pass the "
+            "name of a String column of symbols."
+        )
     return resolved, chosen, mode
 
 

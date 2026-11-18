@@ -133,9 +133,9 @@ larger result is grouped in slices of this size, all published in the one `add`.
 go once Deephaven ships a fix."""
 
 BACKGROUND_NOTE: Final = (
-    "Read in the background: no rows until the download completes, then the complete result "
-    "in one update, which never changes; m.streams() shows LOADING, then DONE or FAILED. "
-    "wait=True waits for the rows instead."
+    "This table is read in the background. It has no rows until the download completes, then "
+    "gets the complete result in one update, which never changes. m.streams() shows LOADING, "
+    "then DONE or FAILED. Pass wait=True to the call to wait for the rows instead."
 )
 """The sentence a background read's table description ends with. Deephaven fixes a table's
 description when the table is created, so it states the behaviour; `m.streams()` shows the
@@ -314,14 +314,18 @@ class BackgroundRead:
                 if not self._stopped_by(f"{type(error).__name__}: {error}"):
                     failure = MassiveError(
                         library_bug(
-                            f"{self._name}: the background read failed: "
+                            f"{self._name}: the background read failed on an unexpected "
                             f"{type(error).__name__}: {error}"
                         ),
                         source=ErrorSource.LIBRARY,
                     )
                     mark_failure_logged(failure)  # logged here, with its trace
                     logger.exception(
-                        "call %d failed after %.3f s. %s", self._call, self._took, LIBRARY_BUG
+                        "%s background read stream %d failed after %.3f s. %s",
+                        self._name,
+                        self._call,
+                        self._took,
+                        LIBRARY_BUG,
                     )
                     self._fail_once(core, failure)
 
@@ -336,7 +340,15 @@ class BackgroundRead:
             core: The session's core.
             error: The error.
         """
-        log_failure(logger, error, "call %d failed after %.3f s: %s", self._call, self._took)
+        log_failure(
+            logger,
+            error,
+            "%s background read stream %d failed after %.3f s: %s",
+            self._name,
+            self._call,
+            self._took,
+            named=self._name,
+        )
         self._fail_once(core, error)
 
     @property
@@ -589,7 +601,7 @@ def open_read(
 
     Raises:
         MassiveError: If the session closed after the read was registered but before the
-            read was submitted (`"MassiveSession #1 is closed; ..."`). One closed before the read
+            read was submitted (`session_closed`). One closed before the read
             could be registered raises the `MassiveError` of `WorkerTables.track`.
             A close after the read was submitted fails its table instead.
     """

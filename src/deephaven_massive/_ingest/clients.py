@@ -26,7 +26,7 @@ import weakref
 from typing import TYPE_CHECKING
 
 from deephaven_massive import _massive
-from deephaven_massive._errors import NEW_SESSION, SessionClosedError
+from deephaven_massive._errors import SessionClosedError, session_closed
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import RestEndpoints, RestState
@@ -111,11 +111,11 @@ class SessionClients:
 
         Raises:
             SessionClosedError: If the core has been garbage-collected: the session is gone, as
-                if closed (`"MassiveSession #1 is closed; ..."`).
+                if closed (`"This session is closed. ..."`).
         """
         core = self._core()
         if core is None:
-            raise SessionClosedError(f"{self._label} is closed; {NEW_SESSION}")
+            raise SessionClosedError(session_closed())
         return core
 
     def rest(self) -> RestEndpoints:
@@ -280,7 +280,8 @@ class SessionClients:
         access_key_id, secret_access_key = config.s3_access_key_id, config.s3_secret_access_key
         if access_key_id is None or secret_access_key is None:
             raise ValueError(
-                "flat files need MassiveConfig s3_access_key_id and s3_secret_access_key"
+                "Reading flat files needs S3 credentials. Pass s3_access_key_id and "
+                "s3_secret_access_key to dm.MassiveConfig."
             )
         factory = _massive.FlatFileClient
         with core.registry_lock:

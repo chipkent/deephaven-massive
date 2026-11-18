@@ -256,8 +256,8 @@ class StocksFinancialsNamespace(Namespace):
         # balance sheets answered HTTP 200 with no rows, which would read as no statements.
         if timeframe is Timeframe.TRAILING_TWELVE_MONTHS:
             raise ValueError(
-                "balance sheets have no trailing twelve months; "
-                "use dm.Timeframe.ANNUAL or dm.Timeframe.QUARTERLY"
+                "Balance sheets have no timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS. Pass "
+                "timeframe=dm.Timeframe.ANNUAL or timeframe=dm.Timeframe.QUARTERLY."
             )
         return _statement_query(
             self._core,

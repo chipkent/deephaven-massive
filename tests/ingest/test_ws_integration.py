@@ -149,7 +149,7 @@ def test_what_massive_says_to_a_delayed_key_on_the_real_time_feed(
     of the snapshot does not refuse the stream first, subscribes `AM.AAPL`, minute bars, and
     records the stream's error and the connection's last error. The refusal does not depend on
     the market being open. Passes when every error is a refusal (`refusals.is_entitlement_text`,
-    such as the library's `refused the subscription to` quoting Massive): the refusal is the
+    such as the library's `Massive answered the subscription to`): the refusal is the
     evidence the question asks for. Fails on any other error, such as an outage or a taken
     connection, which says nothing of what Massive allows. Skips, quoting the rows, when Massive
     served the stream with no error.
@@ -634,7 +634,7 @@ def test_fmv_streams_from_its_host_beside_a_delayed_stocks_stream(
     refused = {
         name: error
         for name, (state, error) in states.items()
-        if state == "FAILED" and error and "refused the subscription to" in error
+        if state == "FAILED" and error and "Massive answered the subscription to" in error
     }
     if refused:
         pytest.skip(f"Massive refused: {refused}")
@@ -680,7 +680,7 @@ def test_admin_messages_on_the_delayed_options_feed(
         session.close()
     evidence(f"AD.* acknowledged topics {acked}; streams {states}")
     state, error = states["options.admin_messages"]
-    if state == "FAILED" and error and "refused the subscription to" in error:
+    if state == "FAILED" and error and "Massive answered the subscription to" in error:
         pytest.skip(f"Massive refused: {error}")
     assert acked, "Massive neither acknowledged nor refused AD.* on the delayed options feed"
     assert state == "RUNNING", f"the admin messages stream is {state}: {error}"

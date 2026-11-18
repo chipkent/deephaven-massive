@@ -95,7 +95,12 @@ from deephaven_massive._errors import (
     library_bug,
     required,
 )
-from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
+from deephaven_massive._log_limits import (
+    bounded_list,
+    log_failure,
+    mark_failure_logged,
+    prose_list,
+)
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
@@ -611,13 +616,13 @@ def _outage_failure(
         limit: `MassiveConfig.max_outage`, in seconds.
 
     Returns:
-        The error, such as `"AAPL has failed for 340 s, as long as MassiveConfig.max_outage
-        allows (300 s); the latest error: HTTP 503: ..."`.
+        The error, such as `"AAPL has failed for 340 s, as long as max_outage=300 s allows.
+        The latest error: Massive answered ..."`.
     """
     failure = copy_error(
         error,
-        f"{name} has failed for {failing_for:.0f} s, as long as MassiveConfig.max_outage "
-        f"allows ({limit:g} s); the latest error: {error}",
+        f"{name} has failed for {failing_for:.0f} s, as long as max_outage={limit:g} s "
+        f"allows. The latest error: {error}",
     )
     failure.__cause__ = error
     return failure
@@ -878,17 +883,18 @@ class FollowCoordinator:
             action()
         except Exception as error:  # one result's defect; the others go on
             logger.exception(  # the traceback names the error and its text
-                "call %d follow: %s failed (%s). %s",
+                "%s call %d: %s failed. %s",
+                result.read.dataset,
                 result.read.call,
                 step,
-                result.read.dataset,
                 LIBRARY_BUG,
             )
             try:
                 self._defect(result, step, error)
             except Exception:
                 logger.exception(
-                    "call %d follow: failing its table after %s failed raised too. %s",
+                    "%s call %d: stopping its table after %s failed raised an error too. %s",
+                    result.read.dataset,
                     result.read.call,
                     step,
                     LIBRARY_BUG,
@@ -954,8 +960,8 @@ class FollowCoordinator:
         """
         failure = MassiveError(
             library_bug(
-                f"{result.read.dataset}: the followed read failed {step}: "
-                f"{type(error).__name__}: {error}"
+                f"{result.read.dataset}: the read that follows its symbol table failed while "
+                f"{step}: {error!r}"
             ),
             source=ErrorSource.LIBRARY,
         )
@@ -1277,15 +1283,14 @@ class FollowCoordinator:
             level = logging.ERROR
         logger.log(
             level,
-            "%s call %d: %s failed after %d %s (%s), and is left out of the result; "
-            "delete and re-add its row to read it again: %s",
+            "%s call %d: %s failed after %d %s and is left out of the result. %s To read it "
+            "again, delete its row from the symbol table and add it back.",
             result.read.dataset,
             result.read.call,
             name,
             attempts,
             "attempt" if attempts == 1 else "attempts",
-            "retryable" if error.is_retryable else "not retryable",
-            symbol.error,
+            symbol.error.removesuffix(".") + ".",
             exc_info=error if level == logging.ERROR else None,  # a bug, with its traceback
         )
         self._call_time_outcome(result, name, error)
@@ -1470,13 +1475,18 @@ class FollowCoordinator:
             except BaseException as error:
                 table_error = MassiveError(
                     library_bug(
-                        f"{read.dataset}: the read of {', '.join(names)} failed: "
-                        f"{type(error).__name__}: {error}"
+                        f"{read.dataset}: the read of {prose_list(names, 'symbols')} failed: "
+                        f"{error!r}"
                     ),
                     source=ErrorSource.LIBRARY,
                 )
                 mark_failure_logged(table_error)  # logged here, with its trace
-                logger.exception("call %d follow: a read failed. %s", read.call, LIBRARY_BUG)
+                logger.exception(
+                    "%s call %d: a read of its symbols failed. %s",
+                    read.dataset,
+                    read.call,
+                    LIBRARY_BUG,
+                )
         self.post(
             _Outcome(
                 read,
@@ -1501,9 +1511,10 @@ class FollowCoordinator:
         log_failure(
             logger,
             error,
-            "%s call %d: the followed read failed, and its table with it: %s",
+            "%s call %d: the read failed, and so did its table: %s",
             result.read.dataset,
             result.read.call,
+            named=result.read.dataset,
         )
         result.read.fail_table(error)
 
@@ -1661,7 +1672,10 @@ class FollowCoordinator:
             death: What ended the thread.
         """
         error = MassiveError(
-            library_bug(f"the follow coordinator died ({death!r}); this table no longer updates"),
+            library_bug(
+                f"The library thread that follows symbol tables died: {death!r}. This table no "
+                "longer updates"
+            ),
             source=ErrorSource.LIBRARY,
         )
         for result in self._results.values():

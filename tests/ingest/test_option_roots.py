@@ -132,8 +132,10 @@ def test_a_failed_lookup_raises_massive_s_error_naming_the_root_and_is_retried(
     reader = reader_of(session)
     with pytest.raises(
         dm.EntitlementError,
-        match=rf"^option root 'SPXW' cannot be classified as an index or not: reading Massive's "
-        rf"Contract Overview of {SPXW} failed",
+        match=rf"^The library cannot tell whether the option root 'SPXW' is an index, since "
+        rf"reading Massive's Contract Overview of {SPXW} failed\. Massive answered GET "
+        rf"/v3/reference/options/contracts/O%3ASPXW261218C06000000\?as_of=2026-11-13 on "
+        r'127\.0\.0\.1 with HTTP 403: "\{"status": "ERROR"\}"\.$',
     ) as raised:
         spxw(reader)
     assert raised.value.status == 403
@@ -148,8 +150,10 @@ def test_a_failed_index_list_raises_massive_s_error_naming_the_root_and_is_retri
     reader = reader_of(session)
     with pytest.raises(
         dm.EntitlementError,
-        match=r"^option root 'SPXW' cannot be classified as an index or not: reading Massive's "
-        r"index ticker list failed",
+        match=r"^The library cannot tell whether the option root 'SPXW' is an index, since "
+        r"reading Massive's index ticker list failed\. Massive answered GET "
+        r"/v3/reference/tickers\?market=indices&active=true&limit=1000 on 127\.0\.0\.1 with "
+        r'HTTP 403: "\{"status": "ERROR"\}"\.$',
     ) as raised:
         spxw(reader)
     assert raised.value.status == 403

@@ -1,6 +1,8 @@
 """Tests for `_error_policy.py`: the error policy, its defaults, and how a call's resolves."""
 
 import dataclasses
+import re
+from dataclasses import fields
 
 import pytest
 
@@ -68,7 +70,9 @@ def test_the_first_argument_is_positional_only() -> None:
 @pytest.mark.parametrize("cause", CAUSES)
 def test_a_cause_must_be_the_enum(cause: str) -> None:
     # A plain string equal to a member's value is refused too: `OnError` is a `StrEnum`.
-    with pytest.raises(TypeError, match=f"{cause} must be dm.OnError, e.g. dm.OnError.RAISE"):
+    with pytest.raises(
+        TypeError, match=rf"^{cause} must be dm\.OnError, such as dm\.OnError\.RAISE, not 'raise'$"
+    ):
         ErrorPolicy(**{cause: "raise"})  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -129,18 +133,54 @@ def test_check_policy_returns_a_policy() -> None:
 
 
 def test_check_policy_shows_how_to_set_every_cause_to_a_bare_member() -> None:
-    with pytest.raises(TypeError, match=r"pass dm.ErrorPolicy\(dm.OnError.RAISE\)"):
+    refusal = (
+        "on_error=dm.OnError.RAISE is not a dm.ErrorPolicy. To set every cause to RAISE, pass "
+        "on_error=dm.ErrorPolicy(dm.OnError.RAISE)."
+    )
+    with pytest.raises(TypeError, match=rf"^{re.escape(refusal)}$"):
         check_policy(dm.OnError.RAISE)
+    # The policy it names sets every cause to the member.
+    named = check_policy(dm.ErrorPolicy(dm.OnError.RAISE))
+    assert set(_settings(named).values()) == {dm.OnError.RAISE}
 
 
 @pytest.mark.parametrize("value", [None, "raise", {"malformed_rows": "raise"}])
 def test_check_policy_refuses_anything_else(value: object) -> None:
-    with pytest.raises(TypeError, match=r"on_error must be dm\.ErrorPolicy, such as .*, not "):
+    refusal = (
+        "on_error must be dm.ErrorPolicy, such as dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE), "
+        f"not {type(value).__name__}"
+    )
+    with pytest.raises(TypeError, match=rf"^{re.escape(refusal)}$"):
         check_policy(value)
 
 
-def test_the_hint_names_the_argument_and_the_settings_file_form() -> None:
-    assert policy_hint("malformed_rows", dm.OnError.LOG) == (
-        "pass on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the dataset method or "
-        "to MassiveConfig, or write 'on_error: {malformed_rows: log}' in the settings file"
+def test_the_hint_is_a_sentence_naming_the_policy_to_pass() -> None:
+    assert policy_hint(dm.OnError.LOG, "malformed_rows") == (
+        "Pass on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
     )
+
+
+def test_the_hint_names_every_cause_it_is_given_in_order() -> None:
+    assert policy_hint(dm.OnError.LOG, "unreadable_keys", "unconvertible_values") == (
+        "Pass on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG, "
+        "unconvertible_values=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+    )
+
+
+def test_the_hint_starts_with_its_purpose_when_given_one() -> None:
+    hint = policy_hint(
+        dm.OnError.LOG, "malformed_rows", purpose="To skip such lines and keep the rest of the file"
+    )
+    assert hint == (
+        "To skip such lines and keep the rest of the file, pass "
+        "on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+    )
+
+
+@pytest.mark.parametrize("name", [field.name for field in fields(ErrorPolicy)])
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_the_policy_the_hint_names_sets_the_cause(name: str, setting: dm.OnError) -> None:
+    # The advice works for every cause: the keyword the hint names is one the policy takes.
+    assert f"dm.ErrorPolicy({name}=dm.OnError.{setting.name})" in policy_hint(setting, name)
+    assert getattr(dm.ErrorPolicy(**{name: setting}), name) is setting

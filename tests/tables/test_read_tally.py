@@ -1,5 +1,6 @@
 """Tests for judging a read's unreadable rows across all its pages, files, and parts."""
 
+import logging
 import threading
 
 import pyarrow as pa
@@ -75,7 +76,9 @@ def test_threads_adding_at_once_lose_no_count() -> None:
         tally.check("stocks.trades")
 
 
-def test_judge_fails_only_the_symbols_a_wholly_withheld_read_gave_rows() -> None:
+def test_judge_fails_only_the_symbols_a_wholly_withheld_read_gave_rows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     rows = dh_arrow.to_table(pa.table({"x": pa.array([], pa.int64())}))
     own = dm.MassiveError("IBM's own failure")
     outcomes: dict[str, SymbolOutcome] = {
@@ -88,11 +91,22 @@ def test_judge_fails_only_the_symbols_a_wholly_withheld_read_gave_rows() -> None
     assert whole.judge("stocks.trades", outcomes) == outcomes
     lost = ReadTally()
     lost.add(1, withheld(1, "first"), source="GET /v3/trades/AAPL")
-    judged = lost.judge("stocks.trades", outcomes)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._tables.read_tally"):
+        judged = lost.judge("stocks.trades", outcomes)
     assert list(judged) == ["AAPL", "MSFT", "IBM"]
     failed = judged["AAPL"]
     assert isinstance(failed, SymbolFailure)
     assert isinstance(failed.error, RowDataError)
-    assert "none of the 1 rows" in str(failed.error)
+    assert str(failed.error) == (
+        "stocks.trades: the library could read none of the 1 rows of the read's symbols and "
+        "window from GET /v3/trades/AAPL whole, so it withheld them all. First. m.problems() "
+        "counts the withheld rows by cause and symbol."
+    )
+    assert caplog.messages[-1] == (
+        "stocks.trades by symbol fails each symbol the read gave rows: the library could read "
+        "none of the 1 rows of the read's symbols and window from GET /v3/trades/AAPL whole, "
+        "so it withheld them all. First. m.problems() counts the withheld rows by cause and "
+        "symbol."
+    )
     assert judged["MSFT"] is outcomes["MSFT"]
     assert judged["IBM"] is outcomes["IBM"]

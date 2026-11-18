@@ -8,7 +8,8 @@ wrong type is refused here instead of reaching Massive as surprising text.
 
 Names arrive in wire form (`"timestamp.gte"`); the library's filter spelling is translated
 before the client. The functions are pure and never modify their arguments, so they are safe
-from any thread. This module imports only the standard library, `net.origins`, and `spec`.
+from any thread. This module imports only the standard library, `net.errors`, `net.origins`, and
+`spec`.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT
 from deephaven_massive._massive.net.origins import origin_of
 from deephaven_massive._massive.spec.values import encode_value
 
@@ -57,16 +59,17 @@ def request_target(
     path_names = {name for name, param in params.items() if param.in_path}
     given = dict(path_params)
     if set(given) != path_names or any(value is None for value in given.values()):
+        named = sorted(name for name, value in given.items() if value is not None)
         raise ValueError(
-            f"{rest_path.template} takes path parameters {sorted(path_names)}, "
-            f"given {sorted(name for name, value in given.items() if value is not None)}"
+            f"A request to Massive gave the path parameters {_names(named)}, where its endpoint "
+            f"takes {_names(sorted(path_names))}. {LIBRARY_BUG_REPORT}"
         )
     texts = {name: encode_value(params[name], value) for name, value in given.items()}
     slashed = sorted(name for name, text in texts.items() if "/" in text)
     if slashed:
         raise ValueError(
-            f"{rest_path.template}: path parameters {slashed} contain '/', which Massive cannot "
-            "read inside a path segment"
+            f"The value of the path parameter {slashed[0]!r} contains '/', which Massive cannot "
+            "read inside a path segment."
         )
     segments = {name: quote(text, safe="") for name, text in texts.items()}
     path = rest_path.template.format_map(segments)
@@ -74,10 +77,28 @@ def request_target(
     for name, value in dict(query_params).items():
         param = params.get(name)
         if param is None or param.in_path:
-            raise ValueError(f"{rest_path.template} has no query parameter {name!r}")
+            raise ValueError(
+                f"A request to GET {path} named the query parameter {name!r}, which that "
+                f"endpoint does not take. {LIBRARY_BUG_REPORT}"
+            )
         if value is not None:
             query.append((name, encode_value(param, value)))
     return f"{path}?{urlencode(query, quote_via=quote)}" if query else path
+
+
+def _names(names: list[str]) -> str:
+    """Return parameter names as prose, such as `"'date', 'extra' and 'stockTicker'"`.
+
+    Args:
+        names: The names, in the order to give them.
+
+    Returns:
+        The names quoted, joined with commas and a final "and"; `"none"` for no name.
+    """
+    if not names:
+        return "none"
+    *head, last = [repr(name) for name in names]
+    return f"{', '.join(head)} and {last}" if head else last
 
 
 def next_target(next_url: str, origin: Origin) -> str:
@@ -115,5 +136,8 @@ def next_target(next_url: str, origin: Origin) -> str:
         points_to = None
     if points_to != origin:
         shown = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}{target}"
-        raise ValueError(f"next_url {shown!r} leaves {origin[0]}://{origin[1]}:{origin[2]}")
+        raise ValueError(
+            f"next_url {shown!r} points to another server than "
+            f"{origin[0]}://{origin[1]}:{origin[2]}."
+        )
     return target

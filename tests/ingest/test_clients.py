@@ -14,7 +14,7 @@ import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._enums import ChannelFamily, Recency
 from deephaven_massive._error_policy import ResolvedPolicy
-from deephaven_massive._errors import NEW_SESSION
+from deephaven_massive._errors import session_closed
 from deephaven_massive._ingest import clients, flatfiles, rate_limits, rest, ws
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._tables.session_core import SessionCore
@@ -84,7 +84,11 @@ def test_the_flat_file_transport_needs_s3_credentials(fake_s3: FakeS3) -> None:
         dataclasses.replace(CONFIG, s3_access_key_id=None, s3_secret_access_key=None)
     )
     try:
-        with pytest.raises(ValueError, match="flat files need MassiveConfig s3_access_key_id"):
+        with pytest.raises(
+            ValueError,
+            match=r"^Reading flat files needs S3 credentials\. Pass s3_access_key_id and "
+            r"s3_secret_access_key to dm\.MassiveConfig\.$",
+        ):
             m._core.flat_file_transport()
     finally:
         m.close()
@@ -308,13 +312,10 @@ def test_a_transport_holds_the_core_itself(session: dm.MassiveSession) -> None:
 def test_clients_whose_session_is_gone_report_it_closed(fake_s3: FakeS3) -> None:
     m = dm.MassiveSession(CONFIG)
     clients = clients_of(m)
-    label = m._core.label
     m.close()
     del m
     gc.collect()
-    with pytest.raises(
-        dm.MassiveError, match=rf"^{label} is closed; " + re.escape(NEW_SESSION) + "$"
-    ):
+    with pytest.raises(dm.MassiveError, match="^" + re.escape(session_closed()) + "$"):
         clients.flat_files()
 
 
