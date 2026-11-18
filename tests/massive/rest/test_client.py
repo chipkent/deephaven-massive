@@ -5,6 +5,7 @@ Time is virtual: every client gets a `FakeClock`, so retry waits are recorded, n
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -19,7 +20,7 @@ import urllib3
 from typing_extensions import override
 
 from deephaven_massive._massive import WireFailure
-from deephaven_massive._massive.net import USER_AGENT, http
+from deephaven_massive._massive.net import USER_AGENT, codec, http
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import (
     WireAuthError,
@@ -1625,7 +1626,12 @@ def test_a_request_interrupted_on_the_wire_hands_its_slot_back(
 def test_a_200_whose_page_cannot_be_read_is_logged_with_its_body(
     client: RestClient, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    fake_rest.reply("/v3/trades/AAPL", Reply(b"<html>not json</html>"))
+    body = b"<html>not json</html>"
+    # The decoder's own words differ between orjson and the standard library and between their
+    # versions, so the test takes them from the decoder the client uses.
+    with pytest.raises(json.JSONDecodeError) as decoded:
+        codec.loads(body)
+    fake_rest.reply("/v3/trades/AAPL", Reply(body))
     with (
         caplog.at_level(logging.DEBUG, logger=client_module.__name__),
         pytest.raises(WireError) as info,
@@ -1637,8 +1643,8 @@ def test_a_200_whose_page_cannot_be_read_is_logged_with_its_body(
     )
     assert str(info.value) == (
         "Massive answered GET /v3/trades/AAPL on 127.0.0.1 with HTTP 200, and the library could "
-        'not read the answer: the body is not JSON and starts "<html>not json</html>": Expecting '
-        "value: line 1 column 1 (char 0)."
+        f'not read the answer: the body is not JSON and starts "<html>not json</html>": '
+        f"{decoded.value}."
     )
     assert line.endswith(f"cannot be read. {info.value} Body: <html>not json</html>")
 

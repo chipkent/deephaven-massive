@@ -695,30 +695,25 @@ def test_a_pandas_timestamp_without_a_zone_or_value_is_refused() -> None:
         parse_date_like(late, "start")
 
 
+def _whole(value: np.datetime64, problem: str) -> tuple[np.datetime64, str]:
+    """Pin the whole refusal of `value`, as this numpy version's repr shows the value.
+
+    Returns:
+        The value and the pattern that matches its whole message.
+    """
+    return value, f"^start={re.escape(repr(value))} {re.escape(problem)}$"
+
+
+_NO_TIME = "is not a time. Pass a date or an aware datetime."
+_PAST_9999 = "is not a time from year 1 to 9999. Pass a time in those years."
+
+
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        (
-            np.datetime64("NaT", "D"),
-            (
-                r"^start=np\.datetime64\('NaT','D'\) is not a time\. "
-                r"Pass a date or an aware datetime\.$"
-            ),
-        ),
-        (
-            np.datetime64("NaT", "ns"),
-            (
-                r"^start=np\.datetime64\('NaT','ns'\) is not a time\. "
-                r"Pass a date or an aware datetime\.$"
-            ),
-        ),
-        (
-            np.datetime64("10000-01-01"),
-            (
-                r"^start=np\.datetime64\('10000-01-01'\) is not a time from year 1 to 9999\. "
-                r"Pass a time in those years\.$"
-            ),
-        ),
+        _whole(np.datetime64("NaT", "D"), _NO_TIME),
+        _whole(np.datetime64("NaT", "ns"), _NO_TIME),
+        _whole(np.datetime64("10000-01-01"), _PAST_9999),
         (np.datetime64("10000-01-01T00:00"), "is not a time from year 1 to 9999"),
     ],
 )
