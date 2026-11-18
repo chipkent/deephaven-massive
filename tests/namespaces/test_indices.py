@@ -680,10 +680,12 @@ def test_index_bars_of_a_day_or_longer_start_at_midnight_in_chicago(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING)
-    # The range stamps a day at midnight in Chicago (01:00 New York time), which the bar keeps;
-    # Massive's `/prev` sample stamps it at the 16:00 close, which moves to the same start.
+    # The range stamps a day at midnight in Chicago (01:00 New York time), which the bar keeps,
+    # and a range of dates requests those Chicago days; Massive's `/prev` sample stamps the day
+    # at the 16:00 close, which moves to the same start.
     day = date(2025, 6, 2)
-    day_path = f"/v2/aggs/ticker/I:SPX/range/1/day/{MIDNIGHT_MS}/{MIDNIGHT_MS + DAY_MS - 1}"
+    chicago = MIDNIGHT_MS + HOUR_MS
+    day_path = f"/v2/aggs/ticker/I:SPX/range/1/day/{chicago}/{chicago + DAY_MS - 1}"
     fake_rest.reply(quote(day_path), bars_reply(MIDNIGHT_MS + HOUR_MS))
     fake_rest.reply(
         quote(PREVIOUS.format(indicesTicker="I:SPX")), bars_reply(MIDNIGHT_MS + 16 * HOUR_MS)
@@ -700,7 +702,7 @@ def test_index_bars_of_a_day_or_longer_start_at_midnight_in_chicago(
     # weekend: it starts at that stamp and ends at the next Sunday's midnight in Chicago. A
     # range must reach the Saturday.
     sunday = MIDNIGHT_MS - DAY_MS
-    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{sunday}/{MIDNIGHT_MS + 6 * DAY_MS - 1}"
+    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{sunday + HOUR_MS}/{chicago + 6 * DAY_MS - 1}"
     fake_rest.reply(
         quote(week_path),
         bars_reply(sunday + HOUR_MS),
@@ -753,16 +755,18 @@ def test_an_index_day_bar_is_kept_once_its_end_has_passed(
     kept: int,
 ) -> None:
     # An index day bar ends at 01:00 New York time the next day, so at 00:30 it is still
-    # open and `history()` leaves it out, as a join on its end would.
+    # open and `history()` leaves it out, as a join on its end would: no day has ended, so
+    # nothing is requested.
     now = datetime.fromtimestamp((MIDNIGHT_MS + DAY_MS) / 1000 + minutes * 60, UTC)
     monkeypatch.setattr(history_source, "_now", lambda: now)
     day = date(2025, 6, 2)
-    # An open end reads through the end of today.
-    path = f"/v2/aggs/ticker/I:SPX/range/1/day/{MIDNIGHT_MS}/{MIDNIGHT_MS + 2 * DAY_MS - 1}"
-    fake_rest.reply(quote(path), bars_reply(MIDNIGHT_MS + HOUR_MS))
+    # An open end reads through the end of today's Chicago day.
+    chicago = MIDNIGHT_MS + HOUR_MS
+    path = f"/v2/aggs/ticker/I:SPX/range/1/day/{chicago}/{chicago + 2 * DAY_MS - 1}"
+    fake_rest.reply(quote(path), bars_reply(chicago))
     q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
     out = rows(q.history(day, None, source=dm.HistorySource.REST, wait=True))
-    assert [p for p, _ in fake_rest.get_queries()] == [path]
+    assert [p for p, _ in fake_rest.get_queries()] == [path] * kept
     assert [r["TimestampEnd"] for r in out] == [(MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS] * kept
 
 

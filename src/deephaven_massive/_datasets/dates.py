@@ -20,9 +20,10 @@ A range has two kinds of bounds, and one range never mixes them (`check_order`):
 
 - **Dates** are whole days, inclusive at both ends, so `history("2025-03-03", "2025-03-03")`
   is the whole of March 3 (`DaySpan`). A day is a calendar day in the asset class's *day
-  zone*: America/New_York for stocks, options, and indices, UTC for forex and crypto. A
-  futures date names the trading session whose `session_end_date` equals it, since a session
-  is the futures trading day.
+  zone*: America/New_York for stocks, options, and indices, UTC for forex and crypto. For
+  bars of a day or longer it is a day of the class's *bar zone* (`bar_zone`), Chicago for
+  indices, whose bars Massive starts at midnight there. A futures date names the trading
+  session whose `session_end_date` equals it, since a session is the futures trading day.
 - **Aware datetimes** are exact instants, a half-open range `[start, end)` (`TimeRange`).
   Equal instants are an empty range, not an error.
 
