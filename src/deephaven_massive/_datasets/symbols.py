@@ -579,10 +579,10 @@ def _convert_stock(text: str) -> str:
     _refuse_surrounding_whitespace(text)
     if text.strip() and _SEPARATORS.intersection(text):
         raise ValueError(
-            f"{text!r} is not a Massive stock ticker. If it is Yahoo's spelling, pass "
-            "convention=dm.SymbolConvention.YAHOO to dm.canonical_symbol or "
-            "dm.canonicalize_symbols, or dm.SymbolConvention.NASDAQ or dm.SymbolConvention.CMS "
-            "for those conventions."
+            f"{text!r} is not a Massive stock ticker. If it is Yahoo's spelling, convert it with "
+            f"dm.canonical_symbol({text!r}, dm.AssetClass.STOCKS, "
+            "convention=dm.SymbolConvention.YAHOO), or name dm.SymbolConvention.NASDAQ or "
+            "dm.SymbolConvention.CMS for those spellings."
         )
     if text == text.lower() != text.upper():
         raise ValueError(

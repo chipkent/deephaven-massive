@@ -429,8 +429,13 @@ def test_the_massive_convention_is_the_default_for_every_class() -> None:
     assert dm.canonical_symbol("EUR/USD", FX) == "C:EURUSD"
     assert dm.canonical_symbol("KIMpL", STK, convention=massive) == "KIMpL"
     assert dm.canonical_symbol("SPX", IDX, convention=massive) == "I:SPX"
-    with pytest.raises(ValueError, match="If it is Yahoo's spelling"):
+    with pytest.raises(ValueError, match=re.escape(stock_conventions_fix("BRK-B"))):
         dm.canonical_symbol("BRK-B", STK, convention=massive)  # Yahoo's or Nasdaq's dash
+    # The call the refusal suggests converts it.
+    assert (
+        dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)
+        == "BRK.B"
+    )
 
 
 def test_converter_enums_reject_text() -> None:
@@ -463,12 +468,15 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
         convert(5)
 
 
-STOCK_CONVENTIONS_FIX = (
-    "If it is Yahoo's spelling, pass convention=dm.SymbolConvention.YAHOO to dm.canonical_symbol "
-    "or dm.canonicalize_symbols, or dm.SymbolConvention.NASDAQ or dm.SymbolConvention.CMS for "
-    "those conventions."
-)
-"""The fix that ends the refusal of a stock ticker with another convention's separator."""
+def stock_conventions_fix(text: str) -> str:
+    # The fix that ends the refusal of a stock ticker with another convention's separator.
+    return (
+        f"If it is Yahoo's spelling, convert it with dm.canonical_symbol({text!r}, "
+        "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), or name "
+        "dm.SymbolConvention.NASDAQ or dm.SymbolConvention.CMS for those spellings."
+    )
+
+
 STOCK_FORMS = (
     "is not a Massive stock ticker, which looks like 'AAPL', 'BRK.B', or 'KIMpL'. Pass the "
     "ticker as m.reference.tickers() lists it."
@@ -482,17 +490,17 @@ STOCK_FORMS = (
         (
             dm.canonical_symbol_stock,
             "BRK-B",
-            f"'BRK-B' is not a Massive stock ticker. {STOCK_CONVENTIONS_FIX}",
+            f"'BRK-B' is not a Massive stock ticker. {stock_conventions_fix('BRK-B')}",
         ),
         (
             dm.canonical_symbol_stock,
             "BRK/B",
-            f"'BRK/B' is not a Massive stock ticker. {STOCK_CONVENTIONS_FIX}",
+            f"'BRK/B' is not a Massive stock ticker. {stock_conventions_fix('BRK/B')}",
         ),
         (
             dm.canonical_symbol_stock,
             "BRK B",
-            f"'BRK B' is not a Massive stock ticker. {STOCK_CONVENTIONS_FIX}",
+            f"'BRK B' is not a Massive stock ticker. {stock_conventions_fix('BRK B')}",
         ),
         (
             dm.canonical_symbol_stock,
@@ -779,9 +787,9 @@ def test_a_converter_log_record_names_the_value_its_result_and_the_fix(
     assert caplog.messages == [
         (
             "canonical_symbol: 'BRK-B' becomes None. 'BRK-B' is not a Massive stock ticker. If it "
-            "is Yahoo's spelling, pass convention=dm.SymbolConvention.YAHOO to "
-            "dm.canonical_symbol or dm.canonicalize_symbols, or dm.SymbolConvention.NASDAQ or "
-            "dm.SymbolConvention.CMS for those conventions."
+            "is Yahoo's spelling, convert it with dm.canonical_symbol('BRK-B', "
+            "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), or name "
+            "dm.SymbolConvention.NASDAQ or dm.SymbolConvention.CMS for those spellings."
         )
     ]
 
