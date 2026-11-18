@@ -315,7 +315,7 @@ def value_table(table: Table, *, argument: str, parameter: str, underlying: bool
         raise ValueError(
             f"The table passed as {argument} has no {column} column. It has "
             f"{prose_list(table.column_names, 'columns')}. Name the column of values {column}, "
-            f'as in t.view("{column} = Value").'
+            f'as in t.rename_columns("{column} = Value").'
         )
     _require_text_column(table, column, what=f"the table passed as {argument}")
     return ValueTable(argument, parameter, column, underlying, table)
@@ -715,7 +715,8 @@ def _normalized_symbols(
             raise ValueError(
                 f"The symbol table has no Symbol column. It has "
                 f"{prose_list(symbols.column_names, 'columns')}. Name the column of tickers "
-                'Symbol, as in t.view("Symbol = Ticker"). For tickers in another spelling, see '
+                'Symbol, as in t.rename_columns("Symbol = Ticker"). For tickers in another '
+                "spelling, see "
                 f"{UNDERLYINGS_IN_ANOTHER_SPELLING}."
             )
         _require_text_column(symbols, "Symbol", what="the symbol table")

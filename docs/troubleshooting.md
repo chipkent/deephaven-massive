@@ -131,8 +131,8 @@ raises it instead.
 | A symbol that used to trade has no rows | The company changed its ticker. | List its changes with `m.reference.ticker_events("META").fetch()`. |
 | A symbol gets no rows, and the log names `unavailable_symbols` | Massive doesn't serve that ticker. | Look it up in Massive's lists: `m.reference.tickers()`, `m.options.contracts()`, or `m.futures.contracts()`. |
 | `... Your plan doesn't include this data timeframe ...` | You asked for data more recent than your plan covers. | End the range earlier. The Plans table on the dataset's [reference page](datasets/README.md) shows how recent each plan's data is. |
-| `EntitlementError: futures.trades: Massive refused the flat files of NYMEX. ...` | You named an exchange in `venues` whose flat files Massive refuses for your key. | Leave that exchange out of `venues`, as the message names it, such as `dm.FuturesVenue.NYMEX`. To skip every refused exchange instead of failing, pass `on_error=dm.ErrorPolicy(refused_venues=dm.OnError.LOG)` ([`on_error.refused_venues`](configuration.md#setting-details)). |
-| `EntitlementError: ...: Massive refused the flat files of every venue the read asked for, ...` | Massive refuses your key the flat files of every exchange the read asked for. | To read from REST instead, pass `source=dm.HistorySource.REST` and contract tickers such as `ESH5` in place of `dm.ALL`. The Plans table on each futures page of the [dataset reference](datasets/README.md) shows what your plan includes. |
+| `EntitlementError: futures.trades: Massive refused the flat files of NYMEX. ...` | You named an exchange in `venues` whose flat files Massive refuses for your key. | Leave the exchange the message names out of `venues`, such as `dm.FuturesVenue.NYMEX`. To skip every refused exchange instead of failing, pass `on_error=dm.ErrorPolicy(refused_venues=dm.OnError.LOG)` ([`on_error.refused_venues`](configuration.md#setting-details)). |
+| `EntitlementError: ...: Massive refused the flat files of every venue the read asked for, ...` | Massive refused the flat files of every exchange the read asked for, usually because your plan includes none of them. | To read from REST instead, pass `source=dm.HistorySource.REST` and contract tickers such as `ESH5` in place of `dm.ALL`. The Plans table on each futures page of the [dataset reference](datasets/README.md) shows what your plan includes. |
 | `... object has no attribute 'history'` | The dataset reads what Massive has now, so its query has `fetch()` and `poll()` instead. | If the dataset method takes `start` and `end`, pass the range there and call `fetch()`, such as `m.stocks.dividends("AAPL", start="2024-01-01", end="2024-12-31").fetch()`. |
 | `... object has no attribute 'fetch'` | The dataset streams or reads a past range, so its query has no `fetch()`. | Call `history(start, end)` for a range. For each symbol's latest row, call the dataset's one-row counterpart, such as `m.stocks.last_trade(...)`. `dm.datasets()` lists each dataset's methods. |
 | Rows are missing, and the log names `unreadable_keys`, `unreadable_symbols`, or `unconvertible_values` | Massive sent a row whose value, symbol, time, or other key the library can't read. The library leaves the row out of the table and lists it in [`m.problems()`](#problems) with its cause. | Nothing in your code: the row is Massive's data, and the row's `Detail` in `m.problems()` gives what Massive sent and why, for a report to Massive. To fail the read instead, pass the dataset method `on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.RAISE, unreadable_symbols=dm.OnError.RAISE, unconvertible_values=dm.OnError.RAISE)`, as [Bad symbols and rows](configuration.md#on-error) shows. |
@@ -155,10 +155,10 @@ failed, `Error` in its `m.streams()` row says why.
 | A watchlist row never appears, and `m.problems()` names its value | The value isn't Massive's exact ticker, so the table skips the row. | Fix or delete the row. [`symbols`](datasets/README.md#symbols) shows Massive's spelling for each asset class. |
 | A row of a table you converted never appears | `dm.canonicalize_symbols` couldn't convert it, so its `Symbol` is null, and every dataset skips the row. | Fix the rows in the table you started from. `.where("isNull(Symbol)")` on the converted table lists them. [Symbols from another source](../README.md#convert-symbols) shows the conversion. |
 | `Another connection with this API key took the WebSocket connection ...` | Massive allows your account one connection per asset class, and a newer connection with your key took this one's place. It came from another program, or from a session on this server with different streaming settings. | Stop the other program, or give both sessions the same `MassiveConfig`. Then run the line that made the table again. To take the connection back automatically, see [`connection_taken`](configuration.md#setting-details). |
-| `... longer than max_outage= ...` or `... which reaches max_outage= ...` | The table went without data it needs, or its poll cycles kept failing, for as long as `max_outage` allows, which defaults to 300 seconds. The message says what it waited for. | To allow longer outages, raise [`max_outage`](configuration.md#setting-details). |
+| `... longer than max_outage= ...` or `... which reaches max_outage= ...` | The table had no data, or its polls kept failing, for `max_outage` seconds. The default is 300. The message says what the table waited for. | To allow longer outages, raise [`max_outage`](configuration.md#setting-details). Then run the line that made the table again. |
 | `... as long as max_outage= ... allows ...` in `Error` of `m.symbol_reads()` | A watchlist symbol's reads kept failing with a temporary error, such as a rate limit. They failed for `max_outage` seconds. | Delete the symbol's row from the watchlist and add it back to read it again. To keep trying longer, raise [`max_outage`](configuration.md#setting-details). |
 | `... MB the library keeps for one connection ...` | Deephaven fell behind the stream, or stopped while a console command ran. The waiting rows reached the library's 1,024 MB limit for one connection, so every live table on that connection stopped. | Keep console commands short, and stream fewer symbols. Then run the line that made the table again. |
-| `Massive answered GET ... with HTTP 429 ...` and `The next request goes at ..., past the ... s this read waits for Massive's pauses` in a read's `Error`, or in a `poll_cycle_failed` row's `Detail` in `m.problems()` | Waiting out Massive's rate-limit pause would take the read or poll cycle past how long it waits: `max_outage`, or 90 s for a console read with `wait=True`. The usual cause is another program using the same Massive account. | Stop the other program, then call the method again, or set `rest_requests_per_minute` in `dm.MassiveConfig` to pace requests. A `poll()` table still `RUNNING` tries again by itself at its next poll. |
+| `... past the ... s this read waits for Massive's pauses ...` in a table's `Error` or in a `Detail` of `m.problems()` | Massive paused your requests for longer than the read waits. The usual cause is another program using the same Massive account. | Stop the other program. If the table failed, run the line that made it again. A `poll()` table that is still `RUNNING` tries again at its next poll. To keep your requests under the limit, set [`rest_requests_per_minute`](configuration.md#setting-details). |
 | The server exits with `AssertionFailure: Assertion failed: asserted isFailed == false` from `MergedListener.propagateErrorDownstream` | Your code filtered a live table with `where_in` by a table made from it. When the live table failed, for example because its session closed, a bug in Deephaven 42.9 and earlier failed the filtered table twice. | For a `fetch()` or `history()` table, read with `wait=True`, so the table is static. Otherwise replace `table.where_in(keys, "Key")` with `table.join(keys.select_distinct("Key"), "Key")`, which keeps the same rows and columns. |
 | `... Can not listen to failed table ...` | You built a table on a live table that failed or whose session was closed. | Make the live table again, or build on a static copy from `table.snapshot()`. |
 | `'HistoryQuery' object has no attribute ...`, such as `'last_by'` | Massive streams only 1-second and 1-minute bars at `multiplier=1`. For any other bars, `bars()` returns a `HistoryQuery`, which has no stream methods. | Pass `dm.Timespan.SECOND` or `dm.Timespan.MINUTE` with `multiplier` at 1. To read any other bars, call `history(start, end)`. |
@@ -168,16 +168,20 @@ failed, `Error` in its `m.streams()` row says why.
 
 <a id="underlyings-in-another-spelling"></a>
 
-### Underlyings in another spelling
+### Tickers from another source
 
-A table of tickers must hold Massive's exact tickers in a `Symbol` column. If your tickers come
-from another source, such as Yahoo's `BRK-B`, convert them with `dm.canonicalize_symbols` and
-the source's `convention=`, as [Symbols from another source](../README.md#convert-symbols)
-shows.
+You see `The symbol table has no Symbol column. ...`, or `A table of underlyings holds ...,
+which is not a stock or index ticker ...`. A table of tickers must hold Massive's exact
+tickers in a column named `Symbol`. If your column has another name, rename it:
+`t.rename_columns("Symbol = Ticker")`. Convert tickers from another source, such as
+Yahoo's `BRK-B`, with `dm.canonicalize_symbols`. Pass the source as `convention=`, one of
+`dm.SymbolConvention.YAHOO`, `NASDAQ`, and `CMS`. [Symbols from another
+source](../README.md#convert-symbols) shows the conversion.
 
 A table you pass as `underlying=` to `m.options.chain` or `m.options.contracts` may mix stocks
-and indices. The stock converter nulls an index ticker such as `I:SPX`, so convert only the
-stock rows and keep the index rows as they are. Here `t` stands for your table:
+and indices. Converting it with `dm.AssetClass.STOCKS` makes an index ticker such as `I:SPX`
+null, so convert only the stock rows and keep the index rows as they are. Here `t` stands for
+your table:
 
 ```python
 from deephaven import merge, new_table
@@ -194,9 +198,6 @@ underlying = merge([stocks, t.where("!isNull(Symbol) && Symbol.startsWith(`I:`)"
 
 `underlying` holds `BRK.B`, `AAPL`, and `I:SPX`, ready for
 `m.options.chain(underlying=underlying)`.
-
-Pass `dm.SymbolConvention.YAHOO`, `NASDAQ`, or `CMS`, whichever source your tickers come from.
-If your column of tickers has another name, rename it first: `t.view("Symbol = Ticker")`.
 
 <a id="handle-errors"></a>
 

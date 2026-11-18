@@ -5432,6 +5432,32 @@ def test_a_poll_cycle_reads_each_value_and_leaves_out_one_massive_has_no_data_fo
     assert any("NQ" in message and "no data" in message for message in caplog.messages)
 
 
+def test_a_poll_cycle_names_the_path_of_a_value_massive_has_no_data_for(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # An underlying goes in the path, so the left-out value names that path.
+    with entered(rest_session._core.exec_ctx):
+        table = new_table([string_col("Symbol", ["ZZZZ"])])
+    boxed = ValueTable("underlying", "underlyingAsset", "Symbol", underlying=True, table=table)
+    fake_rest.reply("/v3/snapshot/options/ZZZZ", Reply({"status": "NOT_FOUND"}, status=404))
+    reader = _endpoints(rest_session)._reader(
+        "poll", rest_session._core.policy, waiter=Waiter.LIVE_TABLE
+    )
+    with ThreadPoolExecutor(1) as pool:
+        read = reader.read_cycle(
+            options_ns.CHAIN,
+            Request(value_table=boxed),
+            symbols=None,
+            values=("ZZZZ",),
+            record=lambda _: None,
+            on_recency=lambda _: None,
+            executor=pool,
+            cancel=Cancel(),
+            pace=rate_limits.PaceCheck("options.chain poll()", 60.0),
+        )
+    assert read.left_out == ("ZZZZ (HTTP 404 from GET /v3/snapshot/options/ZZZZ)",)
+
+
 def test_a_poll_cycle_s_values_share_one_patience(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

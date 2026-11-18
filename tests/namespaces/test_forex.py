@@ -429,7 +429,7 @@ def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession
     table = new_table([string_col("Pair", ["C:EURUSD"])])
     refusal = (
         "The symbol table has no Symbol column. It has Pair. Name the column of tickers Symbol, "
-        'as in t.view("Symbol = Ticker"). For tickers in another spelling, see '
+        'as in t.rename_columns("Symbol = Ticker"). For tickers in another spelling, see '
         "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
         "#underlyings-in-another-spelling."
     )

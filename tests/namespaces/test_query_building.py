@@ -656,7 +656,8 @@ def test_a_symbol_table_needs_a_symbol_column(
         ValueError,
         match=whole(
             "The symbol table has no Symbol column. It has Ticker and Name. Name the column of "
-            'tickers Symbol, as in t.view("Symbol = Ticker"). For tickers in another spelling, see '
+            'tickers Symbol, as in t.rename_columns("Symbol = Ticker"). For tickers in another '
+            "spelling, see "
             "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
             "#underlyings-in-another-spelling."
         ),
