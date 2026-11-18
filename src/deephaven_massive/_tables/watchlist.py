@@ -61,6 +61,7 @@ from typing_extensions import override
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import (
     UNDERLYING_CLASSES,
+    as_written_fault,
     canonical_symbol,
     check_symbol,
     is_canonical,
@@ -155,23 +156,23 @@ def invalid_row_message(
         stocks, alone or among other classes, the remedy names `convention=`, since under the
         default, Massive's own spelling, no ticker with another source's separators converts.
         For values kept as Massive writes them (a third party's global tickers, futures product
-        codes) the remedy is only to fix the row: the converters follow a class's ticker
-        grammar, so they refuse a product code such as `ES`, and they refuse surrounding
-        whitespace and a class prefix, the faults such a row has, so they would null every one.
+        codes) the message names the rule the row breaks, and the remedy is only to fix the row:
+        the converters follow a class's ticker grammar, so they refuse a product code such as
+        `ES`, and they refuse the faults such a row has, so they would null every one.
     """
+    if as_written:
+        return (
+            f"A symbol table holds {symbol!r}, which {as_written_fault(symbol)}, and Massive "
+            "never writes a ticker that way. Fix the row to the value Massive lists, or delete "
+            "it."
+        )
     refusal = ""
     try:
-        check_symbol(asset_class, symbol, as_written=as_written)
+        check_symbol(asset_class, symbol)
     except ValueError as error:
         text = str(error)
         refusal = f" {text}" if text.endswith(".") else f" {text}."
     held = f"A symbol table holds {symbol!r}.{refusal}"
-    if as_written:
-        return (
-            f"{held} dm.canonicalize_symbols does not fit these values, since it applies ticker "
-            "rules they do not follow and would null correct ones too. Fix the row to the value "
-            "Massive writes, or delete it."
-        )
     if asset_class is ClassFromPrefix.ANY:
         remedy = (
             "Fix the row, or convert each row with dm.canonical_symbol and that row's class, "

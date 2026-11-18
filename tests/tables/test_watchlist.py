@@ -92,12 +92,10 @@ CRYPTO = crypto.QUOTES
 WATCHLIST_LOG = "deephaven_massive._tables.watchlist"
 
 
-def refusal(
-    asset_class: AssetClass | ClassFromPrefix, symbol: str, *, as_written: bool = False
-) -> str:
+def refusal(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> str:
     # The symbol module's own refusal, which a row's message quotes as a sentence.
     try:
-        check_symbol(asset_class, symbol, as_written=as_written)
+        check_symbol(asset_class, symbol)
     except ValueError as error:
         text = str(error)
         return text if text.endswith(".") else f"{text}."
@@ -125,7 +123,12 @@ def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["ERIC B", "7203"])])
     events = rule(partners.TMX_CORPORATE_EVENTS)
     assert read_symbols(events, table, stream_id=7).symbols == ("7203", "ERIC B")
-    with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
+    refused = (
+        "partners.tmx.corporate_events: A symbol table holds ' x', which has surrounding "
+        "whitespace, and Massive never writes a ticker that way. Fix the row to the value "
+        "Massive lists, or delete it."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(refused)}$"):
         read_symbols(events, new_table([string_col("Symbol", [" x"])]), stream_id=None)
 
 
@@ -425,7 +428,7 @@ def test_a_table_of_product_codes_is_read_from_its_product_code_column(
 ) -> None:
     table = new_table([string_col("ProductCode", ["NQ", "6E", None, "ES"])])
     assert read_symbols(product_codes(), table, stream_id=7).symbols == ("6E", "ES", "NQ")
-    with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
+    with pytest.raises(ValueError, match=r"^futures\.products: A symbol table holds ' ES', "):
         read_symbols(product_codes(), new_table([string_col("ProductCode", [" ES"])]), stream_id=7)
 
 
@@ -434,12 +437,9 @@ def test_a_refused_product_code_names_no_converter(dh_exec_ctx: object) -> None:
     # dm.canonicalize_symbols would send the caller to a table of nulls.
     message = invalid_row_message(AssetClass.FUTURES, " ES", as_written=True)
     assert message == (
-        f"A symbol table holds ' ES'. {refusal(AssetClass.FUTURES, ' ES', as_written=True)} "
-        "dm.canonicalize_symbols does not fit these values, since it applies ticker rules they "
-        "do not follow and would null correct ones too. Fix the row to the value Massive "
-        "writes, or delete it."
+        "A symbol table holds ' ES', which has surrounding whitespace, and Massive never writes "
+        "a ticker that way. Fix the row to the value Massive lists, or delete it."
     )
-    assert "canonicalize_symbols(table" not in message
     with pytest.raises(ValueError, match=f"^{re.escape(f'futures.products: {message}')}$"):
         read_symbols(product_codes(), new_table([string_col("ProductCode", [" ES"])]), stream_id=7)
     codes = new_table([string_col("ProductCode", ["ES", " ES"])])
@@ -448,12 +448,10 @@ def test_a_refused_product_code_names_no_converter(dh_exec_ctx: object) -> None:
 
 
 def test_a_refused_row_of_a_dataset_kept_as_written_names_no_converter() -> None:
-    message = invalid_row_message(AssetClass.STOCKS, " x", as_written=True)
+    message = invalid_row_message(AssetClass.STOCKS, "X:x", as_written=True)
     assert message == (
-        f"A symbol table holds ' x'. {refusal(AssetClass.STOCKS, ' x', as_written=True)} "
-        "dm.canonicalize_symbols does not fit these values, since it applies ticker rules they "
-        "do not follow and would null correct ones too. Fix the row to the value Massive "
-        "writes, or delete it."
+        "A symbol table holds 'X:x', which starts with the class prefix 'X:', and Massive never "
+        "writes a ticker that way. Fix the row to the value Massive lists, or delete it."
     )
 
 

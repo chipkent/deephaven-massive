@@ -1336,11 +1336,9 @@ def test_a_table_of_values_is_read_each_cycle_and_a_bad_value_is_skipped(
         "SKIPPED",
     )
     assert skipped["Detail"] == (
-        "stocks.dividends: A symbol table holds ' CL'. ' CL' is not a ticker as Massive writes it, "
-        "which is never empty and has no surrounding whitespace, control character, or class "
-        "prefix such as 'X:'. Pass the value as Massive lists it. dm.canonicalize_symbols does not "
-        "fit these values, since it applies ticker rules they do not follow and would null "
-        "correct ones too. Fix the row to the value Massive writes, or delete it."
+        "stocks.dividends: A symbol table holds ' CL', which has surrounding whitespace, and "
+        "Massive never writes a ticker that way. Fix the row to the value Massive lists, or "
+        "delete it."
     )
     assert skipped["EndedAt"] is None
     codes.add(new_table([string_col("ProductCode", ["6E"])]))

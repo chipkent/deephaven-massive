@@ -791,7 +791,6 @@ def test_fetch_and_poll_refuse_a_bad_value_row_when_the_call_raises_and_the_sess
     live_codes: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
-    refusal: Callable[..., str],
 ) -> None:
     rows = ["ES", " CL"]
     codes = live_codes(*rows) if refreshing else new_table([string_col("ProductCode", rows)])
@@ -799,11 +798,9 @@ def test_fetch_and_poll_refuse_a_bad_value_row_when_the_call_raises_and_the_sess
     refused = (
         "^"
         + re.escape(
-            "futures.products: A symbol table holds ' CL'. "
-            f"{refusal(AssetClass.FUTURES, ' CL', as_written=True)} "
-            "dm.canonicalize_symbols does not fit these values, since it applies ticker rules "
-            "they do not follow and would null correct ones too. Fix the row to the value "
-            "Massive writes, or delete it."
+            "futures.products: A symbol table holds ' CL', which has surrounding whitespace, "
+            "and Massive never writes a ticker that way. Fix the row to the value Massive "
+            "lists, or delete it."
         )
         + "$"
     )

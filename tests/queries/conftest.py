@@ -65,11 +65,9 @@ def live(dh_input_table: Callable[..., InputTable]) -> Callable[..., InputTable]
 @pytest.fixture
 def refusal() -> Callable[..., str]:
     # The symbol module's refusal of a value, as the sentence a symbol-table row's message quotes.
-    def refused(
-        asset_class: dm.AssetClass | ClassFromPrefix, symbol: str, *, as_written: bool = False
-    ) -> str:
+    def refused(asset_class: dm.AssetClass | ClassFromPrefix, symbol: str) -> str:
         try:
-            check_symbol(asset_class, symbol, as_written=as_written)
+            check_symbol(asset_class, symbol)
         except ValueError as error:
             text = str(error)
             return text if text.endswith(".") else f"{text}."

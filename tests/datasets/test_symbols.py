@@ -22,6 +22,7 @@ from deephaven_massive._datasets.symbols import (
     AllSymbols,
     SymbolsLike,
     SymbolTable,
+    as_written_fault,
     check_symbol,
     check_symbols,
     forex_codes,
@@ -35,6 +36,7 @@ from deephaven_massive._datasets.symbols import (
 )
 from deephaven_massive._datasets.wire_symbols import WireSymbols, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
+from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._tables.watchlist import CurrentSymbols, SymbolRowRule, read_symbols
 
@@ -1038,16 +1040,26 @@ def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
         assert check_symbol(STK, text, as_written=True) == text
         assert canonical_from_wire(STK, text, as_written=True) == text
     assert check_symbols(STK, ["ERIC B", "7203"], as_written=True) == ("7203", "ERIC B")
-    for bad in ("", " ERIC B", "X:BTCUSD", "A\tB"):
+    faults = {
+        "": "'' is empty",
+        " ERIC B": "' ERIC B' has surrounding whitespace",
+        "ERIC B ": "'ERIC B ' has surrounding whitespace",
+        "X:BTCUSD": "'X:BTCUSD' starts with the class prefix 'X:'",
+        "A\tB": "'A\\tB' holds a control character",
+        "\tAB": "'\\tAB' holds a control character",
+    }
+    for bad, fault in faults.items():
         assert not is_canonical(STK, bad, as_written=True)
         assert canonical_from_wire(STK, bad, as_written=True) is None
         message = (
-            f"{bad!r} is not a ticker as Massive writes it, which is never empty and has no "
-            "surrounding whitespace, control character, or class prefix such as 'X:'. Pass the "
-            "value as Massive lists it."
+            f"{fault}, and Massive never writes a ticker that way. Pass the value as Massive "
+            "lists it."
         )
         with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             check_symbol(STK, bad, as_written=True)
+    # A text the grammar takes breaks no rule: asking for its fault is a defect of the caller.
+    with pytest.raises(BrokenGuaranteeError, match=re.escape(LIBRARY_BUG)):
+        as_written_fault("ERIC B")
     reader = WireSymbols("partners.tmx.corporate_events", STK, as_written=True)
     read = reader.read(pa.array(["ERIC B", None, " x"]), {})
     assert read.symbols.to_pylist() == ["ERIC B", None, None]

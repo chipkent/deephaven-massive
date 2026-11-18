@@ -399,11 +399,13 @@ def test_all_is_refused_by_list_datasets(massive_session: dm.MassiveSession, nam
 def test_stock_datasets_refuse_another_class(massive_session: dm.MassiveSession, name: str) -> None:
     # The TMX calendar keeps tickers as written, but no class prefix passes there either.
     message = (
-        "is not a ticker as Massive writes it"
+        "starts with the class prefix 'X:', and Massive never writes a ticker that way. Pass "
+        "the value as Massive lists it."
         if name == "partners.tmx.corporate_events"
-        else "is a crypto ticker, and this dataset takes stock tickers"
+        else "is a crypto ticker, and this dataset takes stock tickers. Pass a stock ticker, or "
+        "read crypto data through m.crypto."
     )
-    with pytest.raises(ValueError, match=rf"^'X:BTCUSD' {message}"):
+    with pytest.raises(ValueError, match=rf"^'X:BTCUSD' {re.escape(message)}$"):
         factory(massive_session, name)("X:BTCUSD")
 
 

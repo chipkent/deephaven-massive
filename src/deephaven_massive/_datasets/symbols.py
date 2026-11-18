@@ -96,7 +96,7 @@ from deephaven_massive._enums import (
     SymbolConvention,
     _require_enum,
 )
-from deephaven_massive._errors import raises_through
+from deephaven_massive._errors import BrokenGuaranteeError, library_bug, raises_through
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._on_error import effect_of
 
@@ -117,6 +117,7 @@ __all__ = [
     "NormalizedSymbols",
     "SymbolTable",
     "SymbolsLike",
+    "as_written_fault",
     "canonical_symbol",
     "canonical_symbol_crypto",
     "canonical_symbol_forex",
@@ -232,6 +233,10 @@ AS_WRITTEN: Final = re.compile(
 whitespace, and no class prefix. How a futures row's ticker is read, so a row Massive sends is
 never lost to the grammar, and the grammar of a dataset whose symbols are a third party's global
 tickers."""
+_CLASS_PREFIX: Final = re.compile(r"^[OICX]:")
+"""A class prefix, which `AS_WRITTEN` refuses."""
+_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
+"""A control character, which `AS_WRITTEN` refuses anywhere."""
 _FUTURE: Final = re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,3}$")
 """A single futures contract, in the forms Massive's contracts list writes: a root of upper-case
 letters and digits, a month code, and one to three digits. Most contracts end in a one- or
@@ -438,6 +443,32 @@ def is_canonical(
         return AS_WRITTEN.fullmatch(text) is not None
     resolved = symbol_class(text) if asset_class is ClassFromPrefix.ANY else asset_class
     return CANONICAL_GRAMMARS[resolved](text)
+
+
+def as_written_fault(text: str) -> str:
+    """Say which rule of `AS_WRITTEN` text breaks, for the message that refuses it.
+
+    Args:
+        text: Text `AS_WRITTEN` refuses.
+
+    Returns:
+        The rule it breaks, worded to follow the text, such as `"has surrounding whitespace"`.
+
+    Raises:
+        BrokenGuaranteeError: If the text breaks none of the rules, so this function and
+            `AS_WRITTEN` disagree.
+    """
+    if not text:
+        return "is empty"
+    if _CLASS_PREFIX.match(text):
+        return f"starts with the class prefix {text[:2]!r}"
+    if _CONTROL.search(text):
+        return "holds a control character"
+    if text != text.strip(" "):
+        return "has surrounding whitespace"
+    raise BrokenGuaranteeError(
+        library_bug(f"{text!r} breaks no rule of a ticker kept as Massive writes it")
+    )
 
 
 def is_forex_currency(code: str) -> bool:
@@ -1616,9 +1647,8 @@ def check_symbol(
         return text
     if as_written:
         raise ValueError(
-            f"{text!r} is not a ticker as Massive writes it, which is never empty and has no "
-            "surrounding whitespace, control character, or class prefix such as 'X:'. Pass the "
-            "value as Massive lists it."
+            f"{text!r} {as_written_fault(text)}, and Massive never writes a ticker that way. "
+            "Pass the value as Massive lists it."
         )
     resolved = symbol_class(text) if asset_class is ClassFromPrefix.ANY else asset_class
     other = symbol_class(text)
