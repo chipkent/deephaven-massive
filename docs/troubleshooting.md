@@ -166,6 +166,38 @@ failed, `Error` in its `m.streams()` row says why.
 | Memory keeps growing | An `append_only()` table keeps every row. | Keep the last rows with `ring(n)`, or each symbol's latest row with `last_by()`. |
 | A table keeps updating after you delete its variable | A panel or a table made from it still uses it, or Python hasn't garbage-collected it yet. | Close its panels and delete the tables made from it. Before you delete a live table's variable, call `m.release(table)`, as [Stopping live tables](../README.md#stop-live-tables) shows, so it stops without waiting for Python. |
 
+<a id="underlyings-in-another-spelling"></a>
+
+### Underlyings in another spelling
+
+A table of tickers must hold Massive's exact tickers in a `Symbol` column. If your tickers come
+from another source, such as Yahoo's `BRK-B`, convert them with `dm.canonicalize_symbols` and
+the source's `convention=`, as [Symbols from another source](../README.md#convert-symbols)
+shows.
+
+A table you pass as `underlying=` to `m.options.chain` or `m.options.contracts` may mix stocks
+and indices. The stock converter nulls an index ticker such as `I:SPX`, so convert only the
+stock rows and keep the index rows as they are. Here `t` stands for your table:
+
+```python
+from deephaven import merge, new_table
+import deephaven_massive as dm
+
+t = new_table({"Symbol": ["BRK-B", "AAPL", "I:SPX"]})
+stocks = dm.canonicalize_symbols(
+    t.where("isNull(Symbol) || !Symbol.startsWith(`I:`)"),
+    dm.AssetClass.STOCKS,
+    convention=dm.SymbolConvention.YAHOO,
+)
+underlying = merge([stocks, t.where("!isNull(Symbol) && Symbol.startsWith(`I:`)")])
+```
+
+`underlying` holds `BRK.B`, `AAPL`, and `I:SPX`, ready for
+`m.options.chain(underlying=underlying)`.
+
+Pass `dm.SymbolConvention.YAHOO`, `NASDAQ`, or `CMS`, whichever source your tickers come from.
+If your column of tickers has another name, rename it first: `t.view("Symbol = Ticker")`.
+
 <a id="handle-errors"></a>
 
 ## Handle errors in code

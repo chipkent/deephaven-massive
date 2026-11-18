@@ -411,8 +411,14 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         filters=(("ticker_gte", "A"),),
         limit=3,
     )
-    with pytest.raises(ValueError, match=r"m\.stocks\.snapshots\(dm\.ALL\)"):
+    whole_market = (
+        "snapshots does not take dm.ALL. For a whole market, call a class's snapshots(dm.ALL), "
+        "such as m.stocks.snapshots(dm.ALL).fetch()."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(whole_market)}$"):
         massive_session.snapshots(dm.ALL)
+    # The call the refusal names takes dm.ALL.
+    assert massive_session.stocks.snapshots(dm.ALL)._request.symbols is dm.ALL
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         massive_session.snapshots(["AAPL"], order="asc")  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(ValueError, match=r"^limit=0 is not positive\.$"):

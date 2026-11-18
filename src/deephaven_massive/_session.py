@@ -469,8 +469,8 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
-                "use a class's snapshots(dm.ALL), such as m.stocks.snapshots(dm.ALL), for a whole "
-                "market"
+                "For a whole market, call a class's snapshots(dm.ALL), such as "
+                "m.stocks.snapshots(dm.ALL).fetch()."
             ),
             params=list_params(sort=sort, order=order),
             filters=filters,
