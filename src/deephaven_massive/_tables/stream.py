@@ -2126,8 +2126,8 @@ class Flusher:
             return named
         count, reason = ended
         failure = RowDataError(
-            f"{plan.dataset}: the library could not read the last {count:,} rows Massive sent "
-            f"on channel {plan.channel} whole, so it withheld them and published none. "
+            f"{plan.dataset}: the library could not read {count:,} consecutive rows Massive "
+            f"sent on channel {plan.channel} whole, so it withheld them. "
             f"{reason_sentence(reason)} {WITHHELD_LISTED}"
         )
         whole = plan.symbol_field is None
@@ -2161,8 +2161,8 @@ class Flusher:
             return False
         count, first = ended
         failure = RowDataError(
-            f"{plan.dataset}: the library could not read the symbol of the last {count:,} rows "
-            f"Massive sent on channel {plan.channel}, so it withheld them and published none. "
+            f"{plan.dataset}: the library could not read the symbol of {count:,} consecutive "
+            f"rows Massive sent on channel {plan.channel}, so it withheld them. "
             f"{reason_sentence(first)} {WITHHELD_LISTED}"
         )
         failing = [sink for sink in readers if not sink.receives_all]

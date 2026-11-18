@@ -36,6 +36,8 @@ import jpy
 from deephaven.execution_context import ExecutionContext
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
 
+from deephaven_massive._errors import library_bug
+
 __all__ = [
     "entered",
     "has_execution_context",
@@ -130,8 +132,8 @@ def refuse_update_graph_thread(exec_ctx: ExecutionContext) -> None:
     if exec_ctx.update_graph.j_update_graph.currentThreadProcessesUpdates():
         raise ValueError(
             "A deephaven_massive call cannot run on a Deephaven update-graph thread, such as "
-            "inside a table listener. To follow a table's changes, pass the refreshing table as "
-            "symbols, or call poll(), from outside the listener."
+            "inside a table listener. Make the call outside the listener. To follow a table's "
+            "changes, pass the refreshing table as symbols or call poll()."
         )
 
 
@@ -203,8 +205,10 @@ def wait_for_update_cycle(exec_ctx: ExecutionContext, timeout: float) -> bool:
     refuse_update_graph_thread(exec_ctx)
     if holds_update_graph_lock(exec_ctx):
         raise RuntimeError(
-            "No update cycle can end while this thread holds the update graph's lock, so the "
-            "wait would never end. Wait without holding the lock."
+            library_bug(
+                "No update cycle can end while this thread holds the update graph's lock, so "
+                "the wait would never end"
+            )
         )
     j_update_graph = exec_ctx.update_graph.j_update_graph
     lock = j_update_graph.exclusiveLock()

@@ -430,9 +430,7 @@ def test_a_ticker_neither_list_holds_waits_and_is_asked_again_on_the_retry_sched
 ) -> None:
     found = state(calendar, "GONEZ6")
     assert found.readiness is Readiness.WAITING
-    assert found.reason == (
-        "neither Massive's futures snapshot nor its contracts list holds it (asked over 0 min)"
-    )
+    assert found.reason == ("neither Massive's futures snapshot nor its contracts list holds it")
     for asked, delay in enumerate((*RETRY_DELAYS, RETRY_EVERY, RETRY_EVERY), start=1):
         clock.now += delay - 1
         state(calendar, "GONEZ6")
@@ -451,7 +449,7 @@ def test_an_unlisted_ticker_is_discarded_after_30_minutes_then_asked_every_ten(
     clock.now += 1
     found = state(calendar, "GONEZ6")
     assert found.readiness is Readiness.UNLISTED
-    assert found.reason.endswith("(asked over 30 min)")
+    assert found.reason == "neither Massive's futures snapshot nor its contracts list holds it"
     clock.now += RETRY_EVERY  # the ask already due, whose answer starts the spacing
     state(calendar, "GONEZ6")
     asked = len(fetch.queries(CONTRACTS_PATH))
@@ -565,8 +563,8 @@ def test_a_refusal_of_many_tickers_is_split_until_it_names_one(
     assert ready == {"AZ6", "CZ6", "DZ6"}
     assert states["BAD:1"] == LookupState(
         Readiness.WAITING,
-        "Massive refused its lookup: Massive answered GET /futures/v1/contracts on "
-        'api.massive.com with HTTP 400: "Invalid ticker: BAD:1". (asked over 0 min)',
+        "Massive answered GET /futures/v1/contracts on api.massive.com with HTTP 400: "
+        '"Invalid ticker: BAD:1".',
     )
 
 

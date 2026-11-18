@@ -361,9 +361,13 @@ def test_a_column_the_channel_lacks_is_null(massive_session: dm.MassiveSession) 
 # --- StreamSink --------------------------------------------------------------------------------
 
 
-def unread_keys(
-    *rows: int, reason: str = "a T row: no Ticker", sent: str | None = None
-) -> RowMarks:
+# A row's reason as the client gives it for a row with no ticker.
+UNREAD_TICKER = (
+    "a T row from socket.massive.com/stocks: no Ticker (wire key 'sym'), which the dataset needs"
+)
+
+
+def unread_keys(*rows: int, reason: str = UNREAD_TICKER, sent: str | None = None) -> RowMarks:
     # The client's marks of a frame's rows whose key it could not read.
     found = RowMark(
         rows=rows,
@@ -1619,7 +1623,7 @@ def test_an_all_stream_survives_rows_whose_time_or_value_is_odd(
     flusher.rows(
         "T",
         frame(rows),
-        unread_keys(3, reason="a T row from h/stocks: no Ticker"),
+        unread_keys(3),
         generation=1,
     )
     flusher.flush()
@@ -1663,19 +1667,19 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
         flusher.rows(
             "T",
             lost,
-            unread_keys(*range(half), reason="a T row from h/stocks: no Ticker"),
+            unread_keys(*range(half)),
             generation=1,
         )
         flusher.flush()
     assert every.failed
     assert not aapl.failed
-    [record] = [r for r in caplog.records if "could not read the last" in r.getMessage()]
+    [record] = [r for r in caplog.records if "consecutive rows" in r.getMessage()]
     assert record.levelno == logging.WARNING  # Massive's data, no bug of the library
     assert record.getMessage() == (
-        f"test.trades stream 1 failed: the library could not read the last "
-        f"{2 * half} rows Massive sent on channel T whole, so it withheld them and published "
-        "none. Timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100. "
-        "m.problems() counts the withheld rows by cause and symbol."
+        f"test.trades stream 1 failed: the library could not read {2 * half} consecutive rows "
+        "Massive sent on channel T whole, so it withheld them. Timestamp unit mismatch for "
+        "test.trades.Timestamp: 5 ms is outside 1990 to 2100. m.problems() counts the withheld "
+        "rows by cause and symbol."
     )
     assert flusher._runs == {}
 
@@ -1903,10 +1907,13 @@ def test_one_flush_of_dropped_rows_at_the_limit_fails_the_streams_by_the_run_rul
         flusher.flush()
     assert every.failed
     assert "could not publish" not in caplog.text
-    assert (
-        f"the library could not read the last {stream.DROPPED_RUN_LIMIT} rows Massive sent "
-        "on channel T whole"
-    ) in caplog.text
+    [record] = [r for r in caplog.records if "consecutive rows" in r.getMessage()]
+    assert record.getMessage() == (
+        f"test.trades stream 1 failed: the library could not read {stream.DROPPED_RUN_LIMIT} "
+        "consecutive rows Massive sent on channel T whole, so it withheld them. Timestamp unit "
+        "mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100. m.problems() counts "
+        "the withheld rows by cause and symbol."
+    )
 
 
 def test_a_flush_forgets_the_run_of_a_dataset_no_longer_routed(
@@ -2910,8 +2917,9 @@ def test_a_run_of_rows_with_no_readable_symbol_fails_the_named_streams(
     assert record.levelno == logging.WARNING  # Massive's data, no bug of the library
     assert record.getMessage() == (
         "test.trades stream 1 failed: the library could not read the symbol of "
-        "the last 100 rows Massive sent on channel T, so it withheld them and published none. "
-        "A T row: no Ticker. m.problems() counts the withheld rows by cause and symbol."
+        "100 consecutive rows Massive sent on channel T, so it withheld them. A T row from "
+        "socket.massive.com/stocks: no Ticker (wire key 'sym'), which the dataset needs. "
+        "m.problems() counts the withheld rows by cause and symbol."
     )
     assert flusher._unrouted == {}
 

@@ -14,6 +14,7 @@ from deephaven.execution_context import ExecutionContext, get_exec_ctx
 from deephaven.table_listener import TableUpdate, listen
 from deephaven.update_graph import UpdateGraph, exclusive_lock, shared_lock
 
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._tables import execution_context
 from deephaven_massive._tables.execution_context import (
     entered,
@@ -42,8 +43,8 @@ def test_the_update_graph_check_refuses_only_update_graph_threads(
     # The refusal names the way to do a listener's usual job without one.
     refusal = (
         "A deephaven_massive call cannot run on a Deephaven update-graph thread, such as inside "
-        "a table listener. To follow a table's changes, pass the refreshing table as symbols, "
-        "or call poll(), from outside the listener."
+        "a table listener. Make the call outside the listener. To follow a table's changes, "
+        "pass the refreshing table as symbols or call poll()."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
         refuse_update_graph_thread(update_thread)
@@ -209,7 +210,7 @@ def test_a_wait_for_an_update_cycle_is_refused_under_the_lock(
 ) -> None:
     refusal = (
         "No update cycle can end while this thread holds the update graph's lock, so the wait "
-        "would never end. Wait without holding the lock."
+        "would never end. " + LIBRARY_BUG
     )
     with (
         lock(dh_exec_ctx.update_graph),

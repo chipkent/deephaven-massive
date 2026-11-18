@@ -898,7 +898,7 @@ class FuturesCalendar:
             if transient or isinstance(error, (AuthenticationError, EntitlementError)):
                 answers.failed.update({("tickers", t): error for t in chunk})
             elif len(chunk) == 1:
-                answers.unlisted[chunk[0]] = f"Massive refused its lookup: {failure_text(error)}"
+                answers.unlisted[chunk[0]] = failure_text(error)
             else:
                 half = len(chunk) // 2
                 self._from_contracts(chunk[:half], today, answers)
@@ -1105,10 +1105,8 @@ def _ticker_state(lookup: _Lookup, now: float) -> LookupState:
             failing_since=lookup.failing_since,
         )
     if lookup.unlisted_since is not None:
-        missing = now - lookup.unlisted_since
-        why = lookup.error or ("neither Massive's futures snapshot nor its contracts list holds it")
-        why = f"{why} (asked over {missing / 60:.0f} min)"
-        if missing >= UNLISTED_AFTER.total_seconds():
+        why = lookup.error or "neither Massive's futures snapshot nor its contracts list holds it"
+        if now - lookup.unlisted_since >= UNLISTED_AFTER.total_seconds():
             return LookupState(Readiness.UNLISTED, why)
         return LookupState(Readiness.WAITING, why)
     return LookupState(Readiness.WAITING, "its product is being looked up")

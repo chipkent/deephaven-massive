@@ -257,7 +257,7 @@ def test_unlisted_rows_are_discarded_and_counted(
     held: HeldRows[str], calendar: FakeCalendar
 ) -> None:
     settle(held, batch(("GONEZ6", None, 1.0), ("GONEZ6", None, 2.0)))
-    gone = LookupState(Readiness.UNLISTED, "neither list holds it (asked over 30 min)")
+    gone = LookupState(Readiness.UNLISTED, "neither list holds it")
     calendar.found["GONEZ6"] = gone
     calendar.version += 1
     settled = settle(held, batch(("GONEZ6", None, 3.0), ("ESZ6", "2026-11-16", 4.0)))

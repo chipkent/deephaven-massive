@@ -1569,11 +1569,11 @@ def not_published(spec: str, day: str, remedy: str) -> str:
 
 
 READ_REST = (
-    "Call the method again later, or pass source=dm.HistorySource.REST to read the day from REST."
+    "Call history() again later, or pass source=dm.HistorySource.REST to read the day from REST."
 )
 NO_REST = (
     "REST cannot serve this read, since futures.trades history over REST needs explicit "
-    "symbols. Call the method again later."
+    "symbols. Call history() again later."
 )
 MANY = [f"S{n:02d}" for n in range(49)] + ["AAPL"]
 """Fifty symbols: enough for `AUTO` to read flat files, and explicit, so REST can serve them."""
@@ -1758,7 +1758,7 @@ def test_a_missing_day_rest_cannot_serve_raises_under_auto(
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     remedy = (
         "REST cannot serve this read, since stocks.trades history over REST needs explicit "
-        "symbols. Call the method again later."
+        "symbols. Call history() again later."
     )
     with pytest.raises(
         dm.MassiveError,

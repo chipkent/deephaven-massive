@@ -317,10 +317,10 @@ def _check_published(
     if read.unread and infer:
         first = read.unread[0].isoformat()
         remedy = (
-            "Call the method again later, or pass source=dm.HistorySource.REST to read the "
-            "day from REST."
+            "Call history() again later, or pass source=dm.HistorySource.REST to read the day "
+            "from REST."
             if problem is None
-            else f"REST cannot serve this read, since {problem}. Call the method again later."
+            else f"REST cannot serve this read, since {problem}. Call history() again later."
         )
         raise MassiveError(
             f"{spec.name}: Massive has not published the flat file for {first} yet. "

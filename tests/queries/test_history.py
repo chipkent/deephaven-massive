@@ -493,7 +493,7 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     with pytest.raises(dm.MassiveError) as forced:
         many.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert str(forced.value) == note + (
-        "Call the method again later, or pass source=dm.HistorySource.REST to read the day from "
+        "Call history() again later, or pass source=dm.HistorySource.REST to read the day from "
         "REST."
     )
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
@@ -502,7 +502,7 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
         values.history("2025-03-03", "2025-03-04", wait=True)
     assert files.inferred == [False, True, True]
     assert str(unserved.value) == note.replace("stocks.trades", "indices.values") + (
-        "REST cannot serve this read, since indices.values has no REST history. Call the method "
+        "REST cannot serve this read, since indices.values has no REST history. Call history() "
         "again later."
     )
     assert len(rest.calls) == 1

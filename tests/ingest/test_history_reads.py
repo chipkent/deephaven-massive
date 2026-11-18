@@ -248,7 +248,7 @@ def test_a_missing_day_read_later_keeps_the_call_s_instant(
             TRADES,
             True,
             (
-                "Call the method again later, or pass source=dm.HistorySource.REST to read the day "
+                "Call history() again later, or pass source=dm.HistorySource.REST to read the day "
                 "from REST."
             ),
         ),
@@ -256,8 +256,8 @@ def test_a_missing_day_read_later_keeps_the_call_s_instant(
             VALUES,
             False,
             (
-                "REST cannot serve this read, since indices.values has no REST history. Call the "
-                "method again later."
+                "REST cannot serve this read, since indices.values has no REST history. Call "
+                "history() again later."
             ),
         ),
     ],
