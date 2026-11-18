@@ -138,7 +138,7 @@ def _alarm(problem: Problem) -> str | None:
             return None
         symbol = "" if problem.symbol is None else f" of {problem.symbol}"
         if problem.rows:
-            head = f"{problem.rows} rows{symbol}, "
+            head = f"{problem.rows} {'row' if problem.rows == 1 else 'rows'}{symbol}, "
         else:
             head = "" if problem.symbol is None else f"{problem.symbol}: "
         return f"{head}{problem.detail.removesuffix('.')} (at {problem.where})"

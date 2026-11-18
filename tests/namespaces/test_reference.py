@@ -264,9 +264,13 @@ def test_ticker_details_and_events_queries(massive_session: dm.MassiveSession) -
     assert details._request == Request(symbols=("AAPL",), params=(("date", date(2024, 1, 2)),))
     # The day is a calendar date, so an aware datetime is refused.
     early = datetime(2025, 1, 3, 2, tzinfo=UTC)
-    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
+    with pytest.raises(
+        ValueError, match=r"as_of=.* is a time, and as_of takes a calendar date\. Pass a date"
+    ):
         ref.ticker_details("AAPL", as_of=early)
-    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
+    with pytest.raises(
+        ValueError, match=r"as_of=.* is a time, and as_of takes a calendar date\. Pass a date"
+    ):
         ref.tickers(as_of=early)
     assert ref.ticker_details(["O:SPY251219C00600000"])._request == Request(
         symbols=("O:SPY251219C00600000",)
@@ -328,7 +332,7 @@ def test_news_takes_a_watchlist(massive_session: dm.MassiveSession) -> None:
     assert ref.news(symbols=["MSFT", "AAPL"])._request == Request(symbols=("AAPL", "MSFT"))
     table = new_table([string_col("Symbol", ["AAPL"])])
     assert ref.news(symbols=table)._request == Request(symbols=SymbolTable(table))
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         ref.news(symbols=[])
 
 
@@ -426,7 +430,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
             ref.tickers(**{name: 1})
     with pytest.raises(TypeError, match="active must be a bool, not NoneType"):
         ref.tickers(active=None)
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         ref.tickers(as_of="2025-01-02T09:30")
     with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         ref.ticker_details("AAPL", as_of="soon")

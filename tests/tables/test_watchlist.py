@@ -168,9 +168,7 @@ def test_a_refused_stock_row_names_a_convention_that_converts_it(dh_exec_ctx: ob
     assert message == (
         f"A symbol table holds 'BRK-B'. {refusal(AssetClass.STOCKS, 'BRK-B')} Fix the row, or "
         "convert the table with dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, "
-        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from. "
-        "If Massive itself writes 'BRK-B', report it at "
-        f"{ISSUES_URL}, since the library does not know that form yet."
+        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from."
     )
     table = new_table([string_col("Symbol", ["BRK-B"])])
     converted = dm.canonicalize_symbols(

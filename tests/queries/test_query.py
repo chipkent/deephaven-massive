@@ -634,7 +634,7 @@ def test_wait_false_raises_argument_errors_at_the_call(
     every = trades(massive_session, dm.ALL)
     with pytest.raises(ValueError, match="needs explicit symbols"):
         every.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=False)
-    with pytest.raises(ValueError, match=r"history has no possible source"):
+    with pytest.raises(ValueError, match=r"history has no source"):
         every.history("2025-03-03", "2025-03-03", wait=False)
 
     def refuse(*_: object, **__: object) -> None:

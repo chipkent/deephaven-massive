@@ -638,7 +638,8 @@ def symbol_outcomes(
 
     Raises:
         AuthenticationError: When any symbol failed with it: every symbol would.
-        SessionClosedError: `"<session> is closed"` when the session closed during the read.
+        SessionClosedError: `"This session is closed. ..."` when the session closed during the
+            read.
     """
     refused = next((e for e in failures.values() if isinstance(e, AuthenticationError)), None)
     if refused is not None:

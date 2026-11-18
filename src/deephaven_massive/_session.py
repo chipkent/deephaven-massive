@@ -740,10 +740,11 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
     def close(self) -> None:
         """Stop every live table of the session. Calling it again does nothing.
 
-        Each live table, and each table made from one, fails with
-        `MassiveError("MassiveSession #1 was closed; this table no longer updates")`. It keeps its
-        rows, and `t.snapshot()` gives a static copy to keep working with. In a console command,
-        `close()` returns at once. The tables show their final state when the command ends.
+        Each live table, and each table made from one, fails with `MassiveError("This session
+        was closed, so this table no longer updates. Open a new dm.MassiveSession() to read
+        again.")`. It keeps its rows, and `t.snapshot()` gives a static copy to keep working
+        with. In a console command, `close()` returns at once. The tables show their final
+        state when the command ends.
 
         Connections that no other session uses are closed. Afterward, the query methods and the
         diagnostics methods, such as `m.streams()`, raise `MassiveError`. Building queries and

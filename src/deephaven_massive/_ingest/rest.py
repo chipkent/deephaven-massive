@@ -1827,8 +1827,8 @@ class RestReader:
             first = pc.indices_nonzero(other_kind)[0].as_py()
             logger.warning(
                 "%s: the contracts of %s were asked for by the bare ticker %s=%s, and the CFI "
-                "codes of %d rows mark options on something other than an index, so Massive "
-                "answered about another instrument too. Those rows keep the underlying Massive "
+                "code marks options on something other than an index for %d of them, so "
+                "Massive answered about another instrument too. They keep the underlying Massive "
                 "wrote. The first is %s, with Underlying %s and Cfi %s.",
                 spec.name,
                 index,
@@ -1841,11 +1841,11 @@ class RestReader:
             )
         if pc.any(no_code).as_py() and self.state.first("index-no-cfi", spec.name):
             logger.warning(
-                "%s: %d rows of the contracts of %s have no CFI code, so nothing marks their "
+                "%s: the contracts of %s include %d with no CFI code, so nothing marks their "
                 "underlying as the index, and they keep Massive's bare %r. The first is %s.",
                 spec.name,
-                pc.sum(no_code).as_py(),
                 index,
+                pc.sum(no_code).as_py(),
                 contracts_underlying(index),
                 pc.filter(symbols, no_code)[0].as_py(),
             )

@@ -624,7 +624,7 @@ def test_close_returns_after_a_warning_when_no_cycle_shows_the_rows_in_time(
     finally:
         done.set()
         holder.join(TIMEOUT)
-    assert "no update cycle ended within 0.2 s" in caplog.text
+    assert "No update cycle ended within 0.2 s" in caplog.text
     del result, view
 
 

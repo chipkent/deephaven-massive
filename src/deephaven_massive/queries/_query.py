@@ -582,7 +582,7 @@ def _failure_sentence(symbol: str, error: BaseException) -> str:
         error: Its failure.
 
     Returns:
-        Such as `"MSFT: Massive answered GET /v3/trades/MSFT on api.massive.com with HTTP 403:
+        Such as `"MSFT: Massive answered GET /v3/trades/MSFT on 127.0.0.1 with HTTP 403:
         "not in the plan"."`, ended with a period when the failure's text has none.
     """
     text = failure_text(error)

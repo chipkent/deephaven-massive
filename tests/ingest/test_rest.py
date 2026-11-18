@@ -2067,7 +2067,7 @@ def test_an_unreadable_row_symbol_is_withheld_by_default(
     ]
     assert events[0].detail.startswith("Massive sent the symbol 'a b'")
     (alarm,) = alarms(caplog)
-    assert alarm.startswith("stocks.dividends table 1: unreadable_symbols: 1 rows of a b, ")
+    assert alarm.startswith("stocks.dividends table 1: unreadable_symbols: 1 row of a b, ")
 
 
 @pytest.mark.parametrize(
@@ -2118,9 +2118,9 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     # A table whose rows are all bad raises rather than read nothing.
     with pytest.raises(
         ValueError,
-        match=r"^m\.indices\.snapshots\(\): no row of the symbol table is a ticker this dataset "
-        r"takes, so the result would follow nothing: skipping 1 symbol-table value this dataset "
-        r"does not take: 'SPX'; fix or delete that row, or report it at https://",
+        match=r"^m\.indices\.snapshots\(\): No row of the symbol table is a ticker this dataset "
+        r"takes, so the result would follow nothing\. The table holds 'SPX'\. Fix or delete those "
+        r"rows\.$",
     ):
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
     # Under RAISE, a bad row raises at once, naming the fix.
@@ -2132,7 +2132,7 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     with dm.MassiveSession(config) as strict:
         bad = new_table([string_col("Symbol", ["SPX", "I:VIX"])])
         with pytest.raises(
-            ValueError, match=r"^indices\.snapshots: a symbol table holds 'SPX' .*use 'I:SPX'"
+            ValueError, match=r"^indices\.snapshots: A symbol table holds 'SPX'\. .*Pass 'I:SPX'"
         ):
             fetch(strict, INDEX_SNAPSHOTS, symbols=bad)
 
@@ -2273,13 +2273,13 @@ def test_one_odd_row_costs_the_call_only_itself(
     # The first of each cause warns, pointing at m.problems().
     assert sorted(alarms(caplog)) == [
         (
-            "stocks.dividends table 1: unconvertible_values: 1 rows of AAPL, "
+            "stocks.dividends table 1: unconvertible_values: 1 row of AAPL, "
             + next(e.detail for e in events if e.cause is ProblemCause.UNCONVERTIBLE_VALUES)
             + f" (at REST GET {DIVIDENDS_PATH}). m.problems() lists it and every later "
             "unconvertible_values problem of this table, which the log shows at DEBUG only."
         ),
         (
-            f"stocks.dividends table 1: unreadable_keys: 1 rows, {DIVIDENDS_PATH}: row 0: no "
+            f"stocks.dividends table 1: unreadable_keys: 1 row, {DIVIDENDS_PATH}: row 0: no "
             f"Ticker (wire key 'ticker'), which the dataset needs (at REST GET {DIVIDENDS_PATH}). "
             "m.problems() lists it and every later unreadable_keys problem of this table, which "
             "the log shows at DEBUG only."

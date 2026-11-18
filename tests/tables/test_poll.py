@@ -1309,11 +1309,11 @@ def test_a_table_of_values_is_read_each_cycle_and_a_bad_value_is_skipped(
         "SKIPPED",
     )
     assert skipped["Detail"] == (
-        "stocks.dividends: a symbol table holds ' CL': ' CL' is not a ticker as Massive writes it "
-        "(not empty, no surrounding whitespace, no control character, no class prefix). Fix the "
-        "row to the value Massive writes, or delete it. Don't convert the table with "
-        "dm.canonicalize_symbols: it applies ticker rules these values don't follow, so it nulls "
-        "correct ones too"
+        "stocks.dividends: A symbol table holds ' CL'. ' CL' is not a ticker as Massive writes it, "
+        "which is never empty and has no surrounding whitespace, control character, or class "
+        "prefix such as 'X:'. Pass the value as Massive lists it. dm.canonicalize_symbols does not "
+        "fit these values, since it applies ticker rules they do not follow and would null "
+        "correct ones too. Fix the row to the value Massive writes, or delete it."
     )
     assert skipped["EndedAt"] is None
     codes.add(new_table([string_col("ProductCode", ["6E"])]))
@@ -1358,7 +1358,7 @@ def test_a_bad_value_fails_the_poll_under_raise(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("stocks.dividends: a symbol table holds ' CL'")
+    assert row["Error"].startswith("stocks.dividends: A symbol table holds ' CL'")
     assert script.values == [("ES",)]
 
 
@@ -1386,7 +1386,7 @@ def test_a_failing_upstream_watchlist_fails_the_poll(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert "failed upstream, so the result can no longer follow it" in row["Error"]
+    assert "has failed, so the library can no longer read it" in row["Error"]
     assert script.symbols == [("AAPL",)]
 
 
@@ -1422,7 +1422,7 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("stocks.dividends: a symbol table holds 'msft'")
+    assert row["Error"].startswith("stocks.dividends: A symbol table holds 'msft'")
     assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, convention=" in row["Error"]
     assert script.symbols == [("AAPL",)]
 
@@ -1455,11 +1455,11 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
         "log",
     )
     assert skipped["Detail"].startswith(
-        "stocks.dividends: a symbol table holds 'msft' ('msft' is not a Massive stock ticker: "
+        "stocks.dividends: A symbol table holds 'msft'. 'msft' is not a Massive stock ticker, "
     )
     assert skipped["Detail"].endswith(
-        "If Massive itself writes 'msft', the library does not know its form yet: report it at "
-        f"{ISSUES_URL}"
+        f"If Massive itself writes 'msft', report it at {ISSUES_URL}, since the library does not "
+        "know that form yet."
     )
     assert skipped["EndedAt"] is None
     watch.delete(new_table([string_col("Symbol", ["msft"])]))  # deleting it ends the span
@@ -2201,7 +2201,7 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
         symbols=new_table([string_col("Symbol", ["aapl"])]),
     )
     with pytest.raises(
-        ValueError, match=r"^m\.stocks\.dividends\(\): no row of the symbol table is"
+        ValueError, match=r"^m\.stocks\.dividends\(\): No row of the symbol table is"
     ):
         bad.poll(60)
     table = q.poll(60, mode=PollMode.UPSERT)

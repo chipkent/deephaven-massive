@@ -66,7 +66,7 @@ from deephaven_massive._datasets.symbols import (
     is_canonical,
     symbol_class,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
 from deephaven_massive._errors import user_defect
 from deephaven_massive._log_limits import BoundedLog, prose_list
 from deephaven_massive._on_error import effect_of
@@ -209,14 +209,22 @@ def _converts(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> bool:
         symbol: The refused row.
 
     Returns:
-        True when `dm.canonical_symbol` converts the row for its class.
+        True when `dm.canonical_symbol` converts the row for its class, under any convention
+        for a stock.
     """
     resolved = symbol_class(symbol) if asset_class is ClassFromPrefix.ANY else asset_class
-    try:
-        canonical_symbol(symbol, resolved)
-    except ValueError:
-        return False
-    return True
+    # A stock ticker converts only from a named convention, and the message names
+    # `convention=`; every other class converts by its class alone.
+    conventions = (
+        tuple(SymbolConvention) if resolved is AssetClass.STOCKS else (SymbolConvention.MASSIVE,)
+    )
+    for convention in conventions:
+        try:
+            canonical_symbol(symbol, resolved, convention=convention)
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 UNDERLYINGS_IN_ANOTHER_SPELLING: Final = (
@@ -242,8 +250,8 @@ def failed_table_message(dataset: str, cause: object | None = None) -> str:
 
     Args:
         dataset: The dataset the table was passed to, such as `"stocks.quotes"`.
-        cause: What Deephaven reported when the table failed while followed; None when the
-            table had already failed at the read.
+        cause: What Deephaven reported when the table failed while followed, which may end in
+            a stack trace; None when the table had already failed at the read.
 
     Returns:
         Such as `"The table you passed to stocks.quotes has failed, so the library can no longer
@@ -251,7 +259,7 @@ def failed_table_message(dataset: str, cause: object | None = None) -> str:
     """
     problem = f"The table you passed to {dataset} has failed, so the library can no longer read it"
     if cause is not None:
-        problem = f"{problem}. Deephaven reported: {cause}"
+        problem = f"{problem}. Deephaven reported: {str(cause).strip()}"
     return user_defect(problem, f"Fix that table, then call {dataset} again")
 
 

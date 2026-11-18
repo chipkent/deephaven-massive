@@ -237,7 +237,9 @@ def test_only_the_canonical_ticker_is_taken(
     )
     for factory in factories:
         assert factory("C:EURUSD")._request.symbols == ("C:EURUSD",)
-        with pytest.raises(ValueError, match=r"use 'C:EURUSD' .*dm\.canonical_symbol_forex"):
+        with pytest.raises(
+            ValueError, match=r"Pass 'C:EURUSD', which dm\.canonical_symbol_forex\("
+        ):
             factory(symbols)
 
 
@@ -394,11 +396,11 @@ def test_conversion_rejects_bad_arguments(
 @pytest.mark.parametrize(
     ("symbols", "message"),
     [
-        ("EUR/US", "cannot read 'EUR/US' as a forex pair"),
-        ("EUR/USD/JPY", "cannot read 'EUR/USD/JPY' as a forex pair"),
-        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker; this dataset takes forex tickers"),
-        ("EU1/USD", "cannot read 'EU1/USD' as a forex pair"),
-        ([], "no symbols"),
+        ("EUR/US", "'EUR/US' is not a forex pair of two three-letter currency codes"),
+        ("EUR/USD/JPY", "'EUR/USD/JPY' is not a forex pair of two three-letter currency codes"),
+        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker, and this dataset takes forex tickers"),
+        ("EU1/USD", "'EU1/USD' is not a forex pair of two three-letter currency codes"),
+        ([], "symbols holds no tickers"),
     ],
 )
 def test_invalid_pairs_fail_at_construction(
@@ -419,7 +421,7 @@ def test_invalid_pairs_fail_at_construction(
 def test_an_exhausted_generator_has_no_symbols(massive_session: dm.MassiveSession) -> None:
     pairs = (pair for pair in ["C:EURUSD"])
     list(pairs)
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         massive_session.forex.quotes(pairs)  # type: ignore[arg-type]  # the point: any iterable is read
 
 

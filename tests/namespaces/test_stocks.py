@@ -468,7 +468,7 @@ def test_streams_take_symbols_and_all(
     assert type(query) is cls
     assert query._request.symbols == ("AAPL", "MSFT")
     assert make(dm.ALL)._request.symbols is dm.ALL
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         make([])
 
 
@@ -485,7 +485,10 @@ def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession
 
 
 def test_a_lower_case_ticker_names_the_upper_case_one(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"^'spy' is not a Massive stock ticker: .*use 'SPY'"):
+    with pytest.raises(
+        ValueError,
+        match=r"^'spy' is not a Massive stock ticker, .*If you mean 'SPY', pass 'SPY'\.$",
+    ):
         massive_session.stocks.trades("spy")
 
 
@@ -623,19 +626,28 @@ def test_daily_open_close_rejects_all_and_bad_days(massive_session: dm.MassiveSe
     with pytest.raises(ValueError, match=whole(every)):
         open_close(dm.ALL, "2025-06-06")
     assert massive_session.stocks.bars(dm.ALL, dm.Timespan.DAY)._request.symbols is dm.ALL
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         open_close("AAPL", datetime(2025, 6, 6, 9, 30))  # noqa: DTZ001 - a naive time on purpose
-    with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
+    with pytest.raises(
+        ValueError, match=r"date=.* is a time, and date takes a calendar date\. Pass a date"
+    ):
         open_close("AAPL", datetime(2025, 6, 7, 1, tzinfo=UTC))
     # Deephaven's own text reaches the day too, and a time there is no day either; the message
     # shows the text as passed.
-    with pytest.raises(ValueError, match=r"date='2025-06-06T09:30 America/New_York' is a calendar"):
+    with pytest.raises(
+        ValueError,
+        match=r"date='2025-06-06T09:30 America/New_York' is a time, and date takes a calendar",
+    ):
         open_close("AAPL", "2025-06-06T09:30 America/New_York")
     with pytest.raises(ValueError, match=r"names a day and a zone but no time"):
         open_close("AAPL", "2025-06-06 ET")
     with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time"):
         open_close("AAPL", "June 6")
-    with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
+    with pytest.raises(
+        TypeError,
+        match=r"date must be a str, date, datetime, numpy\.datetime64, pandas\.Timestamp, or "
+        r"Java Instant",
+    ):
         open_close("AAPL", 20250606)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="adjusted must be a bool"):
         open_close("AAPL", "2025-06-06", adjusted=None)  # type: ignore[arg-type]  # the point: refused at run time
@@ -688,7 +700,7 @@ def test_start_and_end_bound_the_date_axis(
     make = factory(massive_session, name)
     query = make(start="2024-01-01", end=date(2024, 3, 31))
     assert (query._request.start, query._request.end) == (date(2024, 1, 1), date(2024, 3, 31))
-    with pytest.raises(ValueError, match="must not be after end"):
+    with pytest.raises(ValueError, match="is after end="):
         make(start="2024-03-31", end="2024-01-01")
     refusal = (
         f"The filter '{axis[0]}_gte' sets the time range of stocks.{name}. Pass start= and end= "
@@ -713,7 +725,7 @@ def test_the_symbol_parameter_is_set_through_symbols(
 def test_filters_reach_the_request(massive_session: dm.MassiveSession) -> None:
     query = massive_session.stocks.dividends(filters={"distribution_type": "special"})
     assert dict(query._request.filters) == {"distribution_type": "special"}
-    with pytest.raises(ValueError, match="takes"):
+    with pytest.raises(ValueError, match="'distribution_type'='monthly' is not one of its values"):
         massive_session.stocks.dividends(filters={"distribution_type": "monthly"})
 
 
@@ -963,8 +975,8 @@ def test_previous_day_bar_refuses_a_bar_on_another_split_basis(
     fake_rest.reply("/v2/aggs/ticker/AAPL/prev", Reply(body={**body, "adjusted": False}))
     with pytest.raises(
         dm.MassiveError,
-        match=r"^stocks\.previous_day_bar: Massive answered .* with adjusted=False although "
-        r"adjusted=True was requested",
+        match=r"^stocks\.previous_day_bar: Massive answered with bars of adjusted=False, and the "
+        r"call asked for adjusted=True\. ",
     ):
         rest_session.stocks.previous_day_bar("AAPL").fetch(wait=True)
 
@@ -974,7 +986,7 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+        if r.levelno == logging.WARNING and "cannot tell which day this one covers" in r.message
     ]
 
 
@@ -994,8 +1006,8 @@ def test_previous_day_bar_withholds_an_unexpected_stamp_with_a_warning(
         rest_session.stocks.previous_day_bar("AAPL").fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "stocks.previous_day_bar: a 1-day bar of AAPL from /v2/aggs/ticker/{stocksTicker}/prev is "
-        "stamped 2020-11-10T19:30:00+00:00"
+        "stocks.previous_day_bar: Massive sent a 1-day bar of AAPL stamped "
+        "2020-11-10T19:30:00+00:00"
     )
 
 
@@ -1055,8 +1067,8 @@ def test_a_page_on_another_adjustment_basis_fails_the_call(
     query = rest_session.stocks.bars("AAPL", dm.Timespan.DAY, adjusted=False)
     with pytest.raises(
         dm.MassiveError,
-        match=r"^stocks\.bars: Massive answered .* with adjusted=True although adjusted=False was "
-        r"requested, so the call would mix split-adjusted and as-traded prices",
+        match=r"^stocks\.bars: Massive answered with bars of adjusted=True, and the call asked for "
+        r"adjusted=False\. The table would mix split-adjusted and as-traded prices",
     ):
         query.history("2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True)
 
@@ -1078,7 +1090,10 @@ def test_a_symbol_without_data_returns_no_rows_but_a_cut_short_one_fails(
     later = f"{fake_rest.url}/v2/aggs/ticker/AAPL/next-page"
     fake_rest.reply_first(RANGE_PATH, Reply(body={**first, "next_url": later}))
     fake_rest.reply("/v2/aggs/ticker/AAPL/next-page", Reply(status=404, body={"status": "x"}))
-    with pytest.raises(dm.MassiveError, match=r"^stocks\.bars: AAPL's data was cut short"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^stocks\.bars: the rows of AAPL were cut short after 1 page arrived\. ",
+    ):
         rest_session.stocks.bars("AAPL", dm.Timespan.DAY).history(
             "2020-01-02", "2020-01-03", source=dm.HistorySource.REST, wait=True
         )
@@ -1694,7 +1709,7 @@ def test_fmv_streams_from_its_host_beside_delayed_stock_trades(
     assert rows["stocks.fmv"]["Error"] == (
         'Massive answered the subscription to FMV.MSFT on wss://business.massive.com/stocks: "not '
         'authorized to access FMV.MSFT". Massive documents stocks.fmv only on its Business feed, '
-        "business.massive.com; its plans are listed at "
+        "business.massive.com. Its plans are listed at "
         "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.fmv.md. "
         "Massive documents one host for FMV data, business.massive.com, and websocket_hosts does "
         "not apply to it."
@@ -1868,9 +1883,9 @@ def test_a_day_file_moves_an_early_close_and_warns_on_an_unexpected_stamp(
         query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES, wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "stocks.bars: a 1-day bar of BCC from the flat files us_stocks_sip/day_aggs_v1 is stamped "
-        "2024-11-29T19:30:00+00:00 (2024-11-29T14:30:00-05:00 in America/New_York), which is "
-        "not a stamp Massive is known to use for such a bar"
+        "stocks.bars: Massive sent a 1-day bar of BCC stamped 2024-11-29T19:30:00+00:00 "
+        "(2024-11-29T14:30:00-05:00 in America/New_York). Massive is known to stamp bars of 1 "
+        "day at "
     )
 
 

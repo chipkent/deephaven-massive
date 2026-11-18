@@ -313,7 +313,9 @@ def test_trades_take_massive_tickers_only(massive_session: dm.MassiveSession) ->
     assert type(q) is StreamHistoryQuery
     assert request_of(q).symbols == ("X:BTCUSD", "X:ETHUSD")
     for spelling in ("BTC-USD", "BTC/USD", "x:btcusd"):
-        with pytest.raises(ValueError, match=r"use 'X:BTCUSD' .*dm\.canonical_symbol_crypto"):
+        with pytest.raises(
+            ValueError, match=r"Pass 'X:BTCUSD', which dm\.canonical_symbol_crypto\("
+        ):
             massive_session.crypto.trades(spelling)
 
 
@@ -429,7 +431,10 @@ def test_daily_open_close_refuses_a_time(
     massive_session: dm.MassiveSession, moment: datetime | str
 ) -> None:
     # The day is a calendar date: which UTC day an instant names is left to no guess.
-    with pytest.raises(ValueError, match=r"^crypto\.daily_open_close: date=.* is a calendar date"):
+    with pytest.raises(
+        ValueError,
+        match=r"^crypto\.daily_open_close: date=.* is a time, and date takes a calendar date",
+    ):
         massive_session.crypto.daily_open_close("X:BTCUSD", moment)
     q = massive_session.crypto.daily_open_close("X:BTCUSD", "2026-01-03")
     assert request_of(q).params == (("date", date(2026, 1, 3)),)
@@ -472,7 +477,7 @@ def exhausted() -> Iterator[str]:
 def test_no_symbols_is_refused(
     massive_session: dm.MassiveSession, call: Callable[[Any], object]
 ) -> None:
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         call(massive_session.crypto)
 
 
@@ -536,7 +541,7 @@ def test_flat_file_history_states_its_constraints(massive_session: dm.MassiveSes
     q = massive_session.crypto.bars("X:BTCUSD", dm.Timespan.HOUR)
     with pytest.raises(
         ValueError,
-        match=r"crypto\.bars cannot be read from flat files: .*hold only 1-minute, 1-day bars",
+        match=r"crypto\.bars cannot be read from flat files, .*hold only 1-minute and 1-day bars",
     ):
         q.history("2026-01-02", "2026-01-02", source=dm.HistorySource.FLAT_FILES, wait=True)
 
@@ -724,7 +729,7 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+        if r.levelno == logging.WARNING and "cannot tell which day this one covers" in r.message
     ]
 
 
@@ -744,8 +749,8 @@ def test_a_daily_bar_stamped_inside_its_utc_day_is_withheld_with_a_warning(
         rest_session.crypto.previous_day_bar("X:BTCUSD").fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "crypto.previous_day_bar: a 1-day bar of X:BTCUSD from /v2/aggs/ticker/{cryptoTicker}/prev "
-        "is stamped 2020-11-15T05:00:00+00:00, which is not a stamp Massive is known to use"
+        "crypto.previous_day_bar: Massive sent a 1-day bar of X:BTCUSD stamped "
+        "2020-11-15T05:00:00+00:00. Massive is known to stamp bars of 1 day at "
     )
     caplog.clear()
     # The grouped-daily samples sit at no day boundary at all: each is withheld, and each
@@ -758,9 +763,7 @@ def test_a_daily_bar_stamped_inside_its_utc_day_is_withheld_with_a_warning(
         )
     warnings = stamp_warnings(caplog)
     assert len(warnings) == 2
-    assert "/v2/aggs/grouped/locale/global/market/crypto/{date} is stamped 2020-02-02T20:48" in (
-        "".join(warnings)
-    )
+    assert "of X:ARDRUSD stamped 2020-02-02T20:48:00+00:00. " in "".join(warnings)
 
 
 # X:BTCXYZ is in no ticker list: this path's {from}/{to} are the range, not the pair's two
@@ -900,7 +903,7 @@ def test_a_day_summary_not_in_utc_is_served_with_one_warning(
     [warning] = [w for w in warnings if "isUTC false" in w]
     assert warning.startswith(
         "crypto.daily_open_close: Massive sent the day summary of X:BTCUSD for 2020-10-09 with "
-        "isUTC false, so its day is not the UTC day the other crypto tables use"
+        "isUTC false, so the library can"
     )
 
 
@@ -1087,8 +1090,8 @@ def test_a_flat_file_day_bar_stamped_inside_its_utc_day_is_withheld_with_a_warni
         q.history("2023-03-28", "2023-03-29", source=dm.HistorySource.FLAT_FILES, wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "crypto.bars: a 1-day bar of X:BTCUSD from the flat files global_crypto/day_aggs_v1 is "
-        "stamped 2023-03-28T04:00:00+00:00, which is not a stamp Massive is known to use"
+        "crypto.bars: Massive sent a 1-day bar of X:BTCUSD stamped 2023-03-28T04:00:00+00:00. "
+        "Massive is known to stamp bars of 1 day at "
     )
 
 

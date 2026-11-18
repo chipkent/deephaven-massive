@@ -393,7 +393,7 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+        if r.levelno == logging.WARNING and "cannot tell which day this one covers" in r.message
     ]
 
 
@@ -457,9 +457,7 @@ def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_withheld_with_a_wa
         sma("AAPL", 20, timespan=timespan, on_error=strict).fetch(wait=True)
     [warning] = stamp_warnings(caplog)  # the known stamp gives none
     assert warning.startswith(
-        "indicators.sma: an indicator value of AAPL from /v1/indicators/sma/{stockTicker} is "
-        "stamped "
-        f"{moment.isoformat()}"
+        f"indicators.sma: Massive sent an indicator value of AAPL stamped {moment.isoformat()}"
     )
 
 

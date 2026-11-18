@@ -834,7 +834,7 @@ def test_milliseconds_in_a_nanosecond_column_withhold_their_row_with_a_warning(
     )
     assert events[0].detail == why
     where = f"FLAT_FILES {LOCATION.format(TRADES_0303)}"
-    assert alarms(caplog) == [alarm("unconvertible_values", "1 rows of AAPL, ", why, where=where)]
+    assert alarms(caplog) == [alarm("unconvertible_values", "1 row of AAPL, ", why, where=where)]
 
 
 def test_a_wrong_unit_in_the_time_column_withholds_its_row_with_a_count(
@@ -4531,9 +4531,7 @@ def test_an_unconvertible_value_withholds_its_row_and_warns_once(
     ] * 2
     # Each read is its own table: each warns of its first.
     assert alarms(caplog) == [
-        alarm(
-            "unconvertible_values", f"1 rows of {events[0].symbol}, ", why, where=WHERE, read=read
-        )
+        alarm("unconvertible_values", f"1 row of {events[0].symbol}, ", why, where=WHERE, read=read)
         for read in (1, 2)
     ]
 
@@ -4558,7 +4556,7 @@ def test_an_unconvertible_list_withholds_its_row_and_warns(
         (ProblemCause.UNCONVERTIBLE_VALUES, "Conditions", 1, why)
     ]
     assert alarms(caplog) == [
-        alarm("unconvertible_values", f"1 rows of {events[0].symbol}, ", why, where=WHERE)
+        alarm("unconvertible_values", f"1 row of {events[0].symbol}, ", why, where=WHERE)
     ]
 
 

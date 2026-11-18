@@ -441,7 +441,7 @@ def test_a_symbol_table_that_fails_fails_the_result_once(
     until(lambda: stream_rows()[0]["State"] == "FAILED")
     cycles_ended()
     assert heard() == 1
-    assert "failed upstream" in stream_rows()[0]["Error"]
+    assert "has failed, so the library can no longer read it" in stream_rows()[0]["Error"]
 
 
 def test_a_bad_row_added_under_raise_fails_the_table(
@@ -461,7 +461,7 @@ def test_a_bad_row_added_under_raise_fails_the_table(
     add(wl, "msft")
     until(lambda: bool(result.j_table.isFailed()))
     until(lambda: stream_rows()[0]["State"] == "FAILED")
-    assert "a symbol table holds 'msft'" in stream_rows()[0]["Error"]
+    assert "A symbol table holds 'msft'." in stream_rows()[0]["Error"]
 
 
 def test_a_row_that_is_not_a_ticker_is_skipped_and_listed(

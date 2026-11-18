@@ -433,14 +433,17 @@ def test_trades_quotes_and_fmv_take_massive_option_tickers(
         assert q._request.symbols == ("O:AAPL250117C00150000", "O:AAPL250117P00150000")
         assert factory(dm.ALL)._request.symbols is dm.ALL
         with pytest.raises(
-            ValueError, match=r"use 'O:AAPL250117C00150000' .*canonical_symbol_option"
+            ValueError, match=r"Pass 'O:AAPL250117C00150000', which dm\.canonical_symbol_option\("
         ):
             factory("AAPL250117C00150000")
         with pytest.raises(ValueError, match="is an underlying, not an OCC option symbol"):
             factory("AAPL")
-        with pytest.raises(ValueError, match=r"is a crypto ticker; this dataset takes option"):
+        with pytest.raises(ValueError, match=r"is a crypto ticker, and this dataset takes option"):
             factory("X:BTCUSD")
-        with pytest.raises(ValueError, match="not an OCC option symbol with a real expiry"):
+        with pytest.raises(
+            ValueError,
+            match=r"^'O:BRK\.B250117C00400000' is not an OCC option symbol, which looks like ",
+        ):
             factory("O:BRK.B250117C00400000")  # an OCC root has no dot
 
 
@@ -563,11 +566,17 @@ def test_chain_rejects_bad_arguments(massive_session: dm.MassiveSession) -> None
     assert massive_session.options.snapshots(dm.ALL)._request.symbols is dm.ALL  # the advice
     with pytest.raises(TypeError, match=whole("underlying must be one ticker as a str, not int")):
         chain(1)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match=r"^'  ' is not a Massive stock ticker such as"):
+    with pytest.raises(
+        ValueError, match=r"^'  ' is not a Massive stock ticker, which looks like 'AAPL'"
+    ):
         chain("  ")
     with pytest.raises(ValueError, match=r"tickers are case-sensitive"):
         chain("aapl")
-    with pytest.raises(ValueError, match=r"'i:SPX' is an index ticker \(prefix I:\)"):
+    with pytest.raises(
+        ValueError,
+        match=r"^'i:SPX' is an index ticker, not a stock one\. "
+        r"Call dm\.canonical_symbol_index\('i:SPX'\)\.$",
+    ):
         chain("i:SPX")
     # Massive answers HTTP 400 to the chain of a pair, so a pair is sent.
     assert request_of(chain("C:EURUSD"))["params"]["underlyingAsset"] == "C:EURUSD"
@@ -681,7 +690,7 @@ def test_contracts_reject_bad_arguments(massive_session: dm.MassiveSession) -> N
         contracts("aapl")
     with pytest.raises(TypeError, match="expired must be a bool, not int"):
         contracts(expired=1)  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         contracts(as_of=datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None))
     for key in (
         "underlying_ticker",
@@ -725,7 +734,7 @@ def test_contract_details_reject_bad_arguments(massive_session: dm.MassiveSessio
         details(dm.ALL)
     with pytest.raises(ValueError, match=r"is not an OCC option symbol"):
         details("aapl")  # not canonical: the symbol check explains it
-    with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
+    with pytest.raises(ValueError, match=r"^symbols holds no tickers\. Pass at least one ticker"):
         details([])
     needs = (
         "options.contract_details needs symbols, and symbols is None. Pass a ticker, a list of "
@@ -737,7 +746,8 @@ def test_contract_details_reject_bad_arguments(massive_session: dm.MassiveSessio
     with pytest.raises(ValueError, match=r"^'AAPL' is an underlying, not an OCC option symbol"):
         details(["AAPL"])
     with pytest.raises(
-        ValueError, match=r"^options\.contract_details: as_of=.* is a calendar date"
+        ValueError,
+        match=r"^options\.contract_details: as_of=.* is a time, and as_of takes a calendar date",
     ):
         details(CONTRACT, as_of=datetime(2025, 1, 3, 2, 0, tzinfo=UTC))
     with pytest.raises(TypeError):
@@ -747,9 +757,15 @@ def test_contract_details_reject_bad_arguments(massive_session: dm.MassiveSessio
 def test_as_of_and_date_refuse_a_time(massive_session: dm.MassiveSession) -> None:
     # Both are calendar dates: an instant would name a day only through a zone.
     late = datetime(2025, 1, 3, 2, 0, tzinfo=UTC)
-    with pytest.raises(ValueError, match=r"^options\.contracts: as_of=.* is a calendar date"):
+    with pytest.raises(
+        ValueError,
+        match=r"^options\.contracts: as_of=.* is a time, and as_of takes a calendar date",
+    ):
         massive_session.options.contracts(as_of=late)
-    with pytest.raises(ValueError, match=r"^options\.daily_open_close: date=.* is a calendar date"):
+    with pytest.raises(
+        ValueError,
+        match=r"^options\.daily_open_close: date=.* is a time, and date takes a calendar date",
+    ):
         massive_session.options.daily_open_close(CONTRACT, late)
     q = massive_session.options.contracts(as_of="2025-01-02")
     assert dict(q._request.params) == {"as_of": date(2025, 1, 2)}
@@ -1037,7 +1053,7 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+        if r.levelno == logging.WARNING and "cannot tell which day this one covers" in r.message
     ]
 
 
@@ -1063,10 +1079,9 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_warns(
         rest_session.options.previous_day_bar(TSLA).fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        f"options.previous_day_bar: a 1-day bar of {TSLA} from "
-        "/v2/aggs/ticker/{optionsTicker}/prev is "
-        "stamped 2024-11-29T19:30:00+00:00 (2024-11-29T14:30:00-05:00 in America/New_York), "
-        "which is not a stamp Massive is known to use"
+        f"options.previous_day_bar: Massive sent a 1-day bar of {TSLA} stamped "
+        "2024-11-29T19:30:00+00:00 (2024-11-29T14:30:00-05:00 in America/New_York). Massive is "
+        "known to stamp bars of 1 day at "
     )
 
 
@@ -1333,11 +1348,11 @@ def test_rows_of_another_instrument_keep_their_underlying_and_warn_once(
     assert fake_rest.get_queries()[0][1]["underlying_ticker"] == ["DJT"]
     assert warnings_of(caplog) == [
         (
-            "options.contracts: asked /v3/reference/options/contracts for the contracts of I:DJT "
-            "by its bare ticker, underlying_ticker=DJT, and 1 rows are not options on an index by "
-            "their CFI code, so Massive answered about another instrument; they keep the "
-            "underlying Massive wrote. The first (Symbol, Underlying, Cfi): "
-            "[('O:DJT261120C00020000', 'DJT', 'OCASPS')]"
+            "options.contracts: the contracts of I:DJT were asked for by the bare ticker "
+            "underlying_ticker=DJT, and the CFI code marks options on something other than an "
+            "index for 1 of them, so Massive answered about another instrument too. They keep the "
+            "underlying Massive wrote. The first is O:DJT261120C00020000, with Underlying DJT and "
+            "Cfi OCASPS."
         )
     ]
 
@@ -1365,9 +1380,9 @@ def test_an_index_contract_without_a_cfi_code_keeps_the_bare_ticker_and_warns_on
         ]
     assert warnings_of(caplog) == [
         (
-            "options.contracts: 1 rows of the contracts of I:SPX from "
-            "/v3/reference/options/contracts have no CFI code, so nothing says their underlying is "
-            "an index and they keep Massive's bare 'SPX'; the first: O:SPX261120C00600000"
+            "options.contracts: the contracts of I:SPX include 1 with no CFI code, so nothing "
+            "marks their underlying as the index, and they keep Massive's bare 'SPX'. The first is "
+            "O:SPX261120C00600000."
         )
     ]
 
@@ -1692,7 +1707,10 @@ def test_a_refused_root_lookup_fails_the_read_with_massive_s_refusal(
     else:
         serve_indices(fake_rest, "SPY")  # as if SPY named an index, so its root is asked about
         fake_rest.reply(wire(f"/v3/reference/options/contracts/{LIST_ROW['ticker']}"), refusal)
-    with pytest.raises(dm.EntitlementError, match="option root 'SPY' cannot be classified"):
+    with pytest.raises(
+        dm.EntitlementError,
+        match=r"^The library cannot tell whether the option root 'SPY' is an index, since reading ",
+    ):
         rest_session.options.open_interest().fetch(wait=True)
 
 
@@ -2094,7 +2112,7 @@ def test_a_refused_admin_subscription_fails_its_table_and_links_its_page(
     assert refused["State"] == "FAILED"
     assert refused["Error"] == (
         'Massive answered the subscription to AD.* on wss://socket.test/options: "not authorized '
-        'to access AD.*". options.admin_messages streams only in real time, on the plans listed '
+        'to access AD.*". options.admin_messages streams only in real time. Its plans are listed '
         "at https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
         "options.admin_messages.md. Massive documents the options AD channel only on "
         "socket.massive.com. To stream from another host, pass "
@@ -2132,8 +2150,8 @@ def test_admin_messages_on_the_delayed_feed_fail_on_massives_refusal(
     assert row["State"] == "FAILED"
     assert row["Error"] == (
         'Massive answered the subscription to AD.* on wss://delayed.test/options: "not '
-        'authorized to access AD.*". options.admin_messages streams only in real time, on the '
-        "plans listed at https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
+        'authorized to access AD.*". options.admin_messages streams only in real time. Its '
+        "plans are listed at https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
         "options.admin_messages.md. Massive documents the options AD channel only on "
         "socket.massive.com. delayed_subscriptions lists dm.Subscription.OPTIONS, so this table "
         "streams from Massive's delayed feed. To stream from the real-time feed, remove "

@@ -322,7 +322,7 @@ def test_values_history_from_flat_files_needs_credentials(
     with dm.MassiveSession(dm.MassiveConfig(api_key="test-key")) as session:
         q = session.indices.values("I:SPX")
         for source in (dm.HistorySource.FLAT_FILES, dm.HistorySource.AUTO):
-            with pytest.raises(ValueError, match="no S3 credentials are configured"):
+            with pytest.raises(ValueError, match="no S3 credentials are set"):
                 q.history("2025-06-02", "2025-06-02", source=source, wait=True)
 
 
@@ -401,7 +401,7 @@ def test_bars_history_over_rest_needs_explicit_symbols(m: dm.MassiveSession) -> 
 
 def test_bar_flat_files_hold_only_minutes_and_days(m: dm.MassiveSession) -> None:
     q = m.indices.bars("I:SPX", dm.Timespan.HOUR)
-    with pytest.raises(ValueError, match="flat files hold only 1-minute, 1-day bars"):
+    with pytest.raises(ValueError, match="flat files hold only 1-minute and 1-day bars"):
         q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES, wait=True)
 
 
@@ -429,7 +429,7 @@ def test_snapshots_filters_are_the_snapshot_parameters(m: dm.MassiveSession) -> 
         )
         with pytest.raises(ValueError, match=whole(refusal)):
             m.indices.snapshots("I:SPX", filters={key: "I:A"})
-    with pytest.raises(ValueError, match=r"has no filter 'timestamp_gte'; valid filters: \["):
+    with pytest.raises(ValueError, match=r"has no filter 'timestamp_gte'\. Pass one of ticker_gt"):
         m.indices.snapshots("I:SPX", filters={"timestamp_gte": "I:A"})
     with pytest.raises(ValueError, match="'ticker_lt' takes text, not 5"):
         m.indices.snapshots("I:SPX", filters={"ticker_lt": 5})
@@ -470,14 +470,20 @@ def test_daily_open_close_rejects_all(m: dm.MassiveSession) -> None:
 
 def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
     for moment in (datetime(2025, 6, 2, 15, 30, tzinfo=UTC), "2025-06-03T02:00:00+00:00"):
-        with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
+        with pytest.raises(
+            ValueError, match=r"date=.* is a time, and date takes a calendar date\. Pass a date"
+        ):
             m.indices.daily_open_close("I:SPX", moment)
     naive = datetime(2025, 6, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         m.indices.daily_open_close("I:SPX", naive)
     with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         m.indices.daily_open_close("I:SPX", "June 2")
-    with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
+    with pytest.raises(
+        TypeError,
+        match=r"date must be a str, date, datetime, numpy\.datetime64, pandas\.Timestamp, or "
+        r"Java Instant",
+    ):
         m.indices.daily_open_close("I:SPX", 20250602)  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -492,11 +498,11 @@ def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
         "bars": (dm.Timespan.MINUTE,),
     }
     extra = extras.get(name, ())
-    with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker; this dataset takes"):
+    with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker, and this dataset takes"):
         method("X:BTCUSD", *extra)
-    with pytest.raises(ValueError, match=r"^'SPX' is not Massive's ticker; use 'I:SPX'"):
+    with pytest.raises(ValueError, match=r"^'SPX' is not Massive's index ticker\. Pass 'I:SPX'"):
         method("SPX", *extra)
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         method([], *extra)
 
 
@@ -685,7 +691,7 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+        if r.levelno == logging.WARNING and "cannot tell which day this one covers" in r.message
     ]
 
 
@@ -734,15 +740,14 @@ def test_index_bars_of_a_day_or_longer_start_at_new_york_midnight(
     with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
         q.history(day, day, source=dm.HistorySource.REST, wait=True)
     week_warning, day_warning = stamp_warnings(caplog)
-    assert week_warning.startswith("indices.bars: a bar of I:SPX from ")
-    assert " is stamped 2025-06-01T20:00:00+00:00 " in week_warning
-    assert day_warning.startswith(
-        "indices.bars: a 1-day bar of I:SPX from /v2/aggs/ticker/{indicesTicker}/range/"
+    assert week_warning.startswith(
+        "indices.bars: Massive sent a bar of I:SPX stamped 2025-06-01T20:00:00+00:00 "
     )
-    assert (
-        " is stamped 2025-06-02T06:00:00+00:00 (2025-06-02T02:00:00-04:00 in America/New_York), "
-        "which is not a stamp Massive is known to use"
-    ) in day_warning
+    assert day_warning.startswith(
+        "indices.bars: Massive sent a 1-day bar of I:SPX stamped 2025-06-02T06:00:00+00:00 "
+        "(2025-06-02T02:00:00-04:00 in America/New_York). Massive is known to stamp bars of 1 "
+        "day at "
+    )
 
 
 @pytest.mark.parametrize(("minutes", "kept"), [(30, 0), (60, 1)], ids=["00:30", "01:00"])
@@ -917,7 +922,7 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
     assert message == (
         'Massive answered the subscription to V.I:SPX on wss://socket.test/indices: "not '
         'authorized". Massive documents indices.values only on its Business feed, '
-        "business.massive.com; its plans are listed at "
+        "business.massive.com. Its plans are listed at "
         "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.values.md. "
         "Massive documents the indices V channel only on business.massive.com. To stream from "
         'another host, pass websocket_hosts={dm.AssetClass.INDICES: "<host>"} to '
@@ -1027,8 +1032,7 @@ def test_every_index_from_a_day_file_at_an_unexpected_stamp_is_withheld_with_a_w
     ]
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "indices.bars: a 1-day bar of I:SPX from the flat files us_indices/day_aggs_v1 is "
-        "stamped 2025-06-02T06:00:00+00:00"
+        "indices.bars: Massive sent a 1-day bar of I:SPX stamped 2025-06-02T06:00:00+00:00"
     )
 
 

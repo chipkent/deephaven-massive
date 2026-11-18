@@ -401,7 +401,7 @@ def test_stock_datasets_refuse_another_class(massive_session: dm.MassiveSession,
     message = (
         "is not a ticker as Massive writes it"
         if name == "partners.tmx.corporate_events"
-        else "is a crypto ticker; this dataset takes stock tickers"
+        else "is a crypto ticker, and this dataset takes stock tickers"
     )
     with pytest.raises(ValueError, match=rf"^'X:BTCUSD' {message}"):
         factory(massive_session, name)("X:BTCUSD")
@@ -429,7 +429,7 @@ def test_symbols_may_be_a_table(massive_session: dm.MassiveSession, name: str) -
 def test_an_exhausted_generator_is_refused(massive_session: dm.MassiveSession, name: str) -> None:
     symbols = (symbol for symbol in ["AAPL"])
     assert list(symbols) == ["AAPL"]
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         factory(massive_session, name)(symbols)
 
 
@@ -511,9 +511,9 @@ def test_a_range_must_not_end_before_it_starts(
     make = factory(massive_session, name)
     q = make(start="2025-07-01", end="2025-07-01")  # one whole day
     assert q._request.start == q._request.end == date(2025, 7, 1)
-    with pytest.raises(ValueError, match="must not be after end"):
+    with pytest.raises(ValueError, match="is after end="):
         make(start="2025-07-02", end="2025-07-01")
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         make(start="2025-07-01T09:30")
 
 
@@ -560,11 +560,15 @@ def test_filters_reach_the_endpoint_parameters(
 @pytest.mark.parametrize(
     "case",
     [
-        ("partners.fable.merchant_aggregates", {"channel": "mail"}, r"takes one of \['online'"),
+        (
+            "partners.fable.merchant_aggregates",
+            {"channel": "mail"},
+            r"is not one of its values\. Pass one of 'online'",
+        ),
         (
             "partners.fable.merchant_hierarchy",
             {"listing_status": "listed"},
-            r"takes one of \['public'",
+            r"is not one of its values\. Pass one of 'public'",
         ),
         ("partners.benzinga.earnings", {"importance": "high"}, "takes integer values"),
         ("partners.benzinga.analysts", {"ticker": "AAPL"}, "has no filter 'ticker'"),

@@ -195,7 +195,9 @@ def test_insider_aggregates_leave_no_parameter_to_filters(
     # The arguments reserve every form of the tickers (`tickers.all_of` included), the CIKs,
     # and the date (the exclusive bounds included), as the docstrings say, which leaves no
     # filter; a parameter Massive adds later shows up here.
-    with pytest.raises(ValueError, match=r"valid filters: \[\]"):
+    with pytest.raises(
+        ValueError, match=r"has no filter 'anything', and takes none\. Leave filters out\.$"
+    ):
         factory(massive_session, name)(filters={"anything": "x"})
 
 

@@ -193,7 +193,11 @@ def test_a_dataset_without_a_class_takes_any_class_by_prefix(
     # Indicators, reference data, and the unified snapshot span asset classes.
     q = build(massive_session, INDICATOR, symbols=["X:BTCUSD", "I:SPX", "AAPL", "C:EURUSD"])
     assert q._request.symbols == ("AAPL", "C:EURUSD", "I:SPX", "X:BTCUSD")
-    with pytest.raises(ValueError, match=r"'i:spx' is an index ticker \(prefix I:\)"):
+    with pytest.raises(
+        ValueError,
+        match=r"^'i:spx' is an index ticker, not a stock one\. "
+        r"Call dm\.canonical_symbol_index\('i:spx'\)\.$",
+    ):
         build(massive_session, INDICATOR, symbols=["i:spx"])
 
 
@@ -282,7 +286,9 @@ def test_symbols_follow_the_asset_class(massive_session: dm.MassiveSession) -> N
         channels={NotBars.ANY: "C"},
     )
     assert build(massive_session, fx, symbols="C:EURUSD")._request.symbols == ("C:EURUSD",)
-    with pytest.raises(ValueError, match=r"^'EUR/USD' is not Massive's ticker; use 'C:EURUSD'"):
+    with pytest.raises(
+        ValueError, match=r"^'EUR/USD' is not Massive's forex ticker\. Pass 'C:EURUSD'"
+    ):
         build(massive_session, fx, symbols="EUR/USD")
     # A dataset without an asset class reads the class from each prefix; none is a stock.
     assert build(massive_session, INDICATOR, symbols="KIMpL")._request.symbols == ("KIMpL",)
@@ -413,7 +419,7 @@ def test_filter_validation(massive_session: dm.MassiveSession) -> None:
 
 
 def test_time_bounds_must_be_aware(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"^start='2025-01-01T09:30' needs a timezone"):
+    with pytest.raises(ValueError, match=r"^start='2025-01-01T09:30' has no timezone"):
         build(massive_session, DIVIDENDS, start="2025-01-01T09:30")
 
 
@@ -422,8 +428,8 @@ def test_naive_datetime_filters_and_params_are_rejected(
 ) -> None:
     naive = datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     message = (
-        r"^timestamp_gte=datetime\.datetime\(2025, 1, 2, 9, 30\) needs a timezone: "
-        r"pass an aware datetime or a date$"
+        r"^timestamp_gte=datetime\.datetime\(2025, 1, 2, 9, 30\) has no timezone\. "
+        r"Pass an aware datetime or a date\.$"
     )
     with pytest.raises(ValueError, match=message):
         build(massive_session, INDICATOR, filters={"timestamp_gte": naive})
@@ -473,7 +479,7 @@ def test_filters_take_the_date_and_time_objects_a_time_bound_takes(
     assert _time_value("timestamp_lt", between) == up
     assert _time_value("timestamp.lte", between) == up
     naive = pd.Timestamp("2025-01-02 09:30")
-    with pytest.raises(ValueError, match=r"^timestamp_gte=.* needs a timezone"):
+    with pytest.raises(ValueError, match=r"^timestamp_gte=.* has no timezone"):
         build(massive_session, INDICATOR, filters={"timestamp_gte": naive})
 
 
@@ -519,9 +525,9 @@ NEWS = DatasetSpec(
 
 
 def test_a_time_axis_must_not_end_before_it_starts(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"^start \(.*\) must not be after end"):
+    with pytest.raises(ValueError, match=r"^start=.* is after end="):
         build(massive_session, DIVIDENDS, start="2025-02-01", end="2025-01-01")
-    with pytest.raises(ValueError, match="must not be after end"):
+    with pytest.raises(ValueError, match="is after end="):
         build(
             massive_session,
             NEWS,
@@ -536,9 +542,16 @@ def test_a_time_axis_must_not_end_before_it_starts(massive_session: dm.MassiveSe
 
 
 def test_a_time_axis_refuses_mixed_bounds(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
+    with pytest.raises(
+        ValueError,
+        match=r"is a datetime\. Pass two dates for whole days, or two datetimes for exact "
+        r"instants\.$",
+    ):
         build(massive_session, NEWS, start="2025-01-02", end=datetime(2025, 1, 2, 9, tzinfo=UTC))
-    with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
+    with pytest.raises(
+        ValueError,
+        match=r"is a date\. Pass two dates for whole days, or two datetimes for exact instants\.$",
+    ):
         build(massive_session, NEWS, start=datetime(2025, 1, 2, 9, tzinfo=UTC), end="2025-01-03")
 
 
@@ -1051,7 +1064,7 @@ def test_a_typed_parameter_is_reserved_from_filters(massive_session: dm.MassiveS
     with pytest.raises(ValueError, match="has no filter 'pay_date'") as caught:
         build(massive_session, DIVIDENDS, params={"frequency": None}, filters={"pay_date": "x"})
     assert "frequency" not in str(caught.value)
-    assert "'distribution_type'" in str(caught.value)
+    assert "Pass one of distribution_type, " in str(caught.value)
 
 
 def test_a_fixed_parameter_is_sent_and_reserved(massive_session: dm.MassiveSession) -> None:

@@ -727,7 +727,7 @@ def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream_under_raise
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("test.trades: a symbol table holds 'msft'")
+    assert row["Error"].startswith("test.trades: A symbol table holds 'msft'")
     assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, convention=" in row["Error"]
     # m.problems() names the value beside the failure; its span ended with the stream.
     refused = ("noncanonical_symbols", "msft", True)
@@ -820,14 +820,14 @@ def test_a_failing_upstream_watchlist_fails_the_stream(
         wait_for(lambda: failed_after_flush(ws_session, result))
         (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("the symbol table passed to test.trades failed upstream")
+    assert row["Error"].startswith("The table you passed to test.trades has failed")
     errors = [
         r.getMessage()
         for r in caplog.records
-        if r.levelno >= logging.ERROR and "failed upstream" in r.getMessage()
+        if r.levelno >= logging.ERROR and "can no longer read it" in r.getMessage()
     ]
     assert len(errors) == 1
-    assert errors[0].startswith("test.trades stream 1 failed: the symbol table passed to")
+    assert errors[0].startswith("test.trades stream 1 failed: The table you passed to")
 
 
 def test_a_default_canonicalized_watchlist_skips_a_late_bad_row_and_keeps_following(
@@ -907,7 +907,7 @@ def test_a_failing_watchlist_fails_a_last_by_stream_once(
     assert result.j_table.isFailed()
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("the symbol table passed to test.trades failed upstream")
+    assert row["Error"].startswith("The table you passed to test.trades has failed")
 
 
 def watching_streams(
@@ -1872,7 +1872,10 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
             future.result(TIMEOUT)
     # A verb that races the close finds the session closed, or its stream failed by the close.
     closed = "This session was closed, so this table no longer updates. " + NEW_SESSION
-    assert all(t in (session_closed(), closed) or closed in t for t in closed_errors)
+    opening = f"This session was closed while a stream was opening. {NEW_SESSION}"
+    assert all(t in (session_closed(), closed, opening) or closed in t for t in closed_errors), (
+        closed_errors
+    )
     core = ws_session.session._core
     drained = threading.Event()
     core.defer(drained.set)
