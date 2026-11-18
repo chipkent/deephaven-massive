@@ -606,7 +606,19 @@ def test_a_daily_summary_covers_its_date() -> None:
         END: ["2025-03-10T04:00:00+00:00"] * 2 + [None],
     }
     index = TimeRule("indices.daily_open_close", RowTimes.DAY, A.INDICES, T.DAY, warnings=log)
-    assert fill(index, bars([None], dates=["2025-03-03"]))[END] == ["2025-03-04T06:00:00+00:00"]
+    # An index summary covers its date's Chicago day, as the index day bar of that date does:
+    # 06:00 UTC in standard time, 05:00 UTC in daylight time.
+    assert fill(index, bars([None, None], dates=["2025-03-03", "2025-07-01"])) == {
+        DATE: ["2025-03-03", "2025-07-01"],
+        START: ["2025-03-03T06:00:00+00:00", "2025-07-01T05:00:00+00:00"],
+        END: ["2025-03-04T06:00:00+00:00", "2025-07-02T05:00:00+00:00"],
+    }
+    day_bar = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.DAY, 1)
+    sent = bars(["2025-03-03T06:00:00", "2025-07-01T05:00:00"])
+    assert {k: v for k, v in fill(day_bar, sent).items() if k in (START, END)} == {
+        START: ["2025-03-03T06:00:00+00:00", "2025-07-01T05:00:00+00:00"],
+        END: ["2025-03-04T06:00:00+00:00", "2025-07-02T05:00:00+00:00"],
+    }
     crypto = TimeRule("crypto.daily_open_close", RowTimes.DAY, A.CRYPTO, T.DAY, warnings=log)
     assert fill(crypto, bars([None], dates=["2025-03-03"]))[START] == ["2025-03-03T00:00:00+00:00"]
 

@@ -140,19 +140,12 @@ _CHICAGO_DAYS: Final = (
 _INDEX_MIDNIGHT: Final = "00:00 Chicago time (01:00 New York time)"
 """Where an index day starts and ends, in both zones: they change clocks together."""
 
-_INDEX_HOUR: Final = (
-    f"For indices that end is an hour later, 01:00 New York time, midnight in Chicago, where an "
-    f"index day bar ends. {_CHICAGO_DAYS}"
-)
-"""Why an index day summary ends at 01:00 New York time."""
-
 _FINISHED_ROWS: Final = (
     "A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its "
     'values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows '
     "read after their window ended. That test reads the local clock, which can be off, and a "
     "row read within moments of its end, or from a delayed feed, may still lack the window's "
-    "last trades; an end set later than the window's (an index day summary's extra hour) only "
-    "keeps a finished row out longer."
+    "last trades."
 )
 """How every `TimestampEnd` description tells finished rows from unfinished ones."""
 
@@ -220,6 +213,7 @@ def _date_sentence(spec: DatasetSpec) -> str:
     zone = _zone_word(spec)
     times = spec.times
     if times is RowTimes.DAY:
+        zone = "Chicago" if spec.asset_class is AssetClass.INDICES else zone
         return f"The day the summary covers, as ISO yyyy-MM-dd text: a {zone} calendar day."
     if spec.asset_class is AssetClass.FUTURES:
         if times is RowTimes.TICK:
@@ -267,6 +261,12 @@ def _start_sentence(spec: DatasetSpec) -> str:
     """
     zone = _zone_word(spec)
     if spec.times is RowTimes.DAY:
+        if spec.asset_class is AssetClass.INDICES:
+            return (
+                "The start of the day the summary covers, as an Instant: "
+                f"{_INDEX_MIDNIGHT} of `Date`, where the index day bar of that date starts. "
+                f"{_CHICAGO_DAYS}"
+            )
         utc = f" {_ANY_ZONE}" if spec.asset_class is AssetClass.CRYPTO else ""
         return (
             "The start of the day the summary covers, as an Instant: 00:00 "
@@ -313,11 +313,16 @@ def _end_sentence(spec: DatasetSpec) -> str:
     zone = _zone_word(spec)
     indices = spec.asset_class is AssetClass.INDICES
     if spec.times is RowTimes.DAY:
-        later = f" {_INDEX_HOUR}" if indices else ""
+        if indices:
+            return (
+                "The exclusive end of the day the summary covers, as an Instant: "
+                f"{_INDEX_MIDNIGHT} of the next day, where the index day bar of that date ends. "
+                f"{_CHICAGO_DAYS} {_FINISHED_ROWS}"
+            )
         utc = f" {_ANY_ZONE}" if spec.asset_class is AssetClass.CRYPTO else ""
         return (
             "The exclusive end of the day the summary covers, as an Instant: 00:00 "
-            f"{_ZONE_CLOCKS[str(zone)]} of the next day.{later}{utc} {_FINISHED_ROWS}"
+            f"{_ZONE_CLOCKS[str(zone)]} of the next day.{utc} {_FINISHED_ROWS}"
         )
     if spec.asset_class is AssetClass.FUTURES:
         return (
