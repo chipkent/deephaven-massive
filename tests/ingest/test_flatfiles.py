@@ -91,6 +91,7 @@ RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[s
 NEW_YORK = ZoneInfo("America/New_York")
 R, FF = Transport.REST, Transport.FLAT_FILES
 NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
+INDEX_BARS = CATALOG.by_name["indices.bars"]
 """A Monday afternoon, when every file of the first week of March 2025 is published."""
 LOGGER = "deephaven_massive"
 # The once-per-session warnings a transform built outside a session logs to.
@@ -4822,3 +4823,32 @@ def test_a_refused_venue_is_listed_when_another_file_fails_the_call(
         assert "CME" in events[0].detail
     finally:
         m.close()
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (date(2025, 3, 4), date(2025, 3, 4)),
+        (datetime(2025, 3, 4, 5, tzinfo=UTC), datetime(2025, 3, 4, 6, 1, tzinfo=UTC)),
+    ],
+)
+def test_an_index_minute_read_takes_the_new_york_day_s_first_hour_from_the_file_before(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    start: date | datetime,
+    end: date | datetime,
+) -> None:
+    # Massive's index minute file of a date holds its Chicago day, 01:00 to 01:00 New York, so
+    # Tuesday's New York hour from 00:00 to 01:00 is in Monday's file.
+    header = "ticker,open,close,high,low,window_start\n"
+    utc = [datetime(2025, 3, 4, 5, tzinfo=UTC), datetime(2025, 3, 4, 5, 30, tzinfo=UTC)]
+    monday = "".join(f"I:X,1.0,1.0,1.0,1.0,{epoch_ns(m)}\n" for m in utc)
+    after = [datetime(2025, 3, 4, 6, tzinfo=UTC), datetime(2025, 3, 5, 5, tzinfo=UTC)]
+    tuesday = "".join(f"I:X,1.0,1.0,1.0,1.0,{epoch_ns(m)}\n" for m in after)
+    for day, body in (("2025-03-03", monday), ("2025-03-04", tuesday)):
+        fake_s3.put(f"us_indices/minute_aggs_v1/2025/03/{day}.csv.gz", make_csv_gz(header + body))
+    q = query(session, INDEX_BARS, symbols=dm.ALL, timespan=Timespan.MINUTE)
+    t = q.history(start, end, source=HistorySource.FLAT_FILES, wait=True)
+    assert pick(t, "TimestampStart") == [(epoch_ns(m),) for m in (*utc, after[0])]

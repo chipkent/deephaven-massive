@@ -23,7 +23,7 @@ Every market-data row answers three questions, whichever transport served it:
 
 `RowTimes` says which of these a dataset has, and `TimeRule.fill` computes them for one batch
 of rows already in the dataset's schema, after the transports have converted the vendor's
-fields and, for bars of a day or longer, moved their stamps to the start of their day
+fields and, for bars of a day or longer, placed their stamps at the start of their day
 (`stamp_rule`). The vendor's own time fields feed these columns through the
 dataset's declared keys and are not kept beside them: the bar start (`t`, `s`,
 `window_start`) becomes `TimestampStart`, the WebSocket bar end `e` becomes `TimestampEnd`
@@ -40,40 +40,47 @@ as sent, and the futures
   length (REST and flat-file bars carry no end).
   `Date` is the start's date, null when the bar ends on a later date; for futures it is the
   session as for ticks, null when the bar crosses 17:00 Chicago time.
-- **1-day bar.** 00:00 of the day to 00:00 of the next day (01:00 New York time for indices);
-  `Date` is the day.
+- **1-day bar.** 00:00 of the day to 00:00 of the next day, in the class's bar zone: the day
+  zone, but Chicago for indices, whose days Massive cuts there (`_BAR_ZONES`); `Date` is the
+  day.
 - **n-day, week, month, quarter, or year bar.** 00:00 of the window's first day (for stocks
   and options a period's first weekday, a week's Monday; for every other class its first
   calendar day, a week's Sunday) to 00:00 after its last day (last weekday for stocks and
-  options; for indices, which can update around the clock, the period's last calendar day and
-  one hour more); a bar of several days spans that many calendar days, weekends included, as
+  options; for indices, which can update around the clock, the period's last calendar day), in
+  the bar zone; a bar of several days spans that many calendar days, weekends included, as
   Massive counts them; `Date` is null.
 - **Futures bar of a session or longer.** Massive's `window_start` (00:00 UTC on the first
   day of the bar's bucket of UTC days, `bar_periods`) to 17:00 Chicago time on its label,
   Massive's `session_end_date`, the bucket's last session. `Date` is the label for a
   1-session bar and null for a longer one. Since a session opens the evening before its date,
   consecutive bars overlap by about 22 hours.
-- **Daily open-close.** As a 1-day bar of its date. A crypto summary whose `isUTC` is false
+- **Daily open-close.** 00:00 of its date to 00:00 of the next day in the class day zone
+  (for indices, to 01:00 New York time, midnight in Chicago, where an index day bar ends:
+  `dates.day_end`). A crypto summary whose `isUTC` is false
   keeps Massive's `Date` and `IsUtc`, but its day is not the UTC day and the library cannot
   tell which zone's day it is, so its window is the widest that date's day has in any time
   zone: from 00:00 at UTC+14 to 24:00 at UTC-12. It logs one WARNING per dataset per session.
 - **A period stamped where Massive is not known to stamp one.** A bar or indicator value of a
   day or longer whose stamp `StampRule` does not expect is withheld ("Bar stamps" below).
 
-The indices' extra hour is conservative: an index day bar is stamped at midnight in Chicago,
-and whether it covers the New York or the Chicago day is not verified, so its end is the later
-of the two. A futures bar longer than one session whose label may not yet be its bucket's last
-session has a `TimestampEnd` that can still move, so `history()` returns it only once it has
-certainly ended (`whole`, `bar_periods.futures_bar_ended`). The next midnight is always the
-calendar's next midnight in the zone, never 24 hours later, so a day across a daylight-saving
-change keeps its true length.
+An index bar of a day or longer covers Chicago days: Massive stamps it at midnight in Chicago
+on every source, and its values are those of the Chicago day, though Massive's documentation
+says index days are Eastern. Midnight in Chicago is always 01:00 New York time, since the two
+zones change clocks together, so such a bar's New York `Date` is its Chicago day.
+
+A futures bar longer than one session whose label may not yet be its bucket's last session
+has a `TimestampEnd` that can still move, so `history()` returns it only once it has certainly
+ended (`whole`, `bar_periods.futures_bar_ended`). The next midnight is always the calendar's
+next midnight in the zone, never 24 hours later, so a day across a daylight-saving change
+keeps its true length.
 
 **Bar stamps.** Bars of a day or longer are stamped at 00:00 of the day they start on, in the
-class day zone, whichever source serves them, before their time columns are filled. Massive
+class's bar zone, whichever source serves them, before their time columns are filled. Massive
 stamps the same bar differently by source (the day's start on the aggregates range, the 16:00
 New York session close on the stock grouped daily, the 04:00 New York pre-market open on the
 stock `/prev`, the day's last millisecond in the forex and crypto day files), so every known
-stamp moves to 00:00 of the day it falls on (`day_starts`). A stamp at a time or on a day
+stamp moves to 00:00 of the day it falls on (`day_starts`). A stamp already there, such as an
+index's midnight in Chicago, stays as Massive sent it. A stamp at a time or on a day
 Massive is not known to use for the class and timespan cannot be placed: which day it covers
 would be a guess, and a wrong guess could end the window before the data closed, a
 look-ahead. `StampRule.stamp` returns such rows for the transports to withhold
@@ -115,7 +122,7 @@ from deephaven_massive._datasets.bar_periods import (
     unit_ns,
 )
 from deephaven_massive._datasets.dates import (
-    DAY_ZONES,
+    NEW_YORK,
     day_end,
     day_zone,
     midnight,
@@ -905,9 +912,10 @@ class TimeRule:
     def _long_bars(self, rows: _Rows, timespan: Timespan) -> _Rows:
         """Fill a bar of a day or longer of a class with a day zone.
 
-        Its start is moved to 00:00 of its window's first day and its end is 00:00 after its
-        window's last day (`bar_periods.bar_days`), plus an hour for indices; a 1-day bar's
-        `Date` is its day, and every longer bar's is null.
+        Its start is 00:00 of its window's first day and its end 00:00 after its window's last
+        day (`bar_periods.bar_days`), both in the class's bar zone (`_BAR_ZONES`), so an index
+        bar keeps Massive's stamp at midnight in Chicago; a 1-day bar's `Date` is its day, and
+        every longer bar's is null.
 
         Args:
             rows: The batch, whose known starts `StampRule.stamp` already moved to 00:00 of
@@ -917,7 +925,7 @@ class TimeRule:
         Returns:
             The batch with `Date`, `TimestampStart`, and `TimestampEnd`.
         """
-        zone = self._zone()
+        zone = _bar_zone(self.asset_class)
         single = timespan is Timespan.DAY and self.multiplier == 1
         ns = _to_int(rows.column(START))
         distinct = pc.unique(ns)
@@ -969,6 +977,19 @@ class TimeRule:
         if single:
             return rows
         return _set(rows, DATE, pa.nulls(rows.num_rows, pa.string()))
+
+
+def _bar_zone(asset_class: AssetClass | ClassFromPrefix) -> tzinfo:
+    """Return the zone whose days a class's bars of a day or longer cover (`_BAR_ZONES`).
+
+    Args:
+        asset_class: A class with a day zone, or `ClassFromPrefix.ANY`, whose days are New
+            York days.
+
+    Returns:
+        The zone.
+    """
+    return NEW_YORK if asset_class is ClassFromPrefix.ANY else _BAR_ZONES[asset_class]
 
 
 def _set(rows: _Rows, name: str, values: pa.Array) -> _Rows:
@@ -1033,7 +1054,8 @@ class StampRule:
     share it; `warnings` is thread-safe.
 
     Attributes:
-        zone: The class day zone; every bar is stamped at 00:00 there of the day it starts on.
+        zone: The class's bar zone (`_BAR_ZONES`); every bar is stamped at 00:00 there of the
+            day it starts on.
         known: The other wall-clock times of day, in `zone`, at which Massive is known to stamp
             the class's bars of this length on some source.
         what: The kind of row, for the WARNING: `"1-day bar"`, `"bar"`, or `"indicator value"`.
@@ -1184,9 +1206,11 @@ _INDEX_OPTION_CLOSES: Final = frozenset({time(13, 15), time(16, 15)})
 """The closes of index options such as SPX and SPXW, 15 minutes after the stock market's on
 full and short days, presumed to be where `/prev` may stamp such a contract's 1-day bar."""
 
-_CHICAGO_MIDNIGHT: Final = time(1)
-"""Midnight in Chicago, as New York time (the two zones change clocks together): the indices
-range and day files stamp their 1-day bars there."""
+_INDEX_CLOSES: Final = frozenset({time(15), time(12)})
+"""The 16:00 and 13:00 New York session closes as Chicago time (the two zones change clocks
+together), where Massive's `/prev` sample stamps an index 1-day bar and a short day's close
+would be. Each lies inside its own Chicago day, so accepting it never changes which day a bar
+is labelled with."""
 
 _LAST_MILLISECOND: Final = time(23, 59, 59, 999_000)
 """The last millisecond of a UTC day: forex grouped daily and `/prev` and the forex and crypto
@@ -1195,27 +1219,39 @@ day files stamp their 1-day bars there."""
 _ONE_DAY_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
     AssetClass.STOCKS: frozenset({_PREMARKET_OPEN, _EARLY_CLOSE, _SESSION_CLOSE}),
     AssetClass.OPTIONS: frozenset({_EARLY_CLOSE, _SESSION_CLOSE, *_INDEX_OPTION_CLOSES}),
-    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT, _EARLY_CLOSE, _SESSION_CLOSE}),
+    AssetClass.INDICES: _INDEX_CLOSES,
     AssetClass.FOREX: frozenset({_LAST_MILLISECOND}),
     AssetClass.CRYPTO: frozenset({_LAST_MILLISECOND}),
 }
-"""Per class with a day zone (`dates.DAY_ZONES`), the times of day besides 00:00 at which some
+"""Per class of `_BAR_ZONES`, the times of day in its bar zone besides 00:00 at which some
 source stamps a 1-day bar: those of Massive's documented samples, the stock `/prev`'s 04:00
 seen live, and the closes of a short trading day and of index options, each of which lies
-inside its own New York day."""
+inside its own day."""
 
 _LONGER_STAMPS: Final[Mapping[AssetClass, frozenset[time]]] = {
     AssetClass.STOCKS: frozenset(),
     AssetClass.OPTIONS: frozenset(),
-    AssetClass.INDICES: frozenset({_CHICAGO_MIDNIGHT}),
+    AssetClass.INDICES: frozenset(),
     AssetClass.FOREX: frozenset(),
     AssetClass.CRYPTO: frozenset(),
 }
-"""Per class with a day zone, the times of day besides 00:00 at which the aggregates range
-stamps its bars: accepted for a bar of several days, a week, or longer, which only the range
-serves, and for an indicator value of a day or longer, which is computed over the range's
-bars. The indices range's midnight in Chicago is that of its 1-day bars and of the index
-indicator samples' underlying aggregates."""
+"""Per class of `_BAR_ZONES`, the times of day in its bar zone besides 00:00 at which the
+aggregates range stamps its bars: accepted for a bar of several days, a week, or longer, which
+only the range serves, and for an indicator value of a day or longer, which is computed over
+the range's bars. Every class's range stamps them at 00:00, so none has another."""
+
+_BAR_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
+    AssetClass.STOCKS: NEW_YORK,
+    AssetClass.OPTIONS: NEW_YORK,
+    AssetClass.INDICES: CHICAGO,
+    AssetClass.FOREX: UTC,
+    AssetClass.CRYPTO: UTC,
+}
+"""Per class with a day zone (`dates.DAY_ZONES`), the zone at whose midnight Massive starts the
+class's bars of a day or longer, and whose days those bars cover: the class day zone, except
+for indices, whose days Massive cuts at midnight in Chicago on every source (01:00 New York
+time, since the two zones change clocks together). `DAY_ZONES` still names the zone of `Date`
+and of a range's dates, which for an index bar's day is the same date."""
 
 _SUNDAY: Final = frozenset({calendar.SUNDAY})
 """The day a week bar must be stamped on, in every class: the Sunday Massive starts its week on
@@ -1244,23 +1280,24 @@ def stamp_rule(
 
     One `history()` call returns the same rows whichever source answers it, so every bar of a
     day or longer of a class with a day zone (`dates.DAY_ZONES`: every class but futures) is
-    stamped at 00:00 of the day it starts on in that zone (New York for stocks, options, and
-    indices; UTC for forex and crypto). Massive stamps a 1-day bar at the day's start on the
-    aggregates range but at the session close (stocks, options, indices), the pre-market open
-    (the stock `/prev`), or the day's last millisecond (forex, crypto) on other sources, and
-    the indices range and day files at midnight in Chicago; those stamps move to the day's
-    start. Massive is known to stamp a week, month, quarter, or year bar on the day its period
-    starts (a week's Sunday, a longer period's 1st). A bar at any other stamp is returned for
-    the transports to withhold, with one WARNING per form of stamp per session
+    stamped at 00:00 of the day it starts on in the class's bar zone (`_BAR_ZONES`: New York
+    for stocks and options, Chicago for indices, UTC for forex and crypto). Massive stamps a
+    1-day bar at the day's start on the aggregates range (for indices, midnight in Chicago on
+    every source, kept as sent) but at the session close (stocks, options, and the indices'
+    `/prev` sample), the pre-market open (the stock `/prev`), or the day's last millisecond
+    (forex, crypto) on other sources; those stamps move to the day's start. Massive is known
+    to stamp a week, month, quarter, or year bar on the day its period starts (a week's
+    Sunday, a longer period's 1st). A bar at any other stamp is returned for the transports to
+    withhold, with one WARNING per form of stamp per session
     (`StampRule.stamp`): such a bar may cover other days than the one its stamp falls on (the
     documented crypto REST samples sit at midnight New York time, another day cut), so which
     day it covers would be a guess.
 
     The indicators' values are computed over the aggregates range's bars and carry those
     bars' stamps (Massive's samples show the underlying aggregates at 00:00 New York time for
-    stocks and 01:00 for indices), so an indicator value of a day or longer is checked by the
-    range's rule for its symbols' class: 00:00 of its day, or the indices' midnight in
-    Chicago, on its period's first day. A value stamped otherwise is withheld and warns like
+    stocks and midnight in Chicago for indices), so an indicator value of a day or longer is
+    checked by the range's rule for its symbols' class: 00:00 in the class's bar zone, on its
+    period's first day. A value stamped otherwise is withheld and warns like
     a bar.
 
     Args:
@@ -1283,10 +1320,10 @@ def stamp_rule(
         not (spec.holds_bars or indicator)
         or request.timespan not in _DAYS_OR_LONGER
         or not isinstance(cls, AssetClass)
-        or cls not in DAY_ZONES
+        or cls not in _BAR_ZONES
     ):
         return None
-    zone = DAY_ZONES[cls]
+    zone = _BAR_ZONES[cls]
     timespan = request.timespan
     single = timespan is Timespan.DAY and request.multiplier == 1
     if single and not indicator:
@@ -1356,8 +1393,9 @@ def day_starts(
 
     Args:
         values: The bars' `Timestamp` column, an Arrow `timestamp("ns", "UTC")` array.
-        zone: The class day zone: New York for stocks, options, and indices; UTC for forex and
-            crypto. Its midnights start the bars' days, daylight saving time included.
+        zone: The class's bar zone: New York for stocks and options, Chicago for indices, UTC
+            for forex and crypto. Its midnights start the bars' days, daylight saving time
+            included.
         known: The other wall-clock times of day, in `zone`, at which Massive is known to
             stamp these bars; empty when only 00:00 is expected.
         weekdays: The weekdays (Monday is 0) an expected stamp's date in `zone` falls on;
@@ -1398,7 +1436,7 @@ def _expected_stamp(
     """Tell whether a stamp has a form Massive is known to use for a bar.
 
     Args:
-        local: The stamp, as wall-clock time in the class day zone.
+        local: The stamp, as wall-clock time in the class's bar zone.
         accepted: The expected times of day, in milliseconds since midnight
             (`_millisecond_of_day`).
         weekdays: The weekdays (Monday is 0) an expected stamp falls on; empty for any day.

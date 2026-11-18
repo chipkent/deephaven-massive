@@ -130,19 +130,29 @@ _INTRADAY_END: Final = (
 """How an intraday bar's `TimestampEnd` is filled, on every class."""
 
 
-_INDEX_HOUR: Final = (
-    "For indices that end is an hour later, 01:00 New York time, since whether an index day bar "
-    "covers the New York or the Chicago day is not verified."
+_CHICAGO_DAYS: Final = (
+    "Massive's index days are Chicago days: it stamps an index day at midnight in Chicago on "
+    "every source, and its values are those of that Chicago day, though Massive's documentation "
+    "says index days are Eastern."
 )
-"""Why an index bar of a day or longer ends at 01:00 New York time."""
+"""Why an index row of a day or longer is cut at midnight in Chicago, said on its start and end."""
+
+_INDEX_MIDNIGHT: Final = "00:00 Chicago time (01:00 New York time)"
+"""Where an index day starts and ends, in both zones: they change clocks together."""
+
+_INDEX_HOUR: Final = (
+    f"For indices that end is an hour later, 01:00 New York time, midnight in Chicago, where an "
+    f"index day bar ends. {_CHICAGO_DAYS}"
+)
+"""Why an index day summary ends at 01:00 New York time."""
 
 _FINISHED_ROWS: Final = (
     "A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its "
     'values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows '
     "read after their window ended. That test reads the local clock, which can be off, and a "
     "row read within moments of its end, or from a delayed feed, may still lack the window's "
-    "last trades; an end set later than the window's (an index day's extra hour) only keeps a "
-    "finished row out longer."
+    "last trades; an end set later than the window's (an index day summary's extra hour) only "
+    "keeps a finished row out longer."
 )
 """How every `TimestampEnd` description tells finished rows from unfinished ones."""
 
@@ -268,14 +278,21 @@ def _start_sentence(spec: DatasetSpec) -> str:
         return (
             "The start of the bar the value is computed at, as an Instant. A bar of a day or "
             "longer starts at 00:00 of its window's first day in the day zone of the symbol's "
-            f"class (UTC for forex and crypto, New York otherwise). {_KEPT_STAMP}"
+            f"class (UTC for forex and crypto, New York otherwise), or for an index at "
+            f"{_INDEX_MIDNIGHT}, where Massive stamps it. {_KEPT_STAMP}"
         )
     first = (
         "a week's Monday, a month's, quarter's, or year's first weekday"
         if spec.asset_class in (AssetClass.STOCKS, AssetClass.OPTIONS)
         else "a week's Sunday, a month's, quarter's, or year's 1st"
     )
-
+    if spec.asset_class is AssetClass.INDICES:
+        return (
+            "The start of the bar's window, as an Instant. A bar of a day or longer starts at "
+            f"{_INDEX_MIDNIGHT} of its window's first day ({first}), Massive's own stamp. "
+            f"{_CHICAGO_DAYS} {_KEPT_STAMP} Every other stamp, as each source sends it (quoted "
+            "next), is moved there."
+        )
     return (
         "The start of the bar's window, as an Instant. A bar of a day or longer starts at "
         f"00:00 {_ZONE_CLOCKS[zone]} of its window's first day ({first}), whichever source "
@@ -311,15 +328,15 @@ def _end_sentence(spec: DatasetSpec) -> str:
             "several sessions or longer read before its last session passes that test once its "
             "latest session so far has ended, though later sessions can still join it."
         )
-    where = (
-        f"00:00 {_ZONE_CLOCKS[zone]}"
-        if zone is not None
-        else "00:00, in the day zone of the symbol's class,"
-    )
-    later = f" {_INDEX_HOUR}" if indices else ""
+    if indices:
+        where = _INDEX_MIDNIGHT
+    elif zone is not None:
+        where = f"00:00 {_ZONE_CLOCKS[zone]}"
+    else:
+        where = "00:00, in the day zone of the symbol's class (for an index, midnight in Chicago),"
     return (
         f"{_WINDOW_END} {_INTRADAY_END} A bar of a day or longer ends at {where} after its "
-        f"window's last day.{later} {_FINISHED_ROWS}"
+        f"window's last day. {_FINISHED_ROWS}"
     )
 
 

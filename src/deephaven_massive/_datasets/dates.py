@@ -196,8 +196,7 @@ _ATTOSECONDS: Final[Mapping[str, int]] = {
 _ONE_DAY: Final = timedelta(days=1)
 _INDEX_DAY_END: Final = timedelta(hours=1)
 """How much later an index day ends than the New York day: 01:00 New York time, midnight in
-Chicago, since whether an index day bar covers the New York or the Chicago day is not
-verified."""
+Chicago, where Massive ends an index day bar (the two zones change clocks together)."""
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 _WEEKEND_TRADING: Final = frozenset({AssetClass.FOREX, AssetClass.CRYPTO})
 """The classes that trade at weekends, whose bar periods keep their Saturdays and Sundays."""

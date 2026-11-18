@@ -369,12 +369,24 @@ def test_a_day_bar_ends_at_the_next_midnight_of_the_calendar() -> None:
     }
 
 
-def test_an_index_day_ends_an_hour_late() -> None:
+@pytest.mark.parametrize(
+    ("stamp", "end"),
+    [
+        ("2025-03-03T06:00:00", "2025-03-04T06:00:00"),  # standard time
+        ("2025-07-01T05:00:00", "2025-07-02T05:00:00"),  # daylight time
+        ("2025-03-09T06:00:00", "2025-03-10T05:00:00"),  # the clocks go forward: 23 hours
+        ("2025-11-02T05:00:00", "2025-11-03T06:00:00"),  # the clocks go back: 25 hours
+    ],
+    ids=["standard", "daylight", "spring", "fall"],
+)
+def test_an_index_day_is_the_chicago_day_massive_stamps(stamp: str, end: str) -> None:
+    # Massive stamps an index day at midnight in Chicago and the bar covers that Chicago day:
+    # the start stays Massive's, the end is the next Chicago midnight, the date the day's.
     rule = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.DAY, 1)
-    assert fill(rule, bars(["2025-03-03T05:00:00"])) == {
-        DATE: ["2025-03-03"],
-        START: ["2025-03-03T05:00:00+00:00"],
-        END: ["2025-03-04T06:00:00+00:00"],
+    assert fill(rule, bars([stamp])) == {
+        DATE: [stamp[:10]],
+        START: [f"{stamp}+00:00"],
+        END: [f"{end}+00:00"],
     }
 
 
@@ -390,11 +402,17 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
     month = TimeRule("stocks.bars", RowTimes.BAR, A.STOCKS, T.MONTH, 1)
     index_month = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.MONTH, 1)
     # An index month covers the whole calendar month, weekends included: June 2024 from
-    # Saturday the 1st, to an hour after the month ends.
-    assert fill(index_month, bars(["2024-06-01T04:00:00"])) == {
+    # Saturday the 1st at midnight in Chicago, where Massive stamps it, to July's.
+    assert fill(index_month, bars(["2024-06-01T05:00:00"])) == {
         DATE: [None],
-        START: ["2024-06-01T04:00:00+00:00"],
+        START: ["2024-06-01T05:00:00+00:00"],
         END: ["2024-07-01T05:00:00+00:00"],
+    }
+    # January is in standard time: 06:00 UTC.
+    assert fill(index_month, bars(["2025-01-01T06:00:00"])) == {
+        DATE: [None],
+        START: ["2025-01-01T06:00:00+00:00"],
+        END: ["2025-02-01T06:00:00+00:00"],
     }
     assert fill(month, bars(["2024-06-01T04:00:00"]))[START] == ["2024-06-03T04:00:00+00:00"]
     assert fill(month, bars(["2024-06-01T04:00:00"]))[END] == ["2024-06-29T04:00:00+00:00"]
@@ -413,16 +431,21 @@ def test_longer_bars_cover_their_whole_window_and_have_no_date() -> None:
         END: ["2025-03-06T05:00:00+00:00"],
     }
     # An index can update around the clock, so its week holds its weekend: it runs from its
-    # Sunday to an hour after the next Sunday begins.
+    # Sunday's midnight in Chicago, where Massive stamps it, to the next Sunday's.
     indices = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.WEEK, 1)
-    assert fill(indices, bars(["2025-03-02T05:00:00"])) == {
+    assert fill(indices, bars(["2025-03-02T06:00:00"])) == {
         DATE: [None],
-        START: ["2025-03-02T05:00:00+00:00"],
-        END: ["2025-03-09T06:00:00+00:00"],  # 01:00 New York time, still standard time
+        START: ["2025-03-02T06:00:00+00:00"],
+        END: ["2025-03-09T06:00:00+00:00"],  # still standard time at midnight in Chicago
     }
+    assert fill(indices, bars(["2025-06-01T05:00:00"]))[START] == ["2025-06-01T05:00:00+00:00"]
 
     index_days = TimeRule("indices.bars", RowTimes.BAR, A.INDICES, T.DAY, 2)
-    assert fill(index_days, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-05T06:00:00+00:00"]
+    assert fill(index_days, bars(["2025-03-03T06:00:00"])) == {
+        DATE: [None],
+        START: ["2025-03-03T06:00:00+00:00"],
+        END: ["2025-03-05T06:00:00+00:00"],
+    }
 
 
 def test_bars_of_several_days_count_calendar_days() -> None:
@@ -446,6 +469,18 @@ def test_an_indicator_value_ends_where_a_bar_of_its_period_ends() -> None:
     assert fill(week, bars(["2025-03-02T00:00:00"]))[END] == ["2025-03-09T00:00:00+00:00"]
     day = TimeRule("indicators.sma", RowTimes.BAR, A.STOCKS, T.DAY, 1)
     assert fill(day, bars(["2025-03-03T05:00:00"]))[END] == ["2025-03-04T05:00:00+00:00"]
+    # An index's value keeps Massive's stamp at midnight in Chicago, as its bar does.
+    index = TimeRule("indicators.sma", RowTimes.BAR, A.INDICES, T.DAY, 1)
+    assert fill(index, bars(["2025-07-01T05:00:00"])) == {
+        DATE: ["2025-07-01"],
+        START: ["2025-07-01T05:00:00+00:00"],
+        END: ["2025-07-02T05:00:00+00:00"],
+    }
+    log = session_warnings()
+    sma = stamp_rule(indicators.SMA, Request(timespan=T.DAY), warnings=log, asset_class=A.INDICES)
+    assert sma == StampRule(
+        CHICAGO, frozenset(), "indicator value", T.DAY, 1, log, months=frozenset()
+    )
 
 
 def test_a_rule_without_stamps_takes_every_stamp_as_known() -> None:
@@ -657,7 +692,7 @@ def test_stamp_rule() -> None:
     # 1-day bars expect each class's known closes; longer bars only their period's start.
     log = session_warnings()
     day = Request(timespan=Timespan.DAY)
-    close, early, chicago = time(16), time(13), time(1)
+    close, early = time(16), time(13)
     last_ms = time(23, 59, 59, 999_000)
     stock_closes = frozenset({time(4), early, close})
     option_closes = frozenset({early, close, time(13, 15), time(16, 15)})
@@ -670,16 +705,15 @@ def test_stamp_rule() -> None:
 
     assert rule(stocks.BARS, day) == one_day(NEW_YORK, stock_closes)
     assert rule(options.BARS, day) == one_day(NEW_YORK, option_closes)
-    assert rule(indices.BARS, day) == one_day(NEW_YORK, frozenset({chicago, early, close}))
+    # An index's zone is Chicago, where Massive cuts its days: the closes are an hour earlier.
+    assert rule(indices.BARS, day) == one_day(CHICAGO, frozenset({time(12), time(15)}))
     assert rule(forex.BARS, day) == one_day(UTC, frozenset({last_ms}))
     assert rule(crypto.BARS, day) == one_day(UTC, frozenset({last_ms}))
-    # Several days: only 00:00 (01:00 for indices), on any day.
+    # Several days: only 00:00 (in Chicago for indices), on any day.
     two_days = Request(timespan=Timespan.DAY, multiplier=2)
     assert rule(stocks.BARS, two_days) == StampRule(NEW_YORK, frozenset(), "bar", T.DAY, 2, log)
     assert rule(options.BARS, two_days) == StampRule(NEW_YORK, frozenset(), "bar", T.DAY, 2, log)
-    assert rule(indices.BARS, two_days) == StampRule(
-        NEW_YORK, frozenset({chicago}), "bar", T.DAY, 2, log
-    )
+    assert rule(indices.BARS, two_days) == StampRule(CHICAGO, frozenset(), "bar", T.DAY, 2, log)
     assert rule(forex.BARS, two_days) == StampRule(UTC, frozenset(), "bar", T.DAY, 2, log)
     # A week on its Sunday, in every class, where Massive starts its weeks.
     sunday = frozenset({6})
@@ -689,7 +723,7 @@ def test_stamp_rule() -> None:
             NEW_YORK, frozenset(), "bar", T.WEEK, multiplier, log, weekdays=sunday
         )
         assert rule(indices.BARS, week) == StampRule(
-            NEW_YORK, frozenset({chicago}), "bar", T.WEEK, multiplier, log, weekdays=sunday
+            CHICAGO, frozenset(), "bar", T.WEEK, multiplier, log, weekdays=sunday
         )
         assert rule(forex.BARS, week) == StampRule(
             UTC, frozenset(), "bar", T.WEEK, multiplier, log, weekdays=sunday
@@ -723,8 +757,32 @@ def test_stamp_rule() -> None:
 
 def test_every_class_with_a_day_zone_has_its_stamps() -> None:
     # The column descriptions call a class stamped when it has a day zone; so does the rule.
-    tables = (row_times._ONE_DAY_STAMPS, row_times._LONGER_STAMPS)
+    tables = (row_times._ONE_DAY_STAMPS, row_times._LONGER_STAMPS, row_times._BAR_ZONES)
     assert all(set(table) == set(DAY_ZONES) for table in tables)
+
+
+@pytest.mark.parametrize("day", [date(2025, 1, 6), date(2025, 7, 7)], ids=["winter", "summer"])
+def test_the_index_closes_are_the_new_york_closes_in_chicago(day: date) -> None:
+    # Massive's `/prev` sample stamps an index day at the 16:00 New York close; with a short
+    # day's 13:00 close, each is read in Chicago, where index days are cut, all year.
+    closes = {
+        datetime.combine(day, t, NEW_YORK).astimezone(CHICAGO).time() for t in (time(16), time(13))
+    }
+    assert closes == row_times._INDEX_CLOSES
+
+
+def test_an_index_bar_keeps_its_chicago_stamp_and_moves_a_close_to_it() -> None:
+    log = session_warnings()
+    rule = stamp_rule(indices.BARS, Request(timespan=Timespan.DAY), warnings=log)
+    assert rule is not None
+    chicago = datetime(2025, 6, 2, tzinfo=CHICAGO)
+    new_york = datetime(2025, 6, 2, tzinfo=NEW_YORK)
+    close = datetime(2025, 6, 2, 16, tzinfo=NEW_YORK)
+    sent = [chicago, close, new_york, None]
+    assert stamped(rule, sent, label="indices.bars") == [chicago, chicago, new_york, None]
+    # Midnight in New York is 23:00 the day before in Chicago, a cut Massive is not known to
+    # use for an index, so its row is withheld.
+    assert odd_stamps(rule, sent) == [False, False, True, False]
 
 
 def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:

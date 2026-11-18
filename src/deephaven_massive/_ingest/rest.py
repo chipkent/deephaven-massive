@@ -33,9 +33,10 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   and quotes named by session dates are requested one session at a time
   (`session_end_date=<date>`, weekdays only); `dm.ALL` daily bars one grouped day at a time
   (weekdays only for the classes that do not trade at weekends). Bars of a day or longer
-  are stamped at 00:00 of their day in the class day zone: a stamp Massive is not known to
-  use withholds its row, as an `unconvertible_values` problem, and logs one WARNING per form of
-  stamp per session (`row_times.stamp_rule`, `StampRule.stamp`).
+  are stamped at 00:00 of their day in the class's bar zone (Chicago for indices, where
+  Massive stamps them); a bar at a stamp Massive is not known to use is withheld, as an
+  `unconvertible_values` problem, and logs one WARNING per form of stamp per session
+  (`row_times.stamp_rule`, `StampRule.stamp`).
 - **Time columns.** Every page's rows get the library's time columns (`row_times.TimeRule`):
   `Date`, a bar's `TimestampStart` and `TimestampEnd`, and `TimestampInsert`, the instant the
   page arrived. The day zone of each call follows its own symbols' class (`dates.day_class`),
@@ -1425,8 +1426,8 @@ class RestReader:
 
         Each page of current data is checked for a `DELAYED` label (`_check_recency`), each
         page against the requested adjustment basis (`_check_adjusted`), its bars of a day or
-        longer are stamped (`StampRule.stamp`; a stamp Massive is not known to use withholds its
-        row and logs one WARNING per form of stamp per session), its rows outside the
+        longer are stamped (`StampRule.stamp`; a bar at a stamp Massive is not known to use is
+        withheld and logs one WARNING per form of stamp per session), its rows outside the
         `history()` window dropped (`keep_window`), and its rows given the library's time columns
         (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
         call's day zone follows its own symbols' class (`dates.day_class`).
@@ -3052,8 +3053,8 @@ class RestEndpoints:
         dataset's time axis, or as the aggregates' `{from}/{to}` millisecond epochs, one
         request series per symbol where the path takes one. Rows outside the window are
         dropped (`keep_window`), bars of a day or longer are stamped at 00:00 of their day in the
-        class day zone (`StampRule.stamp`, `row_times.day_starts`; a stamp Massive is not known
-        to use withholds its row and logs one WARNING per form of stamp per session), and every
+        class's bar zone (`StampRule.stamp`, `row_times.day_starts`; a bar at a stamp Massive is
+        not known to use is withheld and logs one WARNING per form of stamp per session), and every
         row gets the library's time columns. A symbol with no data adds no rows. Before the
         first request, one INFO line announces a long download (`rate_limits.announce`): a
         read whose paced requests cannot all start within a minute, with the least time it

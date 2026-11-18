@@ -172,7 +172,7 @@ def test_rest_rows_spell_share_classes_and_preferreds_canonically(
     evidence(f"grouped daily bars of {recent_monday}: {len(rows)} rows of the four roots")
     problems.extend(_check(rows, withheld, evidence))
     raw = live_rest.get(
-        source(Transport.REST, _GROUPED), {"date": recent_monday.isoformat()}, {}, bucket="stocks"
+        source(Transport.REST, _GROUPED), {"date": recent_monday}, {}, bucket="stocks"
     ).rows
     evidence(f"raw grouped daily spellings of the four roots: {_spelled(raw, 'T')}")
     missing = sorted(set(_TICKERS) - {row.get("Symbol") for row in rows})

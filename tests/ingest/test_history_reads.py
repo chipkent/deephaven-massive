@@ -52,6 +52,7 @@ TRADES = _session.CATALOG.by_name["stocks.trades"]
 BARS = _session.CATALOG.by_name["stocks.bars"]
 """Daily bars, which REST reads over the call's own window."""
 VALUES = _session.CATALOG.by_name["indices.values"]
+INDEX_BARS = _session.CATALOG.by_name["indices.bars"]
 """A dataset only the flat files serve."""
 MONDAY, TUESDAY = date(2025, 3, 3), date(2025, 3, 4)
 
@@ -686,3 +687,53 @@ def test_a_symbol_whose_file_rows_were_all_withheld_fails_with_the_read(
     failed = out["AAPL"]
     assert isinstance(failed, SymbolFailure)
     assert isinstance(failed.error, RowDataError)
+
+
+def test_a_missing_index_minute_file_is_read_from_rest_as_the_chicago_day_it_holds(
+    massive_session: dm.MassiveSession, rest: _Rest
+) -> None:
+    # An index minute file holds its date's Chicago day, 01:00 to 01:00 New York time, so
+    # Tuesday's missing file is read from REST as those instants, clipped to the New York days
+    # asked for: Monday's file, which was read, already holds Tuesday 00:00 to 01:00.
+    request = Request(start=MONDAY, end=TUESDAY, timespan=Timespan.MINUTE, multiplier=1)
+    window = history_window(INDEX_BARS, request, start=MONDAY, end=TUESDAY)
+    empty = _rows(massive_session, [], spec=INDEX_BARS)
+    files = _Files(FlatFileRead(((MONDAY, empty),), empty, (TUESDAY,)))
+    read_history(
+        INDEX_BARS,
+        request,
+        window,
+        core=massive_session._core,
+        files=files,
+        dates=(date(2025, 3, 2), MONDAY, TUESDAY),
+        call=1,
+        stop=None,
+        forced=False,
+    )
+    tuesday_chicago = datetime(2025, 3, 4, 6, tzinfo=UTC)  # 01:00 New York
+    wednesday_new_york = datetime(2025, 3, 5, 5, tzinfo=UTC)  # the range's end
+    assert rest.calls == [(tuesday_chicago, wednesday_new_york, None)]
+
+
+def test_a_missing_first_index_minute_file_is_read_from_rest_for_the_first_hour_only(
+    massive_session: dm.MassiveSession, rest: _Rest
+) -> None:
+    # The file before the range's first day holds only its hour from 00:00 to 01:00 New York.
+    request = Request(start=TUESDAY, end=TUESDAY, timespan=Timespan.MINUTE, multiplier=1)
+    window = history_window(INDEX_BARS, request, start=TUESDAY, end=TUESDAY)
+    empty = _rows(massive_session, [], spec=INDEX_BARS)
+    files = _Files(FlatFileRead(((TUESDAY, empty),), empty, (MONDAY,)))
+    read_history(
+        INDEX_BARS,
+        request,
+        window,
+        core=massive_session._core,
+        files=files,
+        dates=(MONDAY, TUESDAY),
+        call=1,
+        stop=None,
+        forced=False,
+    )
+    tuesday_new_york = datetime(2025, 3, 4, 5, tzinfo=UTC)
+    tuesday_chicago = datetime(2025, 3, 4, 6, tzinfo=UTC)
+    assert rest.calls == [(tuesday_new_york, tuesday_chicago, None)]
