@@ -46,6 +46,7 @@ from deephaven_massive._tables.transports import (
     SymbolFailure,
 )
 from deephaven_massive._tables.watchlist import (
+    SKIPPED_ROWS_FIX,
     SymbolRowRule,
     read_symbols,
     skipped_rows_text,
@@ -186,7 +187,7 @@ def _read_value_table(
                 f"{query}: No row of the {values.argument} table is a value this dataset takes, "
                 "so the result would read nothing. The table holds "
                 f"{skipped_rows_text(rows.skipped)}",
-                "Fix or delete those rows",
+                SKIPPED_ROWS_FIX,
             )
         )
     if not rows.symbols and not live:

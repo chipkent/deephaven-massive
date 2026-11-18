@@ -458,12 +458,12 @@ def test_product_code_takes_a_table_of_codes(massive_session: dm.MassiveSession,
     assert not any(key.startswith("product_code") for key, _ in query._request.params)
     refusal = (
         "The table passed as product_code has no ProductCode column. It has Symbol. Name the "
-        'column of values ProductCode, as in t.rename_columns("ProductCode = Value").'
+        'column of values ProductCode, as in t.rename_columns("ProductCode = Symbol").'
     )
     with pytest.raises(ValueError, match=whole(refusal)):
         _with_product_code(f, name, new_table([string_col("Symbol", ["ES"])]))
     # The advice: the renamed column is taken.
-    renamed = new_table([string_col("Symbol", ["ES"])]).view("ProductCode = Symbol")
+    renamed = new_table([string_col("Symbol", ["ES"])]).rename_columns("ProductCode = Symbol")
     assert _with_product_code(f, name, renamed)._request.value_table is not None
 
 

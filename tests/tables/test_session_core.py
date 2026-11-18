@@ -636,8 +636,8 @@ def test_a_table_that_cannot_be_failed_does_not_spare_the_others(
             f"m.streams(). {LIBRARY_BUG}"
         ),
         (
-            "The session closed and failed its live tables, listed in m.streams() by StreamId: "
-            "2. Open a new dm.MassiveSession() to read again."
+            "The session closed and failed the live table with StreamId 2. Open a new "
+            "dm.MassiveSession() to read again."
         ),
     ]
     assert list(fake_streams.failed) == [2]
@@ -658,8 +658,8 @@ def test_close_lists_the_tables_it_failed_and_logs_at_info_when_none(
         massive_session.close()
     assert caplog.messages == [
         (
-            "The session closed and failed its live tables, listed in m.streams() by StreamId: "
-            "1 and 2. Open a new dm.MassiveSession() to read again."
+            "The session closed and failed the live tables with StreamId 1 and 2. Open a new "
+            "dm.MassiveSession() to read again."
         )
     ]
     assert sorted(fake_streams.failed) == [1, 2]

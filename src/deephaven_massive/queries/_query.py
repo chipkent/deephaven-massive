@@ -47,6 +47,7 @@ from deephaven_massive._tables.transports import (
     SymbolFailure,
 )
 from deephaven_massive._tables.watchlist import (
+    SKIPPED_ROWS_FIX,
     CurrentSymbols,
     SymbolRowRule,
     read_symbols,
@@ -219,7 +220,7 @@ def _read_symbol_rows(
             user_defect(
                 f"{query}: No row of the symbol table is a ticker this dataset takes, so the "
                 f"result would follow nothing. The table holds {skipped_rows_text(rows.skipped)}",
-                "Fix or delete those rows",
+                SKIPPED_ROWS_FIX,
             )
         )
     if not rows.symbols and not live:

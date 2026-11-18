@@ -340,7 +340,9 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
     only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
     nothing = (
         "m.stocks.trades(): No row of the symbol table is a ticker this dataset takes, so the "
-        "result would follow nothing. The table holds 'msft'. Fix or delete those rows."
+        "result would follow nothing. The table holds 'msft'. Fix or delete those rows, or "
+        "report them at https://github.com/chipkent/deephaven-massive/issues if Massive itself "
+        "writes them."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(nothing)}$"):
         only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
@@ -853,7 +855,9 @@ def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
     only_bad = live("msft")
     nothing = (
         "m.stocks.trades(): No row of the symbol table is a ticker this dataset takes, so "
-        "the result would follow nothing. The table holds 'msft'. Fix or delete those rows."
+        "the result would follow nothing. The table holds 'msft'. Fix or delete those rows, or "
+        "report them at https://github.com/chipkent/deephaven-massive/issues if Massive itself "
+        "writes them."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(nothing)}$"):
         trades(massive_session, only_bad).history("2025-03-03", "2025-03-03", wait=True)

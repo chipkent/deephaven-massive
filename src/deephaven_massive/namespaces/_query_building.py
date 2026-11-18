@@ -66,7 +66,6 @@ from deephaven_massive._errors import (
 from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import ParamKind
 from deephaven_massive._tables.time_text import deephaven_time_text
-from deephaven_massive._tables.watchlist import UNDERLYINGS_IN_ANOTHER_SPELLING
 from deephaven_massive.queries import FetchQuery, Query
 from deephaven_massive.queries._call import QueryCall
 from deephaven_massive.queries._choice import bar_query_class, query_class
@@ -314,11 +313,30 @@ def value_table(table: Table, *, argument: str, parameter: str, underlying: bool
         logger.debug("%s refused: a table without %s, columns %s", argument, column, columns)
         raise ValueError(
             f"The table passed as {argument} has no {column} column. It has "
-            f"{prose_list(table.column_names, 'columns')}. Name the column of values {column}, "
-            f'as in t.rename_columns("{column} = Value").'
+            f"{prose_list(table.column_names, 'columns')}. "
+            f"{_rename_advice(table, column, 'values')}"
         )
     _require_text_column(table, column, what=f"the table passed as {argument}")
     return ValueTable(argument, parameter, column, underlying, table)
+
+
+def _rename_advice(table: Table, column: str, what: str) -> str:
+    """Return the fix for a table that lacks the column a dataset reads, with a call that works.
+
+    Args:
+        table: The table as passed.
+        column: The column it lacks, such as `"Symbol"`.
+        what: What the column holds, in the plural, such as `"tickers"`.
+
+    Returns:
+        A `rename_columns` call that renames the table's first `String` column, such as
+        `'Name the column of tickers Symbol, as in t.rename_columns("Symbol = Ticker").'`, or,
+        for a table with no `String` column, which no rename can fix, the column to add.
+    """
+    text = [c.name for c in table.columns if c.data_type == dtypes.string]
+    if not text:
+        return f"Pass a table with a {column} column that holds the {what} as Strings."
+    return f'Name the column of {what} {column}, as in t.rename_columns("{column} = {text[0]}").'
 
 
 def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
@@ -714,10 +732,8 @@ def _normalized_symbols(
             )
             raise ValueError(
                 f"The symbol table has no Symbol column. It has "
-                f"{prose_list(symbols.column_names, 'columns')}. Name the column of tickers "
-                'Symbol, as in t.rename_columns("Symbol = Ticker"). For tickers in another '
-                "spelling, see "
-                f"{UNDERLYINGS_IN_ANOTHER_SPELLING}."
+                f"{prose_list(symbols.column_names, 'columns')}. "
+                f"{_rename_advice(symbols, 'Symbol', 'tickers')}"
             )
         _require_text_column(symbols, "Symbol", what="the symbol table")
         normalized = SymbolTable(symbols)

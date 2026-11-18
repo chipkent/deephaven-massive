@@ -240,7 +240,8 @@ def test_a_static_symbol_table_row_that_is_not_canonical_is_skipped(
     expected = (
         "m.stocks.trades(): No row of the symbol table is a ticker this dataset takes, so the "
         "result would follow nothing. The table holds 'msft' and 'nvda'. Fix or delete those "
-        "rows."
+        "rows, or report them at https://github.com/chipkent/deephaven-massive/issues if "
+        "Massive itself writes them."
     )
     only_bad = trades(massive_session, new_table([string_col("Symbol", ["nvda", "msft"])]))
     call = getattr(only_bad, verb)

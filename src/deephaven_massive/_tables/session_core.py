@@ -967,10 +967,11 @@ class SessionCore:
         if not failed:
             logger.info("%s closed with no live table to fail", self.label)
             return
+        # Every StreamId is listed: m.streams() raises once the session is closed.
         logger.warning(
-            "The session closed and failed its live tables, listed in m.streams() by "
-            "StreamId: %s. %s",
-            prose_list(failed, "tables"),
+            "The session closed and failed the live %s with StreamId %s. %s",
+            "table" if len(failed) == 1 else "tables",
+            prose_list(failed, "tables", shown=len(failed)),
             NEW_SESSION,
         )
 

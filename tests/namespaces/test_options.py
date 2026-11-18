@@ -453,9 +453,7 @@ def test_a_symbol_table_is_followed(massive_session: dm.MassiveSession) -> None:
     assert isinstance(q._request.symbols, SymbolTable)
     no_symbol = (
         "The symbol table has no Symbol column. It has Ticker. Name the column of tickers Symbol, "
-        'as in t.rename_columns("Symbol = Ticker"). For tickers in another spelling, see '
-        "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
-        "#underlyings-in-another-spelling."
+        'as in t.rename_columns("Symbol = Ticker").'
     )
     with pytest.raises(ValueError, match=whole(no_symbol)):
         massive_session.options.trades(new_table([string_col("Ticker", [CONTRACT])]))
@@ -533,13 +531,13 @@ def test_chain_and_contracts_take_a_table_of_underlyings(
     tickers = new_table([string_col("Ticker", ["AAPL"])])
     refusal = (
         "The table passed as underlying has no Symbol column. It has Ticker. Name the column of "
-        'values Symbol, as in t.rename_columns("Symbol = Value").'
+        'values Symbol, as in t.rename_columns("Symbol = Ticker").'
     )
     with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.options.chain(tickers)
     with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.options.contracts(underlying=tickers)
-    renamed = tickers.view("Symbol = Ticker")  # the advice
+    renamed = tickers.rename_columns("Symbol = Ticker")  # the advice
     assert massive_session.options.chain(renamed)._request.value_table is not None
 
 

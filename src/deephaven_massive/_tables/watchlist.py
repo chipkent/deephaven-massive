@@ -90,6 +90,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CURRENT_STEP",
+    "SKIPPED_ROWS_FIX",
     "UNDERLYINGS_IN_ANOTHER_SPELLING",
     "CurrentSymbols",
     "RowRule",
@@ -261,6 +262,13 @@ def failed_table_message(dataset: str, cause: object | None = None) -> str:
     if cause is not None:
         problem = f"{problem}. Deephaven reported: {str(cause).strip()}"
     return user_defect(problem, f"Fix that table, then call {dataset} again")
+
+
+SKIPPED_ROWS_FIX: Final = (
+    f"Fix or delete those rows, or report them at {ISSUES_URL} if Massive itself writes them."
+)
+"""What ends the error of a table none of whose values a read takes: a skipped value may be a
+form Massive writes that the library does not know yet (`skipped_rows_text`)."""
 
 
 def skipped_rows_text(values: Sequence[str]) -> str:

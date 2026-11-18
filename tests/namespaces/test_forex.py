@@ -429,14 +429,12 @@ def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession
     table = new_table([string_col("Pair", ["C:EURUSD"])])
     refusal = (
         "The symbol table has no Symbol column. It has Pair. Name the column of tickers Symbol, "
-        'as in t.rename_columns("Symbol = Ticker"). For tickers in another spelling, see '
-        "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
-        "#underlyings-in-another-spelling."
+        'as in t.rename_columns("Symbol = Pair").'
     )
     with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.forex.snapshots(table)
     # The advice: the renamed column is taken.
-    renamed = table.view("Symbol = Pair")
+    renamed = table.rename_columns("Symbol = Pair")
     assert massive_session.forex.snapshots(renamed)._request.symbols is not None
 
 

@@ -585,7 +585,8 @@ def test_a_table_of_values_with_no_value_it_takes_is_refused(
     skipped = (
         "m.options.chain(<table>): No row of the underlying table is a value this dataset takes, "
         "so the result would read nothing. The table holds 'O:AAPL250117C00150000' and "
-        "'X:BTCUSD'. Fix or delete those rows."
+        "'X:BTCUSD'. Fix or delete those rows, or report them at "
+        "https://github.com/chipkent/deephaven-massive/issues if Massive itself writes them."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(skipped)}$"):
         q.fetch(wait=True)

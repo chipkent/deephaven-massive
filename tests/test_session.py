@@ -507,8 +507,8 @@ def test_close_marks_streams_closed_and_warns_once(
         massive_session.close()
     assert caplog.messages == [
         (
-            "The session closed and failed its live tables, listed in m.streams() by StreamId: "
-            "1. Open a new dm.MassiveSession() to read again."
+            "The session closed and failed the live table with StreamId 1. Open a new "
+            "dm.MassiveSession() to read again."
         )
     ]
     # Only the stream still in the registry is closed; the shut-down one keeps its last row.

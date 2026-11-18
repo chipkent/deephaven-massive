@@ -656,16 +656,31 @@ def test_a_symbol_table_needs_a_symbol_column(
         ValueError,
         match=whole(
             "The symbol table has no Symbol column. It has Ticker and Name. Name the column of "
-            'tickers Symbol, as in t.rename_columns("Symbol = Ticker"). For tickers in another '
-            "spelling, see "
-            "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
-            "#underlyings-in-another-spelling."
+            'tickers Symbol, as in t.rename_columns("Symbol = Ticker").'
         ),
     ):
         build(massive_session, TRADES_SPEC, symbols=table)
     # The advice: the renamed column is taken.
-    renamed = table.view("Symbol = Ticker")
+    renamed = table.rename_columns("Symbol = Ticker")
     assert build(massive_session, TRADES_SPEC, symbols=renamed)._request.symbols is not None
+
+
+def test_a_symbol_table_without_text_is_told_to_add_the_column(
+    massive_session: dm.MassiveSession, dh_exec_ctx: object
+) -> None:
+    # No column a rename could turn into Symbol, so the message names none.
+    table = new_table([int_col("Id", [1])])
+    with pytest.raises(
+        ValueError,
+        match=whole(
+            "The symbol table has no Symbol column. It has Id. Pass a table with a Symbol column "
+            "that holds the tickers as Strings."
+        ),
+    ):
+        build(massive_session, TRADES_SPEC, symbols=table)
+    # The advice: a table with such a column is taken.
+    fixed = new_table([int_col("Id", [1]), string_col("Symbol", ["AAPL"])])
+    assert build(massive_session, TRADES_SPEC, symbols=fixed)._request.symbols is not None
 
 
 def test_a_column_of_tickers_or_codes_must_hold_text(
