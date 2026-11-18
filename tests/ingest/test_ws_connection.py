@@ -705,12 +705,12 @@ def test_a_connection_that_does_not_end_is_reported(
 ) -> None:
     result = ws_session.query(TRADES, ["AAPL"]).blink()
     connection = ws_session.connection()
-    monkeypatch.setattr(ws, "JOIN_TIMEOUT", 0.01)
-    monkeypatch.setattr(connection, "join", lambda _: False)
+    monkeypatch.setattr(connection, "join", lambda _: False)  # as if it waited JOIN_TIMEOUT
     ws_session.connections.close()
     assert (
-        f"{_URL}: the connection had not closed 0 s after close(), so it closes in the background."
-    ) in caplog.text
+        f"{_URL}: the connection had not closed 5 s after close(), so it closes in the "
+        "background. Nothing to do."
+    ) in caplog.messages
     del result
 
 

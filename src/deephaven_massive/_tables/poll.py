@@ -1005,7 +1005,7 @@ class Poller:
         error = MassiveError(
             f"{self._spec.name} poll(): the cycle running since {utc_text(began_at)} has "
             f"received nothing for {stalled:.0f} s, longer than max_outage="
-            f"{self._max_outage:g} s, so this table stopped, and the rows since then may be "
+            f"{self._max_outage:g} s, so this table stopped and the rows since then may be "
             f"missing. {good} Call the method again for a new live table.",
             source=ErrorSource.NETWORK,
         )
@@ -1241,7 +1241,8 @@ class Poller:
             level = logging.ERROR if error.is_bug else logging.WARNING
             logger.log(
                 level,
-                "%s poll() stream %d: a cycle failed. %s The next cycle runs as scheduled.",
+                "%s poll() stream %d: a cycle failed. %s Nothing to do: the next cycle runs as "
+                "scheduled.",
                 self._spec.name,
                 self._stream_id,
                 failure_text(error),
@@ -1289,9 +1290,9 @@ class Poller:
         )
         failure = MassiveError(
             f"{self._spec.name} poll(): every cycle since {utc_text(self._failing_at)} has "
-            f"failed, for {down:.0f} s, which reaches max_outage={self._max_outage:g} s, so this "
-            "table stopped, and the rows since then may be missing. Call the method again for "
-            f"a new live table. The latest error: {error}",
+            f"failed for {down:.0f} s, reaching max_outage={self._max_outage:g} s, so this table "
+            f"stopped and the rows since then may be missing. The latest error: "
+            f"{str(error).removesuffix('.')}. Call the method again for a new live table.",
             source=source_of(error),
             is_retryable=isinstance(error, MassiveError) and error.is_retryable,
             is_bug=is_bug_of(error),
@@ -1473,20 +1474,27 @@ class Poller:
         """
         name, stream_id = self._spec.name, self._stream_id
         if not isinstance(error, AuthenticationError | EntitlementError):
-            log_failure(logger, error, "%s poll() stream %d failed. %s", name, stream_id)
+            log_failure(
+                logger,
+                error,
+                "%s poll() stream %d failed: %s",
+                name,
+                stream_id,
+                named=f"{name} poll()",
+            )
             return
         log_failure(
             logger,
             error,
-            "%s poll() stream %d failed. %s",
+            "%s poll() stream %d failed: %s",
             name,
             stream_id,
             expected=logging.DEBUG,
         )
         core.warnings.log(
             f"poll refused\0{name}\0{type(error).__name__}\0{error.status}",
-            "%s poll() stream %d failed. %s Each later poll() table of %s refused this way "
-            "logs at DEBUG.",
+            "%s poll() stream %d failed: %s Later poll() tables of %s refused this way log at "
+            "DEBUG. See m.streams() for each failed table.",
             name,
             stream_id,
             failure_text(error),

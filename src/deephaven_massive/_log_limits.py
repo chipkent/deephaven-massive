@@ -272,6 +272,7 @@ def log_failure(
     *args: object,
     expected: int = logging.WARNING,
     exc_info: BaseException | None = None,
+    named: str = "",
 ) -> bool:
     """Log a failure that fails a live table, once per failure, at the level its `is_bug` gives.
 
@@ -291,6 +292,9 @@ def log_failure(
             caller also raises.
         exc_info: The exception whose traceback the record carries, or None (absent) for none,
             except that a bug always carries its own.
+        named: What the message names before the failure's text, such as the dataset
+            `"stocks.trades"`; a failure's text that starts with it and a colon loses that
+            start, so the record names it once. Empty for none.
 
     Returns:
         True when this call logged the failure at its level; False when the same failure had
@@ -305,7 +309,7 @@ def log_failure(
         level if first else logging.DEBUG,
         message,
         *args,
-        failure_text(error),
+        failure_text(error).removeprefix(f"{named}: ") if named else failure_text(error),
         exc_info=exc_info if first else None,
         stacklevel=2,  # the record names the caller's file and line, not this one's
     )

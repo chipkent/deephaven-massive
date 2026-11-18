@@ -189,6 +189,21 @@ def raising(error: BaseException) -> Callable[[], Fetch]:
     return lambda: fail
 
 
+def answer(path: str, status: int, text: str, *, request_id: str | None = None) -> str:
+    """Return Massive's answer to a GET of `path`, as the REST client words it."""
+    asked = f" (request_id {request_id})" if request_id else ""
+    return f'Massive answered GET {path} on api.massive.com with HTTP {status}{asked}: "{text}".'
+
+
+def answered(kind: type[dm.MassiveError], status: int, text: str) -> Callable[[], Fetch]:
+    """Return a maker of a fetch that Massive answers with `status` and `text`, as `kind`."""
+
+    def fail(probe: SnapshotProbe) -> SnapshotAnswer:
+        raise kind(answer(probe.path, status, text), status=status)
+
+    return lambda: fail
+
+
 # Each event a pinned host's snapshot read can meet: (a maker of the fetch, the recency, what
 # set it, whether it is logged at WARNING).
 # `{path}` and `{name}` stand for the class's probe path and value.
@@ -255,21 +270,23 @@ PINNED_EVENTS: dict[str, tuple[Callable[[], Fetch], Recency, str, bool]] = {
         True,
     ),
     "HTTP 403": (
-        raising(dm.EntitlementError("HTTP 403: not entitled", status=403)),
+        answered(dm.EntitlementError, 403, "You are not entitled to this data"),
         Recency.UNKNOWN,
-        "the host check's snapshot ({path}) was refused: HTTP 403: not entitled",
+        "the host check's snapshot ({path}) was refused: "
+        + answer("{path}", 403, "You are not entitled to this data"),
         True,
     ),
     "HTTP 401": (
-        raising(dm.AuthenticationError("HTTP 401: bad key", status=401)),
+        answered(dm.AuthenticationError, 401, "Unknown API Key"),
         Recency.UNKNOWN,
-        "the host check's snapshot ({path}) failed: HTTP 401: bad key",
+        "the host check's snapshot ({path}) failed: " + answer("{path}", 401, "Unknown API Key"),
         True,
     ),
     "HTTP 503": (
-        raising(dm.MassiveError("HTTP 503: unavailable", status=503)),
+        answered(dm.MassiveError, 503, "Service Unavailable"),
         Recency.UNKNOWN,
-        "the host check's snapshot ({path}) failed: HTTP 503: unavailable",
+        "the host check's snapshot ({path}) failed: "
+        + answer("{path}", 503, "Service Unavailable"),
         True,
     ),
     "no answer": (
@@ -578,8 +595,10 @@ def test_the_futures_probe_reads_past_the_contracts_without_a_timeframe(
 
 
 def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixture) -> None:
+    refusal = answer("/v3/snapshot", 403, "You are not entitled to this data", request_id="r1")
+
     def refuse(probe: SnapshotProbe) -> SnapshotAnswer:
-        raise dm.EntitlementError("HTTP 403 from GET /v3/snapshot", status=403, request_id="r1")
+        raise dm.EntitlementError(refusal, status=403, request_id="r1")
 
     with caplog.at_level(logging.WARNING, LOGGER):
         decision = run(AssetClass.STOCKS, refuse)
@@ -588,11 +607,12 @@ def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixt
     assert decision == HostDecision(
         REALTIME_HOST,
         Recency.REALTIME,
-        "the host check's snapshot (/v3/snapshot) was refused: HTTP 403 from GET /v3/snapshot",
+        "the host check's snapshot (/v3/snapshot) was refused: Massive answered GET /v3/snapshot "
+        'on api.massive.com with HTTP 403 (request_id r1): "You are not entitled to this data".',
     )
     (record,) = caplog.records
     assert record.levelno == logging.WARNING
-    assert "HTTP 403 from GET /v3/snapshot" in record.getMessage()
+    assert refusal in record.getMessage()
     # A stream refusal after it names the plan, not the delayed feed.
     assert refused_snapshot(decision.evidence)
     assert not refused_snapshot("no timeframe in the stocks snapshot")

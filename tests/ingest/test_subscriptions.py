@@ -352,9 +352,8 @@ def test_a_missing_acknowledgement_is_resent_once_then_counted_without_a_reconne
     assert record.levelno == logging.WARNING
     assert record.getMessage() == (
         f"{URL}: Massive has not confirmed the subscriptions T.AAPL and T.IBM after 10 s and "
-        "one re-send, so their live tables may miss their rows. The library re-sends them "
-        "every 60 s. "
-        "m.problems() lists them until Massive confirms."
+        "one re-send, so their live tables may miss rows. m.problems() lists them until "
+        "Massive confirms. Nothing to do: the library re-sends them every 60 s."
     )
 
 

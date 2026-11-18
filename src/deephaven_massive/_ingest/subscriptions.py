@@ -765,8 +765,8 @@ class Subscriptions:
         """Log the `NO_ACK` topics of the step that just resolved, in one WARNING."""
         logger.warning(
             "%s: Massive has not confirmed the subscriptions %s after %.0f s and one re-send, "
-            "so their live tables may miss their rows. The library re-sends them every %.0f s. "
-            "m.problems() lists them until Massive confirms.",
+            "so their live tables may miss rows. m.problems() lists them until Massive "
+            "confirms. Nothing to do: the library re-sends them every %.0f s.",
             self._url,
             prose_list(sorted(self._unreported), "subscriptions"),
             2 * self._subscription_confirmation_timeout,

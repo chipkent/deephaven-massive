@@ -1660,7 +1660,7 @@ def test_a_run_of_dropped_rows_fails_the_datasets_streams_on_the_channel(
     [record] = [r for r in caplog.records if "could not read the last" in r.getMessage()]
     assert record.levelno == logging.WARNING  # Massive's data, no bug of the library
     assert record.getMessage() == (
-        f"test.trades stream 1 failed: test.trades: the library could not read the last "
+        f"test.trades stream 1 failed: the library could not read the last "
         f"{2 * half} rows Massive sent on channel T whole, so it withheld them and published "
         "none. Timestamp unit mismatch for test.trades.Timestamp: 5 ms is outside 1990 to 2100. "
         "m.problems() counts the withheld rows by cause and symbol."
@@ -2684,7 +2684,7 @@ def test_rows_past_the_memory_limit_fail_every_stream_routed_while_they_were_dro
     # The two dropped frames held a row each.
     assert re.fullmatch(
         re.escape(
-            "test.trades stream 1 failed: test.trades: 4 rows, about 0 MB, waited to be "
+            "test.trades stream 1 failed: 4 rows, about 0 MB, waited to be "
             "published, and 2 more would pass the 0 MB the library keeps for one connection. "
             "Deephaven's update graph fell behind the stream, or stopped, as it does while a "
             "console command runs. The rows from "
@@ -2891,7 +2891,7 @@ def test_a_run_of_rows_with_no_readable_symbol_fails_the_named_streams(
     [record] = [r for r in caplog.records if "could not read the symbol" in r.getMessage()]
     assert record.levelno == logging.WARNING  # Massive's data, no bug of the library
     assert record.getMessage() == (
-        "test.trades stream 1 failed: test.trades: the library could not read the symbol of "
+        "test.trades stream 1 failed: the library could not read the symbol of "
         "the last 100 rows Massive sent on channel T, so it withheld them and published none. "
         "A T row: no Ticker. m.problems() counts the withheld rows by cause and symbol."
     )

@@ -790,7 +790,13 @@ def test_wait_true_warns_once_when_some_call_time_symbols_fail(
     rest: Recorder,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: not in the plan"))}
+    # Massive's answer to the read of MSFT, as the REST client words it.
+    refusal = dm.EntitlementError(
+        "Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on api.massive.com with "
+        'HTTP 403: "You are not entitled to this data".',
+        status=403,
+    )
+    rest.outcomes = {"MSFT": SymbolFailure(refusal)}
     with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
         result = trades(massive_session, live("AAPL", "MSFT")).history(
             "2025-03-03", "2025-03-03", wait=True
@@ -798,8 +804,9 @@ def test_wait_true_warns_once_when_some_call_time_symbols_fail(
     assert caplog.messages == [
         (
             "stocks.trades history: 1 of the 2 symbols failed and are left out of the result "
-            "for now. MSFT: HTTP 403: not in the plan. Check m.symbol_reads() for whether each "
-            "one is retrying or has failed."
+            "for now. MSFT: Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on "
+            'api.massive.com with HTTP 403: "You are not entitled to this data". Check '
+            "m.symbol_reads() for whether each one is retrying or has failed."
         )
     ]
     massive_session.release(result)

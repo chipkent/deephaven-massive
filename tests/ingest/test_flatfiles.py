@@ -905,9 +905,9 @@ MALFORMED_ROWS = (
 """Two rows between a line with too few fields, one with too many, and one not UTF-8 text."""
 
 MALFORMED = (
-    f"Massive's flat file {LOCATION.format(TRADES_0303)} has 3 lines the library cannot read. "
-    "The first: Row 2 after the header has 2 fields where the header has 13. They are skipped, "
-    "and the file's other rows are kept."
+    f"Massive's flat file {LOCATION.format(TRADES_0303)} has 3 lines the library cannot read, "
+    "so the library skipped them and kept the file's other rows. Of these, row 2 after the "
+    "header has 2 fields where the header has 13."
 )
 """The detail of the one `malformed_rows` problem of the file that holds `MALFORMED_ROWS`."""
 
@@ -957,7 +957,11 @@ def test_a_malformed_line_fails_the_read_under_raise(
             q.history("2025-03-03", "2025-03-03", wait=True)
     [listed] = events
     assert (listed.cause, listed.policy) == (ProblemCause.MALFORMED_ROWS, dm.OnError.RAISE)
-    assert listed.detail.endswith(" The read fails.")
+    assert listed.detail == (
+        f"Massive's flat file {LOCATION.format(TRADES_0303)} has 3 lines the library cannot "
+        "read, so the read fails. Of these, row 2 after the header has 2 fields where the header "
+        "has 13."
+    )
     assert str(info.value) == (
         f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
         "library cannot read. Row 2 after the header has 2 fields where the header has 13. "
@@ -1097,6 +1101,10 @@ def test_rows_withheld_before_a_malformed_line_under_raise_are_listed_too(
         ProblemCause.UNCONVERTIBLE_VALUES,
         ProblemCause.MALFORMED_ROWS,
     ]
+    assert events[1].detail == (
+        f"Massive's flat file {LOCATION.format(TRADES_0303)} has a line the library cannot read, "
+        "so the read fails. Row 21 after the header has 14 fields where the header has 13."
+    )
 
 
 @pytest.mark.parametrize(

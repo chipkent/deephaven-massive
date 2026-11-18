@@ -907,7 +907,12 @@ class StreamSink:
             closed = None if core is None else core.fail_stream(self.stream_id, error)
             if closed is None:
                 log_failure(
-                    logger, error, "%s stream %d failed: %s", self.plan.dataset, self.stream_id
+                    logger,
+                    error,
+                    "%s stream %d failed: %s",
+                    self.plan.dataset,
+                    self.stream_id,
+                    named=self.plan.dataset,
                 )
             try:
                 self.publisher.publish_failure(

@@ -162,8 +162,14 @@ def test_an_expected_failure_is_logged_once_at_debug(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Massive's answer to the read, as the REST client words it.
+    refusal = (
+        "Massive answered GET /v2/reference/news on api.massive.com with HTTP 403 (request_id "
+        'r1): "You are not entitled to this data".'
+    )
+
     def refused(*_: object, **__: object) -> Table:
-        raise dm.EntitlementError("HTTP 403 from GET /v3/x (request_id r1): not entitled")
+        raise dm.EntitlementError(refusal, status=403, request_id="r1")
 
     monkeypatch.setattr(rest, "fetch", refused)
     with (
@@ -177,7 +183,11 @@ def test_an_expected_failure_is_logged_once_at_debug(
     assert [(r.levelno, _ELAPSED.sub("<s> s", r.getMessage())) for r in failed] == [
         (
             logging.DEBUG,
-            "call 1 failed after <s> s: HTTP 403 from GET /v3/x (request_id r1): not entitled",
+            (
+                "call 1 failed after <s> s: Massive answered GET /v2/reference/news on "
+                'api.massive.com with HTTP 403 (request_id r1): "You are not entitled to this '
+                'data".'
+            ),
         )
     ]
     assert failed[0].exc_info is None  # the traceback travels with the exception instead

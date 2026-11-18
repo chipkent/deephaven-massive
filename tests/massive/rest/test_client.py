@@ -500,7 +500,9 @@ def test_a_numeric_request_id_never_fails_a_call(
 def test_parameters_that_do_not_fit_raise_before_any_request(
     client: RestClient, fake_rest: FakeRestServer
 ) -> None:
-    with pytest.raises(ValueError, match="has no query parameter 'apiKey'"):
+    with pytest.raises(
+        ValueError, match="named the query parameter 'apiKey', which that endpoint does not take"
+    ):
         client.get(_TRADES, _AAPL, {"apiKey": _KEY}, bucket="stocks")
     with pytest.raises(TypeError, match="'limit' takes integer values"):
         client.pages(_TRADES, _AAPL, {"limit": "5"}, bucket="stocks")

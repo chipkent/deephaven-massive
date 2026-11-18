@@ -85,6 +85,17 @@ DIVIDENDS = DatasetSpec(
 ToPylist = Callable[[Table], list[dict[str, Any]]]
 
 GOOD = "The last good cycle ran at 2027-01-15T08:00:00Z."
+
+
+def answered(status: int, text: str) -> str:
+    """Return the message of Massive's answer to the poll's request, as the REST client words it."""
+    return f'Massive answered GET {PATH} on api.massive.com with HTTP {status}: "{text}".'
+
+
+ANSWER_503 = answered(503, "Service Unavailable")
+ANSWER_429 = answered(429, "You've exceeded the maximum requests per minute")
+ANSWER_403 = answered(403, "You are not entitled to this data")
+ANSWER_401 = answered(401, "Unknown API Key")
 """The suffix of a failing cycle's text after the first, good cycle at the fake clock's start."""
 
 NO_GOOD = "No cycle has succeeded since the poll started at 2027-01-15T08:00:00Z."
@@ -491,7 +502,7 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
         until(lambda: len(pairs(table, dh_to_pylist)) == 2)
         script.rows(("AAPL", 1.0), ("MSFT", 2.0))
         next_cycle(clock)  # the same rows again: read, but nothing new to publish
-        script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+        script.fail(dm.MassiveError(ANSWER_503))
         next_cycle(clock)
     patience = "waiting out at most 600 s of pauses; left out: none"
     assert caplog.messages == [
@@ -509,8 +520,8 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
             f"0.000 s, {patience}"
         ),
         (
-            "stocks.dividends poll() stream 1: a cycle failed. HTTP 503 from GET "
-            "/stocks/v1/dividends The next cycle runs as scheduled."
+            f"stocks.dividends poll() stream 1: a cycle failed. {ANSWER_503} Nothing to do: the "
+            "next cycle runs as scheduled."
         ),
     ]
 
@@ -528,9 +539,9 @@ def test_a_run_of_failures_warns_once_whatever_their_source_but_a_bug_logs_an_er
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
     failures = [
-        dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends", status=503),
+        dm.MassiveError(ANSWER_503, status=503),
         dm.MassiveError("connection reset", source=dm.ErrorSource.NETWORK),
-        dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends", status=503),
+        dm.MassiveError(ANSWER_503, status=503),
         dm.MassiveError("a row broke", source=dm.ErrorSource.LIBRARY),
     ]
     with caplog.at_level(logging.DEBUG, LOGGER):
@@ -626,14 +637,14 @@ def test_an_entitlement_error_fails_the_table_and_ends_the_poller(
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
-    script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
+    script.fail(dm.EntitlementError(ANSWER_403))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     poller = poller_of(pollers)
     poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
-    assert (row["State"], row["Error"]) == ("FAILED", "HTTP 403 from GET /stocks/v1/dividends")
+    assert (row["State"], row["Error"]) == ("FAILED", ANSWER_403)
     massive_session.release(table)
     assert stream_rows()[0]["State"] == "FAILED"  # a failed row keeps its state
 
@@ -650,9 +661,9 @@ def test_polls_refused_for_one_entitlement_log_one_warning(
     # the dataset refused this way logs a WARNING, the later ones only DEBUG. A refusal of
     # another kind is a cause of its own and warns again.
     refusals = [
-        dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends", status=403),
-        dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends", status=403),
-        dm.AuthenticationError("HTTP 401 from GET /stocks/v1/dividends", status=401),
+        dm.EntitlementError(ANSWER_403, status=403),
+        dm.EntitlementError(ANSWER_403, status=403),
+        dm.AuthenticationError(ANSWER_401, status=401),
     ]
     tables = []
     with caplog.at_level(logging.DEBUG, LOGGER):
@@ -662,23 +673,27 @@ def test_polls_refused_for_one_entitlement_log_one_warning(
             poller = poller_of(pollers)
             poller.thread.join(TIMEOUT)
             assert not poller.thread.is_alive()
-    failed = [(r.levelno, r.getMessage()) for r in caplog.records if "failed. HTTP" in r.message]
+    failed = [
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if "failed: Massive answered" in r.message
+    ]
     assert [level for level, _ in failed if level >= logging.WARNING] == [
         logging.WARNING,
         logging.WARNING,
     ]
     warned = [message for level, message in failed if level == logging.WARNING]
     assert warned[0] == (
-        "stocks.dividends poll() stream 1 failed. HTTP 403 from GET /stocks/v1/dividends Each "
-        "later poll() table of stocks.dividends refused this way logs at DEBUG."
+        f"stocks.dividends poll() stream 1 failed: {ANSWER_403} Later poll() tables of "
+        "stocks.dividends refused this way log at DEBUG. See m.streams() for each failed table."
     )
     assert warned[1] == (
-        "stocks.dividends poll() stream 3 failed. HTTP 401 from GET /stocks/v1/dividends Each "
-        "later poll() table of stocks.dividends refused this way logs at DEBUG."
+        f"stocks.dividends poll() stream 3 failed: {ANSWER_401} Later poll() tables of "
+        "stocks.dividends refused this way log at DEBUG. See m.streams() for each failed table."
     )
     # Every refusal still logs at DEBUG with its own stream.
     debug = [message for level, message in failed if level == logging.DEBUG]
-    assert [m.split(" failed.")[0] for m in debug] == [
+    assert [m.split(" failed:")[0] for m in debug] == [
         f"stocks.dividends poll() stream {n}" for n in (1, 2, 3)
     ]
     for table in tables:
@@ -708,7 +723,7 @@ def test_a_failure_is_recorded_before_the_table_fails(
 
     monkeypatch.setattr(core, "fail_stream", recording)
     monkeypatch.setattr(TablePublisher, "publish_failure", failing)
-    script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
+    script.fail(dm.EntitlementError(ANSWER_403))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     poller = poller_of(pollers)
     poller.thread.join(TIMEOUT)
@@ -750,7 +765,7 @@ def test_other_errors_keep_the_rows_and_are_a_gap_until_the_next_good_cycle(
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
-    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    script.fail(dm.MassiveError(ANSWER_503))
     with caplog.at_level(logging.INFO, LOGGER):
         next_cycle(clock)
     (row,) = stream_rows()
@@ -762,20 +777,20 @@ def test_other_errors_keep_the_rows_and_are_a_gap_until_the_next_good_cycle(
         "2027-01-15T08:01:00Z",
         None,
     )
-    assert gap["Detail"] == (f"{GOOD} Then a cycle failed: HTTP 503 from GET /stocks/v1/dividends")
+    assert gap["Detail"] == f"{GOOD} Then a cycle failed: {ANSWER_503}"
     assert pairs(table, dh_to_pylist) == [("AAPL", 1.0)]
     # An expected failure: one WARNING for the run.
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (
             logging.WARNING,
             (
-                "stocks.dividends poll() stream 1: a cycle failed. HTTP 503 from GET "
-                "/stocks/v1/dividends The next cycle runs as scheduled."
+                f"stocks.dividends poll() stream 1: a cycle failed. {ANSWER_503} Nothing to do: "
+                "the next cycle runs as scheduled."
             ),
         )
     ]
     caplog.clear()
-    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    script.fail(dm.MassiveError(ANSWER_503))
     with caplog.at_level(logging.INFO, LOGGER):
         next_cycle(clock)
     assert caplog.records == []  # the same run: DEBUG only
@@ -817,7 +832,7 @@ def test_other_errors_keep_the_rows_and_are_a_gap_until_the_next_good_cycle(
         )
     ]
     # A later run of failures is a second span; the first one stays, ended.
-    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    script.fail(dm.MassiveError(ANSWER_503))
     next_cycle(clock)
     (_, second) = problems_of(massive_session, dh_to_pylist, FAILED)
     assert (utc(second["SpanStart"]), second["EndedAt"]) == ("2027-01-15T08:05:00Z", None)
@@ -854,7 +869,7 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
 ) -> None:
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
-    error = dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends", status=503)
+    error = dm.MassiveError(ANSWER_503, status=503)
     for _ in range(5):  # failures at 60 to 300 s: the table runs and names its last good cycle
         script.fail(error)
         next_cycle(clock)
@@ -881,10 +896,9 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     failure = (
-        "stocks.dividends poll(): every cycle since 2027-01-15T08:07:00Z has failed, for 300 s, "
-        "which reaches max_outage=300 s, so this table stopped, and the rows since then may be "
-        "missing. Call the method again for a new live table. The latest error: HTTP 503 from "
-        "GET /stocks/v1/dividends"
+        "stocks.dividends poll(): every cycle since 2027-01-15T08:07:00Z has failed for 300 s, "
+        "reaching max_outage=300 s, so this table stopped and the rows since then may be "
+        f"missing. The latest error: {ANSWER_503} Call the method again for a new live table."
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
     # Massive's outage may be over by the next call, as the latest error says.
@@ -915,7 +929,7 @@ def test_one_failure_long_after_the_last_good_cycle_keeps_the_table(
     script.clock, script.took, script.late_page = clock, took, True
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock, interval=interval)
-    error = dm.MassiveError("HTTP 429 from GET /stocks/v1/dividends")
+    error = dm.MassiveError(ANSWER_429)
     script.fail(error)
     next_cycle(clock, interval)
     (row,) = stream_rows()
@@ -946,7 +960,7 @@ def test_a_gap_starts_where_the_failed_cycle_started_not_at_its_last_page(
     script.clock, script.took, script.late_page = clock, 40.0, True
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
-    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    script.fail(dm.MassiveError(ANSWER_503))
     next_cycle(clock)
     script.rows(("AAPL", 2.0))
     with caplog.at_level(logging.INFO, LOGGER):
@@ -974,13 +988,13 @@ def test_a_failed_cycle_that_received_no_page_counts_its_whole_run(
     table = start(massive_session, script=script, pollers=pollers, clock=clock, interval=600.0)
     clock.wait_for_sleepers(1)
     script.clock, script.took = clock, 400.0
-    error = dm.MassiveError("HTTP 429 from GET /stocks/v1/dividends")
+    error = dm.MassiveError(ANSWER_429)
     script.fail(error)
     clock.advance(600.0)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert "every cycle since 2027-01-15T08:10:00Z has failed, for 400 s" in row["Error"]
+    assert "every cycle since 2027-01-15T08:10:00Z has failed for 400 s" in row["Error"]
 
 
 def _second_cycle_running(script: Script, clock: FakeClock) -> None:
@@ -1068,7 +1082,7 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
     (row,) = stream_rows()
     failure = (
         "stocks.dividends poll(): the cycle running since 2027-01-15T08:01:00Z has received "
-        "nothing for 301 s, longer than max_outage=300 s, so this table stopped, and the rows "
+        "nothing for 301 s, longer than max_outage=300 s, so this table stopped and the rows "
         "since then may be missing. The last good cycle ran at 2027-01-15T08:00:00Z. Call the "
         "method again for a new live table."
     )
@@ -1230,13 +1244,18 @@ def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
         until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     failure = (
-        "stocks.dividends poll(): every cycle since 2027-01-15T08:00:00Z has failed, for 0 s, "
-        "which reaches max_outage=0 s, so this table stopped, and the rows since then may be "
-        "missing. Call the method again for a new live table. The latest error: a defect. "
+        "stocks.dividends poll(): every cycle since 2027-01-15T08:00:00Z has failed for 0 s, "
+        "reaching max_outage=0 s, so this table stopped and the rows since then may be "
+        "missing. The latest error: a defect. Call the method again for a new live table. "
         + LIBRARY_BUG
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
-    assert f"stocks.dividends poll() stream 1 failed. {failure}" in caplog.messages
+    assert (
+        "stocks.dividends poll() stream 1 failed: every cycle since 2027-01-15T08:00:00Z has "
+        "failed for 0 s, reaching max_outage=0 s, so this table stopped and the rows since then "
+        "may be missing. The latest error: a defect. Call the method again for a new live table. "
+        f"{LIBRARY_BUG}"
+    ) in caplog.messages
     # As the message says, calling the method again gives a new live table.
     script.rows(("AAPL", 1.0))
     again = start(massive_session, script=script, pollers=pollers, clock=clock)
@@ -1491,7 +1510,7 @@ def test_a_skipped_symbol_table_row_is_shown_while_its_cycle_fails(
     # holds it whether or not a read succeeds.
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
-    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    script.fail(dm.MassiveError(ANSWER_503))
     table = start(
         massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
     )
@@ -1804,7 +1823,7 @@ def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
         raise RuntimeError("refused")
 
     monkeypatch.setattr(TablePublisher, "publish_failure", refused)
-    script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
+    script.fail(dm.EntitlementError(ANSWER_403))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     poller = poller_of(pollers)
     poller.thread.join(TIMEOUT)
@@ -1813,7 +1832,7 @@ def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
     assert not poller.fail(dm.MassiveError("closed"))  # counted as failed: not tried again
     assert (
         "stocks.dividends poll() stream 1: could not fail the table, so it stops updating with "
-        f"no error. The error was: HTTP 403 from GET /stocks/v1/dividends {LIBRARY_BUG}"
+        f"no error. The error was: {ANSWER_403} {LIBRARY_BUG}"
     ) in caplog.messages
     monkeypatch.undo()
     massive_session.release(table)

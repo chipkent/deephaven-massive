@@ -410,7 +410,12 @@ def test_a_rejected_key_fails_the_table(
     cycles_ended: Callable[[], None],
 ) -> None:
     script = Script(massive_session)
-    script.answers["AAPL"] = AuthenticationError("HTTP 401: the key is wrong")
+    # Massive's answer to the read of AAPL, as the REST client words it.
+    rejected = (
+        "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 401 (request_id r1): "
+        '"Unknown API Key".'
+    )
+    script.answers["AAPL"] = AuthenticationError(rejected, status=401, request_id="r1")
     gate = script.gates["AAPL"] = threading.Event()
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, script)
@@ -420,7 +425,7 @@ def test_a_rejected_key_fails_the_table(
     cycles_ended()
     assert heard() == 1
     (row,) = stream_rows()
-    assert (row["State"], row["Error"]) == ("FAILED", "HTTP 401: the key is wrong")
+    assert (row["State"], row["Error"]) == ("FAILED", rejected)
 
 
 def test_a_symbol_table_that_fails_fails_the_result_once(

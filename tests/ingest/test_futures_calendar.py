@@ -67,6 +67,15 @@ PATHS = {
 SPACING = RELOAD_SPACING.total_seconds()
 
 
+def answered(path: str, status: int, text: str) -> str:
+    """Return Massive's answer to a GET of `path`, as the REST client words it."""
+    return f'Massive answered GET {path} on api.massive.com with HTTP {status}: "{text}".'
+
+
+UNAVAILABLE = "Service Unavailable"
+NOT_ENTITLED = "You are not entitled to this data"
+
+
 def instant(text: str) -> int:
     return int(datetime.fromisoformat(text).replace(tzinfo=UTC).timestamp()) * 10**9
 
@@ -463,11 +472,16 @@ def test_a_transient_failure_waits_and_retries(
     *, calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock, path: str
 ) -> None:
     # A failing snapshot sends its tickers to the contracts list; that failing too, they wait.
-    fetch.answers[path] = MassiveError("HTTP 503", status=503)
-    fetch.answers[CONTRACTS_PATH] = MassiveError("HTTP 503", status=503)
+    fetch.answers[path] = MassiveError(answered(path, 503, UNAVAILABLE), status=503)
+    fetch.answers[CONTRACTS_PATH] = MassiveError(
+        answered(CONTRACTS_PATH, 503, UNAVAILABLE), status=503
+    )
     start = clock.now
     assert state(calendar, "NEWZ6") == LookupState(
-        Readiness.WAITING, "looking up its product failed: HTTP 503", failing_since=start
+        Readiness.WAITING,
+        "looking up its product failed: Massive answered GET /futures/v1/contracts on "
+        'api.massive.com with HTTP 503: "Service Unavailable".',
+        failing_since=start,
     )
     clock.now += RETRY_DELAYS[0]
     fetch.answers[SNAPSHOT_PATH] = list(SNAPSHOT)
@@ -482,8 +496,12 @@ def test_a_transient_failure_is_logged_once_per_run(
     clock: Clock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    fetch.answers[SNAPSHOT_PATH] = MassiveError("HTTP 503", status=503)
-    fetch.answers[CONTRACTS_PATH] = MassiveError("HTTP 503", status=503)
+    fetch.answers[SNAPSHOT_PATH] = MassiveError(
+        answered(SNAPSHOT_PATH, 503, UNAVAILABLE), status=503
+    )
+    fetch.answers[CONTRACTS_PATH] = MassiveError(
+        answered(CONTRACTS_PATH, 503, UNAVAILABLE), status=503
+    )
     with caplog.at_level(logging.WARNING):
         state(calendar, "ESM4")
         clock.now += RETRY_DELAYS[0]
@@ -491,7 +509,8 @@ def test_a_transient_failure_is_logged_once_per_run(
     assert caplog.messages == [
         (
             "Looking up the futures schedules of ESM4 failed, so their rows wait until a later "
-            "lookup succeeds. HTTP 503"
+            "lookup succeeds. Massive answered GET /futures/v1/contracts on api.massive.com "
+            'with HTTP 503: "Service Unavailable".'
         )
     ]
 
@@ -528,7 +547,7 @@ def test_a_refusal_of_many_tickers_is_split_until_it_names_one(
         tickers = query["ticker.any_of"]
         assert isinstance(tickers, tuple)
         if "BAD:1" in tickers:
-            return MassiveError("HTTP 400: bad ticker", status=400)
+            return MassiveError(answered(CONTRACTS_PATH, 400, "Invalid ticker: BAD:1"), status=400)
         return [{"ticker": t, "product_code": "ES"} for t in tickers]
 
     fetch.answers[SNAPSHOT_PATH] = []
@@ -545,7 +564,9 @@ def test_a_refusal_of_many_tickers_is_split_until_it_names_one(
     ready = {t for t, s in states.items() if s.readiness is Readiness.READY}
     assert ready == {"AZ6", "CZ6", "DZ6"}
     assert states["BAD:1"] == LookupState(
-        Readiness.WAITING, "Massive refused its lookup: HTTP 400: bad ticker (asked over 0 min)"
+        Readiness.WAITING,
+        "Massive refused its lookup: Massive answered GET /futures/v1/contracts on "
+        'api.massive.com with HTTP 400: "Invalid ticker: BAD:1". (asked over 0 min)',
     )
 
 
@@ -555,7 +576,9 @@ def test_a_snapshot_refused_twice_is_given_up_for_the_contracts_list(
     fetch: FakeFetch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    fetch.answers[SNAPSHOT_PATH] = EntitlementError("HTTP 403", status=403)
+    fetch.answers[SNAPSHOT_PATH] = EntitlementError(
+        answered(SNAPSHOT_PATH, 403, NOT_ENTITLED), status=403
+    )
     with caplog.at_level(logging.WARNING):
         watched(calendar, "ESU4")
         watched(calendar, "NEWZ6")
@@ -564,7 +587,9 @@ def test_a_snapshot_refused_twice_is_given_up_for_the_contracts_list(
     assert caplog.messages == [
         (
             "Massive refused the futures snapshot twice, so the library looks up futures "
-            "products in Massive's contracts list only. The latest refusal: HTTP 403"
+            "products in Massive's contracts list only. The latest refusal: Massive answered "
+            'GET /futures/v1/snapshot on api.massive.com with HTTP 403: "You are not entitled '
+            'to this data".'
         )
     ]
     assert state(calendar, "NEWZ6").readiness is Readiness.READY
@@ -583,10 +608,13 @@ def test_a_snapshot_failing_for_another_reason_is_kept(
 def test_a_schedule_load_waits_on_a_transient_failure_and_refuses_on_a_refusal(
     calendar: FuturesCalendar, fetch: FakeFetch, clock: Clock
 ) -> None:
-    fetch.answers[SCHEDULES_PATH] = MassiveError("HTTP 500", status=500)
+    fetch.answers[SCHEDULES_PATH] = MassiveError(
+        answered(SCHEDULES_PATH, 500, "Internal Server Error"), status=500
+    )
     assert state(calendar, "ESM4") == LookupState(
         Readiness.WAITING,
-        "loading the schedule of its product ES failed: HTTP 500",
+        "loading the schedule of its product ES failed: Massive answered GET "
+        '/futures/v1/schedules on api.massive.com with HTTP 500: "Internal Server Error".',
         failing_since=clock.now,
     )
     refusal = MassiveError("HTTP 400", status=400)
@@ -817,13 +845,16 @@ def test_a_failed_confirmation_of_no_session_waits_and_retries(
 ) -> None:
     def answer(query: Mapping[str, object]) -> Answer:
         if "product_code" in query:
-            return MassiveError("HTTP 502", status=502)
+            return MassiveError(answered(SCHEDULES_PATH, 502, "Bad Gateway"), status=502)
         return []
 
     fetch.answers[SCHEDULES_PATH] = answer
     found = state(calendar, "ESM4")
     assert found.readiness is Readiness.WAITING
-    assert found.reason == "loading the schedule of its product ES failed: HTTP 502"
+    assert found.reason == (
+        "loading the schedule of its product ES failed: Massive answered GET "
+        '/futures/v1/schedules on api.massive.com with HTTP 502: "Bad Gateway".'
+    )
     fetch.answers[SCHEDULES_PATH] = list(ES_SCHEDULE)
     clock.now += RETRY_DELAYS[0]
     assert state(calendar, "ESM4").readiness is Readiness.READY

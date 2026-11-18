@@ -7,6 +7,7 @@ from enum import StrEnum
 import pytest
 
 from deephaven_massive._massive import spec
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT
 from deephaven_massive._massive.rest import query
 from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, Transport, WireUnit
 
@@ -62,8 +63,8 @@ def test_path_values_are_percent_encoded_whole() -> None:
 def test_a_path_value_with_a_slash_is_refused() -> None:
     # Massive serves no data for a `%2F` segment (404, or a 307), so such a value never succeeds.
     expected = (
-        "The path parameters ['stockTicker'] of '/v1/open-close/{stockTicker}/{date}' contain "
-        "'/', which Massive cannot read inside a path segment."
+        "The value of the path parameter 'stockTicker' contains '/', which Massive cannot read "
+        "inside a path segment."
     )
     with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         query.request_target(_PATH, {"stockTicker": "EUR/USD", "date": date(2026, 1, 2)}, {})
@@ -126,20 +127,22 @@ def test_the_generated_news_publication_bounds_send_an_instant_or_a_date(
 @pytest.mark.parametrize(
     ("path_params", "given"),
     [
-        ({"stockTicker": "AAPL"}, "['stockTicker']"),
-        ({"stockTicker": "AAPL", "date": None}, "['stockTicker']"),
+        ({}, "none"),
+        ({"stockTicker": "AAPL"}, "'stockTicker'"),
+        ({"stockTicker": "AAPL", "date": None}, "'stockTicker'"),
         (
             {"stockTicker": "AAPL", "date": date(2026, 1, 2), "extra": 1},
-            "['date', 'extra', 'stockTicker']",
+            "'date', 'extra' and 'stockTicker'",
         ),
     ],
 )
 def test_path_parameters_must_be_exactly_the_placeholders(
     path_params: dict[str, object], given: str
 ) -> None:
+    # The library builds every path's parameters, so a mismatch is its own defect.
     expected = (
-        "The path '/v1/open-close/{stockTicker}/{date}' takes the path parameters "
-        f"['date', 'stockTicker'], and the call gave {given}."
+        f"A request to Massive gave the path parameters {given}, where its endpoint takes "
+        f"'date' and 'stockTicker'. {LIBRARY_BUG_REPORT}"
     )
     with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         query.request_target(_PATH, path_params, {})
@@ -147,8 +150,10 @@ def test_path_parameters_must_be_exactly_the_placeholders(
 
 @pytest.mark.parametrize("name", ["apiKey", "stockTicker"])
 def test_a_query_name_must_be_a_query_parameter(name: str) -> None:
+    # The public calls check filter names first, so an unknown name is the library's defect.
     expected = (
-        f"The path '/v1/open-close/{{stockTicker}}/{{date}}' has no query parameter '{name}'."
+        f"A request to GET /v1/open-close/AAPL/2026-01-02 named the query parameter '{name}', "
+        f"which that endpoint does not take. {LIBRARY_BUG_REPORT}"
     )
     with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         _target(**{name: "x"})

@@ -296,9 +296,7 @@ class SharedStreams:
             if deephaven and core.closed:
                 raise SessionClosedError(session_closed()) from error
             if failure is not None:
-                named = copy_error(
-                    failure, f"{spec.name} stream {handle.stream_id} failed: {failure}"
-                )
+                named = _named_failure(spec, handle.stream_id, failure)
                 raise named from error
             raise
         if core.closed:  # close() ran while the result was built; it is released on the reaper
@@ -319,7 +317,7 @@ class SharedStreams:
         """
         failure = self._failure(stream_id)
         if failure is not None:
-            named = copy_error(failure, f"{spec.name} stream {stream_id} failed: {failure}")
+            named = _named_failure(spec, stream_id, failure)
             raise named
 
     def _failure(self, stream_id: int) -> MassiveError | None:
@@ -843,3 +841,20 @@ class SharedStreams:
             if state.handle is not None:  # an opening stream has no row yet
                 self._diagnostics.write(closed)
         return opening
+
+
+def _named_failure(spec: DatasetSpec, stream_id: int, failure: MassiveError) -> MassiveError:
+    """Return a copy of a stream's failure whose message names the stream.
+
+    Args:
+        spec: The stream's dataset.
+        stream_id: The stream.
+        failure: The error the stream failed with; a message that already starts with the
+            dataset's name loses that prefix, so the name is given once.
+
+    Returns:
+        The copy, of the same class and attributes (`copy_error`), such as `"stocks.trades
+        stream 1 failed: Massive answered ..."`.
+    """
+    text = str(failure).removeprefix(f"{spec.name}: ")
+    return copy_error(failure, f"{spec.name} stream {stream_id} failed: {text}")

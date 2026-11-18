@@ -1354,7 +1354,7 @@ class WsConnections:
             elif not connection.join(JOIN_TIMEOUT):
                 logger.warning(
                     "%s: the connection had not closed %.0f s after close(), so it closes in "
-                    "the background.",
+                    "the background. Nothing to do.",
                     connection.url,
                     JOIN_TIMEOUT,
                 )

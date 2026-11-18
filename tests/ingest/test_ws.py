@@ -202,6 +202,11 @@ CAP = ProblemCause.OPTIONS_CAP.value
 OUTAGE = ProblemCause.OUTAGE.value
 NONCANONICAL = ProblemCause.NONCANONICAL_SYMBOLS.value
 RETRYING = ProblemCause.SYMBOL_READ_RETRYING.value
+LIST_503 = (
+    "Massive answered GET /v3/reference/tickers?market=crypto&active=true&limit=1000 on "
+    'api.massive.com with HTTP 503: "Service Unavailable".'
+)
+"""Massive's answer to a read of its crypto ticker list, as the REST client words it."""
 
 
 def streams_of(
@@ -2348,14 +2353,15 @@ def test_an_unread_pair_list_is_an_outage_the_stream_rides_out_from_every_source
     caplog.set_level(logging.INFO, logger="deephaven_massive._ingest.ws")
     ws_session = make_ws_session()
     quick_retries(ws_session)
-    busy = dm.MassiveError("HTTP 503: busy", status=503, is_retryable=True)
+    busy = dm.MassiveError(LIST_503, status=503, is_retryable=True)
     ws_session.pair_answers["X:DOTUSD"] = busy
     pairs = crypto_watchlist(["X:BTCUSD", "X:DOTUSD"], source=source, dh_input_table=dh_input_table)
     result = ws_session.query(CRYPTO, pairs).append_only()
     ws_session.subscribed("XT.BTC-USD")
     why = (
         "It waits for Massive's crypto ticker list, which the library reads again. The last read "
-        "failed: HTTP 503: busy."
+        "failed: Massive answered GET /v3/reference/tickers?market=crypto&active=true&limit=1000 "
+        'on api.massive.com with HTTP 503: "Service Unavailable".'
     )
     waiting = (1, RETRYING, "X:DOTUSD", why, 0)
     wait_for(lambda: spans_of(ws_session, dh_to_pylist, RETRYING) == [(*waiting, False)])
@@ -2388,9 +2394,7 @@ def test_a_pair_in_code_waits_for_an_unread_list_in_a_stream_a_static_table_shar
     # so the other call's table never lacks the pair for good.
     ws_session = make_ws_session()
     quick_retries(ws_session)
-    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
-        "HTTP 503: busy", status=503, is_retryable=True
-    )
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503, is_retryable=True)
     second = "code" if first == "static" else "static"
     results = [
         ws_session.query(
@@ -2420,7 +2424,7 @@ def test_an_unread_pair_list_fails_the_stream_after_max_outage(
 ) -> None:
     ws_session = make_ws_session(max_outage=0.1)
     quick_retries(ws_session)
-    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503)
     result = ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
@@ -2428,8 +2432,9 @@ def test_an_unread_pair_list_fails_the_stream_after_max_outage(
     assert re.fullmatch(
         r"test\.crypto stream 1: Massive's crypto ticker list could not be read for \d+ s, "
         r"longer than max_outage=0\.1 s, so this table stopped, since it cannot stream "
-        r"X:DOTUSD\. The last read failed: HTTP 503: busy\. Call the method again for a new "
-        r"live table\.",
+        r"X:DOTUSD\. The last read failed: Massive answered GET "
+        r"/v3/reference/tickers\?market=crypto&active=true&limit=1000 on api\.massive\.com with "
+        r'HTTP 503: "Service Unavailable"\. Call the method again for a new live table\.',
         row["Error"],
     )
     assert len(lookups(ws_session)) > 2  # read again on the backoff until then
@@ -2444,7 +2449,7 @@ def test_the_wait_for_an_unread_pair_list_stops_doubling_at_max_reconnect_backof
     result = ws_session.query(CRYPTO, ["X:BTCUSD"]).append_only()
     ws_session.subscribed("XT.BTC-USD")
     (stream_id,) = connections._mine
-    busy = dm.MassiveError("HTTP 503: busy", status=503, is_retryable=True)
+    busy = dm.MassiveError(LIST_503, status=503, is_retryable=True)
     state = ws._PairState("crypto.trades", DEFAULT_POLICY, since=time.monotonic(), tries=1100)
     delay = connections._wait(stream_id, state, waiting=["X:DOTUSD"], failure=busy)
     assert state.tries == 1101
@@ -2457,7 +2462,7 @@ def test_a_max_outage_of_zero_fails_at_the_first_unread_list(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     ws_session = make_ws_session(max_outage=0)
-    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503)
     result = ws_session.query(CRYPTO, ["X:DOTUSD"]).append_only()
     wait_for(lambda: failed_after_flush(ws_session, result))
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
@@ -2546,7 +2551,7 @@ def test_waiting_pairs_fail_their_stream_at_max_outage_even_while_a_lookup_waits
     with connections._lock:
         state = connections._pair_states[stream_id]
         state.waiting, state.since = {"X:DOTUSD"}, 5.0
-        state.failure = dm.MassiveError("HTTP 503: busy", status=503)
+        state.failure = dm.MassiveError(LIST_503, status=503)
     connections._pairs_expired(stream_id, 4.0)  # another wait's timer: nothing
     assert not failed_after_flush(ws_session, result)
     connections._pairs_expired(stream_id, 5.0)
@@ -2555,7 +2560,9 @@ def test_waiting_pairs_fail_their_stream_at_max_outage_even_while_a_lookup_waits
     assert re.fullmatch(
         r"test\.crypto stream 1: Massive's crypto ticker list could not be read for \d+ s, "
         r"longer than max_outage=300 s, so this table stopped, since it cannot stream X:DOTUSD\. "
-        r"The last read failed: HTTP 503: busy\. Call the method again for a new live table\.",
+        r"The last read failed: Massive answered GET "
+        r"/v3/reference/tickers\?market=crypto&active=true&limit=1000 on api\.massive\.com with "
+        r'HTTP 503: "Service Unavailable"\. Call the method again for a new live table\.',
         row["Error"],
     )
 
@@ -2571,7 +2578,7 @@ def test_a_pair_removed_while_it_waits_is_never_subscribed(
     # still waiting: a pair the table no longer holds is never subscribed. A pair added
     # meanwhile waits with the others, under the one retry already scheduled.
     quick_retries(ws_session)
-    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    busy = dm.MassiveError(LIST_503, status=503)
     ws_session.pair_answers["X:DOTUSD"] = busy
     ws_session.pair_answers["X:ADAUSD"] = busy
     watchlist = crypto_watchlist(["X:BTCUSD"], source="reactive", dh_input_table=dh_input_table)
@@ -2607,7 +2614,7 @@ def test_a_waiting_pair_removed_ends_only_its_own_span(
     # Each waiting pair is its own span: removing one pair ends its span, and the pair that
     # still waits keeps its span open.
     quick_retries(ws_session)
-    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    busy = dm.MassiveError(LIST_503, status=503)
     ws_session.pair_answers["X:DOTUSD"] = busy
     ws_session.pair_answers["X:ADAUSD"] = busy
     watchlist = crypto_watchlist(["X:BTCUSD"], source="reactive", dh_input_table=dh_input_table)
@@ -2653,7 +2660,7 @@ def split_once(ws_session: WsSession, pair: str, topic: str) -> None:
     ws_session.session.release(result)
     ws_session.unsubscribed(topic)
     with ws_session.cond:
-        ws_session.pair_answers[pair] = dm.MassiveError("HTTP 503: busy", status=503)
+        ws_session.pair_answers[pair] = dm.MassiveError(LIST_503, status=503)
 
 
 def waiting_pairs(
@@ -2681,7 +2688,7 @@ def test_a_pair_the_session_split_before_streams_while_the_list_cannot_be_read(
     quick_retries(ws_session)
     split_once(ws_session, "X:ETHUSD", "XT.ETH-USD")
     with ws_session.cond:
-        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503)
     before = len(lookups(ws_session))
     pairs = crypto_watchlist(
         ["X:DOTUSD", "X:ETHUSD", "X:SOLUSD"], source=source, dh_input_table=dh_input_table
@@ -2708,7 +2715,7 @@ def test_a_waiting_pair_another_stream_splits_stops_waiting(
     # Both pairs wait behind X:DOTUSD's failed read. Once another stream splits X:ETHUSD, the
     # next retry subscribes it, though X:DOTUSD's read fails again.
     quick_retries(ws_session)
-    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    busy = dm.MassiveError(LIST_503, status=503)
     with ws_session.cond:
         ws_session.pair_answers["X:DOTUSD"] = busy
         ws_session.pair_answers["X:ETHUSD"] = busy
@@ -2733,7 +2740,7 @@ def test_max_outage_fails_the_stream_naming_only_the_pairs_that_waited(
     quick_retries(ws_session)
     split_once(ws_session, "X:ETHUSD", "XT.ETH-USD")
     with ws_session.cond:
-        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503)
     result = ws_session.query(CRYPTO, ["X:DOTUSD", "X:ETHUSD"]).append_only()
     wait_for(lambda: failed_after_flush(ws_session, result))
     row = stream_row(ws_session, dh_to_pylist, 2)

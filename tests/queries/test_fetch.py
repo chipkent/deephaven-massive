@@ -329,11 +329,16 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     rest: Recorder,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    refusal = dm.EntitlementError("HTTP 403: not in the plan")
+    # Massive's answer to the read of AAPL, as the REST client words it.
+    refusal = dm.EntitlementError(
+        "Massive answered GET /v2/last/trade/AAPL on api.massive.com with HTTP 403: "
+        '"You are not entitled to this data".',
+        status=403,
+    )
     rest.outcomes = {"AAPL": SymbolFailure(refusal)}
     q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
     assert isinstance(q, FetchQuery)
-    with pytest.raises(dm.EntitlementError, match="not in the plan"):
+    with pytest.raises(dm.EntitlementError, match="not entitled"):
         q.fetch(wait=True)
     both = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "MSFT"))
     assert isinstance(both, FetchQuery)
@@ -342,8 +347,9 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     assert caplog.messages == [
         (
             "stocks.last_trade fetch: 1 of the 2 symbols failed and are left out of the result "
-            "for now. AAPL: HTTP 403: not in the plan. Check m.symbol_reads() for whether each "
-            "one is retrying or has failed."
+            "for now. AAPL: Massive answered GET /v2/last/trade/AAPL on api.massive.com with "
+            'HTTP 403: "You are not entitled to this data". Check m.symbol_reads() for whether '
+            "each one is retrying or has failed."
         )
     ]
     rest.outcomes = {}  # the raised error's traceback holds the session

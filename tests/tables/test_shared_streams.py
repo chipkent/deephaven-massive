@@ -421,7 +421,9 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
     ) -> StreamHandle:
         handle = fake_streams.open_stream(spec, request, channel, stream_id=stream_id)
         if stream_id == 1:
-            core.fail_stream(stream_id, dm.AuthenticationError("not authorized", status=401))
+            # A failure that names its dataset: the message names it once.
+            refusal = dm.AuthenticationError("test.trades: not authorized", status=401)
+            core.fail_stream(stream_id, refusal)
         return handle
 
     monkeypatch.setattr(core, "stream_transport", transport_of(open_stream))
@@ -437,7 +439,7 @@ def test_a_failure_during_the_open_is_shown_and_never_reused(
     second = q.blink()  # a fresh stream: the failed one is never reused
     rows = sorted(stream_rows(), key=lambda r: r["StreamId"])
     assert [(r["StreamId"], r["State"], r["Error"], r["HeldResults"]) for r in rows] == [
-        (1, "FAILED", "not authorized", 0),
+        (1, "FAILED", "test.trades: not authorized", 0),
         (2, "RUNNING", None, 1),
     ]
     assert fake_streams.shutdown[1].wait(TIMEOUT)
@@ -1115,7 +1117,7 @@ def test_a_failure_while_the_shape_is_derived_is_named(
         blink = handle.blink
         fake_streams.publishers[1].publish_failure(RuntimeError("entitlement"))
         assert fake_streams.shutdown[1].wait(TIMEOUT)
-        core.fail_stream(1, dm.MassiveError("entitlement"))
+        core.fail_stream(1, dm.MassiveError("test.trades: entitlement"))
         return blink_to_append_only(blink)
 
     with pytest.raises(

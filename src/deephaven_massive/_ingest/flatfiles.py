@@ -1942,6 +1942,16 @@ def _malformed_event(transform: _Transform, file: FlatFile, setting: OnError) ->
     Returns:
         The event, counting the lines as rows, with the file as its field.
     """
+    reason = file.malformed_reason
+    if file.malformed_lines == 1:
+        found, them, first = "a line", "it", reason_sentence(reason)
+    else:
+        found, them, first = f"{file.malformed_lines} lines", "them", f"Of these, {reason}."
+    effect = (
+        "the read fails"
+        if effect_of(setting).fails
+        else f"the library skipped {them} and kept the file's other rows"
+    )
     return ProblemEvent(
         cause=ProblemCause.MALFORMED_ROWS,
         action=ProblemAction.SKIPPED,
@@ -1951,13 +1961,8 @@ def _malformed_event(transform: _Transform, file: FlatFile, setting: OnError) ->
         symbol=None,
         field=file.location,
         rows=file.malformed_lines,
-        detail=f"Massive's flat file {file.location} has {file.malformed_lines} lines the "
-        f"library cannot read. The first: {reason_sentence(file.malformed_reason)} "
-        + (
-            "The read fails."
-            if effect_of(setting).fails
-            else "They are skipped, and the file's other rows are kept."
-        ),
+        detail=f"Massive's flat file {file.location} has {found} the library cannot read, so "
+        f"{effect}. {first}",
         at=time.time_ns(),
         policy=setting,
     )

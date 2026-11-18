@@ -42,6 +42,12 @@ if TYPE_CHECKING:
 
 TIMEOUT = 30.0
 
+ANSWER_500 = (
+    "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 500 (request_id r1): "
+    '"Internal Server Error".'
+)
+"""Massive's answer to the read's request, as the REST client words it."""
+
 SPEC = DatasetSpec(
     name="test.trades",
     summary="A dataset for the tests.",
@@ -211,7 +217,7 @@ def test_a_failed_download_fails_the_table_and_its_row(
     massive_session: dm.MassiveSession, stream_rows: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
     def run(stop: threading.Event) -> Table:
-        raise dm.MassiveError("HTTP 500 for /v3/trades/AAPL (request_id=r1)")
+        raise dm.MassiveError(ANSWER_500, status=500, request_id="r1")
 
     with caplog.at_level(logging.WARNING, logger=background_read.__name__):
         result = open_test_read(massive_session, run)
@@ -220,13 +226,13 @@ def test_a_failed_download_fails_the_table_and_its_row(
     (row,) = stream_rows()
     assert (row["State"], row["Error"]) == (
         "FAILED",
-        "HTTP 500 for /v3/trades/AAPL (request_id=r1)",
+        ANSWER_500,
     )
     (record,) = caplog.records
     assert record.levelno == logging.WARNING  # an expected failure: stale data, not a defect
     assert re.fullmatch(
         r"test\.trades background read stream 1 failed after \d+\.\d{3} s\. "
-        + re.escape("HTTP 500 for /v3/trades/AAPL (request_id=r1)"),
+        + re.escape(ANSWER_500),
         record.getMessage(),
     )
     assert row["StreamId"] == 1
