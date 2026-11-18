@@ -20,9 +20,10 @@ A range has two kinds of bounds, and one range never mixes them (`check_order`):
 
 - **Dates** are whole days, inclusive at both ends, so `history("2025-03-03", "2025-03-03")`
   is the whole of March 3 (`DaySpan`). A day is a calendar day in the asset class's *day
-  zone*: America/New_York for stocks, options, and indices, UTC for forex and crypto. A
-  futures date names the trading session whose `session_end_date` equals it, since a session
-  is the futures trading day.
+  zone*: America/New_York for stocks, options, and indices, UTC for forex and crypto. For
+  bars of a day or longer it is a day of the class's *bar zone* (`bar_zone`), Chicago for
+  indices, whose bars Massive starts at midnight there. A futures date names the trading
+  session whose `session_end_date` equals it, since a session is the futures trading day.
 - **Aware datetimes** are exact instants, a half-open range `[start, end)` (`TimeRange`).
   Equal instants are an empty range, not an error.
 
@@ -75,6 +76,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
 
 __all__ = [
+    "BAR_ZONES",
     "DAY_ZONES",
     "DAY_ZONE_NAMES",
     "MIXED_BOUNDS",
@@ -83,6 +85,7 @@ __all__ = [
     "DaySpan",
     "TimeRange",
     "TimeTextError",
+    "bar_zone",
     "bounds",
     "calendar_day",
     "check_order",
@@ -156,6 +159,19 @@ DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
 
 Futures are absent: a futures date names a trading session, not a calendar day (see `bounds`).
 Datasets without an asset class use New York."""
+
+BAR_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
+    AssetClass.STOCKS: NEW_YORK,
+    AssetClass.OPTIONS: NEW_YORK,
+    AssetClass.INDICES: CHICAGO,
+    AssetClass.FOREX: UTC,
+    AssetClass.CRYPTO: UTC,
+}
+"""Per class with a day zone (`DAY_ZONES`), the zone at whose midnight Massive starts the
+class's bars of a day or longer, and whose days those bars cover: the class day zone, except
+for indices, whose days Massive cuts at midnight in Chicago on every source (01:00 New York
+time, since the two zones change clocks together). `DAY_ZONES` still names the zone of `Date`
+and of a range's dates, which for an index bar's day is the same date."""
 
 DAY_ZONE_NAMES: Final[Mapping[tzinfo, str]] = {NEW_YORK: "New York time", UTC: "UTC"}
 """How user-facing text names each zone of `DAY_ZONES`."""
@@ -797,6 +813,19 @@ def day_zone(asset_class: AssetClass | ClassFromPrefix) -> tzinfo:
     if asset_class is AssetClass.FUTURES:
         return CHICAGO
     return NEW_YORK if asset_class is ClassFromPrefix.ANY else DAY_ZONES[asset_class]
+
+
+def bar_zone(asset_class: AssetClass | ClassFromPrefix) -> tzinfo:
+    """Return the zone whose days a class's bars of a day or longer cover (`BAR_ZONES`).
+
+    Args:
+        asset_class: A class with a day zone, or `ClassFromPrefix.ANY`, whose days are New
+            York days.
+
+    Returns:
+        The zone.
+    """
+    return NEW_YORK if asset_class is ClassFromPrefix.ANY else BAR_ZONES[asset_class]
 
 
 def day_class(

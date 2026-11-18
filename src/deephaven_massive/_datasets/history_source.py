@@ -65,6 +65,7 @@ from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS, jo
 from deephaven_massive._datasets.dates import (
     DaySpan,
     TimeRange,
+    bar_zone,
     bounds,
     day_class,
     day_end,
@@ -224,16 +225,17 @@ def history_window(
 ) -> HistoryWindow:
     """Return what a `history()` call reads and keeps.
 
-    The bounds follow `dates.bounds`: two dates are whole days (for futures, sessions), two
-    datetimes a half-open range of instants, and an `end` of None reads through now. Ticks are
-    kept inside the range. A bar is kept only when its whole window lies inside the range and
-    has ended by now: its `TimestampStart` must be no earlier than the range's start
-    (`bar_periods.bar_starts` selects the starts that fit), and its `TimestampEnd` no later than
-    `HistoryWindow.bars.latest`, so a bar whose window reaches past the range is left out: an
-    index day bar ends at 01:00 New York time, midnight in Chicago. A futures bar of a
-    session or longer named by datetimes is kept by its own window, `TimestampStart` and
-    `TimestampEnd` as filled, and only once it has certainly ended
-    (`bar_periods.futures_bar_ended`); named by dates, by the rules of `_futures_sessions`.
+    The bounds follow `dates.bounds`: two dates are whole days (for futures, sessions; for bars of a
+    day or longer, days of the class's bar zone, `dates.bar_zone`, so an index date is the Chicago
+    day its bar covers), two datetimes a half-open range of instants, and an `end` of None reads
+    through now. Ticks are kept inside the range. A bar is kept only when its whole window lies
+    inside the range and has ended by now: its `TimestampStart` must be no earlier than the range's
+    start (`bar_periods.bar_starts` selects the starts that fit), and its `TimestampEnd` no later
+    than `HistoryWindow.bars.latest`, so a bar whose window reaches past the range is left out: an
+    index day bar ends at 01:00 New York time, midnight in Chicago. A futures bar of a session or
+    longer named by datetimes is kept by its own window, `TimestampStart` and `TimestampEnd` as
+    filled, and only once it has certainly ended (`bar_periods.futures_bar_ended`); named by dates,
+    by the rules of `_futures_sessions`.
 
     Args:
         spec: The dataset.
@@ -258,8 +260,12 @@ def history_window(
     futures = asset_class is AssetClass.FUTURES
     if isinstance(span, DaySpan) and futures:
         return _futures_sessions(spec, request, span, now=moment)
-    instants = span if isinstance(span, TimeRange) else span.instants(day_zone(asset_class))
     timespan = request.timespan
+    long_bars = spec.is_bars and timespan is not None and not intraday(timespan)
+    if isinstance(span, TimeRange):
+        instants = span
+    else:
+        instants = span.instants(bar_zone(asset_class) if long_bars else day_zone(asset_class))
     if not spec.is_bars or timespan is None:
         return HistoryWindow(span, instants, None, instants, now=moment)
     ended = TimeRange(instants.start, min(instants.end, moment))
@@ -410,14 +416,15 @@ def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...
 
 
 _FILE_DAY_ZONES: Final[Mapping[str, tzinfo]] = MappingProxyType(
-    {"us_indices/minute_aggs_v1": CHICAGO}
+    {"us_indices/day_aggs_v1": CHICAGO, "us_indices/minute_aggs_v1": CHICAGO}
 )
 """The prefixes whose file of a date holds that date's day in another zone than the class's.
 
 Massive's index minute file of a date holds the bars from midnight to midnight in Chicago,
 01:00 to 01:00 New York time, while REST and the indices' documented days are New York's, so
-the New York day's first hour lies in the previous date's file. Every other prefix's file
-holds its class's day (for futures, its session)."""
+the New York day's first hour lies in the previous date's file. Its index day file of a date
+holds the bar of that Chicago day, stamped at its midnight (`dates.BAR_ZONES`). Every other
+prefix's file holds its class's day (for futures, its session)."""
 
 
 @dataclass(frozen=True)

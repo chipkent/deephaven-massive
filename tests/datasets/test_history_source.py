@@ -340,6 +340,7 @@ def test_futures_bars_by_instants_request_them_exactly() -> None:
 
 INDEX_BARS = CATALOG.by_name["indices.bars"]
 MINUTES = Request(timespan=Timespan.MINUTE, multiplier=1)
+DAYS = Request(timespan=Timespan.DAY, multiplier=1)
 
 
 def test_index_minute_files_hold_the_chicago_day() -> None:
@@ -348,9 +349,41 @@ def test_index_minute_files_hold_the_chicago_day() -> None:
     # Midnight in Chicago is 01:00 New York, in winter and in summer.
     assert files.start(date(2025, 3, 4)) == datetime(2025, 3, 4, 1, tzinfo=NEW_YORK)
     assert files.start(date(2025, 7, 1)) == datetime(2025, 7, 1, 1, tzinfo=NEW_YORK)
-    days = Request(timespan=Timespan.DAY, multiplier=1)
-    assert file_days(INDEX_BARS, days).zone is None
+    # The day file of a date holds the bar Massive stamps at that date's midnight in Chicago.
+    assert file_days(INDEX_BARS, DAYS).zone is CHICAGO
     assert file_days(STOCK_BARS, MINUTES).zone is None
+
+
+@pytest.mark.parametrize(
+    "start",
+    [datetime(2025, 6, 2, 5, tzinfo=UTC), datetime(2025, 1, 6, 6, tzinfo=UTC)],
+    ids=["daylight", "standard"],
+)
+def test_index_day_bars_plan_over_chicago_days(start: datetime) -> None:
+    # Massive stamps an index day bar at midnight in Chicago, so a range of exactly that
+    # Chicago day requests and keeps its bar, and reads its one day file.
+    end = start + timedelta(days=1)
+    day = start.astimezone(CHICAGO).date()
+    later = datetime(2025, 7, 1, tzinfo=UTC)
+    exact = window(INDEX_BARS, start, end, now=later, timespan=Timespan.DAY)
+    assert exact.times == TimeRange(start, end)
+    assert exact.requested == TimeRange(start, end)
+    assert exact.bars is not None
+    assert exact.bars.latest == end
+    assert file_dates(INDEX_BARS, DAYS, exact) == (day,)
+    # A range of that date is the same Chicago day.
+    dates = window(INDEX_BARS, day, day, now=later, timespan=Timespan.DAY)
+    assert dates.times == TimeRange(start, end)
+    assert dates.requested == TimeRange(start, end)
+    assert file_dates(INDEX_BARS, DAYS, dates) == (day,)
+    # An index's minute bars and a stock's day bars keep New York days.
+    minutes = window(INDEX_BARS, day, day, now=later, timespan=Timespan.MINUTE)
+    assert minutes.span == DaySpan(day, day)
+    assert minutes.requested == DaySpan(day, day).instants(NEW_YORK)
+    stock = window(STOCK_BARS, day, day, now=later, timespan=Timespan.DAY)
+    assert stock.times == DaySpan(day, day).instants(NEW_YORK)
+    stock_exact = window(STOCK_BARS, start, end, now=later, timespan=Timespan.DAY)
+    assert stock_exact.empty
 
 
 def test_index_minute_days_read_the_file_before_the_first_day() -> None:

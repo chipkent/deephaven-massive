@@ -19,7 +19,7 @@ import deephaven_massive.namespaces._stocks as stocks
 from deephaven_massive import _log_limits
 from deephaven_massive._datasets import row_times
 from deephaven_massive._datasets.catalog import DatasetSpec
-from deephaven_massive._datasets.dates import DAY_ZONES, NEW_YORK
+from deephaven_massive._datasets.dates import BAR_ZONES, DAY_ZONES, NEW_YORK
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import (
@@ -757,7 +757,7 @@ def test_stamp_rule() -> None:
 
 def test_every_class_with_a_day_zone_has_its_stamps() -> None:
     # The column descriptions call a class stamped when it has a day zone; so does the rule.
-    tables = (row_times._ONE_DAY_STAMPS, row_times._LONGER_STAMPS, row_times._BAR_ZONES)
+    tables = (row_times._ONE_DAY_STAMPS, row_times._LONGER_STAMPS, BAR_ZONES)
     assert all(set(table) == set(DAY_ZONES) for table in tables)
 
 

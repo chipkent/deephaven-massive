@@ -53,8 +53,9 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "\n"
             '- A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven '
             "`LocalDate`. It's the day in the market's time zone: New York for stocks, options, "
-            "and indices, and UTC for forex and crypto. For futures, it's the trading session "
-            "that ends that day.\n"
+            "and indices, and UTC for forex and crypto. For index bars of a day or longer, it's "
+            "the Chicago day, since Massive starts those bars at midnight Chicago time. For "
+            "futures, it's the trading session that ends that day.\n"
             "- An instant is a Python `datetime` with a time zone, a Deephaven `Instant`, or "
             'Deephaven time text such as `"2025-06-02T09:30 ET"`.\n'
             "- A dataset whose range is a calendar date, such as an ex-dividend date, takes "

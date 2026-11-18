@@ -15,12 +15,14 @@ from deephaven.time import to_j_instant, to_j_local_date, to_j_local_time, to_j_
 from deephaven_massive._datasets import dates as dates_module
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.dates import (
+    BAR_ZONES,
     DAY_ZONES,
     MIXED_BOUNDS,
     NEW_YORK,
     DateLike,
     DaySpan,
     TimeRange,
+    bar_zone,
     bounds,
     calendar_day,
     check_order,
@@ -118,6 +120,15 @@ def test_day_zones() -> None:
     assert DAY_ZONES[AssetClass.CRYPTO] == UTC
     # A futures date names a session, not a calendar day.
     assert set(DAY_ZONES) == set(AssetClass) - {AssetClass.FUTURES}
+
+
+def test_bar_zones() -> None:
+    # Massive starts an index bar of a day or longer at midnight in Chicago; every other class's
+    # bars cover the class's own days.
+    assert bar_zone(AssetClass.INDICES) is CHICAGO
+    assert all(bar_zone(cls) is DAY_ZONES[cls] for cls in set(DAY_ZONES) - {AssetClass.INDICES})
+    assert bar_zone(ClassFromPrefix.ANY) is NEW_YORK
+    assert set(BAR_ZONES) == set(DAY_ZONES)
 
 
 def test_whole_days_are_inclusive_in_new_york() -> None:
