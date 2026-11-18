@@ -240,7 +240,7 @@ Each symbol is Massive's ticker, spelled exactly:
 
 The first day or moment of the range. Give `start` and `end` as two dates or two instants.
 
-- A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It's the day in the market's time zone: New York for stocks, options, and indices, and UTC for forex and crypto. For futures, it's the trading session that ends that day.
+- A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It's the day in the market's time zone: New York for stocks, options, and indices, and UTC for forex and crypto. For index bars of a day or longer, it's the Chicago day, since Massive starts those bars at midnight Chicago time. For futures, it's the trading session that ends that day.
 - An instant is a Python `datetime` with a time zone, a Deephaven `Instant`, or Deephaven time text such as `"2025-06-02T09:30 ET"`.
 - A dataset whose range is a calendar date, such as an ex-dividend date, takes dates only.
 
