@@ -101,6 +101,9 @@ ANSWER_401 = answered(401, "Unknown API Key")
 NO_GOOD = "No cycle has succeeded since the poll started at 2027-01-15T08:00:00Z."
 """The suffix of a failing cycle's text before any good one."""
 
+FAILED_AFTER_GOOD = "A cycle failed after the last good one at 2027-01-15T08:00:00Z: "
+"""The start of a failed cycle's `Detail` after the first, good cycle at the fake clock's start."""
+
 FAILED = ProblemCause.POLL_CYCLE_FAILED
 LATE = ProblemCause.POLL_CYCLE_LATE
 UNAVAILABLE = ProblemCause.UNAVAILABLE_SYMBOLS
@@ -777,7 +780,10 @@ def test_other_errors_keep_the_rows_and_are_a_gap_until_the_next_good_cycle(
         "2027-01-15T08:01:00Z",
         None,
     )
-    assert gap["Detail"] == f"{GOOD} Then a cycle failed: {ANSWER_503}"
+    assert gap["Detail"] == (
+        "A cycle failed after the last good one at 2027-01-15T08:00:00Z: Massive answered GET "
+        '/stocks/v1/dividends on api.massive.com with HTTP 503: "Service Unavailable".'
+    )
     assert pairs(table, dh_to_pylist) == [("AAPL", 1.0)]
     # An expected failure: one WARNING for the run.
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
@@ -809,7 +815,7 @@ def test_other_errors_keep_the_rows_and_are_a_gap_until_the_next_good_cycle(
     assert (utc(gap["SpanStart"]), gap["EndedAt"], gap["Detail"]) == (
         "2027-01-15T08:01:00Z",
         None,
-        f"{GOOD} Then a cycle failed: a defect",
+        f"{FAILED_AFTER_GOOD}a defect",
     )
     assert stream_rows()[0]["Error"] is None
     caplog.clear()
@@ -876,10 +882,10 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
         (row,) = stream_rows()
         assert (row["State"], row["Error"]) == ("RUNNING", None)
         (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
-        assert (gap["Detail"], gap["EndedAt"]) == (f"{GOOD} Then a cycle failed: {error}", None)
+        assert (gap["Detail"], gap["EndedAt"]) == (f"{FAILED_AFTER_GOOD}{error}", None)
     script.rows()  # a good cycle with no new row: quiet data, which ends the run of failures
     next_cycle(clock)
-    good_again = "The last good cycle ran at 2027-01-15T08:06:00Z."
+    good_again = "A cycle failed after the last good one at 2027-01-15T08:06:00Z: "
     for _ in range(5):  # failures at 420 to 660 s: under 300 s since the run's first
         script.fail(error)
         next_cycle(clock)
@@ -888,7 +894,7 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     assert first["EndedAt"] is not None
     assert (utc(second["SpanStart"]), second["Detail"], second["EndedAt"]) == (
         "2027-01-15T08:07:00Z",
-        f"{good_again} Then a cycle failed: {error}",
+        f"{good_again}{error}",
         None,
     )
     script.fail(error)  # 300 s after the run's first failure: max_outage
@@ -936,7 +942,7 @@ def test_one_failure_long_after_the_last_good_cycle_keeps_the_table(
     (row,) = stream_rows()
     assert (row["State"], row["Error"]) == ("RUNNING", None)
     (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
-    assert (gap["Detail"], gap["EndedAt"]) == (f"{GOOD} Then a cycle failed: {error}", None)
+    assert (gap["Detail"], gap["EndedAt"]) == (f"{FAILED_AFTER_GOOD}{error}", None)
     script.rows(("AAPL", 2.0))
     next_cycle(clock, interval)
     (row,) = stream_rows()
@@ -2660,7 +2666,10 @@ def test_a_failure_while_publishing_keeps_the_poller(
     (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
     assert (utc(gap["SpanStart"]), gap["Detail"], gap["EndedAt"]) == (
         "2027-01-15T08:00:00Z",
-        f"{NO_GOOD} Then a cycle failed: publish failed",
+        (
+            "A cycle failed, and none has succeeded since the poll started at "
+            "2027-01-15T08:00:00Z: publish failed"
+        ),
         None,
     )
     script.rows(("AAPL", 2.0))
@@ -2688,7 +2697,7 @@ def test_a_failed_publish_still_evicts_the_keys_it_dropped(
     next_cycle(clock)
     assert stream_rows()[0]["Error"] is None
     (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
-    detail = f"{GOOD} Then a cycle failed: conversion failed"
+    detail = f"{FAILED_AFTER_GOOD}conversion failed"
     assert (gap["Detail"], gap["EndedAt"]) == (detail, None)
     assert pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)]
     script.rows(("AAPL", 4.0))  # the next cycle still tombstones MSFT
@@ -2852,7 +2861,7 @@ def test_a_failed_append_remembers_nothing(
     assert feed_session._core.diagnostics.wait_until_shown(30.0)
     assert dh_to_pylist(feed_session.streams())[0]["Error"] is None
     (gap,) = problems_of(feed_session, dh_to_pylist, FAILED)
-    detail = f"{GOOD} Then a cycle failed: conversion failed"
+    detail = f"{FAILED_AFTER_GOOD}conversion failed"
     assert (gap["Detail"], gap["EndedAt"]) == (detail, None)
     assert ids(table, dh_to_pylist) == [("a", 1.0)]
     next_cycle(clock)  # so the next cycle appends b, and still skips a

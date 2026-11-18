@@ -1251,13 +1251,25 @@ class Poller:
             )
         self._failing = run
         spans = self._failures.update(
-            {"failed": (None, None, f"{self._good_text()} Then a cycle failed: {error}", 0)},
+            {"failed": (None, None, f"{self._failed_after()}: {error}", 0)},
             at=int(self._clock.time() * 1e9),
             since=int(self._gap_from * 1e9),
         )
         if spans is not None:
             core.problems([spans])
         return True
+
+    def _failed_after(self) -> str:
+        """Name a failed cycle after the last good one, or after the poll's start before one.
+
+        Returns:
+            The start of a `poll_cycle_failed` span's `Detail`, such as
+            `"A cycle failed after the last good one at 2026-10-30T14:03:05Z"`.
+        """
+        at = utc_text(self._good_at)
+        if self._succeeded:
+            return f"A cycle failed after the last good one at {at}"
+        return f"A cycle failed, and none has succeeded since the poll started at {at}"
 
     def _good_text(self) -> str:
         """Name the last good cycle's time, or the poll's start before one, as a sentence.
