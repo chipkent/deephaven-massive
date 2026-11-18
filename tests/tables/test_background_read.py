@@ -231,7 +231,7 @@ def test_a_failed_download_fails_the_table_and_its_row(
     (record,) = caplog.records
     assert record.levelno == logging.WARNING  # an expected failure: stale data, not a defect
     assert re.fullmatch(
-        r"test\.trades background read stream 1 failed after \d+\.\d{3} s\. "
+        r"test\.trades background read stream 1 failed after \d+\.\d{3} s: "
         + re.escape(ANSWER_500),
         record.getMessage(),
     )

@@ -1491,6 +1491,7 @@ class Poller:
             name,
             stream_id,
             expected=logging.DEBUG,
+            named=f"{name} poll()",
         )
         core.warnings.log(
             f"poll refused\0{name}\0{type(error).__name__}\0{error.status}",

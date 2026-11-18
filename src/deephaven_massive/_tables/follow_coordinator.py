@@ -1514,6 +1514,7 @@ class FollowCoordinator:
             "%s call %d: the read failed, and so did its table: %s",
             result.read.dataset,
             result.read.call,
+            named=result.read.dataset,
         )
         result.read.fail_table(error)
 

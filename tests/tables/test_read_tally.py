@@ -102,9 +102,11 @@ def test_judge_fails_only_the_symbols_a_wholly_withheld_read_gave_rows(
         "window from GET /v3/trades/AAPL whole, so it withheld them all. First. m.problems() "
         "counts the withheld rows by cause and symbol."
     )
-    assert (
-        f"stocks.trades by symbol: the read fails each symbol it gave rows. {failed.error}"
-        in caplog.messages
+    assert caplog.messages[-1] == (
+        "stocks.trades by symbol fails each symbol the read gave rows: the library could read "
+        "none of the 1 rows of the read's symbols and window from GET /v3/trades/AAPL whole, "
+        "so it withheld them all. First. m.problems() counts the withheld rows by cause and "
+        "symbol."
     )
     assert judged["MSFT"] is outcomes["MSFT"]
     assert judged["IBM"] is outcomes["IBM"]

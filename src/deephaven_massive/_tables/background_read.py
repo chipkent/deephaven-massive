@@ -343,10 +343,11 @@ class BackgroundRead:
         log_failure(
             logger,
             error,
-            "%s background read stream %d failed after %.3f s. %s",
+            "%s background read stream %d failed after %.3f s: %s",
             self._name,
             self._call,
             self._took,
+            named=self._name,
         )
         self._fail_once(core, error)
 

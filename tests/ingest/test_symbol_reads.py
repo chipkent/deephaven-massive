@@ -258,13 +258,12 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
         )
     ]
     # The shared failure is logged once, at DEBUG: it is expected, and the caller reports it.
-    failed = [r for r in caplog.records if "fails this symbol alone" in r.getMessage()]
+    failed = [r for r in caplog.records if "failed alone" in r.getMessage()]
     assert [r.levelno for r in failed] == [logging.DEBUG, logging.DEBUG]
     assert failed[0].getMessage() == (
-        "call 7 stocks.dividends TSLA: the read from REST failed, which fails this symbol alone. "
-        "stocks.dividends: Massive refused this read for the Stocks subscription. Massive "
-        "answered GET /stocks/v1/dividends?limit=5000&ticker.any_of=NVDA%2CTSLA on 127.0.0.1 "
-        'with HTTP 403: "upgrade".'
+        "call 7 stocks.dividends TSLA failed alone, in its read from REST: Massive refused this "
+        "read for the Stocks subscription. Massive answered GET /stocks/v1/dividends?limit=5000&"
+        'ticker.any_of=NVDA%2CTSLA on 127.0.0.1 with HTTP 403: "upgrade".'
     )
 
 

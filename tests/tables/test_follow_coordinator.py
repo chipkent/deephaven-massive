@@ -1501,8 +1501,10 @@ def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
 
 def test_two_bad_rows_fail_the_table_once(
     watchlist: Callable[..., InputTable],
+    *,
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     config = dataclasses.replace(
         massive_session._core.config, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
@@ -1511,9 +1513,25 @@ def test_two_bad_rows_fail_the_table_once(
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, Script(massive_session))
     wait_state(massive_session, "AAPL", SymbolReadState.DONE)
-    add(wl, "msft", "nvda")  # two refusals in one update: the second finds the table failed
-    until(lambda: bool(result.j_table.isFailed()))
-    wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        add(wl, "msft", "nvda")  # two refusals in one update: the second finds the table failed
+        until(lambda: bool(result.j_table.isFailed()))
+        wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
+    # The record names the dataset once, though the failure's text starts with it too.
+    [record] = caplog.records
+    assert re.fullmatch(
+        r"test\.trades call \d+: the read failed, and so did its table: "
+        + re.escape(
+            "A symbol table holds 'msft'. 'msft' is not a Massive stock ticker, because "
+            "Massive's tickers are case-sensitive. If you mean 'MSFT', pass 'MSFT'. Fix the "
+            "row, or convert the table with dm.canonicalize_symbols(table, "
+            "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), naming the "
+            "convention your tickers come from. If Massive itself writes 'msft', report it at "
+            "https://github.com/chipkent/deephaven-massive/issues, since the library does not "
+            "know that form yet."
+        ),
+        record.getMessage(),
+    )
 
 
 def test_a_read_stopped_by_a_release_leaves_its_symbol_stopped(

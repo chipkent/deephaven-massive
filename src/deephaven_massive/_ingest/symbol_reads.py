@@ -675,12 +675,13 @@ def symbol_outcomes(
         log_failure(
             logger,
             error,
-            "call %d %s %s: the read from %s failed, which fails this symbol alone. %s",
+            "call %d %s %s failed alone, in its read from %s: %s",
             call,
             spec.name,
             symbol,
             source,
             expected=logging.DEBUG,
+            named=spec.name,
         )
     return outcomes
 
