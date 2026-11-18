@@ -295,7 +295,7 @@ def test_an_outage_fails_its_tickers_streams_past_max_outage_from_the_oldest_hel
         "The rows of ESZ6 have waited 301 s for their trading session, longer than "
         "max_outage=300 s, so this table stopped. They wait because looking up its product "
         "failed: Massive answered GET /futures/v1/contracts on api.massive.com with HTTP 503: "
-        '"Service Unavailable". Call the method again for a new live table.'
+        '"Service Unavailable".'
     )
     assert held.holding() == ()
 

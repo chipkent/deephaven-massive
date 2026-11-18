@@ -1170,15 +1170,27 @@ def test_a_stale_futures_ticker_s_span_ends_only_when_its_held_row_publishes(
 
 
 def test_a_refused_lookup_fails_only_the_streams_that_receive_the_ticker(
-    futures_flush: FuturesFlush,
+    futures_flush: FuturesFlush, caplog: pytest.LogCaptureFixture
 ) -> None:
     flush = futures_flush
-    refusal = dm.EntitlementError("HTTP 403", status=403)
+    refusal = dm.EntitlementError(
+        'Massive answered GET /futures/v1/contracts on api.massive.com with HTTP 403: "not '
+        'entitled".',
+        status=403,
+    )
     flush.calendar.set("NQM5", LookupState(Readiness.REFUSED, "refused", error=refusal))
     flush.calendar.set("ESM5", LookupState(Readiness.READY, loaded_at=0.0))
-    flush.send("NQM5", "ESM5")
+    with caplog.at_level(logging.WARNING):
+        flush.send("NQM5", "ESM5")
     assert [sink.failed for sink in flush.sinks] == [True, False]
     assert flush.published()[2] == 1
+    assert caplog.messages == [
+        (
+            "futures.trades stream 1 failed: Looking up the trading session of NQM5 failed. "
+            'Massive answered GET /futures/v1/contracts on api.massive.com with HTTP 403: "not '
+            'entitled". Call m.futures.trades again for a new live table.'
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2661,8 +2673,10 @@ def test_rows_past_the_memory_limit_fail_every_stream_routed_while_they_were_dro
     flusher.rows("T", frame([trade("AAPL")] * 2), {}, generation=1)
     assert (flusher.backlog, flusher._backlog_bytes) == (4, 2 * frame_bytes(two))
     flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # past the limit: dropped
-    during, _ = make_sink(core, ("AAPL",), plan, stream_id=2)
-    flusher.routes.add("T", during)
+    # Routed during the drops, and of another dataset: its failure names its own dataset.
+    forex = ChannelPlan.build(core.catalog, FOREX, "C")
+    during, _ = make_sink(core, ALL, forex, stream_id=2)
+    flusher.routes.add("C", during)
     flusher.rows("T", frame([trade("AAPL")]), {}, generation=1)  # dropped: still over
     assert flusher.backlog == 4
     dropping = [r.getMessage() for r in caplog.records if "drops the rows" in r.getMessage()]
@@ -2679,22 +2693,26 @@ def test_rows_past_the_memory_limit_fail_every_stream_routed_while_they_were_dro
     assert during.failed
     assert (first.rows_published, during.rows_published) == (0, 0)
     assert (flusher.backlog, flusher._backlog_bytes) == (0, 0)
-    failures = [r.getMessage() for r in caplog.records if "stream 1 failed" in r.getMessage()]
-    (failure,) = failures
+    failures = [r.getMessage() for r in caplog.records if " failed: " in r.getMessage()]
+    assert len(failures) == 2
     # The two dropped frames held a row each.
-    assert re.fullmatch(
-        re.escape(
-            "test.trades stream 1 failed: 4 rows, about 0 MB, waited to be "
-            "published, and 2 more would pass the 0 MB the library keeps for one connection. "
-            "Deephaven's update graph fell behind the stream, or stopped, as it does while a "
-            "console command runs. The rows from "
+    for failure, (dataset, stream_id) in zip(
+        failures, [("test.trades", 1), ("test.forex", 2)], strict=True
+    ):
+        assert re.fullmatch(
+            re.escape(
+                f"{dataset} stream {stream_id} failed: 4 rows, about 0 MB, waited to be "
+                "published, and 2 more would pass the 0 MB the library keeps for one connection. "
+                "Deephaven's update graph fell behind the stream, or stopped, as it does while a "
+                "console command runs. The rows from "
+            )
+            + r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"
+            + re.escape(
+                f" on are missing, so this table stopped. Call m.{dataset} again for a new live "
+                "table."
+            ),
+            failure,
         )
-        + r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"
-        + re.escape(
-            " on are missing, so this table stopped. Call the method again for a new live table."
-        ),
-        failure,
-    )
     after, shown = make_sink(core, ("AAPL",), plan, stream_id=3)
     kept = blink_to_append_only(shown)  # before the flush, so no cycle's rows pass it by
     flusher.routes.add("T", after)

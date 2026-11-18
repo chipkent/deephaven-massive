@@ -146,6 +146,7 @@ from deephaven_massive._errors import (
     failure_text,
     is_bug_of,
     library_bug,
+    new_live_table,
     required,
     session_closed,
     source_of,
@@ -1006,7 +1007,7 @@ class Poller:
             f"{self._spec.name} poll(): the cycle running since {utc_text(began_at)} has "
             f"received nothing for {stalled:.0f} s, longer than max_outage="
             f"{self._max_outage:g} s, so this table stopped and the rows since then may be "
-            f"missing. {good} Call the method again for a new live table.",
+            f"missing. {good} {new_live_table(self._spec.name)}",
             source=ErrorSource.NETWORK,
         )
         logger.debug(
@@ -1292,7 +1293,7 @@ class Poller:
             f"{self._spec.name} poll(): every cycle since {utc_text(self._failing_at)} has "
             f"failed for {down:.0f} s, reaching max_outage={self._max_outage:g} s, so this table "
             f"stopped and the rows since then may be missing. The latest error: "
-            f"{str(error).removesuffix('.')}. Call the method again for a new live table.",
+            f"{str(error).removesuffix('.')}. {new_live_table(self._spec.name)}",
             source=source_of(error),
             is_retryable=isinstance(error, MassiveError) and error.is_retryable,
             is_bug=is_bug_of(error),

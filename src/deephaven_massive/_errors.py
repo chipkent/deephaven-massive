@@ -104,6 +104,7 @@ __all__ = [
     "from_wire",
     "is_bug_of",
     "library_bug",
+    "new_live_table",
     "raises_through",
     "required",
     "required_instance",
@@ -683,6 +684,18 @@ def user_defect(problem: str, fix: str) -> str:
         `"<problem>. <fix>."`.
     """
     return f"{_sentence(problem)} {_sentence(fix)}"
+
+
+def new_live_table(dataset: str) -> str:
+    """Return the sentence that ends the error of a failed live table: the call that makes it again.
+
+    Args:
+        dataset: The table's dataset, such as `"stocks.trades"`.
+
+    Returns:
+        `"Call m.stocks.trades again for a new live table."`.
+    """
+    return f"Call m.{dataset} again for a new live table."
 
 
 def session_closed() -> str:

@@ -101,6 +101,7 @@ from deephaven_massive._errors import (
     copy_error,
     failure_text,
     library_bug,
+    new_live_table,
     required,
     session_closed,
     unmatched_form,
@@ -1175,7 +1176,7 @@ class WsConnections:
             f"{state.dataset} stream {stream_id}: Massive's crypto ticker list could not be read "
             f"for {now - since:.0f} s, longer than max_outage={self._max_outage:g} s, so this "
             f"table stopped, since it cannot stream {waiting}. The last read failed: "
-            f"{str(failure).removesuffix('.')}. Call the method again for a new live table.",
+            f"{str(failure).removesuffix('.')}. {new_live_table(state.dataset)}",
         )
 
     def _schedule(self, stream_id: int, delay: float, method: str, *args: object) -> None:

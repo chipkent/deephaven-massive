@@ -1435,7 +1435,7 @@ def _outage_failure(since: str, limit: str) -> str:
     return (
         f"The WebSocket connection to socket.test/stocks has been down since {since}, longer "
         f"than max_outage={limit} s, so this table stopped and the rows from then on are "
-        "missing. Call the method again for a new live table."
+        "missing. Call m.test.trades again for a new live table."
     )
 
 
@@ -1558,8 +1558,7 @@ def test_an_outage_past_max_outage_fails_every_stream_and_its_derived_tables(
     assert [r["State"] for r in rows] == ["FAILED", "FAILED"]
     since = _since(rows[0]["Error"])
     assert [r["Error"] for r in rows] == [_outage_failure(since, "300")] * 2
-    failure = connection._episodes.failure
-    assert failure is not None
+    failure = connection._episodes.failures["test.trades"]
     assert (failure.source, failure.is_retryable) == (dm.ErrorSource.NETWORK, True)
     # An expected failure: one WARNING for both streams, never an ERROR.
     failures = [r for r in caplog.records if "longer than max_outage=" in r.message]

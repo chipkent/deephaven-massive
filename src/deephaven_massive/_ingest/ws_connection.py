@@ -77,6 +77,7 @@ from deephaven_massive._errors import (
     MassiveError,
     SessionClosedError,
     from_wire,
+    new_live_table,
     required,
     required_instance,
     wire_source,
@@ -419,8 +420,9 @@ class _Episodes:
             or None.
         last_frame_at: When the last frame of any kind arrived or the socket opened
             (nanoseconds since the epoch); data has the connection's own `_last_message_at`.
-        failure: The error the outage fails its streams with, made at its first failure, so
-            the outage logs it once however many streams it fails; None until then.
+        failures: The error the outage fails each dataset's streams with, made at its first
+            failure of the dataset, so the outage logs it once per dataset however many of its
+            streams it fails; each names its dataset's call.
         expired: The streams an outage has failed, which no later outage holds down again.
     """
 
@@ -431,7 +433,7 @@ class _Episodes:
     data_since_open: bool = False
     down_note: str | None = None
     last_frame_at: int = 0
-    failure: MassiveError | None = None
+    failures: dict[str, MassiveError] = field(default_factory=dict)
     expired: set[int] = field(default_factory=set)
 
 
@@ -1477,16 +1479,16 @@ class Connection:
         episodes.gap_since.pop(stream_id, None)
         episodes.expired.add(stream_id)
         logger.debug("%s: stream %d stayed down for max_outage; failing it", self.url, stream_id)
-        if episodes.failure is None:
+        dataset = self._streams[stream_id].plan.dataset
+        if dataset not in episodes.failures:
             since = utc_text(required(episodes.down_since, "the outage's start"))
-            episodes.failure = MassiveError(
+            episodes.failures[dataset] = MassiveError(
                 f"The WebSocket connection to {self.decision.host}{self.path} has been down "
                 f"since {since}, longer than max_outage={self._group.max_outage:g} s, so this "
-                "table stopped and the rows from then on are missing. Call the method again for "
-                "a new live table.",
+                f"table stopped and the rows from then on are missing. {new_live_table(dataset)}",
                 source=ErrorSource.NETWORK,
             )
-        self.flusher.fail([stream_id], episodes.failure)
+        self.flusher.fail([stream_id], episodes.failures[dataset])
 
     @staticmethod
     def _recovered(stream: ConnectionStream, topics: _TopicStates) -> bool:
@@ -1571,7 +1573,7 @@ class Connection:
         episodes.down_since = None
         episodes.slot_warned = False
         episodes.down_note = None
-        episodes.failure = None
+        episodes.failures.clear()
 
     def _cancel_outage_timers(self) -> None:
         """Cancel every down stream's timer: the connection has ended or handed its streams on."""

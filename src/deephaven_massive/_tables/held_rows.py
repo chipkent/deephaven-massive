@@ -619,7 +619,7 @@ class HeldRows(Generic[_K]):
         return MassiveError(
             f"The rows of {ticker} have waited {down:.0f} s for their trading session, longer "
             f"than max_outage={self._max_outage:g} s, so this table stopped. They wait because "
-            f"{state.reason.removesuffix('.')}. Call the method again for a new live table."
+            f"{state.reason.removesuffix('.')}."
         )
 
     def _delayed(self, held: dict[str, _Waiting], now: float) -> dict[str, Delayed]:

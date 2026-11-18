@@ -898,7 +898,8 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     failure = (
         "stocks.dividends poll(): every cycle since 2027-01-15T08:07:00Z has failed for 300 s, "
         "reaching max_outage=300 s, so this table stopped and the rows since then may be "
-        f"missing. The latest error: {ANSWER_503} Call the method again for a new live table."
+        f"missing. The latest error: {ANSWER_503} Call m.stocks.dividends again for a new live "
+        "table."
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
     # Massive's outage may be over by the next call, as the latest error says.
@@ -1083,8 +1084,8 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
     failure = (
         "stocks.dividends poll(): the cycle running since 2027-01-15T08:01:00Z has received "
         "nothing for 301 s, longer than max_outage=300 s, so this table stopped and the rows "
-        "since then may be missing. The last good cycle ran at 2027-01-15T08:00:00Z. Call the "
-        "method again for a new live table."
+        "since then may be missing. The last good cycle ran at 2027-01-15T08:00:00Z. Call "
+        "m.stocks.dividends again for a new live table."
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
     # No page came: the network's, and data may flow again.
@@ -1246,14 +1247,15 @@ def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
     failure = (
         "stocks.dividends poll(): every cycle since 2027-01-15T08:00:00Z has failed for 0 s, "
         "reaching max_outage=0 s, so this table stopped and the rows since then may be "
-        "missing. The latest error: a defect. Call the method again for a new live table. "
+        "missing. The latest error: a defect. Call m.stocks.dividends again for a new live table. "
         + LIBRARY_BUG
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
     assert (
         "stocks.dividends poll() stream 1 failed: every cycle since 2027-01-15T08:00:00Z has "
         "failed for 0 s, reaching max_outage=0 s, so this table stopped and the rows since then "
-        "may be missing. The latest error: a defect. Call the method again for a new live table. "
+        "may be missing. The latest error: a defect. Call m.stocks.dividends again for a new "
+        "live table. "
         f"{LIBRARY_BUG}"
     ) in caplog.messages
     # As the message says, calling the method again gives a new live table.

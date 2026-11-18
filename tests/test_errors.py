@@ -34,6 +34,7 @@ from deephaven_massive._errors import (
     from_wire,
     is_bug_of,
     library_bug,
+    new_live_table,
     raises_through,
     required,
     required_instance,
@@ -363,6 +364,15 @@ def test_a_user_defect_message_names_the_fix_and_asks_for_no_report() -> None:
     )
     assert user_defect(f"{problem}.", "Fix that table, then call stocks.quotes again.") == text
     assert LIBRARY_BUG not in text
+    # A problem that already ends a sentence, as a question does, gets no period added.
+    assert user_defect("Is the table released?", "Pass a live table") == (
+        "Is the table released? Pass a live table."
+    )
+    assert user_defect("It failed!", "Pass a live table") == "It failed! Pass a live table."
+
+
+def test_a_failed_live_table_s_message_names_the_call_that_makes_a_new_one() -> None:
+    assert new_live_table("stocks.trades") == "Call m.stocks.trades again for a new live table."
 
 
 def test_required_returns_a_value_and_names_a_missing_one_a_library_defect() -> None:

@@ -117,7 +117,9 @@ from deephaven_massive._errors import (
     MassiveError,
     RowDataError,
     SessionClosedError,
+    copy_error,
     library_bug,
+    new_live_table,
     required,
 )
 from deephaven_massive._log_limits import log_failure, mark_failure_logged
@@ -1622,7 +1624,7 @@ class Flusher:
                 f"{HELD_BYTES_LIMIT // 2**20} MB the library keeps for one connection. "
                 "Deephaven's update graph fell behind the stream, or stopped, as it does while "
                 f"a console command runs. The rows from {missing} on are missing, so this table "
-                "stopped. Call the method again for a new live table.",
+                f"stopped. {new_live_table(dataset)}",
                 source=ErrorSource.USER,
                 is_retryable=True,
             )
@@ -1846,7 +1848,7 @@ class Flusher:
         """
         if settled.overflow:
             failure = MassiveError(
-                f"{plan.dataset}: {settled.overflow} Call the method again for a new live table."
+                f"{plan.dataset}: {settled.overflow} {new_live_table(plan.dataset)}"
             )
             held.drop(plan, why=str(failure))
             self._waits.pop(plan, None)
@@ -1854,9 +1856,15 @@ class Flusher:
             return []
         waits = self._open_waits(plan, settled, held.waiting(plan))
         kept: list[StreamSink] = []
+        # One copy per ticker, shared by its streams, so its failure is logged once.
+        again = new_live_table(plan.dataset)
+        failed = {
+            ticker: copy_error(error, f"{str(error).removesuffix('.')}. {again}")
+            for ticker, error in settled.failed.items()
+        }
         for sink in readers:
             refused = next(
-                (e for t, e in settled.failed.items() if sink.receives_all or sink.holds(t)),
+                (e for t, e in failed.items() if sink.receives_all or sink.holds(t)),
                 None,
             )
             if refused is not None:

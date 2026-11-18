@@ -2434,7 +2434,7 @@ def test_an_unread_pair_list_fails_the_stream_after_max_outage(
         r"longer than max_outage=0\.1 s, so this table stopped, since it cannot stream "
         r"X:DOTUSD\. The last read failed: Massive answered GET "
         r"/v3/reference/tickers\?market=crypto&active=true&limit=1000 on api\.massive\.com with "
-        r'HTTP 503: "Service Unavailable"\. Call the method again for a new live table\.',
+        r'HTTP 503: "Service Unavailable"\. Call m\.test\.crypto again for a new live table\.',
         row["Error"],
     )
     assert len(lookups(ws_session)) > 2  # read again on the backoff until then
@@ -2562,7 +2562,7 @@ def test_waiting_pairs_fail_their_stream_at_max_outage_even_while_a_lookup_waits
         r"longer than max_outage=300 s, so this table stopped, since it cannot stream X:DOTUSD\. "
         r"The last read failed: Massive answered GET "
         r"/v3/reference/tickers\?market=crypto&active=true&limit=1000 on api\.massive\.com with "
-        r'HTTP 503: "Service Unavailable"\. Call the method again for a new live table\.',
+        r'HTTP 503: "Service Unavailable"\. Call m\.test\.crypto again for a new live table\.',
         row["Error"],
     )
 
