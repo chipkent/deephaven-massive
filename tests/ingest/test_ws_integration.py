@@ -386,7 +386,7 @@ def test_a_newer_connection_with_one_key_takes_the_older_ones_place(
         errors = [str(r["Error"]) for r in newly_failed(streams)]
         assert errors, "Massive did not close the older connection"
         assert errors[0].startswith(
-            "another connection with this API key took the WebSocket connection to "
+            "Another connection with this API key took the WebSocket connection to "
             "socket.massive.com/crypto at "
         ), errors[0]
         # The table's failure and the connection's CLOSED row land on other threads, so each
