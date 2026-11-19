@@ -29,7 +29,7 @@ from deephaven.update_graph import exclusive_lock, shared_lock
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
-from deephaven_massive._errors import NEW_SESSION, AuthenticationError, MassiveError
+from deephaven_massive._errors import AuthenticationError, MassiveError, session_closed
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator, followed_read
 from deephaven_massive._tables.execution_context import entered
@@ -410,7 +410,12 @@ def test_a_rejected_key_fails_the_table(
     cycles_ended: Callable[[], None],
 ) -> None:
     script = Script(massive_session)
-    script.answers["AAPL"] = AuthenticationError("HTTP 401: the key is wrong")
+    # Massive's answer to the read of AAPL, as the REST client words it.
+    rejected = (
+        "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 401 (request_id r1): "
+        '"Unknown API Key".'
+    )
+    script.answers["AAPL"] = AuthenticationError(rejected, status=401, request_id="r1")
     gate = script.gates["AAPL"] = threading.Event()
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, script)
@@ -420,7 +425,7 @@ def test_a_rejected_key_fails_the_table(
     cycles_ended()
     assert heard() == 1
     (row,) = stream_rows()
-    assert (row["State"], row["Error"]) == ("FAILED", "HTTP 401: the key is wrong")
+    assert (row["State"], row["Error"]) == ("FAILED", rejected)
 
 
 def test_a_symbol_table_that_fails_fails_the_result_once(
@@ -441,7 +446,7 @@ def test_a_symbol_table_that_fails_fails_the_result_once(
     until(lambda: stream_rows()[0]["State"] == "FAILED")
     cycles_ended()
     assert heard() == 1
-    assert "failed upstream" in stream_rows()[0]["Error"]
+    assert "has failed, so the library can no longer read it" in stream_rows()[0]["Error"]
 
 
 def test_a_bad_row_added_under_raise_fails_the_table(
@@ -461,7 +466,7 @@ def test_a_bad_row_added_under_raise_fails_the_table(
     add(wl, "msft")
     until(lambda: bool(result.j_table.isFailed()))
     until(lambda: stream_rows()[0]["State"] == "FAILED")
-    assert "a symbol table holds 'msft'" in stream_rows()[0]["Error"]
+    assert "A symbol table holds 'msft'." in stream_rows()[0]["Error"]
 
 
 def test_a_row_that_is_not_a_ticker_is_skipped_and_listed(
@@ -536,8 +541,11 @@ def test_a_defect_of_a_read_fails_the_table_naming_it(
     until(lambda: bool(result.j_table.isFailed()))
     until(lambda: stream_rows()[0]["State"] == "FAILED")
     error = stream_rows()[0]["Error"]
-    assert "ZeroDivisionError: oops" in error
-    assert "This is a bug in deephaven-massive" in error
+    assert error == (
+        "test.trades: the read of AAPL failed: ZeroDivisionError('oops'). This is a bug in "
+        "deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and report it with "
+        "the log and m.streams() at https://github.com/chipkent/deephaven-massive/issues."
+    )
 
 
 # --- Lifetime ---------------------------------------------------------------------------------
@@ -707,7 +715,7 @@ def test_a_closed_session_refuses_to_follow(
     watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession
 ) -> None:
     massive_session.close()
-    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
+    with pytest.raises(MassiveError, match="^" + re.escape(session_closed()) + "$"):
         follow(massive_session, watchlist("AAPL"), Script(massive_session))
 
 
@@ -727,7 +735,7 @@ def test_a_close_racing_the_registration_releases_the_result(
         return record
 
     monkeypatch.setattr(ResultRegistry, "track", track_then_close)
-    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
+    with pytest.raises(MassiveError, match="^" + re.escape(session_closed()) + "$"):
         follow(massive_session, watchlist("AAPL"), Script(massive_session))
     assert core.follows.thread is None
 

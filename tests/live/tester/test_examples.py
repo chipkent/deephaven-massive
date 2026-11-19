@@ -29,6 +29,7 @@ from deephaven_massive import _debug_log, _massive
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets import history_source
 from deephaven_massive._ingest import ws_connection
+from deephaven_massive._ingest.recency_labels import delayed_refusal
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 from tests._fakes.ws import status_frame
 from tests._live.live_run.secret_scrub import SecretFilter
@@ -282,7 +283,7 @@ def test_every_example_runs_against_the_fake_market(
     assert printed["11_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
     assert "0 copies of the key" in printed["12_check_the_log"]
     assert re.search(r"<MassiveSession #\d+ closed>", printed["25_finish"])
-    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["25_finish"])
+    assert re.search(r"MassiveError: This session is closed\.", printed["25_finish"])
     assert (out / "tables" / "03_daily_bars" / "daily.csv").exists()
     assert (out / "tables" / "20_watchlist_poll" / "watched_bars.csv").exists()
     assert (out / "tables" / "20_watchlist_poll" / "watched_contracts.csv").exists()
@@ -485,7 +486,11 @@ def test_fitted_runs_a_copy_only_when_the_example_names_a_path_of_the_run(tmp_pa
 
 def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() -> None:
     passed = examples.Outcome("17_a.py", examples.PASSED, 1.0, "")
-    refusal = f"the WebSocket server x {examples.STREAM_REFUSAL} to AM.AAPL; Massive said: no"
+    refusal = (
+        'Massive answered the subscription to AM.AAPL on wss://socket.massive.com/stocks: "not '
+        'authorized".'
+    )
+    assert examples.STREAM_REFUSAL in refusal
     assert examples.stream_verdict(passed, []) is passed
     refused = examples.stream_verdict(passed, [refusal])
     assert (refused.status, refused.error) == (examples.REFUSED, f"a stream failed: {refusal}")
@@ -497,9 +502,35 @@ def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() ->
 
 def test_stream_verdict_tells_a_refused_read_from_an_unlisted_delay() -> None:
     passed = examples.Outcome("18_a.py", examples.PASSED, 1.0, "")
-    plan = "stocks.bars: the Stocks subscription of your plan does not include this data"
-    delayed = "AAPL would be delayed, and ... MassiveConfig.delayed_subscriptions, so ..."
-    assert examples.stream_verdict(passed, [plan]).status == examples.REFUSED
+    answer = 'Massive answered GET /v2/aggs with HTTP 403: "You are not entitled to this data".'
+    plan = f"stocks.bars: Massive refused this read for the Stocks subscription. {answer}"
+    s3 = 'Massive answered the read of s3://flatfiles/x with HTTP 403: "AccessDenied".'
+    files = [
+        f"stocks.trades: Massive refused its flat files. {s3}",
+        (
+            f"futures.trades: Massive refused the flat files of NYMEX. {s3} Leave "
+            "dm.FuturesVenue.NYMEX out of venues."
+        ),
+        (
+            "futures.trades: Massive refused the flat files of every venue the read asked for, "
+            f"CME and NYMEX. {s3}"
+        ),
+    ]
+    delayed = str(
+        delayed_refusal(
+            dm.Subscription.STOCKS,
+            "stocks.bars data",
+            "timeframe=DELAYED",
+            streams=False,
+        )
+    )
+    for refusal in [plan, *files]:
+        assert examples.stream_verdict(passed, [refusal]).status == examples.REFUSED, refusal
+    for other in [
+        f"stocks.trades history: Massive refused the flat files. {answer}",
+        "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange.",
+    ]:
+        assert examples.stream_verdict(passed, [other]).status == examples.FAILED, other
     assert examples.stream_verdict(passed, [delayed]).status == examples.NOT_LISTED
     assert examples.stream_verdict(passed, [plan, delayed]).status == examples.NOT_LISTED
     assert examples.stream_verdict(passed, [plan, "HTTP 500"]).status == examples.FAILED

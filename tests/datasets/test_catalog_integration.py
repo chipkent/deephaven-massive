@@ -132,10 +132,13 @@ _TIMEOUTS = {"history": _HISTORY_TIMEOUT, "stream": _STREAM_TIMEOUT}
 _CASE_TIMEOUTS = {("indices.values", "history"): _DAY_FILE_TIMEOUT}
 """The cases whose limit is not their verb's, and their limits."""
 
-_SOURCE_CHOICE = re.compile(r" history: AUTO read .+? \(.*\); the read leaves .* null")
+_SOURCE_CHOICE = re.compile(
+    r" history: source=dm\.HistorySource\.AUTO read .+? for .+, and that read leaves .+ null"
+)
 """The library's once-per-session notice that an `AUTO` history read chose the source that
-leaves some columns null, such as "futures.trades history: AUTO read REST (1 symbols <
-flat_file_symbol_threshold 50); the read leaves Correction, Exchange null, ..."."""
+leaves some columns null, such as "futures.trades history: source=dm.HistorySource.AUTO read
+REST for 1 symbol, fewer than flat_file_symbol_threshold=50, and that read leaves Correction and
+Exchange null, ..."."""
 
 _LIMIT = 5
 

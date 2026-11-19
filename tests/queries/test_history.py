@@ -1,6 +1,7 @@
 """Tests for `queries/_history.py`: `history()` from REST and flat files, and following a table."""
 
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
@@ -211,8 +212,8 @@ def test_history_dispatches_by_the_source_choice(
             "has no REST history)"
         ),
         (
-            "stocks.trades history: AUTO chose REST (flat files cannot serve it: stocks.trades has "
-            "no flat files)"
+            "stocks.trades history: AUTO chose REST (flat files cannot serve it, since "
+            "stocks.trades has no flat files)"
         ),
     ]
 
@@ -221,7 +222,7 @@ def test_history_with_no_possible_source_raises_before_any_transport(
     *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
 ) -> None:
     every = trades(massive_session, dm.ALL)  # no flat files, and REST needs explicit symbols
-    with pytest.raises(ValueError, match=r"stocks\.trades history has no possible source"):
+    with pytest.raises(ValueError, match=r"stocks\.trades history has no source"):
         every.history("2025-03-03", "2025-03-03", wait=True)
     with pytest.raises(ValueError, match=r"stocks\.trades cannot be read from flat files"):
         trades(massive_session).history(
@@ -247,11 +248,15 @@ def test_history_argument_errors(massive_session: dm.MassiveSession, flat: Recor
             reread="never",  # type: ignore[arg-type]  # the point: refused at run time
             wait=True,
         )
-    with pytest.raises(ValueError, match="needs a timezone: pass an aware datetime or a date"):
+    with pytest.raises(ValueError, match=r"has no timezone\. Pass an aware datetime or a date\."):
         q.history("2025-03-03T09:30", "2025-03-04", wait=True)
-    with pytest.raises(ValueError, match="must not be after end"):
+    with pytest.raises(ValueError, match="is after end="):
         q.history("2025-03-04", "2025-03-03", wait=True)
-    with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
+    with pytest.raises(
+        ValueError,
+        match=r"is a datetime\. Pass two dates for whole days, or two datetimes for exact "
+        r"instants\.$",
+    ):
         q.history("2025-03-03", datetime(2025, 3, 4, tzinfo=UTC), wait=True)
     assert flat.calls == []
 
@@ -302,14 +307,13 @@ def test_history_refuses_a_symbol_table_row_that_is_not_canonical_under_raise(
     rest: Recorder,
     flat: Recorder,
     monkeypatch: pytest.MonkeyPatch,
+    refusal: Callable[..., str],
 ) -> None:
     strict(massive_session, monkeypatch)
     q = trades(massive_session, new_table([string_col("Symbol", ["AAPL", "msft", None])]))
+    refused = f"^{re.escape(msft_refused(refusal))}$"
     for source in HistorySource:
-        with pytest.raises(
-            ValueError,
-            match=r"^stocks\.trades: a symbol table holds 'msft' .*dm\.canonicalize_symbols",
-        ):
+        with pytest.raises(ValueError, match=refused):
             q.history("2025-03-03", "2025-03-03", source=source, wait=True)
     assert rest.calls == []
     assert flat.calls == []
@@ -332,12 +336,15 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
         "SKIPPED",
         "msft",
     )
-    assert skipped["Detail"].startswith("stocks.trades: a symbol table holds 'msft'")
+    assert skipped["Detail"].startswith("stocks.trades: A symbol table holds 'msft'.")
     only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
-    with pytest.raises(
-        ValueError,
-        match=r"^m\.stocks\.trades\(\): no row of the symbol table is a ticker this dataset",
-    ):
+    nothing = (
+        "m.stocks.trades(): No row of the symbol table is a ticker this dataset takes, so the "
+        "result would follow nothing. The table holds 'msft'. Fix or delete those rows, or "
+        "report them at https://github.com/chipkent/deephaven-massive/issues if Massive itself "
+        "writes them."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(nothing)}$"):
         only_bad.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     # The call that raised still names its query on its problem.
     failed = [r for r in problem_rows() if r["StreamId"] != skipped["StreamId"]]
@@ -345,22 +352,36 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
 
 
 def test_history_rejects_a_symbol_table_without_symbols(
-    *, massive_session: dm.MassiveSession, rest: Recorder, flat: Recorder
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    flat: Recorder,
+    problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     every_row_null = (
-        r"^m\.stocks\.trades\(\): every row's Symbol is null; a table from "
-        r"dm\.canonicalize_symbols nulls the rows it cannot convert, and its log names each value$"
+        "m.stocks.trades(): Every row of the symbol table has a null Symbol. The usual cause is "
+        "dm.canonicalize_symbols, which nulls each value it cannot convert. Fix the values that "
+        "m.problems() lists for this call."
     )
-    for content, message in (
-        ([], r"^m\.stocks\.trades\(\): the symbol table holds no symbols$"),
-        ([None, None], every_row_null),
-    ):
+    no_rows = (
+        "m.stocks.trades(): The symbol table has no rows. Pass a table with at least one ticker."
+    )
+    for content, message in (([], no_rows), ([None, None], every_row_null)):
         q = trades(massive_session, new_table([string_col("Symbol", content)]))
         for source in (HistorySource.AUTO, HistorySource.REST):  # the session has no S3 keys
-            with pytest.raises(ValueError, match=message):
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
                 q.history("2025-03-03", "2025-03-03", source=source, wait=True)
     assert rest.calls == []
     assert flat.calls == []
+    # The usual cause, as the message names it: m.problems() lists each value it nulled.
+    converted = dm.canonicalize_symbols(
+        new_table([string_col("Symbol", ["no pe!", "x y"])]), dm.AssetClass.STOCKS
+    )
+    q = trades(massive_session, converted)
+    with pytest.raises(ValueError, match=f"^{re.escape(every_row_null)}$"):
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
+    listed = [r["Symbol"] for r in problem_rows() if r["Query"] == repr(q)]
+    assert sorted(listed) == ["no pe!", "x y"]
 
 
 @pytest.mark.parametrize("unreadable", list(dm.OnError))
@@ -396,7 +417,7 @@ def test_a_history_table_names_its_source(
     assert [t.attributes()["TableDescription"] for t in (ticks, forced, files)] == [
         (
             f"stocks.trades: {summary} Read from REST: AUTO chose it (flat files cannot serve "
-            "it: stocks.trades has no flat files)."
+            "it, since stocks.trades has no flat files)."
         ),
         f"stocks.trades: {summary} Read from REST: requested with source=dm.HistorySource.REST.",
         (
@@ -432,9 +453,9 @@ def test_auto_warns_once_about_columns_the_other_source_fills(
         q.history("2025-03-03", "2025-03-03", wait=True)
         q.history("2025-03-04", "2025-03-04", wait=True)  # once per session
     warning = (
-        "stocks.trades history: AUTO read flat files (60 symbols >= flat_file_symbol_threshold "
-        "50); the read leaves DecimalSize null, which the other source, REST, fills: pass "
-        "source=dm.HistorySource.REST to get them (logged once per session)"
+        "stocks.trades history: source=dm.HistorySource.AUTO read flat files for 60 symbols, at "
+        "least flat_file_symbol_threshold=50, and that read leaves DecimalSize null, which REST "
+        "fills. Pass source=dm.HistorySource.REST to fill them."
     )
     assert caplog.messages == [warning]
 
@@ -459,19 +480,21 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     assert (verb, request.start, request.end) == ("history", date(2025, 3, 4), date(2025, 3, 4))
     assert extra["window"].span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
     assert caplog.messages[-1] == (
-        "stocks.trades history: AUTO read REST because the flat files are missing for these "
-        "days: 1 [2025-03-04]"
+        "stocks.trades history: Massive has no flat files for 2025-03-04. The read took those "
+        "rows from REST instead."
     )
     # Holidays are inferred only where no other source can serve the read.
     assert files.inferred == [False]
     note = (
-        "stocks.trades: the flat file for 2025-03-04 is not published yet. Massive usually "
-        "publishes a day's flat files by about 11:00 ET the next day, but the time varies. "
+        "stocks.trades: Massive has not published the flat file for 2025-03-04 yet. Massive "
+        "usually publishes a day's flat files by about 11:00 ET the next day, but the time "
+        "varies. "
     )
     with pytest.raises(dm.MassiveError) as forced:
         many.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert str(forced.value) == note + (
-        "Retry later, or read REST with source=dm.HistorySource.REST"
+        "Call history() again later, or pass source=dm.HistorySource.REST to read the day from "
+        "REST."
     )
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
@@ -479,7 +502,8 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
         values.history("2025-03-03", "2025-03-04", wait=True)
     assert files.inferred == [False, True, True]
     assert str(unserved.value) == note.replace("stocks.trades", "indices.values") + (
-        "Retry later; REST cannot serve this read: indices.values has no REST history"
+        "REST cannot serve this read, since indices.values has no REST history. Call history() "
+        "again later."
     )
     assert len(rest.calls) == 1
 
@@ -524,7 +548,7 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     )
 
     def refused(*_: object, **__: object) -> Table:
-        raise dm.EntitlementError("the plan does not include these flat files", status=403)
+        raise dm.EntitlementError("The plan does not include these flat files.", status=403)
 
     monkeypatch.setattr(flat, "history", refused)
     q = make(s3_session, TRADES_FILES_SPEC, symbols=_symbols(60))
@@ -533,9 +557,8 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     with pytest.raises(dm.EntitlementError) as info:
         q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert str(info.value) == (
-        "the plan does not include these flat files; REST serves this read too: pass "
-        "source=dm.HistorySource.REST to history() (it can fill other columns; columns() "
-        "shows which)"
+        "The plan does not include these flat files. To read from REST instead, pass "
+        "source=dm.HistorySource.REST to history()."
     )
     assert info.value.status == 403
     assert rest.calls == []
@@ -544,8 +567,8 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
         q.history("2025-03-03", "2025-03-03", wait=True)
     assert [c[0] for c in rest.calls] == ["history"]
     assert caplog.messages[-1] == (
-        "stocks.trades history: AUTO read REST because S3 refused the flat files (the plan does "
-        "not include these flat files)"
+        "stocks.trades history: Massive refused the flat files. The plan does not include these "
+        "flat files. The read took those rows from REST instead."
     )
 
     def rejected(*_: object, **__: object) -> Table:
@@ -565,7 +588,9 @@ def test_a_refused_flat_file_read_is_read_from_rest_under_auto(
     monkeypatch.setattr(flat, "history", refused)
     values = make(s3_session, VALUES_SPEC, symbols=["I:SPX"])
     assert isinstance(values, HistoryQuery)
-    with pytest.raises(dm.EntitlementError, match=r"^the plan does not include these flat files$"):
+    with pytest.raises(
+        dm.EntitlementError, match=r"^The plan does not include these flat files\.$"
+    ):
         values.history("2025-03-03", "2025-03-03", wait=True)
 
 
@@ -767,16 +792,23 @@ def test_wait_true_warns_once_when_some_call_time_symbols_fail(
     rest: Recorder,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError("HTTP 403: not in the plan"))}
+    # Massive's answer to the read of MSFT, as the REST client words it.
+    refusal = dm.EntitlementError(
+        "Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on api.massive.com with "
+        'HTTP 403: "You are not entitled to this data".',
+        status=403,
+    )
+    rest.outcomes = {"MSFT": SymbolFailure(refusal)}
     with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
         result = trades(massive_session, live("AAPL", "MSFT")).history(
             "2025-03-03", "2025-03-03", wait=True
         )
     assert caplog.messages == [
         (
-            "stocks.trades history: 1 of the 2 symbols of the call failed and are left out of the "
-            "result for now; m.symbol_reads() shows each one (retrying, or failed): "
-            "MSFT: HTTP 403: not in the plan"
+            "stocks.trades history: 1 of the 2 symbols failed and are left out of the result "
+            "for now. MSFT: Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on "
+            'api.massive.com with HTTP 403: "You are not entitled to this data". Check '
+            "m.symbol_reads() for whether each one is retrying or has failed."
         )
     ]
     massive_session.release(result)
@@ -818,12 +850,22 @@ def test_a_followed_table_refuses_a_bad_row_or_a_failed_table_at_the_call(
     massive_session: dm.MassiveSession,
     rest: Recorder,
     monkeypatch: pytest.MonkeyPatch,
+    refusal: Callable[..., str],
 ) -> None:
     only_bad = live("msft")
-    with pytest.raises(ValueError, match="no row of the symbol table is a ticker"):
+    nothing = (
+        "m.stocks.trades(): No row of the symbol table is a ticker this dataset takes, so "
+        "the result would follow nothing. The table holds 'msft'. Fix or delete those rows, or "
+        "report them at https://github.com/chipkent/deephaven-massive/issues if Massive itself "
+        "writes them."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(nothing)}$"):
         trades(massive_session, only_bad).history("2025-03-03", "2025-03-03", wait=True)
     strict(massive_session, monkeypatch)
-    with pytest.raises(ValueError, match="a symbol table holds 'msft'"):
+    with pytest.raises(
+        ValueError,
+        match=f"^{re.escape(msft_refused(refusal))}$",
+    ):
         trades(massive_session, live("AAPL", "msft")).history("2025-03-03", "2025-03-03", wait=True)
     assert rest.by_symbol == []
 
@@ -883,6 +925,18 @@ def test_symbol_classes_raise_a_library_defect_for_a_symbols_form_with_no_rule()
         _history._symbol_classes(object())  # type: ignore[arg-type]  # the point: refused at run time
 
 
+def msft_refused(refusal: Callable[..., str]) -> str:
+    # The message of a stocks.trades symbol-table row 'msft'.
+    return (
+        f"stocks.trades: A symbol table holds 'msft'. {refusal(AssetClass.STOCKS, 'msft')} Fix "
+        "the row, or convert the table with dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, "
+        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from. If "
+        "Massive itself writes 'msft', report it at "
+        "https://github.com/chipkent/deephaven-massive/issues, since the library does not know "
+        "that form yet."
+    )
+
+
 RAISES = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
 """A call's policy that fails on a symbol-table row that is not Massive's ticker."""
 
@@ -894,6 +948,7 @@ def test_history_refuses_a_bad_row_when_the_call_raises_and_the_session_logs(
     live: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
+    refusal: Callable[..., str],
 ) -> None:
     # The `dm.ErrorPolicy` docstring's example: the session skips such a row, this call fails.
     rows = ["AAPL", "msft"]
@@ -901,7 +956,10 @@ def test_history_refuses_a_bad_row_when_the_call_raises_and_the_session_logs(
     q = massive_session.stocks.trades(
         watchlist, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
     )
-    with pytest.raises(ValueError, match=r"^stocks\.trades: a symbol table holds 'msft'"):
+    with pytest.raises(
+        ValueError,
+        match=f"^{re.escape(msft_refused(refusal))}$",
+    ):
         q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True)
     assert (rest.calls, rest.by_symbol) == ([], [])
 

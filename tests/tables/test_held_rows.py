@@ -41,6 +41,16 @@ RULE = TimeRule("futures.trades", RowTimes.TICK, AssetClass.FUTURES)
 WAITING = LookupState(Readiness.WAITING, "its product is being looked up")
 READY = LookupState(Readiness.READY)
 
+# Massive's answers to the calendar's requests, as the REST client words them.
+REFUSED_403 = (
+    "Massive answered GET /futures/v1/schedules on api.massive.com with HTTP 403 "
+    '(request_id r1): "You are not entitled to this data".'
+)
+UNAVAILABLE_503 = (
+    'Massive answered GET /futures/v1/contracts on api.massive.com with HTTP 503: "Service '
+    'Unavailable".'
+)
+
 
 class FakeCalendar:
     """A futures session calendar whose states and dates the test sets."""
@@ -247,7 +257,7 @@ def test_unlisted_rows_are_discarded_and_counted(
     held: HeldRows[str], calendar: FakeCalendar
 ) -> None:
     settle(held, batch(("GONEZ6", None, 1.0), ("GONEZ6", None, 2.0)))
-    gone = LookupState(Readiness.UNLISTED, "neither list holds it (asked over 30 min)")
+    gone = LookupState(Readiness.UNLISTED, "neither list holds it")
     calendar.found["GONEZ6"] = gone
     calendar.version += 1
     settled = settle(held, batch(("GONEZ6", None, 3.0), ("ESZ6", "2026-11-16", 4.0)))
@@ -259,12 +269,12 @@ def test_unlisted_rows_are_discarded_and_counted(
 def test_a_refused_lookup_fails_its_tickers_streams_with_massives_answer(
     held: HeldRows[str], calendar: FakeCalendar
 ) -> None:
-    refusal = EntitlementError("HTTP 403: not entitled", status=403, request_id="r1")
+    refusal = EntitlementError(REFUSED_403, status=403, request_id="r1")
     calendar.found["ESZ6"] = LookupState(Readiness.REFUSED, "refused", error=refusal)
     settled = settle(held, batch(("ESZ6", None, 1.0)))
     assert settled.rows is None
     error = settled.failed["ESZ6"]
-    assert str(error) == "looking up the trading session of ESZ6 failed: HTTP 403: not entitled"
+    assert str(error) == f"Looking up the trading session of ESZ6 failed. {REFUSED_403}"
     assert (error.status, error.request_id, error.source) == (403, "r1", ErrorSource.MASSIVE)
     assert held.holding() == ()
 
@@ -273,7 +283,7 @@ def test_an_outage_fails_its_tickers_streams_past_max_outage_from_the_oldest_hel
     held: HeldRows[str], calendar: FakeCalendar, clock: Clock
 ) -> None:
     failing = LookupState(
-        Readiness.WAITING, "looking up its product failed: HTTP 503", failing_since=0.0
+        Readiness.WAITING, f"looking up its product failed: {UNAVAILABLE_503}", failing_since=0.0
     )
     calendar.found["ESZ6"] = failing
     settle(held, batch(("ESZ6", None, 1.0)))  # failing for long, but held only now
@@ -282,8 +292,10 @@ def test_an_outage_fails_its_tickers_streams_past_max_outage_from_the_oldest_hel
     clock.now += 1.0
     settled = settle(held, None)
     assert str(settled.failed["ESZ6"]) == (
-        "the rows of ESZ6 have waited 301 s for its trading session, longer than "
-        "MassiveConfig.max_outage (300 s): looking up its product failed: HTTP 503"
+        "The rows of ESZ6 have waited 301 s for their trading session, longer than "
+        "max_outage=300 s, so this table stopped. They wait because looking up its product "
+        "failed: Massive answered GET /futures/v1/contracts on api.massive.com with HTTP 503: "
+        '"Service Unavailable".'
     )
     assert held.holding() == ()
 
@@ -326,15 +338,25 @@ def test_past_the_byte_limit_the_dataset_holding_the_most_fails(
             held.settle("quotes", batch(("ESZ6", None, 1.0)), generation=1, times=RULE).overflow
             == ""
         )
-        assert len(caplog.messages) == 1  # a tenth of the limit: the wait is named
-        assert "a tenth of the" in caplog.messages[0]
+        assert caplog.messages == [  # a tenth of the limit: the wait is named
+            (
+                "0 MB of streamed futures rows wait for their trading sessions on one connection, "
+                "a tenth of the 0 MB the library keeps for it. The usual cause is that Massive's "
+                "futures contracts and schedules are slow or out of reach. m.problems() lists the "
+                "waiting rows under undated_rows."
+            )
+        ]
         settled = held.settle(
             "trades",
             batch(("ESZ6", None, 1.0), ("ESZ6", None, 2.0), ("NQZ6", None, 3.0)),
             generation=1,
             times=RULE,
         )
-    assert settled.overflow.startswith("3 streamed futures rows (0 MB) waited for their trading")
+    assert settled.overflow == (
+        "3 streamed futures rows, about 0 MB, waited for their trading sessions, past the 0 MB "
+        "the library keeps for one connection, so this table stopped. The first waits because "
+        "its product is being looked up."
+    )
     assert held.settle("quotes", None, generation=1, times=RULE).overflow == ""
 
 
@@ -482,7 +504,7 @@ def test_new_rows_of_a_ticker_failing_past_max_outage_are_not_held(
     settle(held, batch(("ESZ6", None, 1.0)))
     clock.now += 301.0
     settled = settle(held, batch(("ESZ6", None, 2.0)))
-    assert "longer than MassiveConfig.max_outage (300 s)" in str(settled.failed["ESZ6"])
+    assert "longer than max_outage=300 s" in str(settled.failed["ESZ6"])
     assert held.rows_of("trades") == 0
 
 
@@ -541,7 +563,7 @@ def test_a_failing_reload_fails_the_rows_waiting_on_it(
     )
     calendar.version += 1
     failure = str(settle(held, None).failed["ESZ6"])
-    assert ("HTTP 403" if refused else "longer than MassiveConfig.max_outage") in failure
+    assert ("HTTP 403" if refused else "longer than max_outage=300 s") in failure
     assert held.holding() == ()
 
 

@@ -70,9 +70,9 @@ def test_the_fix_for_massive_s_unreadable_rows_names_the_setting_not_a_bug_repor
     assert fixes == {
         **{
             cause: "The library withheld the row because Massive sent it in a form the library "
-            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. To "
-            f"quiet it, set `{cause.value}` to `dm.OnError.IGNORE`; to fail the table, "
-            "`dm.OnError.RAISE`."
+            "can't read. `Detail` gives what Massive sent and why, for a report to Massive. Set "
+            f"`{cause.value}` to `dm.OnError.IGNORE` to quiet it, or to `dm.OnError.RAISE` to "
+            "fail the table."
             for cause in (
                 ProblemCause.UNREADABLE_SYMBOLS,
                 ProblemCause.UNREADABLE_KEYS,
@@ -81,8 +81,8 @@ def test_the_fix_for_massive_s_unreadable_rows_names_the_setting_not_a_bug_repor
         },
         ProblemCause.MALFORMED_ROWS: "The library skipped the line because Massive sent it in a "
         "form the library can't read. `Detail` names the file and its first such line, for a "
-        "report to Massive. To quiet it, set `malformed_rows` to `dm.OnError.IGNORE`; to fail "
-        "the read, `dm.OnError.RAISE`.",
+        "report to Massive. Set `malformed_rows` to `dm.OnError.IGNORE` to quiet it, or to "
+        "`dm.OnError.RAISE` to fail the read.",
     }
 
 
@@ -132,10 +132,13 @@ def test_drift_events_report_only_fields_the_documentation_lacks() -> None:
         (ProblemCause.SCHEMA_DRIFT, ProblemAction.PUBLISHED, "z", None, 7),
     ]
     assert found[0].detail == (
-        "Massive sent the field 'halted', which its documentation lacks; the rows are "
-        "published without it; first sent for AAPL; first value true"
+        "Massive sent the field 'halted', which its documentation lacks, so the rows are "
+        "published without it. It was first sent for AAPL. Its first value: true."
     )
-    assert found[1].detail.endswith("published without it")
+    assert found[1].detail == (
+        "Massive sent the field 'z', which its documentation lacks, so the rows are published "
+        "without it."
+    )
     missing = DriftReport(missing=frozenset({"m"}))
     assert drift_events(missing, dataset="d", stream_id=None, where="w") == ()
 

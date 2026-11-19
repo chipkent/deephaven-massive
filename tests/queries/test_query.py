@@ -162,8 +162,14 @@ def test_an_expected_failure_is_logged_once_at_debug(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Massive's answer to the read, as the REST client words it.
+    refusal = (
+        "Massive answered GET /v2/reference/news on api.massive.com with HTTP 403 (request_id "
+        'r1): "You are not entitled to this data".'
+    )
+
     def refused(*_: object, **__: object) -> Table:
-        raise dm.EntitlementError("HTTP 403 from GET /v3/x (request_id r1): not entitled")
+        raise dm.EntitlementError(refusal, status=403, request_id="r1")
 
     monkeypatch.setattr(rest, "fetch", refused)
     with (
@@ -177,7 +183,11 @@ def test_an_expected_failure_is_logged_once_at_debug(
     assert [(r.levelno, _ELAPSED.sub("<s> s", r.getMessage())) for r in failed] == [
         (
             logging.DEBUG,
-            "call 1 failed after <s> s: HTTP 403 from GET /v3/x (request_id r1): not entitled",
+            (
+                "call 1 failed after <s> s: Massive answered GET /v2/reference/news on "
+                'api.massive.com with HTTP 403 (request_id r1): "You are not entitled to this '
+                'data".'
+            ),
         )
     ]
     assert failed[0].exc_info is None  # the traceback travels with the exception instead
@@ -634,7 +644,7 @@ def test_wait_false_raises_argument_errors_at_the_call(
     every = trades(massive_session, dm.ALL)
     with pytest.raises(ValueError, match="needs explicit symbols"):
         every.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=False)
-    with pytest.raises(ValueError, match=r"history has no possible source"):
+    with pytest.raises(ValueError, match=r"history has no source"):
         every.history("2025-03-03", "2025-03-03", wait=False)
 
     def refuse(*_: object, **__: object) -> None:
@@ -688,7 +698,11 @@ def test_wait_false_on_an_empty_range_lands_no_rows_without_a_request(
     [Query, FetchQuery, StreamQuery, NoSymbolStreamQuery, HistoryQuery, StreamHistoryQuery],
 )
 def test_a_user_cannot_construct_a_query(cls: type[Query]) -> None:
-    with pytest.raises(TypeError, match=r"^a query comes from a dataset method, such as "):
+    expected = (
+        f"{cls.__name__}() cannot be called. Build a query with a dataset method, such as "
+        "m.stocks.trades('AAPL')."
+    )
+    with pytest.raises(TypeError, match=f"^{re.escape(expected)}$"):
         cls()
 
 

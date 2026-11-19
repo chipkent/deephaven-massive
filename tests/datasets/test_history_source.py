@@ -1,6 +1,7 @@
 """Tests for the `history()` source choice: partition dates, publication, REST, and AUTO."""
 
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -339,6 +340,7 @@ def test_futures_bars_by_instants_request_them_exactly() -> None:
 
 INDEX_BARS = CATALOG.by_name["indices.bars"]
 MINUTES = Request(timespan=Timespan.MINUTE, multiplier=1)
+DAYS = Request(timespan=Timespan.DAY, multiplier=1)
 
 
 def test_index_minute_files_hold_the_chicago_day() -> None:
@@ -347,9 +349,41 @@ def test_index_minute_files_hold_the_chicago_day() -> None:
     # Midnight in Chicago is 01:00 New York, in winter and in summer.
     assert files.start(date(2025, 3, 4)) == datetime(2025, 3, 4, 1, tzinfo=NEW_YORK)
     assert files.start(date(2025, 7, 1)) == datetime(2025, 7, 1, 1, tzinfo=NEW_YORK)
-    days = Request(timespan=Timespan.DAY, multiplier=1)
-    assert file_days(INDEX_BARS, days).zone is None
+    # The day file of a date holds the bar Massive stamps at that date's midnight in Chicago.
+    assert file_days(INDEX_BARS, DAYS).zone is CHICAGO
     assert file_days(STOCK_BARS, MINUTES).zone is None
+
+
+@pytest.mark.parametrize(
+    "start",
+    [datetime(2025, 6, 2, 5, tzinfo=UTC), datetime(2025, 1, 6, 6, tzinfo=UTC)],
+    ids=["daylight", "standard"],
+)
+def test_index_day_bars_plan_over_chicago_days(start: datetime) -> None:
+    # Massive stamps an index day bar at midnight in Chicago, so a range of exactly that
+    # Chicago day requests and keeps its bar, and reads its one day file.
+    end = start + timedelta(days=1)
+    day = start.astimezone(CHICAGO).date()
+    later = datetime(2025, 7, 1, tzinfo=UTC)
+    exact = window(INDEX_BARS, start, end, now=later, timespan=Timespan.DAY)
+    assert exact.times == TimeRange(start, end)
+    assert exact.requested == TimeRange(start, end)
+    assert exact.bars is not None
+    assert exact.bars.latest == end
+    assert file_dates(INDEX_BARS, DAYS, exact) == (day,)
+    # A range of that date is the same Chicago day.
+    dates = window(INDEX_BARS, day, day, now=later, timespan=Timespan.DAY)
+    assert dates.times == TimeRange(start, end)
+    assert dates.requested == TimeRange(start, end)
+    assert file_dates(INDEX_BARS, DAYS, dates) == (day,)
+    # An index's minute bars and a stock's day bars keep New York days.
+    minutes = window(INDEX_BARS, day, day, now=later, timespan=Timespan.MINUTE)
+    assert minutes.span == DaySpan(day, day)
+    assert minutes.requested == DaySpan(day, day).instants(NEW_YORK)
+    stock = window(STOCK_BARS, day, day, now=later, timespan=Timespan.DAY)
+    assert stock.times == DaySpan(day, day).instants(NEW_YORK)
+    stock_exact = window(STOCK_BARS, start, end, now=later, timespan=Timespan.DAY)
+    assert stock_exact.empty
 
 
 def test_index_minute_days_read_the_file_before_the_first_day() -> None:
@@ -495,17 +529,16 @@ def choose(
 
 def test_auto_with_neither_source_lists_every_violated_constraint() -> None:
     bars = Request(symbols=dm.ALL, timespan=Timespan.HOUR, multiplier=5, adjusted=True)
-    with pytest.raises(ValueError, match=r"stocks\.bars history has no possible source") as info:
+    with pytest.raises(ValueError, match=r"stocks\.bars history has no source") as info:
         choose(STOCK_BARS, bars, cfg=NO_S3)
     assert str(info.value) == (
-        "stocks.bars history has no possible source. Flat files: "
-        "no S3 credentials are configured (MassiveConfig s3_access_key_id and "
-        "s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY); "
-        "stocks.bars flat files hold only 1-minute, 1-day bars; "
-        "adjusted=True needs REST, since flat-file bars are unadjusted (as traded) and one "
-        "history() never mixes adjusted and unadjusted prices; pass adjusted=False for the "
-        "flat files. "
-        "REST: stocks.bars history over REST needs explicit symbols."
+        "stocks.bars history has no source. Flat files cannot serve it, since no S3 credentials "
+        "are set, stocks.bars flat files hold only 1-minute and 1-day bars, and flat-file bars "
+        "are as traded and adjusted=True asks for split-adjusted ones. REST cannot serve it, "
+        "since stocks.bars history over REST needs explicit symbols. Set s3_access_key_id and "
+        "s3_secret_access_key in "
+        "dm.MassiveConfig, or the environment variables MASSIVE_S3_ACCESS_KEY_ID and "
+        "MASSIVE_S3_SECRET_ACCESS_KEY. Pass adjusted=False."
     )
 
 
@@ -521,10 +554,10 @@ def test_auto_with_only_flat_files_possible_reads_flat_files() -> None:
 def test_auto_with_only_rest_possible_uses_rest() -> None:
     choice = decide(STOCK_TRADES, Request(symbols=many(500)), cfg=NO_S3)
     assert choice.source is HistorySource.REST
-    assert choice.reason.startswith("flat files cannot serve it: no S3 credentials")
+    assert choice.reason == "flat files cannot serve it, since no S3 credentials are set"
     assert decide(YIELDS, Request(symbols=None)) == SourceChoice(
         HistorySource.REST,
-        "flat files cannot serve it: economy.yields has no flat files",
+        "flat files cannot serve it, since economy.yields has no flat files",
         Alternative.UNAVAILABLE,
     )
 
@@ -536,7 +569,7 @@ def test_auto_with_only_rest_possible_uses_rest() -> None:
             many(49),
             SourceChoice(
                 HistorySource.REST,
-                "49 symbols < flat_file_symbol_threshold 50",
+                "49 symbols, fewer than flat_file_symbol_threshold=50",
                 Alternative.AVAILABLE,
             ),
         ),
@@ -544,7 +577,7 @@ def test_auto_with_only_rest_possible_uses_rest() -> None:
             many(50),
             SourceChoice(
                 HistorySource.FLAT_FILES,
-                "50 symbols >= flat_file_symbol_threshold 50",
+                "50 symbols, at least flat_file_symbol_threshold=50",
                 Alternative.AVAILABLE,
             ),
         ),
@@ -557,6 +590,16 @@ def test_auto_with_both_possible_switches_at_the_threshold(
     # The daily grouped endpoint makes REST possible for dm.ALL too.
     req = Request(symbols=symbols, timespan=Timespan.DAY, adjusted=False)
     assert decide(STOCK_BARS, req) == expected
+
+
+def test_one_symbol_is_counted_in_the_singular() -> None:
+    assert decide(STOCK_TRADES, Request(symbols=AAPL)).reason == (
+        "1 symbol, fewer than flat_file_symbol_threshold=50"
+    )
+    cfg = replace(CONFIG, flat_file_symbol_threshold=1)
+    assert decide(STOCK_TRADES, Request(symbols=AAPL), cfg=cfg).reason == (
+        "1 symbol, at least flat_file_symbol_threshold=1"
+    )
 
 
 def test_auto_threshold_comes_from_the_config() -> None:
@@ -573,24 +616,30 @@ def test_flat_files_forced_reads_flat_files_or_names_every_violation() -> None:
     with pytest.raises(ValueError, match="cannot be read from flat files") as info:
         choose(STOCK_TRADES, Request(symbols=AAPL), requested=forced, cfg=NO_S3)
     assert str(info.value) == (
-        "stocks.trades cannot be read from flat files: no S3 credentials are configured "
-        "(MassiveConfig s3_access_key_id and s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID "
-        "and MASSIVE_S3_SECRET_ACCESS_KEY)"
+        "stocks.trades cannot be read from flat files, since no S3 credentials are set. Set "
+        "s3_access_key_id and s3_secret_access_key in dm.MassiveConfig, or the environment "
+        "variables MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY."
     )
+    # The advice works: with the keys set in dm.MassiveConfig, flat files serve the call.
+    assert choose(STOCK_TRADES, Request(symbols=AAPL), requested=forced) is forced
 
 
 def test_adjusted_bars_of_every_symbol_say_why_no_source_serves_them() -> None:
     # Flat files hold as-traded prices and REST reads minute bars one symbol at a time.
     req = Request(symbols=dm.ALL, timespan=Timespan.MINUTE, adjusted=True)
-    with pytest.raises(ValueError, match=r"with adjusted=True has no source") as info:
+    with pytest.raises(ValueError, match=r"and adjusted=True has no source") as info:
         choose(STOCK_BARS, req)
     assert str(info.value) == (
-        "stocks.bars history of every symbol (dm.ALL) with adjusted=True has no source: only "
-        "REST serves split-adjusted bars, and REST reads bars one symbol at a time (every "
-        "symbol at once only for 1-day bars), while flat files hold as-traded prices. Pass "
-        "adjusted=False to read the as-traded flat files, or name the symbols to read adjusted "
-        "bars from REST"
+        "stocks.bars history with symbols=dm.ALL and adjusted=True has no source. Only REST "
+        "serves split-adjusted bars, and REST reads these bars one symbol at a time. Pass "
+        "adjusted=False, or name the symbols."
     )
+    # The advice works: as-traded bars of every symbol read flat files, and adjusted bars of
+    # named symbols read REST.
+    unadjusted = Request(symbols=dm.ALL, timespan=Timespan.MINUTE, adjusted=False)
+    assert choose(STOCK_BARS, unadjusted) is HistorySource.FLAT_FILES
+    named = Request(symbols=AAPL, timespan=Timespan.MINUTE, adjusted=True)
+    assert choose(STOCK_BARS, named) is HistorySource.REST
 
 
 @pytest.mark.parametrize(
@@ -598,13 +647,44 @@ def test_adjusted_bars_of_every_symbol_say_why_no_source_serves_them() -> None:
     [
         (STOCK_BARS, Timespan.MINUTE, 1, False, None),
         (STOCK_BARS, Timespan.DAY, 1, False, None),
-        (STOCK_BARS, Timespan.HOUR, 1, False, "hold only 1-minute, 1-day bars"),
-        (STOCK_BARS, Timespan.MINUTE, 5, False, "hold only 1-minute, 1-day"),
-        (STOCK_BARS, Timespan.DAY, 1, True, "pass adjusted=False"),
+        (
+            STOCK_BARS,
+            Timespan.HOUR,
+            1,
+            False,
+            (
+                "^stocks.bars cannot be read from flat files, since stocks.bars flat files hold "
+                "only "
+                "1-minute and 1-day bars.$"
+            ),
+        ),
+        (STOCK_BARS, Timespan.MINUTE, 5, False, "hold only 1-minute and 1-day bars"),
+        (
+            STOCK_BARS,
+            Timespan.DAY,
+            1,
+            True,
+            (
+                "^stocks.bars cannot be read from flat files, since flat-file bars are as traded "
+                "and "
+                "adjusted=True asks for split-adjusted ones. Pass adjusted=False.$"
+            ),
+        ),
         (INDEX_BARS, Timespan.DAY, 1, None, None),  # no adjusted parameter
         (FUTURES_BARS, Timespan.SESSION, 1, None, None),
         (FUTURES_BARS, Timespan.MINUTE, 1, None, None),
-        (FUTURES_BARS, Timespan.HOUR, 1, None, "hold only 1-minute, 1-session bars"),
+        (FUTURES_BARS, Timespan.HOUR, 1, None, "hold only 1-minute and 1-session bars"),
+        (
+            FUTURES_BARS,
+            Timespan.DAY,
+            1,
+            None,
+            (
+                "^futures.bars cannot be read from flat files, since futures.bars flat files hold "
+                "only 1-minute and 1-session bars. Pass timespan=dm.Timespan.SESSION for each "
+                "contract's daily bars.$"
+            ),
+        ),
         (
             replace(STOCK_BARS, flat_file_prefixes={}, keys={}),
             Timespan.DAY,
@@ -716,8 +796,16 @@ def test_longer_futures_bars_by_instants_are_kept_by_their_own_window() -> None:
 @pytest.mark.parametrize("key", ["session_end_date", "session_end_date_gte", "session_end_date_lt"])
 def test_a_session_end_date_filter_needs_datetimes(key: str) -> None:
     filters = ((key, date(2025, 3, 4)),)
-    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
+    message = (
+        "futures.trades: history() with dates sets session_end_date itself, so it takes no "
+        "session_end_date filter. Leave the filter out, or pass datetimes as start and end to "
+        "combine it with a time range."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         window(FUTURES_TRADES, "2025-03-04", "2025-03-04", filters=filters)
+    assert window(FUTURES_TRADES, "2025-03-04", "2025-03-04").span == DaySpan(
+        date(2025, 3, 4), date(2025, 3, 4)
+    )
     start = datetime(2025, 3, 4, 8, tzinfo=CHICAGO)
     assert window(FUTURES_TRADES, start, start + timedelta(hours=1), filters=filters).times
 
@@ -755,3 +843,24 @@ def test_an_unfilled_warning_for_a_source_auto_never_chooses_is_a_defect() -> No
     warnings = BoundedLog(logging.getLogger("tests.history_source"), limit=1, level=logging.INFO)
     with pytest.raises(BrokenGuaranteeError, match=r"^stocks\.trades history\(\) chose "):
         warn_unfilled(STOCK_TRADES, choice, catalog=CATALOG, warnings=warnings)
+
+
+def test_an_unfilled_warning_names_the_choice_the_columns_and_the_source_to_pass(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger = logging.getLogger("tests.history_source")
+    warnings = BoundedLog(logger, limit=5, level=logging.WARNING)
+    spec = CATALOG.by_name["stocks.bars"]
+    choice = SourceChoice(HistorySource.FLAT_FILES, "every symbol", Alternative.AVAILABLE)
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        warn_unfilled(spec, choice, catalog=CATALOG, warnings=warnings)
+    assert caplog.messages == [
+        (
+            "stocks.bars history: source=dm.HistorySource.AUTO read flat files for every symbol, "
+            "and that read leaves Otc and Vwap null, which REST fills. Pass "
+            "source=dm.HistorySource.REST to fill them."
+        )
+    ]
+    # The advice works: REST fills the columns the flat files leave null.
+    missing = CATALOG.history_columns(spec, Transport.FLAT_FILES)
+    assert {"Otc", "Vwap"} <= CATALOG.history_columns(spec, Transport.REST) - missing

@@ -61,7 +61,7 @@ class ConnectionSlots:
             ValueError: If `size` is less than 1.
         """
         if size < 1:
-            raise ValueError(f"a client needs at least one connection slot, not {size}")
+            raise ValueError(f"size={size!r} is not at least 1 connection slot.")
         self._size = size
         self._free = size
         self._ready = threading.Condition(threading.Lock())
@@ -100,7 +100,7 @@ class ConnectionSlots:
         """
         with self._ready:
             if self._free == self._size:
-                raise RuntimeError("a connection slot was given back that was never taken")
+                raise RuntimeError("A connection slot was given back that was never taken.")
             self._free += 1
             # Every waiter, since one woken whose `stop` is set leaves without the slot.
             self._ready.notify_all()

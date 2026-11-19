@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gc
-import itertools
 import logging
 import pkgutil
 import re
@@ -18,7 +17,7 @@ from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table, time_table
 from deephaven.column import string_col
 from deephaven.dherror import DHError
-from deephaven.execution_context import make_user_exec_ctx
+from deephaven.execution_context import get_exec_ctx, make_user_exec_ctx
 from deephaven.table_listener import listen
 from deephaven.update_graph import exclusive_lock
 
@@ -28,7 +27,7 @@ from deephaven_massive import _snapshots as snapshots
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
-from deephaven_massive._errors import NEW_SESSION
+from deephaven_massive._errors import session_closed
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._tables import session_core as _core
@@ -178,7 +177,9 @@ def test_the_first_session_applies_the_logging_variables(
     monkeypatch.setattr(_debug_log, "_switch", _debug_log._Switch())
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "verbose")
     with pytest.raises(
-        ValueError, match=r"^DEEPHAVEN_MASSIVE_LOG='verbose' is not a logging level"
+        ValueError,
+        match=r"^DEEPHAVEN_MASSIVE_LOG='verbose' is not a logging level\. Set it to DEBUG, INFO, "
+        r"WARN, WARNING, ERROR, or CRITICAL\.$",
     ):
         dm.MassiveSession(dm.MassiveConfig(api_key="k"))
 
@@ -229,7 +230,14 @@ def test_config_must_be_a_massive_config() -> None:
 
 def test_construction_under_a_frozen_query_scope_fails_fast() -> None:
     frozen = make_user_exec_ctx(freeze_vars=["dm"])
-    with frozen, pytest.raises(dm.MassiveError, match="frozen copy") as misuse:
+    refusal = (
+        "This thread's ExecutionContext comes from make_user_exec_ctx(freeze_vars=[...]), whose "
+        "query scope is a frozen copy, and a MassiveSession needs the Python script session's "
+        "own, since the library's formulas call Python functions through it. Create the session "
+        "from the console or an application script, or use make_user_exec_ctx() without "
+        "freeze_vars."
+    )
+    with frozen, pytest.raises(dm.MassiveError, match=rf"^{re.escape(refusal)}$") as misuse:
         dm.MassiveSession(dm.MassiveConfig(api_key="k"))
     assert (misuse.value.source, misuse.value.is_bug) == (dm.ErrorSource.USER, True)
     with make_user_exec_ctx():  # an unfrozen user context shares the script session's scope
@@ -238,19 +246,29 @@ def test_construction_under_a_frozen_query_scope_fails_fast() -> None:
 
 def test_construction_without_an_execution_context_fails_fast() -> None:
     errors: list[BaseException] = []
+    made: list[dm.MassiveSession] = []
+    ctx = get_exec_ctx()
 
     def worker() -> None:
         try:
             dm.MassiveSession(dm.MassiveConfig(api_key="k"))
         except dm.MassiveError as e:
             errors.append(e)
+        with ctx:  # the message's fix: the console's context, entered on this thread
+            made.append(dm.MassiveSession(dm.MassiveConfig(api_key="k")))
 
     thread = threading.Thread(target=worker)
     thread.start()
     thread.join(TIMEOUT)
     assert len(errors) == 1
-    assert "must be created inside a Deephaven server" in str(errors[0])
-    assert "ExecutionContext" in str(errors[0])
+    assert str(errors[0]) == (
+        "No Deephaven ExecutionContext is active on this thread, and a MassiveSession needs one. "
+        "Create the session from the Deephaven console or an application script, or create it "
+        "on this thread inside with ctx: after saving ctx = "
+        "deephaven.execution_context.get_exec_ctx() in the console."
+    )
+    assert len(made) == 1
+    made[0].close()
     assert isinstance(errors[0], dm.MassiveError)
     assert (errors[0].source, errors[0].is_bug) == (dm.ErrorSource.USER, True)
 
@@ -301,11 +319,10 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
     warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
     assert warnings == [
         (
-            f"{label(apart)} uses the same API key as {label(first)} with different connection "
-            "settings (subscription_confirmation_timeout, flush_interval), so the two cannot "
-            "share WebSocket connections; Massive allows an account one connection per asset "
-            "class and keeps the newer, so the live tables on the older follow their session's "
-            "connection_taken"
+            "A new MassiveSession uses the same API key as an open session, with "
+            "subscription_confirmation_timeout=9 and flush_interval=0.5 where the open one has "
+            f"subscription_confirmation_timeout=5 and flush_interval=0.05, {_CANNOT_SHARE}"
+            "subscription_confirmation_timeout and flush_interval, or close the older session."
         )
     ]
     caplog.clear()
@@ -318,20 +335,69 @@ def test_a_same_key_session_warns_only_when_it_cannot_share(
     other.close()
 
 
-def test_the_same_key_warning_names_the_oldest_session_that_cannot_share(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+_CANNOT_SHARE = (
+    "so the two cannot share WebSocket connections. Massive keeps one connection per asset class "
+    "for an account, so when the new session connects, the older session's live tables fail or "
+    "reconnect as its connection_taken says. Give both sessions the same "
+)
+
+
+def test_the_same_key_warning_compares_with_the_oldest_session_and_warns_once(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Numbers 9 and 10: text order would put #10 first, creation order puts #9 first.
-    monkeypatch.setattr(_session, "_session_numbers", itertools.count(9))
-    config = dm.MassiveConfig(api_key="ordered-key")
-    ninth, tenth = dm.MassiveSession(config), dm.MassiveSession(config)
+    oldest = dm.MassiveSession(dm.MassiveConfig(api_key="ordered-key", max_outage=60.0))
+    # The newer session differs from the next in max_outage, so a comparison with it instead of
+    # the oldest would name max_outage alone.
+    newer = dm.MassiveSession(
+        dm.MassiveConfig(api_key="ordered-key", flush_interval=0.5, max_outage=30.0)
+    )
+    caplog.clear()
     with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
         apart = dm.MassiveSession(dm.MassiveConfig(api_key="ordered-key", flush_interval=0.5))
     warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
-    assert [w.split(" with ")[0] for w in warnings] == [
-        "MassiveSession #11 uses the same API key as MassiveSession #9"
+    assert warnings == [
+        (
+            "A new MassiveSession uses the same API key as an open session, with max_outage=300 "
+            "and flush_interval=0.5 where the open one has max_outage=60 and flush_interval=0.05, "
+            f"{_CANNOT_SHARE}max_outage and flush_interval, or close the older session."
+        )
     ]
-    for session in (ninth, tenth, apart):
+    caplog.clear()
+    oldest.close()  # the message's fix: close the older sessions
+    newer.close()
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+        same = dm.MassiveSession(dm.MassiveConfig(api_key="ordered-key", flush_interval=0.5))
+    assert "same API key" not in caplog.text  # the other fix: the same settings share
+    for session in (apart, same):
+        session.close()
+
+
+def test_the_same_key_warning_writes_hosts_and_urls_as_they_are_passed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    hosts = {dm.AssetClass.STOCKS: "h.test"}
+    first = dm.MassiveSession(dm.MassiveConfig(api_key="hosts-key"))
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._session"):
+        second = dm.MassiveSession(
+            dm.MassiveConfig(
+                api_key="hosts-key", websocket_hosts=hosts, rest_base_url="https://r.test"
+            )
+        )
+    warnings = [r.getMessage() for r in caplog.records if "same API key" in r.getMessage()]
+    assert warnings == [
+        (
+            "A new MassiveSession uses the same API key as an open session, with "
+            "websocket_hosts={dm.AssetClass.STOCKS: 'h.test'} and rest_base_url='https://r.test' "
+            "where the open one has websocket_hosts={} and "
+            f"rest_base_url='https://api.massive.com', {_CANNOT_SHARE}websocket_hosts and "
+            "rest_base_url, or close the older session."
+        )
+    ]
+    # The settings as written are ones MassiveConfig takes.
+    assert dm.MassiveConfig(
+        api_key="k", websocket_hosts={dm.AssetClass.STOCKS: "h.test"}
+    ).websocket_hosts == {dm.AssetClass.STOCKS: "h.test"}
+    for session in (first, second):
         session.close()
 
 
@@ -389,14 +455,25 @@ def test_unified_snapshots(massive_session: dm.MassiveSession) -> None:
         filters=(("ticker_gte", "A"),),
         limit=3,
     )
-    with pytest.raises(ValueError, match=r"m\.stocks\.snapshots\(dm\.ALL\)"):
+    whole_market = (
+        "snapshots does not take dm.ALL. For a whole market, call a class's snapshots(dm.ALL), "
+        "such as m.stocks.snapshots(dm.ALL).fetch()."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(whole_market)}$"):
         massive_session.snapshots(dm.ALL)
+    # The call the refusal names takes dm.ALL.
+    assert massive_session.stocks.snapshots(dm.ALL)._request.symbols is dm.ALL
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         massive_session.snapshots(["AAPL"], order="asc")  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="limit must be positive"):
+    with pytest.raises(ValueError, match=r"^limit=0 is not positive\.$"):
         massive_session.snapshots(["AAPL"], limit=0)
-    with pytest.raises(ValueError, match=r"^snapshots takes no type filter: Massive refuses type"):
+    with pytest.raises(
+        ValueError,
+        match=r"^m\.snapshots takes no 'type' filter, since Massive refuses it beside tickers and "
+        r"each ticker's prefix already selects its asset class\. Remove 'type' from filters\.$",
+    ):
         massive_session.snapshots(["AAPL"], filters={"type": "options"})
+    massive_session.snapshots(["AAPL"], filters={})  # the message's fix
     with pytest.raises(ValueError, match="ticker_any_of"):
         massive_session.snapshots(["AAPL"], filters={"ticker_any_of": ["MSFT"]})
 
@@ -473,11 +550,17 @@ def test_close_marks_streams_closed_and_warns_once(
         massive_session.close()
         massive_session.close()
     assert caplog.messages == [
-        f"{massive_session._core.label} closed; 1 live tables failed, streams 1 [1]"
+        (
+            "The session closed and failed the live table with StreamId 1. Open a new "
+            "dm.MassiveSession() to read again."
+        )
     ]
     # Only the stream still in the registry is closed; the shut-down one keeps its last row.
     rows = sorted(dh_arrow.to_arrow(streams).to_pylist(), key=lambda r: r["StreamId"])
-    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
+    closed = (
+        "This session was closed, so this table no longer updates. Open a new "
+        "dm.MassiveSession() to read again."
+    )
     assert [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed), ("RELEASED", None)]
     assert fake_streams.failed == {1: closed}
     assert isinstance(fake_streams.errors[1], dm.SessionClosedError)
@@ -591,7 +674,7 @@ def test_close_returns_after_a_warning_when_no_cycle_shows_the_rows_in_time(
     finally:
         done.set()
         holder.join(TIMEOUT)
-    assert "no update cycle ended within 0.2 s" in caplog.text
+    assert "No update cycle ended within 0.2 s" in caplog.text
     del result, view
 
 
@@ -616,7 +699,10 @@ def test_close_fails_derived_tables_and_marks_their_stream_closed(
     streams = massive_session.streams()
     massive_session.close()
     rows = dh_arrow.to_arrow(streams).to_pylist()
-    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
+    closed = (
+        "This session was closed, so this table no longer updates. Open a new "
+        "dm.MassiveSession() to read again."
+    )
     assert [(r["State"], r["HeldResults"], r["Error"]) for r in rows] == [("CLOSED", 0, closed)]
     assert fake_streams.shutdown[1].wait(TIMEOUT)  # the failure shut the stream down
     wait_until(lambda: bool(derived.j_table.isFailed()))
@@ -633,14 +719,14 @@ def test_close_with_no_live_tables_logs_info(
     with caplog.at_level(logging.INFO, logger="deephaven_massive._tables.session_core"):
         massive_session.close()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.INFO, f"{massive_session._core.label} closed; 0 live tables failed, streams 0 []")
+        (logging.INFO, f"{massive_session._core.label} closed with no live table to fail")
     ]
 
 
 def test_after_close(massive_session: dm.MassiveSession) -> None:
     q = stream_query(massive_session)
     massive_session.close()
-    message = f"^{label(massive_session)} is closed; " + re.escape(NEW_SESSION) + "$"
+    message = "^" + re.escape(session_closed()) + "$"
     with pytest.raises(dm.MassiveError, match=message):
         massive_session.connections()
     with pytest.raises(dm.MassiveError, match=message):
@@ -693,14 +779,13 @@ def test_context_manager_closes() -> None:
 def test_release_argument_errors(massive_session: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match="must be a Deephaven Table"):
         massive_session.release("t")  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match=r": release\(\) takes a live table") as caught:
-        massive_session.release(new_table([string_col("Symbol", ["A"])]))
-    assert str(caught.value) == (
-        f"{massive_session._core.label}: release() takes a live table that this session "
-        "returned, and this table is not one. For a table you made from a live table, release "
-        "the live table instead. A table of another session needs that session's release(). A "
-        "static table needs no release"
+    refusal = (
+        "release() takes only a live table this session returned, and this table is not one. "
+        "Release the live table a derived table came from, call release() on the session that "
+        "returned the table, or leave a static table as it is."
     )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
+        massive_session.release(new_table([string_col("Symbol", ["A"])]))
 
 
 def test_a_session_closed_while_a_stream_opens(
@@ -871,7 +956,10 @@ def test_close_in_a_console_command_returns_without_waiting_for_a_cycle(
     rows_when(view, lambda rows: [r["State"] for r in rows] == ["RUNNING"])
     writer = massive_session._core.diagnostics.thread
     console_command(massive_session.close)
-    closed = f"{label(massive_session)} was closed; this table no longer updates; " + NEW_SESSION
+    closed = (
+        "This session was closed, so this table no longer updates. Open a new "
+        "dm.MassiveSession() to read again."
+    )
     rows_when(view, lambda rows: [(r["State"], r["Error"]) for r in rows] == [("CLOSED", closed)])
     writer.join(TIMEOUT)
     assert not writer.is_alive()

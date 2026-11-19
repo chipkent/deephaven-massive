@@ -15,8 +15,17 @@ from deephaven_massive._tables.problem_events import (
 )
 
 
+def _answer(venue: str, request_id: str) -> str:
+    # The flat-file client's message for S3's refusal of a venue's file.
+    return (
+        f"Massive answered the read of s3://flatfiles/us_futures_{venue.lower()}/trades_v1/2025/"
+        f"03/2025-03-03.csv.gz at https://files.massive.com with HTTP 403 (request_id "
+        f'{request_id}): "AccessDenied: Access Denied".'
+    )
+
+
 def _refusal(venue: str, request_id: str) -> WireEntitlementError:
-    return WireEntitlementError(f"{venue} denied", status=403, request_id=request_id)
+    return WireEntitlementError(_answer(venue, request_id), status=403, request_id=request_id)
 
 
 def test_a_venue_keeps_its_first_refusal_and_venues_come_in_enum_order(
@@ -26,22 +35,22 @@ def test_a_venue_keeps_its_first_refusal_and_venues_come_in_enum_order(
     assert refused.venues() == ()
     assert None not in refused
     with caplog.at_level(logging.DEBUG, logger=refused_venues.__name__):
-        refused.add(FuturesVenue.COMEX, _refusal("comex-1", "r1"))
-        refused.add(FuturesVenue.CME, _refusal("cme", "r2"))
-        refused.add(FuturesVenue.COMEX, _refusal("comex-2", "r3"))
+        refused.add(FuturesVenue.COMEX, _refusal("COMEX", "r1"))
+        refused.add(FuturesVenue.CME, _refusal("CME", "r2"))
+        refused.add(FuturesVenue.COMEX, _refusal("COMEX", "r3"))
     assert refused.venues() == (FuturesVenue.CME, FuturesVenue.COMEX)
     assert FuturesVenue.COMEX in refused
     assert FuturesVenue.CBOT not in refused
     assert caplog.messages == [
-        "S3 refused comex-1 denied; skipping venue COMEX",
-        "S3 refused cme denied; skipping venue CME",
-        "S3 refused comex-2 denied; skipping venue COMEX (already refused)",
+        f"skipping venue COMEX: {_answer('COMEX', 'r1')}",
+        f"skipping venue CME: {_answer('CME', 'r2')}",
+        f"skipping venue COMEX (already refused): {_answer('COMEX', 'r3')}",
     ]
-    error = refused.every_venue_refused()
+    error = refused.every_venue_refused("futures.trades")
     assert str(error) == (
-        "the plan does not include the flat files of any venue requested (CME, COMEX): cme "
-        "denied; pass venues={dm.FuturesVenue.<VENUE>, ...} with only the venues the plan "
-        "includes"
+        "futures.trades: Massive refused the flat files of every venue the read asked for, CME "
+        f"and COMEX. {_answer('CME', 'r2')} To read from REST instead, pass "
+        "source=dm.HistorySource.REST and contract tickers such as 'ESH5' in place of dm.ALL."
     )
     assert (error.status, error.request_id) == (403, "r2")
 
@@ -83,12 +92,12 @@ def test_a_report_gives_each_venue_once_for_the_call_that_keeps_the_record(
         report(call, FuturesVenue.CME)
         report(call, FuturesVenue.CME, FuturesVenue.NYMEX)
         report(LoggedKeys(), FuturesVenue.CME)
-    skipped = [r for r in caplog.records if "skipping the flat files" in r.getMessage()]
+    skipped = [r for r in caplog.records if "for the whole range" in r.getMessage()]
     assert [r.levelno for r in skipped] == [logging.DEBUG] * 3
-    assert [r.getMessage().split("S3 refused: ")[1] for r in skipped] == [
-        "CME: CME denied",
-        "NYMEX: NYMEX denied",
-        "CME: CME denied",
+    assert [r.getMessage() for r in skipped] == [
+        "futures.trades history (MassiveSession #1 call-2): Massive refused the flat files of "
+        f"{venue} for the whole range: {_answer(venue, 'r').removesuffix('.')}"
+        for venue in ("CME", "NYMEX", "CME")
     ]
     events = [p for p in problems if isinstance(p, ProblemEvent)]
     assert [(e.cause, e.action, e.stream_id, e.policy) for e in events] == [
@@ -96,8 +105,8 @@ def test_a_report_gives_each_venue_once_for_the_call_that_keeps_the_record(
     ] * 3
     # Each exchange is its own row of m.problems(): a later refusal never merges into another.
     assert [e.field for e in events] == ["CME", "NYMEX", "CME"]
-    assert [e.detail.split("S3 refused: ")[1] for e in events] == [
-        "CME: CME denied",
-        "NYMEX: NYMEX denied",
-        "CME: CME denied",
+    assert [e.detail for e in events] == [
+        f"Massive refused the flat files of {venue} for the whole range: "
+        f"{_answer(venue, 'r').removesuffix('.')}"
+        for venue in ("CME", "NYMEX", "CME")
     ]

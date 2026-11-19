@@ -337,7 +337,9 @@ CONTRACTS: Final = DatasetSpec(
     fetch_path=_CONTRACTS,
     keys={(_REST, _CONTRACTS): _keys("Ticker", fanout="UnderlyingTicker")},
     # Massive's page marks `ticker` deprecated here and points to the per-contract endpoint.
-    symbol_params_elsewhere={"ticker": "read named contracts with m.options.contract_details()"},
+    symbol_params_elsewhere={
+        "ticker": "To read named contracts, call m.options.contract_details(contracts).fetch()."
+    },
 )
 CONTRACT_DETAILS: Final = DatasetSpec(
     name="options.contract_details",
@@ -446,7 +448,7 @@ def _chain_underlying(value: object) -> str:
     """
     if not isinstance(value, str):
         kind = "dm.ALL" if value is ALL else type(value).__name__
-        raise TypeError(f"underlying must be one ticker, a str, not {kind}")
+        raise TypeError(f"underlying must be one ticker as a str, not {kind}")
     return check_symbol(ClassFromPrefix.ANY, value)
 
 
@@ -477,8 +479,8 @@ def _underlying(value: object) -> str:
     ticker = _chain_underlying(value)
     if symbol_class(ticker) in _PAIR_CLASSES:
         raise ValueError(
-            f"underlying={value!r} is a currency or crypto pair, which has no listed options; "
-            "pass a ticker such as 'AAPL' or 'I:SPX'"
+            f"underlying={value!r} is a currency or crypto pair, which has no listed options. "
+            "Pass a stock or index ticker, such as 'AAPL' or 'I:SPX'."
         )
     return ticker
 
@@ -625,7 +627,8 @@ class OptionsNamespace(Namespace):
             LAST_TRADE,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="use m.options.chain(underlying).fetch()",
+            all_alternative="For every contract of one underlying, call "
+            "m.options.chain('AAPL').fetch().",
             on_error=on_error,
         )
 
@@ -769,8 +772,8 @@ class OptionsNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
-                "use m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False).history(day, day), "
-                "every contract's bar of that day"
+                "For every contract's bar of one day, call m.options.bars(dm.ALL, "
+                "dm.Timespan.DAY, adjusted=False).history('2025-01-02', '2025-01-02')."
             ),
             timespan=Timespan.DAY,
             adjusted=require_bool("adjusted", adjusted),
@@ -905,8 +908,8 @@ class OptionsNamespace(Namespace):
             # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
             logger.debug("options.chain refused: underlying=dm.ALL")
             raise ValueError(
-                "options.chain reads one underlying's chain and does not take dm.ALL; "
-                "m.options.snapshots(dm.ALL) lists every contract"
+                "options.chain reads one underlying's chain, so it does not take dm.ALL. For "
+                "every contract, call m.options.snapshots(dm.ALL).fetch()."
             )
         values = (
             value_table(
@@ -1133,15 +1136,15 @@ class OptionsNamespace(Namespace):
             # A refused argument is the caller's to fix and travels in the ValueError: DEBUG only.
             logger.debug("options.contract_details refused: symbols=%r is an underlying", symbols)
             raise ValueError(
-                f"{symbols!r} is an underlying, not an options contract: list its contracts "
-                f"with m.options.contracts({symbols!r})"
+                f"{symbols!r} is an underlying, not an options contract. To list its contracts, "
+                f"call m.options.contracts({symbols!r}).fetch()."
             )
         return build_query(
             self._core,
             CONTRACT_DETAILS,
             query_type=FetchQuery,
             symbols=symbols,
-            all_alternative="use m.options.contracts() to list contracts",
+            all_alternative="To list contracts, call m.options.contracts().fetch().",
             params={
                 "as_of": None if as_of is None else day_argument(CONTRACT_DETAILS, as_of, "as_of")
             },
@@ -1195,8 +1198,8 @@ class OptionsNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
-                "use m.options.bars(dm.ALL, dm.Timespan.DAY, adjusted=False)"
-                ".history(day, day), every contract's bar of that day"
+                "For every contract's bar of one day, call m.options.bars(dm.ALL, "
+                "dm.Timespan.DAY, adjusted=False).history('2025-01-02', '2025-01-02')."
             ),
             adjusted=require_bool("adjusted", adjusted),
             params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
@@ -1271,7 +1274,7 @@ class OptionsNamespace(Namespace):
         return list_query(
             self._core,
             OPEN_INTEREST,
-            all_alternative="leave symbols out, which returns every contract",
+            all_alternative="Leave symbols out to read every contract.",
             symbols=symbols,
             start=start,
             end=end,
@@ -1358,7 +1361,7 @@ class OptionsNamespace(Namespace):
         return list_query(
             self._core,
             UNUSUAL_TRADES,
-            all_alternative="leave symbols out, which returns every contract",
+            all_alternative="Leave symbols out to read every contract.",
             symbols=symbols,
             start=start,
             end=end,

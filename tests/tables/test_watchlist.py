@@ -23,6 +23,7 @@ import deephaven_massive.namespaces._options as options
 import deephaven_massive.namespaces._partners as partners
 from deephaven_massive._datasets.request import ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
+from deephaven_massive._datasets.symbols import check_symbol
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
 from deephaven_massive._tables.execution_context import update_cycle
 from deephaven_massive._tables.liveness import new_scope, release_scope
@@ -30,6 +31,7 @@ from deephaven_massive._tables.problem_events import Problem, ProblemSpans
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.watchlist import (
     CURRENT_STEP,
+    UNDERLYINGS_IN_ANOTHER_SPELLING,
     CurrentSymbols,
     SkippedValues,
     SymbolRowRule,
@@ -90,6 +92,16 @@ CRYPTO = crypto.QUOTES
 WATCHLIST_LOG = "deephaven_massive._tables.watchlist"
 
 
+def refusal(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> str:
+    # The symbol module's own refusal, which a row's message quotes as a sentence.
+    try:
+        check_symbol(asset_class, symbol)
+    except ValueError as error:
+        text = str(error)
+        return text if text.endswith(".") else f"{text}."
+    raise AssertionError(f"{symbol!r} is accepted")
+
+
 def rule(spec: DatasetSpec = FOREX, mode: OnError = OnError.RAISE) -> SymbolRowRule:
     return SymbolRowRule.of(spec, mode)
 
@@ -111,7 +123,12 @@ def test_read_symbols_of_a_dataset_kept_as_written(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["ERIC B", "7203"])])
     events = rule(partners.TMX_CORPORATE_EVENTS)
     assert read_symbols(events, table, stream_id=7).symbols == ("7203", "ERIC B")
-    with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
+    refused = (
+        "partners.tmx.corporate_events: A symbol table holds ' x', which has surrounding "
+        "whitespace, and Massive never writes a ticker that way. Fix the row to the value "
+        "Massive lists, or delete it."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(refused)}$"):
         read_symbols(events, new_table([string_col("Symbol", [" x"])]), stream_id=None)
 
 
@@ -125,37 +142,37 @@ def test_read_symbols_refuses_a_failed_table(
         watch = dm.canonicalize_symbols(source, AssetClass.FOREX, on_error=OnError.RAISE)
     source.add(new_table([string_col("Symbol", ["no pe!"])]))
     wait_for(lambda: bool(watch.j_table.isFailed()))
-    with pytest.raises(
-        ValueError,
-        match=r"^the symbol table passed to forex\.quotes failed upstream, so the result can no "
-        r"longer follow it: it is failed\. Fix that table and call forex\.quotes again",
-    ):
+    expected = (
+        "The table you passed to forex.quotes has failed, so the library can no longer read it. "
+        "Fix that table, then call forex.quotes again."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
         read_symbols(rule(mode=mode), watch, stream_id=7)
     scope.release()
 
 
 def test_read_symbols_refuses_a_row_that_is_not_canonical(dh_exec_ctx: object) -> None:
     table = new_table([string_col("Symbol", ["C:EURUSD", "EUR/USD"])])
-    with pytest.raises(
-        ValueError,
-        match=r"^forex\.quotes: a symbol table holds 'EUR/USD' \('EUR/USD' is not Massive's "
-        r"ticker; use 'C:EURUSD' .*\)\. Fix the row, or pass the table through "
-        r"dm\.canonicalize_symbols\(table, dm\.AssetClass\.FOREX\), "
-        r"which converts what it can and nulls the rest, "
-        r"or, given on_error=dm\.OnError\.RAISE, fails on the rest$",
-    ):
+    expected = (
+        f"forex.quotes: A symbol table holds 'EUR/USD'. {refusal(AssetClass.FOREX, 'EUR/USD')} "
+        "Fix the row, or convert the table with dm.canonicalize_symbols(table, "
+        "dm.AssetClass.FOREX)."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
         read_symbols(rule(), table, stream_id=7)
+    # The advice converts the row.
+    converted = dm.canonicalize_symbols(table, AssetClass.FOREX)
+    assert read_symbols(rule(), converted, stream_id=7) == CurrentSymbols(("C:EURUSD",))
 
 
 def test_a_refused_stock_row_names_a_convention_that_converts_it(dh_exec_ctx: object) -> None:
     # Under the default convention, nothing with another source's separators converts.
     message = invalid_row_message(AssetClass.STOCKS, "BRK-B")
-    assert (
-        "Fix the row, or pass the table through dm.canonicalize_symbols(table, "
-        "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), or with the convention "
-        "the tickers come from, which converts what it can and nulls the rest, or, given "
-        "on_error=dm.OnError.RAISE, fails on the rest"
-    ) in message
+    assert message == (
+        f"A symbol table holds 'BRK-B'. {refusal(AssetClass.STOCKS, 'BRK-B')} Fix the row, or "
+        "convert the table with dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, "
+        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from."
+    )
     table = new_table([string_col("Symbol", ["BRK-B"])])
     converted = dm.canonicalize_symbols(
         table, AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO
@@ -171,7 +188,10 @@ def test_a_skipped_row_read_before_any_stream_names_the_call(
     with caplog.at_level("WARNING", logger=WATCHLIST_LOG):
         read_symbols(rule(mode=OnError.LOG), table, stream_id=None)
     [record] = [r.getMessage() for r in caplog.records if bad in r.getMessage()]
-    assert record.startswith(f"forex.quotes a call's read: a symbol table holds {bad!r}")
+    assert record == (
+        f"forex.quotes: Skipping the row {bad!r} until it is fixed or deleted. "
+        f"{invalid_row_message(AssetClass.FOREX, bad)}"
+    )
 
 
 def test_a_live_verbs_first_read_logs_a_skipped_row_at_debug(
@@ -201,38 +221,29 @@ def test_read_symbols_skips_a_row_that_is_not_canonical(
         read_symbols(rule(mode=mode), table, stream_id=7)  # a second read logs nothing more
     records = [r for r in caplog.records if bad in r.getMessage()]
     assert [r.levelname for r in records] == ["DEBUG"]
-    assert (
-        records[0].getMessage().startswith(f"forex.quotes stream 7: a symbol table holds {bad!r}")
+    assert records[0].getMessage() == (
+        f"forex.quotes stream 7: Skipping the row {bad!r} until it is fixed or deleted. "
+        f"{invalid_row_message(AssetClass.FOREX, bad)}"
     )
-    assert records[0].getMessage().endswith("; the row is skipped until it is fixed or deleted")
 
 
-def test_the_skipped_rows_text_counts_and_lists_the_first_five() -> None:
-    # The value is not called wrong: Massive may write a form the library does not know yet.
-    assert skipped_rows_text(["aapl"]) == (
-        "skipping 1 symbol-table value this dataset does not take: 'aapl'; fix or delete that "
-        f"row, or report it at {ISSUES_URL} if Massive itself writes it"
-    )
+def test_the_skipped_rows_text_lists_the_values_sorted_and_counts_the_rest() -> None:
+    assert skipped_rows_text(["aapl"]) == "'aapl'"
+    assert skipped_rows_text(["b", "a"]) == "'a' and 'b'"
     assert skipped_rows_text(["g", "f", "e", "d", "c", "b", "a"]) == (
-        "skipping 7 symbol-table values this dataset does not take: 'a', 'b', 'c', 'd', 'e', "
-        f"and 2 more; fix or delete those rows, or report them at {ISSUES_URL} if Massive "
-        "itself writes them"
-    )
-    assert skipped_rows_text(["b", "a"]).startswith(
-        "skipping 2 symbol-table values this dataset does not take: 'a', 'b'; fix or delete "
+        "7 values, the first 3: 'a', 'b', and 'c'"
     )
 
 
 def test_the_message_of_a_dataset_that_spans_classes_names_each_conversion() -> None:
     message = invalid_row_message(ClassFromPrefix.ANY, "aapl")
-    assert "tickers are case-sensitive" in message
-    assert message.endswith(
-        "Fix the row, or convert each row with dm.canonical_symbol(text, asset_class) and that "
-        "row's class (dm.AssetClass.FOREX for 'EUR/USD'), since this table's rows may mix "
-        "classes. A stock in another source's spelling also needs that source's convention: "
-        "dm.canonical_symbol('BRK-B', dm.AssetClass.STOCKS, "
-        "convention=dm.SymbolConvention.YAHOO) gives 'BRK.B'. If Massive itself writes "
-        f"'aapl', the library does not know its form yet: report it at {ISSUES_URL}"
+    assert message == (
+        f"A symbol table holds 'aapl'. {refusal(ClassFromPrefix.ANY, 'aapl')} Fix the row, or "
+        "convert each row with dm.canonical_symbol and that row's class, such as "
+        "dm.canonical_symbol('EUR/USD', dm.AssetClass.FOREX), or dm.canonical_symbol('BRK-B', "
+        "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO) for a stock in Yahoo's "
+        f"spelling. If Massive itself writes 'aapl', report it at {ISSUES_URL}, since the "
+        "library does not know that form yet."
     )
 
 
@@ -384,18 +395,11 @@ def test_a_table_of_underlyings_takes_only_stock_and_index_tickers(dh_exec_ctx: 
     for refused in (option, "X:BTCUSD", "aapl"):
         assert not underlyings().accepts(refused)
     advice = (
-        "options.chain: a table of underlyings holds 'O:AAPL250117C00150000', which is not a "
-        "stock or index ticker such as 'AAPL' or 'I:SPX'. Fix or delete the row. If your stock "
-        "tickers use another source's spelling, such as Yahoo's 'BRK-B', convert every row but "
-        "the index rows: converting the whole table as stocks nulls index rows such as 'I:SPX'. "
-        "With t the table you passed as underlying=:\n"
-        "    from deephaven import merge\n"
-        "    stocks = dm.canonicalize_symbols("
-        't.where("isNull(Symbol) || !Symbol.startsWith(`I:`)"), '
-        "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)\n"
-        '    underlying = merge([stocks, t.where("!isNull(Symbol) && '
-        'Symbol.startsWith(`I:`)")])\n'
-        "Use YAHOO, NASDAQ, or CMS, whichever source the tickers come from"
+        "options.chain: A table of underlyings holds 'O:AAPL250117C00150000', which is not a "
+        "stock or index ticker such as 'AAPL' or 'I:SPX'. Fix or delete the row. If your tickers "
+        "use another source's spelling, such as Yahoo's 'BRK-B', convert the stock rows with "
+        "dm.canonicalize_symbols and keep the index rows: https://github.com/chipkent/"
+        "deephaven-massive/blob/main/docs/troubleshooting.md#underlyings-in-another-spelling."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(advice)}$"):
         read_symbols(underlyings(), new_table([string_col("Symbol", [option])]), stream_id=7)
@@ -410,7 +414,13 @@ def test_a_skipped_underlying_is_logged_with_its_reason(
         rows = read_symbols(underlyings(OnError.LOG), table, stream_id=None)
     assert rows == CurrentSymbols(("AAPL",), (bad,))
     [record] = [r.getMessage() for r in caplog.records if bad in r.getMessage()]
-    assert record.startswith(f"options.chain a call's read: a table of underlyings holds {bad!r}")
+    assert record == (
+        f"options.chain: Skipping the row {bad!r} until it is fixed or deleted. A table of "
+        f"underlyings holds {bad!r}, which is not a stock or index ticker such as 'AAPL' or "
+        "'I:SPX'. Fix or delete the row. If your tickers use another source's spelling, such as "
+        "Yahoo's 'BRK-B', convert the stock rows with dm.canonicalize_symbols and keep the "
+        f"index rows: {UNDERLYINGS_IN_ANOTHER_SPELLING}."
+    )
 
 
 def test_a_table_of_product_codes_is_read_from_its_product_code_column(
@@ -418,7 +428,7 @@ def test_a_table_of_product_codes_is_read_from_its_product_code_column(
 ) -> None:
     table = new_table([string_col("ProductCode", ["NQ", "6E", None, "ES"])])
     assert read_symbols(product_codes(), table, stream_id=7).symbols == ("6E", "ES", "NQ")
-    with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
+    with pytest.raises(ValueError, match=r"^futures\.products: A symbol table holds ' ES', "):
         read_symbols(product_codes(), new_table([string_col("ProductCode", [" ES"])]), stream_id=7)
 
 
@@ -426,12 +436,10 @@ def test_a_refused_product_code_names_no_converter(dh_exec_ctx: object) -> None:
     # The converters follow a ticker grammar: they null a product code such as ES, so naming
     # dm.canonicalize_symbols would send the caller to a table of nulls.
     message = invalid_row_message(AssetClass.FUTURES, " ES", as_written=True)
-    assert message.endswith(
-        "Fix the row to the value Massive writes, or delete it. Don't convert the table with "
-        "dm.canonicalize_symbols: it applies ticker rules these values don't follow, so it "
-        "nulls correct ones too"
+    assert message == (
+        "A symbol table holds ' ES', which has surrounding whitespace, and Massive never writes "
+        "a ticker that way. Fix the row to the value Massive lists, or delete it."
     )
-    assert "canonicalize_symbols(table" not in message
     with pytest.raises(ValueError, match=f"^{re.escape(f'futures.products: {message}')}$"):
         read_symbols(product_codes(), new_table([string_col("ProductCode", [" ES"])]), stream_id=7)
     codes = new_table([string_col("ProductCode", ["ES", " ES"])])
@@ -440,13 +448,10 @@ def test_a_refused_product_code_names_no_converter(dh_exec_ctx: object) -> None:
 
 
 def test_a_refused_row_of_a_dataset_kept_as_written_names_no_converter() -> None:
-    message = invalid_row_message(AssetClass.STOCKS, " x", as_written=True)
+    message = invalid_row_message(AssetClass.STOCKS, "X:x", as_written=True)
     assert message == (
-        "a symbol table holds ' x': ' x' is not a ticker as Massive writes it (not empty, no "
-        "surrounding whitespace, no control character, no class prefix). Fix the row to "
-        "the value Massive writes, or delete it. Don't convert the table with "
-        "dm.canonicalize_symbols: it applies ticker rules these values don't follow, so it "
-        "nulls correct ones too"
+        "A symbol table holds 'X:x', which starts with the class prefix 'X:', and Massive never "
+        "writes a ticker that way. Fix the row to the value Massive lists, or delete it."
     )
 
 
@@ -454,15 +459,15 @@ def test_a_refused_underlying_names_conversions_that_convert_it(dh_exec_ctx: obj
     # Under Massive's own convention no refused underlying converts, so the advice names the
     # conversion; followed, it gives a table every row of which the chain takes.
     t = new_table([string_col("Symbol", ["BRK-B", "I:SPX", None])])
-    with pytest.raises(ValueError, match=r"convention=dm\.SymbolConvention\.YAHOO\)"):
+    with pytest.raises(ValueError, match=re.escape(UNDERLYINGS_IN_ANOTHER_SPELLING)):
         read_symbols(underlyings(), t, stream_id=7)
-    index = "!isNull(Symbol) && Symbol.startsWith(`I:`)"
+    # The code of the linked section, as written there.
     stocks = dm.canonicalize_symbols(
         t.where("isNull(Symbol) || !Symbol.startsWith(`I:`)"),
         dm.AssetClass.STOCKS,
         convention=dm.SymbolConvention.YAHOO,
     )
-    converted = merge([stocks, t.where(index)])
+    converted = merge([stocks, t.where("!isNull(Symbol) && Symbol.startsWith(`I:`)")])
     assert read_symbols(underlyings(), converted, stream_id=7) == CurrentSymbols(("BRK.B", "I:SPX"))
     # Converting the whole table as stocks nulls the index, as the advice warns.
     whole = dm.canonicalize_symbols(t, AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)
@@ -507,10 +512,8 @@ def test_a_failing_watch_is_refused_and_logged_only_at_debug(
     with caplog.at_level(logging.DEBUG, logger=WATCHLIST_LOG):
         counter.on_error(RuntimeError("table broke"))
     expected = (
-        "the symbol table passed to snapshots failed upstream, so the result can no longer "
-        "follow it: table broke. Fix that table and call snapshots again; a table made by "
-        "dm.canonicalize_symbols fails on a row it cannot convert only under "
-        "on_error=dm.OnError.RAISE"
+        "The table you passed to snapshots has failed, so the library can no longer read it. "
+        "Deephaven reported: table broke. Fix that table, then call snapshots again."
     )
     assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
         ("DEBUG", f"snapshots stream 7: {expected}")
@@ -531,7 +534,11 @@ def test_a_watch_over_a_failing_canonicalized_table_refuses_it(
     assert seen == [(frozenset({"C:EURUSD"}), frozenset())]
     source.add(new_table([string_col("Symbol", ["no pe!"])]))
     wait_for(lambda: len(refused) == 1)
-    assert refused[0].startswith("the symbol table passed to forex.quotes failed upstream")
+    assert refused[0].startswith(
+        "The table you passed to forex.quotes has failed, so the library can no longer read it. "
+        "Deephaven reported: "
+    )
+    assert refused[0].endswith(" Fix that table, then call forex.quotes again.")
     scope.release()
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import re
 import string
 import threading
 from collections.abc import Callable, Iterator
@@ -58,6 +59,13 @@ if TYPE_CHECKING:
 """The refusal of a stream of bars Massive doesn't stream."""
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
+
 NS = 10**9
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 MS = 10**6
@@ -229,7 +237,9 @@ def test_only_the_canonical_ticker_is_taken(
     )
     for factory in factories:
         assert factory("C:EURUSD")._request.symbols == ("C:EURUSD",)
-        with pytest.raises(ValueError, match=r"use 'C:EURUSD' .*dm\.canonical_symbol_forex"):
+        with pytest.raises(
+            ValueError, match=r"Pass 'C:EURUSD', which dm\.canonical_symbol_forex\("
+        ):
             factory(symbols)
 
 
@@ -346,11 +356,26 @@ def test_a_large_integer_amount_keeps_every_digit(massive_session: dm.MassiveSes
         ({"from_currency": 840}, (TypeError, "from_currency must be a str, not int")),
         ({"to_currency": None}, (TypeError, "to_currency must be a str, not NoneType")),
         # The code is a path segment, which can't be empty.
-        ({"from_currency": ""}, (ValueError, r"^from_currency is empty, and an empty code")),
-        ({"to_currency": ""}, (ValueError, r"^to_currency is empty")),
+        (
+            {"from_currency": ""},
+            (
+                ValueError,
+                whole("from_currency='' is not a currency code. Pass one, such as 'USD'."),
+            ),
+        ),
+        (
+            {"to_currency": ""},
+            (ValueError, whole("to_currency='' is not a currency code. Pass one, such as 'USD'.")),
+        ),
         # A request cannot carry NaN or an infinity as a number.
-        ({"amount": float("inf")}, (ValueError, "amount must be finite, got inf")),
-        ({"amount": float("nan")}, (ValueError, "amount must be finite, got nan")),
+        (
+            {"amount": float("inf")},
+            (ValueError, whole("amount=inf is not a finite number. Pass one, such as 100.")),
+        ),
+        (
+            {"amount": float("nan")},
+            (ValueError, whole("amount=nan is not a finite number. Pass one, such as 100.")),
+        ),
         ({"amount": "1"}, (TypeError, "amount must be an int or float, not str")),
         ({"amount": True}, (TypeError, "amount must be an int or float, not bool")),
         ({"precision": 2.0}, (TypeError, "precision must be an int, not float")),
@@ -371,11 +396,11 @@ def test_conversion_rejects_bad_arguments(
 @pytest.mark.parametrize(
     ("symbols", "message"),
     [
-        ("EUR/US", "cannot read 'EUR/US' as a forex pair"),
-        ("EUR/USD/JPY", "cannot read 'EUR/USD/JPY' as a forex pair"),
-        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker; this dataset takes forex tickers"),
-        ("EU1/USD", "cannot read 'EU1/USD' as a forex pair"),
-        ([], "no symbols"),
+        ("EUR/US", "'EUR/US' is not a forex pair of two three-letter currency codes"),
+        ("EUR/USD/JPY", "'EUR/USD/JPY' is not a forex pair of two three-letter currency codes"),
+        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker, and this dataset takes forex tickers"),
+        ("EU1/USD", "'EU1/USD' is not a forex pair of two three-letter currency codes"),
+        ([], "symbols holds no tickers"),
     ],
 )
 def test_invalid_pairs_fail_at_construction(
@@ -396,22 +421,39 @@ def test_invalid_pairs_fail_at_construction(
 def test_an_exhausted_generator_has_no_symbols(massive_session: dm.MassiveSession) -> None:
     pairs = (pair for pair in ["C:EURUSD"])
     list(pairs)
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         massive_session.forex.quotes(pairs)  # type: ignore[arg-type]  # the point: any iterable is read
 
 
 def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession) -> None:
     table = new_table([string_col("Pair", ["C:EURUSD"])])
-    with pytest.raises(ValueError, match="must have a Symbol column"):
+    refusal = (
+        "The symbol table has no Symbol column. It has Pair. Name the column of tickers Symbol, "
+        'as in t.rename_columns("Symbol = Pair").'
+    )
+    with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.forex.snapshots(table)
+    # The advice: the renamed column is taken.
+    renamed = table.rename_columns("Symbol = Pair")
+    assert massive_session.forex.snapshots(renamed)._request.symbols is not None
 
 
 def test_the_one_row_datasets_refuse_every_pair(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"use m\.forex\.snapshots\(dm\.ALL\)\.fetch\(\)"):
+    every_pair = (
+        "forex.last_quote does not take dm.ALL. For every pair, call "
+        "m.forex.snapshots(dm.ALL).fetch()."
+    )
+    with pytest.raises(ValueError, match=whole(every_pair)):
         massive_session.forex.last_quote(dm.ALL)
-    every_bar = r"use m\.forex\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)"
-    with pytest.raises(ValueError, match=every_bar):
+    every_bar = (
+        "forex.previous_day_bar does not take dm.ALL. For every ticker's bar of one day, call "
+        "m.forex.bars(dm.ALL, dm.Timespan.DAY).history('2025-01-02', '2025-01-02')."
+    )
+    with pytest.raises(ValueError, match=whole(every_bar)):
         massive_session.forex.previous_day_bar(dm.ALL)
+    # The calls the refusals name take dm.ALL.
+    assert massive_session.forex.snapshots(dm.ALL)._request.symbols is dm.ALL
+    assert massive_session.forex.bars(dm.ALL, dm.Timespan.DAY)._request.symbols is dm.ALL
 
 
 def test_the_streams_and_daily_bars_have_no_fetch(massive_session: dm.MassiveSession) -> None:

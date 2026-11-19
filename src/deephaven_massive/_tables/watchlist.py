@@ -61,13 +61,15 @@ from typing_extensions import override
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import (
     UNDERLYING_CLASSES,
+    as_written_fault,
     canonical_symbol,
     check_symbol,
     is_canonical,
     symbol_class,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
+from deephaven_massive._errors import user_defect
+from deephaven_massive._log_limits import BoundedLog, prose_list
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.problem_events import (
     ProblemAction,
@@ -89,11 +91,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CURRENT_STEP",
+    "SKIPPED_ROWS_FIX",
+    "UNDERLYINGS_IN_ANOTHER_SPELLING",
     "CurrentSymbols",
     "RowRule",
     "SkippedValues",
     "SymbolRowRule",
     "SymbolWatch",
+    "failed_table_message",
     "invalid_row_message",
     "latest_rows_since_added",
     "read_symbols",
@@ -104,8 +109,6 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _SYMBOL: Final = "Symbol"
-_SHOWN: Final = 5
-"""The most bad values one message lists."""
 _WATCHED: Final = "__MassiveWatched"
 """The hidden column `watched_rows` joins on and drops. Dataset columns are PascalCase wire names,
 so none can take this name."""
@@ -153,47 +156,46 @@ def invalid_row_message(
         stocks, alone or among other classes, the remedy names `convention=`, since under the
         default, Massive's own spelling, no ticker with another source's separators converts.
         For values kept as Massive writes them (a third party's global tickers, futures product
-        codes) the remedy is only to fix the row: the converters follow a class's ticker
-        grammar, so they refuse a product code such as `ES`, and they refuse surrounding
-        whitespace and a class prefix, the faults such a row has, so they would null every one.
+        codes) the message names the rule the row breaks, and the remedy is only to fix the row:
+        the converters follow a class's ticker grammar, so they refuse a product code such as
+        `ES`, and they refuse the faults such a row has, so they would null every one.
     """
-    refusal = ""
-    try:
-        check_symbol(asset_class, symbol, as_written=as_written)
-    except ValueError as error:
-        refusal = str(error)
     if as_written:
         return (
-            f"a symbol table holds {symbol!r}: {refusal}. Fix the row to the value Massive "
-            "writes, or delete it. Don't convert the table with dm.canonicalize_symbols: it "
-            "applies ticker rules these values don't follow, so it nulls correct ones too"
+            f"A symbol table holds {symbol!r}, which {as_written_fault(symbol)}, and Massive "
+            "never writes a ticker that way. Fix the row to the value Massive lists, or delete "
+            "it."
         )
-    reason = f" ({refusal})" if refusal else ""
+    refusal = ""
+    try:
+        check_symbol(asset_class, symbol)
+    except ValueError as error:
+        text = str(error)
+        refusal = f" {text}" if text.endswith(".") else f" {text}."
+    held = f"A symbol table holds {symbol!r}.{refusal}"
     if asset_class is ClassFromPrefix.ANY:
         remedy = (
-            "convert each row with dm.canonical_symbol(text, asset_class) and that row's class "
-            "(dm.AssetClass.FOREX for 'EUR/USD'), since this table's rows may mix classes. A "
-            "stock in another source's spelling also needs that source's "
-            "convention: dm.canonical_symbol('BRK-B', dm.AssetClass.STOCKS, "
-            "convention=dm.SymbolConvention.YAHOO) gives 'BRK.B'"
+            "Fix the row, or convert each row with dm.canonical_symbol and that row's class, "
+            "such as dm.canonical_symbol('EUR/USD', dm.AssetClass.FOREX), or "
+            "dm.canonical_symbol('BRK-B', dm.AssetClass.STOCKS, "
+            "convention=dm.SymbolConvention.YAHOO) for a stock in Yahoo's spelling."
         )
-    else:
-        convention = (
-            ", convention=dm.SymbolConvention.YAHOO), or with the convention the tickers come from"
-            if asset_class is AssetClass.STOCKS
-            else ")"
-        )
+    elif asset_class is AssetClass.STOCKS:
         remedy = (
-            f"pass the table through dm.canonicalize_symbols(table, "
-            f"dm.AssetClass.{asset_class.name}{convention}, which converts what it can and "
-            "nulls the rest, or, given on_error=dm.OnError.RAISE, fails on the rest"
+            "Fix the row, or convert the table with dm.canonicalize_symbols(table, "
+            "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), naming the convention "
+            "your tickers come from."
         )
-    message = f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
+    else:  # every other class converts by its class alone
+        remedy = (
+            f"Fix the row, or convert the table with dm.canonicalize_symbols(table, "
+            f"dm.AssetClass.{asset_class.name})."
+        )
     if _converts(asset_class, symbol):
-        return message
+        return f"{held} {remedy}"
     return (
-        f"{message}. If Massive itself writes {symbol!r}, the library does not know its form "
-        f"yet: report it at {ISSUES_URL}"
+        f"{held} {remedy} If Massive itself writes {symbol!r}, report it at {ISSUES_URL}, since "
+        "the library does not know that form yet."
     )
 
 
@@ -209,66 +211,79 @@ def _converts(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> bool:
         symbol: The refused row.
 
     Returns:
-        True when `dm.canonical_symbol` converts the row for its class.
+        True when `dm.canonical_symbol` converts the row for its class, under any convention
+        for a stock.
     """
     resolved = symbol_class(symbol) if asset_class is ClassFromPrefix.ANY else asset_class
-    try:
-        canonical_symbol(symbol, resolved)
-    except ValueError:
-        return False
-    return True
+    # A stock ticker converts only from a named convention, and the message names
+    # `convention=`; every other class converts by its class alone.
+    conventions = (
+        tuple(SymbolConvention) if resolved is AssetClass.STOCKS else (SymbolConvention.MASSIVE,)
+    )
+    for convention in conventions:
+        try:
+            canonical_symbol(symbol, resolved, convention=convention)
+        except ValueError:
+            continue
+        return True
+    return False
 
+
+UNDERLYINGS_IN_ANOTHER_SPELLING: Final = (
+    "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
+    "#underlyings-in-another-spelling"
+)
+"""The troubleshooting section that converts a table of tickers in another source's spelling,
+a table of underlyings that mixes stocks and indices among them."""
 
 _UNDERLYING_CONVERSION: Final = (
-    "If your stock tickers use another source's spelling, such as Yahoo's 'BRK-B', convert "
-    "every row but the index rows: converting the whole table as stocks nulls index rows such "
-    "as 'I:SPX'. With t the table you passed as underlying=:\n"
-    "    from deephaven import merge\n"
-    "    stocks = dm.canonicalize_symbols("
-    't.where("isNull(Symbol) || !Symbol.startsWith(`I:`)"), '
-    "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)\n"
-    '    underlying = merge([stocks, t.where("!isNull(Symbol) && '
-    'Symbol.startsWith(`I:`)")])\n'
-    "Use YAHOO, NASDAQ, or CMS, whichever source the tickers come from"
+    "If your tickers use another source's spelling, such as Yahoo's 'BRK-B', convert the stock "
+    f"rows with dm.canonicalize_symbols and keep the index rows: {UNDERLYINGS_IN_ANOTHER_SPELLING}."
 )
-"""How a table of underlyings in another source's stock spelling converts, one step per line:
-the stock rows only, since the stock converter nulls an index ticker."""
+"""How a table of underlyings in another source's stock spelling converts: the stock rows only,
+since the stock converter nulls an index ticker. The linked section holds the code."""
 
 
-_FAILED_TABLE: Final = (
-    "the symbol table passed to {dataset} failed upstream, so the result can no longer follow "
-    "it: {cause}. Fix that table and call {dataset} again; a table made by "
-    "dm.canonicalize_symbols fails on a row it cannot convert only under on_error=dm.OnError.RAISE"
+def failed_table_message(dataset: str, cause: object | None = None) -> str:
+    """Say that the table a result follows has failed, and how to go on.
+
+    A table made by `dm.canonicalize_symbols` under `on_error=dm.OnError.RAISE` fails on a row
+    it cannot convert; any other failed table fails the same way.
+
+    Args:
+        dataset: The dataset the table was passed to, such as `"stocks.quotes"`.
+        cause: What Deephaven reported when the table failed while followed, which may end in
+            a stack trace; None when the table had already failed at the read.
+
+    Returns:
+        Such as `"The table you passed to stocks.quotes has failed, so the library can no longer
+        read it. Deephaven reported: boom. Fix that table, then call stocks.quotes again."`.
+    """
+    problem = f"The table you passed to {dataset} has failed, so the library can no longer read it"
+    if cause is not None:
+        problem = f"{problem}. Deephaven reported: {str(cause).strip()}"
+    return user_defect(problem, f"Fix that table, then call {dataset} again")
+
+
+SKIPPED_ROWS_FIX: Final = (
+    f"Fix or delete those rows, or report them at {ISSUES_URL} if Massive itself writes them."
 )
-"""The message of a result whose symbol table failed upstream, formatted with the dataset and
-the cause."""
+"""What ends the error of a table none of whose values a read takes: a skipped value may be a
+form Massive writes that the library does not know yet (`skipped_rows_text`)."""
 
 
-def skipped_rows_text(values: Iterable[str]) -> str:
-    """Say which values of a symbol table are skipped, for the error of a table that holds none.
+def skipped_rows_text(values: Sequence[str]) -> str:
+    """Say which values of a table a read skipped, for the error of a table that holds none.
 
     Args:
         values: The distinct skipped values; at least one.
 
     Returns:
-        Their count and the first five in sorted order, and what to do, such as
-        `skipping 1 symbol-table value this dataset does not take: 'aapl'; fix or delete that
-        row, or report it at <issues> if Massive itself writes it`. The value is not called
-        wrong: Massive may write a form the library does not know yet.
+        The values in sorted order as prose, the first three only when there are more, such
+        as `"'aapl' and 'msft'"` or `"7 values, the first 3: 'a', 'b', and 'c'"`. The values
+        are not called wrong: Massive may write a form the library does not know yet.
     """
-    texts = sorted(values)
-    shown = ", ".join(repr(text) for text in texts[:_SHOWN])
-    more = f", and {len(texts) - _SHOWN} more" if len(texts) > _SHOWN else ""
-    if texts[1:]:
-        return (
-            f"skipping {len(texts)} symbol-table values this dataset does not take: "
-            f"{shown}{more}; fix or delete those rows, or report them at {ISSUES_URL} if "
-            "Massive itself writes them"
-        )
-    return (
-        f"skipping 1 symbol-table value this dataset does not take: {shown}; fix or delete "
-        f"that row, or report it at {ISSUES_URL} if Massive itself writes it"
-    )
+    return prose_list([repr(text) for text in sorted(values)], "values")
 
 
 class RowRule(Protocol):
@@ -471,7 +486,7 @@ class SymbolRowRule:
         """
         if self.underlying:
             return (
-                f"a table of underlyings holds {symbol!r}, which is not a stock or index ticker "
+                f"A table of underlyings holds {symbol!r}, which is not a stock or index ticker "
                 f"such as 'AAPL' or 'I:SPX'. Fix or delete the row. {_UNDERLYING_CONVERSION}"
             )
         return invalid_row_message(self.asset_class, symbol, as_written=self.as_written)
@@ -500,12 +515,13 @@ class SymbolRowRule:
         level = effect_of(self.noncanonical).level
         alarm = level > logging.DEBUG and stream_id is None and not reported
         rows = _logged_rows if alarm else _ignored_rows
-        reader = "a call's read" if stream_id is None else f"stream {stream_id}"
+        reader = "" if stream_id is None else f" stream {stream_id}"
         rows.log(
             f"{self.dataset}\0{symbol}",
-            "%s %s: %s; the row is skipped until it is fixed or deleted",
+            "%s%s: Skipping the row %r until it is fixed or deleted. %s",
             self.dataset,
             reader,
+            symbol,
             self._reason(symbol),
         )
 
@@ -694,7 +710,7 @@ def read_symbols(
             in sorted order).
     """
     if table.j_table.isFailed():
-        raise ValueError(_FAILED_TABLE.format(dataset=rule.dataset, cause="it is failed"))
+        raise ValueError(failed_table_message(rule.dataset))
     found = sorted({row[0] for row in table.iter_tuple(cols=rule.column) if row[0] is not None})
     good: list[str] = []
     skipped: list[str] = []
@@ -930,7 +946,7 @@ class _SymbolCounter(TableListener):
         Args:
             e: What Deephaven reported.
         """
-        message = _FAILED_TABLE.format(dataset=self._rule.dataset, cause=e)
+        message = failed_table_message(self._rule.dataset, e)
         logger.debug("%s stream %d: %s", self._rule.dataset, self._stream_id, message)
         self._on_invalid(message)
 

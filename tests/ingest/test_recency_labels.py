@@ -62,10 +62,10 @@ def test_a_stream_refusal_names_the_delayed_feed() -> None:
     # Massive serves the delayed data; the session's settings refuse it.
     assert (error.source, error.is_bug) == (dm.ErrorSource.USER, False)
     assert str(error) == (
-        "options streams would be delayed (Massive reports last_trade.timeframe=DELAYED), and "
-        "dm.Subscription.OPTIONS is not in MassiveConfig.delayed_subscriptions, so the library "
-        "serves only real-time options data. To use Massive's delayed options feed: "
-        "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})"
+        "options streams would be delayed, since Massive reports last_trade.timeframe=DELAYED, "
+        "and dm.Subscription.OPTIONS is not in delayed_subscriptions, so the library serves only "
+        "real-time options data. To use Massive's delayed options feed, pass "
+        "delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."
     )
 
 
@@ -73,9 +73,19 @@ def test_a_rest_refusal_says_streams_move_too() -> None:
     error = delayed_refusal(
         Subscription.STOCKS, "stocks.snapshots data", "status=DELAYED", streams=False
     )
-    assert "To accept delayed stocks data (its streams then use Massive's delayed feed too)" in (
-        str(error)
+    assert str(error) == (
+        "stocks.snapshots data would be delayed, since Massive reports status=DELAYED, and "
+        "dm.Subscription.STOCKS is not in delayed_subscriptions, so the library serves only "
+        "real-time stocks data. To accept delayed stocks data, whose streams then use Massive's "
+        "delayed feed too, pass delayed_subscriptions={dm.Subscription.STOCKS} to "
+        "dm.MassiveConfig."
     )
+
+
+def test_the_setting_the_refusal_names_lets_the_delayed_data_through() -> None:
+    # The advice works: a configuration built as the message says lists the subscription.
+    config = dm.MassiveConfig(api_key="test-key", delayed_subscriptions={dm.Subscription.OPTIONS})
+    assert Subscription.OPTIONS in config.delayed_subscriptions
 
 
 @pytest.mark.parametrize(

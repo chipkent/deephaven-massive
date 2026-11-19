@@ -1,6 +1,7 @@
 """Tests for the unit of each epoch field and the timestamp routine."""
 
 import logging
+import re
 from datetime import UTC, datetime
 
 import pyarrow as pa
@@ -86,7 +87,12 @@ def test_rest_fmv_times_keep_their_unit() -> None:
 
 def test_a_field_that_is_not_an_epoch_has_no_unit() -> None:
     stream = source(Transport.WS, "stocks/T")
-    with pytest.raises(ValueError, match=r"^stocks/T field 'p' is not an epoch timestamp$"):
+    message = (
+        "The library read field 'p' of stocks/T as an epoch timestamp, which it is not. This is "
+        "a bug in deephaven-massive. Turn on dm.enable_debug_logging(), reproduce it, and report "
+        "it with the log and m.streams() at https://github.com/chipkent/deephaven-massive/issues."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         time_unit(stream, stream.field("Price"))
 
 
@@ -123,7 +129,7 @@ def test_fmv_rule_classifies_at_the_threshold(
         assert one(FMV, NANOS) == NANOS
     detected = [r.getMessage() for r in caplog.records if "by magnitude" in r.getMessage()]
     assert detected == [
-        "t.T: timestamps read by magnitude (milliseconds or nanoseconds) arrived in ms"
+        "t.T: timestamps read by magnitude, as milliseconds or nanoseconds, arrived in ms."
     ]
     # The threshold itself is nanoseconds (1973, so out of bounds); just below it is
     # milliseconds, which overflows.
@@ -146,7 +152,7 @@ def test_fmv_rule_logs_only_a_decided_unit(
         one(FMV, NANOS)
     detected = [r.getMessage() for r in caplog.records if "by magnitude" in r.getMessage()]
     assert detected == [
-        "t.T: timestamps read by magnitude (milliseconds or nanoseconds) arrived in ns"
+        "t.T: timestamps read by magnitude, as milliseconds or nanoseconds, arrived in ns."
     ]
 
 

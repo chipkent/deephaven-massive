@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import gc
 import logging
+import re
 import threading
 import time
 import weakref
@@ -21,7 +22,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars
-from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, MassiveError
+from deephaven_massive._errors import LIBRARY_BUG, MassiveError
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import background_read, live_set
 from deephaven_massive._tables.background_read import BACKGROUND_NOTE, BackgroundRead, open_read
@@ -40,6 +41,12 @@ if TYPE_CHECKING:
 
 
 TIMEOUT = 30.0
+
+ANSWER_500 = (
+    "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 500 (request_id r1): "
+    '"Internal Server Error".'
+)
+"""Massive's answer to the read's request, as the REST client words it."""
 
 SPEC = DatasetSpec(
     name="test.trades",
@@ -144,6 +151,11 @@ def test_a_read_fills_its_table_in_one_update(
     assert result.attributes()["TableDescription"] == (
         f"test.trades: A dataset for the tests. Read from flat files: a test. {BACKGROUND_NOTE}"
     )
+    assert BACKGROUND_NOTE == (
+        "This table is read in the background. It has no rows until the download completes, "
+        "then gets the complete result in one update, which never changes. m.streams() shows "
+        "LOADING, then DONE or FAILED. Pass wait=True to the call to wait for the rows instead."
+    )
     (row,) = stream_rows()
     assert {k: row[k] for k in ("Kind", "State", "Transport", "Host", "Path", "RowsPublished")} == {
         "Kind": "read",
@@ -205,7 +217,7 @@ def test_a_failed_download_fails_the_table_and_its_row(
     massive_session: dm.MassiveSession, stream_rows: Rows, caplog: pytest.LogCaptureFixture
 ) -> None:
     def run(stop: threading.Event) -> Table:
-        raise dm.MassiveError("HTTP 500 for /v3/trades/AAPL (request_id=r1)")
+        raise dm.MassiveError(ANSWER_500, status=500, request_id="r1")
 
     with caplog.at_level(logging.WARNING, logger=background_read.__name__):
         result = open_test_read(massive_session, run)
@@ -214,12 +226,16 @@ def test_a_failed_download_fails_the_table_and_its_row(
     (row,) = stream_rows()
     assert (row["State"], row["Error"]) == (
         "FAILED",
-        "HTTP 500 for /v3/trades/AAPL (request_id=r1)",
+        ANSWER_500,
     )
     (record,) = caplog.records
     assert record.levelno == logging.WARNING  # an expected failure: stale data, not a defect
-    assert record.getMessage().endswith(": HTTP 500 for /v3/trades/AAPL (request_id=r1)")
-    assert record.getMessage().startswith(f"call {row['StreamId']} failed after ")
+    assert re.fullmatch(
+        r"test\.trades background read stream 1 failed after \d+\.\d{3} s: "
+        + re.escape(ANSWER_500),
+        record.getMessage(),
+    )
+    assert row["StreamId"] == 1
     assert record.exc_info is None  # the text says it all
     assert not the_read(massive_session).fail(dm.MassiveError("later"))  # once only
     massive_session.release(result)
@@ -237,12 +253,19 @@ def test_a_defect_fails_the_table_with_a_massive_error_naming_it(
     until(lambda: failed(result))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("test.trades: the background read failed: ")
-    assert "Price" in row["Error"]
-    assert row["Error"].endswith(LIBRARY_BUG)
+    assert row["Error"].startswith(
+        "test.trades: the background read failed on an unexpected DHError: table view operation "
+        "failed. : RuntimeError: io.deephaven.engine.table.impl.NoSuchColumnException: Unknown "
+        "column names [Price]"
+    )
+    assert row["Error"].endswith(f". {LIBRARY_BUG}")
     (record,) = caplog.records  # once, though the table's failure is logged too
     assert record.levelno == logging.ERROR
-    assert record.getMessage().endswith(LIBRARY_BUG)
+    assert re.fullmatch(
+        r"test\.trades background read stream 1 failed after \d+\.\d{3} s\. "
+        + re.escape(LIBRARY_BUG),
+        record.getMessage(),
+    )
     assert record.exc_info is not None  # a defect is logged with its traceback
     massive_session.release(result)
 
@@ -472,7 +495,10 @@ def test_closing_the_session_fails_a_loading_read(
     (row,) = [r for r in dh_to_pylist(view) if r["Kind"] == "read"]
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates; " + NEW_SESSION,
+        (
+            "This session was closed, so this table no longer updates. Open a new "
+            "dm.MassiveSession() to read again."
+        ),
     )
     del view
 

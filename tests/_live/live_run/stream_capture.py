@@ -125,17 +125,15 @@ SESSION_GRACE: Final = timedelta(minutes=5)
 """How long past its session's open a unit may go without a row."""
 
 REFUSAL_MARKS: Final = (
-    "refused the subscription to",
+    "Massive answered the subscription to",
     "HTTP 403",
     "NOT_AUTHORIZED",
     "not entitled",
-    "may not include this data",
-    "(FMV) data needs",
 )
 """Text that marks a failed stream's error as a refusal by Massive: the library's wording of a
-topic Massive's WebSocket server refused (`the WebSocket server <host> refused the subscription
-to <topics>; Massive said: <its message>; <the feed's hint>`), an HTTP 403, a `NOT_AUTHORIZED`
-envelope, and the hints of a refused topic, including a fair-market-value (FMV) topic's."""
+subscription Massive's WebSocket server refused (`Massive answered the subscription to
+<subscriptions> on <url>: "<its message>".`, then the feed's hint), an HTTP 403, a
+`NOT_AUTHORIZED` envelope, and Massive's own "not entitled"."""
 
 
 def is_refusal(error: str) -> bool:
@@ -150,7 +148,7 @@ def is_refusal(error: str) -> bool:
     return any(mark in error for mark in REFUSAL_MARKS)
 
 
-NOT_LISTED_MARK: Final = "is not in MassiveConfig.delayed_subscriptions"
+NOT_LISTED_MARK: Final = "is not in delayed_subscriptions"
 """Text that marks a failed stream's error as the settings' refusal of delayed data: the
 library's message names the setting that would accept it (`recency_labels.delayed_refusal`)."""
 

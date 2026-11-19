@@ -320,8 +320,8 @@ class IndicesNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
-                "use m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
-                "every ticker's bar of that day"
+                "For every ticker's bar of one day, call m.indices.bars(dm.ALL, dm.Timespan.DAY)"
+                ".history('2025-01-02', '2025-01-02')."
             ),
             timespan=Timespan.DAY,
             on_error=on_error,
@@ -425,8 +425,8 @@ class IndicesNamespace(Namespace):
             query_type=FetchQuery,
             symbols=symbols,
             all_alternative=(
-                "use m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day), "
-                "every index's bar of that day"
+                "For every index's bar of one day, call m.indices.bars(dm.ALL, dm.Timespan.DAY)"
+                ".history('2025-01-02', '2025-01-02')."
             ),
             params={"date": day_argument(DAILY_OPEN_CLOSE, date, "date")},
             on_error=on_error,

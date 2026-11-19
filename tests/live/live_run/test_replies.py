@@ -262,8 +262,8 @@ def test_a_stream_the_settings_refused_later_skips_as_not_listed() -> None:
     """The settings' refusal can fail a stream after it opened, in `m.streams()` alone."""
     example = _example("market-status")
     error = (
-        "stocks streams would be delayed (Massive reports timeframe=DELAYED), and "
-        "dm.Subscription.STOCKS is not in MassiveConfig.delayed_subscriptions"
+        "stocks streams would be delayed, since Massive reports timeframe=DELAYED, and "
+        "dm.Subscription.STOCKS is not in delayed_subscriptions"
     )
     assert replies._verdict(example, error=None, stream_error=error, count=1) == (
         "skipped",

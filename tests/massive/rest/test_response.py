@@ -14,6 +14,7 @@ from deephaven_massive._massive.net.errors import (
 )
 from deephaven_massive._massive.rest.response import (
     GOOD_STATUSES,
+    ErrorContext,
     Page,
     RequestTarget,
     body_excerpt,
@@ -105,10 +106,10 @@ def test_a_missing_result_key_under_any_other_status_is_an_error(status: str) ->
         body["status"] = status
     with pytest.raises(WireError, match="the body has no 'results'") as caught:
         _decode(body)
-    shown = status or "(none)"
+    labelled = f"its status is {status!r}" if status else "it has no status"
     assert str(caught.value) == (
-        f"HTTP 200 with status {shown} from GET /v3/x?limit=5 on api.massive.com "
-        "(request_id r): the body has no 'results'"
+        "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 200 (request_id r), and "
+        f"the library could not read the answer: the body has no 'results' and {labelled}."
     )
     assert (caught.value.status, caught.value.request_id) == (200, "r")
     # A body of the wrong shape is a gap in the library.
@@ -211,8 +212,8 @@ def test_not_authorized_is_an_entitlement_error_on_every_path(rest_path: RestPat
     with pytest.raises(WireEntitlementError) as caught:
         _decode(body, rest_path)
     assert str(caught.value) == (
-        "HTTP 200 with status NOT_AUTHORIZED from GET /v3/x?limit=5 on api.massive.com "
-        "(request_id r): upgrade your plan"
+        "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 200 and status "
+        'NOT_AUTHORIZED (request_id r): "upgrade your plan".'
     )
     assert (caught.value.status, caught.value.request_id) == (200, "r")
     assert (caught.value.host, caught.value.path) == ("api.massive.com", "/v3/x?limit=5")
@@ -221,21 +222,25 @@ def test_not_authorized_is_an_entitlement_error_on_every_path(rest_path: RestPat
 @pytest.mark.parametrize("rest_path", [_RESULTS, _LAST, _VALUES, _BODY])
 def test_error_is_a_wire_error_on_every_path_even_with_rows(rest_path: RestPath) -> None:
     body = {"status": "ERROR", "error": "bad ticker", "results": [{}], "last": {}}
-    with pytest.raises(WireError, match=r"with status ERROR .*: bad ticker$") as caught:
+    with pytest.raises(WireError, match=r'and status ERROR.*: "bad ticker"\.$') as caught:
         _decode(body, rest_path)
     assert type(caught.value) is WireError
     assert caught.value.kind is WireFailure.REFUSED  # Massive's own answer, not an unreadable body
 
 
 def test_an_error_status_without_a_message_says_so() -> None:
-    with pytest.raises(WireError, match=r"no message$"):
+    with pytest.raises(WireError) as caught:
         _decode({"status": "ERROR"})
+    assert str(caught.value) == (
+        "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 200 and status ERROR and "
+        "no message."
+    )
 
 
 def test_an_error_message_is_cut_to_200_characters() -> None:
     with pytest.raises(WireError) as caught:
         _decode({"status": "ERROR", "message": "x" * 300})
-    assert caught.value.message.endswith(": " + "x" * 200)
+    assert caught.value.message.endswith(': "' + "x" * 200 + '".')
 
 
 @pytest.mark.parametrize("rest_path", [_RESULTS, _BODY])
@@ -271,7 +276,6 @@ def test_a_status_that_is_not_text_is_an_error(body: dict[str, object]) -> None:
         b"<html>Bad gateway</html>",
         b'{"status": "OK", "results": [',
         b'\xff\xfe{"status": "OK"}',
-        b"",
         b'{"a": NaN}',
         b"[" * 1100 + b"]" * 1100,  # deeper than either decoder allows (512, orjson 1024)
     ],
@@ -279,17 +283,89 @@ def test_a_status_that_is_not_text_is_an_error(body: dict[str, object]) -> None:
 def test_a_body_that_is_not_json_is_an_error_quoting_its_start(data: bytes) -> None:
     with pytest.raises(WireError, match="the body is not JSON") as caught:
         decode_page(data, _RESULTS, _REQUEST)
-    assert repr(data[:200]) in caught.value.message
-    assert caught.value.status == 200
+    excerpt = data.decode("utf-8", "replace")[:200]
     assert isinstance(caught.value.__cause__, ValueError)
+    assert caught.value.message == (
+        "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 200, and the library "
+        f'could not read the answer: the body is not JSON and starts "{excerpt}": '
+        f"{caught.value.__cause__}."
+    )
+    assert caught.value.status == 200
     assert caught.value.kind is WireFailure.UNREADABLE
 
 
-def test_a_huge_bad_body_is_quoted_only_for_200_bytes() -> None:
+def test_an_empty_body_is_an_error_saying_so() -> None:
+    with pytest.raises(WireError) as caught:
+        decode_page(b"", _RESULTS, _REQUEST)
+    assert caught.value.message == (
+        "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 200, and the library "
+        "could not read the answer: the body is empty."
+    )
+    assert caught.value.kind is WireFailure.UNREADABLE
+
+
+def test_a_huge_bad_body_is_quoted_only_for_200_characters() -> None:
     data = b"<" + b"x" * 1000
     with pytest.raises(WireError) as caught:
         decode_page(data, _RESULTS, _REQUEST)
-    assert caught.value.message.endswith(repr(data[:200]))
+    assert f'starts "{data[:200].decode()}": ' in caught.value.message
+
+
+# The two sentences of a wire error.
+
+
+def test_an_answer_is_one_sentence_quoting_massive_whatever_the_status() -> None:
+    context = _REQUEST.answered(403, "You are not entitled to this data", request_id="abc123")
+    assert context == ErrorContext(
+        message=(
+            "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 403 (request_id "
+            'abc123): "You are not entitled to this data".'
+        ),
+        status=403,
+        host="api.massive.com",
+        path="/v3/x?limit=5",
+        request_id="abc123",
+    )
+    assert _REQUEST.answered(503, "busy", request_id=None)["message"] == (
+        'Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 503: "busy".'
+    )
+    envelope = _REQUEST.answered(
+        200, "upgrade your plan", request_id="r", envelope_status="NOT_AUTHORIZED"
+    )
+    assert envelope["message"] == (
+        "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 200 and status "
+        'NOT_AUTHORIZED (request_id r): "upgrade your plan".'
+    )
+    assert _REQUEST.answered(502, "", request_id=None)["message"] == (
+        "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 502 and no message."
+    )
+
+
+def test_an_unreadable_answer_says_what_the_library_could_not_read() -> None:
+    context = _REQUEST.unreadable(200, "the body is not a JSON object")
+    assert context == ErrorContext(
+        message=(
+            "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 200, and the "
+            "library could not read the answer: the body is not a JSON object."
+        ),
+        status=200,
+        host="api.massive.com",
+        path="/v3/x?limit=5",
+        request_id=None,
+    )
+    assert _REQUEST.unreadable(200, "the envelope's status is not text", request_id="r") == (
+        ErrorContext(
+            message=(
+                "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 200 (request_id "
+                "r), and the library could not read the answer: the envelope's status is not "
+                "text."
+            ),
+            status=200,
+            host="api.massive.com",
+            path="/v3/x?limit=5",
+            request_id="r",
+        )
+    )
 
 
 # HTTP errors.
@@ -311,7 +387,8 @@ def test_an_http_status_maps_to_its_error(status: int, kind: type[WireError]) ->
     error = http_error(status, data, _REQUEST)
     assert type(error) is kind
     assert str(error) == (
-        f"HTTP {status} from GET /v3/x?limit=5 on api.massive.com (request_id r): nope"
+        f"Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP {status} (request_id "
+        'r): "nope".'
     )
     assert (error.status, error.request_id, error.host, error.path) == (
         status,
@@ -323,7 +400,9 @@ def test_an_http_status_maps_to_its_error(status: int, kind: type[WireError]) ->
 
 def test_an_http_error_quotes_the_error_key_when_there_is_no_message() -> None:
     error = http_error(400, b'{"status": "ERROR", "error": "bad limit"}', _REQUEST)
-    assert str(error) == "HTTP 400 from GET /v3/x?limit=5 on api.massive.com: bad limit"
+    assert str(error) == (
+        'Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 400: "bad limit".'
+    )
     assert error.request_id is None
 
 
@@ -334,13 +413,16 @@ def test_an_http_error_quotes_the_error_key_when_there_is_no_message() -> None:
 def test_an_http_error_without_a_message_quotes_200_characters_of_the_body(data: bytes) -> None:
     error = http_error(502, data, _REQUEST)
     assert str(error) == (
-        f"HTTP 502 from GET /v3/x?limit=5 on api.massive.com: {data.decode()[:200]}"
+        "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 502: "
+        f'"{data.decode()[:200]}".'
     )
 
 
 def test_an_http_error_with_an_empty_or_undecodable_body() -> None:
-    assert str(http_error(503, b"", _REQUEST)).endswith(": an empty body")
-    assert str(http_error(503, b"\xffoops", _REQUEST)).endswith(": �oops")
+    assert str(http_error(503, b"", _REQUEST)) == (
+        "Massive answered GET /v3/x?limit=5 on api.massive.com with HTTP 503 and no message."
+    )
+    assert str(http_error(503, b"\xffoops", _REQUEST)).endswith(': "�oops".')
 
 
 def test_an_http_error_decodes_only_the_bytes_its_excerpt_can_need() -> None:
@@ -363,7 +445,7 @@ def test_an_http_error_decodes_only_the_bytes_its_excerpt_can_need() -> None:
     body = "\U0001f600".encode() * 300  # 4 bytes a character, the most UTF-8 needs
     error = http_error(502, Recording(body), _REQUEST)
     assert sliced == [slice(None, 800)]  # 200 characters of 4 bytes, never the whole body
-    assert str(error).endswith(": " + "\U0001f600" * 200)
+    assert str(error).endswith(': "' + "\U0001f600" * 200 + '".')
 
 
 def test_an_error_keeps_a_numeric_request_id_as_text() -> None:

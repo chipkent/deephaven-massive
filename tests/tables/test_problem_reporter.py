@@ -77,18 +77,18 @@ def test_the_first_problem_of_each_table_and_cause_warns_once(
     assert warnings(caplog) == [
         (
             "stocks.trades table 7: unconvertible_values: 2 rows of AAPL, Price holds 'x' (at GET "
-            "/v3/trades); m.problems() lists it and every later unconvertible_values problem of "
-            "this table, which the log shows at DEBUG only"
+            "/v3/trades). m.problems() lists it and every later unconvertible_values problem of "
+            "this table, which the log shows at DEBUG only."
         ),
         (
-            "stocks.trades table 8: unconvertible_values: Price holds 'x' (at GET /v3/trades); "
+            "stocks.trades table 8: unconvertible_values: Price holds 'x' (at GET /v3/trades). "
             "m.problems() lists it and every later unconvertible_values problem of this table, "
-            "which the log shows at DEBUG only"
+            "which the log shows at DEBUG only."
         ),
         (
             "stocks.trades table 7: unreadable_keys: 2 rows of AAPL, Price holds 'x' (at GET "
-            "/v3/trades); m.problems() lists it and every later unreadable_keys problem of this "
-            "table, which the log shows at DEBUG only"
+            "/v3/trades). m.problems() lists it and every later unreadable_keys problem of this "
+            "table, which the log shows at DEBUG only."
         ),
     ]
     debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
@@ -129,9 +129,9 @@ def test_a_span_warns_and_an_empty_snapshot_only_queues(
         reporter([stale])
     assert warnings(caplog) == [
         (
-            "stocks.trades table 7: stale_symbol_data: ESZ6: why (at here); m.problems() lists it "
+            "stocks.trades table 7: stale_symbol_data: ESZ6: why (at here). m.problems() lists it "
             "and every later stale_symbol_data problem of this table, which the log shows at DEBUG "
-            "only"
+            "only."
         )
     ]
     assert len(queued) == 2

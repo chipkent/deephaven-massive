@@ -372,9 +372,10 @@ class SharedLookup(Generic[K, V]):
             (`_AbandonedError`), so this caller tries again.
 
         Once a pause of the lookup outlasts this caller's patience, it raises the public error
-        of a request that gives up: `MassiveError("rate limited: ...")` with status 429, or
-        `"... is closed; ..."` if the session closed meanwhile. Once `cancel` is set, it raises
-        `MassiveError("waiting for <what>: cancelled")`, or the closed session's error.
+        of a request that gives up, a `MassiveError` with status 429, or `"This session is
+        closed. ..."` if the session closed meanwhile. Once `cancel` is set, it raises
+        `MassiveError("Waiting for <what> ended. The read stopped ...")`, or the closed
+        session's error.
         """
         logger.debug(
             "%s: waits for %s another caller is making, through at most %.0f s of its pauses",
@@ -403,7 +404,7 @@ class SharedLookup(Generic[K, V]):
                     return True
                 if cancel is not None and cancel.is_set():
                     stopped = public(
-                        WireError(f"waiting for {what}: cancelled", kind=WireFailure.STOPPED)
+                        WireError(f"Waiting for {what} ended.", kind=WireFailure.STOPPED)
                     )
                     logger.debug(
                         "%s: stops waiting for %s, its read was stopped: %s",

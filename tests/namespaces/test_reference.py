@@ -37,6 +37,12 @@ from deephaven_massive.queries import FetchQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
+
 OWNER = "namespaces/reference"
 R = Transport.REST
 NAMES = [
@@ -258,9 +264,13 @@ def test_ticker_details_and_events_queries(massive_session: dm.MassiveSession) -
     assert details._request == Request(symbols=("AAPL",), params=(("date", date(2024, 1, 2)),))
     # The day is a calendar date, so an aware datetime is refused.
     early = datetime(2025, 1, 3, 2, tzinfo=UTC)
-    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
+    with pytest.raises(
+        ValueError, match=r"as_of=.* is a time, and as_of takes a calendar date\. Pass a date"
+    ):
         ref.ticker_details("AAPL", as_of=early)
-    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
+    with pytest.raises(
+        ValueError, match=r"as_of=.* is a time, and as_of takes a calendar date\. Pass a date"
+    ):
         ref.tickers(as_of=early)
     assert ref.ticker_details(["O:SPY251219C00600000"])._request == Request(
         symbols=("O:SPY251219C00600000",)
@@ -322,7 +332,7 @@ def test_news_takes_a_watchlist(massive_session: dm.MassiveSession) -> None:
     assert ref.news(symbols=["MSFT", "AAPL"])._request == Request(symbols=("AAPL", "MSFT"))
     table = new_table([string_col("Symbol", ["AAPL"])])
     assert ref.news(symbols=table)._request == Request(symbols=SymbolTable(table))
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         ref.news(symbols=[])
 
 
@@ -379,27 +389,37 @@ def test_each_endpoint_accepts_its_own_asset_classes(
         (ref.conditions, "conditions", dm.AssetClass.INDICES, ["STOCKS", "OPTIONS"]),
     ]
     for factory, name, asset_class, accepted in rejected:
+        names = [f"dm.AssetClass.{name}" for name in (*accepted, "FOREX", "CRYPTO")]
+        listed = f"{', '.join(names[:-1])}, and {names[-1]}"
         message = (
-            f"reference.{name} does not accept AssetClass.{asset_class.name}; "
-            f"it accepts {[*accepted, 'FOREX', 'CRYPTO']}"
+            f"reference.{name} takes no asset_class=dm.AssetClass.{asset_class.name}. Pass one "
+            f"of {listed}."
         )
-        with pytest.raises(ValueError, match=re.escape(message)):
+        with pytest.raises(ValueError, match=whole(message)):
             factory(asset_class=asset_class)
+        assert factory(asset_class=dm.AssetClass.STOCKS)._request is not None  # the advice
 
 
 def test_dm_all_names_the_alternative(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
     alternatives = {
-        "tickers": "leave symbols out for every ticker",
-        "news": "leave symbols out for every article",
+        "tickers": "Leave symbols out to read every ticker.",
+        "news": "Leave symbols out to read every article.",
     }
     for method, alternative in alternatives.items():
-        with pytest.raises(ValueError, match=re.escape(f"does not accept dm.ALL; {alternative}")):
+        refusal = f"reference.{method} does not take dm.ALL. {alternative}"
+        with pytest.raises(ValueError, match=whole(refusal)):
             getattr(ref, method)(symbols=dm.ALL)
-    with pytest.raises(ValueError, match=r"use m\.reference\.tickers\(\) for every ticker"):
+        assert getattr(ref, method)()._request.symbols is None  # the advice
+    details = (
+        "reference.ticker_details does not take dm.ALL. For every ticker, call "
+        "m.reference.tickers().fetch()."
+    )
+    with pytest.raises(ValueError, match=whole(details)):
         ref.ticker_details(dm.ALL)
     for method in ("ticker_events", "related_companies"):
-        with pytest.raises(ValueError, match=r"does not accept dm\.ALL; pass a list of symbols"):
+        refusal = f"reference.{method} does not take dm.ALL. Pass a list of tickers."
+        with pytest.raises(ValueError, match=whole(refusal)):
             getattr(ref, method)(dm.ALL)
 
 
@@ -410,13 +430,14 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
             ref.tickers(**{name: 1})
     with pytest.raises(TypeError, match="active must be a bool, not NoneType"):
         ref.tickers(active=None)
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         ref.tickers(as_of="2025-01-02T09:30")
     with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         ref.ticker_details("AAPL", as_of="soon")
-    with pytest.raises(ValueError, match="types is empty"):
+    empty = "types=[] is empty, so it would select nothing. Leave types out for every event type."
+    with pytest.raises(ValueError, match=whole(empty)):
         ref.ticker_events("AAPL", types=[])
-    with pytest.raises(TypeError, match="types must hold only str"):
+    with pytest.raises(TypeError, match=whole("types must hold only str, not int")):
         ref.ticker_events("AAPL", types=["ticker_change", 1])
     with pytest.raises(TypeError, match="types must be a sequence of str, not int"):
         ref.ticker_events("AAPL", types=1)
@@ -424,13 +445,20 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         with pytest.raises(TypeError, match="condition_id must be an int"):
             ref.conditions(condition_id=bad)
     # A reserved wire name names the factory's argument, which may be spelled differently.
-    with pytest.raises(ValueError, match=r"^type is set through its own argument, ticker_type="):
+    own = "The filter 'type' has its own argument. Pass ticker_type= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         ref.tickers(filters={"type": "CS"})
-    with pytest.raises(ValueError, match=r"^date is set through its own argument, as_of="):
+    own = "The filter 'date' has its own argument. Pass as_of= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         ref.tickers(filters={"date": "2025-01-02"})
-    with pytest.raises(ValueError, match=r"^id_gte is set through its own argument, condition_id="):
+    own = "The filter 'id_gte' has its own argument. Pass condition_id= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         ref.conditions(filters={"id_gte": 1})
-    with pytest.raises(ValueError, match="published_utc_gte is set through start= and end="):
+    axis = (
+        "The filter 'published_utc_gte' sets the time range of reference.news. Pass start= and "
+        "end= instead."
+    )
+    with pytest.raises(ValueError, match=whole(axis)):
         ref.news(filters={"published_utc_gte": "2025-01-01"})
     with pytest.raises(ValueError, match="end"):
         ref.news(start="2025-02-01", end="2025-01-01")

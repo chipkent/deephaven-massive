@@ -171,7 +171,7 @@ def test_a_refusal_is_an_error_with_massives_status_and_message(
     answers = bad_values.ask_all(client, bad_values.PRECISION, lines.append, today=_DAY)
     assert answers == (bad_values.Answer("ERROR", 400, 0, None),)
     assert "verdict ERROR (HTTP 400" in lines[-1]
-    assert lines[-1].endswith("precision must be 0 to 4)")
+    assert lines[-1].endswith('"precision must be 0 to 4".)')
 
 
 def test_an_error_envelope_sent_with_200_is_an_error(

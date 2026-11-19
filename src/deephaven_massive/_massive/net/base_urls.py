@@ -64,7 +64,7 @@ def _refusal(setting: str, base_url: str, reason: str) -> str:
         A message naming the setting, the URL with `***` in place of a user and password, a
         query, and a fragment, and the reason.
     """
-    message = f"{setting} {without_userinfo_or_query(base_url)!r} {reason}"
+    message = f"{setting}={without_userinfo_or_query(base_url)!r} {reason}"
     logger.debug("REST base URL refused: %s", message)
     return message
 
@@ -78,8 +78,8 @@ def check_rest_base_url(base_url: str, *, setting: str) -> Origin:
             check_rest_base_url("https://api.massive.com", setting="rest_base_url")
             # ("https", "api.massive.com", 443)
             check_rest_base_url("https://api.massive.com/v3", setting="rest_base_url")
-            # ValueError: rest_base_url 'https://api.massive.com/v3' must name only a
-            # scheme, host, and port
+            # ValueError: rest_base_url='https://api.massive.com/v3' names more than a
+            # scheme, host, and port. Pass only those, such as 'https://api.massive.com'.
 
     Args:
         base_url: The base URL, such as `"https://api.massive.com"`. A trailing `/` is allowed.
@@ -96,7 +96,7 @@ def check_rest_base_url(base_url: str, *, setting: str) -> Origin:
             not loopback, which would send the API key in clear text. The message shows the URL
             with `***` in place of a user and password, a query, and a fragment.
     """
-    invalid = "is not an absolute http or https URL with a valid port"
+    invalid = "is not an absolute http or https URL with a valid port."
     try:
         origin = origin_of(base_url)
     except ValueError:
@@ -107,14 +107,21 @@ def check_rest_base_url(base_url: str, *, setting: str) -> Origin:
         raise ValueError(_refusal(setting, base_url, invalid))
     parts = urlsplit(base_url)
     if parts.path not in {"", "/"} or parts.query or parts.fragment or "@" in parts.netloc:
-        raise ValueError(_refusal(setting, base_url, "must name only a scheme, host, and port"))
+        raise ValueError(
+            _refusal(
+                setting,
+                base_url,
+                "names more than a scheme, host, and port. Pass only those, such as "
+                "'https://api.massive.com'.",
+            )
+        )
     if origin[0] == "http" and not _is_loopback(origin[1]):
         raise ValueError(
             _refusal(
                 setting,
                 base_url,
-                "would send the API key in clear text; use https "
-                "(http is allowed only for a loopback host, such as a local test server)",
+                "would send the API key in clear text. Use https, or use http only for a "
+                "loopback host such as a local test server.",
             )
         )
     logger.debug("REST base URL %s %r reaches %s", setting, without_userinfo(base_url), origin)

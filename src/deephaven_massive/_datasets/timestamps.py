@@ -48,6 +48,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.epoch import epoch_ns
+from deephaven_massive._errors import library_bug
 from deephaven_massive._log_limits import log_once
 
 if TYPE_CHECKING:
@@ -113,7 +114,7 @@ def _log_magnitude_unit(label: str, unit: TimeUnit) -> None:
     log_once(
         logger,
         f"magnitude-unit\0{label}",
-        "%s: timestamps read by magnitude (milliseconds or nanoseconds) arrived in %s",
+        "%s: timestamps read by magnitude, as milliseconds or nanoseconds, arrived in %s.",
         label,
         unit.value,
     )
@@ -132,11 +133,16 @@ def time_unit(source: Source, field: Field) -> TimeUnit:
         The unit to convert the field's values by.
 
     Raises:
-        ValueError: If the field is not an epoch (it has no unit); the message names the source
-            and the field.
+        ValueError: If the field is not an epoch (it has no unit), a defect of the library's
+            caller; the message names the source and the field.
     """
     if field.unit is None:
-        raise ValueError(f"{source.key} field {field.wire_key!r} is not an epoch timestamp")
+        raise ValueError(
+            library_bug(
+                f"The library read field {field.wire_key!r} of {source.key} as an epoch "
+                "timestamp, which it is not"
+            )
+        )
     return TimeUnit(field.unit.value)
 
 

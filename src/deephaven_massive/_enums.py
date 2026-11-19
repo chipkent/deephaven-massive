@@ -653,7 +653,7 @@ def _require_enum(value: object, enum_type: type[_E], name: str) -> _E:
 
     Raises:
         TypeError: If `value` is not a member of `enum_type`, for example
-            `TypeError("timespan must be dm.Timespan, e.g. dm.Timespan.MINUTE")`.
+            `TypeError("timespan must be dm.Timespan, such as dm.Timespan.MINUTE, not 'minute'")`.
     """
     if isinstance(value, enum_type):
         return value
@@ -666,4 +666,12 @@ def _require_enum(value: object, enum_type: type[_E], name: str) -> _E:
                 example = member
                 break
     qualified = f"dm.{enum_type.__name__}"
-    raise TypeError(f"{name} must be {qualified}, e.g. {qualified}.{example.name}")
+    # Another enum's member reads as the user wrote it, text as quoted, and anything else by
+    # its type, the form Python's own type errors take.
+    if isinstance(value, Enum):
+        actual = f"dm.{type(value).__name__}.{value.name}"
+    elif isinstance(value, str):
+        actual = repr(value)
+    else:
+        actual = type(value).__name__
+    raise TypeError(f"{name} must be {qualified}, such as {qualified}.{example.name}, not {actual}")

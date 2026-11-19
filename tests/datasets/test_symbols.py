@@ -22,6 +22,7 @@ from deephaven_massive._datasets.symbols import (
     AllSymbols,
     SymbolsLike,
     SymbolTable,
+    as_written_fault,
     check_symbol,
     check_symbols,
     forex_codes,
@@ -35,6 +36,7 @@ from deephaven_massive._datasets.symbols import (
 )
 from deephaven_massive._datasets.wire_symbols import WireSymbols, canonical_from_wire
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
+from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError
 from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._tables.watchlist import CurrentSymbols, SymbolRowRule, read_symbols
 
@@ -125,23 +127,36 @@ NOT_CANONICAL = [
 ]
 
 
+FUTURES_FORMS = (
+    "A contract looks like 'ESZ5' or 'NGZ26' and a spread like 'GCQ6-GCZ6', in upper case. Pass "
+    "the ticker as m.futures.contracts() lists it."
+)
+"""The sentences after the first of every refusal of text that is no futures ticker."""
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("esz5", r"^'esz5' is not a Massive futures ticker: a contract is a root of upper-case"),
-        ("ESZ", r"^'ESZ' is not a Massive futures ticker: a contract is"),
-        ("hello world", r"^'hello world' is not a Massive futures ticker: a contract is"),
-        ("GC  Z6", r"^'GC  Z6' is not a Massive futures ticker: a contract is"),
-        (" ESZ5 ", r"^' ESZ5 ' has surrounding whitespace; write"),
-        ("X:ESZ5", "is a crypto ticker"),
+        ("esz5", f"'esz5' is not a Massive futures ticker. {FUTURES_FORMS}"),
+        ("ESZ", f"'ESZ' is not a Massive futures ticker. {FUTURES_FORMS}"),
+        ("hello world", f"'hello world' is not a Massive futures ticker. {FUTURES_FORMS}"),
+        ("GC  Z6", f"'GC  Z6' is not a Massive futures ticker. {FUTURES_FORMS}"),
+        (" ESZ5 ", "' ESZ5 ' has surrounding whitespace. Pass 'ESZ5'."),
+        (
+            "X:ESZ5",
+            (
+                "'X:ESZ5' is a crypto ticker, not a futures one. "
+                "Call dm.canonical_symbol_crypto('X:ESZ5')."
+            ),
+        ),
     ],
 )
 def test_the_general_converter_is_as_strict_for_futures_as_the_contract_one(
     text: str, message: str
 ) -> None:
-    with pytest.raises(ValueError, match=message) as general:
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$") as general:
         dm.canonical_symbol(text, FUT)
-    with pytest.raises(ValueError, match=message) as contract:
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$") as contract:
         dm.canonical_symbol_future(text)
     assert str(general.value) == str(contract.value)
 
@@ -155,13 +170,14 @@ def test_a_dataset_refuses_futures_text_the_converter_refuses(text: str) -> None
         dm.canonical_symbol(text, FUT)
     with pytest.raises(ValueError, match="is not a Massive futures ticker") as dataset:
         check_symbol(FUT, text)
-    assert str(dataset.value) == f"{converter.value}; symbols must be Massive's exact tickers"
+    assert str(dataset.value) == str(converter.value)
     assert not is_canonical(FUT, text)
 
 
 @pytest.mark.parametrize("text", [" ESZ5", "ESZ5 "])
 def test_a_futures_ticker_with_surrounding_whitespace_is_refused(text: str) -> None:
-    with pytest.raises(ValueError, match="has surrounding whitespace; write 'ESZ5'"):
+    message = f"{text!r} has surrounding whitespace. Pass 'ESZ5'."
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         check_symbol(FUT, text)
 
 
@@ -224,7 +240,7 @@ def test_canonical_text_is_canonical_and_converts_to_itself(
 @pytest.mark.parametrize(("asset_class", "text"), NOT_CANONICAL)
 def test_other_text_is_not_canonical(asset_class: AssetClass, text: str) -> None:
     assert not is_canonical(asset_class, text)
-    with pytest.raises(ValueError, match=r"Massive|ticker"):
+    with pytest.raises(ValueError, match=r"Massive|ticker|surrounding whitespace|OCC option|pair"):
         check_symbol(asset_class, text)
 
 
@@ -370,14 +386,14 @@ CONVENTIONS = [SymbolConvention.YAHOO, SymbolConvention.NASDAQ, SymbolConvention
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        (" ABC ", r"^' ABC ' has surrounding whitespace; write 'ABC'$"),
-        ("", r"^'' is empty, not a ticker$"),
-        ("  ", r"^'  ' is only whitespace, not a ticker$"),
+        (" ABC ", r"^' ABC ' has surrounding whitespace\. Pass 'ABC'\.$"),
+        ("", r"^'' is empty, not a ticker\.$"),
+        ("  ", r"^'  ' is only whitespace, not a ticker\.$"),
         (
             "abc",
             (
-                r"^'abc' is not a {name} ticker: the {name} convention writes tickers in upper "
-                r"case; use 'ABC' if that is the ticker you mean$"
+                r"^'abc' is not a {name} ticker\. The {name} convention writes tickers in upper "
+                r"case\. If you mean 'ABC', pass 'ABC'\.$"
             ),
         ),
     ],
@@ -396,9 +412,14 @@ def test_a_convention_refuses_another_class_prefix() -> None:
 
 def test_a_stock_convention_applies_to_stocks_only() -> None:
     for convention in (SymbolConvention.YAHOO, SymbolConvention.NASDAQ, SymbolConvention.CMS):
-        message = rf"^the {convention.name} convention applies to stocks only, not forex$"
-        with pytest.raises(ValueError, match=message):
+        message = (
+            f"convention=dm.SymbolConvention.{convention.name} is for stock tickers, not forex. "
+            "Pass asset_class=dm.AssetClass.STOCKS, or leave convention out."
+        )
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             dm.canonical_symbol("EUR/USD", FX, convention=convention)
+    # The advice works: without the convention, the forex pair converts.
+    assert dm.canonical_symbol("EUR/USD", FX) == "C:EURUSD"
 
 
 def test_the_massive_convention_is_the_default_for_every_class() -> None:
@@ -408,8 +429,13 @@ def test_the_massive_convention_is_the_default_for_every_class() -> None:
     assert dm.canonical_symbol("EUR/USD", FX) == "C:EURUSD"
     assert dm.canonical_symbol("KIMpL", STK, convention=massive) == "KIMpL"
     assert dm.canonical_symbol("SPX", IDX, convention=massive) == "I:SPX"
-    with pytest.raises(ValueError, match="if it is Yahoo's spelling"):
+    with pytest.raises(ValueError, match=re.escape(stock_conventions_fix("BRK-B"))):
         dm.canonical_symbol("BRK-B", STK, convention=massive)  # Yahoo's or Nasdaq's dash
+    # The call the refusal suggests converts it.
+    assert (
+        dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO)
+        == "BRK.B"
+    )
 
 
 def test_converter_enums_reject_text() -> None:
@@ -442,138 +468,273 @@ def test_a_converter_takes_only_text_or_none(convert: Callable[[object], str | N
         convert(5)
 
 
+def stock_conventions_fix(text: str) -> str:
+    # The fix that ends the refusal of a stock ticker with another convention's separator.
+    return (
+        f"If it is Yahoo's spelling, convert it with dm.canonical_symbol({text!r}, "
+        "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), or name "
+        "dm.SymbolConvention.NASDAQ or dm.SymbolConvention.CMS for those spellings."
+    )
+
+
+STOCK_FORMS = (
+    "is not a Massive stock ticker, which looks like 'AAPL', 'BRK.B', or 'KIMpL'. Pass the "
+    "ticker as m.reference.tickers() lists it."
+)
+"""The refusal of text that is no stock ticker in any form the library names, after the text."""
+
+
 @pytest.mark.parametrize(
     ("convert", "text", "message"),
     [
         (
             dm.canonical_symbol_stock,
             "BRK-B",
-            (
-                r"^'BRK-B' is not a Massive stock ticker; if it is Yahoo's spelling, pass "
-                r"convention=dm\.SymbolConvention\.YAHOO to dm\.canonical_symbol or "
-                r"dm\.canonicalize_symbols \(NASDAQ and CMS are the others\)$"
-            ),
+            f"'BRK-B' is not a Massive stock ticker. {stock_conventions_fix('BRK-B')}",
         ),
-        (dm.canonical_symbol_stock, "BRK/B", "if it is Yahoo's spelling"),
-        (dm.canonical_symbol_stock, "BRK B", "if it is Yahoo's spelling"),
+        (
+            dm.canonical_symbol_stock,
+            "BRK/B",
+            f"'BRK/B' is not a Massive stock ticker. {stock_conventions_fix('BRK/B')}",
+        ),
+        (
+            dm.canonical_symbol_stock,
+            "BRK B",
+            f"'BRK B' is not a Massive stock ticker. {stock_conventions_fix('BRK B')}",
+        ),
         (
             dm.canonical_symbol_stock,
             "kimpl",
             (
-                r"^'kimpl' is not a Massive stock ticker: tickers are case-sensitive, with an "
-                r"upper-case root and possibly a lower-case suffix \(KIMpL is a preferred\); "
-                r"write Massive's ticker exactly: use 'KIMPL' if that is the ticker you mean$"
+                "'kimpl' is not a Massive stock ticker, because Massive's tickers are "
+                "case-sensitive. If you mean 'KIMPL', pass 'KIMPL'."
             ),
         ),
-        (
-            dm.canonical_symbol_stock,
-            " AAPL ",
-            r"^' AAPL ' has surrounding whitespace; write 'AAPL'$",
-        ),
-        (dm.canonical_symbol_stock, "Aapl", r"^'Aapl' is not a Massive stock ticker such as"),
-        (dm.canonical_symbol_stock, "", r"^'' is not a Massive stock ticker such as"),
+        (dm.canonical_symbol_stock, " AAPL ", "' AAPL ' has surrounding whitespace. Pass 'AAPL'."),
+        (dm.canonical_symbol_stock, "Aapl", f"'Aapl' {STOCK_FORMS}"),
+        (dm.canonical_symbol_stock, "", f"'' {STOCK_FORMS}"),
         (
             dm.canonical_symbol_stock,
             "C:EURUSD",
             (
-                r"^'C:EURUSD' is a forex ticker \(prefix C:\), not a stock one; call "
-                r"dm\.canonical_symbol_forex$"
+                "'C:EURUSD' is a forex ticker, not a stock one. "
+                "Call dm.canonical_symbol_forex('C:EURUSD')."
             ),
         ),
         (
             dm.canonical_symbol_crypto,
             "C:EURUSD",
             (
-                r"^'C:EURUSD' is a forex ticker \(prefix C:\), not a crypto one; call "
-                r"dm\.canonical_symbol_forex$"
+                "'C:EURUSD' is a forex ticker, not a crypto one. "
+                "Call dm.canonical_symbol_forex('C:EURUSD')."
             ),
         ),
         (
             dm.canonical_symbol_forex,
             "X:BTCUSD",
-            r"^'X:BTCUSD' is a crypto ticker \(prefix X:\), not a forex one",
+            (
+                "'X:BTCUSD' is a crypto ticker, not a forex one. "
+                "Call dm.canonical_symbol_crypto('X:BTCUSD')."
+            ),
         ),
         (
             dm.canonical_symbol_stock,
             "o:AAPL250117C00150000",
-            r"is an option ticker \(prefix O:\), not a stock one; call dm\.canonical_symbol_option",
+            (
+                "'o:AAPL250117C00150000' is an option ticker, not a stock one. "
+                "Call dm.canonical_symbol_option('o:AAPL250117C00150000')."
+            ),
         ),
         (
             dm.canonical_symbol_option,
             "I:SPX",
-            r"^'I:SPX' is an index ticker \(prefix I:\), not an option one",
+            (
+                "'I:SPX' is an index ticker, not an option one. "
+                "Call dm.canonical_symbol_index('I:SPX')."
+            ),
         ),
         (
             dm.canonical_symbol_option,
             "AAPL",
-            r"^'AAPL' is an underlying, not an OCC option symbol such as",
+            (
+                "'AAPL' is an underlying, not an OCC option symbol such as "
+                "'O:AAPL250117C00150000'. "
+                "Pass a contract's symbol from m.options.contracts('AAPL')."
+            ),
         ),
         (
             dm.canonical_symbol_option,
             "O:AAPL250132C00150000",
             (
-                r"^'O:AAPL250132C00150000' has the OCC shape, but its expiry 250132 \(YYMMDD\) "
-                r"is not a real date$"
+                "'O:AAPL250132C00150000' has the shape of an OCC option symbol, but its expiry "
+                "250132, read as YYMMDD, is not a real date. Pass the symbol as "
+                "m.options.contracts() lists it."
             ),
         ),
         (
             dm.canonical_symbol_option,
             "AAPL250230C00150000",
-            r"^'AAPL250230C00150000' has the OCC shape, but its expiry 250230",
+            (
+                "'AAPL250230C00150000' has the shape of an OCC option symbol, but its expiry "
+                "250230, read as YYMMDD, is not a real date. Pass the symbol as "
+                "m.options.contracts() lists it."
+            ),
         ),
-        (dm.canonical_symbol_option, "BRKB 250117C00400000", "with a real expiry date"),
-        (dm.canonical_symbol_future, " ESZ5 ", r"^' ESZ5 ' has surrounding whitespace; write"),
-        (dm.canonical_symbol_future, "", r"^'' is not a Massive futures ticker: a contract is"),
-        (dm.canonical_symbol_future, "esz5", "a contract is a root of upper-case letters"),
-        (dm.canonical_symbol_future, "ESZ", "a contract is a root of upper-case letters"),
+        (
+            dm.canonical_symbol_option,
+            "BRKB 250117C00400000",
+            (
+                "'BRKB 250117C00400000' is not an OCC option symbol, which looks like "
+                "'O:AAPL250117C00150000'. Pass the symbol as m.options.contracts() lists it."
+            ),
+        ),
+        (dm.canonical_symbol_future, " ESZ5 ", "' ESZ5 ' has surrounding whitespace. Pass 'ESZ5'."),
+        (dm.canonical_symbol_future, "", f"'' is not a Massive futures ticker. {FUTURES_FORMS}"),
+        (
+            dm.canonical_symbol_future,
+            "esz5",
+            f"'esz5' is not a Massive futures ticker. {FUTURES_FORMS}",
+        ),
+        (
+            dm.canonical_symbol_future,
+            "ESZ",
+            f"'ESZ' is not a Massive futures ticker. {FUTURES_FORMS}",
+        ),
         (
             dm.canonical_symbol_future,
             "GCQ6-GCZ6",
             (
-                r"^'GCQ6-GCZ6' is a futures combo \(a spread, strip, pack, or bundle\), not a "
-                r"single contract; call dm\.canonical_symbol_future_spread$"
+                "'GCQ6-GCZ6' is a futures combo, such as a spread, not a single contract. "
+                "Call dm.canonical_symbol_future_spread('GCQ6-GCZ6')."
             ),
         ),
         (
             dm.canonical_symbol_future_spread,
             "ESZ5",
             (
-                r"^'ESZ5' is a single futures contract, not a combo; call "
-                r"dm\.canonical_symbol_future$"
+                "'ESZ5' is a single futures contract, not a combo. "
+                "Call dm.canonical_symbol_future('ESZ5')."
             ),
         ),
         (
             dm.canonical_symbol_future_spread,
             "GCQ6--GCZ6",
-            r"^'GCQ6--GCZ6' is not a Massive futures combo ticker: runs of upper-case letters",
+            (
+                "'GCQ6--GCZ6' is not a Massive futures combo ticker, which looks like 'GCQ6-GCZ6', "
+                "'BOB 02-01 U6', or 'CL:BF Q6-U6-V6'. Pass the ticker as m.futures.contracts() "
+                "lists it."
+            ),
         ),
-        (dm.canonical_symbol_future_spread, "X:BTCUSD", "is a crypto ticker"),
-        (dm.canonical_symbol_future, "X:ESZ5", "is a crypto ticker"),
-        (dm.canonical_symbol_index, "S P X", r"^'S P X' is not a Massive index ticker"),
+        (
+            dm.canonical_symbol_future_spread,
+            "X:BTCUSD",
+            (
+                "'X:BTCUSD' is a crypto ticker, not a futures one. "
+                "Call dm.canonical_symbol_crypto('X:BTCUSD')."
+            ),
+        ),
+        (
+            dm.canonical_symbol_future,
+            "X:ESZ5",
+            (
+                "'X:ESZ5' is a crypto ticker, not a futures one. "
+                "Call dm.canonical_symbol_crypto('X:ESZ5')."
+            ),
+        ),
+        (
+            dm.canonical_symbol_index,
+            "S P X",
+            (
+                "'S P X' is not a Massive index ticker, which looks like 'I:SPX'. Pass the ticker "
+                "as "
+                "m.reference.tickers(market=dm.Market.INDICES) lists it."
+            ),
+        ),
         (
             dm.canonical_symbol_index,
             "spx",
             (
-                r"^'spx' is not a Massive index ticker: index tickers are upper case; use "
-                r"'I:SPX' if that is the ticker you mean$"
+                "'spx' is not a Massive index ticker. Index tickers are upper case. If you mean "
+                "'I:SPX', pass 'I:SPX'."
             ),
         ),
-        (dm.canonical_symbol_index, "C:EURUSD", "is a forex ticker"),
-        (dm.canonical_symbol_forex, "EU1/USD", "two three-letter codes"),
-        (dm.canonical_symbol_forex, "EURO/USD", "two three-letter codes"),
-        (dm.canonical_symbol_forex, "EUR/USD/JPY", "two three-letter codes"),
-        (dm.canonical_symbol_forex, "EUR USD", "two three-letter codes"),
-        (dm.canonical_symbol_crypto, "BTC.USD", r"^cannot read 'BTC.USD' as a crypto pair"),
-        (dm.canonical_symbol_crypto, "BTC--USD", r"^cannot read 'BTC--USD' as a crypto pair"),
-        (dm.canonical_symbol_crypto, "BTC", r"^cannot read .BTC. as a crypto pair: it is too"),
-        (dm.canonical_symbol_crypto, "X:ETH", r"^cannot read .X:ETH. as a crypto pair: it is"),
+        (
+            dm.canonical_symbol_index,
+            "C:EURUSD",
+            (
+                "'C:EURUSD' is a forex ticker, not an index one. "
+                "Call dm.canonical_symbol_forex('C:EURUSD')."
+            ),
+        ),
+        *(
+            (
+                dm.canonical_symbol_forex,
+                pair,
+                (
+                    f"{pair!r} is not a forex pair of two three-letter currency codes. Write it as "
+                    "BASE/QUOTE, such as 'EUR/USD'."
+                ),
+            )
+            for pair in ("EU1/USD", "EURO/USD", "EUR/USD/JPY", "EUR USD")
+        ),
+        *(
+            (
+                dm.canonical_symbol_crypto,
+                pair,
+                f"{pair!r} is not a crypto pair. Write it as BASE-QUOTE, such as 'BTC-USD'.",
+            )
+            for pair in ("BTC.USD", "BTC--USD")
+        ),
+        *(
+            (
+                dm.canonical_symbol_crypto,
+                pair,
+                (
+                    f"{pair!r} is too short to hold a base currency and a quote currency. "
+                    "Write the "
+                    "pair as BASE-QUOTE, such as 'BTC-USD'."
+                ),
+            )
+            for pair in ("BTC", "X:ETH")
+        ),
     ],
 )
 def test_a_converter_refuses_with_a_reason(
     convert: Callable[[str], str | None], text: str, message: str
 ) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         convert(text)
+
+
+@pytest.mark.parametrize(
+    ("convert", "text", "expected"),
+    [
+        # Each call or value a refusal above names, run on the case it describes.
+        (functools.partial(dm.canonical_symbol_stock_yahoo), "BRK-B", "BRK.B"),
+        (dm.canonical_symbol_stock, "KIMPL", "KIMPL"),
+        (dm.canonical_symbol_stock, "AAPL", "AAPL"),
+        (dm.canonical_symbol_forex, "C:EURUSD", "C:EURUSD"),
+        (dm.canonical_symbol_crypto, "X:BTCUSD", "X:BTCUSD"),
+        (dm.canonical_symbol_option, "o:AAPL250117C00150000", "O:AAPL250117C00150000"),
+        (dm.canonical_symbol_index, "I:SPX", "I:SPX"),
+        (dm.canonical_symbol_future, "ESZ5", "ESZ5"),
+        (dm.canonical_symbol_future_spread, "GCQ6-GCZ6", "GCQ6-GCZ6"),
+        (dm.canonical_symbol_crypto, "X:ESZ5", "X:ESZ5"),
+        (dm.canonical_symbol_forex, "EUR/USD", "C:EURUSD"),
+        (dm.canonical_symbol_crypto, "BTC-USD", "X:BTCUSD"),
+    ],
+)
+def test_the_fix_a_refusal_names_converts(
+    convert: Callable[[str], str | None], text: str, expected: str
+) -> None:
+    assert convert(text) == expected
+
+
+@pytest.mark.parametrize("text", ["KIMpL", "KIMr", "KIMw", "AAPL"])
+def test_a_stock_ticker_with_its_lower_case_marker_is_canonical(text: str) -> None:
+    # The refusal of all lower-case text says Massive's tickers are case-sensitive: a
+    # preferred's `p`, rights' `r`, and when-issued `w` pass as Massive writes them.
+    assert check_symbol(STK, text) == text
 
 
 @pytest.fixture
@@ -612,8 +773,24 @@ def test_a_converter_raises_by_default_and_returns_none_under_log_and_ignore(
         assert convert(text, on_error=OnError.IGNORE) is None
         assert convert(None, on_error=OnError.LOG) is None
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (logging.WARNING, f"{caller}: {refused.value}; it returns None"),
-        (logging.DEBUG, f"{caller}: {refused.value}; it returns None"),
+        (logging.WARNING, f"{caller}: {text!r} becomes None. {refused.value}"),
+        (logging.DEBUG, f"{caller}: {text!r} becomes None. {refused.value}"),
+    ]
+
+
+@pytest.mark.usefixtures("fresh_converter_logs")
+def test_a_converter_log_record_names_the_value_its_result_and_the_fix(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger=symbols.logger.name):
+        assert dm.canonical_symbol_stock("BRK-B", on_error=OnError.LOG) is None
+    assert caplog.messages == [
+        (
+            "canonical_symbol: 'BRK-B' becomes None. 'BRK-B' is not a Massive stock ticker. If it "
+            "is Yahoo's spelling, convert it with dm.canonical_symbol('BRK-B', "
+            "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), or name "
+            "dm.SymbolConvention.NASDAQ or dm.SymbolConvention.CMS for those spellings."
+        )
     ]
 
 
@@ -625,10 +802,10 @@ def test_a_converter_logs_each_value_once_per_process_up_to_a_limit(
         for text in ("b1", "b2", "b1", "b3", "b4"):
             assert dm.canonical_symbol_forex(text, on_error=OnError.LOG) is None
     assert [m[:30] for m in caplog.messages] == [
-        "canonical_symbol: cannot read ",  # b1
-        "canonical_symbol: cannot read ",  # b2
-        "canonical_symbol: cannot read ",  # b3
-        "3 values were reported; furthe",  # the limit: b4 is not logged
+        "canonical_symbol: 'b1' becomes",
+        "canonical_symbol: 'b2' becomes",
+        "canonical_symbol: 'b3' becomes",
+        "3 values were reported. Furthe",  # the limit: b4 is not logged
     ]
 
 
@@ -697,8 +874,8 @@ def test_a_scalar_and_a_table_cell_refuse_a_value_the_same_way(
     assert [row[0] for row in cells.iter_tuple(cols="Symbol")] == [None]
     level = logging.WARNING if on_error is OnError.LOG else logging.DEBUG
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
-        (level, f"canonical_symbol: {reason}; it returns None"),
-        (level, f"canonicalize_symbols: {reason}; its rows get a null Symbol"),
+        (level, f"canonical_symbol: {text!r} becomes None. {reason}"),
+        (level, f"canonicalize_symbols: {text!r} becomes a null Symbol. {reason}"),
     ]
 
 
@@ -710,34 +887,54 @@ def test_no_conversion_looks_a_name_up() -> None:
         assert canonical_from_wire(IDX, name) == f"I:{name}"
         assert canonical_from_wire(ClassFromPrefix.ANY, name) == name
         assert canonical_from_wire(STK, name) == name
-        with pytest.raises(ValueError, match="use 'I:"):
+        message = (
+            f"{name!r} is not Massive's index ticker. Pass 'I:{name}', which "
+            f"dm.canonical_symbol_index({name!r}) returns."
+        )
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             check_symbol(IDX, name)
+        assert check_symbol(IDX, f"I:{name}") == f"I:{name}"
 
 
 def test_check_symbol_names_the_fix() -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"^'EUR/USD' is not Massive's ticker; use 'C:EURUSD' \(symbols must be Massive's "
-        r"exact tickers, and dm\.canonical_symbol_forex converts\)$",
-    ):
+    forex = (
+        "'EUR/USD' is not Massive's forex ticker. Pass 'C:EURUSD', which "
+        "dm.canonical_symbol_forex('EUR/USD') returns."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(forex)}$"):
         check_symbol(FX, "EUR/USD")
-    with pytest.raises(
-        ValueError, match=r"tickers are case-sensitive.*; symbols must be Massive's"
-    ):
+    assert dm.canonical_symbol_forex("EUR/USD") == "C:EURUSD"
+    assert check_symbol(FX, "C:EURUSD") == "C:EURUSD"
+    # Text the converter refuses gets the converter's reason and fix, unchanged.
+    lower = (
+        "'aapl' is not a Massive stock ticker, because Massive's tickers are case-sensitive. "
+        "If you mean 'AAPL', pass 'AAPL'."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(lower)}$"):
         check_symbol(STK, "aapl")
-    with pytest.raises(ValueError, match=r"use 'I:SPX'"):
-        check_symbol(IDX, "SPX")
+    assert check_symbol(STK, "AAPL") == "AAPL"
     # A canonical ticker of another class names the class the dataset takes, not a converter.
-    with pytest.raises(
-        ValueError, match=r"^'X:BTCUSD' is a crypto ticker; this dataset takes stock tickers$"
-    ):
+    crypto = (
+        "'X:BTCUSD' is a crypto ticker, and this dataset takes stock tickers. Pass a stock "
+        "ticker, or read crypto data through m.crypto."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(crypto)}$"):
         check_symbol(STK, "X:BTCUSD")
-    with pytest.raises(
-        ValueError, match=r"^'I:SPX' is an index ticker; this dataset takes stock tickers$"
-    ):
+    index = (
+        "'I:SPX' is an index ticker, and this dataset takes stock tickers. Pass a stock "
+        "ticker, or read index data through m.indices."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(index)}$"):
         check_symbol(STK, "I:SPX")
-    with pytest.raises(ValueError, match=r"is a crypto ticker \(prefix X:\)"):
-        check_symbol(STK, "X:BTC-USD")  # not canonical crypto either: the converter's reason
+    assert check_symbol(IDX, "I:SPX") == "I:SPX"
+    assert check_symbol(CRY, "X:BTCUSD") == "X:BTCUSD"
+    # Not canonical crypto either: the converter's reason.
+    other = (
+        "'X:BTC-USD' is a crypto ticker, not a stock one. "
+        "Call dm.canonical_symbol_crypto('X:BTC-USD')."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(other)}$"):
+        check_symbol(STK, "X:BTC-USD")
     with pytest.raises(TypeError, match=r"^a symbol must be a str, not int$"):
         check_symbol(STK, 5)
 
@@ -782,7 +979,7 @@ def test_check_symbols_sorts_and_deduplicates_canonical_symbols() -> None:
 def test_check_symbols_refuses_what_is_not_canonical(
     asset_class: AssetClass | ClassFromPrefix, value: str | list[str]
 ) -> None:
-    with pytest.raises(ValueError, match="symbols must be Massive's exact tickers"):
+    with pytest.raises(ValueError, match=r"is not (a Massive|Massive's)|is a crypto ticker"):
         check_symbols(asset_class, value)
 
 
@@ -793,10 +990,15 @@ def test_check_symbols_materializes_generators() -> None:
 def test_exhausted_generator_raises() -> None:
     items = (s for s in ["A"])
     list(items)
-    with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
+    message = (
+        "symbols holds no tickers. Pass at least one ticker, or dm.ALL for every ticker where "
+        "the dataset takes it."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         check_symbols(STK, items)
-    with pytest.raises(ValueError, match=r"^no symbols: the list is empty"):
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         check_symbols(STK, [])
+    assert check_symbols(STK, ALL) is ALL
 
 
 def test_check_symbols_all_passes_through() -> None:
@@ -804,7 +1006,10 @@ def test_check_symbols_all_passes_through() -> None:
 
 
 def test_check_symbols_rejects_non_iterables_and_non_strings() -> None:
-    with pytest.raises(TypeError, match="symbols must be"):
+    with pytest.raises(
+        TypeError,
+        match=r"^symbols must be a str, a sequence of str, a Deephaven Table, or dm\.ALL, not int$",
+    ):
         check_symbols(STK, 5)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match="must be a str"):
         check_symbols(STK, ["AAPL", 5])  # type: ignore[list-item]  # the point: refused at run time
@@ -843,11 +1048,26 @@ def test_a_dataset_kept_as_written_takes_any_ticker_text() -> None:
         assert check_symbol(STK, text, as_written=True) == text
         assert canonical_from_wire(STK, text, as_written=True) == text
     assert check_symbols(STK, ["ERIC B", "7203"], as_written=True) == ("7203", "ERIC B")
-    for bad in ("", " ERIC B", "X:BTCUSD", "A\tB"):
+    faults = {
+        "": "'' is empty",
+        " ERIC B": "' ERIC B' has surrounding whitespace",
+        "ERIC B ": "'ERIC B ' has surrounding whitespace",
+        "X:BTCUSD": "'X:BTCUSD' starts with the class prefix 'X:'",
+        "A\tB": "'A\\tB' holds a control character",
+        "\tAB": "'\\tAB' holds a control character",
+    }
+    for bad, fault in faults.items():
         assert not is_canonical(STK, bad, as_written=True)
         assert canonical_from_wire(STK, bad, as_written=True) is None
-        with pytest.raises(ValueError, match="is not a ticker as Massive writes it"):
+        message = (
+            f"{fault}, and Massive never writes a ticker that way. Pass the value as Massive "
+            "lists it."
+        )
+        with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
             check_symbol(STK, bad, as_written=True)
+    # A text the grammar takes breaks no rule: asking for its fault is a defect of the caller.
+    with pytest.raises(BrokenGuaranteeError, match=re.escape(LIBRARY_BUG)):
+        as_written_fault("ERIC B")
     reader = WireSymbols("partners.tmx.corporate_events", STK, as_written=True)
     read = reader.read(pa.array(["ERIC B", None, " x"]), {})
     assert read.symbols.to_pylist() == ["ERIC B", None, None]
@@ -882,7 +1102,7 @@ def test_each_converter_runs_in_a_query_string(
     assert column.data_type == dtypes.string
     assert [row[0] for row in table.iter_tuple(cols="S")] == [expected, None]
     bad = new_table([string_col("P", ["X:BTC-USD" if "crypto" not in name else "C:EURUSD"])])
-    with pytest.raises(DHError, match="ticker \\(prefix"):
+    with pytest.raises(DHError, match=r"is a (crypto|forex) ticker, not an? \w+ one\. Call dm\."):
         bad.update(["S = convert(P)"])
     # A partial that binds on_error, in scope by a bare name, still makes a String column, and
     # turns the bad row into a null instead of failing the formula.
@@ -906,21 +1126,23 @@ def test_a_converter_called_through_the_module_needs_a_cast(dh_exec_ctx: object)
 
 def test_the_spread_converter_names_surrounding_whitespace() -> None:
     with pytest.raises(
-        ValueError, match=r"^' GCQ6-GCZ6 ' has surrounding whitespace; write 'GCQ6-GCZ6'$"
+        ValueError, match=r"^' GCQ6-GCZ6 ' has surrounding whitespace\. Pass 'GCQ6-GCZ6'\.$"
     ):
         dm.canonical_symbol_future_spread(" GCQ6-GCZ6 ")
 
 
 def test_yahoo_forex_spelling_is_refused_with_massive_form() -> None:
     message = (
-        "cannot read 'EURUSD=X' as a forex pair: it looks like Yahoo Finance's spelling; "
-        "Massive's forex tickers look like 'C:EURUSD', two three-letter currency codes after "
-        "C:, and this function reads 'EUR/USD', 'EUR-USD', or 'EURUSD'"
+        "'EURUSD=X' is Yahoo Finance's spelling of a forex pair, which the library does not "
+        "read. Write the pair as 'EUR/USD', 'EUR-USD', or 'EURUSD', or pass Massive's ticker, "
+        "such as 'C:EURUSD'."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         dm.canonical_symbol_forex("EURUSD=X")
     with pytest.raises(ValueError, match="Yahoo Finance"):
         dm.canonical_symbol_forex("eurusd=x")
+    for spelling in ("EUR/USD", "EUR-USD", "EURUSD", "C:EURUSD"):
+        assert dm.canonical_symbol_forex(spelling) == "C:EURUSD"
 
 
 def test_all_is_the_exported_singleton() -> None:

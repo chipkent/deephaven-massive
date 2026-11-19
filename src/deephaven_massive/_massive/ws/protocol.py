@@ -251,7 +251,7 @@ def handshake_status(data: str | bytes) -> tuple[str, str]:
             status, message = item.get("status"), item.get("message", "")
             if isinstance(status, str):
                 return status, message if isinstance(message, str) else ""
-    raise ValueError(f"expected a status object, got {_quote(data)}")
+    raise ValueError(f"The frame holds no status object with a text status: {_quote(data)}.")
 
 
 def classify_failure(error: Exception, *, host: str, path: str, now: float) -> WireError | float:
@@ -281,8 +281,9 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     """
     if is_certificate_failure(error):
         return WireError(
-            f"TLS certificate verification failed for {host}: {error}; "
-            "set SSL_CERT_FILE to a bundle that trusts the server's certificate",
+            f"The TLS certificate of {host} did not verify for the WebSocket connection to "
+            f"{host}{path}: {error}. If a proxy or a private certificate authority signs it, set "
+            "SSL_CERT_FILE to a bundle that trusts it.",
             host=host,
             path=path,
             kind=WireFailure.LOCAL,
@@ -298,12 +299,17 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     reason = f"HTTP {status}" if status is not None else f"{type(error).__name__}: {error}"
     kind = _fatal_kind(error)
     fix = (
-        "; check the proxy, and its user and password, in HTTPS_PROXY"
+        " Correct the proxy, and its user and password, in HTTPS_PROXY."
         if kind is WireFailure.LOCAL
         else ""
     )
+    said = (
+        f"Massive answered the WebSocket connection to {host}{path} with {reason}."
+        if isinstance(error, InvalidStatus)
+        else f"The WebSocket connection to {host}{path} failed with {reason}."
+    )
     return WireError(
-        f"WebSocket connection to {host}{path} failed: {reason}{fix}",
+        f"{said}{fix}",
         status=status,
         host=host,
         path=path,
@@ -510,15 +516,18 @@ class FrameDecoder:
         for source in sources:
             channel = source.key.partition("/")[2]
             if source.transport is not Transport.WS or not channel:
-                raise ValueError(f"{source.key!r} is not a WebSocket source '<cluster>/<channel>'")
+                raise ValueError(
+                    f"Source {source.key!r} is not a WebSocket source of the form "
+                    "'<cluster>/<channel>'."
+                )
             dotted = sorted(f.wire_key for f in source.fields if "." in f.wire_key)
             if dotted:
                 raise ValueError(
-                    f"source {source.key!r} has dotted wire keys {dotted}; "
-                    "a WebSocket object is flat"
+                    f"Source {source.key!r} has dotted wire keys {', '.join(dotted)}, and a "
+                    "WebSocket object is flat."
                 )
             if channel in self._channels:
-                raise ValueError(f"two sources for channel {channel!r}")
+                raise ValueError(f"Two sources name the channel {channel!r}.")
             self._channels[channel] = _Channel.plan(source)
 
     def set_required(
@@ -541,11 +550,11 @@ class FrameDecoder:
         """
         current = self._channels.get(channel)
         if current is None:
-            raise ValueError(f"no source for channel {channel!r}")
+            raise ValueError(f"No source names the channel {channel!r}.")
         by_column = {f.column: f.wire_key for f in current.source.fields}
         unknown = sorted((keys | {symbol} if symbol is not None else keys) - by_column.keys())
         if unknown:
-            raise ValueError(f"source {current.source.key!r} has no columns {unknown}")
+            raise ValueError(f"Source {current.source.key!r} has no columns {unknown}.")
         self._channels[channel] = _Channel.plan(
             current.source,
             frozenset(by_column[k] for k in keys),
@@ -573,7 +582,7 @@ class FrameDecoder:
         except ValueError:
             logger.log(
                 self._drop_level(),
-                "Massive sent a frame from %s%s that is not JSON, so the library dropped it: %s",
+                "Massive sent a frame from %s%s that is not JSON, so the library dropped it: %s.",
                 self._host,
                 self._path,
                 _quote(data),
@@ -587,7 +596,7 @@ class FrameDecoder:
                 logger.log(
                     self._drop_level(),
                     "Massive sent an element of a frame from %s%s with no text 'ev', so the "
-                    "library dropped it: %s",
+                    "library dropped it: %s.",
                     self._host,
                     self._path,
                     _quote(item),
@@ -598,7 +607,8 @@ class FrameDecoder:
                 if ev not in self._unknown:
                     self._unknown.add(ev)
                     logger.warning(
-                        "dropping objects of channel %r from %s%s, which has no source",
+                        "Massive sent objects of the channel %r from %s%s, which the library does "
+                        "not read, so it drops them.",
                         ev,
                         self._host,
                         self._path,
@@ -625,7 +635,8 @@ class FrameDecoder:
             return logging.WARNING
         if self._dropped == DROPPED_WARNING_LIMIT + 1:
             logger.warning(
-                "%s%s: %d dropped frames or elements were logged; further ones are logged at DEBUG",
+                "%s%s: the library has warned of %d dropped frames or elements, and it logs "
+                "further ones at DEBUG.",
                 self._host,
                 self._path,
                 DROPPED_WARNING_LIMIT,

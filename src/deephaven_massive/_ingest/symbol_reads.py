@@ -63,7 +63,6 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._errors import (
-    NEW_SESSION,
     AuthenticationError,
     ErrorSource,
     MassiveError,
@@ -72,6 +71,7 @@ from deephaven_massive._errors import (
     library_bug,
     required,
     required_instance,
+    session_closed,
 )
 from deephaven_massive._ingest.crypto_tickers import recording_split
 from deephaven_massive._ingest.rest_requests import (
@@ -80,7 +80,7 @@ from deephaven_massive._ingest.rest_requests import (
     own_symbols,
     plan_calls,
 )
-from deephaven_massive._log_limits import bounded_list, log_failure
+from deephaven_massive._log_limits import bounded_list, log_failure, prose_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
@@ -181,7 +181,7 @@ def _refused(symbols: Sequence[str], error: ValueError) -> dict[str, MassiveErro
         fix: leave the parameter out, or read these symbols in a call without it.
     """
     refusal = UnsupportedParameterError(
-        f"{error}; leave that parameter out, or read these symbols in a call without it"
+        f"{error} Leave that argument out, or read these symbols in a call without it."
     )
     return dict.fromkeys(symbols, refusal)
 
@@ -559,13 +559,12 @@ def _attribute(
     level = logging.WARNING if reader.state.first("unowned", spec.name, template) else logging.DEBUG
     logger.log(
         level,
-        "%s: %d of the %d rows Massive returned from %s for %s name none of those symbols, so "
-        "no symbol's read owns them and they are left out",
+        "%s: %d of the %d rows Massive returned for %s name none of those symbols, so no "
+        "symbol's read owns them and they are left out.",
         spec.name,
         left,
         rows.num_rows,
-        template,
-        bounded_list(own) if own else "no symbol",
+        prose_list(own, "symbols") if own else "no symbol",
     )
 
 
@@ -598,13 +597,13 @@ def split_by_symbol(
         kept = sum(part.size for part in tables.values())
     if kept != total:
         logger.warning(
-            "%s: %d of the %d rows read from %s for %s name none of those symbols (or no "
-            "symbol), so no symbol's read owns them and they are left out",
+            "%s: %d of the %d rows read from %s for %s name none of those symbols, or no "
+            "symbol, so no symbol's read owns them and they are left out.",
             spec.name,
             total - kept,
             total,
             source,
-            bounded_list(symbols),
+            prose_list(symbols, "symbols"),
         )
     return tables
 
@@ -639,7 +638,8 @@ def symbol_outcomes(
 
     Raises:
         AuthenticationError: When any symbol failed with it: every symbol would.
-        SessionClosedError: `"<session> is closed"` when the session closed during the read.
+        SessionClosedError: `"This session is closed. ..."` when the session closed during the
+            read.
     """
     refused = next((e for e in failures.values() if isinstance(e, AuthenticationError)), None)
     if refused is not None:
@@ -648,7 +648,7 @@ def symbol_outcomes(
         )
         raise refused
     if core.closed:
-        raise SessionClosedError(f"{core.label} is closed; {NEW_SESSION}")
+        raise SessionClosedError(session_closed())
     expected = col_defs(core.dataset_schema(spec))
     outcomes: dict[str, SymbolOutcome] = {}
     for symbol in symbols:
@@ -675,13 +675,13 @@ def symbol_outcomes(
         log_failure(
             logger,
             error,
-            "call %d %s %s: the read from %s failed (%s), which fails this symbol alone: %s",
+            "call %d %s %s failed alone, in its read from %s: %s",
             call,
             spec.name,
             symbol,
             source,
-            "retryable" if error.is_retryable else "not retryable",
             expected=logging.DEBUG,
+            named=spec.name,
         )
     return outcomes
 

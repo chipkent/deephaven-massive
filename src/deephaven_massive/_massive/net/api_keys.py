@@ -50,8 +50,8 @@ def check_api_key(api_key: str, *, setting: str) -> None:
 
             check_api_key("abc123", setting="api_key")  # accepted
             check_api_key("abc 123", setting="api_key")
-            # ValueError: api_key must be non-empty visible ASCII, with no whitespace or
-            # line break (check for a trailing newline); the key is not shown
+            # ValueError: api_key holds a whitespace character at index 3, and an API key
+            # may hold only visible ASCII. Pass the key without that character.
 
     Args:
         api_key: The key.
@@ -75,7 +75,9 @@ def check_api_key(api_key: str, *, setting: str) -> None:
         length,
         refused,
     )
+    if first is None:
+        raise ValueError(f"{setting} is empty. Pass your Massive API key.")
     raise ValueError(
-        f"{setting} must be non-empty visible ASCII, with no whitespace or line break "
-        "(check for a trailing newline); the key is not shown"
+        f"{setting} holds a {_kind_of(api_key[first])} character at index {first}, and an API "
+        "key may hold only visible ASCII. Pass the key without that character."
     )

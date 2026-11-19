@@ -144,8 +144,8 @@ def test_fmv_of_a_delayed_subscription_streams_from_its_documented_host() -> Non
 
 def test_a_dataset_documented_only_in_real_time_streams_only_in_real_time() -> None:
     assert refusal_note(ADMIN) == (
-        "options.admin_messages streams only in real time, on the plans listed at "
-        f"{PAGES}options.admin_messages.md"
+        "options.admin_messages streams only in real time. Its plans are listed at "
+        f"{PAGES}options.admin_messages.md."
     )
 
 
@@ -155,8 +155,8 @@ def test_a_dataset_documented_on_another_feed_alone_names_that_feed(spec: Datase
     (only,) = {h for c in spec.channels.values() for h in channel_hosts(spec.single_class, c)}
     assert only.feed is Feed.BUSINESS
     assert refusal_note(spec) == (
-        f"Massive documents {spec.name} only on its Business feed, {only.host}; its plans are "
-        f"listed at {page_url(spec)}"
+        f"Massive documents {spec.name} only on its Business feed, {only.host}. Its plans are "
+        f"listed at {page_url(spec)}."
     )
 
 
@@ -185,6 +185,21 @@ def answering(status: str, *rows: Mapping[str, object]) -> Callable[[], Fetch]:
 def raising(error: BaseException) -> Callable[[], Fetch]:
     def fail(probe: SnapshotProbe) -> SnapshotAnswer:
         raise error
+
+    return lambda: fail
+
+
+def answer(path: str, status: int, text: str, *, request_id: str | None = None) -> str:
+    """Return Massive's answer to a GET of `path`, as the REST client words it."""
+    asked = f" (request_id {request_id})" if request_id else ""
+    return f'Massive answered GET {path} on api.massive.com with HTTP {status}{asked}: "{text}".'
+
+
+def answered(kind: type[dm.MassiveError], status: int, text: str) -> Callable[[], Fetch]:
+    """Return a maker of a fetch that Massive answers with `status` and `text`, as `kind`."""
+
+    def fail(probe: SnapshotProbe) -> SnapshotAnswer:
+        raise kind(answer(probe.path, status, text), status=status)
 
     return lambda: fail
 
@@ -255,21 +270,23 @@ PINNED_EVENTS: dict[str, tuple[Callable[[], Fetch], Recency, str, bool]] = {
         True,
     ),
     "HTTP 403": (
-        raising(dm.EntitlementError("HTTP 403: not entitled", status=403)),
+        answered(dm.EntitlementError, 403, "You are not entitled to this data"),
         Recency.UNKNOWN,
-        "the host check's snapshot ({path}) was refused: HTTP 403: not entitled",
+        "the host check's snapshot ({path}) was refused: "
+        + answer("{path}", 403, "You are not entitled to this data"),
         True,
     ),
     "HTTP 401": (
-        raising(dm.AuthenticationError("HTTP 401: bad key", status=401)),
+        answered(dm.AuthenticationError, 401, "Unknown API Key"),
         Recency.UNKNOWN,
-        "the host check's snapshot ({path}) failed: HTTP 401: bad key",
+        "the host check's snapshot ({path}) failed: " + answer("{path}", 401, "Unknown API Key"),
         True,
     ),
     "HTTP 503": (
-        raising(dm.MassiveError("HTTP 503: unavailable", status=503)),
+        answered(dm.MassiveError, 503, "Service Unavailable"),
         Recency.UNKNOWN,
-        "the host check's snapshot ({path}) failed: HTTP 503: unavailable",
+        "the host check's snapshot ({path}) failed: "
+        + answer("{path}", 503, "Service Unavailable"),
         True,
     ),
     "no answer": (
@@ -315,8 +332,16 @@ def test_a_pinned_host_s_recency_is_massive_s_label(
     assert pinned(decision.evidence)
     (record,) = caplog.records
     assert record.levelno == (logging.WARNING if warned else logging.INFO)
-    assert host in record.getMessage()
-    assert evidence in record.getMessage()
+    if not warned:
+        assert host in record.getMessage()
+        assert evidence in record.getMessage()
+        return
+    shown = why.format(path=probe.path, name=asset_class.value).rstrip(".")
+    assert record.getMessage() == (
+        f"{asset_class.value} streams: the library cannot tell from Massive's snapshot whether "
+        f"the data on the pinned host {host} is delayed, so m.connections() shows its Recency "
+        f"as UNKNOWN. The snapshot showed: {shown}. A new session reads Massive's snapshot again."
+    )
 
 
 def test_a_pinned_business_host_without_a_label_is_never_real_time() -> None:
@@ -424,10 +449,10 @@ def test_a_delayed_plan_refuses_a_real_time_stream(
         run(asset_class, fetch)
     text = str(info.value)
     name = asset_class.value
-    assert text.startswith(f"{name} streams would be delayed (Massive reports {evidence})")
+    assert text.startswith(f"{name} streams would be delayed, since Massive reports {evidence},")
     assert text.endswith(
-        f"To use Massive's delayed {name} feed: "
-        f"dm.MassiveConfig(delayed_subscriptions={{dm.Subscription.{asset_class.name}}})"
+        f"To use Massive's delayed {name} feed, pass "
+        f"delayed_subscriptions={{dm.Subscription.{asset_class.name}}} to dm.MassiveConfig."
     )
     assert "minutes" not in text  # the delay differs by class: none is quoted
     assert fetch.probes == [SNAPSHOT_PROBES[asset_class]]
@@ -470,8 +495,21 @@ def test_an_undocumented_timeframe_streams_real_time_data(
     )
     (record,) = caplog.records
     assert record.levelno == logging.WARNING
-    assert "'END-OF-DAY'" in record.getMessage()
-    assert "websocket_hosts={dm.AssetClass.STOCKS" in record.getMessage()
+    assert record.getMessage() == (
+        "stocks streams: the library cannot tell from Massive's snapshot whether this key's "
+        "stocks data is delayed, so it connects to the real-time feed socket.massive.com. The "
+        "snapshot showed: last_trade.timeframe='END-OF-DAY', neither DELAYED nor REAL-TIME, in "
+        "the snapshot. If Massive refuses a stream there, its table fails with Massive's text. "
+        "To connect to Massive's delayed feed instead, pass "
+        "delayed_subscriptions={dm.Subscription.STOCKS} to dm.MassiveConfig."
+    )
+    # The advice works: with the setting, the stocks streams connect to the delayed feed.
+    advised = run(
+        AssetClass.STOCKS,
+        snapshot("stocks_unknown_timeframe.json"),
+        delayed=frozenset({Subscription.STOCKS}),
+    )
+    assert (advised.host, advised.recency) == (DELAYED_HOST, Recency.DELAYED)
 
 
 def test_delayed_beside_an_undocumented_timeframe_is_refused() -> None:
@@ -557,8 +595,10 @@ def test_the_futures_probe_reads_past_the_contracts_without_a_timeframe(
 
 
 def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixture) -> None:
+    refusal = answer("/v3/snapshot", 403, "You are not entitled to this data", request_id="r1")
+
     def refuse(probe: SnapshotProbe) -> SnapshotAnswer:
-        raise dm.EntitlementError("HTTP 403 from GET /v3/snapshot", status=403, request_id="r1")
+        raise dm.EntitlementError(refusal, status=403, request_id="r1")
 
     with caplog.at_level(logging.WARNING, LOGGER):
         decision = run(AssetClass.STOCKS, refuse)
@@ -567,11 +607,12 @@ def test_a_refused_snapshot_lets_the_server_decide(caplog: pytest.LogCaptureFixt
     assert decision == HostDecision(
         REALTIME_HOST,
         Recency.REALTIME,
-        "the host check's snapshot (/v3/snapshot) was refused: HTTP 403 from GET /v3/snapshot",
+        "the host check's snapshot (/v3/snapshot) was refused: Massive answered GET /v3/snapshot "
+        'on api.massive.com with HTTP 403 (request_id r1): "You are not entitled to this data".',
     )
     (record,) = caplog.records
     assert record.levelno == logging.WARNING
-    assert "HTTP 403 from GET /v3/snapshot" in record.getMessage()
+    assert refusal in record.getMessage()
     # A stream refusal after it names the plan, not the delayed feed.
     assert refused_snapshot(decision.evidence)
     assert not refused_snapshot("no timeframe in the stocks snapshot")

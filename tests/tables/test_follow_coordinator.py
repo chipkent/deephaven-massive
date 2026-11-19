@@ -34,9 +34,10 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import (
-    NEW_SESSION,
+    LIBRARY_BUG,
     BrokenGuaranteeError,
     MassiveError,
+    session_closed,
 )
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables import follow_coordinator
@@ -97,8 +98,35 @@ def rows_of(m: dm.MassiveSession, symbol: str, count: int) -> Table:
         return dh_arrow.to_table(schema.to_arrow(rows))
 
 
-def refused(status: int, text: str = "refused") -> SymbolFailure:
-    return SymbolFailure(MassiveError(f"HTTP {status}: {text}", status=status))
+MASSIVE_TEXT = {
+    403: "You are not entitled to this data",
+    404: "Not Found",
+    429: "You've exceeded the maximum requests per minute",
+    500: "Internal Server Error",
+    503: "Service Unavailable",
+}
+"""Massive's text for each status the tests answer with."""
+
+
+def answer(status: int, symbol: str = "AAPL", *, request_id: str | None = None) -> str:
+    """Return Massive's answer to the read of `symbol`, as the REST client words it."""
+    asked = f" (request_id {request_id})" if request_id else ""
+    return (
+        f"Massive answered GET /v3/trades/{symbol} on api.massive.com with HTTP {status}{asked}: "
+        f'"{MASSIVE_TEXT[status]}".'
+    )
+
+
+FLAT_FILES_403 = (
+    "Massive answered the read of s3://flatfiles/us_stocks_sip/trades_v1/2026/11/2026-11-16.csv.gz "
+    'at https://files.massive.com with HTTP 403 (request_id R1): "AccessDenied: Access Denied".'
+)
+"""S3's refusal of a flat-file scan, as the library words it."""
+
+
+def refused(status: int, symbol: str = "AAPL", *, request_id: str | None = None) -> SymbolFailure:
+    text = answer(status, symbol, request_id=request_id)
+    return SymbolFailure(MassiveError(text, status=status, request_id=request_id))
 
 
 class Script:
@@ -336,16 +364,23 @@ def test_a_permanent_failure_fails_only_its_symbol(
     dh_to_pylist: ToList,
 ) -> None:
     script = Script(massive_session)
-    script.answers["AAPL"] = [refused(403, "not in the plan (request_id abc)")]
+    script.answers["AAPL"] = [refused(403, request_id="abc")]
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
         failed = wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
         wait_state(massive_session, "MSFT", SymbolReadState.DONE)
-    assert failed.error == "HTTP 403: not in the plan (request_id abc)"
+    assert failed.error == answer(403, request_id="abc")
     assert (failed.attempts, failed.next_attempt_at, failed.rows) == (1, None, 0)
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "AAPL failed after 1 attempt (not retryable)" in warnings[0]
+    assert re.fullmatch(
+        r"test\.trades call \d+: AAPL failed after 1 attempt and is left out of the result\. "
+        + re.escape(
+            f"{answer(403, request_id='abc')} To read it again, delete its row from "
+            "the symbol table and add it back."
+        ),
+        warnings[0],
+    )
     until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
     massive_session.release(result)
 
@@ -404,17 +439,17 @@ def test_a_transient_failure_retries_soon_then_every_minute_until_max_outage(
     assert (RETRY_DELAYS, RETRY_EVERY) == ((2.0, 8.0, 30.0), 60.0)
     assert massive_session._core.config.max_outage == 300.0
     script = Script(massive_session)
-    script.answers["AAPL"] = [refused(503, "unavailable")]
+    script.answers["AAPL"] = [refused(503)]
     result = follow(massive_session, watchlist("AAPL"), script)
     retrying = wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
-    assert (retrying.attempts, retrying.error) == (1, "HTTP 503: unavailable")
+    assert (retrying.attempts, retrying.error) == (1, answer(503))
     delays = run_out_retries(massive_session, script, clock=clock, name="AAPL")
     assert delays == [2.0, 8.0, 30.0, 60.0, 60.0, 60.0, 60.0, 60.0]
     failed = row(massive_session, "AAPL")
     assert (failed.attempts, failed.next_attempt_at) == (9, None)
     assert failed.error == (
-        "AAPL has failed for 340 s, as long as MassiveConfig.max_outage allows (300 s); "
-        "the latest error: HTTP 503: unavailable"
+        "AAPL has failed for 340 s, as long as max_outage=300 s allows. The latest error: "
+        f"{answer(503)}"
     )
     massive_session.release(result)
 
@@ -426,13 +461,14 @@ def test_a_max_outage_of_zero_fails_a_symbol_at_its_first_failure(
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", max_outage=0))
     try:
         script = Script(m)
-        script.answers["AAPL"] = [refused(429, "too many requests")]
+        script.answers["AAPL"] = [refused(429)]
         result = follow(m, watchlist("AAPL", "MSFT"), script)
         failed = wait_state(m, "AAPL", SymbolReadState.FAILED)
         assert (failed.attempts, script.reads_of("AAPL")) == (1, 1)
         assert failed.error is not None
-        assert failed.error.startswith(
-            "AAPL has failed for 0 s, as long as MassiveConfig.max_outage allows (0 s); "
+        assert failed.error == (
+            "AAPL has failed for 0 s, as long as max_outage=0 s allows. The latest error: "
+            f"{answer(429)}"
         )
         m.release(result)
     finally:
@@ -448,7 +484,7 @@ def test_rows_end_a_run_of_failures_so_the_next_one_starts_over(
     # AAPL fails for 220 s, gets rows, then is removed and added back: its new failures start a
     # new run, with the full max_outage and the 2 s first retry.
     script = Script(massive_session)
-    failing = refused(503, "busy")
+    failing = refused(503)
     answers: list[Answer] = [failing] * 6
     script.answers["AAPL"] = [*answers, SymbolRows(rows_of(massive_session, "AAPL", 1))]
     wl = watchlist("AAPL")
@@ -472,7 +508,7 @@ def test_a_retry_that_succeeds_clears_the_error(
 ) -> None:
     script = Script(massive_session)
     script.answers["AAPL"] = [
-        refused(429, "too many requests"),
+        refused(429),
         SymbolRows(rows_of(massive_session, "AAPL", 3)),
     ]
     result = follow(massive_session, watchlist("AAPL"), script)
@@ -494,7 +530,7 @@ def test_a_retry_wakes_the_coordinator_by_itself(
     # A due retry needs no event: the coordinator's wait ends at it. The retry falls due only
     # once the coordinator waits for it, so no batch of events can find it due first.
     script = Script(massive_session)
-    script.answers["AAPL"] = [refused(500, "boom"), SymbolRows(rows_of(massive_session, "AAPL", 1))]
+    script.answers["AAPL"] = [refused(500), SymbolRows(rows_of(massive_session, "AAPL", 1))]
     monkeypatch.setattr(follow_coordinator, "RETRY_DELAYS", (0.05, 0.05, 0.05))
     waiting = threading.Event()
     next_due = follow_coordinator.FollowCoordinator._next_due
@@ -770,12 +806,12 @@ def test_a_run_of_failures_starts_when_its_first_failure_lands(
     # its whole length, even when the failure is a rate-limit refusal: it may have spent that
     # time receiving pages. The symbol retries, and its run counts from that failure.
     first = FirstRead(
-        {"AAPL": refused(status, "refused")},
+        {"AAPL": refused(status)},
         began_at=int(clock.time() * 1e9),
         seconds=360.0,
     )
     script = Script(massive_session)
-    script.answers["AAPL"] = [refused(status, "refused")]
+    script.answers["AAPL"] = [refused(status)]
     result = follow(massive_session, watchlist("AAPL"), script, first=first)
     assert wait_state(massive_session, "AAPL", SymbolReadState.RETRYING).attempts == 1
     delays = run_out_retries(massive_session, script, clock=clock, name="AAPL", earlier=-1)
@@ -933,7 +969,7 @@ def test_close_marks_every_unfinished_symbol_closed(
     monkeypatch.setattr(massive_session._core.reads, "_max_workers", 1)
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
-    script.answers["NVDA"] = [refused(403)]
+    script.answers["NVDA"] = [refused(403, "NVDA")]
     wl = watchlist("AAPL", "NVDA")
     result = follow(massive_session, wl, script, one_scan=True)
     until(lambda: script.calls == [("AAPL", "NVDA")])
@@ -964,7 +1000,7 @@ def test_a_symbol_table_view_after_close_keeps_the_final_rows(
     view = massive_session.symbol_reads()
     massive_session.close()
     until(lambda: [(r["Symbol"], r["State"]) for r in dh_to_pylist(view)] == [("AAPL", "CLOSED")])
-    with pytest.raises(MassiveError, match=r"is closed; " + re.escape(NEW_SESSION) + "$"):
+    with pytest.raises(MassiveError, match="^" + re.escape(session_closed()) + "$"):
         massive_session.symbol_reads()
     massive_session.release(view)
     del result
@@ -1045,17 +1081,17 @@ def test_failed_and_retrying_symbols_are_spans_with_their_errors(
     script = Script(massive_session)
     names = ["A", "B", "C", "D", "E", "F", "G"]
     for name in names:
-        script.answers[name] = [refused(403, "not in the plan")]
-    script.answers["H"] = [refused(404, "gone")]
-    script.answers["R"] = [refused(503, "busy")]
+        script.answers[name] = [refused(403, name)]
+    script.answers["H"] = [refused(404, "H")]
+    script.answers["R"] = [refused(503, "R")]
     result = follow(massive_session, watchlist(*names, "H", "R"), script)
     wait_state(massive_session, "R", SymbolReadState.RETRYING)
     for name in [*names, "H"]:
         wait_state(massive_session, name, SymbolReadState.FAILED)
     expected = [
-        *[("symbol_read_failed", name, "HTTP 403: not in the plan", False) for name in names],
-        ("symbol_read_failed", "H", "HTTP 404: gone", False),
-        ("symbol_read_retrying", "R", "HTTP 503: busy", False),
+        *[("symbol_read_failed", name, answer(403, name), False) for name in names],
+        ("symbol_read_failed", "H", answer(404, "H"), False),
+        ("symbol_read_retrying", "R", answer(503, "R"), False),
     ]
     until(lambda: troubled(problem_rows) == expected)
     # Neither fails the read: its Error names only why it stopped.
@@ -1072,21 +1108,15 @@ def test_a_retrying_symbol_removed_from_the_watchlist_ends_its_span(
     # AAPL waits for its retry when its row is deleted: no read of it is missing any more, so
     # its span ends, and no failed span opens. MSFT lands, so the table lives on.
     script = Script(massive_session)
-    script.answers["AAPL"] = [refused(503, "busy")]
+    script.answers["AAPL"] = [refused(503)]
     wl = watchlist("AAPL", "MSFT")
     result = follow(massive_session, wl, script)
     wait_state(massive_session, "MSFT", SymbolReadState.DONE)
     wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
-    until(
-        lambda: (
-            troubled(problem_rows) == [("symbol_read_retrying", "AAPL", "HTTP 503: busy", False)]
-        )
-    )
+    until(lambda: troubled(problem_rows) == [("symbol_read_retrying", "AAPL", answer(503), False)])
     delete(wl, "AAPL")
     wait_state(massive_session, "AAPL", SymbolReadState.REMOVED)
-    until(
-        lambda: troubled(problem_rows) == [("symbol_read_retrying", "AAPL", "HTTP 503: busy", True)]
-    )
+    until(lambda: troubled(problem_rows) == [("symbol_read_retrying", "AAPL", answer(503), True)])
     massive_session.release(result)
 
 
@@ -1098,10 +1128,10 @@ def test_a_retrying_symbol_s_span_ends_when_its_retry_lands(
     problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     script = Script(massive_session)
-    script.answers["AAPL"] = [refused(503, "busy"), SymbolRows(rows_of(massive_session, "AAPL", 1))]
+    script.answers["AAPL"] = [refused(503), SymbolRows(rows_of(massive_session, "AAPL", 1))]
     result = follow(massive_session, watchlist("AAPL"), script)
     wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
-    retrying = ("symbol_read_retrying", "AAPL", "HTTP 503: busy")
+    retrying = ("symbol_read_retrying", "AAPL", answer(503))
     until(lambda: troubled(problem_rows) == [(*retrying, False)])
     clock.advance(RETRY_DELAYS[0])
     massive_session._core.follows.wake()
@@ -1119,7 +1149,7 @@ def test_a_retrying_symbol_that_gives_up_ends_its_span_and_opens_a_failed_one(
     problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     script = Script(massive_session)
-    script.answers["AAPL"] = [refused(503, "busy")]
+    script.answers["AAPL"] = [refused(503)]
     # MSFT lands, so the table outlives AAPL's failure.
     result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
     wait_state(massive_session, "MSFT", SymbolReadState.DONE)
@@ -1138,12 +1168,13 @@ def test_a_retrying_symbol_that_gives_up_ends_its_span_and_opens_a_failed_one(
     # Each wait for a retry is a span of its own, ended once the retry starts; the last one
     # gives up, and the failed span stays open.
     gave_up = (
-        f"AAPL has failed for {sum(schedule):.0f} s, as long as MassiveConfig.max_outage allows "
-        f"({massive_session._core.config.max_outage:.0f} s); the latest error: HTTP 503: busy"
+        f"AAPL has failed for {sum(schedule):.0f} s, as long as "
+        f"max_outage={massive_session._core.config.max_outage:.0f} s allows. The latest error: "
+        f"{answer(503)}"
     )
     expected = [
         ("symbol_read_failed", "AAPL", gave_up, False),
-        *[("symbol_read_retrying", "AAPL", "HTTP 503: busy", True)] * len(schedule),
+        *[("symbol_read_retrying", "AAPL", answer(503), True)] * len(schedule),
     ]
     until(lambda: troubled(problem_rows) == expected)
     massive_session.release(result)
@@ -1182,7 +1213,7 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     problem_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
     script = Script(massive_session)
-    script.answers["NVDA"] = [refused(403)]
+    script.answers["NVDA"] = [refused(403, "NVDA")]
     gate = script.gates["TSLA"] = threading.Event()
     wl = watchlist("AAPL", "MSFT", "NVDA", "TSLA")
     result = follow(massive_session, wl, script)
@@ -1201,7 +1232,7 @@ def test_the_streams_summary_agrees_with_the_symbol_reads(
     assert summary["Loading"] == sum(
         r["State"] in ("QUEUED", "LOADING", "RETRYING") for r in symbols
     )
-    failed = ("symbol_read_failed", "NVDA", "HTTP 403: refused")
+    failed = ("symbol_read_failed", "NVDA", answer(403, "NVDA"))
     until(lambda: troubled(problem_rows) == [(*failed, False)])
     delete(wl, "AAPL", "NVDA")  # a landed and a failed symbol leave: so do their counts
     until(lambda: stream(massive_session, drain, dh_to_pylist)["SymbolCount"] == 2)
@@ -1264,13 +1295,15 @@ def test_a_dying_coordinator_fails_every_followed_table(
     with caplog.at_level(logging.ERROR):
         massive_session._core.follows.wake()
         until(lambda: bool(first.j_table.isFailed()) and bool(second.j_table.isFailed()))
-    assert "massive #" in caplog.text
-    assert "died; its queue is no longer handled" in caplog.text
+    assert "A library thread died, so its session's live tables fail. " in caplog.text
     until(lambda: [args.exc_type for args in escaped] == [SystemExit])
     assert massive_session._core.follows.following == 0
     with massive_session._core.registry_lock:
         errors = [w.row.error for w in massive_session._core.workers._workers.values()]
-    assert all("the follow coordinator died" in (e or "") for e in errors)
+    assert all(
+        (e or "").startswith("The library thread that follows symbol tables died: SystemExit(")
+        for e in errors
+    )
 
 
 def _holds_rows(to_list: ToList, table: Table, count: int) -> bool:
@@ -1468,8 +1501,10 @@ def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
 
 def test_two_bad_rows_fail_the_table_once(
     watchlist: Callable[..., InputTable],
+    *,
     massive_session: dm.MassiveSession,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     config = dataclasses.replace(
         massive_session._core.config, on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
@@ -1478,9 +1513,25 @@ def test_two_bad_rows_fail_the_table_once(
     wl = watchlist("AAPL")
     result = follow(massive_session, wl, Script(massive_session))
     wait_state(massive_session, "AAPL", SymbolReadState.DONE)
-    add(wl, "msft", "nvda")  # two refusals in one update: the second finds the table failed
-    until(lambda: bool(result.j_table.isFailed()))
-    wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        add(wl, "msft", "nvda")  # two refusals in one update: the second finds the table failed
+        until(lambda: bool(result.j_table.isFailed()))
+        wait_state(massive_session, "AAPL", SymbolReadState.STOPPED)
+    # The record names the dataset once, though the failure's text starts with it too.
+    [record] = caplog.records
+    assert re.fullmatch(
+        r"test\.trades call \d+: the read failed, and so did its table: "
+        + re.escape(
+            "A symbol table holds 'msft'. 'msft' is not a Massive stock ticker, because "
+            "Massive's tickers are case-sensitive. If you mean 'MSFT', pass 'MSFT'. Fix the "
+            "row, or convert the table with dm.canonicalize_symbols(table, "
+            "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), naming the "
+            "convention your tickers come from. If Massive itself writes 'msft', report it at "
+            "https://github.com/chipkent/deephaven-massive/issues, since the library does not "
+            "know that form yet."
+        ),
+        record.getMessage(),
+    )
 
 
 def test_a_read_stopped_by_a_release_leaves_its_symbol_stopped(
@@ -1490,7 +1541,7 @@ def test_a_read_stopped_by_a_release_leaves_its_symbol_stopped(
     # The read sees the stop token and fails as reads do then; that failure is not the symbol's.
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
-    script.answers["AAPL"] = [refused(503, "stopped")]
+    script.answers["AAPL"] = [refused(503)]
     keeper = follow(massive_session, watchlist("MSFT"), Script(massive_session))
     result = follow(massive_session, watchlist("AAPL"), script)
     until(lambda: script.calls == [("AAPL",)])
@@ -1532,11 +1583,11 @@ def test_one_result_s_defect_leaves_the_others_following(
         add(broken_list, "NVDA")
         add(healthy_list, "MSFT")
         until(lambda: bool(broken.j_table.isFailed()))
-    assert "follow: handling _" in caplog.text  # its start's set, or the later change
+    assert ": handling _" in caplog.text  # its start's set, or the later change
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
     with massive_session._core.registry_lock:
         error = massive_session._core.workers._workers[broken_id].row.error or ""
-    assert "RuntimeError: a defect" in error
+    assert "RuntimeError('a defect')" in error
     massive_session.release(healthy)
     massive_session.release(broken)
 
@@ -1598,10 +1649,13 @@ def test_a_defect_in_any_step_fails_only_its_result(
             massive_session._core.follows.wake()
         until(lambda: bool(broken.j_table.isFailed()))
     broken_id = max(_calls(massive_session))
-    assert f"call {broken_id} follow: {step} failed (test.trades)" in caplog.text
+    assert f"test.trades call {broken_id}: {step} failed. {LIBRARY_BUG}" in caplog.text
     with massive_session._core.registry_lock:
         error = massive_session._core.workers._workers[broken_id].row.error or ""
-    assert f"the followed read failed {step}: RuntimeError: a defect in {method}" in error
+    assert error == (
+        f"test.trades: the read that follows its symbol table failed while {step}: "
+        f"RuntimeError('a defect in {method}'). {LIBRARY_BUG}"
+    )
     add(healthy_list, "MSFT")
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
     if method != "_show":  # its symbol is stopped, never left queued or loading
@@ -1638,7 +1692,12 @@ def test_a_defect_while_failing_a_broken_result_is_logged_too(
     monkeypatch.setattr(FollowedRead, "fail_table", cannot_fail)
     with caplog.at_level(logging.ERROR, logger=LOGGER):
         broken = follow(massive_session, watchlist("NVDA"), Script(massive_session))
-        until(lambda: "failing its table after writing its rows failed raised too" in caplog.text)
+        until(
+            lambda: (
+                "stopping its table after writing its rows failed raised an error too"
+                in caplog.text
+            )
+        )
     monkeypatch.undo()
     add(healthy_list, "MSFT")  # the coordinator goes on
     until(lambda: {r["Ticker"] for r in dh_to_pylist(healthy)} == {"AAPL", "MSFT"})
@@ -1692,7 +1751,7 @@ def test_a_flat_file_scan_fails_as_a_unit(
 ) -> None:
     script = Script(massive_session)
     gate = script.gates["AAPL"] = threading.Event()
-    scan = SymbolFailure(MassiveError("HTTP 403: the files are refused", status=403))
+    scan = SymbolFailure(MassiveError(FLAT_FILES_403, status=403, request_id="R1"))
     script.answers["MSFT"] = [scan]
     script.answers["NVDA"] = [scan]
     wl = watchlist("AAPL")
@@ -1704,7 +1763,7 @@ def test_a_flat_file_scan_fails_as_a_unit(
     msft = wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
     nvda = wait_state(massive_session, "NVDA", SymbolReadState.FAILED)
     assert script.calls == [("AAPL",), ("MSFT", "NVDA")]
-    assert msft.error == nvda.error == "HTTP 403: the files are refused"
+    assert msft.error == nvda.error == FLAT_FILES_403
     massive_session.release(result)
 
 
@@ -1921,12 +1980,12 @@ def test_a_table_whose_call_time_symbols_all_fail_for_good_fails(
     # A plan without the dataset refuses every symbol: the table fails with the first
     # symbol's error, in name order, as a call that waits raises it.
     script = Script(massive_session)
-    script.answers["MSFT"] = [refused(403, "MSFT not in the plan")]
-    script.answers["AAPL"] = [refused(403, "AAPL not in the plan")]
+    script.answers["MSFT"] = [refused(403, "MSFT")]
+    script.answers["AAPL"] = [refused(403)]
     result = follow(massive_session, watchlist("MSFT", "AAPL"), script)
     until(lambda: bool(result.j_table.isFailed()))
     shown = stream(massive_session, drain, dh_to_pylist)
-    assert (shown["State"], shown["Error"]) == ("FAILED", "HTTP 403: AAPL not in the plan")
+    assert (shown["State"], shown["Error"]) == ("FAILED", answer(403))
     assert row(massive_session, "AAPL").state is SymbolReadState.FAILED
 
 
@@ -1948,8 +2007,8 @@ def test_a_call_time_symbol_counts_as_failed_once_it_has_failed_for_max_outage(
 
     monkeypatch.setattr(TablePublisher, "publish_failure", recording)
     script = Script(massive_session)
-    script.answers["AAPL"] = [refused(503, "busy")]
-    script.answers["MSFT"] = [refused(403, "not in the plan")]
+    script.answers["AAPL"] = [refused(503)]
+    script.answers["MSFT"] = [refused(403, "MSFT")]
     result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
     wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
     wait_state(massive_session, "AAPL", SymbolReadState.RETRYING)
@@ -1961,7 +2020,7 @@ def test_a_call_time_symbol_counts_as_failed_once_it_has_failed_for_max_outage(
     (failure,) = failures
     assert isinstance(failure, dm.MassiveError)
     assert (failure.status, failure.is_retryable) == (503, False)
-    assert "as long as MassiveConfig.max_outage allows (300 s)" in str(failure)
+    assert "as long as max_outage=300 s allows" in str(failure)
 
 
 def test_deleting_an_unsettled_call_time_symbol_keeps_the_table(
@@ -1972,8 +2031,8 @@ def test_deleting_an_unsettled_call_time_symbol_keeps_the_table(
     script = Script(massive_session)
     script.gates["AAPL"] = threading.Event()
     script.gates["MSFT"] = threading.Event()
-    script.answers["MSFT"] = [refused(403, "not in the plan")]
-    script.answers["NVDA"] = [refused(403, "not in the plan")]
+    script.answers["MSFT"] = [refused(403, "MSFT")]
+    script.answers["NVDA"] = [refused(403, "NVDA")]
     wl = watchlist("AAPL", "MSFT")
     result = follow(massive_session, wl, script)
     until(lambda: state(massive_session, "MSFT") is SymbolReadState.LOADING)
@@ -1993,8 +2052,8 @@ def test_deleting_a_failed_call_time_symbol_leaves_the_check_to_the_others(
 ) -> None:
     script = Script(massive_session)
     script.gates["AAPL"] = threading.Event()
-    script.answers["AAPL"] = [refused(403, "not in the plan")]
-    script.answers["MSFT"] = [refused(403, "not in the plan")]
+    script.answers["AAPL"] = [refused(403)]
+    script.answers["MSFT"] = [refused(403, "MSFT")]
     wl = watchlist("AAPL", "MSFT")
     result = follow(massive_session, wl, script)
     wait_state(massive_session, "MSFT", SymbolReadState.FAILED)
@@ -2058,10 +2117,10 @@ def test_the_call_time_check_does_not_rescan_its_symbols(
     result.call_time = _CountedScans(result.call_time)
     monkeypatch.setattr(_CountedScans, "scans", 0)
     for name in names:
-        outcome = refused(403, f"{name} not in the plan")
+        outcome = refused(403, name)
         handle([follow_coordinator._Began(read, {name: 1})])
         handle([follow_coordinator._Outcome(read, {name: 1}, {name: outcome}, 0, 0.0)])
-    assert str(read.failed) == "HTTP 403: S0000 not in the plan"
+    assert str(read.failed) == answer(403, "S0000")
     assert _CountedScans.scans <= 1
 
 

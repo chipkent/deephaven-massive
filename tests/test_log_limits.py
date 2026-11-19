@@ -13,6 +13,7 @@ from deephaven_massive._log_limits import (
     log_failure,
     log_once,
     mark_failure_logged,
+    prose_list,
 )
 
 
@@ -24,6 +25,21 @@ def test_bounded_list_shows_the_count_and_the_first_items() -> None:
     assert bounded_list("ABC", limit=3) == "3 [A, B, C]"  # exactly the limit: none left out
     many = [f"T{n}" for n in range(LIST_LIMIT + 1)]
     assert bounded_list(many).endswith(f", T{LIST_LIMIT - 1}, +1 more]")
+
+
+def test_prose_list_joins_a_few_items_as_prose() -> None:
+    assert prose_list([], "symbols") == "no symbols"
+    assert prose_list(["X:FOOUSD"], "symbols") == "X:FOOUSD"
+    assert prose_list(["X:FOOUSD", "X:BARUSD"], "symbols") == "X:FOOUSD and X:BARUSD"
+    assert prose_list(["AAPL", "MSFT", "NVDA"], "symbols") == "AAPL, MSFT, and NVDA"
+    assert prose_list(iter([7, 9]), "ids") == "7 and 9"  # any iterable, each item by str
+
+
+def test_prose_list_counts_a_long_list_and_shows_its_first_items() -> None:
+    symbols = [f"S{n}" for n in range(12)]
+    assert prose_list(symbols, "symbols") == "12 symbols, the first 3: S0, S1, and S2"
+    assert prose_list(symbols, "symbols", shown=1) == "12 symbols, the first 1: S0"
+    assert prose_list(symbols[:3], "symbols", shown=3) == "S0, S1, and S2"  # exactly the limit
 
 
 def test_log_once_logs_each_key_once(
@@ -86,7 +102,7 @@ def test_bounded_log_reports_each_value_once_up_to_the_limit(
     assert [r.getMessage() for r in caplog.records] == [
         "bad a",
         "bad b",
-        "2 values were reported; further ones are not logged",
+        "2 values were reported. Further ones are not logged.",
     ]
     assert {r.levelno for r in caplog.records} == {level}
 

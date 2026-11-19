@@ -25,9 +25,11 @@ the page's `DriftReport.statuses`, so a new status Massive introduces is seen, n
 
 **Error mapping** of a status other than 200: 401 is `WireAuthError`, 403 is
 `WireEntitlementError`, and every other status is `WireError`. Each error carries the status,
-the host, the request target (whose query never holds a secret), and the `request_id`, and its
-message names them with the first 200 characters of the server's `message` (or of the body,
-when it has none).
+the host, the request target (whose query never holds a secret), and the `request_id`. Its
+message is one of two sentences `RequestTarget` builds: `answered`, for an answer Massive gave,
+quoting the first 200 characters of the server's `message` (or of the body, when it has none)
+and never judging it; and `unreadable`, for an answer the library could not read, naming what
+was wrong with it.
 
 The functions are pure and safe from any thread. This module imports only the standard
 library, `net`, and `spec`.
@@ -86,25 +88,96 @@ class RequestTarget:
     host: str
     target: str
 
-    def context(
-        self, what: str, detail: str, *, status: int | None, request_id: str | None = None
+    def answered(
+        self,
+        status: int,
+        text: str,
+        *,
+        request_id: str | None,
+        envelope_status: str | None = None,
     ) -> ErrorContext:
-        """Return the arguments of a wire error for this request, as `WireError(**context)`.
+        """Return the arguments of a wire error for an answer Massive gave this request.
+
+        The sentence is the same for every status, so no site judges whether a 429 or a 503
+        is a refusal: the error's class says the rest. Massive's text is quoted as it is.
 
         Args:
-            what: What happened, such as `"HTTP 404"`, leading the message.
-            detail: The server's message or the cause, ending the message.
-            status: The HTTP status, or `None` when there was no response.
+            status: The HTTP status.
+            text: Massive's text: the envelope's `message`, or the body's start when it has
+                none; empty for an empty body.
+            request_id: Massive's `request_id`, or `None`.
+            envelope_status: The envelope's `status` when it, not the HTTP status, is the
+                answer (`NOT_AUTHORIZED`, `ERROR`), or `None`.
+
+        Returns:
+            The arguments, as `WireError(**context)`; the message reads `"Massive answered
+            GET /v3/trades/AAPL on api.massive.com with HTTP 403 (request_id abc123): "You
+            are not entitled to this data"."`, with `and status NOT_AUTHORIZED` after the
+            HTTP status when `envelope_status` is given, without the parenthesis when there
+            is no `request_id`, and ending `and no message.` instead of the quotation when
+            `text` is empty.
+        """
+        answer = (
+            f"HTTP {status}"
+            if envelope_status is None
+            else f"HTTP {status} and status {envelope_status}"
+        )
+        quoted = f': "{text}".' if text else " and no message."
+        return self._context(
+            f"{self._answered(answer, request_id)}{quoted}", status=status, request_id=request_id
+        )
+
+    def unreadable(
+        self, status: int, problem: str, *, request_id: str | None = None
+    ) -> ErrorContext:
+        """Return the arguments of a wire error for an answer the library could not read.
+
+        Args:
+            status: The HTTP status.
+            problem: What was wrong with the answer, as a clause with no final period, such as
+                `"the body is not a JSON object"`.
             request_id: Massive's `request_id`, or `None`.
 
         Returns:
-            The arguments; the message reads
-            `"<what> from GET <target> on <host> (request_id <id>): <detail>"`, without the
-            parenthesis when there is no `request_id`.
+            The arguments, as `WireError(**context)`; the message reads `"Massive answered GET
+            /v3/trades/AAPL on api.massive.com with HTTP 200, and the library could not read
+            the answer: the body is not a JSON object."`, with the `request_id` parenthesis
+            after the status when there is one.
+        """
+        return self._context(
+            f"{self._answered(f'HTTP {status}', request_id)}, and the library could not read "
+            f"the answer: {problem}.",
+            status=status,
+            request_id=request_id,
+        )
+
+    def _answered(self, answer: str, request_id: str | None) -> str:
+        """Return the clause that names the request and Massive's answer to it.
+
+        Args:
+            answer: The answer, such as `"HTTP 403"`.
+            request_id: Massive's `request_id`, or `None`.
+
+        Returns:
+            `"Massive answered GET <target> on <host> with <answer>"`, then
+            `" (request_id <id>)"` when there is one.
         """
         rid = f" (request_id {request_id})" if request_id else ""
+        return f"Massive answered GET {self.target} on {self.host} with {answer}{rid}"
+
+    def _context(self, message: str, *, status: int, request_id: str | None) -> ErrorContext:
+        """Return the arguments of a wire error for this request, with its message.
+
+        Args:
+            message: The message.
+            status: The HTTP status.
+            request_id: Massive's `request_id`, or `None`.
+
+        Returns:
+            The arguments, as `WireError(**context)`.
+        """
         return ErrorContext(
-            message=f"{what} from GET {self.target} on {self.host}{rid}: {detail}",
+            message=message,
             status=status,
             host=self.host,
             path=self.target,
@@ -196,10 +269,10 @@ def _excerpt(data: bytes | bytearray) -> str:
         data: The body.
 
     Returns:
-        The first 200 characters, with undecodable bytes replaced, or `"an empty body"`.
+        The first 200 characters, with undecodable bytes replaced; empty for an empty body.
     """
     # A character is at most four UTF-8 bytes, so only the excerpt's bytes are decoded.
-    return data[: _EXCERPT * 4].decode("utf-8", "replace")[:_EXCERPT] or "an empty body"
+    return data[: _EXCERPT * 4].decode("utf-8", "replace")[:_EXCERPT]
 
 
 def http_error(status: int, data: bytes | bytearray, request: RequestTarget) -> WireError:
@@ -219,14 +292,14 @@ def http_error(status: int, data: bytes | bytearray, request: RequestTarget) -> 
         body = codec.loads(data)
     except ValueError:
         body = None
-    detail = _excerpt(data)
+    text = _excerpt(data)
     request_id = None
     if isinstance(body, dict):
         message = body.get("message") or body.get("error")
         if isinstance(message, str) and message:
-            detail = message[:_EXCERPT]
+            text = message[:_EXCERPT]
         request_id = _request_id(body.get("request_id"))
-    context = request.context(f"HTTP {status}", detail, status=status, request_id=request_id)
+    context = request.answered(status, text, request_id=request_id)
     if status == HTTPStatus.UNAUTHORIZED:
         return WireAuthError(**context)
     if status == HTTPStatus.FORBIDDEN:
@@ -251,15 +324,13 @@ def _as_rows(value: object, request: RequestTarget) -> list[dict[str, object]]:
         return [value]
     if not isinstance(value, list):
         raise WireError(
-            **request.context(
-                "HTTP 200", "the rows are neither a JSON object nor a list", status=200
-            ),
+            **request.unreadable(200, "the rows are neither a JSON object nor a list"),
             kind=WireFailure.UNREADABLE,
         )
     for index, row in enumerate(value):
         if not isinstance(row, dict):
             raise WireError(
-                **request.context("HTTP 200", f"row {index} is not a JSON object", status=200),
+                **request.unreadable(200, f"row {index} is not a JSON object"),
                 kind=WireFailure.UNREADABLE,
             )
     return value
@@ -308,16 +379,13 @@ def _envelope(body: dict[str, object], request: RequestTarget) -> tuple[str, str
     request_id = _request_id(body.get("request_id"))
     if not isinstance(status, str):
         raise WireError(
-            **request.context("HTTP 200", "the envelope's status is not text", status=200),
+            **request.unreadable(200, "the envelope's status is not text", request_id=request_id),
             kind=WireFailure.UNREADABLE,
         )
     if status in {"NOT_AUTHORIZED", "ERROR"}:
-        message = body.get("message") or body.get("error") or "no message"
-        context = request.context(
-            f"HTTP 200 with status {status}",
-            str(message)[:_EXCERPT],
-            status=200,
-            request_id=request_id,
+        message = body.get("message") or body.get("error") or ""
+        context = request.answered(
+            200, str(message)[:_EXCERPT], request_id=request_id, envelope_status=status
         )
         if status == "NOT_AUTHORIZED":
             raise WireEntitlementError(**context)
@@ -359,27 +427,26 @@ def decode_page(data: bytes | bytearray, rest_path: RestPath, request: RequestTa
         nor an error status.
 
     Raises:
-        WireError: If the body is not UTF-8 JSON (quoting its first 200 bytes), has the wrong
-            shape, or lacks the result key under a status other than `OK` or `DELAYED`; each
-            of these is marked `unreadable`, while a status `ERROR` is Massive's answer and
-            is not.
+        WireError: If the body is not UTF-8 JSON (quoting its first 200 characters), has the
+            wrong shape, or lacks the result key under a status other than `OK` or `DELAYED`;
+            each of these is marked `unreadable`, while a status `ERROR` is Massive's answer
+            and is not.
     """
     try:
         body = codec.loads(data)
     except ValueError as error:
-        raise WireError(
-            **request.context(
-                "HTTP 200",
-                f"the body is not JSON ({error}): {bytes(data[:_EXCERPT])!r}",
-                status=200,
-            ),
-            kind=WireFailure.UNREADABLE,
-        ) from error
+        excerpt = _excerpt(data)
+        problem = (
+            "the body is empty"
+            if not excerpt
+            else f'the body is not JSON and starts "{excerpt}": {error}'
+        )
+        raise WireError(**request.unreadable(200, problem), kind=WireFailure.UNREADABLE) from error
     if isinstance(body, list) and rest_path.result_key is None:
         return Page(status="", request_id=None, rows=_as_rows(body, request), body=body)
     if not isinstance(body, dict):
         raise WireError(
-            **request.context("HTTP 200", "the body is not a JSON object", status=200),
+            **request.unreadable(200, "the body is not a JSON object"),
             kind=WireFailure.UNREADABLE,
         )
     status, request_id = _envelope(body, request)
@@ -393,11 +460,11 @@ def decode_page(data: bytes | bytearray, rest_path: RestPath, request: RequestTa
     elif status in _EMPTY_STATUSES:
         rows = []
     else:
+        labelled = f"its status is {status!r}" if status else "it has no status"
         raise WireError(
-            **request.context(
-                f"HTTP 200 with status {status or '(none)'}",
-                f"the body has no {rest_path.result_key!r}",
-                status=200,
+            **request.unreadable(
+                200,
+                f"the body has no {rest_path.result_key!r} and {labelled}",
                 request_id=request_id,
             ),
             kind=WireFailure.UNREADABLE,

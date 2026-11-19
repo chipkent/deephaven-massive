@@ -66,6 +66,8 @@ _TICKERS_PATH: Final = "/v3/reference/tickers"
 """The reference path that lists Massive's tickers by market."""
 _INDEX_LIST_KEY: Final = "index tickers"
 """The key of the session's one index ticker list in its `SharedLookup`."""
+_INDICES_FAILED: Final = "Reading Massive's index ticker list failed"
+"""What failed when the index ticker list's read fails, for its messages."""
 _INDEX_PREFIX: Final = "I:"
 
 REREAD_AFTER: Final = 3600.0
@@ -179,8 +181,8 @@ class OptionRootKinds:
         except MassiveError as public:
             named = copy_error(
                 public,
-                f"option root {root!r} cannot be classified as an index or not: reading "
-                f"Massive's index ticker list failed: {public}",
+                f"The library cannot tell whether the option root {root!r} is an index, since "
+                f"reading Massive's index ticker list failed. {public}",
             )
             raise named from public
         if underlying not in indices:
@@ -204,8 +206,8 @@ class OptionRootKinds:
         except MassiveError as public:
             named = copy_error(
                 public,
-                f"option root {root!r} cannot be classified as an index or not: reading "
-                f"Massive's Contract Overview of {contract} failed: {public}",
+                f"The library cannot tell whether the option root {root!r} is an index, since "
+                f"reading Massive's Contract Overview of {contract} failed. {public}",
             )
             raise named from public
 
@@ -259,14 +261,12 @@ class OptionRootKinds:
                 "try again" if stopped else "get a copy of the error",
                 public,
             )
-            self._indices.fail(claim, public, "the read failed", stopped=stopped)
+            self._indices.fail(claim, public, _INDICES_FAILED, stopped=stopped)
             raise public from error
         except BaseException as error:
-            self._indices.fail(claim, error, "the read failed")
+            self._indices.fail(claim, error, _INDICES_FAILED)
             if source_of(error) is ErrorSource.LIBRARY:
-                logger.exception(
-                    "%s: reading Massive's index ticker list failed. %s", self._label, LIBRARY_BUG
-                )
+                logger.exception("%s. %s", _INDICES_FAILED, LIBRARY_BUG)
             raise
         self._indices.complete(claim, names)
         return names
@@ -309,9 +309,8 @@ class OptionRootKinds:
             )
         else:
             logger.warning(
-                "%s: Massive's index ticker list (%s?market=indices) holds no index, so no "
-                "option underlying in this session gets the I: prefix of an index",
-                self._label,
+                "Massive's index ticker list, %s?market=indices, holds no index, so no option "
+                "underlying in this session gets the I: prefix of an index.",
                 _TICKERS_PATH,
             )
         return frozenset(names)
@@ -353,6 +352,7 @@ class OptionRootKinds:
         )
         if not isinstance(claim, Claim):
             return claim
+        failed = f"Reading Massive's Contract Overview of {contract} failed"
         try:
             page = self._client.get(
                 reader.rest_path(_CONTRACT_PATH),
@@ -384,17 +384,12 @@ class OptionRootKinds:
                 "try again" if stopped else "get a copy of the error",
                 public,
             )
-            self._lookup.fail(claim, public, "the request failed", stopped=stopped)
+            self._lookup.fail(claim, public, failed, stopped=stopped)
             raise public from error
         except BaseException as error:
-            self._lookup.fail(claim, error, "the request failed")
+            self._lookup.fail(claim, error, failed)
             if source_of(error) is ErrorSource.LIBRARY:
-                logger.exception(
-                    "%s: reading Massive's Contract Overview of %s failed. %s",
-                    self._label,
-                    contract,
-                    LIBRARY_BUG,
-                )
+                logger.exception("%s. %s", failed, LIBRARY_BUG)
             raise
         cfi = next((row.get("cfi") for row in page.rows), None)
         kind = (

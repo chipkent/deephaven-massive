@@ -37,7 +37,13 @@ from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._error_policy import DEFAULT_POLICY, ResolvedPolicy
-from deephaven_massive._errors import LIBRARY_BUG, NEW_SESSION, BrokenGuaranteeError, RowDataError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    NEW_SESSION,
+    BrokenGuaranteeError,
+    RowDataError,
+    session_closed,
+)
 from deephaven_massive._ingest import futures_calendar, host_decision, ws, ws_connection
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.rest import RestReader
@@ -185,9 +191,9 @@ def settle(ws_session: WsSession) -> None:
 
 
 STALL = (
-    r"connection down since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ; no data; waiting for a WebSocket "
-    r"slot on socket\.test/options: another connection with this API key, perhaps from another "
-    r"process, holds it; the account allows one connection per asset class"
+    r"The connection has been down since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, so no data arrives\. "
+    r'It waits for a free connection, since Massive answered the login with "max_connections", '
+    r"so another connection with this API key holds its place\."
 )
 """A pattern of the `outage` span's detail of an options stream whose connection waits for a
 slot."""
@@ -196,6 +202,11 @@ CAP = ProblemCause.OPTIONS_CAP.value
 OUTAGE = ProblemCause.OUTAGE.value
 NONCANONICAL = ProblemCause.NONCANONICAL_SYMBOLS.value
 RETRYING = ProblemCause.SYMBOL_READ_RETRYING.value
+LIST_503 = (
+    "Massive answered GET /v3/reference/tickers?market=crypto&active=true&limit=1000 on "
+    'api.massive.com with HTTP 503: "Service Unavailable".'
+)
+"""Massive's answer to a read of its crypto ticker list, as the REST client words it."""
 
 
 def streams_of(
@@ -338,11 +349,11 @@ def test_a_refused_topic_fails_only_its_streams(
     ws_session.flush()
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
-    assert (
-        "socket.test/stocks refused the subscription to Q.AAPL; Massive said: not authorized "
-        "to access Q.AAPL"
-    ) in rows[1]["Error"]
-    assert "MassiveConfig.websocket_hosts[AssetClass.STOCKS]" in rows[1]["Error"]
+    assert rows[1]["Error"] == (
+        'Massive answered the subscription to Q.AAPL on wss://socket.test/stocks: "not '
+        'authorized to access Q.AAPL". To stream from another host, pass '
+        'websocket_hosts={dm.AssetClass.STOCKS: "<host>"} to dm.MassiveConfig.'
+    )
     ws_session.send(trade("AAPL"))
     ws_session.flush()
     rows_when(trades, lambda rows: len(rows) == 1)  # the connection kept running
@@ -721,7 +732,7 @@ def test_a_late_watchlist_row_that_is_not_canonical_fails_the_stream_under_raise
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("test.trades: a symbol table holds 'msft'")
+    assert row["Error"].startswith("test.trades: A symbol table holds 'msft'")
     assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, convention=" in row["Error"]
     # m.problems() names the value beside the failure; its span ended with the stream.
     refused = ("noncanonical_symbols", "msft", True)
@@ -759,11 +770,11 @@ def test_a_watchlist_row_that_is_not_canonical_is_skipped_and_shown(
 
 
 UNREADABLE_BRKB = (
-    "test.trades: Massive sent rows the library cannot read whole, so it withheld them: 1 under "
+    "test.trades: Massive sent 1 row the library cannot read whole, so it withheld it: 1 under "
     "unreadable_symbols. Massive sent the symbol 'BRK/B', a spelling the library cannot read as "
     "Massive's ticker. To go on without such rows, pass "
-    "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the dataset method or to "
-    "MassiveConfig, or write 'on_error: {unreadable_symbols: log}' in the settings file."
+    "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
+    "dm.MassiveConfig."
 )
 """The failure of a stream under `unreadable_symbols=RAISE` that met the symbol BRK/B."""
 
@@ -814,14 +825,14 @@ def test_a_failing_upstream_watchlist_fails_the_stream(
         wait_for(lambda: failed_after_flush(ws_session, result))
         (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("the symbol table passed to test.trades failed upstream")
+    assert row["Error"].startswith("The table you passed to test.trades has failed")
     errors = [
         r.getMessage()
         for r in caplog.records
-        if r.levelno >= logging.ERROR and "failed upstream" in r.getMessage()
+        if r.levelno >= logging.ERROR and "can no longer read it" in r.getMessage()
     ]
     assert len(errors) == 1
-    assert errors[0].startswith("test.trades stream 1 failed: the symbol table passed to")
+    assert errors[0].startswith("test.trades stream 1 failed: The table you passed to")
 
 
 def test_a_default_canonicalized_watchlist_skips_a_late_bad_row_and_keeps_following(
@@ -901,7 +912,7 @@ def test_a_failing_watchlist_fails_a_last_by_stream_once(
     assert result.j_table.isFailed()
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("the symbol table passed to test.trades failed upstream")
+    assert row["Error"].startswith("The table you passed to test.trades has failed")
 
 
 def watching_streams(
@@ -994,10 +1005,17 @@ def test_static_options_beyond_the_cap_raise(
     monkeypatch.setattr(ws, "OPTIONS_CAP", 2)
     monkeypatch.setattr(ws_connection, "OPTIONS_CAP", 2)
     contracts = ["O:SPY251219C00600000", "O:SPY251219C00610000", "O:SPY251219C00620000"]
-    with pytest.raises(ValueError, match="3 new option topics and 0 in use exceed the 2"):
+    with pytest.raises(
+        ValueError,
+        match=r"^test\.options: this table would add 3 options subscriptions to the 0 its "
+        r"connection carries, over Massive's cap of 2\. Each channel of each contract counts, "
+        r"from every session on the connection\. Pass fewer contracts\.$",
+    ):
         ws_session.query(OPTIONS, contracts).blink()
     first = ws_session.query(OPTIONS, contracts[:2]).blink()
-    with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
+    with pytest.raises(
+        ValueError, match="would add 1 options subscription to the 2 its connection carries"
+    ):
         ws_session.query(OPTIONS, contracts[2:]).blink()
     every = ws_session.query(OPTIONS, dm.ALL).blink()  # a wildcard counts zero
     ws_session.session.release(first)
@@ -1014,8 +1032,8 @@ def test_the_cap_message_counts_topics_not_contracts(
     trades = ws_session.query(OPTIONS, contracts).blink()
     with pytest.raises(
         ValueError,
-        match=r"^test.option_quotes: 2 new option topics and 2 in use exceed the 3 topics one "
-        r"/options connection carries; a topic is one contract on one channel",
+        match=r"^test\.option_quotes: this table would add 2 options subscriptions to the 2 "
+        r"its connection carries, over Massive's cap of 3\.",
     ):
         ws_session.query(OPTION_QUOTES, contracts).blink()
     ws_session.session.release(trades)
@@ -1040,7 +1058,13 @@ def test_reactive_options_beyond_the_cap_are_deferred(
     [row] = streams_of(ws_session, dh_to_pylist)
     assert (row["State"], row["Deferred"], row["Error"]) == ("RUNNING", 1, None)
     # The deferred contract is an options_cap span that counts it.
-    cap = (1, "options_cap", None, "over capacity: 2/1; 1 deferred", 1)
+    cap = (
+        1,
+        "options_cap",
+        None,
+        "The connection wants 2 options subscriptions, over Massive's cap of 1, so 1 wait.",
+        1,
+    )
     assert spans_of(ws_session, dh_to_pylist, CAP) == [(*cap, False)]
     watchlist.delete(new_table([string_col("Symbol", ["O:SPY251219C00600000"])]))
     ws_session.subscribed("T.O:SPY251219C00610000")
@@ -1074,12 +1098,18 @@ def test_an_options_cap_span_whose_deferred_count_changes_keeps_its_start(
         return [r for r in dh_to_pylist(ws_session.session.problems()) if r["Cause"] == CAP]
 
     [before] = cap_rows()
-    assert (before["Detail"], before["Rows"]) == ("over capacity: 2/1; 1 deferred", 1)
+    assert (before["Detail"], before["Rows"]) == (
+        "The connection wants 2 options subscriptions, over Massive's cap of 1, so 1 wait.",
+        1,
+    )
     watchlist.add(new_table([string_col("Symbol", ["O:SPY251219C00620000"])]))
     wait_for(lambda: [r["Rows"] for r in cap_rows()] == [2])
     # One span still: its detail and count follow the change, and it began when it first held.
     [after] = cap_rows()
-    assert (after["Detail"], after["EndedAt"]) == ("over capacity: 3/1; 2 deferred", None)
+    assert (after["Detail"], after["EndedAt"]) == (
+        "The connection wants 3 options subscriptions, over Massive's cap of 1, so 2 wait.",
+        None,
+    )
     assert after["SpanStart"] == before["SpanStart"]
     [row] = streams_of(ws_session, dh_to_pylist)
     assert (row["State"], row["Deferred"], row["Error"]) == ("RUNNING", 2, None)
@@ -1154,7 +1184,7 @@ def test_a_failing_shutdown_is_logged(
 
     monkeypatch.setattr(ws_session.session._core.streams, "shut_down", broken)
     ws_session.connections._shut_down(42)
-    assert "the shutdown of stream 42 failed" in caplog.text
+    assert f"Releasing stream 42 failed. {LIBRARY_BUG}" in caplog.text
 
 
 def test_the_flush_thread_publishes_by_itself(
@@ -1380,7 +1410,9 @@ def test_contracts_of_opening_streams_count_against_the_cap(
     connection = ws_session.connection("wss://socket.test/options")
     with ws_session.connections.group.lock:
         connection.cap_pending[99] = frozenset({"T.O:SPY251219C00610000"})  # still opening
-        with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
+        with pytest.raises(
+            ValueError, match="would add 1 options subscription to the 2 its connection carries"
+        ):
             ws.WsConnections._check_cap(OPTIONS, connection, frozenset({"T.O:SPY251219C00620000"}))
         del connection.cap_pending[99]
     ws_session.session.release(first)
@@ -1441,11 +1473,11 @@ def test_a_stream_opening_as_its_connection_fails_fails_too(
         return real(*args, **kwargs)
 
     monkeypatch.setattr(ws, "open_stream_tables", failing_meanwhile)
-    with pytest.raises(dm.MassiveError, match=r"stream 2 failed: .*rejected the API key"):
+    with pytest.raises(dm.MassiveError, match=r"stream 2 failed: .*with status auth_failed"):
         ws_session.query(TRADES, ["MSFT"]).blink()
     wait_for(lambda: [r["State"] for r in streams_of(ws_session, dh_to_pylist)] == ["FAILED"] * 2)
     rows = streams_of(ws_session, dh_to_pylist)
-    assert all("rejected the API key" in r["Error"] for r in rows)
+    assert all("with status auth_failed" in r["Error"] for r in rows)
     del first
 
 
@@ -1519,7 +1551,9 @@ def test_contracts_a_wildcard_covers_still_count_against_the_cap(
     first = ws_session.query(OPTIONS, ["O:SPY251219C00600000", "O:SPY251219C00610000"]).blink()
     connection = ws_session.connection("wss://socket.test/options")
     ws_session.on_loop(connection, lambda: None)
-    with pytest.raises(ValueError, match="1 new option topics and 2 in use"):
+    with pytest.raises(
+        ValueError, match="would add 1 options subscription to the 2 its connection carries"
+    ):
         ws_session.query(OPTIONS, ["O:SPY251219C00620000"]).blink()
     assert connection.cap_pending == {}  # the opened stream counts through the admitted set
     ws_session.session.release(first)
@@ -1602,7 +1636,7 @@ def test_a_stream_waiting_for_a_slot_says_so(
     watchlist.add(new_table([string_col("Symbol", contracts)]))
     capped = ws_session.query(OPTIONS, watchlist).blink()
     ws_session.subscribed("T.O:SPY251219C00600000")
-    cap = "over capacity: 2/1; 1 deferred"
+    cap = "The connection wants 2 options subscriptions, over Massive's cap of 1, so 1 wait."
     wait_for(lambda: open_spans(ws_session, dh_to_pylist) == {(1, CAP, cap)})
     fake_ws_server.hold_slot(held=True)  # until the watchlist has changed during the wait
     fake_ws_server.close()  # the socket drops; the reconnect finds the slot taken
@@ -1623,7 +1657,7 @@ def test_a_stream_waiting_for_a_slot_says_so(
     wait_for(lambda: stalled(cap, 1, 2))
     # A contract added during the wait is counted, and its cap span changes beside the wait.
     watchlist.add(new_table([string_col("Symbol", ["O:SPY251219C00620000"])]))
-    more = "over capacity: 3/1; 2 deferred"
+    more = "The connection wants 3 options subscriptions, over Massive's cap of 1, so 2 wait."
 
     def counted() -> bool:
         deferred = [r["Deferred"] for r in streams_of(ws_session, dh_to_pylist)]
@@ -1667,7 +1701,11 @@ def test_skipped_rows_and_a_stall_neither_hide_nor_clear_each_other(
     watchlist.add(new_table([string_col("Symbol", contracts)]))
     capped = ws_session.query(OPTIONS, watchlist).blink()
     ws_session.subscribed("T.O:SPY251219C00600000")
-    cap = (1, CAP, "over capacity: 2/1; 1 deferred")
+    cap = (
+        1,
+        CAP,
+        "The connection wants 2 options subscriptions, over Massive's cap of 1, so 1 wait.",
+    )
     skipped = (1, NONCANONICAL, "spy")
     wait_for(lambda: open_spans(ws_session, dh_to_pylist) == {cap, skipped})
     fake_ws_server.hold_slot(held=True)  # until the watchlist has changed during the wait
@@ -1716,7 +1754,11 @@ def test_skipped_rows_and_the_options_cap_neither_hide_nor_clear_each_other(
         ws_session.on_loop(connection, lambda: None)
         return open_spans(ws_session, dh_to_pylist)
 
-    cap = (1, CAP, "over capacity: 2/1; 1 deferred")
+    cap = (
+        1,
+        CAP,
+        "The connection wants 2 options subscriptions, over Massive's cap of 1, so 1 wait.",
+    )
     skipped = (1, NONCANONICAL, "spy")
     wait_for(lambda: spans() == {cap, skipped})
     watchlist.delete(new_table([string_col("Symbol", ["spy"])]))
@@ -1834,9 +1876,10 @@ def test_stress_two_sessions_open_and_release_while_one_closes(ws_session: WsSes
         for future in futures:
             future.result(TIMEOUT)
     # A verb that races the close finds the session closed, or its stream failed by the close.
-    name = other._core.label
-    assert all(
-        f"{name} is closed; " + NEW_SESSION in t or f"{name} was closed" in t for t in closed_errors
+    closed = "This session was closed, so this table no longer updates. " + NEW_SESSION
+    opening = f"This session was closed while a stream was opening. {NEW_SESSION}"
+    assert all(t in (session_closed(), closed, opening) or closed in t for t in closed_errors), (
+        closed_errors
     )
     core = ws_session.session._core
     drained = threading.Event()
@@ -2020,14 +2063,14 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
     (stream_id,) = ws_session.connections.group.streams
 
     def closed() -> futures_calendar.FuturesCalendar:
-        raise dm.SessionClosedError("MassiveSession #1 is closed; " + NEW_SESSION)
+        raise dm.SessionClosedError(session_closed())
 
     monkeypatch.setattr(ws_session.connections, "futures_calendar", closed)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
         ws_session.connections._symbols_changed(stream_id, frozenset({"NQZ5"}), frozenset())
     assert (
         f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
-        f"is closing (MassiveSession #1 is closed; {NEW_SESSION})"
+        f"is closing ({session_closed()})"
     ) in caplog.text
     ws_session.session.release(result)
 
@@ -2223,7 +2266,7 @@ def test_a_pair_massive_has_no_data_for_is_skipped_and_shown_from_every_source(
         1,
         "SKIPPED",
         setting,
-        "Massive has no data for it (Massive's crypto ticker list does not hold it); it is skipped",
+        "Massive has no data for this pair: Massive's crypto ticker list does not hold it.",
     )
     warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warned) == (1 if setting is dm.OnError.LOG else 0)
@@ -2255,10 +2298,11 @@ def test_a_pair_massive_has_no_data_for_fails_the_stream_under_raise_from_every_
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert row["Error"] == (
-        "crypto stream 1: Massive has no data for 1 [X:ETHTUSD (Massive's crypto ticker list "
-        "does not hold it)]. Remove the pair; to skip it and stream the others, pass "
-        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the dataset method or to "
-        "MassiveConfig, or write 'on_error: {unavailable_symbols: log}' in the settings file"
+        "test.crypto stream 1: Massive has no data for X:ETHTUSD, which is not on its crypto "
+        "ticker list, m.reference.tickers(market=dm.Market.CRYPTO). Remove it from the symbols, "
+        "or to stream the others, pass "
+        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
     )
     # The stream failed before it subscribed any pair, so its connection never opened a socket.
     assert ws_session.opens == 0
@@ -2309,13 +2353,15 @@ def test_an_unread_pair_list_is_an_outage_the_stream_rides_out_from_every_source
     caplog.set_level(logging.INFO, logger="deephaven_massive._ingest.ws")
     ws_session = make_ws_session()
     quick_retries(ws_session)
-    busy = dm.MassiveError("HTTP 503: busy", status=503, is_retryable=True)
+    busy = dm.MassiveError(LIST_503, status=503, is_retryable=True)
     ws_session.pair_answers["X:DOTUSD"] = busy
     pairs = crypto_watchlist(["X:BTCUSD", "X:DOTUSD"], source=source, dh_input_table=dh_input_table)
     result = ws_session.query(CRYPTO, pairs).append_only()
     ws_session.subscribed("XT.BTC-USD")
     why = (
-        "waits for Massive's crypto ticker list, which could not be read (HTTP 503: busy); retrying"
+        "It waits for Massive's crypto ticker list, which the library reads again. The last read "
+        "failed: Massive answered GET /v3/reference/tickers?market=crypto&active=true&limit=1000 "
+        'on api.massive.com with HTTP 503: "Service Unavailable".'
     )
     waiting = (1, RETRYING, "X:DOTUSD", why, 0)
     wait_for(lambda: spans_of(ws_session, dh_to_pylist, RETRYING) == [(*waiting, False)])
@@ -2348,9 +2394,7 @@ def test_a_pair_in_code_waits_for_an_unread_list_in_a_stream_a_static_table_shar
     # so the other call's table never lacks the pair for good.
     ws_session = make_ws_session()
     quick_retries(ws_session)
-    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(
-        "HTTP 503: busy", status=503, is_retryable=True
-    )
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503, is_retryable=True)
     second = "code" if first == "static" else "static"
     results = [
         ws_session.query(
@@ -2380,16 +2424,18 @@ def test_an_unread_pair_list_fails_the_stream_after_max_outage(
 ) -> None:
     ws_session = make_ws_session(max_outage=0.1)
     quick_retries(ws_session)
-    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503)
     result = ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith(
-        "crypto stream 1: Massive's crypto ticker list could not be read for "
-    )
-    assert (
-        "longer than MassiveConfig.max_outage (0.1 s), so 1 [X:DOTUSD] cannot be" in (row["Error"])
+    assert re.fullmatch(
+        r"test\.crypto stream 1: Massive's crypto ticker list could not be read for \d+ s, "
+        r"longer than max_outage=0\.1 s, so this table stopped, since it cannot stream "
+        r"X:DOTUSD\. The last read failed: Massive answered GET "
+        r"/v3/reference/tickers\?market=crypto&active=true&limit=1000 on api\.massive\.com with "
+        r'HTTP 503: "Service Unavailable"\. Call m\.test\.crypto again for a new live table\.',
+        row["Error"],
     )
     assert len(lookups(ws_session)) > 2  # read again on the backoff until then
 
@@ -2403,7 +2449,7 @@ def test_the_wait_for_an_unread_pair_list_stops_doubling_at_max_reconnect_backof
     result = ws_session.query(CRYPTO, ["X:BTCUSD"]).append_only()
     ws_session.subscribed("XT.BTC-USD")
     (stream_id,) = connections._mine
-    busy = dm.MassiveError("HTTP 503: busy", status=503, is_retryable=True)
+    busy = dm.MassiveError(LIST_503, status=503, is_retryable=True)
     state = ws._PairState("crypto.trades", DEFAULT_POLICY, since=time.monotonic(), tries=1100)
     delay = connections._wait(stream_id, state, waiting=["X:DOTUSD"], failure=busy)
     assert state.tries == 1101
@@ -2416,7 +2462,7 @@ def test_a_max_outage_of_zero_fails_at_the_first_unread_list(
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
     ws_session = make_ws_session(max_outage=0)
-    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+    ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503)
     result = ws_session.query(CRYPTO, ["X:DOTUSD"]).append_only()
     wait_for(lambda: failed_after_flush(ws_session, result))
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:DOTUSD"]
@@ -2467,7 +2513,7 @@ def test_a_pair_list_failure_no_retry_can_fix_fails_the_stream_at_once(
     result = ws_session.query(CRYPTO, ["X:BTCUSD", "X:DOTUSD"]).append_only()
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
-    assert row["Error"] == f"crypto stream 1: {failure}"
+    assert row["Error"] == f"test.crypto stream 1: {failure}"
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:BTCUSD", "X:DOTUSD"]
 
 
@@ -2505,13 +2551,20 @@ def test_waiting_pairs_fail_their_stream_at_max_outage_even_while_a_lookup_waits
     with connections._lock:
         state = connections._pair_states[stream_id]
         state.waiting, state.since = {"X:DOTUSD"}, 5.0
-        state.failure = dm.MassiveError("HTTP 503: busy", status=503)
+        state.failure = dm.MassiveError(LIST_503, status=503)
     connections._pairs_expired(stream_id, 4.0)  # another wait's timer: nothing
     assert not failed_after_flush(ws_session, result)
     connections._pairs_expired(stream_id, 5.0)
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
-    assert "longer than MassiveConfig.max_outage" in row["Error"]
+    assert re.fullmatch(
+        r"test\.crypto stream 1: Massive's crypto ticker list could not be read for \d+ s, "
+        r"longer than max_outage=300 s, so this table stopped, since it cannot stream X:DOTUSD\. "
+        r"The last read failed: Massive answered GET "
+        r"/v3/reference/tickers\?market=crypto&active=true&limit=1000 on api\.massive\.com with "
+        r'HTTP 503: "Service Unavailable"\. Call m\.test\.crypto again for a new live table\.',
+        row["Error"],
+    )
 
 
 def test_a_pair_removed_while_it_waits_is_never_subscribed(
@@ -2525,7 +2578,7 @@ def test_a_pair_removed_while_it_waits_is_never_subscribed(
     # still waiting: a pair the table no longer holds is never subscribed. A pair added
     # meanwhile waits with the others, under the one retry already scheduled.
     quick_retries(ws_session)
-    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    busy = dm.MassiveError(LIST_503, status=503)
     ws_session.pair_answers["X:DOTUSD"] = busy
     ws_session.pair_answers["X:ADAUSD"] = busy
     watchlist = crypto_watchlist(["X:BTCUSD"], source="reactive", dh_input_table=dh_input_table)
@@ -2561,7 +2614,7 @@ def test_a_waiting_pair_removed_ends_only_its_own_span(
     # Each waiting pair is its own span: removing one pair ends its span, and the pair that
     # still waits keeps its span open.
     quick_retries(ws_session)
-    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    busy = dm.MassiveError(LIST_503, status=503)
     ws_session.pair_answers["X:DOTUSD"] = busy
     ws_session.pair_answers["X:ADAUSD"] = busy
     watchlist = crypto_watchlist(["X:BTCUSD"], source="reactive", dh_input_table=dh_input_table)
@@ -2607,7 +2660,7 @@ def split_once(ws_session: WsSession, pair: str, topic: str) -> None:
     ws_session.session.release(result)
     ws_session.unsubscribed(topic)
     with ws_session.cond:
-        ws_session.pair_answers[pair] = dm.MassiveError("HTTP 503: busy", status=503)
+        ws_session.pair_answers[pair] = dm.MassiveError(LIST_503, status=503)
 
 
 def waiting_pairs(
@@ -2635,7 +2688,7 @@ def test_a_pair_the_session_split_before_streams_while_the_list_cannot_be_read(
     quick_retries(ws_session)
     split_once(ws_session, "X:ETHUSD", "XT.ETH-USD")
     with ws_session.cond:
-        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503)
     before = len(lookups(ws_session))
     pairs = crypto_watchlist(
         ["X:DOTUSD", "X:ETHUSD", "X:SOLUSD"], source=source, dh_input_table=dh_input_table
@@ -2662,7 +2715,7 @@ def test_a_waiting_pair_another_stream_splits_stops_waiting(
     # Both pairs wait behind X:DOTUSD's failed read. Once another stream splits X:ETHUSD, the
     # next retry subscribes it, though X:DOTUSD's read fails again.
     quick_retries(ws_session)
-    busy = dm.MassiveError("HTTP 503: busy", status=503)
+    busy = dm.MassiveError(LIST_503, status=503)
     with ws_session.cond:
         ws_session.pair_answers["X:DOTUSD"] = busy
         ws_session.pair_answers["X:ETHUSD"] = busy
@@ -2687,12 +2740,14 @@ def test_max_outage_fails_the_stream_naming_only_the_pairs_that_waited(
     quick_retries(ws_session)
     split_once(ws_session, "X:ETHUSD", "XT.ETH-USD")
     with ws_session.cond:
-        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError("HTTP 503: busy", status=503)
+        ws_session.pair_answers["X:DOTUSD"] = dm.MassiveError(LIST_503, status=503)
     result = ws_session.query(CRYPTO, ["X:DOTUSD", "X:ETHUSD"]).append_only()
     wait_for(lambda: failed_after_flush(ws_session, result))
     row = stream_row(ws_session, dh_to_pylist, 2)
     assert row["State"] == "FAILED"
-    assert "(0.1 s), so 1 [X:DOTUSD] cannot be streamed" in row["Error"]
+    assert (
+        "max_outage=0.1 s, so this table stopped, since it cannot stream X:DOTUSD." in row["Error"]
+    )
 
 
 def test_pair_bookkeeping_of_a_stream_that_ended_changes_nothing(
@@ -2752,9 +2807,7 @@ def test_a_defect_in_a_pair_lookup_fails_the_stream_and_is_never_retried(
     assert row["State"] == "FAILED"
     assert row["Error"] == f"the split broke. {LIBRARY_BUG}"
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [
-        (f"{ws_session.session._core.label}: {row['Error']}", True)
-    ]
+    assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [(row["Error"], True)]
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:BTCUSD", "X:DOTUSD"]
 
 
@@ -2780,14 +2833,12 @@ def test_an_unexpected_lookup_failure_fails_the_stream(
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["Error"] == (
-        "the watchlist change of stream 1 (added 1 [X:DOTUSD], removed 0 []) failed: "
-        "RuntimeError('the lookup broke'). " + LIBRARY_BUG
+        "Stream 1 could not follow a change of its symbol table, which added X:DOTUSD and "
+        "removed no symbols: RuntimeError('the lookup broke'). " + LIBRARY_BUG
     )
     # A defect of the library: one ERROR, with its trace, for the lookup and the stream it fails.
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [
-        (f"{ws_session.session._core.label}: {row['Error']}", True)
-    ]
+    assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [(row["Error"], True)]
 
 
 def test_a_defect_after_the_lookup_fails_the_stream(
@@ -2812,8 +2863,8 @@ def test_a_defect_after_the_lookup_fails_the_stream(
     assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [
         (
             (
-                f"{ws_session.session._core.label}: the watchlist change of stream 1 (added 1 "
-                f"[{symbol}], removed 0 []) failed: RuntimeError('posting broke'). {LIBRARY_BUG}"
+                f"Stream 1 could not follow a change of its symbol table, which added {symbol} and "
+                f"removed no symbols: RuntimeError('posting broke'). {LIBRARY_BUG}"
             ),
             True,
         )
@@ -3638,9 +3689,7 @@ def close_under_load(harness: WsSession, round_: int) -> float:
                 result = harness.query(TRADES, [SOAK_SYMBOLS[(worker * 3 + step) % 40]], other)
                 other.release(result.blink())
             except dm.MassiveError as error:  # a verb that races the close may find it closed
-                if " is closed; " + NEW_SESSION not in str(error) and " was closed" not in str(
-                    error
-                ):
+                if session_closed() != str(error) and " was closed" not in str(error):
                     errors.append(str(error))
                 return
 
@@ -3807,7 +3856,7 @@ def test_a_crypto_stream_splits_its_pairs_under_its_call_s_policy(
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("crypto stream 1: Massive has no data for 1 [X:ETHTUSD")
+    assert row["Error"].startswith("test.crypto stream 1: Massive has no data for X:ETHTUSD,")
     with ws_session.cond:
         policies = {policy.unavailable_symbols for _, policy in ws_session.pair_policies}
     assert policies == {dm.OnError.RAISE}

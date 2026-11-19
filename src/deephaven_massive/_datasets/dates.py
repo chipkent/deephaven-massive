@@ -20,9 +20,10 @@ A range has two kinds of bounds, and one range never mixes them (`check_order`):
 
 - **Dates** are whole days, inclusive at both ends, so `history("2025-03-03", "2025-03-03")`
   is the whole of March 3 (`DaySpan`). A day is a calendar day in the asset class's *day
-  zone*: America/New_York for stocks, options, and indices, UTC for forex and crypto. A
-  futures date names the trading session whose `session_end_date` equals it, since a session
-  is the futures trading day.
+  zone*: America/New_York for stocks, options, and indices, UTC for forex and crypto. For
+  bars of a day or longer it is a day of the class's *bar zone* (`bar_zone`), Chicago for
+  indices, whose bars Massive starts at midnight there. A futures date names the trading
+  session whose `session_end_date` equals it, since a session is the futures trading day.
 - **Aware datetimes** are exact instants, a half-open range `[start, end)` (`TimeRange`).
   Equal instants are an empty range, not an error.
 
@@ -75,6 +76,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
 
 __all__ = [
+    "BAR_ZONES",
     "DAY_ZONES",
     "DAY_ZONE_NAMES",
     "MIXED_BOUNDS",
@@ -83,6 +85,7 @@ __all__ = [
     "DaySpan",
     "TimeRange",
     "TimeTextError",
+    "bar_zone",
     "bounds",
     "calendar_day",
     "check_order",
@@ -157,14 +160,24 @@ DAY_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
 Futures are absent: a futures date names a trading session, not a calendar day (see `bounds`).
 Datasets without an asset class use New York."""
 
+BAR_ZONES: Final[Mapping[AssetClass, tzinfo]] = {
+    AssetClass.STOCKS: NEW_YORK,
+    AssetClass.OPTIONS: NEW_YORK,
+    AssetClass.INDICES: CHICAGO,
+    AssetClass.FOREX: UTC,
+    AssetClass.CRYPTO: UTC,
+}
+"""Per class with a day zone (`DAY_ZONES`), the zone at whose midnight Massive starts the
+class's bars of a day or longer, and whose days those bars cover: the class day zone, except
+for indices, whose days Massive cuts at midnight in Chicago on every source (01:00 New York
+time, since the two zones change clocks together). `DAY_ZONES` still names the zone of `Date`
+and of a range's dates, which for an index bar's day is the same date."""
+
 DAY_ZONE_NAMES: Final[Mapping[tzinfo, str]] = {NEW_YORK: "New York time", UTC: "UTC"}
 """How user-facing text names each zone of `DAY_ZONES`."""
 
-MIXED_BOUNDS: Final = (
-    "start and end must both be dates or both be datetimes: a date is a whole day (for "
-    "futures, a trading session) and a datetime an exact instant"
-)
-"""The message of a range that mixes a date and a datetime."""
+MIXED_BOUNDS: Final = "Pass two dates for whole days, or two datetimes for exact instants."
+"""The fix that ends the message of a range that mixes a date and a datetime."""
 
 # A fraction of a second finer than the microsecond, which `datetime.fromisoformat` truncates,
 # in the extended (`09:30:00.1234567`) and the basic (`093000.1234567`) time form alike. Only a
@@ -175,7 +188,7 @@ characters. `date.fromisoformat` alone also reads longer runs of digits, such as
 count `"1741012200"` as 1741-01-22, which this keeps out."""
 _FRACTION: Final = re.compile(r"[.,](\d+)")
 """The fraction of a second in ISO-8601 text; only a fraction can hold a `.` or `,`."""
-_OUTSIDE_DATETIME: Final = "is not a time from year 1 to 9999, which a datetime holds"
+_OUTSIDE_DATETIME: Final = "is not a time from year 1 to 9999. Pass a time in those years."
 _JAVA_INSTANTS: Final = frozenset({"java.time.Instant", "java.time.ZonedDateTime"})
 """The Java classes whose values are instants, by their jpy class name."""
 _NANOS: Final = 10**9
@@ -265,22 +278,25 @@ def parse_date_like(value: object, name: str, *, upper: bool = False) -> date | 
     elif isinstance(value, str):
         text = value
         if text != text.strip():
-            raise ValueError(f"{name}={value!r} has surrounding whitespace; write {text.strip()!r}")
+            raise ValueError(f"{name}={value!r} has surrounding whitespace. Pass {text.strip()!r}.")
         if _ISO_DATE.match(text):  # a calendar date: `2025-03-03`, `20250303`, `2025-W10-1`
             with contextlib.suppress(ValueError):
                 return date.fromisoformat(text)
         try:
             parsed = datetime.fromisoformat(text)
         except ValueError:
-            raise TimeTextError(f"{name}={value!r} is not an ISO-8601 date or datetime") from None
+            raise TimeTextError(
+                f"{name}={value!r} is not an ISO-8601 date or datetime. Pass a date such as "
+                "'2025-03-03', or a time with its offset such as '2025-03-03T09:30:00-05:00'."
+            ) from None
         require_aware(name, value, parsed)
         return _outward(parsed, _cut_digits(text), name=name, value=value, upper=upper)
     else:
         found = _foreign_bound(value, name, upper=upper)
         if found is None:
             raise TypeError(
-                f"{name} must be a str, date, datetime, Java Instant, ZonedDateTime, or "
-                f"LocalDate, numpy.datetime64, or pandas.Timestamp, not {type(value).__name__}"
+                f"{name} must be a str, date, datetime, numpy.datetime64, pandas.Timestamp, or "
+                f"Java Instant, ZonedDateTime, or LocalDate, not {type(value).__name__}"
             )
         return found
     require_aware(name, value, parsed)
@@ -305,7 +321,7 @@ def _pandas_bound(value: datetime, utc: np.datetime64, name: str, *, upper: bool
     A time outside years 1 to 9999 raises the `ValueError` of `_rounded`.
     """
     if np.isnat(utc):
-        raise ValueError(f"{name}={value!r} is NaT, not a time")
+        raise ValueError(f"{name}={value!r} is not a time. Pass a date or an aware datetime.")
     require_aware(name, value, value)
     unit, count = np.datetime_data(utc.dtype)
     return _rounded(
@@ -377,12 +393,12 @@ def _numpy_bound(value: np.datetime64, name: str, *, upper: bool) -> date | date
     A time outside years 1 to 9999 raises the `ValueError` of `_rounded`.
     """
     if np.isnat(value):
-        raise ValueError(f"{name}={value!r} is NaT, not a time")
+        raise ValueError(f"{name}={value!r} is not a time. Pass a date or an aware datetime.")
     unit, count = np.datetime_data(value.dtype)
     if unit in _NUMPY_PERIODS:
         raise ValueError(
-            f"{name}={value!r} is a numpy.datetime64 of a week, month, or year; pass a day, "
-            "such as numpy.datetime64('2025-03-03')"
+            f"{name}={value!r} is a week, month, or year, not a day or a time. Pass a day, "
+            "such as numpy.datetime64('2025-03-03')."
         )
     if unit == _NUMPY_DAY:
         try:
@@ -490,11 +506,11 @@ def require_aware(name: str, raw: object, moment: datetime) -> None:
 
     Raises:
         ValueError: If `moment` has no timezone, with a message naming the parameter, the
-            value, and the fix, such as `start=datetime.datetime(2025, 1, 2, 9, 30) needs a
-            timezone: pass an aware datetime or a date`.
+            value, and the fix, such as `start=datetime.datetime(2025, 1, 2, 9, 30) has no
+            timezone. Pass an aware datetime or a date.`
     """
     if moment.tzinfo is None or moment.utcoffset() is None:
-        raise ValueError(f"{name}={raw!r} needs a timezone: pass an aware datetime or a date")
+        raise ValueError(f"{name}={raw!r} has no timezone. Pass an aware datetime or a date.")
 
 
 def check_order(start: date | datetime, end: date | datetime) -> None:
@@ -517,18 +533,25 @@ def check_order(start: date | datetime, end: date | datetime) -> None:
         end: The parsed upper bound.
 
     Raises:
-        ValueError: `MIXED_BOUNDS` if one bound is a date and the other a datetime, or
-            `start (...) must not be after end (...)` if the range is reversed.
+        ValueError: If one bound is a date and the other a datetime, ending with
+            `MIXED_BOUNDS`, or if the range is reversed.
     """
     if isinstance(start, datetime) is not isinstance(end, datetime):
-        raise ValueError(f"{MIXED_BOUNDS}; got start={start!r}, end={end!r}")
+        start_kind = "a datetime" if isinstance(start, datetime) else "a date"
+        end_kind = "a datetime" if isinstance(end, datetime) else "a date"
+        raise ValueError(
+            f"start={start.isoformat()} is {start_kind} and end={end.isoformat()} is "
+            f"{end_kind}. {MIXED_BOUNDS}"
+        )
     if isinstance(start, datetime) and isinstance(end, datetime):
         # In UTC: two datetimes sharing one tzinfo compare by wall clock and ignore `fold`.
         reversed_range = start.astimezone(UTC) > end.astimezone(UTC)
     else:
         reversed_range = start > end
     if reversed_range:
-        raise ValueError(f"start ({start!r}) must not be after end ({end!r})")
+        raise ValueError(
+            f"start={start!r} is after end={end!r}. Pass a start no later than the end."
+        )
 
 
 def midnight(day: date, zone: tzinfo) -> datetime:
@@ -683,7 +706,8 @@ def bounds(
             # Refused because Massive answers it with no error: AAPL's day bars from 10 to 20
             # days ahead answered HTTP 200 with no rows, which would read as no trading.
             raise ValueError(
-                f"start ({first!r}) must not be after now ({last!r}); end=None reads through now"
+                f"start={first!r} is after now, {last}, and end=None reads up to now. Pass a "
+                "start no later than now."
             ) from None
         raise
     if isinstance(first, datetime) and isinstance(last, datetime):
@@ -791,6 +815,19 @@ def day_zone(asset_class: AssetClass | ClassFromPrefix) -> tzinfo:
     return NEW_YORK if asset_class is ClassFromPrefix.ANY else DAY_ZONES[asset_class]
 
 
+def bar_zone(asset_class: AssetClass | ClassFromPrefix) -> tzinfo:
+    """Return the zone whose days a class's bars of a day or longer cover (`BAR_ZONES`).
+
+    Args:
+        asset_class: A class with a day zone, or `ClassFromPrefix.ANY`, whose days are New
+            York days.
+
+    Returns:
+        The zone.
+    """
+    return NEW_YORK if asset_class is ClassFromPrefix.ANY else BAR_ZONES[asset_class]
+
+
 def day_class(
     spec: DatasetSpec, classes: Iterable[AssetClass] = ()
 ) -> AssetClass | ClassFromPrefix:
@@ -841,8 +878,7 @@ def calendar_day(spec: DatasetSpec, value: object, name: str, *, given: object =
 
     Raises:
         ValueError: If `value` is a time rather than a day: a `datetime`, ISO-8601 text with a
-            time, or an instant (`"<dataset>: <name>=<value> is a calendar date; pass a
-            date"`, showing the value as the caller passed it).
+            time, or an instant; the message shows the value as the caller passed it.
 
     Text that is not ISO-8601, or a value of another type, raises the `ValueError` or
     `TypeError` of `parse_date_like`.
@@ -851,7 +887,10 @@ def calendar_day(spec: DatasetSpec, value: object, name: str, *, given: object =
     if not isinstance(parsed, datetime):
         return parsed
     shown = value if given is None else given
-    raise ValueError(f"{spec.name}: {name}={shown!r} is a calendar date; pass a date")
+    raise ValueError(
+        f"{spec.name}: {name}={shown!r} is a time, and {name} takes a calendar date. Pass a "
+        "date such as '2025-03-03'."
+    )
 
 
 _UNIT_STEPS: Final[Mapping[WireUnit, timedelta]] = {
@@ -928,7 +967,6 @@ def instant_bound(
     if step is None:
         sent = "ISO-8601 instants of no documented precision" if unit is None else "nanoseconds"
         raise ValueError(
-            f"{name} takes {sent}, so it cannot bound a half-open range exactly; use the .gte "
-            "and .lt forms"
+            f"{name} takes {sent}, so no day can end on it exactly. Use the .gte and .lt forms."
         )
     return instant - step

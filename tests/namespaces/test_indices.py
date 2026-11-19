@@ -13,6 +13,7 @@ import csv
 import io
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, date, datetime
@@ -47,6 +48,12 @@ if TYPE_CHECKING:
     from tests._fakes.ws_session import WsSession
 
 """The refusal of a stream of bars Massive doesn't stream."""
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 OWNER = "namespaces/indices"
 SNAPSHOT = "/v3/snapshot/indices"
@@ -315,7 +322,7 @@ def test_values_history_from_flat_files_needs_credentials(
     with dm.MassiveSession(dm.MassiveConfig(api_key="test-key")) as session:
         q = session.indices.values("I:SPX")
         for source in (dm.HistorySource.FLAT_FILES, dm.HistorySource.AUTO):
-            with pytest.raises(ValueError, match="no S3 credentials are configured"):
+            with pytest.raises(ValueError, match="no S3 credentials are set"):
                 q.history("2025-06-02", "2025-06-02", source=source, wait=True)
 
 
@@ -375,9 +382,10 @@ def test_previous_day_bars_need_explicit_symbols(m: dm.MassiveSession) -> None:
     assert repr(q) == ("m.indices.previous_day_bar(['I:NDX', 'I:SPX'])")
     with pytest.raises(
         ValueError,
-        match=r"^indices\.previous_day_bar does not accept dm\.ALL; use "
-        r"m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\), "
-        r"every ticker's bar of that day$",
+        match=whole(
+            "indices.previous_day_bar does not take dm.ALL. For every ticker's bar of one day, "
+            "call m.indices.bars(dm.ALL, dm.Timespan.DAY).history('2025-01-02', '2025-01-02')."
+        ),
     ):
         m.indices.previous_day_bar(dm.ALL)
 
@@ -393,7 +401,7 @@ def test_bars_history_over_rest_needs_explicit_symbols(m: dm.MassiveSession) -> 
 
 def test_bar_flat_files_hold_only_minutes_and_days(m: dm.MassiveSession) -> None:
     q = m.indices.bars("I:SPX", dm.Timespan.HOUR)
-    with pytest.raises(ValueError, match="flat files hold only 1-minute, 1-day bars"):
+    with pytest.raises(ValueError, match="flat files hold only 1-minute and 1-day bars"):
         q.history("2025-06-02", "2025-06-02", source=dm.HistorySource.FLAT_FILES, wait=True)
 
 
@@ -416,9 +424,12 @@ def test_snapshots_query(m: dm.MassiveSession) -> None:
 def test_snapshots_filters_are_the_snapshot_parameters(m: dm.MassiveSession) -> None:
     # The equality forms of the symbol parameter are set through symbols only.
     for key in ("ticker", "ticker_any_of", "ticker_all_of"):
-        with pytest.raises(ValueError, match=f"{key} is set through symbols=, not filters"):
+        refusal = (
+            f"The filter {key!r} sets the symbols of indices.snapshots. Pass symbols= instead."
+        )
+        with pytest.raises(ValueError, match=whole(refusal)):
             m.indices.snapshots("I:SPX", filters={key: "I:A"})
-    with pytest.raises(ValueError, match=r"has no filter 'timestamp_gte'; valid filters: \["):
+    with pytest.raises(ValueError, match=r"has no filter 'timestamp_gte'\. Pass one of ticker_gt"):
         m.indices.snapshots("I:SPX", filters={"timestamp_gte": "I:A"})
     with pytest.raises(ValueError, match="'ticker_lt' takes text, not 5"):
         m.indices.snapshots("I:SPX", filters={"ticker_lt": 5})
@@ -427,7 +438,7 @@ def test_snapshots_filters_are_the_snapshot_parameters(m: dm.MassiveSession) -> 
 def test_snapshots_check_their_list_parameters(m: dm.MassiveSession) -> None:
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
         m.indices.snapshots("I:SPX", order="asc")  # type: ignore[arg-type]  # the point: refused at run time
-    with pytest.raises(ValueError, match="limit must be positive"):
+    with pytest.raises(ValueError, match=whole("limit=0 is not positive.")):
         m.indices.snapshots("I:SPX", limit=0)
 
 
@@ -449,22 +460,30 @@ def test_daily_open_close_rejects_all(m: dm.MassiveSession) -> None:
     # Massive has no grouped daily endpoint for indices: the day's bars serve every index.
     with pytest.raises(
         ValueError,
-        match=r"; use m\.indices\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\), "
-        r"every index's bar of that day$",
+        match=whole(
+            "indices.daily_open_close does not take dm.ALL. For every index's bar of one day, "
+            "call m.indices.bars(dm.ALL, dm.Timespan.DAY).history('2025-01-02', '2025-01-02')."
+        ),
     ):
         m.indices.daily_open_close(dm.ALL, "2025-06-02")
 
 
 def test_daily_open_close_needs_a_zoned_day(m: dm.MassiveSession) -> None:
     for moment in (datetime(2025, 6, 2, 15, 30, tzinfo=UTC), "2025-06-03T02:00:00+00:00"):
-        with pytest.raises(ValueError, match=r"date=.* is a calendar date; pass a date"):
+        with pytest.raises(
+            ValueError, match=r"date=.* is a time, and date takes a calendar date\. Pass a date"
+        ):
             m.indices.daily_open_close("I:SPX", moment)
     naive = datetime(2025, 6, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         m.indices.daily_open_close("I:SPX", naive)
     with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         m.indices.daily_open_close("I:SPX", "June 2")
-    with pytest.raises(TypeError, match="date must be a str, date, datetime, Java Instant"):
+    with pytest.raises(
+        TypeError,
+        match=r"date must be a str, date, datetime, numpy\.datetime64, pandas\.Timestamp, or "
+        r"Java Instant",
+    ):
         m.indices.daily_open_close("I:SPX", 20250602)  # type: ignore[arg-type]  # the point: refused at run time
 
 
@@ -479,11 +498,11 @@ def test_symbols_must_be_index_symbols(m: dm.MassiveSession, name: str) -> None:
         "bars": (dm.Timespan.MINUTE,),
     }
     extra = extras.get(name, ())
-    with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker; this dataset takes"):
+    with pytest.raises(ValueError, match=r"'X:BTCUSD' is a crypto ticker, and this dataset takes"):
         method("X:BTCUSD", *extra)
-    with pytest.raises(ValueError, match=r"^'SPX' is not Massive's ticker; use 'I:SPX'"):
+    with pytest.raises(ValueError, match=r"^'SPX' is not Massive's index ticker\. Pass 'I:SPX'"):
         method("SPX", *extra)
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         method([], *extra)
 
 
@@ -672,7 +691,7 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+        if r.levelno == logging.WARNING and "cannot tell which day this one covers" in r.message
     ]
 
 
@@ -680,10 +699,12 @@ def test_index_bars_of_a_day_or_longer_start_at_midnight_in_chicago(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING)
-    # The range stamps a day at midnight in Chicago (01:00 New York time), which the bar keeps;
-    # Massive's `/prev` sample stamps it at the 16:00 close, which moves to the same start.
+    # The range stamps a day at midnight in Chicago (01:00 New York time), which the bar keeps,
+    # and a range of dates requests those Chicago days; Massive's `/prev` sample stamps the day
+    # at the 16:00 close, which moves to the same start.
     day = date(2025, 6, 2)
-    day_path = f"/v2/aggs/ticker/I:SPX/range/1/day/{MIDNIGHT_MS}/{MIDNIGHT_MS + DAY_MS - 1}"
+    chicago = MIDNIGHT_MS + HOUR_MS
+    day_path = f"/v2/aggs/ticker/I:SPX/range/1/day/{chicago}/{chicago + DAY_MS - 1}"
     fake_rest.reply(quote(day_path), bars_reply(MIDNIGHT_MS + HOUR_MS))
     fake_rest.reply(
         quote(PREVIOUS.format(indicesTicker="I:SPX")), bars_reply(MIDNIGHT_MS + 16 * HOUR_MS)
@@ -700,7 +721,7 @@ def test_index_bars_of_a_day_or_longer_start_at_midnight_in_chicago(
     # weekend: it starts at that stamp and ends at the next Sunday's midnight in Chicago. A
     # range must reach the Saturday.
     sunday = MIDNIGHT_MS - DAY_MS
-    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{sunday}/{MIDNIGHT_MS + 6 * DAY_MS - 1}"
+    week_path = f"/v2/aggs/ticker/I:SPX/range/1/week/{sunday + HOUR_MS}/{chicago + 6 * DAY_MS - 1}"
     fake_rest.reply(
         quote(week_path),
         bars_reply(sunday + HOUR_MS),
@@ -723,22 +744,21 @@ def test_index_bars_of_a_day_or_longer_start_at_midnight_in_chicago(
     with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
         q.history(day, day, source=dm.HistorySource.REST, wait=True)
     week_warning, day_warning = stamp_warnings(caplog)
-    assert week_warning.startswith("indices.bars: a bar of I:SPX from ")
-    assert " is stamped 2025-06-01T20:00:00+00:00 " in week_warning
-    assert day_warning.startswith(
-        "indices.bars: a 1-day bar of I:SPX from /v2/aggs/ticker/{indicesTicker}/range/"
+    assert week_warning.startswith(
+        "indices.bars: Massive sent a bar of I:SPX stamped 2025-06-01T20:00:00+00:00 "
     )
-    assert (
-        " is stamped 2025-06-02T06:00:00+00:00 (2025-06-02T01:00:00-05:00 in America/Chicago), "
-        "which is not a stamp Massive is known to use"
-    ) in day_warning
+    assert day_warning.startswith(
+        "indices.bars: Massive sent a 1-day bar of I:SPX stamped 2025-06-02T06:00:00+00:00 "
+        "(2025-06-02T01:00:00-05:00 in America/Chicago). Massive is known to stamp bars of 1 "
+        "day at "
+    )
     # Midnight in New York, 23:00 the day before in Chicago, is a cut Massive is not known to
     # use for an index either: the bar is withheld and warns. Placed as sent, it would start
     # before the range, so the read leaves it out without counting it.
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS))
     assert rows(q.history(day, day, source=dm.HistorySource.REST, wait=True)) == []
     assert (
-        " is stamped 2025-06-02T04:00:00+00:00 (2025-06-01T23:00:00-05:00 in America/Chicago)"
+        " stamped 2025-06-02T04:00:00+00:00 (2025-06-01T23:00:00-05:00 in America/Chicago). "
         in stamp_warnings(caplog)[-1]
     )
 
@@ -753,16 +773,18 @@ def test_an_index_day_bar_is_kept_once_its_end_has_passed(
     kept: int,
 ) -> None:
     # An index day bar ends at 01:00 New York time the next day, so at 00:30 it is still
-    # open and `history()` leaves it out, as a join on its end would.
+    # open and `history()` leaves it out, as a join on its end would: no day has ended, so
+    # nothing is requested.
     now = datetime.fromtimestamp((MIDNIGHT_MS + DAY_MS) / 1000 + minutes * 60, UTC)
     monkeypatch.setattr(history_source, "_now", lambda: now)
     day = date(2025, 6, 2)
-    # An open end reads through the end of today.
-    path = f"/v2/aggs/ticker/I:SPX/range/1/day/{MIDNIGHT_MS}/{MIDNIGHT_MS + 2 * DAY_MS - 1}"
-    fake_rest.reply(quote(path), bars_reply(MIDNIGHT_MS + HOUR_MS))
+    # An open end reads through the end of today's Chicago day.
+    chicago = MIDNIGHT_MS + HOUR_MS
+    path = f"/v2/aggs/ticker/I:SPX/range/1/day/{chicago}/{chicago + 2 * DAY_MS - 1}"
+    fake_rest.reply(quote(path), bars_reply(chicago))
     q = rest_session.indices.bars("I:SPX", dm.Timespan.DAY)
     out = rows(q.history(day, None, source=dm.HistorySource.REST, wait=True))
-    assert [p for p, _ in fake_rest.get_queries()] == [path]
+    assert [p for p, _ in fake_rest.get_queries()] == [path] * kept
     assert [r["TimestampEnd"] for r in out] == [(MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS] * kept
 
 
@@ -912,10 +934,15 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
 
     wait_for(lambda: error() is not None)
     message = str(error())
-    assert (
-        "socket.test/indices refused the subscription to V.I:SPX; Massive said: not authorized"
-    ) in message
-    assert "MassiveConfig.websocket_hosts[AssetClass.INDICES]" in message
+    assert message == (
+        'Massive answered the subscription to V.I:SPX on wss://socket.test/indices: "not '
+        'authorized". Massive documents indices.values only on its Business feed, '
+        "business.massive.com. Its plans are listed at "
+        "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.values.md. "
+        "Massive documents the indices V channel only on business.massive.com. To stream from "
+        'another host, pass websocket_hosts={dm.AssetClass.INDICES: "<host>"} to '
+        "dm.MassiveConfig."
+    )
     assert "business.massive.com" in message
     assert [type(error) for error in failures] == [dm.EntitlementError]
     del result
@@ -1020,8 +1047,7 @@ def test_every_index_from_a_day_file_at_an_unexpected_stamp_is_withheld_with_a_w
     ]
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
-        "indices.bars: a 1-day bar of I:SPX from the flat files us_indices/day_aggs_v1 is "
-        "stamped 2025-06-02T06:00:00+00:00"
+        "indices.bars: Massive sent a 1-day bar of I:SPX stamped 2025-06-02T06:00:00+00:00"
     )
 
 

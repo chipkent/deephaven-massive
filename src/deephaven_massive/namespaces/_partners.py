@@ -75,7 +75,7 @@ __all__ = [
 
 _REST: Final = Transport.REST
 
-_NO_TICKER_FILTER: Final = "leave symbols out, which applies no ticker filter"
+_NO_TICKER_FILTER: Final = "Leave symbols out to read every ticker."
 """The alternative a list dataset names when it is given `dm.ALL`."""
 
 _ETF_KEYS: Final = ("Symbol", "EffectiveDate", "ProcessedDate")
@@ -609,7 +609,7 @@ class PartnersBenzingaNamespace(Namespace):
             self._core,
             BENZINGA_CONSENSUS_RATINGS,
             symbols=symbols,
-            all_alternative="pass a list of symbols; the endpoint takes one ticker per request",
+            all_alternative="Pass a list of tickers.",
             filters=filters,
             on_error=on_error,
         )
