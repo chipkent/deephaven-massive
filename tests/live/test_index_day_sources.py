@@ -292,3 +292,26 @@ def test_the_aave_verdicts(
             _tally("I:AAVE100", window=chicago, differ=True, day_file=chicago, minute_file=aave)
         )
     assert sources.summary_lines(tallies)[-1] == f"(c) I:AAVE100's mismatch: {verdict}"
+
+
+def test_the_open_close_must_match_the_chicago_day_where_the_days_differ() -> None:
+    tally = sources.IndexTally("I:AAVE100")
+    rebuilds = {"New York": (1.0, 2.0, 0.5, 1.5), "Chicago": (1.1, 2.0, 0.5, 1.6)}
+    days = [date(2026, 11, d) for d in range(9, 15)]
+    tally.windows_differ_days.update(days[:5])
+    tally.add_open_close(days[0], "Chicago day", values=rebuilds["Chicago"], rebuilds=rebuilds)
+    tally.add_open_close(days[1], "New York day", values=rebuilds["New York"], rebuilds=rebuilds)
+    tally.add_open_close(days[2], "both days", values=(1.0, 2.0, 0.5, 1.5), rebuilds=rebuilds)
+    # No open and close, or no minutes to rebuild a day from, says nothing either way.
+    tally.add_open_close(days[3], "no bar", values=None, rebuilds=rebuilds)
+    tally.add_open_close(days[4], "no minute bars", values=(1.0, 2.0, 0.5, 1.5), rebuilds={})
+    # A day whose windows hold the same minutes can't tell them apart.
+    tally.add_open_close(days[5], "neither day", values=(9.0, 9.0, 9.0, 9.0), rebuilds=rebuilds)
+    assert tally.open_close_judged == set(days[:3])
+    rebuilt = "rebuilds {'New York': (1.0, 2.0, 0.5, 1.5), 'Chicago': (1.1, 2.0, 0.5, 1.6)}"
+    rebuilt = "rebuilds {'New York': (1.0, 2.0, 0.5, 1.5), 'Chicago': (1.1, 2.0, 0.5, 1.6)}"
+    sent = "the open and close (1.0, 2.0, 0.5, 1.5) matched"
+    assert tally.open_close_misses == [
+        f"I:AAVE100 2026-11-10: {sent} New York day, not the Chicago day alone; {rebuilt}",
+        f"I:AAVE100 2026-11-11: {sent} both days, not the Chicago day alone; {rebuilt}",
+    ]

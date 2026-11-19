@@ -759,7 +759,7 @@ class TimeRule:
         `TimestampEnd` never attaches it before its day ended, wherever that day was cut. It
         logs one WARNING per dataset per session through `warnings`.
         """
-        zone = _bar_zone(self.asset_class)
+        zone = bar_zone(self.asset_class)
         labels = _column(rows, DATE)
         distinct = pc.unique(labels)
         starts: list[int | None] = []

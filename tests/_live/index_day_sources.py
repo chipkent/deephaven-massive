@@ -329,6 +329,10 @@ class IndexTally:
         no_window_days: The days whose day-file row matched neither window.
         minute_gap_days: The days whose minute file had gaps (`MinuteFileComparison.has_gaps`).
         minute_value_days: The days whose minute file had prices other than REST's.
+        open_close_judged: The days whose windows differ on which the daily open and close was
+            judged against both (`add_open_close`).
+        open_close_misses: One line for each such day on which the open and close did not
+            match the Chicago day alone, with its prices and both rebuilds.
     """
 
     index: str
@@ -341,6 +345,38 @@ class IndexTally:
     no_window_days: set[date] = field(default_factory=set)
     minute_gap_days: set[date] = field(default_factory=set)
     minute_value_days: set[date] = field(default_factory=set)
+    open_close_judged: set[date] = field(default_factory=set)
+    open_close_misses: list[str] = field(default_factory=list)
+
+    def add_open_close(
+        self,
+        day: date,
+        verdict: str,
+        *,
+        values: Prices | None,
+        rebuilds: Mapping[str, Prices | None],
+    ) -> None:
+        """Judge one day's daily open and close against the Chicago day the library gives it.
+
+        Only a day whose windows differ (`windows_differ_days`, so call it after recording
+        them) can tell the two apart; on it, the open and close must match the Chicago day and
+        not the New York one. A day without an open and close or without minute bars says
+        nothing either way and is not judged.
+
+        Args:
+            day: The day.
+            verdict: The open and close's verdict that day (`window_verdict`).
+            values: Its prices, None when Massive sent none.
+            rebuilds: The minute rebuild of each window, by window name.
+        """
+        if day not in self.windows_differ_days or verdict in ("no bar", "no minute bars"):
+            return
+        self.open_close_judged.add(day)
+        if verdict != "Chicago day":
+            self.open_close_misses.append(
+                f"{self.index} {day}: the open and close {values} matched {verdict}, not the "
+                f"Chicago day alone; rebuilds {dict(rebuilds)}"
+            )
 
     def add_verdict(self, source: str, verdict: str, error: float | None) -> None:
         """Count one day's verdict of one source and keep its largest error.
