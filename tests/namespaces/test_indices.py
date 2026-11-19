@@ -806,10 +806,10 @@ def test_daily_open_close_fetches_each_index_for_the_day(
         "/v1/open-close/I:NDX/2025-06-02",
         "/v1/open-close/I:SPX/2025-06-02",
     ]
-    # The day is the row's `Date`; its window is the New York day, ending an hour late.
+    # The day is the row's `Date`; its window is the Chicago day, 01:00 to 01:00 New York time.
     day = {
         "Date": "2025-06-02",
-        "TimestampStart": MIDNIGHT_MS * MS,
+        "TimestampStart": (MIDNIGHT_MS + HOUR_MS) * MS,
         "TimestampEnd": (MIDNIGHT_MS + DAY_MS + HOUR_MS) * MS,
         "High": 5940.35,
         "Low": 5876.0,

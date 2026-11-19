@@ -448,8 +448,22 @@ def test_the_daily_summaries_and_indicators_describe_their_windows() -> None:
         "The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of "
         f"the next day. {FINISHED}"
     )
-    assert description(indices.DAILY_OPEN_CLOSE, "TimestampEnd").endswith(
-        f"says index days are Eastern. {FINISHED}"
+    chicago = (
+        "Massive's index days are Chicago days: it stamps an index day at midnight in Chicago on "
+        "every source, and its values are those of that Chicago day, though Massive's "
+        "documentation says index days are Eastern."
+    )
+    assert description(indices.DAILY_OPEN_CLOSE, "Date").startswith(
+        "The day the summary covers, as ISO yyyy-MM-dd text: a Chicago calendar day."
+    )
+    assert description(indices.DAILY_OPEN_CLOSE, "TimestampStart") == (
+        "The start of the day the summary covers, as an Instant: 00:00 Chicago time (01:00 New "
+        f"York time) of `Date`, where the index day bar of that date starts. {chicago}"
+    )
+    assert description(indices.DAILY_OPEN_CLOSE, "TimestampEnd") == (
+        "The exclusive end of the day the summary covers, as an Instant: 00:00 Chicago time "
+        "(01:00 New York time) of the next day, where the index day bar of that date ends. "
+        f"{chicago} {FINISHED}"
     )
     # A crypto summary not in UTC gets its date's widest window in any zone.
     for name in ("TimestampStart", "TimestampEnd"):
@@ -472,8 +486,7 @@ FINISHED = (
     'values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows '
     "read after their window ended. That test reads the local clock, which can be off, and a "
     "row read within moments of its end, or from a delayed feed, may still lack the window's "
-    "last trades; an end set later than the window's (an index day summary's extra hour) only "
-    "keeps a finished row out longer."
+    "last trades."
 )
 
 

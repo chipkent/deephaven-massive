@@ -618,6 +618,9 @@ _PER_FAMILY = 2
 _TICKERS = "/v3/reference/tickers"
 _PREV = "/v2/aggs/ticker/{indicesTicker}/prev"
 _OPEN_CLOSE = "/v1/open-close/{indicesTicker}/{date}"
+_OPEN_CLOSE_SOURCE = "open-close"
+"""The source name of the daily open and close, whose window the library sets to the Chicago
+day."""
 _NS_PER_MS = 1_000_000
 
 FileRead: TypeAlias = "tuple[list[dict[str, str | None]], frozenset[str]] | None"
@@ -722,6 +725,9 @@ def _record_day(
     if ranged is not None and filed is not None:
         error = index_day_sources.relative_error(ranged, filed)
         evidence(f"{index} {day} day file against the range bar: {error:.2e}")
+    tally.add_open_close(
+        day, verdicts[_OPEN_CLOSE_SOURCE], values=bars[_OPEN_CLOSE_SOURCE], rebuilds=rebuilds
+    )
     compared = _record_minute_file(index, day, minute_file, minutes=minutes, evidence=evidence)
     tally.add_files(
         day,
@@ -816,7 +822,7 @@ def _read_index(
         )
         sources = {
             index_day_sources.RANGE_SOURCE: by_day.get(day),
-            "open-close": open_close,
+            _OPEN_CLOSE_SOURCE: open_close,
             **({"/prev": prev} if prev_day == day else {}),
         }
         day_file, minute_file = files[day]
@@ -867,11 +873,13 @@ def test_index_day_windows_and_files_across_many_indices(
     match no window, and which minute files have gaps or other prices; (c) are `I:AAVE100`'s wrong
     values (a day file in no window, or other minute prices) isolated.
 
-    It asserts only that each index has REST day and minute bars and that at least one day file and
-    one minute file were read; everything else is evidence. Cost: 3 ticker-list searches, then per
-    index one 1-day range, one `/prev`, one open-close per day, and one minute range per run of
-    adjacent days (two or three for the usual days): at most about 110 REST requests, and 2
-    flat files per day.
+    It asserts that each index has REST day and minute bars, that at least one day file and one
+    minute file were read, and that on every day whose two windows rebuild to different prices
+    the daily open and close matches the Chicago day and not the New York one, the window the
+    library gives that row, with at least one such day; everything else is evidence. Cost: 3
+    ticker-list searches, then per index one 1-day range, one `/prev`, one open-close per day,
+    and one minute range per run of adjacent days (two or three for the usual days): at most
+    about 110 REST requests, and 2 flat files per day.
     """
     days = index_check_days
     found = {
@@ -909,5 +917,8 @@ def test_index_day_windows_and_files_across_many_indices(
         evidence(line)
     empty = [tally.index for tally, complete in reads if not complete]
     assert not empty, f"no REST day or minute bars for {empty}"
+    tallies = [tally for tally, _ in reads]
+    failure = index_day_sources.open_close_failure(tallies)
+    assert failure is None, f"{failure} (days {[str(day) for day in days]})"
     assert any(day_file for day_file, _ in files.values()), f"no {_DAY_FILE} file of {days}"
     assert any(minute for _, minute in files.values()), f"no {_MINUTE_FILE} file of {days}"

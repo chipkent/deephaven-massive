@@ -54,12 +54,12 @@ as sent, and the futures
   Massive's `session_end_date`, the bucket's last session. `Date` is the label for a
   1-session bar and null for a longer one. Since a session opens the evening before its date,
   consecutive bars overlap by about 22 hours.
-- **Daily open-close.** 00:00 of its date to 00:00 of the next day in the class day zone
-  (for indices, to 01:00 New York time, midnight in Chicago, where an index day bar ends:
-  `dates.day_end`). A crypto summary whose `isUTC` is false
-  keeps Massive's `Date` and `IsUtc`, but its day is not the UTC day and the library cannot
-  tell which zone's day it is, so its window is the widest that date's day has in any time
-  zone: from 00:00 at UTC+14 to 24:00 at UTC-12. It logs one WARNING per dataset per session.
+- **Daily open-close.** 00:00 of its date to 00:00 of the next day in the class's bar zone,
+  so an index summary covers the same Chicago day as the index day bar of its date. A crypto
+  summary whose `isUTC` is false keeps Massive's `Date` and `IsUtc`, but its day is not the
+  UTC day and the library cannot tell which zone's day it is, so its window is the widest
+  that date's day has in any time zone: from 00:00 at UTC+14 to 24:00 at UTC-12. It logs one
+  WARNING per dataset per session.
 - **A period stamped where Massive is not known to stamp one.** A bar or indicator value of a
   day or longer whose stamp `StampRule` does not expect is withheld ("Bar stamps" below).
 
@@ -745,7 +745,7 @@ class TimeRule:
         return pc.coalesce(sent, ruled)
 
     def _daily(self, rows: _Rows) -> _Rows:
-        """Fill a daily summary's window from its `Date`: that calendar day in the zone.
+        """Fill a daily summary's window from its `Date`: that calendar day in the bar zone.
 
         Args:
             rows: The batch.
@@ -759,7 +759,7 @@ class TimeRule:
         `TimestampEnd` never attaches it before its day ended, wherever that day was cut. It
         logs one WARNING per dataset per session through `warnings`.
         """
-        zone = self._zone()
+        zone = bar_zone(self.asset_class)
         labels = _column(rows, DATE)
         distinct = pc.unique(labels)
         starts: list[int | None] = []
