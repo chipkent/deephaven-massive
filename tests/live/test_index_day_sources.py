@@ -301,17 +301,49 @@ def test_the_open_close_must_match_the_chicago_day_where_the_days_differ() -> No
     tally.windows_differ_days.update(days[:5])
     tally.add_open_close(days[0], "Chicago day", values=rebuilds["Chicago"], rebuilds=rebuilds)
     tally.add_open_close(days[1], "New York day", values=rebuilds["New York"], rebuilds=rebuilds)
-    tally.add_open_close(days[2], "both days", values=(1.0, 2.0, 0.5, 1.5), rebuilds=rebuilds)
+    tally.add_open_close(days[2], "neither day", values=(9.0, 9.0, 9.0, 9.0), rebuilds=rebuilds)
     # No open and close, or no minutes to rebuild a day from, says nothing either way.
     tally.add_open_close(days[3], "no bar", values=None, rebuilds=rebuilds)
     tally.add_open_close(days[4], "no minute bars", values=(1.0, 2.0, 0.5, 1.5), rebuilds={})
     # A day whose windows hold the same minutes can't tell them apart.
-    tally.add_open_close(days[5], "neither day", values=(9.0, 9.0, 9.0, 9.0), rebuilds=rebuilds)
+    tally.add_open_close(days[5], "New York day", values=(1.0, 2.0, 0.5, 1.5), rebuilds=rebuilds)
     assert tally.open_close_judged == set(days[:3])
     rebuilt = "rebuilds {'New York': (1.0, 2.0, 0.5, 1.5), 'Chicago': (1.1, 2.0, 0.5, 1.6)}"
-    rebuilt = "rebuilds {'New York': (1.0, 2.0, 0.5, 1.5), 'Chicago': (1.1, 2.0, 0.5, 1.6)}"
-    sent = "the open and close (1.0, 2.0, 0.5, 1.5) matched"
+    alone = f"not the Chicago day alone; {rebuilt}"
+    new_york = "the open and close (1.0, 2.0, 0.5, 1.5) matched New York day"
+    neither = "the open and close (9.0, 9.0, 9.0, 9.0) matched neither day"
     assert tally.open_close_misses == [
-        f"I:AAVE100 2026-11-10: {sent} New York day, not the Chicago day alone; {rebuilt}",
-        f"I:AAVE100 2026-11-11: {sent} both days, not the Chicago day alone; {rebuilt}",
+        f"I:AAVE100 2026-11-10: {new_york}, {alone}",
+        f"I:AAVE100 2026-11-11: {neither}, {alone}",
     ]
+
+
+def test_an_open_close_whose_windows_rebuild_alike_is_not_judged() -> None:
+    # The windows hold different minutes, but the extra hour moved no price: either window
+    # gives the bar sent, so the day neither passes nor fails the check.
+    tally = sources.IndexTally("I:BTC1RP")
+    same = (1.0, 2.0, 0.5, 1.5)
+    tally.windows_differ_days.add(_DAY)
+    rebuilds = {"New York": same, "Chicago": same}
+    tally.add_open_close(_DAY, "both days", values=same, rebuilds=rebuilds)
+    assert tally.open_close_judged == set()
+    assert tally.open_close_misses == []
+
+
+def test_the_open_close_check_fails_on_a_miss_and_when_nothing_was_judged() -> None:
+    passed = sources.IndexTally("I:AAVE100")
+    passed.open_close_judged.add(_DAY)
+    unjudged = sources.IndexTally("I:SPX")
+    assert sources.open_close_failure([passed, unjudged]) is None
+    assert sources.open_close_failure([unjudged, sources.IndexTally("I:NDX")]) == (
+        "no day of ['I:SPX', 'I:NDX'] told the open and close's window apart: on no day did an "
+        "index's New York and Chicago days rebuild to different prices with an open and close "
+        "sent"
+    )
+    assert sources.open_close_failure([]) is not None
+    missed = sources.IndexTally("I:BTC10RP")
+    missed.open_close_judged.add(_DAY)
+    missed.open_close_misses.extend(["first miss", "second miss"])
+    assert sources.open_close_failure([passed, missed]) == (
+        "the daily open and close is not the Chicago day:\nfirst miss\nsecond miss"
+    )

@@ -305,6 +305,9 @@ def compare_minute_file(
 WINDOW_VERDICTS: Final = frozenset({"New York day", "Chicago day"})
 """The verdicts that name one window (`window_verdict`)."""
 
+_INCONCLUSIVE: Final = frozenset({"no bar", "no minute bars", "both days"})
+"""The verdicts that cannot say which window a bar covers (`window_verdict`)."""
+
 
 @dataclass
 class IndexTally:
@@ -329,8 +332,8 @@ class IndexTally:
         no_window_days: The days whose day-file row matched neither window.
         minute_gap_days: The days whose minute file had gaps (`MinuteFileComparison.has_gaps`).
         minute_value_days: The days whose minute file had prices other than REST's.
-        open_close_judged: The days whose windows differ on which the daily open and close was
-            judged against both (`add_open_close`).
+        open_close_judged: The days on which the daily open and close was judged: its windows
+            held different minutes and their rebuilt prices differ (`add_open_close`).
         open_close_misses: One line for each such day on which the open and close did not
             match the Chicago day alone, with its prices and both rebuilds.
     """
@@ -361,7 +364,9 @@ class IndexTally:
         Only a day whose windows differ (`windows_differ_days`, so call it after recording
         them) can tell the two apart; on it, the open and close must match the Chicago day and
         not the New York one. A day without an open and close or without minute bars says
-        nothing either way and is not judged.
+        nothing either way and is not judged, and neither is a day whose two windows hold
+        different minutes but rebuild to the same prices (`"both days"`): the extra hour moved
+        no open, high, low, or close, so either window gives the bar sent.
 
         Args:
             day: The day.
@@ -369,7 +374,7 @@ class IndexTally:
             values: Its prices, None when Massive sent none.
             rebuilds: The minute rebuild of each window, by window name.
         """
-        if day not in self.windows_differ_days or verdict in ("no bar", "no minute bars"):
+        if day not in self.windows_differ_days or verdict in _INCONCLUSIVE:
             return
         self.open_close_judged.add(day)
         if verdict != "Chicago day":
@@ -483,6 +488,30 @@ def _named(tallies: Sequence[IndexTally], days: Callable[[IndexTally], set[date]
         The index tickers, in order.
     """
     return [t.index for t in tallies if days(t)]
+
+
+def open_close_failure(tallies: Sequence[IndexTally]) -> str | None:
+    """Say why the indices' daily open and close fail to show the Chicago day, if they do.
+
+    Args:
+        tallies: Every index's tally (`IndexTally.add_open_close`).
+
+    Returns:
+        The failure, quoting each day that missed the Chicago day with its prices and both
+        rebuilds; or, when no day told the windows apart, that the check judged nothing; None
+        when at least one day was judged and every judged day matched the Chicago day.
+    """
+    misses = [miss for tally in tallies for miss in tally.open_close_misses]
+    if misses:
+        return "the daily open and close is not the Chicago day:\n" + "\n".join(misses)
+    if not any(tally.open_close_judged for tally in tallies):
+        indices = [tally.index for tally in tallies]
+        return (
+            f"no day of {indices} told the open and close's window apart: on no day did an "
+            "index's New York and Chicago days rebuild to different prices with an open and "
+            "close sent"
+        )
+    return None
 
 
 def summary_lines(tallies: Sequence[IndexTally]) -> list[str]:

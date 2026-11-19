@@ -874,12 +874,12 @@ def test_index_day_windows_and_files_across_many_indices(
     values (a day file in no window, or other minute prices) isolated.
 
     It asserts that each index has REST day and minute bars, that at least one day file and one
-    minute file were read, and that on every day whose two windows differ the daily open and close
-    matches the Chicago day and not the New York one, the window the library gives that row, on at
-    least one such day; everything else is evidence. Cost: 3 ticker-list searches, then per
-    index one 1-day range, one `/prev`, one open-close per day, and one minute range per run of
-    adjacent days (two or three for the usual days): at most about 110 REST requests, and 2
-    flat files per day.
+    minute file were read, and that on every day whose two windows rebuild to different prices
+    the daily open and close matches the Chicago day and not the New York one, the window the
+    library gives that row, with at least one such day; everything else is evidence. Cost: 3
+    ticker-list searches, then per index one 1-day range, one `/prev`, one open-close per day,
+    and one minute range per run of adjacent days (two or three for the usual days): at most
+    about 110 REST requests, and 2 flat files per day.
     """
     days = index_check_days
     found = {
@@ -918,11 +918,7 @@ def test_index_day_windows_and_files_across_many_indices(
     empty = [tally.index for tally, complete in reads if not complete]
     assert not empty, f"no REST day or minute bars for {empty}"
     tallies = [tally for tally, _ in reads]
-    misses = [miss for tally in tallies for miss in tally.open_close_misses]
-    assert not misses, "the daily open and close is not the Chicago day:\n" + "\n".join(misses)
-    assert any(tally.open_close_judged for tally in tallies), (
-        f"no day of {indices} on {[str(day) for day in days]} told the open and close's window "
-        "apart: no index's New York and Chicago days differed with an open and close sent"
-    )
+    failure = index_day_sources.open_close_failure(tallies)
+    assert failure is None, f"{failure} (days {[str(day) for day in days]})"
     assert any(day_file for day_file, _ in files.values()), f"no {_DAY_FILE} file of {days}"
     assert any(minute for _, minute in files.values()), f"no {_MINUTE_FILE} file of {days}"
