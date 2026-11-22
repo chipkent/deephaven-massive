@@ -8,18 +8,22 @@ virtual: every client gets a `FakeClock`, so retry waits are recorded, never sle
 
 from __future__ import annotations
 
+import http.server
 import io
 import logging
 import random
+import re
 import socket
 import ssl
 import struct
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 import boto3
+import botocore.config
 import botocore.loaders
 import botocore.utils
 import certifi
@@ -32,32 +36,45 @@ from botocore.exceptions import (
     ConnectTimeoutError,
     EndpointConnectionError,
     HTTPClientError,
+    InvalidProxiesConfigError,
     ParamValidationError,
     ProxyConnectionError,
     ReadTimeoutError,
     SSLError,
 )
 from botocore.response import StreamingBody
+from typing_extensions import override
 from urllib3.exceptions import ProtocolError
 from urllib3.exceptions import SSLError as Urllib3SSLError
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.flatfiles import client as client_module
 from deephaven_massive._massive.flatfiles.client import FlatFileClient
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import WireAuthError, WireEntitlementError, WireError
 from deephaven_massive._massive.net.slots import ConnectionSlots
-from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
-from tests._fakes.rest import REFUSED_PORT, FakeRestServer, Reply
+from tests._fakes.rest import REFUSED_PORT, FakeRestServer, LoopbackHTTPServer, Reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from typing import TypeAlias
 
+    from botocore.endpoint import Endpoint
+    from types_boto3_s3 import S3Client
+    from urllib3 import PoolManager
+
 
 TIMEOUT = 30.0
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
+CLOSED = (
+    "The library closed its connections to https://files.massive.com before this request was sent."
+)
+TRUST_IT = (
+    ". If a proxy or a private certificate authority signs it, set SSL_CERT_FILE to a bundle "
+    "that trusts it."
+)
 FUTURES_KEY = "us_futures_nymex/trades_v1/2025/03/2025-03-04.csv.gz"
 ACCESS_KEY = "AKIDFLATFILES"
 PRIVATE_KEY = "flat-file-secret"
@@ -166,7 +183,8 @@ def stocks_plan(block_size: int = 1 << 20) -> ReadPlan:
         symbols=None,
         time_header="sip_timestamp",
         window_ns=None,
-        to_ns=lambda values: (values, ""),
+        to_ns=lambda values: values,
+        unplaced=str,
         block_size=block_size,
         chunk_size=16 * block_size,
         parse_threads=3,
@@ -294,8 +312,9 @@ def test_a_close_while_the_network_settings_are_read_creates_no_client(
         client.close()
 
     monkeypatch.setattr(client_module, "https_proxy", proxy_for)
-    with pytest.raises(WireError, match="is closed"):
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == CLOSED
     assert (fake_s3.clients, fake_s3.keys()) == ([], [])
 
 
@@ -441,7 +460,8 @@ def test_rejected_credentials_are_a_wire_auth_error(
     error = info.value
     # The message says what happened to which object; the remedy is the library's to add.
     assert error.message == (
-        f"HTTP 403 for s3://flatfiles/{FUTURES_KEY} at https://files.massive.com ({code}: Rejected)"
+        f"Massive answered the read of s3://flatfiles/{FUTURES_KEY} at https://files.massive.com "
+        f'with HTTP 403 (request_id 4442587FB7D0A2F9): "{code}: Rejected".'
     )
     assert (error.status, error.host, error.path) == (403, "files.massive.com", FUTURES_KEY)
     assert error.request_id == fake_s3.request_id
@@ -455,8 +475,8 @@ def test_another_403_is_a_wire_entitlement_error(
     with pytest.raises(WireEntitlementError) as info:
         client.open(FUTURES_KEY)
     assert info.value.message == (
-        f"HTTP 403 for s3://flatfiles/{FUTURES_KEY} at https://files.massive.com "
-        "(AccessDenied: Access Denied)"
+        f"Massive answered the read of s3://flatfiles/{FUTURES_KEY} at https://files.massive.com "
+        'with HTTP 403 (request_id 4442587FB7D0A2F9): "AccessDenied: Access Denied".'
     )
     assert (info.value.status, info.value.path) == (403, FUTURES_KEY)
     assert info.value.request_id == fake_s3.request_id
@@ -482,7 +502,8 @@ def test_another_status_is_a_wire_error_at_once(
     error = info.value
     assert type(error) is WireError
     assert error.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: HTTP {status} ({code}: No)"
+        f"Massive answered the read of s3://flatfiles/{KEY} at https://files.massive.com with "
+        f'HTTP {status} (request_id 4442587FB7D0A2F9): "{code}: No".'
     )
     assert (error.status, error.path, error.request_id) == (status, KEY, fake_s3.request_id)
     assert isinstance(error.__cause__, ClientError)
@@ -518,23 +539,27 @@ def test_a_transient_answer_is_retried_three_times_on_the_shared_schedule(
     error = info.value
     assert type(error) is WireError
     assert error.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: HTTP {status} "
-        f"({code}: Try again)"
+        f"Massive answered the read of s3://flatfiles/{KEY} at https://files.massive.com with "
+        f'HTTP {status} (request_id 4442587FB7D0A2F9): "{code}: Try again".'
     )
     assert (error.status, error.request_id) == (status, fake_s3.request_id)
+    # S3 answers a timeout with HTTP 400, whose status alone does not say it may pass.
+    assert error.kind is WireFailure.REFUSED  # S3 answered, a RequestTimeout included
+    # S3 documents a RequestTimeout as a stalled connection: an answer that means try again.
+    assert error.means_retry is (code == "RequestTimeout")
     assert isinstance(error.__cause__, ClientError)
     assert fake_s3.keys() == [KEY] * 4
     assert clock.waits == WAITS
     logged = [
         (r.levelno, r.getMessage())
         for r in caplog.records
-        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "giving up" in r.msg)
+        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "Giving up" in r.msg)
     ]
     assert logged == [
-        (logging.INFO, f"{error}; retry 1 of 3 in 0.55 s"),
-        (logging.INFO, f"{error}; retry 2 of 3 in 1.10 s"),
-        (logging.INFO, f"{error}; retry 3 of 3 in 2.20 s"),
-        (logging.DEBUG, f"{error}; giving up after 4 attempts"),
+        (logging.INFO, f"{error} Retry 1 of 3 in 0.55 s."),
+        (logging.INFO, f"{error} Retry 2 of 3 in 1.10 s."),
+        (logging.INFO, f"{error} Retry 3 of 3 in 2.20 s."),
+        (logging.DEBUG, f"{error} Giving up after 4 attempts."),
     ]
 
 
@@ -624,11 +649,16 @@ def test_an_unreachable_endpoint_is_a_wire_error_after_the_retries(
     *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock
 ) -> None:
     fake_s3.fail(KEY, "unreachable")
-    with pytest.raises(WireError, match=f"^cannot read s3://flatfiles/{KEY} at ") as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == (
+        f"No answer to the read of s3://flatfiles/{KEY} at https://files.massive.com after 4 "
+        'tries: Could not connect to the endpoint URL: "https://files.massive.com".'
+    )
     assert type(info.value) is WireError
     assert (info.value.status, info.value.request_id, info.value.path) == (None, None, KEY)
     assert isinstance(info.value.__cause__, EndpointConnectionError)
+    assert info.value.kind is WireFailure.NO_ANSWER
     assert fake_s3.keys() == [KEY] * 4
     assert clock.waits == WAITS
 
@@ -649,10 +679,21 @@ def test_a_failure_no_retry_can_fix_is_not_retried(
         raise failure
 
     fake_s3.before_answer = fail
-    with pytest.raises(WireError, match=f"^cannot read s3://flatfiles/{KEY} at ") as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    # botocore's own text follows the colon, on one line.
+    said = {
+        "ParamValidationError": "Parameter validation failed: Invalid bucket name",
+        "HTTPClientError": "An HTTP Client raised an unhandled exception: a bug in the HTTP layer",
+    }[type(failure).__name__]
+    assert info.value.message == (
+        f"The read of s3://flatfiles/{KEY} at https://files.massive.com failed before it was "
+        f"sent: {said}."
+    )
     assert info.value.__cause__ is failure
     assert clock.waits == []
+    # S3 never answered: the failure is the client's.
+    assert info.value.kind is WireFailure.CLIENT_DEFECT
 
 
 def _certificate_rejected(_key: str) -> None:
@@ -680,26 +721,16 @@ def _handshake_refused(_key: str) -> None:
     [
         (
             _certificate_rejected,
-            (
-                r"TLS certificate verification failed for files\.massive\.com \(.*\); if a proxy "
-                r"or private CA signs it, set SSL_CERT_FILE to a bundle that trusts it$"
-            ),
+            "certificate verify failed",
         ),
         (
             _certificate_rejected_by_way_of_the_proxy,
-            r"TLS certificate verification failed for files\.massive\.com \(.*proxy\.corp.*\);",
-        ),
-        (
-            _handshake_refused,
-            (
-                r"TLS failed for files\.massive\.com \(SSL validation failed for "
-                r"https://files\.massive\.com .*wrong version number.*\)$"
-            ),
+            'Failed to connect to proxy URL: "https://proxy.corp:3129"',
         ),
     ],
-    ids=["certificate", "certificate-at-the-proxy", "handshake"],
+    ids=["certificate", "certificate-at-the-proxy"],
 )
-def test_a_tls_failure_is_never_retried(
+def test_a_certificate_failure_is_never_retried(
     *,
     client: FlatFileClient,
     fake_s3: FakeS3,
@@ -714,13 +745,52 @@ def test_a_tls_failure_is_never_retried(
         failure(key)
 
     fake_s3.before_answer = fail
-    with pytest.raises(
-        WireError, match=f"^cannot read s3://flatfiles/{KEY} at .*: {message}"
-    ) as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == (
+        f"The TLS certificate of files.massive.com did not verify for the read of "
+        f"s3://flatfiles/{KEY}: {message}{TRUST_IT}"
+    )
     assert (info.value.status, info.value.path) == (None, KEY)
     assert isinstance(info.value.__cause__, BotoCoreError)
+    assert info.value.kind is WireFailure.LOCAL  # SSL_CERT_FILE, on this machine, is the fix
     assert (attempts, clock.waits) == ([KEY], [])
+
+
+def test_a_proxy_setting_botocore_cannot_use_is_this_machines_to_fix(
+    *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock
+) -> None:
+    def fail(_key: str) -> None:
+        raise InvalidProxiesConfigError(proxy_url="http://proxy.corp")
+
+    fake_s3.before_answer = fail
+    with pytest.raises(WireError) as info:
+        client.open(KEY)
+    assert info.value.kind is WireFailure.LOCAL
+    assert clock.waits == []
+
+
+def test_a_failed_tls_handshake_got_no_answer_and_is_retried(
+    *, client: FlatFileClient, fake_s3: FakeS3, clock: FakeClock
+) -> None:
+    # As the REST client counts it: no answer came, so the request is sent again.
+    attempts: list[str] = []
+
+    def fail(key: str) -> None:
+        attempts.append(key)
+        _handshake_refused(key)
+
+    fake_s3.before_answer = fail
+    with pytest.raises(WireError) as info:
+        client.open(KEY)
+    assert info.value.message == (
+        f"No answer to the read of s3://flatfiles/{KEY} at https://files.massive.com after 4 "
+        "tries: the TLS connection to files.massive.com failed: SSL validation failed for "
+        "https://files.massive.com wrong version number."
+    )
+    assert isinstance(info.value.__cause__, SSLError)
+    assert info.value.kind is WireFailure.NO_ANSWER
+    assert (attempts, clock.waits) == ([KEY] * 4, WAITS)
 
 
 def test_closing_the_client_ends_a_retry_wait(fake_s3: FakeS3) -> None:
@@ -746,7 +816,8 @@ def test_closing_the_client_ends_a_retry_wait(fake_s3: FakeS3) -> None:
     reader.join(TIMEOUT)
     assert not reader.is_alive()
     (error,) = raised
-    assert error.message == "the flat-file client for https://files.massive.com is closed"
+    assert error.message == CLOSED
+    assert error.kind is WireFailure.STOPPED
     assert fake_s3.keys() == [KEY]
     assert clock.monotonic() == 0.0  # the wait ended without time passing
 
@@ -766,10 +837,14 @@ def test_a_dropped_body_fails_the_read_and_is_never_requested_again(
     assert file is not None
     with file, pytest.raises(WireError) as info:
         list(file.batches(stocks_plan()))
-    assert info.value.message.startswith(f"cannot read s3://flatfiles/{KEY} at ")
+    assert info.value.message == (
+        f"The connection broke off while the library read Massive's file s3://flatfiles/{KEY} "
+        "at https://files.massive.com: An error occurred while reading from response stream: "
+        "Connection broken: IncompleteRead."
+    )
     assert isinstance(info.value.__cause__, OSError)
     assert file.dropped
-    assert not info.value.unreadable  # a transport failure, not the file's content
+    assert info.value.kind is WireFailure.NO_ANSWER  # a transport failure, not the file's content
     assert (fake_s3.keys(), clock.waits) == ([KEY], [])
     assert fake_s3.closed_bodies == [KEY]
 
@@ -783,14 +858,16 @@ def test_a_broken_file_is_not_a_dropped_read(*, client: FlatFileClient, fake_s3:
     with file, pytest.raises(WireError, match="Not a gzipped file") as info:
         list(file.batches(stocks_plan()))
     assert not file.dropped
-    assert info.value.unreadable  # the file's content: a gap in the library
+    assert info.value.kind is WireFailure.UNREADABLE  # the file's content: a gap in the library
 
 
 def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
     *, client: FlatFileClient, clock: FakeClock, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG, logger=client_module.__name__)
-    error = WireError("cannot read s3://flatfiles/k at here: dropped")
+    error = WireError(
+        "No answer to the read of s3://flatfiles/k at here: dropped.", kind=WireFailure.NO_ANSWER
+    )
     cancel = threading.Event()
     assert [client.wait_to_reread(error, retry, cancel) for retry in range(4)] == [
         True,
@@ -802,13 +879,34 @@ def test_a_reread_waits_on_the_shared_schedule_and_gives_up_after_three(
     logged = [
         (r.levelno, r.getMessage())
         for r in caplog.records
-        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "giving up" in r.msg)
+        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "Giving up" in r.msg)
     ]
     assert logged == [
-        (logging.INFO, f"{error}; reading it again from its start, reread 1 of 3 in 0.55 s"),
-        (logging.INFO, f"{error}; reading it again from its start, reread 2 of 3 in 1.10 s"),
-        (logging.INFO, f"{error}; reading it again from its start, reread 3 of 3 in 2.20 s"),
-        (logging.DEBUG, f"{error}; giving up after 4 reads"),
+        (
+            logging.INFO,
+            (
+                "No answer to the read of s3://flatfiles/k at here: dropped. Reading it again from "
+                "its start, reread 1 of 3 in 0.55 s."
+            ),
+        ),
+        (
+            logging.INFO,
+            (
+                "No answer to the read of s3://flatfiles/k at here: dropped. Reading it again from "
+                "its start, reread 2 of 3 in 1.10 s."
+            ),
+        ),
+        (
+            logging.INFO,
+            (
+                "No answer to the read of s3://flatfiles/k at here: dropped. Reading it again from "
+                "its start, reread 3 of 3 in 2.20 s."
+            ),
+        ),
+        (
+            logging.DEBUG,
+            "No answer to the read of s3://flatfiles/k at here: dropped. Giving up after 4 reads.",
+        ),
     ]
 
 
@@ -819,7 +917,7 @@ def test_a_reread_is_not_waited_for_once_the_call_is_cancelled(
     cancel = threading.Event()
     cancel.set()
     # No reread will follow, so there is no wait and no line promising one.
-    assert client.wait_to_reread(WireError("dropped"), 0, cancel)
+    assert client.wait_to_reread(WireError("dropped", kind=WireFailure.NO_ANSWER), 0, cancel)
     assert clock.waits == []
     assert [r for r in caplog.records if r.name == client_module.__name__] == []
 
@@ -844,7 +942,8 @@ def waiting() -> Iterator[tuple[FakeClock, FlatFileClient, Start]]:
 
     def start(cancel: threading.Event, retry: int = 0) -> threading.Thread:
         thread = threading.Thread(
-            target=client.wait_to_reread, args=(WireError("dropped"), retry, cancel)
+            target=client.wait_to_reread,
+            args=(WireError("dropped", kind=WireFailure.NO_ANSWER), retry, cancel),
         )
         thread.start()
         threads.append(thread)
@@ -978,7 +1077,10 @@ def test_a_tls_failure_part_way_through_the_body_is_a_dropped_read(
     body = _body(StreamingBody(raw, len(data)))
     with FlatFile(body, KEY, location="here", host=None) as file, pytest.raises(WireError) as info:
         list(file.batches(stocks_plan()))
-    assert info.value.message.startswith("cannot read here: ")
+    assert info.value.message == (
+        "The connection broke off while the library read Massive's file here: "
+        "[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] bad record mac."
+    )
     assert isinstance(info.value.__cause__, OSError)
     assert file.dropped
 
@@ -1005,12 +1107,15 @@ def test_a_drop_after_the_first_block_fails_loudly_and_repeats_no_row(
     seen: list[int] = []
 
     def read(file: FlatFile) -> None:
-        for batch, _ in file.batches(stocks_plan(block_size=16 << 10)):
+        for batch, _, _ in file.batches(stocks_plan(block_size=16 << 10)):
             seen.extend(batch["SequenceNumber"].to_pylist())
 
     with FlatFile(body, KEY, location="here", host=None) as file, pytest.raises(WireError) as info:
         read(file)
-    assert info.value.message.startswith("cannot read here: ")
+    assert info.value.message == (
+        "The connection broke off while the library read Massive's file here: An error "
+        "occurred while reading from response stream: Connection broken: IncompleteRead."
+    )
     assert isinstance(info.value.__cause__, OSError)
     assert file.dropped
     assert 0 < len(seen) < total
@@ -1022,12 +1127,15 @@ def test_a_client_that_cannot_be_created_is_a_wire_error(
 ) -> None:
     monkeypatch.setenv("AWS_PROFILE", "no-such-profile")
     client = make_client()
-    with pytest.raises(
-        WireError,
-        match=r"cannot create the S3 client for https://files\.massive\.com: .*no-such-profile",
-    ) as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == (
+        "The library could not create its S3 client for https://files.massive.com: The config "
+        "profile (no-such-profile) could not be found. Set AWS_PROFILE to a profile that "
+        "exists, or correct the proxy in HTTPS_PROXY."
+    )
     assert info.value.host == "files.massive.com"
+    assert info.value.kind is WireFailure.LOCAL  # AWS_PROFILE, on this machine, is the fix
     assert fake_s3.clients == []
 
 
@@ -1038,8 +1146,9 @@ def test_a_closed_client_makes_no_request(*, client: FlatFileClient, fake_s3: Fa
     assert fake_s3.closes == 1
     client.close()  # idempotent
     assert fake_s3.closes == 1
-    with pytest.raises(WireError, match=r"the flat-file client for .* is closed") as info:
+    with pytest.raises(WireError) as info:
         client.open(KEY)
+    assert info.value.message == CLOSED
     assert info.value.path == KEY
     assert fake_s3.keys() == [KEY]
 
@@ -1094,11 +1203,11 @@ def factory_calls(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> list[dict
         The arguments of each `Session.client` call, in order.
     """
     calls: list[dict[str, object]] = []
-    create = cast("Callable[..., object]", boto3.session.Session.client)
+    create = boto3.session.Session.client
 
     def client(session: boto3.session.Session, *args: object, **kwargs: object) -> object:
         calls.append(kwargs)
-        return create(session, *args, **kwargs)
+        return create(session, *args, **kwargs)  # type: ignore[call-overload]  # forwards any service
 
     monkeypatch.setattr(boto3.session.Session, "client", client)
     return calls
@@ -1136,12 +1245,16 @@ def test_the_client_follows_the_shared_tls_and_proxy_rules_and_never_retries_its
         client.close()
     (kwargs,) = factory_calls
     assert kwargs["verify"] == bundle
-    config = cast("Any", kwargs["config"])  # botocore declares no type for its settings
+    config = kwargs["config"]
+    assert isinstance(config, botocore.config.Config)
     # An empty mapping, not None: None would make botocore look the proxy up itself.
-    assert config.proxies == ({} if proxy is None else {"https": proxy})
-    assert config.proxies_config == {"proxy_ca_bundle": bundle}
-    assert config.retries == {"total_max_attempts": 1, "mode": "standard"}
-    assert (config.connect_timeout, config.read_timeout) == (60.0, 60.0)
+    proxies = {} if proxy is None else {"https": proxy}
+    assert config.proxies == proxies  # type: ignore[attr-defined]  # not in botocore's type stubs
+    assert config.proxies_config == {"proxy_ca_bundle": bundle}  # type: ignore[attr-defined]  # not in botocore's type stubs
+    retries = {"total_max_attempts": 1, "mode": "standard"}
+    assert config.retries == retries  # type: ignore[attr-defined]  # not in botocore's type stubs
+    timeouts = (config.connect_timeout, config.read_timeout)  # type: ignore[attr-defined]  # not in botocore's type stubs
+    assert timeouts == (60.0, 60.0)
 
 
 def test_botocore_never_looks_the_proxy_up_itself(
@@ -1231,7 +1344,8 @@ def test_a_404_page_that_is_not_s3s_is_a_wire_error_over_the_network(
     error = info.value
     assert type(error) is WireError
     assert error.message == (
-        f"cannot read s3://flatfile/{KEY} at {tls_server.url}: HTTP 404 (404: Not Found)"
+        f"Massive answered the read of s3://flatfile/{KEY} at {tls_server.url} with HTTP 404: "
+        '"404: Not Found".'
     )
     assert (error.status, error.path) == (404, KEY)
     assert clock.waits == []
@@ -1240,7 +1354,9 @@ def test_a_404_page_that_is_not_s3s_is_a_wire_error_over_the_network(
 def _symbols(file: FlatFile | None) -> list[str]:
     assert file is not None
     with file:
-        return [s for batch, _ in file.batches(stocks_plan()) for s in batch["Symbol"].to_pylist()]
+        return [
+            s for batch, _, _ in file.batches(stocks_plan()) for s in batch["Symbol"].to_pylist()
+        ]
 
 
 def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(
@@ -1250,12 +1366,113 @@ def test_a_certificate_no_bundle_trusts_fails_at_once_over_the_network(
     client = make_client(endpoint_url=tls_server.url, clock=clock)
     try:
         with pytest.raises(
-            WireError, match=r"certificate verification failed for 127\.0\.0\.1 .*SSL_CERT_FILE"
+            WireError,
+            match=(
+                rf"^{re.escape('The TLS certificate of 127.0.0.1 did not verify for the read of ')}"
+                rf"{re.escape(f's3://flatfiles/{KEY}: ')}.*CERTIFICATE_VERIFY"
+                rf".*{re.escape(TRUST_IT)}$"
+            ),
         ):
             client.open(KEY)
     finally:
         client.close()
     assert (tls_server.requests, clock.waits) == ([], [])
+
+
+def test_a_certificate_for_another_name_fails_at_once_over_the_network(
+    *, tls_server: FakeRestServer, trusted: pytest.MonkeyPatch
+) -> None:
+    # The certificate is trusted but names 127.0.0.1, not localhost. botocore leaves the name
+    # check to urllib3, which raises its own error rather than Python's, and that must fail at
+    # once as a certificate failure does, not be retried as a handshake that got no answer.
+    clock = FakeClock()
+    endpoint_url = tls_server.url.replace("127.0.0.1", "localhost")
+    client = make_client(endpoint_url=endpoint_url, clock=clock)
+    try:
+        with pytest.raises(
+            WireError,
+            match=(
+                rf"^{re.escape('The TLS certificate of localhost did not verify for the read of ')}"
+                rf"{re.escape(f's3://flatfiles/{KEY}: ')}.*localhost.*"
+                rf"{re.escape(TRUST_IT)}$"
+            ),
+        ) as info:
+            client.open(KEY)
+    finally:
+        client.close()
+    assert info.value.kind is WireFailure.LOCAL
+    assert (tls_server.requests, clock.waits) == ([], [])
+
+
+@pytest.mark.parametrize(
+    ("sent", "linger", "raised"),
+    [(b"", False, False), (b"", True, False), (b"GET /x HTTP/1.1\r\n", False, True)],
+    ids=["close", "reset", "reset after the request line"],
+)
+def test_the_tls_fake_ends_a_connection_the_client_drops_before_its_request(
+    *, sent: bytes, linger: bool, raised: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # urllib3 checks the certificate's name after the TLS handshake, and on a mismatch drops
+    # the connection before sending a request: a close, which becomes a reset when the server's
+    # session tickets lie unread. The fake must end that connection as a close: an error that
+    # reached the server's `handle_error` would be printed to a stream an xdist worker may have
+    # closed, failing whichever test was tearing down. A drop after the request line is still
+    # an error. The client drops only once the server reached the point under test: its
+    # handshake done, or the request line read. Before Python 3.13, `ssl` reads a reset as the
+    # end of the stream, so a real reset after the request line would end the request there and
+    # fail only the reply's write. That case raises the reset where 3.13 does: reading headers.
+    errors: list[BaseException | None] = []
+    reached = threading.Event()
+    served = threading.Event()
+    process_request = LoopbackHTTPServer.process_request
+    shutdown_request = LoopbackHTTPServer.shutdown_request
+    parse_request = http.server.BaseHTTPRequestHandler.parse_request
+
+    def handle_error(server: LoopbackHTTPServer, request: object, address: object) -> None:
+        errors.append(sys.exception())
+
+    def handshake_done(
+        server: LoopbackHTTPServer, request: socket.socket, address: tuple[str, int]
+    ) -> None:
+        if not sent:
+            reached.set()
+        process_request(server, request, address)
+
+    def request_line_read(handler: http.server.BaseHTTPRequestHandler) -> bool:
+        reached.set()
+        if raised:
+            raise ConnectionResetError
+        return parse_request(handler)
+
+    def signal_served(server: LoopbackHTTPServer, request: socket.socket) -> None:
+        shutdown_request(server, request)
+        served.set()
+
+    monkeypatch.setattr(LoopbackHTTPServer, "handle_error", handle_error)
+    monkeypatch.setattr(LoopbackHTTPServer, "process_request", handshake_done)
+    monkeypatch.setattr(LoopbackHTTPServer, "shutdown_request", signal_served)
+    monkeypatch.setattr(http.server.BaseHTTPRequestHandler, "parse_request", request_line_read)
+    server = FakeRestServer(tls=(DATA / "tls_cert.pem", DATA / "tls_key.pem"))
+    server.start()
+    try:
+        host, _, port = server.url.removeprefix("https://").rpartition(":")
+        context = ssl.create_default_context(cafile=DATA / "tls_cert.pem")
+        context.check_hostname = False  # as urllib3, which checks the name itself
+        raw = socket.create_connection((host, int(port)), timeout=10)
+        with context.wrap_socket(raw) as connection:
+            connection.sendall(sent)
+            assert reached.wait(10)
+            if linger:
+                connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        assert served.wait(10)
+    finally:
+        server.close()
+    if raised:
+        [error] = errors
+        assert isinstance(error, ConnectionResetError)
+    else:
+        assert errors == []
+    assert server.requests == []
 
 
 def test_ssl_cert_file_is_trusted_and_the_shared_schedule_retries_over_the_network(
@@ -1350,9 +1567,14 @@ def test_an_unreachable_proxy_is_retried_and_its_password_stays_out_of_the_error
     finally:
         client.close()
     assert clock.waits == WAITS
-    assert info.value.message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: cannot connect "
-        f"through the proxy http://127.0.0.1:{port} ("
+    # The operating system's words for the refused connection follow the last colon.
+    assert re.fullmatch(
+        re.escape(
+            f"No answer to the read of s3://flatfiles/{KEY} at https://files.massive.com after 4 "
+            f"tries: the proxy http://127.0.0.1:{port} could not be reached: "
+        )
+        + r".+\.",
+        info.value.message,
     )
     secret = f"{user}:{password}@"
     assert secret not in info.value.message
@@ -1381,10 +1603,11 @@ def test_a_proxy_that_refuses_the_credentials_is_never_retried(
     finally:
         client.close()
     assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at {tls_server.url}: the proxy {fake_rest.url} "
-        "refused its credentials (HTTP 407); check the user and password in HTTPS_PROXY"
+        f"The proxy {fake_rest.url} refused its credentials with HTTP 407 for the read of "
+        f"s3://flatfiles/{KEY} at {tls_server.url}. Correct the user and password in HTTPS_PROXY."
     )
     assert (info.value.status, info.value.path) == (407, KEY)
+    assert info.value.kind is WireFailure.LOCAL
     assert [r.method for r in fake_rest.requests] == ["CONNECT"]
     assert (tls_server.requests, clock.waits) == ([], [])
     assert not any("wr0ng" in r.getMessage() for r in caplog.records)
@@ -1501,11 +1724,18 @@ def test_an_error_response_cut_short_every_time_is_a_wire_error_after_the_retrie
     finally:
         client.close()
         server.close()
-    assert info.value.message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at {server.url}: the error response was cut short ("
+    # urllib3's words for the broken body follow the last colon.
+    assert re.fullmatch(
+        re.escape(
+            f"No answer to the read of s3://flatfiles/{KEY} at {server.url} after 4 tries: the "
+            "error response was cut short: "
+        )
+        + r".+\.",
+        info.value.message,
     )
     assert isinstance(info.value.__cause__, ProtocolError)
     assert (info.value.status, info.value.path) == (None, KEY)
+    assert info.value.kind is WireFailure.NO_ANSWER  # no answer, so a later request may get one
     assert server.connections == 4
     assert clock.waits == WAITS
 
@@ -1555,8 +1785,8 @@ def test_a_last_page_without_its_pagination_fields_ends_the_listing(
 @pytest.mark.parametrize(
     ("pagination", "listings", "message"),
     [
-        ("missing", [None], "a truncated page gave no continuation token"),
-        ("repeat", [None, "after-2"], "a truncated page gave the same continuation token"),
+        ("missing", [None], "no continuation token"),
+        ("repeat", [None, "after-2"], "the same continuation token as before"),
     ],
 )
 def test_a_truncated_page_without_a_new_token_is_a_wire_error(
@@ -1572,7 +1802,10 @@ def test_a_truncated_page_without_a_new_token_is_a_wire_error(
     fake_s3.pagination = pagination
     with pytest.raises(WireError) as info:
         client.prefixes()
-    assert info.value.message == f"cannot list {BUCKET}: {message}"
+    assert info.value.message == (
+        f"Massive answered the list of {BUCKET} with a truncated page and {message}, so the "
+        "library could not list the rest."
+    )
     assert info.value.host == "files.massive.com"
     assert fake_s3.listings == listings
 
@@ -1617,15 +1850,19 @@ def test_a_listing_that_stays_unreachable_is_a_wire_error_after_the_retries(
 ) -> None:
     caplog.set_level(logging.DEBUG, logger=client_module.__name__)
     fake_s3.fail("", "unreachable")
-    with pytest.raises(WireError, match=f"^cannot list {BUCKET}: ") as info:
+    with pytest.raises(WireError) as info:
         client.prefixes()
+    assert info.value.message == (
+        f"No answer to the list of {BUCKET} after 4 tries: Could not connect to the endpoint "
+        'URL: "https://files.massive.com".'
+    )
     assert (info.value.status, info.value.path) == (None, "")
     assert isinstance(info.value.__cause__, EndpointConnectionError)
     assert clock.waits == WAITS
     assert [
         r.levelno
         for r in caplog.records
-        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "giving up" in r.msg)
+        if r.name == client_module.__name__ and (r.levelno > logging.DEBUG or "Giving up" in r.msg)
     ] == [
         logging.INFO,
         logging.INFO,
@@ -1637,14 +1874,36 @@ def test_a_listing_that_stays_unreachable_is_a_wire_error_after_the_retries(
 @pytest.mark.parametrize(
     ("status", "code", "error_type", "message"),
     [
-        (403, "AccessDenied", WireEntitlementError, f"HTTP 403 for {BUCKET} (AccessDenied: No)"),
+        (
+            403,
+            "AccessDenied",
+            WireEntitlementError,
+            (
+                f"Massive answered the list of {BUCKET} with HTTP 403 "
+                "(request_id 4442587FB7D0A2F9): "
+                '"AccessDenied: No".'
+            ),
+        ),
         (
             403,
             "InvalidAccessKeyId",
             WireAuthError,
-            f"HTTP 403 for {BUCKET} (InvalidAccessKeyId: No)",
+            (
+                f"Massive answered the list of {BUCKET} with HTTP 403 "
+                "(request_id 4442587FB7D0A2F9): "
+                '"InvalidAccessKeyId: No".'
+            ),
         ),
-        (404, "NoSuchBucket", WireError, f"cannot list {BUCKET}: HTTP 404 (NoSuchBucket: No)"),
+        (
+            404,
+            "NoSuchBucket",
+            WireError,
+            (
+                f"Massive answered the list of {BUCKET} with HTTP 404 "
+                "(request_id 4442587FB7D0A2F9): "
+                '"NoSuchBucket: No".'
+            ),
+        ),
     ],
 )
 def test_a_refused_listing_is_a_wire_error_at_once(
@@ -1673,8 +1932,9 @@ def test_a_refused_listing_is_a_wire_error_at_once(
 
 def test_a_closed_client_lists_nothing(*, client: FlatFileClient, fake_s3: FakeS3) -> None:
     client.close()
-    with pytest.raises(WireError, match=r"the flat-file client for .* is closed") as info:
+    with pytest.raises(WireError) as info:
         client.prefixes()
+    assert info.value.message == CLOSED
     assert info.value.path == ""
     assert (fake_s3.listings, fake_s3.clients) == ([], [])
 
@@ -1700,7 +1960,7 @@ def test_closing_the_client_ends_a_listing_retry_wait(fake_s3: FakeS3) -> None:
     lister.join(TIMEOUT)
     assert not lister.is_alive()
     (error,) = raised
-    assert error.message == "the flat-file client for https://files.massive.com is closed"
+    assert error.message == CLOSED
     assert fake_s3.listings == [None]
 
 
@@ -1790,10 +2050,7 @@ def test_a_close_ends_the_wait_for_a_connection_of_open_and_prefixes(
     client.close()
     for waiter in waiters:
         waiter.join(TIMEOUT)
-    assert (
-        sorted(error.message for error in errors)
-        == ["the flat-file client for https://files.massive.com is closed"] * 2
-    )
+    assert sorted(error.message for error in errors) == [CLOSED] * 2
     held.close()
 
 
@@ -1843,12 +2100,13 @@ def test_overlapping_reads_share_the_pool_without_discarding_connections(
     assert [r.getMessage() for r in caplog.records if "pool is full" in r.getMessage()] == []
 
 
-def _ssl_context_of(client: object) -> ssl.SSLContext:
+def _ssl_context_of(client: S3Client) -> ssl.SSLContext:
     """Return the `SSLContext` a boto3 client's connections to the endpoint are made with."""
     # botocore keeps the client's urllib3 pool manager, and the context it gives every
     # connection, in private attributes with no public accessor; reading them is the only way
     # to check that no two connection slots share a context.
-    manager: Any = cast("Any", client)._endpoint.http_session._manager
+    endpoint: Endpoint = client._endpoint  # type: ignore[attr-defined]  # not in botocore's type stubs
+    manager: PoolManager = endpoint.http_session._manager  # type: ignore[attr-defined]  # not in botocore's type stubs
     context: ssl.SSLContext = manager.connection_pool_kw["ssl_context"]
     return context
 
@@ -1864,17 +2122,20 @@ def test_no_two_held_connection_slots_share_an_ssl_context(fake_s3: FakeS3) -> N
     client = make_client(max_pool=3)
     files = [client.open(key) for key in keys]
     try:
+        held = [file for file in files if file is not None]
+        assert len(held) == 3
         built = list(client._clients)
         assert (len(built), client._idle) == (3, [])  # one client per held slot
-        pools = [cast("Any", each.meta.config).max_pool_connections for each in built]
+        pools = [each.meta.config.max_pool_connections for each in built]  # type: ignore[attr-defined]  # not in botocore's type stubs
         assert pools == [1, 1, 1]
         assert len({id(_ssl_context_of(each)) for each in built}) == 3
-        cast("FlatFile", files[0]).close()
+        held[0].close()
         files[0] = client.open(keys[0])  # takes the slot given back, and its client
         assert client._clients == built
     finally:
         for file in files:
-            cast("FlatFile", file).close()
+            if file is not None:
+                file.close()
         client.close()
 
 
@@ -1896,14 +2157,20 @@ def test_an_endpoint_s_user_and_password_never_reach_a_message(
     finally:
         flat_files.close()
     message = str(info.value)
-    assert message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at https://***@files.massive.com: "
+    assert message == (
+        f"No answer to the read of s3://flatfiles/{KEY} at https://***@files.massive.com after 4 "
+        f'tries: Could not connect to the endpoint URL: "https://***@files.massive.com/flatfiles/'
+        f'{KEY}".'
     )
     assert "hunter2" not in message
     assert "reader" not in message
     assert "https://***@files.massive.com/flatfiles/" in message
-    with pytest.raises(WireError, match=r"^the flat-file client for https://\*\*\*@files"):
+    with pytest.raises(WireError) as closed:
         flat_files.open(KEY)
+    assert closed.value.message == (
+        "The library closed its connections to https://***@files.massive.com before this "
+        "request was sent."
+    )
 
 
 class _UnclosableRaw(io.BytesIO):
@@ -1934,8 +2201,9 @@ def test_an_attempt_never_waits_for_the_lock_a_client_build_holds(
     # AWS configuration. An attempt on a client its caller already holds needs nothing the
     # lock guards, so it is sent while the lock is held elsewhere.
     def attempt() -> object:
+        unused: S3Client = None  # type: ignore[assignment]  # the call never reads its client
         return client._attempt(
-            cast("Any", None), lambda _: "sent", key="k", location="s3://bucket/k", verb="read"
+            unused, lambda _: "sent", key="k", location="s3://bucket/k", verb="read"
         )
 
     with ThreadPoolExecutor(1) as pool, client._lock:  # the lock is let go first

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 
-from deephaven_massive._massive import Transport, WireEntitlementError, source
+from deephaven_massive._massive import Transport, source
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -39,14 +39,11 @@ def test_every_consensus_row_names_its_ticker(*, live_rest: RestClient, evidence
     consensus of three stocks raw, one request each, charged to the Stocks bucket as the
     library charges them, and records each row's `ticker`. Reading it: a pass confirms the
     library; a row without `ticker`, or with another stock's, fails the test, and then the
-    dataset needs another key. Without the Benzinga add-on ($99 a month) it skips.
+    dataset needs another key. When Massive refuses a request, the test skips, quoting it.
     """
     rest_path = source(Transport.REST, _CONSENSUS)
     for ticker in _CONSENSUS_TICKERS:
-        try:
-            rows = live_rest.get(rest_path, {"ticker": ticker}, {}, bucket="stocks").rows
-        except WireEntitlementError as error:
-            pytest.skip(f"not entitled: needs the Benzinga add-on, $99 a month ({error})")
+        rows = live_rest.get(rest_path, {"ticker": ticker}, {}, bucket="stocks").rows
         sent = [row.get("ticker") for row in rows]
         evidence(f"{ticker}: {len(rows)} rows, tickers {sent}")
         assert rows, f"{ticker}: no consensus row"

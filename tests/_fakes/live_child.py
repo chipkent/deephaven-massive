@@ -1,21 +1,24 @@
-"""A fake child process of the live-run program: pytest or a built-in group, scripted by a test.
+"""A fake child process of the live-run program: pytest, a built-in group, or the probe.
 
 The live-run program (`tests/_live/live_run/commands.py`) runs every group in a child process:
-pytest
-with the outcomes plugin, or its own script's `_group` command. Its tests must never run the
-real live suites, which would call Massive, so they point the program's interpreter at a
-wrapper that runs this file instead, with the same arguments. It does what the test scripts in
+pytest with the outcomes plugin, or its own script's `_group` command; and each probe of the
+key in its script's `_probe` command. Its tests must never run the real live suites or the
+real probe, which would call Massive, so they point the program's interpreter at a wrapper
+that runs this file instead, with the same arguments. It does what the test scripts in
 the JSON of the `FAKE_LIVE_CHILD` environment variable, in this order:
 
 - `print`: lines to print (a test plants secrets in them to see the program clean its logs);
 - `evidence`: text appended to `live-evidence-20261104T163000Z.log` in the working directory,
   as the live tests' evidence recorder writes its run's own file (never while collecting);
-- `collection`: with `--collect-only`, the object written to `MASSIVE_LIVE_COLLECTION`;
-- `outcomes`: for each node id on the command line, its phase records, appended to
-  `MASSIVE_LIVE_OUTCOMES` as the outcomes plugin would;
+- `collection`: with `--collect-only`, the object written to the file `--live-collection`
+  names;
+- `outcomes`: for each node id on the command line, its phase records, appended to the file
+  `--live-outcomes` names, as the outcomes plugin would;
 - `results`: for `_group`, the lines appended to the attempt's `results.jsonl`;
 - `prompt`: for `_group`, a line printed before the results, after which the child reads one
   line from its standard input (the upgrade check's Enter);
+- `probe`: for `_probe`, the object written to the `--result` file, a probe's result; with no
+  `probe`, the child writes nothing, as a probe child that failed;
 - `hang`: wait for a signal instead of exiting (never while collecting); `ignore_interrupt`
   also ignores SIGINT, so only SIGKILL ends it;
 - `exit`: the exit status, 0 by default.
@@ -53,8 +56,8 @@ def main() -> int:
     if "evidence" in script and "--collect-only" not in argv:
         with Path("live-evidence-20261104T163000Z.log").open("a", encoding="utf-8") as file:
             file.write(script["evidence"])
-    collection = os.environ.get("MASSIVE_LIVE_COLLECTION", "")
-    outcomes = os.environ.get("MASSIVE_LIVE_OUTCOMES", "")
+    collection = _option(argv, "--live-collection")
+    outcomes = _option(argv, "--live-outcomes")
     if "--collect-only" in argv and collection and "collection" in script:
         Path(collection).write_text(json.dumps(script["collection"]), encoding="utf-8")
     elif outcomes:
@@ -75,6 +78,8 @@ def main() -> int:
         with (folder / "results.jsonl").open("a", encoding="utf-8") as file:
             for line in script.get("results", []):
                 file.write(json.dumps(line) + "\n")
+    elif "_probe" in argv and "probe" in script:
+        Path(_option(argv, "--result")).write_text(json.dumps(script["probe"]), encoding="utf-8")
     if script.get("hang") and "--collect-only" not in argv:
         if script.get("ignore_interrupt"):
             signal.signal(signal.SIGINT, signal.SIG_IGN)

@@ -12,6 +12,7 @@ try:
     dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS)
 except ValueError as error:
     print(f"ValueError: {error}")
+print(dm.canonical_symbol("BRK-B", dm.AssetClass.STOCKS, on_error=dm.OnError.LOG))
 
 yahoo_symbols = new_table([string_col("Symbol", ["BRK-B", "AAPL", "not a ticker"])])
 converted = dm.canonicalize_symbols(

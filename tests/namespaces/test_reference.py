@@ -8,7 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from urllib.parse import urlencode
 
 import pyarrow as pa
@@ -25,17 +25,23 @@ from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._datasets.symbols import SymbolTable
-from deephaven_massive._enums import ClassFromPrefix
+from deephaven_massive._enums import ClassFromPrefix, Recency
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import reference
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query
+from deephaven_massive._massive import DriftReport, Transport, to_batch
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.poll import Pollers, open_poll
+from deephaven_massive.namespaces import _reference as reference
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import FetchQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 OWNER = "namespaces/reference"
 R = Transport.REST
@@ -77,12 +83,12 @@ condition is keyed by all of them, since Massive lists two stocks quote conditio
 
 
 def _types(spec: DatasetSpec) -> dict[str, ColumnType]:
-    return {c.name: c.type for c in CATALOG.dataset_schema(spec, raw_symbol=False).columns}
+    return {c.name: c.type for c in CATALOG.dataset_schema(spec).columns}
 
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.reference
-    assert type(namespace) is reference._Reference
+    assert type(namespace) is reference.ReferenceNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -127,7 +133,7 @@ def test_ticker_events_take_the_symbol_from_the_request() -> None:
         "id", from_request=True
     )
     # The event's `Date` is the vendor's date, not a trading day: reference rows have none.
-    assert CATALOG.dataset_schema(spec, raw_symbol=False).column_names == (
+    assert CATALOG.dataset_schema(spec).column_names == (
         "Symbol",
         "Date",
         "Type",
@@ -141,7 +147,7 @@ def test_related_companies_name_the_peer_and_the_company_asked_about() -> None:
     spec = reference.RELATED_COMPANIES
     keys = spec.keys_for(R, "/v1/related-companies/{ticker}")
     assert keys == SourceKeys(symbol=KeySpec("Ticker"), fanout=KeySpec("ticker", from_request=True))
-    assert CATALOG.dataset_schema(spec, raw_symbol=False).column_names == (
+    assert CATALOG.dataset_schema(spec).column_names == (
         "Symbol",
         "Underlying",
         "TimestampInsert",
@@ -203,7 +209,7 @@ def test_market_holidays_hours_are_instants() -> None:
 
 @pytest.mark.parametrize("name", NAMES)
 def test_the_docstring_opens_with_the_summary_and_links_its_page(name: str) -> None:
-    doc = getattr(reference._Reference, name).__doc__
+    doc = getattr(reference.ReferenceNamespace, name).__doc__
     assert doc.splitlines()[0] == CATALOG.by_name[f"reference.{name}"].summary
     assert f"docs/datasets/reference.{name}.md" in doc
 
@@ -214,7 +220,7 @@ def test_the_docstring_opens_with_the_summary_and_links_its_page(name: str) -> N
 def test_tickers_query(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
     query = ref.tickers()
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._spec is reference.TICKERS
     assert query._request == Request(params=(("active", True),))
     full = ref.tickers(
@@ -258,9 +264,13 @@ def test_ticker_details_and_events_queries(massive_session: dm.MassiveSession) -
     assert details._request == Request(symbols=("AAPL",), params=(("date", date(2024, 1, 2)),))
     # The day is a calendar date, so an aware datetime is refused.
     early = datetime(2025, 1, 3, 2, tzinfo=UTC)
-    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
+    with pytest.raises(
+        ValueError, match=r"as_of=.* is a time, and as_of takes a calendar date\. Pass a date"
+    ):
         ref.ticker_details("AAPL", as_of=early)
-    with pytest.raises(ValueError, match=r"as_of=.* is a calendar date; pass a date"):
+    with pytest.raises(
+        ValueError, match=r"as_of=.* is a time, and as_of takes a calendar date\. Pass a date"
+    ):
         ref.tickers(as_of=early)
     assert ref.ticker_details(["O:SPY251219C00600000"])._request == Request(
         symbols=("O:SPY251219C00600000",)
@@ -315,14 +325,14 @@ def test_news_query(massive_session: dm.MassiveSession) -> None:
 def test_news_takes_a_watchlist(massive_session: dm.MassiveSession) -> None:
     # The endpoint's `ticker` parameter is single-valued and it has no `ticker.any_of`, so a
     # watchlist is one request per ticker.
-    news = cast("RestPath", source(R, "/v2/reference/news"))
+    news = CATALOG.rest_path("/v2/reference/news")
     assert "ticker.any_of" not in {p.name for p in news.params}
     assert reference.NEWS.ticker_list == "Tickers"
     ref: Any = massive_session.reference
     assert ref.news(symbols=["MSFT", "AAPL"])._request == Request(symbols=("AAPL", "MSFT"))
     table = new_table([string_col("Symbol", ["AAPL"])])
     assert ref.news(symbols=table)._request == Request(symbols=SymbolTable(table))
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         ref.news(symbols=[])
 
 
@@ -362,7 +372,7 @@ def test_lookup_queries(massive_session: dm.MassiveSession) -> None:
         (ref.market_status(), reference.MARKET_STATUS),
         (ref.market_holidays(), reference.MARKET_HOLIDAYS),
     ):
-        assert type(query) is Query
+        assert type(query) is FetchQuery
         assert query._spec is spec
         assert query._request == Request()
     assert repr(ref.market_status()) == "m.reference.market_status()"
@@ -372,34 +382,44 @@ def test_each_endpoint_accepts_its_own_asset_classes(
     massive_session: dm.MassiveSession,
 ) -> None:
     ref = massive_session.reference
-    rejected: list[tuple[Callable[..., Query], str, dm.AssetClass, list[str]]] = [
+    rejected: list[tuple[Callable[..., FetchQuery], str, dm.AssetClass, list[str]]] = [
         (ref.ticker_types, "ticker_types", dm.AssetClass.FUTURES, ["STOCKS", "OPTIONS", "INDICES"]),
         (ref.exchanges, "exchanges", dm.AssetClass.INDICES, ["STOCKS", "OPTIONS", "FUTURES"]),
         (ref.conditions, "conditions", dm.AssetClass.FUTURES, ["STOCKS", "OPTIONS"]),
         (ref.conditions, "conditions", dm.AssetClass.INDICES, ["STOCKS", "OPTIONS"]),
     ]
     for factory, name, asset_class, accepted in rejected:
+        names = [f"dm.AssetClass.{name}" for name in (*accepted, "FOREX", "CRYPTO")]
+        listed = f"{', '.join(names[:-1])}, and {names[-1]}"
         message = (
-            f"reference.{name} does not accept AssetClass.{asset_class.name}; "
-            f"it accepts {[*accepted, 'FOREX', 'CRYPTO']}"
+            f"reference.{name} takes no asset_class=dm.AssetClass.{asset_class.name}. Pass one "
+            f"of {listed}."
         )
-        with pytest.raises(ValueError, match=re.escape(message)):
+        with pytest.raises(ValueError, match=whole(message)):
             factory(asset_class=asset_class)
+        assert factory(asset_class=dm.AssetClass.STOCKS)._request is not None  # the advice
 
 
 def test_dm_all_names_the_alternative(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
     alternatives = {
-        "tickers": "leave symbols out for every ticker",
-        "news": "leave symbols out for every article",
+        "tickers": "Leave symbols out to read every ticker.",
+        "news": "Leave symbols out to read every article.",
     }
     for method, alternative in alternatives.items():
-        with pytest.raises(ValueError, match=re.escape(f"does not accept dm.ALL; {alternative}")):
+        refusal = f"reference.{method} does not take dm.ALL. {alternative}"
+        with pytest.raises(ValueError, match=whole(refusal)):
             getattr(ref, method)(symbols=dm.ALL)
-    with pytest.raises(ValueError, match=r"use m\.reference\.tickers\(\) for every ticker"):
+        assert getattr(ref, method)()._request.symbols is None  # the advice
+    details = (
+        "reference.ticker_details does not take dm.ALL. For every ticker, call "
+        "m.reference.tickers().fetch()."
+    )
+    with pytest.raises(ValueError, match=whole(details)):
         ref.ticker_details(dm.ALL)
     for method in ("ticker_events", "related_companies"):
-        with pytest.raises(ValueError, match=r"does not accept dm\.ALL; pass a list of symbols"):
+        refusal = f"reference.{method} does not take dm.ALL. Pass a list of tickers."
+        with pytest.raises(ValueError, match=whole(refusal)):
             getattr(ref, method)(dm.ALL)
 
 
@@ -410,13 +430,14 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
             ref.tickers(**{name: 1})
     with pytest.raises(TypeError, match="active must be a bool, not NoneType"):
         ref.tickers(active=None)
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         ref.tickers(as_of="2025-01-02T09:30")
     with pytest.raises(ValueError, match=r"is neither ISO-8601 .* nor Deephaven date or time text"):
         ref.ticker_details("AAPL", as_of="soon")
-    with pytest.raises(ValueError, match="types is empty"):
+    empty = "types=[] is empty, so it would select nothing. Leave types out for every event type."
+    with pytest.raises(ValueError, match=whole(empty)):
         ref.ticker_events("AAPL", types=[])
-    with pytest.raises(TypeError, match="types must hold only str"):
+    with pytest.raises(TypeError, match=whole("types must hold only str, not int")):
         ref.ticker_events("AAPL", types=["ticker_change", 1])
     with pytest.raises(TypeError, match="types must be a sequence of str, not int"):
         ref.ticker_events("AAPL", types=1)
@@ -424,13 +445,20 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
         with pytest.raises(TypeError, match="condition_id must be an int"):
             ref.conditions(condition_id=bad)
     # A reserved wire name names the factory's argument, which may be spelled differently.
-    with pytest.raises(ValueError, match=r"^type is set through its own argument, ticker_type="):
+    own = "The filter 'type' has its own argument. Pass ticker_type= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         ref.tickers(filters={"type": "CS"})
-    with pytest.raises(ValueError, match=r"^date is set through its own argument, as_of="):
+    own = "The filter 'date' has its own argument. Pass as_of= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         ref.tickers(filters={"date": "2025-01-02"})
-    with pytest.raises(ValueError, match=r"^id_gte is set through its own argument, condition_id="):
+    own = "The filter 'id_gte' has its own argument. Pass condition_id= instead."
+    with pytest.raises(ValueError, match=whole(own)):
         ref.conditions(filters={"id_gte": 1})
-    with pytest.raises(ValueError, match="published_utc_gte is set through start= and end="):
+    axis = (
+        "The filter 'published_utc_gte' sets the time range of reference.news. Pass start= and "
+        "end= instead."
+    )
+    with pytest.raises(ValueError, match=whole(axis)):
         ref.news(filters={"published_utc_gte": "2025-01-01"})
     with pytest.raises(ValueError, match="end"):
         ref.news(start="2025-02-01", end="2025-01-01")
@@ -440,7 +468,7 @@ def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSess
 
 def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
     ref: Any = massive_session.reference
-    calls: list[tuple[Callable[..., Query], str, str]] = [
+    calls: list[tuple[Callable[..., FetchQuery], str, str]] = [
         (ref.tickers, "market", "Market"),
         (ref.tickers, "ticker_type", "TickerType"),
         (ref.tickers, "order", "Order"),
@@ -466,8 +494,12 @@ def _rows(payload: object, result_key: str | None) -> list[dict[str, object]]:
     # The rows of a response body, found as the REST client finds them.
     found = payload
     for part in (result_key or "").split(".") if result_key else ():
-        found = cast("dict[str, object]", found)[part]
-    return cast("list[dict[str, object]]", found if isinstance(found, list) else [found])
+        assert isinstance(found, dict)
+        found = found[part]
+    listed = found if isinstance(found, list) else [found]
+    rows = [row for row in listed if isinstance(row, dict)]
+    assert len(rows) == len(listed)
+    return rows
 
 
 @dataclass(frozen=True)
@@ -519,10 +551,12 @@ def test_the_vendor_samples_decode(
     load_fixture: Callable[[str, str], bytes], sample: Sample
 ) -> None:
     spec = sample.spec
-    rest_path = cast("RestPath", source(R, cast("str", spec.fetch_path)))
+    assert spec.fetch_path is not None
+    rest_path = CATALOG.rest_path(spec.fetch_path)
     rows = _rows(json.loads(load_fixture(OWNER, f"{sample.fixture}.json")), rest_path.result_key)
     required = [f.column for f in required_fields(spec, rest_path)]
-    batch, report = to_batch(rows, rest_path, required=required)
+    batch, report, marks = to_batch(rows, rest_path, required=required)
+    assert marks == {}  # every row read whole
     assert tuple(sorted(report.extra)) == sample.extra
     assert tuple(sorted(report.missing)) == sample.missing
     first = batch.to_pylist()[0]
@@ -555,7 +589,7 @@ def test_tickers_fetch(
     out = dh_to_pylist(
         rest_session.reference.tickers(
             "A", market=dm.Market.STOCKS, ticker_type=dm.TickerType.CS, as_of="2021-04-25"
-        ).fetch()
+        ).fetch(wait=True)
     )
     assert fake_rest.get_queries() == [
         (
@@ -582,11 +616,11 @@ def test_tickers_without_symbols_list_every_ticker_and_symbols_fan_out(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply("/v3/reference/tickers", Reply(envelope([])))
-    rest_session.reference.tickers().fetch()
+    rest_session.reference.tickers().fetch(wait=True)
     assert fake_rest.get_queries() == [
         ("/v3/reference/tickers", {"active": ["true"], "limit": ["1000"]})
     ]
-    rest_session.reference.tickers(["MSFT", "AAPL"]).fetch()
+    rest_session.reference.tickers(["MSFT", "AAPL"]).fetch(wait=True)
     # The per-symbol requests run concurrently, so they arrive in any order.
     fanned = sorted(params["ticker"] for _, params in fake_rest.get_queries()[1:])
     assert fanned == [["AAPL"], ["MSFT"]]
@@ -601,7 +635,9 @@ def test_ticker_details_fetch_one_request_per_symbol(
     dh_to_pylist: ToRows,
 ) -> None:
     fake_rest.reply("/v3/reference/tickers/AAPL", sample(load_fixture, "ticker_details"))
-    out = dh_to_pylist(rest_session.reference.ticker_details("AAPL", as_of="2024-01-02").fetch())
+    out = dh_to_pylist(
+        rest_session.reference.ticker_details("AAPL", as_of="2024-01-02").fetch(wait=True)
+    )
     assert fake_rest.get_queries() == [("/v3/reference/tickers/AAPL", {"date": ["2024-01-02"]})]
     assert [(r["Symbol"], r["AddressCity"], r["ListDate"]) for r in out] == [
         ("AAPL", "Cupertino", "1980-12-12")
@@ -616,7 +652,9 @@ def test_ticker_events_fill_the_symbol_from_the_request(
     dh_to_pylist: ToRows,
 ) -> None:
     fake_rest.reply("/vX/reference/tickers/META/events", sample(load_fixture, "ticker_events"))
-    out = dh_to_pylist(rest_session.reference.ticker_events("META", types="ticker_change").fetch())
+    out = dh_to_pylist(
+        rest_session.reference.ticker_events("META", types="ticker_change").fetch(wait=True)
+    )
     assert fake_rest.get_queries() == [
         ("/vX/reference/tickers/META/events", {"types": ["ticker_change"]})
     ]
@@ -634,14 +672,13 @@ def test_related_companies_name_the_peer_and_the_ticker_asked_about(
     dh_to_pylist: ToRows,
 ) -> None:
     fake_rest.reply("/v1/related-companies/AAPL", sample(load_fixture, "related_companies"))
-    out = dh_to_pylist(rest_session.reference.related_companies("AAPL").fetch())
+    out = dh_to_pylist(rest_session.reference.related_companies("AAPL").fetch(wait=True))
     assert fake_rest.get_queries() == [("/v1/related-companies/AAPL", {})]
     assert len(out) == 10
     assert out[0]["TimestampInsert"] is not None
     assert {k: v for k, v in out[0].items() if k != "TimestampInsert"} == {
         "Symbol": "MSFT",
         "Underlying": "AAPL",
-        "RawSymbol": None,
     }
 
 
@@ -656,7 +693,7 @@ def test_news_fetch(
     query = rest_session.reference.news(
         symbols="UBS", start=date(2024, 6, 24), end=date(2024, 6, 24), order=dm.Order.DESC
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     ((path, params),) = fake_rest.get_queries()
     assert path == "/v2/reference/news"
     assert params["ticker"] == ["UBS"]
@@ -716,7 +753,9 @@ def test_news_of_a_watchlist_lists_an_article_under_each_ticker(
         _news_target("MSFT", limit=3),
         Reply(envelope([shared, _article("m1", "2024-06-24T16:00:00Z", "MSFT"), unnamed])),
     )
-    out = dh_to_pylist(rest_session.reference.news(symbols=["MSFT", "AAPL"], limit=3).fetch())
+    out = dh_to_pylist(
+        rest_session.reference.news(symbols=["MSFT", "AAPL"], limit=3).fetch(wait=True)
+    )
     assert sorted(r.target for r in fake_rest.requests) == [
         _news_target("AAPL", limit=3),
         _news_target("MSFT", limit=3),
@@ -786,7 +825,7 @@ def test_a_news_page_without_keywords_keeps_every_column(
     for article in body["results"]:
         del article["keywords"]
     fake_rest.reply("/v2/reference/news", Reply(body))
-    (row,) = dh_to_pylist(rest_session.reference.news("UBS").fetch())
+    (row,) = dh_to_pylist(rest_session.reference.news("UBS").fetch(wait=True))
     assert row["Keywords"] is None
     assert row["Tickers"] == ["UBS"]
     assert row["Author"] == "Sam Boughedda"
@@ -806,11 +845,11 @@ def test_lookup_fetches(
     fake_rest.reply("/v3/reference/conditions", sample(load_fixture, "conditions"))
     fake_rest.reply("/v1/marketstatus/now", sample(load_fixture, "market_status"))
     fake_rest.reply("/v1/marketstatus/upcoming", sample(load_fixture, "market_holidays"))
-    types = dh_to_pylist(ref.ticker_types(asset_class=dm.AssetClass.STOCKS).fetch())
-    exchanges = dh_to_pylist(ref.exchanges(locale=dm.Locale.US).fetch())
-    conditions = dh_to_pylist(ref.conditions(condition_id=2, sip=dm.Sip.CTA).fetch())
-    status = dh_to_pylist(ref.market_status().fetch())
-    holidays = dh_to_pylist(ref.market_holidays().fetch())
+    types = dh_to_pylist(ref.ticker_types(asset_class=dm.AssetClass.STOCKS).fetch(wait=True))
+    exchanges = dh_to_pylist(ref.exchanges(locale=dm.Locale.US).fetch(wait=True))
+    conditions = dh_to_pylist(ref.conditions(condition_id=2, sip=dm.Sip.CTA).fetch(wait=True))
+    status = dh_to_pylist(ref.market_status().fetch(wait=True))
+    holidays = dh_to_pylist(ref.market_holidays().fetch(wait=True))
     assert fake_rest.get_queries() == [
         ("/v3/reference/tickers/types", {"asset_class": ["stocks"]}),
         ("/v3/reference/exchanges", {"locale": ["us"]}),
@@ -850,10 +889,11 @@ class _Statuses:
     def __call__(
         self,
         *,
+        stream_id: int,
         symbols: object,
         values: object,
-        record: Callable[[object], None],
-        on_recency: Callable[[object], None],
+        record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
         executor: ThreadPoolExecutor,
         cancel: object,
     ) -> poll.CycleRows:
@@ -888,7 +928,7 @@ def test_market_status_polls_one_row_in_every_keyed_mode(
         interval=timedelta(seconds=60),
         mode=mode,
         query="<Query test>",
-        read=cast("Any", _Statuses("open", "closed")),
+        read=_Statuses("open", "closed"),
         pollers=pollers,
         host="api.massive.com",
         path="/v1/marketstatus/now",

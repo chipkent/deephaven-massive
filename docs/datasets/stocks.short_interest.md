@@ -7,7 +7,7 @@ Short interest of US-listed stocks, one row per ticker and FINRA settlement date
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.stocks.short_interest(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None)
+m.stocks.short_interest(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -29,6 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"days_to_cover_gte": 5}`. Keys: `avg_daily_volume`, `avg_daily_volume_any_of`, `avg_daily_volume_gt`, `avg_daily_volume_gte`, `avg_daily_volume_lt`, `avg_daily_volume_lte`, `days_to_cover`, `days_to_cover_any_of`, `days_to_cover_gt`, `days_to_cover_gte`, `days_to_cover_lt`, `days_to_cover_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -47,7 +48,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The primary ticker symbol for the stock." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `AvgDailyVolume` | long | The average daily trading volume for the stock over a specified period, typically used to contextualize short interest. |
 | `DaysToCover` | double | Calculated as short_interest divided by avg_daily_volume, representing the estimated number of days it would take to cover all short positions based on average trading volume. |
 | `SettlementDate` | String | The date (formatted as YYYY-MM-DD) on which the short interest data is considered settled, typically based on exchange reporting schedules. |
@@ -56,14 +56,13 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `AvgDailyVolume` | `avg_daily_volume` |
 | `DaysToCover` | `days_to_cover` |
 | `SettlementDate` | `settlement_date` |
@@ -78,4 +77,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

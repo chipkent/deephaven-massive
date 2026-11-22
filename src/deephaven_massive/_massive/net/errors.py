@@ -12,15 +12,17 @@ or JSON exception:
 - `WireEntitlementError`: the credentials are valid but the plan does not cover the request
   (HTTP 403, a `NOT_AUTHORIZED` envelope, or any other S3 403).
 
-Each carries the HTTP `status`, the `host` and `path` of the request, Massive's `request_id`,
-and a `message`. The library outside `_massive` never shows these to users: `_errors.from_wire`
-turns each one into the public `MassiveError`, `AuthenticationError`, or `EntitlementError`
-with the same message, `status`, and `request_id`.
+Each carries its `kind`, a `WireFailure` that says who, if anyone, answered: every error has
+exactly one, and the client that raises it must choose it. Each also carries the HTTP
+`status`, the `host` and `path` of the request, Massive's `request_id`, and a `message`. The
+library outside `_massive` never shows these to users: `_errors.from_wire` turns each one into
+the public `MassiveError`, `AuthenticationError`, or `EntitlementError` with the same message,
+`status`, and `request_id`.
 
 The clients classify what their HTTP libraries raise before they wrap it, and those libraries
 nest the root cause as an argument, a `__cause__`, or a `__context__`. `linked_errors` walks
-that whole chain, and `is_tls_failure` and `is_proxy_auth_failure` find the two failures no
-client retries in it: a certificate that did not verify, and a proxy that refused the
+that whole chain, and `is_certificate_failure` and `is_proxy_auth_failure` find the two failures
+no client retries in it: a certificate that did not verify, and a proxy that refused the
 credentials.
 
 `LIBRARY_BUG_REPORT` is the sentence that ends the wire clients' own ERROR records about a
@@ -28,14 +30,17 @@ defect: the same text as `deephaven_massive._errors.LIBRARY_BUG`, which the rest
 uses, repeated here because the wire package imports nothing else of the library (a test keeps
 the two equal). It stays inside the package: the rest of the library uses its own copy.
 
-This module imports only the standard library. It is part of `net`, the layer every client
-shares. Its functions are pure, so they are safe from any thread.
+This module imports only the standard library and urllib3's `CertificateError`. It is part of
+`net`, the layer every client shares. Its functions are pure, so they are safe from any thread.
 """
 
 from __future__ import annotations
 
-import sys
+import enum
+import ssl
 from typing import TYPE_CHECKING, Final
+
+from urllib3.util.ssl_match_hostname import CertificateError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -45,8 +50,9 @@ __all__ = [
     "WireAuthError",
     "WireEntitlementError",
     "WireError",
+    "WireFailure",
+    "is_certificate_failure",
     "is_proxy_auth_failure",
-    "is_tls_failure",
     "linked_errors",
 ]
 
@@ -57,9 +63,51 @@ LIBRARY_BUG_REPORT: Final = (
 )
 """What ends each of the wire clients' ERROR records about a defect of the library.
 
-A defect is a broken internal invariant, an unexpected exception on a library thread, or data
-from Massive the library cannot convert or read: none is the user's to fix, so the text says
-how to report it."""
+A defect is a broken internal invariant or an unexpected exception on a library thread: neither
+is the user's to fix, so the text says how to report it. Data from Massive the library cannot
+read is Massive's, not a defect, and its records never end with this sentence."""
+
+
+class WireFailure(enum.Enum):
+    """What kind of failure a wire error is: whether Massive answered, and if not, why not.
+
+    Every `WireError` has exactly one, chosen where it is raised, so a failure is never taken
+    for Massive's answer by default. `_errors.wire_source` maps each to the public error's
+    source.
+    """
+
+    REFUSED = "refused"
+    """Massive answered with a refusal or an error: an HTTP error status (S3's included), a
+    WebSocket status message, or an answer the client refuses to follow, such as a `next_url`
+    on another host or one that repeats a page."""
+
+    NO_ANSWER = "no_answer"
+    """No answer came: a connection that could not be made, was reset, timed out, or broke
+    off part-way through a body, or a TLS handshake that failed for another reason than the
+    certificate. A client that retries such a failure raises it once its retries are spent;
+    one that does not, at once."""
+
+    LOCAL = "local"
+    """This machine's settings stopped the request before Massive could answer: a
+    certificate it does not trust (`SSL_CERT_FILE`), or a proxy that refused its credentials
+    or is configured wrong (`HTTPS_PROXY`)."""
+
+    STOPPED = "stopped"
+    """The caller stopped the request, or closed the client, before an answer came. A stop
+    the library chooses itself, such as its other requests after one fails, is never
+    surfaced: the caller raises the failure that caused it."""
+
+    UNREADABLE = "unreadable"
+    """Massive delivered data the client could not read: a malformed or truncated flat file,
+    a header the file lacks, or a body that is not the JSON the path declares."""
+
+    UNREADABLE_ROWS = "unreadable_rows"
+    """Massive delivered a flat file the client read whole, but whose every line is malformed,
+    so it has no row to give. The lines are Massive's data, not a defect of the client."""
+
+    CLIENT_DEFECT = "client_defect"
+    """The client itself failed on an unexpected exception: a bug in it, not anything Massive
+    did."""
 
 
 class WireError(Exception):
@@ -77,14 +125,16 @@ class WireError(Exception):
     Example:
         A REST client giving up on a rate limit::
 
-            from deephaven_massive._massive import WireError
+            from deephaven_massive._massive import WireError, WireFailure
 
             error = WireError(
-                "HTTP 429 from GET /v3/trades/AAPL (request_id abc123): rate limited",
+                "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 429 "
+                '(request_id abc123): "rate limited".',
                 status=429,
                 host="api.massive.com",
                 path="/v3/trades/AAPL",
                 request_id="abc123",
+                kind=WireFailure.REFUSED,
             )
             assert str(error) == error.message
     """
@@ -97,8 +147,8 @@ class WireError(Exception):
         host: str | None = None,
         path: str | None = None,
         request_id: str | None = None,
-        unreadable: bool = False,
-        client_defect: bool = False,
+        kind: WireFailure,
+        means_retry: bool = False,
     ) -> None:
         """Create a wire error.
 
@@ -112,12 +162,11 @@ class WireError(Exception):
                 WebSocket path, or the S3 object key; `None` when there was no request.
             request_id: The `request_id` of Massive's response (`x-amz-request-id` for S3), or
                 `None` when the response had none.
-            unreadable: True when Massive delivered the data but the client could not read it
-                (a malformed or truncated flat file, a header the file lacks): a gap in the
-                library rather than a transport failure, which the library reports as a
-                defect. False, the default, for every failure to reach or hear from Massive.
-            client_defect: True when the client itself failed on an unexpected exception (a
-                bug in it, not anything Massive did), which the library reports as a defect.
+            kind: What kind of failure it is; required, so that no failure is taken for
+                Massive's answer by default.
+            means_retry: True for an answer that means "try again" although its status alone
+                does not say so, such as S3's `RequestTimeout` (HTTP 400): the caller may
+                succeed by sending the request again later.
         """
         super().__init__(message)
         self._message = message
@@ -125,8 +174,8 @@ class WireError(Exception):
         self._host = host
         self._path = path
         self._request_id = request_id
-        self._unreadable = unreadable
-        self._client_defect = client_defect
+        self._kind = kind
+        self._means_retry = means_retry
 
     @property
     def message(self) -> str:
@@ -154,14 +203,14 @@ class WireError(Exception):
         return self._request_id
 
     @property
-    def unreadable(self) -> bool:
-        """True when Massive delivered the data but the client could not read it."""
-        return self._unreadable
+    def kind(self) -> WireFailure:
+        """What kind of failure it is: whether Massive answered, and if not, why not."""
+        return self._kind
 
     @property
-    def client_defect(self) -> bool:
-        """True when the client itself failed on an unexpected exception: a bug in it."""
-        return self._client_defect
+    def means_retry(self) -> bool:
+        """True for an answer that means "try again" although its status alone does not say so."""
+        return self._means_retry
 
 
 class WireAuthError(WireError):
@@ -176,9 +225,40 @@ class WireAuthError(WireError):
 
             from deephaven_massive._massive import WireAuthError, WireError
 
-            error = WireAuthError("HTTP 401 from GET /v3/trades/AAPL: unknown API key", status=401)
+            error = WireAuthError(
+                "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 401: "
+                '"Unknown API Key".',
+                status=401,
+            )
             assert isinstance(error, WireError)
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        host: str | None = None,
+        path: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        """Create the error, a refusal by Massive (`WireFailure.REFUSED`).
+
+        Args:
+            message: The complete text a person reads, as for `WireError`.
+            status: The HTTP status of the response, or `None` for a WebSocket reply.
+            host: The host the request went to, or `None`.
+            path: The request's path or S3 object key, without secrets, or `None`.
+            request_id: The `request_id` of Massive's response, or `None`.
+        """
+        super().__init__(
+            message,
+            status=status,
+            host=host,
+            path=path,
+            request_id=request_id,
+            kind=WireFailure.REFUSED,
+        )
 
 
 class WireEntitlementError(WireError):
@@ -193,30 +273,70 @@ class WireEntitlementError(WireError):
             from deephaven_massive._massive import WireEntitlementError
 
             error = WireEntitlementError(
-                "HTTP 403 from GET /v3/quotes/AAPL: not entitled", status=403
+                "Massive answered GET /v3/quotes/AAPL on api.massive.com with HTTP 403: "
+                '"You are not entitled to this data".',
+                status=403,
             )
             assert error.status == 403
     """
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        host: str | None = None,
+        path: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        """Create the error, a refusal by Massive (`WireFailure.REFUSED`).
 
-def is_tls_failure(error: BaseException) -> bool:
+        Args:
+            message: The complete text a person reads, as for `WireError`.
+            status: The HTTP status of the response, or `None` for a WebSocket reply.
+            host: The host the request went to, or `None`.
+            path: The request's path or S3 object key, without secrets, or `None`.
+            request_id: The `request_id` of Massive's response, or `None`.
+        """
+        super().__init__(
+            message,
+            status=status,
+            host=host,
+            path=path,
+            request_id=request_id,
+            kind=WireFailure.REFUSED,
+        )
+
+
+_CERTIFICATE_FAILURES: Final = (ssl.SSLCertVerificationError, CertificateError)
+"""What Python and urllib3 raise for a server certificate that failed verification."""
+
+
+def is_certificate_failure(error: BaseException) -> bool:
     """Return whether `error` is, or wraps, a failed TLS certificate verification.
 
-    HTTP libraries wrap `ssl.SSLCertVerificationError` in their own exceptions, as an argument
-    (urllib3's `SSLError`) or as the cause or context of a later one, so the search follows all
-    three.
+    This is the one test every client (REST, WebSocket, flat files) applies to a failed TLS
+    handshake. A certificate verification failure (a certificate that is untrusted, expired,
+    self-signed, or issued for another name) fails the request at once, as the user's to fix
+    with `SSL_CERT_FILE`: the certificate will not change between attempts. Every other TLS
+    failure is not one, and each client retries it as a request that got no answer, because
+    Python's exceptions cannot tell a settings mismatch from a transient alert by the server.
+
+    Two exceptions mean a certificate failed. When OpenSSL checks the server's name (the REST
+    and WebSocket clients), any failure is an `ssl.SSLCertVerificationError`. botocore turns
+    OpenSSL's name check off, and urllib3 then checks the name itself and raises its own
+    `CertificateError`. The HTTP libraries wrap either one in their own exceptions, as an
+    argument (urllib3's `SSLError`) or as the cause or context of a later one, so the search
+    follows all three.
 
     Args:
         error: The exception a request raised.
 
     Returns:
-        True when an `ssl.SSLCertVerificationError` is found among `error`, its arguments, its
-        `__cause__`, and its `__context__`, recursively.
+        True when an `ssl.SSLCertVerificationError` or urllib3's `CertificateError` is found
+        among `error`, its arguments, its `__cause__`, and its `__context__`, recursively.
     """
-    # The class is looked up, not imported: naming the errors must load no network module, and
-    # no instance of it can exist before `ssl` is loaded (an empty tuple matches nothing).
-    verification = getattr(sys.modules.get("ssl"), "SSLCertVerificationError", ())
-    return any(isinstance(item, verification) for item in linked_errors(error))
+    return any(isinstance(item, _CERTIFICATE_FAILURES) for item in linked_errors(error))
 
 
 _PROXY_AUTH_REFUSED = "Tunnel connection failed: 407 "

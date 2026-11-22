@@ -176,9 +176,7 @@ def _spread_over_types(products: Sequence[Mapping[str, Any]], count: int) -> lis
     return chosen
 
 
-def spread_reads(
-    products: Sequence[Mapping[str, Any]], *, reads: int | None
-) -> tuple[list[SpreadRead], list[str]]:
+def spread_reads(products: Sequence[Mapping[str, Any]]) -> list[SpreadRead]:
     """Choose the reads of combo contracts: one per venue, naming its anchors and combo products.
 
     The futures contracts endpoint filters by product code, not by venue, so each venue's read
@@ -188,22 +186,18 @@ def spread_reads(
 
     Args:
         products: The combo products of every venue (`/futures/v1/products?type=combo`).
-        reads: The most reads, one request each: 4 when Futures is on Basic, which leaves
-            one request of the test's 5 for the products; None for one per venue.
 
     Returns:
-        The reads, the four anchor venues first, then any other venue with the most products
-        first; and the venues left out for `reads`.
+        The reads, one request each: the four anchor venues first, then any other venue with
+        the most products first.
     """
-    venues = _venues(products)
-    kept = venues if reads is None else venues[:reads]
     chosen = []
-    for venue in kept:
+    for venue in _venues(products):
         own = [row for row in products if str(row.get("trading_venue")) == venue]
         anchors = VENUE_ANCHORS.get(venue, ())
         codes = [c for c in _spread_over_types(own, PRODUCTS_PER_READ) if c not in anchors]
         chosen.append(SpreadRead(venue, (*anchors, *codes)))
-    return chosen, venues[len(kept) :]
+    return chosen
 
 
 def _product_lines(products: Sequence[Mapping[str, Any]]) -> list[str]:

@@ -1,4 +1,4 @@
-"""Tests of when a delayed stream must deliver rows (`tests/_live/streams.py`)."""
+"""Tests of when a live stream must deliver rows (`tests/_live/streams.py`)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tests._live import plans, streams
+from tests._live import streams
 from tests._live.calendar import NEW_YORK
 
 _OPEN = datetime(2026, 10, 29, 9, 30, tzinfo=NEW_YORK)
@@ -15,30 +15,6 @@ _OPEN = datetime(2026, 10, 29, 9, 30, tzinfo=NEW_YORK)
 def test_the_index_session_opens_at_half_past_nine_in_new_york() -> None:
     now = datetime(2026, 10, 29, 15, 0, tzinfo=UTC)
     assert streams.index_session_open(now) == _OPEN
-
-
-@pytest.mark.parametrize(
-    ("declared", "name", "after", "due"),
-    [
-        ("indices=starter", "indices", timedelta(minutes=14, seconds=59), False),
-        ("indices=starter", "indices", timedelta(minutes=15), True),
-        ("indices=advanced", "indices", timedelta(0), True),
-        ("futures=starter", "futures", timedelta(minutes=9), False),
-        ("futures=developer", "futures", timedelta(minutes=9, seconds=59), False),
-        ("futures=developer", "futures", timedelta(minutes=10), True),
-        ("futures=advanced", "futures", timedelta(seconds=1), True),
-    ],
-)
-def test_rows_are_due_once_the_feed_delay_has_passed(
-    declared: str, name: str, *, after: timedelta, due: bool
-) -> None:
-    held = plans.declared_plans(declared)
-    assert streams.rows_due(held, name, opened=_OPEN, now=_OPEN + after) is due
-
-
-def test_no_rows_are_due_while_the_market_is_closed() -> None:
-    held = plans.declared_plans("indices=advanced")
-    assert not streams.rows_due(held, "indices", opened=None, now=_OPEN)
 
 
 _DAY = datetime(2026, 10, 29, 12, 0, tzinfo=NEW_YORK)
@@ -72,17 +48,12 @@ _MORNING = datetime(2026, 11, 9, 10, 0, tzinfo=NEW_YORK)
 
 @pytest.mark.parametrize("market", ["stocks", "options", "indices"])
 def test_no_regular_session_rows_are_due_after_the_close_whatever_the_status(market: str) -> None:
-    held = plans.declared_plans(f"{market}=advanced")
-    opened = streams.opened_at(market, "open", family="values", now=_AFTER_CLOSE)
-    assert opened is None
-    assert not streams.rows_due(held, market, opened=opened, now=_AFTER_CLOSE)
+    assert streams.opened_at(market, "open", family="values", now=_AFTER_CLOSE) is None
 
 
 def test_regular_session_rows_are_due_before_the_close() -> None:
-    held = plans.declared_plans("indices=starter")
     opened = streams.opened_at("indices", "open", family="values", now=_MORNING)
     assert opened == datetime(2026, 11, 9, 9, 30, tzinfo=NEW_YORK)
-    assert streams.rows_due(held, "indices", opened=opened, now=_MORNING)
 
 
 def test_stock_trades_stay_due_in_the_evening_extended_hours() -> None:
@@ -116,12 +87,6 @@ def test_a_futures_session_opens_when_its_status_says() -> None:
     assert streams.opened_at("futures", "pause", family="bars", now=_DAY, since=since) is None
 
 
-def test_a_delayed_stock_plan_waits_out_its_delay() -> None:
-    held = plans.declared_plans("stocks=starter")
-    assert not streams.rows_due(held, "stocks", opened=_EARLY, now=_EARLY + timedelta(minutes=14))
-    assert streams.rows_due(held, "stocks", opened=_EARLY, now=_EARLY + timedelta(minutes=15))
-
-
 @pytest.mark.parametrize(
     ("now", "deadline"),
     [
@@ -146,28 +111,134 @@ def _new_york(day: int, hour: int, minute: int) -> datetime:
 @pytest.mark.parametrize(
     ("now", "session"),
     [
-        (_new_york(10, 3, 59), streams.OVERNIGHT),
-        (_new_york(10, 4, 0), streams.PRE_MARKET),
-        (_new_york(10, 9, 29), streams.PRE_MARKET),
-        (_new_york(10, 9, 30), streams.REGULAR),
-        (_new_york(10, 15, 59), streams.REGULAR),
-        (_new_york(10, 16, 0), streams.AFTER_HOURS),
-        (_new_york(10, 19, 59), streams.AFTER_HOURS),
-        (_new_york(10, 20, 0), streams.OVERNIGHT),
-        (_new_york(27, 12, 59), streams.REGULAR),  # the day after Thanksgiving closes at 13:00
-        (_new_york(27, 13, 0), streams.AFTER_HOURS),
-        (_new_york(27, 16, 59), streams.AFTER_HOURS),
-        (_new_york(27, 17, 0), streams.OVERNIGHT),
-        (_new_york(26, 10, 0), streams.OVERNIGHT),  # Thanksgiving
-        (_new_york(14, 10, 0), streams.OVERNIGHT),  # a Saturday
+        (_new_york(10, 3, 59), streams.StockSession.OVERNIGHT),  # Monday night, before Tuesday
+        (_new_york(10, 4, 0), streams.StockSession.PRE_MARKET),
+        (_new_york(10, 9, 29), streams.StockSession.PRE_MARKET),
+        (_new_york(10, 9, 30), streams.StockSession.REGULAR),
+        (_new_york(10, 15, 59), streams.StockSession.REGULAR),
+        (_new_york(10, 16, 0), streams.StockSession.AFTER_HOURS),
+        (_new_york(10, 19, 59), streams.StockSession.AFTER_HOURS),
+        (_new_york(10, 20, 0), streams.StockSession.CLOSED),  # the nightly pause
+        (_new_york(10, 20, 59), streams.StockSession.CLOSED),
+        (_new_york(10, 21, 0), streams.StockSession.OVERNIGHT),
+        (_new_york(13, 21, 0), streams.StockSession.CLOSED),  # Friday night
+        (_new_york(14, 3, 0), streams.StockSession.CLOSED),  # Saturday, early
+        (_new_york(14, 10, 0), streams.StockSession.CLOSED),  # a Saturday
+        (_new_york(15, 20, 59), streams.StockSession.CLOSED),  # Sunday evening
+        (_new_york(15, 21, 0), streams.StockSession.OVERNIGHT),  # Sunday night, before Monday
+        (_new_york(16, 3, 59), streams.StockSession.OVERNIGHT),
+        (_new_york(1, 21, 0), streams.StockSession.OVERNIGHT),  # the day the clocks go back
+        (_new_york(25, 21, 0), streams.StockSession.CLOSED),  # the night before Thanksgiving
+        (_new_york(26, 3, 0), streams.StockSession.CLOSED),
+        (_new_york(26, 10, 0), streams.StockSession.CLOSED),  # Thanksgiving
+        (_new_york(26, 21, 0), streams.StockSession.OVERNIGHT),  # before the half day
+        (_new_york(27, 3, 0), streams.StockSession.OVERNIGHT),
+        (_new_york(27, 12, 59), streams.StockSession.REGULAR),  # the half day closes at 13:00
+        (_new_york(27, 13, 0), streams.StockSession.AFTER_HOURS),
+        (_new_york(27, 16, 59), streams.StockSession.AFTER_HOURS),
+        (_new_york(27, 17, 0), streams.StockSession.CLOSED),
+        (_new_york(27, 21, 0), streams.StockSession.CLOSED),  # the half day is a Friday
     ],
 )
-def test_the_stock_session_follows_the_new_york_clock(now: datetime, session: str) -> None:
-    assert streams.stock_session(now.astimezone(UTC), timedelta(0)) == session
+def test_the_stock_session_follows_the_new_york_clock(
+    now: datetime, session: streams.StockSession
+) -> None:
+    assert streams.stock_session(now.astimezone(UTC)) is session
 
 
-def test_a_delayed_feed_is_in_the_session_of_its_own_time() -> None:
-    delay = timedelta(minutes=15)
-    assert streams.stock_session(_new_york(10, 9, 44), delay) == streams.PRE_MARKET
-    assert streams.stock_session(_new_york(10, 9, 45), delay) == streams.REGULAR
-    assert streams.stock_session(_new_york(10, 20, 14), delay) == streams.AFTER_HOURS
+@pytest.mark.parametrize(
+    ("now", "opened"),
+    [
+        (_new_york(10, 8, 0), _new_york(10, 4, 0)),  # pre-market
+        (_new_york(10, 12, 0), _new_york(10, 4, 0)),  # regular
+        (_new_york(10, 18, 0), _new_york(10, 4, 0)),  # after hours
+        (_new_york(10, 20, 30), _new_york(10, 20, 30)),  # the pause: Massive's word stands
+        (_new_york(10, 22, 0), _new_york(10, 21, 0)),  # overnight, before midnight
+        (_new_york(11, 2, 0), _new_york(10, 21, 0)),  # overnight, after midnight
+        (_new_york(16, 1, 0), _new_york(15, 21, 0)),  # the Sunday night session
+        (_new_york(14, 12, 0), _new_york(14, 12, 0)),  # a Saturday, likewise
+    ],
+)
+@pytest.mark.parametrize("status", ["open", "extended-hours"])
+def test_stock_ticks_are_due_from_the_open_of_the_session_massive_says_trades(
+    now: datetime, opened: datetime | None, status: str
+) -> None:
+    assert streams.opened_at("stocks", status, family="trades", now=now) == opened
+    assert streams.opened_at("stocks", status, family="quotes", now=now) == opened
+
+
+@pytest.mark.parametrize(
+    "now",
+    [
+        _new_york(10, 8, 0),  # pre-market
+        _new_york(10, 12, 0),  # regular
+        _new_york(10, 18, 0),  # after hours
+        _new_york(10, 20, 30),  # the nightly pause
+        _new_york(10, 22, 0),  # overnight
+        _new_york(11, 2, 0),  # overnight, after midnight
+        _new_york(14, 12, 0),  # a Saturday
+    ],
+)
+def test_no_stock_tick_is_due_while_massive_says_the_market_is_closed(now: datetime) -> None:
+    assert streams.opened_at("stocks", "closed", family="trades", now=now) is None
+
+
+@pytest.mark.parametrize("market", ["stocks", "options", "indices", "fx", "crypto"])
+@pytest.mark.parametrize("family", ["trades", "bars", "values"])
+def test_a_status_the_tests_do_not_know_fails_by_name(market: str, family: str) -> None:
+    with pytest.raises(ValueError, match="'overnight_trading' is none the tests know"):
+        streams.opened_at(market, "overnight_trading", family=family, now=_DAY)
+
+
+@pytest.mark.parametrize("state", list(streams.MarketState))
+def test_every_known_status_reads_by_its_name(state: streams.MarketState) -> None:
+    assert streams.market_state(state.value) is state
+
+
+@pytest.mark.parametrize(("market", "family"), [("stocks", "bars"), ("options", "trades")])
+def test_a_regular_session_stream_is_not_due_overnight(market: str, family: str) -> None:
+    now = _new_york(10, 22, 0)
+    assert streams.opened_at(market, "extended-hours", family=family, now=now) is None
+    assert streams.opened_at(market, "open", family=family, now=now) is None
+
+
+_EVENING = datetime(2026, 11, 10, 18, 40, tzinfo=NEW_YORK)
+
+
+@pytest.mark.parametrize(
+    ("market", "family", "now", "quiet"),
+    [
+        ("stocks", "quotes", _EVENING, True),
+        ("stocks", "trades", datetime(2026, 11, 10, 8, 0, tzinfo=NEW_YORK), True),
+        ("stocks", "quotes", _MORNING, False),
+        ("stocks", "trades", datetime(2026, 11, 10, 20, 0, tzinfo=NEW_YORK), False),
+        ("stocks", "trades", datetime(2026, 11, 10, 22, 0, tzinfo=NEW_YORK), True),
+        ("stocks", "quotes", datetime(2026, 11, 11, 3, 0, tzinfo=NEW_YORK), True),
+        ("stocks", "trades", datetime(2026, 11, 14, 12, 0, tzinfo=NEW_YORK), False),
+        ("stocks", "trades", datetime(2026, 11, 10, 15, 59, tzinfo=NEW_YORK), False),
+        ("stocks", "trades", datetime(2026, 11, 10, 16, 0, tzinfo=NEW_YORK), True),
+        ("stocks", "bars", _EVENING, False),
+        ("options", "trades", _EVENING, False),
+    ],
+)
+def test_one_stocks_ticks_may_go_quiet_only_outside_the_regular_session(
+    market: str, family: str, *, now: datetime, quiet: bool
+) -> None:
+    assert streams.may_go_quiet(market, family, now=now) is quiet
+
+
+def test_a_session_no_case_handles_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(streams, "stock_session", lambda _at: "lunch")
+    with pytest.raises(AssertionError):
+        streams.session_open(_DAY)
+    with pytest.raises(AssertionError):
+        streams.may_go_quiet("stocks", "trades", now=_DAY)
+
+
+@pytest.mark.parametrize(("market", "family"), [("stocks", "trades"), ("indices", "values")])
+def test_a_market_state_no_case_handles_is_refused(
+    monkeypatch: pytest.MonkeyPatch, market: str, family: str
+) -> None:
+    monkeypatch.setattr(streams, "market_state", lambda _status: "halted")
+    with pytest.raises(AssertionError):
+        streams.opened_at(market, "open", family=family, now=_DAY)

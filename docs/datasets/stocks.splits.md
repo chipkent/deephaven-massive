@@ -7,7 +7,7 @@ Stock splits, reverse splits, and stock dividends of US-listed stocks.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.stocks.splits(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None)
+m.stocks.splits(symbols=None, *, start=None, end=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -29,6 +29,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"adjustment_type": "reverse_split"}`. Keys: `adjustment_type`, `adjustment_type_any_of`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -47,7 +48,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "Stock symbol for the company that executed the split". |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `AdjustmentType` | String | Classification of the share-change event. Possible values include: forward_split (share count increases), reverse_split (share count decreases), stock_dividend (shares issued as a dividend) |
 | `ExecutionDate` | String | Date when the stock split takes effect. The adjustment is applied overnight. On the prior trading day, the post-market session is the last session that shows pre-split prices. On the execution date, all trading is already adjusted for the split. This includes the pre-market session. |
 | `HistoricalAdjustmentFactor` | double | Cumulative adjustment factor used to offset split effects on historical prices. To adjust a historical price for splits: for a price on date D, find the first split whose `execution_date` is after date D and multiply the unadjusted price by the `historical_adjustment_factor`. |
@@ -58,14 +58,13 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `AdjustmentType` | `adjustment_type` |
 | `ExecutionDate` | `execution_date` |
 | `HistoricalAdjustmentFactor` | `historical_adjustment_factor` |
@@ -82,4 +81,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

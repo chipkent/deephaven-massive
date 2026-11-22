@@ -10,12 +10,14 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   Massive and names the fix for the connection's feed (`_refused`); a connection never moves
   to another host. A fatal failure (a rejected key, a handshake error retrying cannot fix)
   fails every stream on it.
-- **Rows, drift, and its row.** Rows go to the flush thread; drift, and the rows the client
-  dropped because a key could not be read, are recorded on the connection's `SchemaDrift` and
-  handed to the flush thread, which logs them and counts the drops; a dropped row fails no
-  stream. The connection logs one WARNING per outage, and one
-  when it goes silent during its market's trading hours (`NO_FRAMES_WARNING`), each with its
-  recovery at INFO. The connection's `m.connections()` row is rewritten as its state changes, at
+- **Rows, drift, and its row.** Rows go to the flush thread, with the client's marks of the
+  rows it could not read; a field Massive's documentation lacks is handed to it too, and it
+  reports both as the streams' problems; a withheld row fails no stream unless its cause is
+  `RAISE`. Each stream's outage, quiet feed, options-cap deferral, and unacknowledged topics
+  are spans of its problems in `m.problems()` (`_report_spans`). The connection logs one
+  WARNING per outage, and one when it goes silent during its market's trading hours
+  (`ws_silence.SilenceCheck`), each with its recovery at INFO. The connection's `m.connections()`
+  row is rewritten as its state changes, at
   most once a second while messages flow, and its traffic is logged as a summary every
   `SUMMARY_INTERVAL` seconds.
 - **Outages and silence.** A live table never shows stale data as if it were current. While
@@ -30,7 +32,9 @@ subscription protocol), its flush thread (`Flusher`), and the streams it carries
   session remains; otherwise it closes (`_taken`). The setting is no connection setting, so
   sessions that differ only in it still share connections and never take them from each other.
 - **The options cap.** An `/options` connection carries at most `OPTIONS_CAP` explicit topics.
-- **Lifetime.** A connection with no stream attached for `IDLE_GRACE` seconds closes itself.
+- **Lifetime.** A connection opens its socket only once one of its streams wants a topic; until
+  then its row's state is `WAITING`. Once open, it stays open while it has a stream, topics or
+  not, and a connection with no stream attached for `IDLE_GRACE` seconds closes itself.
 
 `ConnectionGroup` is what sessions share: sessions in one process with the same API key and
 equal connection settings (`CONNECTION_SETTINGS`, and the same Deephaven update graph) attach
@@ -57,27 +61,29 @@ import itertools
 import logging
 import threading
 import time
-from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, assert_never
 
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
-from deephaven_massive._datasets.trading_hours import in_trading_hours
-from deephaven_massive._datasets.wire_symbols import canonical_from_wire
+from deephaven_massive._datasets.feeds import FMV_CHANNEL, channel_only_host
 from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
 from deephaven_massive._errors import (
+    NEW_SESSION,
     AuthenticationError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
+    SessionClosedError,
     from_wire,
-    wire_cause,
+    new_live_table,
+    required,
+    required_instance,
+    wire_source,
 )
 from deephaven_massive._ingest.futures_calendar import FuturesCalendar
-from deephaven_massive._ingest.host_decision import refused_snapshot, unlabelled
+from deephaven_massive._ingest.host_decision import pinned, refused_snapshot, unlabelled
 from deephaven_massive._ingest.recency_labels import shows_real_time
 from deephaven_massive._ingest.subscriptions import (
     Sender,
@@ -87,23 +93,26 @@ from deephaven_massive._ingest.subscriptions import (
     stream_topics,
     wildcard,
 )
-from deephaven_massive._log_limits import bounded_list, log_failure
+from deephaven_massive._ingest.ws_silence import SilenceCheck
+from deephaven_massive._log_limits import bounded_list, log_failure, prose_list
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
+    RowFault,
     Transport,
     WireAuthError,
+    WireError,
     WsState,
 )
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
-    DriftRegistry,
-    NotePart,
     StreamUpdate,
     describe_symbols,
     utc_text,
 )
+from deephaven_massive._tables.held_rows import HeldRows
+from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.stream import ChannelPlan, Flusher, StreamSink
 
 if TYPE_CHECKING:
@@ -113,22 +122,24 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
 
     from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._ingest.futures_calendar import RowFetch
     from deephaven_massive._ingest.ws import WsConnections
-    from deephaven_massive._massive import Reject, Source, Status, WireError
+    from deephaven_massive._massive import RowMarks, Source, Status
+    from deephaven_massive._tables.futures_dates import FuturesSessionDates
+    from deephaven_massive._tables.problem_events import Problem
     from deephaven_massive._tables.session_core import SessionCore
-    from deephaven_massive._tables.stream import FuturesSessionDates
     from deephaven_massive._tables.transports import HostDecision
 
 __all__ = [
     "CONNECTION_SETTINGS",
     "IDLE_GRACE",
-    "NO_FRAMES_WARNING",
     "OPTIONS_CAP",
     "SUMMARY_INTERVAL",
     "ClientFactory",
     "Connection",
     "ConnectionGroup",
     "ConnectionStream",
+    "GroupSession",
 ]
 
 logger = logging.getLogger(__name__)
@@ -152,12 +163,6 @@ _MESSAGE_ROW_NS: Final = 1_000_000_000
 SUMMARY_INTERVAL: Final = 60.0
 """Seconds between a connection's DEBUG summaries of its traffic, so a stall shows in the log."""
 
-NO_FRAMES_WARNING: Final = 300.0
-"""Seconds a connection with acknowledged subscriptions may go without a frame during its asset
-class's regular trading hours before it logs a WARNING that its live tables may be stale. Five
-minutes, since a connection carrying only a few quiet symbols can go a minute or two without a
-trade; the check runs with each `SUMMARY_INTERVAL` summary."""
-
 KEEPALIVE_WINDOW: Final = 40.0
 """Seconds a socket that died silently may still look open: the `websockets` keepalive's
 default `ping_interval` (20 s) plus its `ping_timeout` (20 s), which `WsClient` keeps. A
@@ -179,17 +184,37 @@ one value of each, so only sessions whose values are all equal share connections
 (`ConnectionGroup`). `rest_base_url` is one because the group's futures schedule calendar reads
 through any of its sessions' REST clients, which must all read the same API."""
 
-_FMV_CHANNEL: Final = "FMV"
-"""The fair-market-value channel, every class's one channel of the FMV family."""
-
 _group_numbers: Final = itertools.count(1)
 """Numbers the connection groups of the process, for their threads' names."""
 
-_TAKEN_HELP: Final = (
-    "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
-    "#live-table-messages"
-)
-"""The troubleshooting section the error of a taken connection points to."""
+
+def _subscriptions(count: int) -> str:
+    """Return a count of options subscriptions in words, for a message.
+
+    Args:
+        count: How many.
+
+    Returns:
+        `"1 options subscription"` or `"1,200 options subscriptions"`.
+    """
+    noun = "subscription" if count == 1 else "subscriptions"
+    return f"{count:,} options {noun}"
+
+
+def _live_tables(count: int) -> str:
+    """Return a count of live tables in words, for a message.
+
+    Args:
+        count: How many.
+
+    Returns:
+        `"1 live table"` or `"2 live tables"`.
+    """
+    return f"{count} live table" if count == 1 else f"{count} live tables"
+
+
+_Current: TypeAlias = "Mapping[str, tuple[str | None, str | None, str, int]]"
+"""The spans of one cause that hold now for a stream, as `SpanTracker.update` takes them."""
 
 _BACKLOG_ROW_DELAY: Final = 1.0
 """Seconds after a connection's row showed buffered rows that it is written again."""
@@ -215,10 +240,36 @@ class _Client(Sender, Protocol):
         """Wait a bounded time for the client's thread to end."""
         ...
 
+    def connect(self) -> None:
+        """Let the client open its socket, from any thread; later calls do nothing."""
+        ...
+
     def set_required(
         self, channel: str, keys: frozenset[str], *, symbol: str | None = None
     ) -> None:
         """Declare a channel's required key columns and its symbol column."""
+        ...
+
+
+class GroupSession(Protocol):
+    """A session of a connection group, as the group reads through it: a `WsConnections`."""
+
+    @property
+    def closed(self) -> bool:
+        """True once the session's `close` has run."""
+        ...
+
+    def core(self) -> SessionCore | None:
+        """Return the session's core, or None once it has been freed.
+
+        Returns:
+            The core.
+        """
+        ...
+
+    @property
+    def fetch_rows(self) -> RowFetch:
+        """Returns every row of a REST path for a query, through the session's REST transport."""
         ...
 
 
@@ -232,7 +283,7 @@ class ClientFactory(Protocol):
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], RowMarks, DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_deadline: Callable[[], float | None],
     ) -> _Client:
@@ -312,8 +363,8 @@ class ConnectionStream:
         static: True for `dm.ALL` and a symbol list, False for a reactive symbol table, whose
             topics the options cap may defer.
         refusal_note: What the error of a refused subscription adds for this stream: for a
-            real-time-only dataset, where its plans are listed (`host_decision.real_time_note`);
-            `""` for any other.
+            dataset Massive documents on one feed, that feed and its page
+            (`host_decision.refusal_note`); `""` for any other.
     """
 
     stream_id: int
@@ -345,10 +396,11 @@ class _TopicStates:
 
 @dataclass(slots=True)
 class _Episodes:
-    """A connection's two silence episodes, each logged once as a WARNING. Loop-confined.
+    """A connection's outage, logged once as a WARNING. Loop-confined.
 
-    Each also shows in its streams' `Error` while it lasts, and an outage that lasts
-    `MassiveConfig.max_outage` for a stream fails it (`down`).
+    It also shows in its streams' `Error` while it lasts, and an outage that lasts
+    `MassiveConfig.max_outage` for a stream fails it (`down`). The other silence, a connected
+    socket with no frames in trading hours, is the `SilenceCheck`'s.
 
     Attributes:
         slot_warned: Whether the outage has logged its WARNING for waiting on a free
@@ -362,16 +414,15 @@ class _Episodes:
             `max_outage`, by id.
         gap_since: When each down stream's rows may have started to go missing (seconds since
             the epoch): the outage's start, or the stream's open when it opened during the
-            outage. Its recovery records the gap from then to now in its `Gaps`.
+            outage: its `outage` span's start.
         data_since_open: Whether a data frame arrived since the current socket opened.
-        down_note: The `Error` of a down stream during the outage under way, or None.
+        down_note: The detail of a down stream's `outage` span during the outage under way,
+            or None.
         last_frame_at: When the last frame of any kind arrived or the socket opened
             (nanoseconds since the epoch); data has the connection's own `_last_message_at`.
-        quiet_at: When the no-frames WARNING was logged (nanoseconds since the epoch), or
-            None outside that episode.
-        quiet_note: The `Error` of every stream that is not down during that episode, or None.
-        failure: The error the outage fails its streams with, made at its first failure, so
-            the outage logs it once however many streams it fails; None until then.
+        failures: The error the outage fails each dataset's streams with, made at its first
+            failure of the dataset, so the outage logs it once per dataset however many of its
+            streams it fails; each names its dataset's call.
         expired: The streams an outage has failed, which no later outage holds down again.
     """
 
@@ -382,9 +433,7 @@ class _Episodes:
     data_since_open: bool = False
     down_note: str | None = None
     last_frame_at: int = 0
-    quiet_at: int | None = None
-    quiet_note: str | None = None
-    failure: MassiveError | None = None
+    failures: dict[str, MassiveError] = field(default_factory=dict)
     expired: set[int] = field(default_factory=set)
 
 
@@ -436,7 +485,6 @@ class Connection:
         self.asset_class: Final = asset_class
         self.decision: Final = decision
         self.path: Final = f"/{asset_class.value}"
-        self._key: Final = (Transport.WS.value, asset_class.value, family.value)
         self.exec_ctx: Final = exec_ctx
         self._group = group
         self._lock: Final = group.lock
@@ -460,8 +508,10 @@ class Connection:
         self.flusher: Final = Flusher(
             exec_ctx,
             f"{group.label} flush {decision.host}{self.path}",
+            url=url,
             interval=group.flush_interval,
             sessions=sessions,
+            held=None if sessions is None else HeldRows(sessions, max_outage=group.max_outage),
             # Rows of a reconnected socket may recover a stream the outage holds down.
             on_new_generation=lambda: self.post(self._check_recovered),
         )
@@ -472,8 +522,8 @@ class Connection:
             sources=sources,
             on_open=self._on_open,
             on_status=self._on_status,
-            on_data=lambda generation, channel, rows, rejects, drift: self._on_data(
-                channel, rows, generation=generation, rejects=rejects, drift=drift
+            on_data=lambda generation, channel, rows, marks, drift: self._on_data(
+                channel, rows, generation=generation, marks=marks, drift=drift
             ),
             on_state=self._on_state,
             reconnect_deadline=self._reconnect_deadline,
@@ -485,26 +535,29 @@ class Connection:
             cap=OPTIONS_CAP if asset_class is AssetClass.OPTIONS else None,
             on_refused=self._refused,
             on_change=self._changed,
+            url=url,
         )
         # Loop-confined from here on.
         self._streams: dict[int, ConnectionStream] = {}
         self._required: dict[str, frozenset[str]] = {}
         self._idle: Timer | None = None
-        # Each stream's notes as its `Error` shows them: its deferred options topics and its
-        # topics Massive has not acknowledged; a stream with neither has no entry.
+        # Each stream's deferred options topics and topics Massive has not acknowledged, as its
+        # spans last showed them; a stream with neither has no entry.
         self._notes_shown: dict[int, tuple[int, frozenset[str]]] = {}
-        self._state = ConnectionState.CONNECTING
+        self._state = ConnectionState.WAITING  # until a stream wants a topic (`_after_change`)
         self._reconnects = 0
         self._last_message_at: int | None = None
         self._message_row_at = 0
         self._next_reconnect_at: int | None = None
         self._last_error: str | None = None
-        self._drift: str | None = None
         self._summary: Timer | None = None
         self._traffic = _Traffic()
-        self._drift_seen: Final = DriftRegistry()  # the connection's own SchemaDrift text
+        # Each stream's span problems the connection reports (an outage, a quiet feed, the
+        # options cap, unacknowledged topics), by cause; loop-confined.
+        self._spans: dict[int, dict[ProblemCause, SpanTracker]] = {}
         self._ended = False
         self._episodes = _Episodes()
+        self._silence = SilenceCheck(url, asset_class, on_note=self._show_silence_note)
         # When another connection with the key took this one, until the next socket opens.
         self._taken_at: float | None = None
         self._backlog_timer: Timer | None = None
@@ -534,20 +587,14 @@ class Connection:
         self.leases -= 1
         self.users[owner] -= 1
 
-    @property
-    def key(self) -> tuple[str, str, str]:
-        """The connection's owner key in the drift registry: transport, class, and family.
-
-        Fixed when the connection is created, from the family of the stream that created it,
-        so a stream of another family that joins later (an FMV stream on a `business.`
-        connection opened for trades) never moves the connection's drift to a new owner.
-        """
-        return self._key
-
     # --- lifecycle (any thread) ----------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the flush thread and the client. Does nothing once closed or started."""
+        """Start the flush thread and the client. Does nothing once closed or started.
+
+        The client opens its socket once a stream wants a topic (`_after_change`); until then
+        the row shows `WAITING`.
+        """
         with self._start_lock:
             if self._closing or self._started:
                 return
@@ -643,6 +690,32 @@ class Connection:
             return False
         return True
 
+    def post_later(self, delay: float, callback: Callable[..., None], *args: object) -> bool:
+        """Run `callback(*args)` on the loop thread after `delay` seconds. Any thread; never blocks.
+
+        The loop keeps the timer, so it ends with the connection: a callback still waiting then
+        never runs.
+
+        Args:
+            delay: Seconds to wait.
+            callback: A callable that never blocks and makes no Java call.
+            *args: Plain data.
+
+        Returns:
+            False when the loop has closed, so the callback never runs (`post`).
+        """
+        return self.post(self._start_timer, delay, callback, *args)
+
+    def _start_timer(self, delay: float, callback: Callable[..., None], *args: object) -> None:
+        """Start a timer of `post_later`; runs on the loop thread.
+
+        Args:
+            delay: Seconds to wait.
+            callback: What the timer runs.
+            *args: Its arguments.
+        """
+        self._client.loop.call_later(delay, callback, *args)
+
     # --- loop thread: streams ------------------------------------------------------------------
 
     def add_stream(self, stream: ConnectionStream) -> None:
@@ -672,7 +745,7 @@ class Connection:
         self._streams[stream.stream_id] = stream
         if self._episodes.down_since is not None:  # it opens during an outage: held down
             self._hold_down(stream.stream_id, self._group.max_outage, since=time.time())
-        if self._episodes.down_since is not None or self._episodes.quiet_note is not None:
+        if self._episodes.down_since is not None or self._silence.note is not None:
             self._show_outage_notes([stream.stream_id])
         keys = self._required.get(stream.channel, frozenset()) | stream.plan.required
         if self._required.get(stream.channel) != keys:
@@ -695,6 +768,7 @@ class Connection:
             return
         self.flusher.routes.remove(stream_id)
         self._notes_shown.pop(stream_id, None)
+        self._end_spans(stream, self._spans.pop(stream_id, {}))
         self._release_down(stream_id)
         self._episodes.expired.discard(stream_id)
         self.subscriptions.remove(stream.topics, static=stream.static)
@@ -709,7 +783,10 @@ class Connection:
     def change_symbols(
         self, stream_id: int, added: frozenset[str], removed: frozenset[str]
     ) -> None:
-        """Apply a reactive symbol table's change to its stream's topics and its row.
+        """Apply a change of a stream's symbols to its topics and its row.
+
+        A reactive symbol table's changes come here, and so do a crypto stream's pairs once
+        they are split (`WsConnections._change_pairs`).
 
         Args:
             stream_id: The stream.
@@ -720,13 +797,14 @@ class Connection:
         if stream is None:
             self._unknown(stream_id, self.change_symbols, (added, removed))
             return
-        symbols = (cast("frozenset[str]", stream.symbols) | added) - removed
+        symbols = (required(stream.symbols, f"stream {stream_id}'s symbols") | added) - removed
         # The stream's session resolved every added crypto pair before posting the change.
         with self._lock:
             pairs = dict(self._group.pairs)
         topics = stream_topics(self.asset_class, stream.channel, symbols, pairs=pairs)
-        self.subscriptions.add(topics - stream.topics)
-        self.subscriptions.remove(stream.topics - topics)
+        # Counted as the stream's other topics are, so its release removes what was added.
+        self.subscriptions.add(topics - stream.topics, static=stream.static)
+        self.subscriptions.remove(stream.topics - topics, static=stream.static)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "stream %d: its symbol table added %s and removed %s",
@@ -777,6 +855,8 @@ class Connection:
         if self._taken_at is not None and self._settle_taken(None):
             return  # the last stream of a RECONNECT session left during the reconnect wait
         self.subscriptions.reconcile()
+        if self.subscriptions.wanted:  # the first topic opens the socket; later calls do nothing
+            self._client.connect()
         self._show_notes(opened=opened)
         if not self._streams and self._idle is None:
             self._idle = self._client.loop.call_later(IDLE_GRACE, self._idle_close)
@@ -824,7 +904,7 @@ class Connection:
             status: The decoded status.
         """
         self._episodes.last_frame_at = time.time_ns()
-        self._heard()
+        self._silence.heard()
         if generation == self.subscriptions.generation:
             self.subscriptions.status(status)
 
@@ -834,39 +914,37 @@ class Connection:
         rows: list[tuple[object, ...]],
         *,
         generation: int,
-        rejects: list[Reject],
+        marks: RowMarks,
         drift: DriftReport,
     ) -> None:
         """Hand one channel's rows to the flush thread, and record the frame's drift.
 
-        A row the client dropped because a key could not be read (a reject) fails no stream:
-        it is counted in the drift (`DriftReport.dropped_rows`, with the first reject's error
-        as the reason), which the flush thread logs and counts for each dataset.
+        Every row goes to the flush thread with the client's marks, which withholds each row
+        the library cannot read whole (`ChannelPlan.convert`). A row whose key could not be
+        read counts in the window's traffic as dropped, not as data heard.
 
         Args:
             channel: The channel.
-            rows: The decoded rows, each a tuple of the source's fields, without the dropped
-                ones.
+            rows: The decoded rows, each a tuple of the source's fields.
             generation: The generation of the socket the frame arrived on, which the streams
                 its rows reach record, so only rows of a reconnected socket recover a stream
                 (`_recovered`).
-            rejects: The rows the client dropped.
+            marks: The rows the client could not read whole, by index into `rows`.
             drift: The frame's drift for the channel.
         """
         now = time.time_ns()
-        self._heard()
+        self._silence.heard()
         if self._episodes.down_since is not None:  # data flows again: the outage may be over
             self._episodes.data_since_open = True
             self._check_recovered()
-        self._traffic.received(channel, len(rows), len(rejects), now=now)
-        if rejects:
-            lost = DriftReport(dropped_rows=len(rejects), dropped_reason=rejects[0].error.message)
-            drift = drift.merge(lost)
-        if rows:
-            self.flusher.rows(channel, rows, generation=generation)
-            self._arm_backlog_row()  # the row write below may be throttled
-        if drift.fields_drifted or drift.dropped_rows:
-            self._record_drift(channel, drift, dropped=self._dropped_symbols(rejects))
+        unread = marks.get(RowFault.UNREADABLE_KEYS)
+        dropped = 0 if unread is None else len(unread.rows)
+        self._traffic.received(channel, len(rows) - dropped, dropped, now=now)
+        # A channel's data in a frame holds at least one row.
+        self.flusher.rows(channel, rows, marks, generation=generation)
+        self._arm_backlog_row()  # the row write below may be throttled
+        if drift.extra:  # a field Massive's documentation lacks; the rest is the rows' marks
+            self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}")
         self._last_message_at = now
         if now - self._message_row_at >= _MESSAGE_ROW_NS:
             self._write_row()
@@ -926,61 +1004,20 @@ class Connection:
         traffic.next_window()
 
     def _check_frames(self, now: int) -> None:
-        """Warn once per episode when the connection goes silent while its market trades.
-
-        A connection that holds acknowledged subscriptions and has received no frame of any
-        kind for `NO_FRAMES_WARNING` seconds, during its asset class's regular trading hours
-        (`in_trading_hours`), logs one WARNING that its live tables may be stale and shows it
-        in every stream's `Error` (`_set_quiet_note`); the streams keep running, since quiet symbols
-        and market holidays are silent too. The first frame after it clears the note and logs
-        the recovery at INFO (`_heard`). A connection that is not connected is the outage's
-        (`_on_state`), not this one's.
+        """Check for a silent connection (`SilenceCheck.check`) with its state now.
 
         Args:
             now: The current time, in nanoseconds since the epoch.
         """
-        episodes = self._episodes
-        if episodes.quiet_at is not None:
-            return
-        last = max(episodes.last_frame_at, self._last_message_at or 0)
-        silent = (now - last) / 1e9
-        if (
-            self._state is not ConnectionState.CONNECTED
-            or not self.subscriptions.acknowledged
-            or silent < NO_FRAMES_WARNING
-            or not in_trading_hours(self.asset_class, datetime.fromtimestamp(now / 1e9, UTC))
-        ):
-            return
-        episodes.quiet_at = now
-        logger.warning(
-            "%s: no frame for %.0f s during %s trading hours, though %d topics are "
-            "acknowledged, so its live tables may be stale; a market holiday or symbols that "
-            "are not trading explain it, and m.connections() shows the connection's state",
-            self.url,
-            silent,
-            self.asset_class.value,
-            len(self.subscriptions.acknowledged),
-        )
-        self._set_quiet_note(
-            f"no data since {utc_text(last / 1e9)} during {self.asset_class.value} trading "
-            "hours; quiet symbols or a market holiday may explain it"
+        self._silence.check(
+            now,
+            connected=self._state is ConnectionState.CONNECTED,
+            acknowledged=len(self.subscriptions.acknowledged),
+            last_frame=max(self._episodes.last_frame_at, self._last_message_at or 0),
         )
 
-    def _heard(self) -> None:
-        """End a silence episode on a frame's arrival: log the recovery and clear the note."""
-        if self._episodes.quiet_at is None:
-            return
-        self._episodes.quiet_at = None
-        logger.info("%s: frames arrive again", self.url)
-        self._set_quiet_note(None)
-
-    def _set_quiet_note(self, note: str | None) -> None:
-        """Show the silence's note on every stream, or clear it.
-
-        Args:
-            note: The text, or None to clear it.
-        """
-        self._episodes.quiet_note = note
+    def _show_silence_note(self) -> None:
+        """Report the silence as every stream's `quiet_feed` span, or end it (`SilenceCheck`)."""
         self._show_outage_notes(list(self._streams))
 
     def _warn_down(self, *, waiting_slot: bool, at: float) -> None:
@@ -1004,14 +1041,16 @@ class Connection:
         if not warn:
             return
         logger.warning(
-            "%s: the connection is down (%s); its %d live tables get no data until it "
-            "reconnects, next attempt in %.0f s; m.connections() shows its state",
+            "%s: the connection is down, so its %s %s no data until it reconnects. %s",
             self.url,
-            "the account has no free connection, max_connections"
+            _live_tables(len(self._streams)),
+            "gets" if len(self._streams) == 1 else "get",
+            f'Massive answered the login with "max_connections", so another connection with '
+            f"this API key holds its place. The library tries again in "
+            f"{at - time.time():.0f} s. Stop the other program or session that uses the key."
             if waiting_slot
-            else "reconnecting",
-            len(self._streams),
-            at - time.time(),
+            else f"The library tries again in {at - time.time():.0f} s. m.connections() shows "
+            "its state.",
         )
 
     def _on_state(self, state: WsState, detail: float | WireError | None) -> None:
@@ -1030,18 +1069,23 @@ class Connection:
         self._next_reconnect_at = None  # shown only while a reconnect waits for its time
         if state is WsState.TAKEN:
             self.subscriptions.ended()
-            self._taken(cast("float", detail))
+            self._taken(required_instance(detail, float, "a TAKEN state's next attempt"))
             return
-        if state in {WsState.RECONNECTING, WsState.WAITING_SLOT}:
+        if state is WsState.RECONNECTING or state is WsState.WAITING_SLOT:
             self.subscriptions.ended()
-            self._next_reconnect_at = int(cast("float", detail) * 1e9)
-            self._warn_down(waiting_slot=state is WsState.WAITING_SLOT, at=cast("float", detail))
+            at = required_instance(detail, float, f"a {state.value} state's next attempt")
+            self._next_reconnect_at = int(at * 1e9)
+            self._warn_down(waiting_slot=state is WsState.WAITING_SLOT, at=at)
             self._outage(detail=self._slot_text() if state is WsState.WAITING_SLOT else None)
         elif state is WsState.FAILED:
             self.subscriptions.ended()
-            self._failed(cast("WireError", detail))
+            self._failed(required_instance(detail, WireError, "a FAILED state's error"))
         elif state is WsState.CLOSED:
             self.subscriptions.ended()
+        elif state is WsState.CONNECTING:
+            pass  # only the row shows it: the socket is opening
+        else:
+            assert_never(state)  # a new state needs its rule here
         self._state = ConnectionState(state.value)
         self._write_row()
         if state in {WsState.CLOSED, WsState.FAILED}:
@@ -1051,6 +1095,7 @@ class Connection:
             self._cancel_outage_timers()
             self._streams.clear()
             self._notes_shown.clear()
+            self._spans.clear()  # each stream failed or closed, which ends its spans
 
     def _taken(self, next_at: float) -> None:
         """Apply `connection_taken` after another connection with the key took this one.
@@ -1087,15 +1132,15 @@ class Connection:
         Returns:
             True when the connection closed.
         """
-        at = cast("float", self._taken_at)
+        at = required(self._taken_at, "the time the connection was taken")
         group = self._group
         error = MassiveError(
-            f"another connection with this API key took the WebSocket connection to "
-            f"{self.decision.host}{self.path} at {utc_text(at)}, so this table stopped; stop "
-            "the other program or session that uses the key and call the method again, or set "
-            "MassiveConfig(connection_taken=dm.ConnectionTaken.RECONNECT) to take the "
-            f"connection back; see {_TAKEN_HELP}",
-            cause=ErrorCause.EXPECTED,
+            f"Another connection with this API key took the WebSocket connection to "
+            f"{self.decision.host}{self.path} at {utc_text(at)}, so this table stopped. Stop "
+            "the other program or session that uses the key and call the method again, or "
+            "pass connection_taken=dm.ConnectionTaken.RECONNECT to dm.MassiveConfig to take "
+            "the connection back.",
+            source=ErrorSource.MASSIVE,
         )
         with self._lock:
             leased = [sid for sid, connection in group.streams.items() if connection is self]
@@ -1120,12 +1165,12 @@ class Connection:
                 self._ride_taken(at, next_at, keepers=len(keepers), failing=failing, error=error)
             return False
         logger.warning(
-            "%s: another connection with this API key took the connection at %s "
-            "(max_connections); no live table of a session with connection_taken=RECONNECT "
-            "remains, so its %d live tables fail and the connection closes",
+            "%s: another connection with this API key took this one at %s. Massive closed it "
+            "with the reason max_connections. No live table's session set "
+            "connection_taken=RECONNECT, so its %s failed and the connection closed.",
             self.url,
             utc_text(at),
-            len(leased),  # the opening ones too, which fail as they attach
+            _live_tables(len(leased)),  # the opening ones too, which fail as they attach
         )
         self._taken_at = None  # the close is decided: a later change must not decide it again
         self._last_error = str(error)
@@ -1146,26 +1191,31 @@ class Connection:
             error: The error they fail with.
         """
         logger.warning(
-            "%s: another connection with this API key took the connection at %s "
-            "(max_connections); %d live tables of sessions with connection_taken=RECONNECT "
-            "remain, so it reconnects at %s and takes the connection back; %d live tables of "
-            "sessions with connection_taken=FAIL fail",
+            "%s: another connection with this API key took this one at %s. Massive closed it "
+            "with the reason max_connections. The %s whose session set "
+            "connection_taken=RECONNECT %s at %s and %s it back.%s",
             self.url,
             utc_text(at),
-            keepers,
+            _live_tables(keepers),
+            "reconnects" if keepers == 1 else "reconnect",
             utc_text(next_at),
-            len(failing),
+            "takes" if keepers == 1 else "take",
+            ""
+            if not failing
+            else f" The {_live_tables(len(failing))} whose session set connection_taken=FAIL "
+            f"{'has' if len(failing) == 1 else 'have'} failed.",
         )
         self._last_error = (
-            f"another connection with this API key took the connection at {utc_text(at)}"
+            f"Another connection with this API key took this connection at {utc_text(at)}. "
+            f"The library takes it back at {utc_text(next_at)}."
         )
         self._episodes.expired.update(failing)  # no outage holds a failing stream down
         if failing:
             self.flusher.fail(failing, error)
         self._next_reconnect_at = int(next_at * 1e9)
         self._outage(
-            detail=f"another connection with this API key took it at {utc_text(at)}; "
-            f"reconnecting at {utc_text(next_at)} takes it back (connection_taken=RECONNECT)"
+            detail=f"Another connection with this API key took it at {utc_text(at)}, and the "
+            f"library takes it back at {utc_text(next_at)}."
         )
         self._state = ConnectionState.RECONNECTING
         self._write_row()
@@ -1186,18 +1236,18 @@ class Connection:
             # plan has no streams of the class too; its text, which the message keeps, tells.
             wire = from_wire(error)
             public = AuthenticationError(
-                f"{wire}; this can also mean the {subscription_of(self.asset_class)} plan "
-                f"includes no WebSocket streams for {self.asset_class.value}, not only a bad key",
+                f"{str(wire).removesuffix('.')}. Massive gives this answer for a wrong key and "
+                f"for a key with no WebSocket streams of {self.asset_class.value}, and its "
+                "text tells which.",
                 status=wire.status,
                 request_id=wire.request_id,
-                cause=wire.cause,
+                source=wire.source,
             )
         else:
             public = MassiveError(
-                f"the WebSocket connection to {self.decision.host}{self.path} failed: "
-                f"{error.message}",
+                f"{error.message.removesuffix('.')}.",
                 status=error.status,
-                cause=wire_cause(error),  # an internal error of the client is a defect
+                source=wire_source(error),  # an internal error of the client is a defect
             )
         self._last_error = str(public)
         log_failure(logger, public, "%s")
@@ -1213,7 +1263,7 @@ class Connection:
     def _refused(self, topics: tuple[str, ...], message: str) -> None:
         """Fail the streams of refused topics with `EntitlementError`, naming the feed's fix.
 
-        A real-time-only dataset's streams add where its plans are listed
+        The streams of a dataset Massive documents on one feed add that feed and its page
         (`ConnectionStream.refusal_note`), and only theirs.
 
         Args:
@@ -1221,134 +1271,103 @@ class Connection:
             message: The server's message, verbatim.
         """
         refused = set(topics)
-        text = (
-            f"the WebSocket server {self.decision.host}{self.path} refused the subscription to "
-            f"{', '.join(sorted(refused))}; Massive said: {message}; "
-            f"{self._refusal_hint(refused)}"
+        answered = (
+            f"Massive answered the subscription to {prose_list(sorted(refused), 'subscriptions')} "
+            f'on {self.url}: "{message}".'
         )
-        self._last_error = text
+        hint = self._refusal_hint(refused)
+        self._last_error = f"{answered} {hint}"
         # One error per note, so a note reaches only the streams that carry it.
         by_note: dict[str, list[int]] = {}
         for stream in self._streams.values():
             if stream.topics & refused:
                 by_note.setdefault(stream.refusal_note, []).append(stream.stream_id)
         for note, ids in by_note.items():
-            self.flusher.fail(ids, EntitlementError(f"{text}; {note}" if note else text))
+            # The note says where Massive documents the dataset: a why, before the fix.
+            text = f"{answered} {note.removesuffix('.')}. {hint}" if note else self._last_error
+            self.flusher.fail(ids, EntitlementError(text))
 
     def _refusal_hint(self, refused: set[str]) -> str:
-        """Return what a refusal's message says to do, by the connection's feed.
+        """Return what a refusal's message adds after Massive's answer, by the connection's feed.
+
+        Each hint names the setting that changes the outcome, after one sentence of cause
+        where the feed's evidence suggests one; none says what a plan includes, which is
+        Massive's to answer.
 
         Args:
             refused: The refused topics.
 
         Returns:
-            On a pinned host, that `MassiveConfig.websocket_hosts` chooses it; on the delayed
-            feed, that the subscription is listed in `delayed_subscriptions` and that removing it
-            uses the real-time feed; on the real-time feed of a key whose snapshot showed
-            real-time data, that its plan or an add-on may not include the data (such a key has
-            nothing to gain from the delayed feed); on the real-time feed of a key whose snapshot
-            carried no label (a
-            base Business key's), that `websocket_hosts` pins the host the plan serves it on, or
-            the delayed feed if its data is delayed; on the real-time feed of a key whose snapshot
-            Massive refused (a Basic key's), that the plan has no live data on either feed and
-            that REST reads it instead; on the real-time feed otherwise, how to use
-            Massive's delayed feed instead; for fair-market-value topics, that they need a Business
-            plan; on another host, that `websocket_hosts` chooses it; and for index values, that
-            they may need `business.massive.com`.
+            First, for each refused channel whose page documents one host other than this
+            connection's (index values, say), that host. Then: on a host from `websocket_hosts`,
+            that it comes from there, and to remove it or set another; on the delayed feed, that
+            `delayed_subscriptions` lists the subscription, and to remove it for the real-time feed;
+            on the real-time feed of a key whose snapshot Massive labelled real-time, that label, so
+            the delayed feed is no alternative; on the real-time feed of a key whose snapshot
+            carried no label, to pin another host or ask for the delayed feed; on the real-time feed
+            of a key whose snapshot Massive refused, that refusal, and to read the data with REST
+            instead; on the real-time feed otherwise, the usual cause and how to use Massive's
+            delayed feed; for fair-market-value topics, the one host Massive documents for them,
+            which `websocket_hosts` never changes; on another host, how to choose one with
+            `websocket_hosts`.
         """
         subscription = subscription_of(self.asset_class)
-        if self.decision.evidence == "websocket_hosts":
+        evidence = self.decision.evidence
+        pin = f'websocket_hosts={{dm.AssetClass.{self.asset_class.name}: "<host>"}}'
+        delayed = delayed_fix(subscription, purpose=f"To use Massive's delayed {subscription} feed")
+        if pinned(evidence):
             hint = (
-                f"MassiveConfig.websocket_hosts[AssetClass.{self.asset_class.name}] pins this "
-                "host; the plan may not include this data here"
+                "This host comes from websocket_hosts in dm.MassiveConfig. Remove "
+                f"dm.AssetClass.{self.asset_class.name} from websocket_hosts, or set it to a "
+                "host Massive gives you."
             )
         elif self.decision.host.startswith(DELAYED_PREFIX):
             hint = (
-                f"MassiveConfig.delayed_subscriptions lists dm.Subscription.{subscription.name}, "
-                f"so its streams use Massive's delayed feed; whether Massive serves it to "
-                f"every plan is unverified; to use the real-time feed, remove "
-                f"dm.Subscription.{subscription.name} from delayed_subscriptions"
+                f"delayed_subscriptions lists dm.Subscription.{subscription.name}, so this "
+                "table streams from Massive's delayed feed. To stream from the real-time feed, "
+                f"remove dm.Subscription.{subscription.name} from delayed_subscriptions."
             )
-        elif self.decision.host == REALTIME_HOST and shows_real_time(self.decision.evidence):
+        elif self.decision.host == REALTIME_HOST and shows_real_time(evidence):
             hint = (
-                f"the {subscription} subscription's plan is real-time "
-                f"({self.decision.evidence}) but may not include this data; it may need a "
-                "higher plan or an add-on"
+                f"The {subscription} snapshot answered real-time data, {evidence}, so Massive's "
+                "delayed feed is no alternative."
             )
-        elif self.decision.host == REALTIME_HOST and unlabelled(self.decision.evidence):
+        elif self.decision.host == REALTIME_HOST and unlabelled(evidence):
             hint = (
-                f"the {subscription} snapshot carried no recency label, as a Business plan's "
-                "without the trades and quotes expansion does, so the plan may serve this data "
-                "on another host: pin it with MassiveConfig(websocket_hosts="
-                f'{{dm.AssetClass.{self.asset_class.name}: "<host>"}}); '
-                f"if the plan's data is delayed instead, use Massive's delayed {subscription} "
-                f"feed: {delayed_fix(subscription)}"
+                f"Massive's {subscription} snapshot did not say whether this key's data is "
+                "real-time or delayed, so the library chose the real-time host. To stream from "
+                f"another host, pass {pin} to dm.MassiveConfig. {delayed}"
             )
-        elif self.decision.host == REALTIME_HOST and refused_snapshot(self.decision.evidence):
+        elif self.decision.host == REALTIME_HOST and refused_snapshot(evidence):
             hint = (
-                f"Massive also refused the {subscription} snapshot, as it does on the free "
-                f"Basic plan, which includes no live (WebSocket) {subscription} data on either "
-                "feed; read the data with fetch(), poll(), or history() instead"
+                f"Massive also refused the {subscription} snapshot: {evidence}. The usual cause "
+                f"is a key without live {subscription} data. Read it with fetch(), poll(), or "
+                "history() instead."
             )
         elif self.decision.host == REALTIME_HOST:
+            hint = f"The usual cause is a key without real-time {subscription} data. {delayed}"
+        elif any(channel_of(t) == FMV_CHANNEL for t in refused):
             hint = (
-                f"the {subscription} subscription's plan may not include this data in real "
-                f"time; if its data is delayed, use Massive's delayed {subscription} feed: "
-                f"{delayed_fix(subscription)}"
-            )
-        elif any(channel_of(t) == _FMV_CHANNEL for t in refused):
-            hint = (
-                "fair-market-value (FMV) data needs a Business plan of the "
-                f"{subscription} subscription; MassiveConfig.websocket_hosts never applies to it"
+                f"Massive documents one host for FMV data, {self.decision.host}, and "
+                "websocket_hosts does not apply to it."
             )
         else:
-            hint = (
-                f"the {subscription} subscription's plan may not include this data on this "
-                f"host; MassiveConfig.websocket_hosts[AssetClass.{self.asset_class.name}] chooses "
-                "the host"
-            )
-        if self.asset_class is AssetClass.INDICES and any(channel_of(t) == "V" for t in refused):
-            hint += " (index values may need business.massive.com)"
-        return hint
-
-    def _record_drift(
-        self, channel: str, drift: DriftReport, *, dropped: Mapping[str, int]
-    ) -> None:
-        """Add a frame's drift to the connection's row and hand it to the flush thread.
-
-        Args:
-            channel: The channel.
-            drift: Its drift in the frame.
-            dropped: How many of the frame's dropped rows each canonical symbol had.
-        """
-        text = self._drift_seen.record(self.key, channel, drift)
-        if text is not None:
-            self._drift = text
-            self._write_row()
-        self.flusher.drift(channel, drift, where=f"{self.url} channel {channel}", dropped=dropped)
-
-    def _dropped_symbols(self, rejects: list[Reject]) -> dict[str, int]:
-        """Count a frame's dropped rows by canonical symbol, for each symbol's run of drops.
-
-        Args:
-            rejects: The rows the client dropped.
-
-        Returns:
-            Each canonical symbol's count of dropped rows; a row whose raw symbol is missing,
-            not text, or a spelling the library cannot read is left out (the dataset's own run
-            still counts it).
-        """
-        found = (canonical_from_wire(self.asset_class, r.symbol) for r in rejects if r.symbol)
-        return dict(Counter(symbol for symbol in found if symbol is not None))
+            hint = f"To stream from another host, pass {pin} to dm.MassiveConfig."
+        channels = [
+            f"Massive documents the {self.asset_class.value} {channel} channel only on {only}."
+            for channel in sorted({channel_of(t) for t in refused})
+            if (only := channel_only_host(self.asset_class, channel)) is not None
+            and only != self.decision.host
+        ]
+        return " ".join([*channels, hint])
 
     # --- loop thread: outages and notes --------------------------------------------------------
 
     def _slot_text(self) -> str:
-        """Return what a down stream's `Error` adds while the connection waits for a slot."""
+        """Return what a stream's outage `Detail` adds while the connection waits for a slot."""
         return (
-            f"waiting for a WebSocket slot on {self.decision.host}{self.path}: another "
-            "connection with this API key, perhaps from another process, holds it; the "
-            "account allows one connection per asset class"
+            "It waits for a free connection, since Massive answered the login with "
+            '"max_connections", so another connection with this API key holds its place.'
         )
 
     def _outage(self, *, detail: str | None) -> None:
@@ -1376,12 +1395,11 @@ class Connection:
         last = max(episodes.last_frame_at, self._last_message_at or 0) / 1e9
         if episodes.down_since is None:
             episodes.down_since = last or now
-            episodes.quiet_at = None  # the outage's note replaces the silence's
-            episodes.quiet_note = None
+            self._silence.end()  # the outage's note replaces the silence's
         since = utc_text(episodes.down_since)
-        note = f"connection down since {since}; no data"
+        note = f"The connection has been down since {since}, so no data arrives."
         if detail is not None:
-            note += f"; {detail}"
+            note += f" {detail}"
         start = max(last, now - KEEPALIVE_WINDOW) if last else now
         left = max(start + self._group.max_outage - now, 0.0)
         newly = [s for s in self._streams if s not in episodes.down and s not in episodes.expired]
@@ -1462,16 +1480,16 @@ class Connection:
         episodes.gap_since.pop(stream_id, None)
         episodes.expired.add(stream_id)
         logger.debug("%s: stream %d stayed down for max_outage; failing it", self.url, stream_id)
-        if episodes.failure is None:
-            since = utc_text(cast("float", episodes.down_since))
-            episodes.failure = MassiveError(
-                f"the WebSocket connection to {self.decision.host}{self.path} has been down "
-                f"since {since}, longer than MassiveConfig.max_outage "
-                f"({self._group.max_outage:g} s); the rows from {since} on are missing, so this "
-                "table stopped; call the verb again for a new live table",
-                cause=ErrorCause.EXPECTED,
+        dataset = self._streams[stream_id].plan.dataset
+        if dataset not in episodes.failures:
+            since = utc_text(required(episodes.down_since, "the outage's start"))
+            episodes.failures[dataset] = MassiveError(
+                f"The WebSocket connection to {self.decision.host}{self.path} has been down "
+                f"since {since}, longer than max_outage={self._group.max_outage:g} s, so this "
+                f"table stopped and the rows from then on are missing. {new_live_table(dataset)}",
+                source=ErrorSource.NETWORK,
             )
-        self.flusher.fail([stream_id], episodes.failure)
+        self.flusher.fail([stream_id], episodes.failures[dataset])
 
     @staticmethod
     def _recovered(stream: ConnectionStream, topics: _TopicStates) -> bool:
@@ -1521,26 +1539,26 @@ class Connection:
         subscriptions = self.subscriptions
         acknowledged = subscriptions.acknowledged
         topics = _TopicStates(
-            generation=cast("int", subscriptions.generation),  # set while connected
+            generation=required(subscriptions.generation, "a connected socket's generation"),
             acknowledged=acknowledged,
             answered=acknowledged | subscriptions.no_ack,
             deferred=subscriptions.deferred,
         )
         recovered = [s for s in episodes.down if self._recovered(self._streams[s], topics)]
-        now = time.time_ns()
-        gaps = {s: (int(episodes.gap_since[s] * 1e9), now) for s in recovered}
+        starts = {s: episodes.gap_since[s] for s in recovered}
         for stream_id in recovered:
             self._release_down(stream_id)
         if recovered:
             logger.debug(
                 "%s: streams %s recovered: data again, their topics acknowledged, or, for a "
                 "stream that never received a row, each topic acknowledged or in NO_ACK; each "
-                "records the gap since its rows may have gone missing in Gaps: %s",
+                "ends its outage span in m.problems(), which began when its rows may have gone "
+                "missing: %s",
                 self.url,
                 bounded_list(recovered),
-                bounded_list(f"{s} from {utc_text(start / 1e9)}" for s, (start, _) in gaps.items()),
+                bounded_list(f"{s} from {utc_text(start)}" for s, start in starts.items()),
             )
-            self._show_outage_notes(recovered, gaps=gaps)
+            self._show_outage_notes(recovered)
         if episodes.down or not (episodes.data_since_open or self.subscriptions.acknowledged):
             return
         logger.log(
@@ -1556,43 +1574,85 @@ class Connection:
         episodes.down_since = None
         episodes.slot_warned = False
         episodes.down_note = None
-        episodes.failure = None
+        episodes.failures.clear()
 
     def _cancel_outage_timers(self) -> None:
         """Cancel every down stream's timer: the connection has ended or handed its streams on."""
         for stream_id in list(self._episodes.down):
             self._release_down(stream_id)
 
-    def _show_outage_notes(
-        self, stream_ids: Iterable[int], *, gaps: Mapping[int, tuple[int, int]] | None = None
-    ) -> None:
-        """Write each stream's outage and silence parts of its `Error`, or clear them.
+    def _show_outage_notes(self, stream_ids: Iterable[int]) -> None:
+        """Report each stream's outage and quiet-feed spans, or end them.
 
-        Only these two parts change (`NotePart.OUTAGE`, `NotePart.QUIET`): a down stream shows
-        the outage's note, every stream the silence's while it lasts, and the other parts (the
-        options cap, a stale symbol) stay as their sources left them. A recovered stream's
-        outage note goes, and its gap is recorded in its `Gaps` in the same update, so the
-        record of the missing rows outlasts the note.
+        A down stream has an `outage` span from when its rows may have gone missing
+        (`_Episodes.gap_since`) until it recovers; every stream a `quiet_feed` span while the
+        connection hears nothing during trading hours. The other spans (the options cap, a
+        stale symbol) are their sources' own.
 
         Args:
-            stream_ids: The streams whose notes may have changed.
-            gaps: The gap each recovered stream records, `(start, end)` in epoch nanoseconds,
-                by stream id; None for none.
+            stream_ids: The streams whose spans may have changed.
         """
         episodes = self._episodes
-        ended = gaps or {}
-        self._update_streams(
-            {
-                stream_id: StreamUpdate(
-                    notes={
-                        NotePart.OUTAGE: episodes.down_note if stream_id in episodes.down else None,
-                        NotePart.QUIET: episodes.quiet_note,
-                    },
-                    gap=ended.get(stream_id),
-                )
-                for stream_id in stream_ids
+        silence = self._silence
+        quiet = {} if silence.note is None else {"quiet": (None, None, silence.note, 0)}
+        changes: dict[int, dict[ProblemCause, tuple[_Current, int | None]]] = {}
+        for stream_id in stream_ids:
+            note = episodes.down_note if stream_id in episodes.down else None
+            since = episodes.gap_since.get(stream_id)
+            changes[stream_id] = {
+                ProblemCause.OUTAGE: (
+                    {} if note is None else {"outage": (None, None, note, 0)},
+                    None if since is None else int(since * 1e9),
+                ),
+                ProblemCause.QUIET_FEED: (quiet, silence.quiet_at),
             }
-        )
+        self._report_spans(changes)
+
+    def _report_spans(
+        self, changes: Mapping[int, Mapping[ProblemCause, tuple[_Current, int | None]]]
+    ) -> None:
+        """Hand each stream's changed spans to its own session, one call per session.
+
+        Args:
+            changes: Per stream, per cause, the spans that hold now (`SpanTracker.update`) and
+                when a span that holds anew began (None for now).
+        """
+        by_core: dict[SessionCore, list[Problem]] = {}
+        for stream_id, causes in changes.items():
+            # Every caller passes streams the connection holds: a stream held down leaves
+            # `_episodes.down` when it leaves `_streams`.
+            stream = self._streams[stream_id]
+            core = stream.sink.core()
+            if core is None:  # a freed session shows no problem
+                continue
+            trackers = self._spans.setdefault(stream_id, {})
+            for cause, (current, since) in causes.items():
+                tracker = trackers.get(cause)
+                if tracker is None:
+                    if not current:
+                        continue
+                    tracker = trackers[cause] = SpanTracker(
+                        cause, dataset=stream.plan.dataset, stream_id=stream_id, where=self.url
+                    )
+                spans = tracker.update(current, since=since)
+                if spans is not None:
+                    by_core.setdefault(core, []).append(spans)
+        for core, found in by_core.items():
+            core.problems(found)
+
+    def _end_spans(
+        self, stream: ConnectionStream, trackers: Mapping[ProblemCause, SpanTracker]
+    ) -> None:
+        """End the spans of a stream that leaves the connection.
+
+        Args:
+            stream: The stream.
+            trackers: Its spans, by cause.
+        """
+        core = stream.sink.core()
+        ended = [spans for t in trackers.values() if (spans := t.update({})) is not None]
+        if core is not None and ended:
+            core.problems(ended)
 
     @staticmethod
     def _no_ack_text(missing: frozenset[str]) -> str:
@@ -1604,23 +1664,26 @@ class Connection:
         Returns:
             The text, naming the first `_NOTE_TOPICS` of them.
         """
-        shown = sorted(missing)[:_NOTE_TOPICS]
-        more = len(missing) - len(shown)
+        listed = prose_list(sorted(missing), "subscriptions", shown=_NOTE_TOPICS)
+        one = len(missing) == 1
+        if len(missing) <= _NOTE_TOPICS:
+            listed = f"the subscription {listed}" if one else f"the subscriptions {listed}"
         return (
-            f"no acknowledgement from Massive for {', '.join(shown)}"
-            f"{f' and {more} more' if more else ''}; "
-            f"{'its' if len(missing) == 1 else 'their'} rows may be missing; the subscription "
-            "is re-sent until Massive acknowledges it"
+            f"Massive has not confirmed {listed}, so {'its' if one else 'their'} rows may be "
+            f"missing. The library re-sends {'it' if one else 'them'} until Massive confirms."
         )
 
     def _cap_text(self) -> str:
-        """Return the `Error` of an options stream whose contracts the cap defers.
+        """Return the `Detail` of an options stream's `options_cap` span.
 
         Returns:
             The text, with the topics wanted and deferred now.
         """
         deferred = len(self.subscriptions.deferred)
-        return f"over capacity: {self.subscriptions.explicit}/{OPTIONS_CAP}; {deferred} deferred"
+        return (
+            f"The connection wants {_subscriptions(self.subscriptions.explicit)}, over "
+            f"Massive's cap of {OPTIONS_CAP:,}, so {deferred:,} wait."
+        )
 
     # --- loop thread: diagnostics --------------------------------------------------------------
 
@@ -1647,14 +1710,14 @@ class Connection:
         self._write_row()
 
     def _show_notes(self, *, opened: Collection[int] = ()) -> None:
-        """Publish the admitted options topics, and show each stream's notes in its `Error`.
+        """Publish the admitted options topics, and report each stream's cap and no-ack spans.
 
-        A stream's notes are its options topics the cap defers (with `Deferred`, the stream's
+        A stream's spans come from its options topics the cap defers (with `Deferred`, the stream's
         own deferred topics, one per contract since a stream reads one channel) and its topics
         Massive has not acknowledged after a re-send (`NO_ACK`). Neither fails the stream; each
-        is its own part of the `Error` (`NotePart.CAP`, `NotePart.NO_ACK`), shown beside the
-        stream's other warnings and never replacing them. A note is cleared once it no longer
-        holds: room frees, a late acknowledgement arrives, or a new generation starts. On
+        is a span of its problems (`options_cap`, `unacknowledged_topics`), opened and ended
+        alone. A span ends once it no longer holds: room frees, a late acknowledgement arrives,
+        or a new generation starts. On
         `/options`, the admitted set is published, and an opening stream's pending topics
         dropped, in one section of the group's lock, so a verb's cap check never sees the
         stream's topics in neither.
@@ -1673,6 +1736,7 @@ class Connection:
         if not deferred and not no_ack and not self._notes_shown:
             return
         updates: dict[int, StreamUpdate] = {}
+        spans: dict[int, dict[ProblemCause, tuple[_Current, int | None]]] = {}
         for stream in self._streams.values():
             count = len(stream.topics & deferred) if deferred else 0
             missing = stream.topics & no_ack if no_ack else frozenset()
@@ -1686,15 +1750,22 @@ class Connection:
             else:
                 self._notes_shown[stream.stream_id] = note
             self._log_note(stream, count=count, old_count=old_count, missing=missing)
-            # Two parts of the stream's `Error`, each set or cleared alone, beside its others.
-            notes = {
-                NotePart.CAP: self._cap_text() if count else None,
-                NotePart.NO_ACK: self._no_ack_text(missing) if missing else None,
+            # Two spans of the stream's problems, each opened or ended alone.
+            spans[stream.stream_id] = {
+                ProblemCause.OPTIONS_CAP: (
+                    {"cap": (None, None, self._cap_text(), count)} if count else {},
+                    None,
+                ),
+                ProblemCause.UNACKNOWLEDGED_TOPICS: (
+                    {"no_ack": (None, None, self._no_ack_text(missing), len(missing))}
+                    if missing
+                    else {},
+                    None,
+                ),
             }
-            update = StreamUpdate(notes=notes)
             if options:
-                update = replace(update, deferred=count)
-            updates[stream.stream_id] = update
+                updates[stream.stream_id] = StreamUpdate(deferred=count)
+        self._report_spans(spans)
         if updates:
             self._update_streams(updates)
 
@@ -1716,7 +1787,11 @@ class Connection:
         """
         if count and not old_count:
             logger.warning(
-                "%s stream %d: %s", stream.plan.dataset, stream.stream_id, self._cap_text()
+                "%s stream %d: %s They subscribe as others leave. To stream them all, pass "
+                "fewer contracts.",
+                stream.plan.dataset,
+                stream.stream_id,
+                self._cap_text(),
             )
         elif count != old_count and count:
             logger.debug(
@@ -1810,7 +1885,6 @@ class Connection:
                     next_reconnect_at=self._next_reconnect_at,
                     updated_at=now,
                     last_error=self._last_error,
-                    schema_drift=self._drift,
                 )
                 self._rows[family] = row
                 for owner, core in users:
@@ -1851,7 +1925,7 @@ class _WsClientFactory:
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], RowMarks, DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_deadline: Callable[[], float | None],
     ) -> _Client:
@@ -1904,7 +1978,9 @@ def _sharing_value(name: str, value: object) -> Hashable:
         A hashable value, equal for equal settings.
     """
     if name == "api_key":
-        return hashlib.sha256(cast("str", value).encode()).digest()
+        return hashlib.sha256(
+            required_instance(value, str, "the api_key setting").encode()
+        ).digest()
     if isinstance(value, Mapping):
         return frozenset(value.items())
     return value
@@ -1975,7 +2051,7 @@ class ConnectionGroup:
         self.connections: dict[str, Connection] = {}
         self.streams: dict[int, Connection] = {}
         self.owners: dict[int, WsConnections] = {}
-        self.sessions: set[WsConnections] = set()
+        self.sessions: set[GroupSession] = set()
         self._calendar: FuturesCalendar | None = None
         # The base and quote of each crypto symbol a session looked up: vendor facts, the same
         # for every session of the key, which the connections' topics are built from.
@@ -2048,19 +2124,9 @@ class ConnectionGroup:
         if calendar is not None:
             calendar.close(wait=wait)
 
-    def wake_schedule_waiters(self) -> None:
-        """Wake every thread waiting for futures schedules, so each checks its stop event.
-
-        A session's close calls it after it set its stop event (`FuturesCalendar.wake`). The
-        calendar is read under the lock and woken outside it; a group without a calendar has
-        no waiter. Never blocks.
-        """
-        with self.lock:
-            calendar = self._calendar
-        if calendar is not None:
-            calendar.wake()
-
-    def futures_calendar(self, *, contracts_path: str, schedules_path: str) -> FuturesCalendar:
+    def futures_calendar(
+        self, *, snapshot_path: str, contracts_path: str, schedules_path: str
+    ) -> FuturesCalendar:
         """Return the group's futures schedule calendar, creating it on first use.
 
         The calendar dates the streamed futures rows of every session on the group's futures
@@ -2072,6 +2138,7 @@ class ConnectionGroup:
         first wins, and the other is closed at once. Never waits on the network.
 
         Args:
+            snapshot_path: The `futures.snapshots` dataset's REST path.
             contracts_path: The `futures.contracts` dataset's REST path.
             schedules_path: The `futures.schedules` dataset's REST path.
 
@@ -2079,7 +2146,7 @@ class ConnectionGroup:
             The calendar.
 
         Raises:
-            MassiveError: If every session has left the group meanwhile.
+            SessionClosedError: If every session has left the group meanwhile.
         """
         with self.lock:
             found = self._calendar
@@ -2087,6 +2154,7 @@ class ConnectionGroup:
             return found
         candidate = FuturesCalendar(
             self._fetch_rows,
+            snapshot_path=snapshot_path,
             contracts_path=contracts_path,
             schedules_path=schedules_path,
             label=self.label,
@@ -2098,7 +2166,9 @@ class ConnectionGroup:
         if found is not candidate:
             candidate.close()
         if found is None:
-            raise MassiveError("every session of the WebSocket connection group has closed")
+            raise SessionClosedError(
+                f"Every session that shares these WebSocket connections has closed. {NEW_SESSION}"
+            )
         return found
 
     def _fetch_rows(
@@ -2120,12 +2190,15 @@ class ConnectionGroup:
             The rows.
 
         Raises:
-            MassiveError: If no session of the group is open, or the read fails.
+            SessionClosedError: If no session of the group is open.
+            MassiveError: If the read fails.
         """
         with self.lock:
             open_ = [o for o in self.sessions if not o.closed and o.core() is not None]
         if not open_:
-            raise MassiveError("every session of the WebSocket connection group has closed")
+            raise SessionClosedError(
+                f"Every session that shares these WebSocket connections has closed. {NEW_SESSION}"
+            )
         return open_[0].fetch_rows(template, query, bucket=bucket, cancel=cancel)
 
     def retire(self, connection: Connection, *, idle: bool) -> bool:

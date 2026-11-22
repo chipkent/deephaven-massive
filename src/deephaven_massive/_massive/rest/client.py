@@ -5,9 +5,9 @@ transport (urllib3, with TLS and proxy settings from `net.http`, and a cap on th
 size of a response body), bearer authentication, the retry schedule of `net.retry` for
 transient failures, and `next_url` paging. When each attempt may start is the
 `RequestGovernor`'s decision (`rest.governor`): the client takes a permit of the request's
-bucket (its Massive subscription) before every attempt and reports how it ended, so
-a Basic subscription is paced and a refused one pauses, together with every other client that
-shares the governor. Encoding lives in `rest.query`, decoding and error mapping in
+bucket (its Massive subscription) before every attempt and reports how it ended, so a
+subscription with a known limit is paced and a refused one pauses, together with every other
+client that shares the governor. Encoding lives in `rest.query`, decoding and error mapping in
 `rest.response`, and conversion to Arrow in `rest.batch`.
 
 **Thread-safety.** One client serves a whole session: the caller thread, every poller, and
@@ -34,7 +34,7 @@ pool of a `max_concurrency` of 64 up front would cost about a second and 48 MB.
 the `request_id`, and the time it took, with the row count for a 200 and, for any other status,
 the body (up to 2,000 characters, the key replaced by `***`). A retry logs at INFO, and giving
 up at DEBUG: the call that fails raises the error, which the library logs at the level its
-cause gives, so a failure shows once in the console. Nothing logs a header.
+`is_bug` gives, so a failure shows once in the console. Nothing logs a header.
 
 This module imports only the standard library, `urllib3`, `net`, and `spec`.
 """
@@ -46,7 +46,7 @@ import random
 import threading
 from dataclasses import dataclass, replace
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol
 from urllib.parse import urlsplit
 
 import urllib3
@@ -58,8 +58,9 @@ from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.capture import capture_response
 from deephaven_massive._massive.net.errors import (
     WireError,
+    WireFailure,
+    is_certificate_failure,
     is_proxy_auth_failure,
-    is_tls_failure,
     linked_errors,
 )
 from deephaven_massive._massive.net.http import (
@@ -78,7 +79,7 @@ from deephaven_massive._massive.net.retry import (
     transient_wait,
 )
 from deephaven_massive._massive.net.slots import ConnectionSlots
-from deephaven_massive._massive.rest.governor import UNLIMITED, is_basic_refusal
+from deephaven_massive._massive.rest.governor import UNLIMITED, is_rate_limit_refusal
 from deephaven_massive._massive.rest.query import next_target, request_target
 from deephaven_massive._massive.rest.response import (
     RequestTarget,
@@ -180,14 +181,14 @@ def _new_pool(proxy: str | None) -> urllib3.PoolManager:
 class RefusalHook(Protocol):
     """What a `RestClient` calls for every HTTP 429, before its governor pauses the bucket."""
 
-    def __call__(self, bucket: str, error: WireError, *, basic: bool) -> None:
+    def __call__(self, bucket: str, error: WireError, *, per_minute: bool) -> None:
         """Note a refusal; called on the requesting thread, it must not block or raise.
 
         Args:
             bucket: The refused request's bucket.
             error: The refusal: status 429, the path, the request id, and Massive's message.
-            basic: Whether the message named the per-minute maximum, the mark of a Basic
-                subscription (`rest.governor.is_basic_refusal`).
+            per_minute: Whether the message named the per-minute maximum, which says the
+                subscription has a limit per minute (`rest.governor.is_rate_limit_refusal`).
         """
 
 
@@ -196,10 +197,33 @@ class _Retryable:
     """An attempt that failed in a way a retry may fix: a transient status or connection failure.
 
     Attributes:
-        error: The error to raise if no retry is left.
+        error: The attempt's error, which `final` raises when no retry is left.
+        no_answer: What the HTTP library said of an attempt that got no answer, or None for
+            a transient status Massive answered with.
     """
 
     error: WireError
+    no_answer: str | None = None
+
+    def final(self, tries: int) -> WireError:
+        """Return the error to raise once the retries are spent.
+
+        Args:
+            tries: How many attempts the request made.
+
+        Returns:
+            The attempt's error for a status Massive answered with; for an attempt that got no
+            answer, a `NO_ANSWER` error that says how many attempts went unanswered.
+        """
+        if self.no_answer is None:
+            return self.error
+        return WireError(
+            f"No answer from {self.error.host} to GET {self.error.path} after {tries} tries: "
+            f"{self.no_answer}.",
+            host=self.error.host,
+            path=self.error.path,
+            kind=WireFailure.NO_ANSWER,
+        )
 
 
 @dataclass(frozen=True, eq=False)
@@ -221,9 +245,17 @@ class _Job:
     patience: Patience
 
 
-_REFUSED: Final = object()
-"""The outcome of an attempt Massive refused with HTTP 429: try again, once the governor lets
-the request start, without counting a retry."""
+class _Refused:
+    """An attempt Massive refused with HTTP 429.
+
+    Try again, once the governor lets the request start, without counting a retry.
+    """
+
+    __slots__ = ()
+
+
+_REFUSED: Final = _Refused()
+"""The outcome of every refused attempt."""
 
 
 class RestClient:
@@ -235,10 +267,10 @@ class RestClient:
     that echoes it has it replaced with `***` before it is decoded (`net.redaction`), so no row,
     error, or log line can quote it. Requests go to the base URL's host only: a `next_url` that
     points elsewhere is refused. Every attempt first takes a permit of its subscription's bucket
-    from the `RequestGovernor` (which paces a Basic subscription and pauses one Massive
-    refused); transient failures are retried per `net.retry`, and failures are raised as
-    `WireError`, `WireAuthError`, or `WireEntitlementError`; no urllib3 or JSON exception
-    escapes.
+    from the `RequestGovernor` (which paces a subscription at its declared or learned limit
+    and pauses one Massive refused); transient failures are retried per `net.retry`, and
+    failures are raised as `WireError`, `WireAuthError`, or `WireEntitlementError`; no urllib3
+    or JSON exception escapes.
 
     Example:
         ::
@@ -311,7 +343,7 @@ class RestClient:
         check_api_key(api_key, setting="api_key")
         origin = check_rest_base_url(base_url, setting="base_url")
         if max_concurrency < 1:
-            raise ValueError(f"max_concurrency must be at least 1, not {max_concurrency}")
+            raise ValueError(f"max_concurrency={max_concurrency!r} is not at least 1.")
         self._origin = origin
         self._base = f"{origin[0]}://{urlsplit(base_url).netloc}"
         self._host = origin[1]
@@ -442,7 +474,7 @@ class RestClient:
                 (a parameter value of a type its kind does not accept raises `TypeError`).
         """
         if limit is not None and limit < 1:
-            raise ValueError(f"limit must be at least 1, not {limit}")
+            raise ValueError(f"limit={limit!r} is not at least 1.")
         target = request_target(rest_path, path_params, query_params)
         return self._pages(_Job(rest_path, bucket, cancel, patience), target, limit)
 
@@ -498,14 +530,20 @@ class RestClient:
                 following = next_target(next_url, self._origin)
             except ValueError as error:
                 raise WireError(
-                    f"{job.rest_path.template}: refusing to follow {error}", host=self._host
+                    f"Massive answered GET {target} on {self._host} with a next_url the library "
+                    f"does not follow. {error}",
+                    host=self._host,
+                    path=target,
+                    kind=WireFailure.REFUSED,
                 ) from error
             if following in fetched:
                 raise WireError(
-                    f"{job.rest_path.template}: next_url {following} repeats a page this "
-                    "pagination already fetched; refusing to loop",
+                    f"Massive answered GET {target} on {self._host} with a next_url, {following}, "
+                    "that leads back to a page this read already fetched, so the library stopped "
+                    "paging instead of looping forever.",
                     host=self._host,
                     path=following,
+                    kind=WireFailure.REFUSED,
                 )
             fetched.add(following)
             target = following
@@ -530,23 +568,23 @@ class RestClient:
             retry = 0
             while True:
                 outcome = self._attempt(job, request, stop)
-                if outcome is _REFUSED:
+                if isinstance(outcome, _Refused):
                     continue
                 if not isinstance(outcome, _Retryable):
-                    return cast("Page", outcome)
+                    return outcome
                 if retry == MAX_RETRIES:
-                    _log.debug("%s; giving up after %d attempts", outcome.error, retry + 1)
-                    raise outcome.error
+                    _log.debug("%s Giving up after %d attempts.", outcome.error, retry + 1)
+                    raise outcome.final(retry + 1)
                 wait = transient_wait(retry, _JITTER.random())
                 _log.info(
-                    "%s; retry %d of %d in %.2f s", outcome.error, retry + 1, MAX_RETRIES, wait
+                    "%s Retry %d of %d in %.2f s.", outcome.error, retry + 1, MAX_RETRIES, wait
                 )
                 self._clock.wait(stop, wait)
                 retry += 1
 
     def _attempt(
         self, job: _Job, request: RequestTarget, stop: Cancel
-    ) -> Page | _Retryable | object:
+    ) -> Page | _Retryable | _Refused:
         """Send one attempt of a request, once the governor admits it.
 
         Args:
@@ -584,6 +622,8 @@ class RestClient:
                 self._governor.release(permit)
                 raise
             try:
+                # Sent from now: the minute Massive counts it in, after the wait for a slot.
+                self._governor.sending(permit)
                 return self._send(
                     job, request, permit, pool=pool, waited=self._clock.monotonic() - queued
                 )
@@ -619,7 +659,7 @@ class RestClient:
         *,
         pool: urllib3.PoolManager,
         waited: float,
-    ) -> Page | _Retryable | object:
+    ) -> Page | _Retryable | _Refused:
         """Send an admitted attempt and report its end to the governor.
 
         Args:
@@ -654,7 +694,9 @@ class RestClient:
         try:
             body = self._body(response)
         except urllib3.exceptions.DecodeError as error:  # a subclass of HTTPError: first
-            unreadable = self._unreadable(request, response, f"does not decompress ({error})")
+            unreadable = self._unreadable(
+                request, response, f"the body does not decompress: {error}"
+            )
         except urllib3.exceptions.HTTPError as error:  # the body broke off or timed out
             if response.status == HTTPStatus.TOO_MANY_REQUESTS:
                 # Massive refused before the body broke off: the refusal stands.
@@ -666,11 +708,12 @@ class RestClient:
                 unreadable = self._unreadable(
                     request,
                     response,
-                    f"decompresses to more than {MAX_BODY_BYTES} bytes, the most the client reads",
+                    f"the body decompresses to more than {MAX_BODY_BYTES} bytes, the most the "
+                    "library reads",
                 )
             # The call that fails logs the one error; this records which reply it was. Never the
             # body: it was not read, or not in full.
-            _log.debug("%s (HTTP %d); not retried", unreadable, response.status)
+            _log.debug("%s Not retried.", unreadable)
             # The status arrived whole, so the governor hears of it: a refusal pauses the bucket,
             # and any other status is an answer.
             if response.status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -699,7 +742,7 @@ class RestClient:
         body: bytearray,
         elapsed: float,
         waited: float,
-    ) -> Page | _Retryable | object:
+    ) -> Page | _Retryable | _Refused:
         """Clean a body read in full, log the attempt, and turn it into what `_attempt` returns.
 
         The body is cleaned of the key once, here, before anything reads it, so no row, error,
@@ -738,7 +781,7 @@ class RestClient:
                 if _log.isEnabledFor(logging.DEBUG):
                     _log.debug(
                         "GET %s -> 200 in %.3f s, waited %.1f s for a permit, but the page "
-                        "cannot be read (%s); body: %s",
+                        "cannot be read. %s Body: %s",
                         self._base + request.target,
                         elapsed,
                         waited,
@@ -838,19 +881,14 @@ class RestClient:
         Args:
             request: The request.
             response: The response, for its status.
-            reason: What is wrong with the body, completing "the response from <host> ...".
+            reason: What is wrong with the body, as a clause with no final period, such as
+                `"the body does not decompress: <error>"`.
 
         Returns:
             A `WireError` with the response's status that names the request and the reason,
             never the body, marked `unreadable`: the body arrived whole.
         """
-        return WireError(
-            f"GET {request.target}: the response from {self._host} {reason}",
-            status=response.status,
-            host=self._host,
-            path=request.target,
-            unreadable=True,
-        )
+        return WireError(**request.unreadable(response.status, reason), kind=WireFailure.UNREADABLE)
 
     def _permit(self, request: RequestTarget, admission: Admission, stop: Cancel) -> Permit:
         """Wait for the governor to admit an attempt, in the call's lane.
@@ -867,9 +905,9 @@ class RestClient:
             The attempt's permit.
 
         Raises:
-            WireError: If `stop` is set before or during the wait: "the REST client is
-                closed" when the client closed, "cancelled" otherwise (`_attempt` releases a
-                permit granted just as `stop` was set). With status 429 when the bucket is
+            WireError: If `stop` is set before or during the wait, saying whether the client
+                closed or the read was cancelled (`_attempt` releases a permit granted just as
+                `stop` was set). With status 429 when the bucket is
                 paused for longer than the call's patience still covers, quoting the latest
                 refusal.
         """
@@ -878,7 +916,7 @@ class RestClient:
         try:
             return admission.acquire(stop)
         except WireError as error:
-            if error.status is None:  # the wait was cancelled
+            if error.kind is WireFailure.STOPPED:  # the wait was cancelled
                 raise self._stopped(request) from None
             raise WireError(
                 error.message,
@@ -886,6 +924,7 @@ class RestClient:
                 host=self._host,
                 path=request.target,
                 request_id=error.request_id,
+                kind=error.kind,
             ) from None
 
     def _stopped(self, request: RequestTarget) -> WireError:
@@ -895,10 +934,19 @@ class RestClient:
             request: The request.
 
         Returns:
-            A `WireError` without a status.
+            A `WireError` without a status, `WireFailure.STOPPED`.
         """
-        reason = "the REST client is closed" if self._closed.is_set() else "cancelled"
-        return WireError(f"GET {request.target}: {reason}", host=self._host, path=request.target)
+        reason = (
+            "the library closed its connections to Massive"
+            if self._closed.is_set()
+            else "its read was cancelled"
+        )
+        return WireError(
+            f"GET {request.target} on {self._host} stopped because {reason}.",
+            host=self._host,
+            path=request.target,
+            kind=WireFailure.STOPPED,
+        )
 
     def _unanswered(
         self, request: RequestTarget, error: urllib3.exceptions.HTTPError
@@ -917,28 +965,32 @@ class RestClient:
                 refusal of its credentials (HTTP 407 to the tunnel request): neither changes
                 on a retry, and repeating refused credentials can lock a corporate account.
         """
-        if is_tls_failure(error):
+        if is_certificate_failure(error):
             raise WireError(
-                f"GET {request.target}: TLS certificate verification failed for "
-                f"{self._host} ({error}); if a proxy or private CA signs it, set "
-                "SSL_CERT_FILE to a bundle that trusts it",
+                f"The TLS certificate of {self._host} did not verify for GET {request.target}: "
+                f"{error}. If a proxy or a private certificate authority signs it, set "
+                "SSL_CERT_FILE to a bundle that trusts it.",
                 host=self._host,
                 path=request.target,
+                kind=WireFailure.LOCAL,
             ) from error
         if is_proxy_auth_failure(error):
             raise WireError(
-                f"GET {request.target}: the proxy refused its credentials (HTTP 407 for a "
-                f"tunnel to {self._host}); check the user and password in HTTPS_PROXY",
+                f"The proxy refused its credentials with HTTP 407 for GET {request.target} on "
+                f"{self._host}. Correct the user and password in HTTPS_PROXY.",
                 status=HTTPStatus.PROXY_AUTHENTICATION_REQUIRED,
                 host=self._host,
                 path=request.target,
+                kind=WireFailure.LOCAL,
             ) from error
         return _Retryable(
             WireError(
-                f"GET {request.target} on {self._host} failed: {error}",
+                f"No answer from {self._host} to GET {request.target}: {error}.",
                 host=self._host,
                 path=request.target,
-            )
+                kind=WireFailure.NO_ANSWER,
+            ),
+            no_answer=str(error),
         )
 
     def _refused(self, permit: Permit, failure: WireError, response: BaseHTTPResponse) -> None:
@@ -958,10 +1010,10 @@ class RestClient:
         attempt is then made again once the governor allows; the next permit fails instead,
         with status 429, if the call's patience cannot cover the pause.
         """
-        basic = is_basic_refusal(failure.message)
+        per_minute = is_rate_limit_refusal(failure.message)
         try:
             if self._on_refused is not None:
-                self._on_refused(permit.bucket, failure, basic=basic)
+                self._on_refused(permit.bucket, failure, per_minute=per_minute)
         finally:
             self._pause(permit, failure, response)
 

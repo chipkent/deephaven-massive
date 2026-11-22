@@ -19,32 +19,42 @@ arguments (`Request`), and the generated REST paths into `Call`s, one per reques
 Everything here is pure: it reads the catalog's generated paths and the call's arguments, makes
 no request, starts no thread, and keeps no state, so it is tested without a fake server. A
 crypto pair is split by the caller's `CryptoSplit` (the REST transport reads Massive's crypto
-ticker list), never by a guess. The REST transport (`rest.py`) runs the calls this module plans.
+ticker list), never by a guess; a pair it gives no split for is planned as a call that is
+never sent (`Call.unsplit`). The REST transport (`rest.py`) runs the calls this module
+plans.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Final, TypeAlias, cast
+from enum import Enum, auto
+from typing import TYPE_CHECKING, Final, TypeAlias, assert_never
 
 from deephaven_massive._datasets.dates import day_class, instant_bound, is_trading_day
 from deephaven_massive._datasets.filters import filter_key, param_base, takes_instants
 from deephaven_massive._datasets.history_source import session_date_param
-from deephaven_massive._datasets.symbols import forex_codes, symbol_class
+from deephaven_massive._datasets.symbols import AllSymbols, forex_codes, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Timespan
+from deephaven_massive._errors import (
+    BrokenGuaranteeError,
+    library_bug,
+    required,
+    required_instance,
+    unmatched_form,
+)
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import ParamKind, Transport
-from deephaven_massive._types import _All
+from deephaven_massive._tables.transports import Unsplit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from deephaven_massive._datasets.catalog import DatasetSpec
-    from deephaven_massive._datasets.dates import DaySpan, TimeRange
+    from deephaven_massive._datasets.dates import TimeRange
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._massive import RestPath
 
 __all__ = [
@@ -52,6 +62,7 @@ __all__ = [
     "Call",
     "CryptoSplit",
     "axis_query",
+    "capped_call",
     "fetch_paths",
     "history_calls",
     "largest_page",
@@ -66,14 +77,16 @@ _FUTURES_UNITS: Final[Mapping[Timespan, str]] = {
     Timespan.SECOND: "sec",
     Timespan.MINUTE: "min",
     Timespan.HOUR: "hour",
+    Timespan.DAY: "day",
     Timespan.SESSION: "session",
     Timespan.WEEK: "week",
     Timespan.MONTH: "month",
     Timespan.QUARTER: "quarter",
     Timespan.YEAR: "year",
 }
-"""The unit of the futures aggregates' `resolution` parameter (`"5min"`) for each timespan; the
-endpoint has no day unit, so `Timespan.DAY` is rejected when the query is built."""
+"""The unit of the futures aggregates' `resolution` parameter (`"5min"`) for each timespan.
+Massive's documentation lists no `day` unit, but it serves `1day` bars in the shape of
+`1session` bars."""
 
 _ONE_DAY: Final = timedelta(days=1)
 
@@ -84,8 +97,13 @@ BARE_INDEX_PARAM: Final = "underlying_ticker"
 `underlying_ticker` finds no contract for `I:SPX` and every one of `SPX`, so the request keeps
 the canonical ticker and only the wire gets the bare one (`wire_symbols.contracts_underlying`)."""
 
-CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str]]"
-"""Splits a crypto ticker into its base and quote currencies (`RestReader.crypto_pair`)."""
+_CRYPTO_PAIR_PLACEHOLDER: Final = "cryptoTicker"
+"""The path placeholder Massive names for one crypto pair, as in
+`/v1/indicators/sma/{cryptoTicker}`."""
+
+CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str] | Unsplit]"
+"""Splits a crypto ticker into its base and quote currencies, or says why Massive has no data for
+it (`RestReader.crypto_pair`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,11 +116,16 @@ class Call:
         symbol: The one symbol of a per-symbol request: it fills the keys the dataset takes
             from the request (`KeySpec.from_request`), and HTTP 404 for it drops the symbol.
             None for a request that is not per symbol.
+        unsplit: Why the call's crypto pair has no split, known before any request; the call
+            is then never sent. A pair Massive has no data for is reported as Massive's HTTP
+            404 would be; one whose currencies cannot be read is only left out, as the lookup
+            reported it. None for a call to send.
     """
 
     path_params: Mapping[str, object]
     query: Mapping[str, object]
     symbol: str | None = None
+    unsplit: Unsplit | None = None
 
 
 def _date_bound(name: str, value: date, *, upper: bool) -> date:
@@ -225,7 +248,7 @@ def _filter_days(
     return sent
 
 
-def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]:
+def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str] | Unsplit:
     """Split a forex or crypto symbol into the two currencies a `{from}/{to}` path takes.
 
     Args:
@@ -236,16 +259,19 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]
             three letters each.
 
     Returns:
-        The base and quote currencies, such as `("EUR", "USD")`.
+        The base and quote currencies, such as `("EUR", "USD")`, or, for a crypto pair `split`
+        gives none for, why (`Unsplit`).
 
     Raises:
         ValueError: If the dataset's class has no currency pairs.
 
-    A crypto symbol `split` cannot split raises its `MassiveError`; no split is ever guessed.
+    A failed lookup raises the `MassiveError` of `split`; no split is ever guessed.
     """
     asset_class = spec.asset_class
     if asset_class is not AssetClass.FOREX and asset_class is not AssetClass.CRYPTO:
-        raise ValueError(f"{spec.name}: only forex and crypto symbols are currency pairs")
+        raise ValueError(
+            library_bug(f"{spec.name} asked for a currency pair, which only forex and crypto have")
+        )
     if asset_class is AssetClass.CRYPTO:
         return split(symbol)
     return forex_codes(symbol)
@@ -268,7 +294,10 @@ def own_symbols(
     if symbol is not None:
         return (symbol,)
     chunk = own_query.get(spec.symbol_param) if spec.symbol_param is not None else None
-    return chunk if isinstance(chunk, tuple) else ()
+    if chunk is None:
+        return ()
+    # `_symbol_parts` puts a chunk in the query as a tuple; any other form is a defect.
+    return required_instance(chunk, tuple, f"{spec.name}'s chunk of symbols")
 
 
 def _symbol_targets(keys: list[str], *, slot: str | None, pair: bool) -> list[str]:
@@ -290,15 +319,33 @@ def _symbol_targets(keys: list[str], *, slot: str | None, pair: bool) -> list[st
     return targets
 
 
+class _Spread(Enum):
+    """How a request's symbols spread over requests of one path (`_symbol_parts`).
+
+    Attributes:
+        PATH: The path or the dataset takes each symbol itself: one request per symbol, and
+            the request must name its symbols.
+        ONE: The symbol parameter takes one value: one request per symbol.
+        LIST: The symbol parameter takes a list: up to `DatasetSpec.symbols_per_request`
+            symbols a request.
+        NONE: The path takes no symbol: one request without symbols.
+    """
+
+    PATH = auto()
+    ONE = auto()
+    LIST = auto()
+    NONE = auto()
+
+
 def _symbol_parts(
     spec: DatasetSpec,
     rest_path: RestPath,
-    symbols: NormalizedSymbols | None,
+    symbols: tuple[str, ...] | AllSymbols | None,
     *,
     slot: str | None,
     pair: bool = False,
     split: CryptoSplit,
-) -> list[tuple[str | None, dict[str, object], dict[str, object]]]:
+) -> list[tuple[str | None, dict[str, object], dict[str, object], Unsplit | None]]:
     """Return how a request's symbols spread over requests of one path.
 
     A path that takes the symbol itself (a key the dataset fills from the request, such as
@@ -321,9 +368,10 @@ def _symbol_parts(
         split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
-        `(symbol, path parameters, query parameters)` per request: `symbol` is set for a
-        per-symbol request. Empty for an empty symbol tuple (a reactive table with no valid
-        row).
+        `(symbol, path parameters, query parameters, unsplit)` per request: `symbol` is set
+        for a per-symbol request, and `unsplit` says why a pair `split` gives no currencies for
+        has none (`Call.unsplit`). Empty for an empty symbol tuple (a reactive table with no
+        valid row).
 
     Raises:
         ValueError: If the path needs a symbol per request and the symbols are `dm.ALL` or
@@ -333,37 +381,87 @@ def _symbol_parts(
     keys = spec.keys_for(Transport.REST, rest_path.template)
     from_request = [key for _, key in keys.declared() if key.from_request]
     param = spec.symbol_param if spec.symbol_param in params else None
-    listed = param is not None and params[param].kind is ParamKind.LIST
-    takes_one = bool(from_request) or slot is not None or pair or spec.per_symbol
-    per_symbol = takes_one or (param is not None and not listed)
-    if symbols is None or isinstance(symbols, _All):
-        if takes_one:
-            raise ValueError(f"{spec.name}: {rest_path.template} needs explicit symbols")
-        return [(None, {}, {})]
-    explicit = cast("tuple[str, ...]", symbols)
+    if bool(from_request) or slot is not None or pair or spec.per_symbol:
+        spread = _Spread.PATH
+    elif param is None:
+        spread = _Spread.NONE
+    elif params[param].kind is ParamKind.LIST:
+        spread = _Spread.LIST
+    else:
+        spread = _Spread.ONE
+    if symbols is None or isinstance(symbols, AllSymbols):
+        if spread is _Spread.PATH:
+            raise ValueError(f"{spec.name} needs the symbols named. Pass them in place of dm.ALL.")
+        return [(None, {}, {}, None)]
+    explicit = symbols
     if not explicit:
         return []
-    if not per_symbol:
-        if param is None:
-            return [(None, {}, {})]
+    if spread is _Spread.NONE:
+        return [(None, {}, {}, None)]
+    if spread is _Spread.LIST:
         size = spec.symbols_per_request or len(explicit)
-        return [(None, {}, {param: explicit[i : i + size]}) for i in range(0, len(explicit), size)]
+        listed = required(param, f"{rest_path.template}'s list parameter")
+        return [
+            (None, {}, {listed: explicit[i : i + size]}, None)
+            for i in range(0, len(explicit), size)
+        ]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
-    parts: list[tuple[str | None, dict[str, object], dict[str, object]]] = []
-    for symbol in explicit:
-        path: dict[str, object] = {}
-        query: dict[str, object] = {}
-        for name in targets:
-            if name == "from" and "to" in params:
-                path["from"], path["to"] = _pair(spec, symbol, split)
-            elif params[name].in_path:
-                path[name] = symbol
+    return [
+        _symbol_request(spec, symbol, rest_path, targets=targets, param=param, split=split)
+        for symbol in explicit
+    ]
+
+
+def _symbol_request(
+    spec: DatasetSpec,
+    symbol: str,
+    rest_path: RestPath,
+    *,
+    targets: Sequence[str],
+    param: str | None,
+    split: CryptoSplit,
+) -> tuple[str, dict[str, object], dict[str, object], Unsplit | None]:
+    """Return the parameters of one symbol's request.
+
+    The symbol fills each target: a `{from}/{to}` pair takes its two currencies (`_pair`), a
+    path placeholder or a query parameter the symbol itself. The symbol parameter, when the
+    path has one, takes the symbol too: as a one-symbol tuple when it takes a list. A crypto
+    pair `split` gives no currencies for leaves `{from}/{to}` unfilled and gets why, so the
+    call is never sent.
+
+    Args:
+        spec: The dataset, for messages.
+        symbol: The symbol.
+        rest_path: The path.
+        targets: The parameters the symbol fills (`_symbol_targets`), `"from"` standing for
+            the `{from}/{to}` pair.
+        param: The dataset's symbol parameter when the path has it, or None.
+        split: Splits a crypto symbol into its two currencies (`_pair`).
+
+    Returns:
+        `(symbol, path parameters, query parameters, unsplit)`, with why the pair has no
+        split, or None.
+    """
+    params = {p.name: p for p in rest_path.params}
+    path: dict[str, object] = {}
+    query: dict[str, object] = {}
+    unsplit = None
+    for name in targets:
+        if name == "from" and "to" in params:
+            currencies = _pair(spec, symbol, split)
+            if isinstance(currencies, tuple):
+                path["from"], path["to"] = currencies
+            elif isinstance(currencies, Unsplit):
+                unsplit = currencies
             else:
-                query[name] = symbol
-        if param is not None:
-            query[param] = (symbol,) if listed else symbol
-        parts.append((symbol, path, query))
-    return parts
+                assert_never(currencies)  # a new outcome of a split is decided here
+        elif params[name].in_path:
+            path[name] = symbol
+        else:
+            query[name] = symbol
+    if param is not None:
+        query[param] = (symbol,) if params[param].kind is ParamKind.LIST else symbol
+    return symbol, path, query, unsplit
 
 
 def _caller_params(
@@ -387,7 +485,7 @@ def _caller_params(
 
     Raises:
         ValueError: If a typed parameter or a filter the caller set is not a parameter of the
-            path (for example a filter of a dataset's list path on its per-symbol path), or
+            path (for example a filter of a dataset's fetch path on one of its per-class paths), or
             `order` is set where the path has neither `order` nor `sort`.
     """
     params = {p.name: p for p in rest_path.params}
@@ -398,10 +496,8 @@ def _caller_params(
     folded = "order" in typed and "order" not in params
     unknown = [name for name in typed if name not in params and not (folded and name == "order")]
     for name, value in typed.items():
-        bare = name == BARE_INDEX_PARAM and isinstance(value, str)
         if name in params:
-            sent = contracts_underlying(cast("str", value)) if bare else value
-            (path if params[name].in_path else query)[name] = sent
+            (path if params[name].in_path else query)[name] = _sent_value(name, value)
     if folded and "sort" in query:
         query["sort"] = f"{typed['sort']}.{typed['order']}"
     elif folded:
@@ -413,7 +509,8 @@ def _caller_params(
         else:
             query[wire] = value
     if unknown:
-        raise ValueError(f"{spec.name}: {rest_path.template} does not take {sorted(set(unknown))}")
+        named = prose_list(sorted(set(unknown)), "arguments")
+        raise ValueError(f"{spec.name} does not take {named}.")
     return path, query
 
 
@@ -459,7 +556,36 @@ def largest_page(rest_path: RestPath) -> int:
     for param in rest_path.params:
         if param.name == "limit" and not param.in_path and param.maximum is not None:
             return param.maximum
-    raise ValueError(f"{rest_path.template} documents no maximum page size (`limit`)")
+    raise ValueError(
+        library_bug(f"Massive's documentation of {rest_path.template} gives no maximum limit")
+    )
+
+
+def _sent_value(name: str, value: object) -> object:
+    """Return a typed parameter's value as sent: an index underlying bare, every other as is.
+
+    Args:
+        name: The wire parameter's name.
+        value: Its value.
+
+    Returns:
+        `contracts_underlying(value)` for the options contracts' underlying; `value` otherwise.
+    """
+    if name == BARE_INDEX_PARAM and isinstance(value, str):
+        return contracts_underlying(value)
+    return value
+
+
+def _takes_crypto_pair(rest_path: RestPath) -> bool:
+    """Say whether a path serves one crypto pair: it has Massive's crypto pair placeholder.
+
+    Args:
+        rest_path: The path.
+
+    Returns:
+        True for a path such as `/v1/indicators/sma/{cryptoTicker}`.
+    """
+    return any(p.in_path and p.name == _CRYPTO_PAIR_PLACEHOLDER for p in rest_path.params)
 
 
 def shared_params(
@@ -470,12 +596,13 @@ def shared_params(
     Only parameters the path declares are sent: the caller's (`_caller_params`); `multiplier`
     in a path placeholder of that name; `timespan` wherever the path takes it (the aggregates'
     segment, the indicators' query parameter); `Request.adjusted` when it is set and the path
-    takes it (a path without it, the crypto indicators', serves prices no split changes, so
-    `True` is left out there); and the
-    futures `resolution` and the page size when the path takes them. The page size is
-    `DatasetSpec.page_size`, or else the path's documented maximum `limit`, or `Request.limit`
-    when that is smaller; a path that documents no maximum, for a dataset without a
-    `page_size`, gets only `Request.limit`.
+    takes it; and the futures `resolution` and the page size when the path takes them.
+    `adjusted` chooses whether prices are adjusted for splits, and a crypto pair has no splits,
+    so on a path of one crypto pair (`_CRYPTO_PAIR_PLACEHOLDER`) that doesn't declare it, as
+    the crypto indicators' don't, both values give the same prices and `adjusted` is left
+    out. The page size is `DatasetSpec.page_size`, or else the path's documented maximum
+    `limit`, or `Request.limit` when that is smaller; a path that documents no maximum, for a
+    dataset without a `page_size`, gets only `Request.limit`.
 
     Args:
         spec: The dataset.
@@ -488,8 +615,8 @@ def shared_params(
         `(path parameters, query parameters)`.
 
     Raises:
-        ValueError: If `Request.adjusted` is False and the path has no `adjusted` parameter
-            (the crypto indicators): unadjusted prices are never dropped silently.
+        ValueError: If `Request.adjusted` is False and the path, not one of a crypto pair, has
+            no `adjusted` parameter: unadjusted prices are never dropped silently.
 
     Any other parameter the caller set that the path does not take raises the `ValueError` of
     `_caller_params`.
@@ -502,30 +629,64 @@ def shared_params(
         (path if params["timespan"].in_path else query)["timespan"] = request.timespan
     if "adjusted" in params and request.adjusted is not None:
         query["adjusted"] = request.adjusted
-    elif request.adjusted is False:
-        raise ValueError(f"{spec.name}: {rest_path.template} does not take ['adjusted']")
+    elif request.adjusted is False and not _takes_crypto_pair(rest_path):
+        raise ValueError(f"{spec.name} does not take adjusted=False.")
     if request.timespan is not None and "resolution" in params:
         query["resolution"] = f"{request.multiplier}{_FUTURES_UNITS[request.timespan]}"
     if "limit" in params:
         # A page size, as the list paths read `limit`. The aggregates' range path reads its
         # `limit` as the number of base aggregates queried instead (at most 50,000); its
         # datasets set that maximum, and bars take no `limit` argument, so no cap shrinks it.
-        sizes = [v for v in (page_size(spec, rest_path), request.limit) if v is not None]
-        if sizes:
-            query["limit"] = min(sizes)
+        size = _page_limit(spec, rest_path, request.limit)
+        if size is not None:
+            query["limit"] = size
     path.update(fixed)
     return path, query
 
 
+def _page_limit(spec: DatasetSpec, rest_path: RestPath, cap: int | None) -> int | None:
+    """Return the `limit` a path's request sends: its page size, or a smaller cap.
+
+    Args:
+        spec: The dataset.
+        rest_path: The path, which takes a `limit` query parameter.
+        cap: The most rows the request may keep, or None.
+
+    Returns:
+        `page_size`, or `cap` when that is smaller; None when neither is known.
+    """
+    sizes = [v for v in (page_size(spec, rest_path), cap) if v is not None]
+    return min(sizes) if sizes else None
+
+
+def capped_call(spec: DatasetSpec, rest_path: RestPath, call: Call, *, cap: int) -> Call:
+    """Return a planned call that asks Massive for at most `cap` rows a page.
+
+    A read capped at `Request.limit` asks each later request only for the rows it still
+    wants, so no page brings rows it cannot keep. A path without a `limit` parameter sends
+    the call as planned.
+
+    Args:
+        spec: The dataset.
+        rest_path: The call's path.
+        call: The planned call.
+        cap: The rows the read still wants, at least 1.
+
+    Returns:
+        The call, its `limit` query parameter the smaller of its page size and `cap`.
+    """
+    if not any(param.name == "limit" and not param.in_path for param in rest_path.params):
+        return call
+    return replace(call, query={**call.query, "limit": _page_limit(spec, rest_path, cap)})
+
+
 def fetch_paths(
-    spec: DatasetSpec, symbols: NormalizedSymbols | None
-) -> list[tuple[str, NormalizedSymbols | None]]:
+    spec: DatasetSpec, symbols: tuple[str, ...] | AllSymbols | None
+) -> list[tuple[str, tuple[str, ...] | AllSymbols | None]]:
     """Return the REST paths a `fetch()` or `poll()` cycle reads, each with its symbols.
 
-    A dataset with a per-symbol detail path (`DatasetSpec.detail_path`, such as one option
-    contract's reference data) reads it once per symbol when the call names symbols, and its
-    list path (`fetch_path`) otherwise. A dataset that serves some asset classes on paths of
-    their own (`DatasetSpec.fetch_paths_by_class`) sends each symbol to its class's path
+    A dataset reads its `fetch_path`. One that serves some asset classes on paths of their own
+    (`DatasetSpec.fetch_paths_by_class`) sends each symbol to its class's path
     (`symbol_class`), and every other symbol to `fetch_path`.
 
     Args:
@@ -534,12 +695,18 @@ def fetch_paths(
 
     Returns:
         `(path template, symbols)` pairs, in the order of each path's first symbol.
+
+    Raises:
+        BrokenGuaranteeError: For a form of symbols with no rule here.
     """
-    default = cast("str", spec.fetch_path)
-    if not isinstance(symbols, tuple) or not symbols:
-        return [(default, symbols)]
-    if spec.detail_path is not None:
-        return [(spec.detail_path, symbols)]
+    default = required(spec.fetch_path, f"{spec.name}'s fetch path")
+    match symbols:
+        case tuple() if symbols:
+            pass
+        case tuple() | AllSymbols() | None:
+            return [(default, symbols)]
+        case _:
+            raise BrokenGuaranteeError(unmatched_form("a REST call's paths", symbols))
     if not spec.fetch_paths_by_class:
         return [(default, symbols)]
     groups: dict[str, list[str]] = {}
@@ -554,7 +721,7 @@ def plan_calls(
     rest_path: RestPath,
     request: Request,
     *,
-    symbols: NormalizedSymbols | None,
+    symbols: tuple[str, ...] | AllSymbols | None,
     fixed: Mapping[str, object] | None = None,
     dates: tuple[date | None, date | None] = (None, None),
     extra: Mapping[str, object] | None = None,
@@ -606,11 +773,12 @@ def plan_calls(
     slot = empty[0] if len(empty) == 1 else None
     calls = []
     parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair, split=split)
-    for symbol, own_path, own_query in parts:
+    for symbol, own_path, own_query, unsplit in parts:
         zone_class = day_class(spec, map(symbol_class, own_symbols(spec, symbol, own_query)))
         axis = axis_query(spec, rest_path, dates=dates, asset_class=zone_class)
         sent = _filter_days(rest_path, {**query, **axis}, zone_class)
-        calls.append(Call({**path, **own_path}, {**sent, **(extra or {}), **own_query}, symbol))
+        sent_query = {**sent, **(extra or {}), **own_query}
+        calls.append(Call({**path, **own_path}, sent_query, symbol, unsplit))
     return calls
 
 
@@ -708,7 +876,7 @@ def history_calls(
     order = _ascending(spec, rest_path, request)
     requested = window.requested
     if requested is None:
-        sessions = cast("DaySpan", window.sessions)
+        sessions = required(window.sessions, f"{spec.name}'s history sessions")
         session = session_date_param(spec)
         return [
             call
@@ -718,7 +886,7 @@ def history_calls(
                 spec,
                 rest_path,
                 request,
-                symbols=request.symbols,
+                symbols=request.static_symbols,
                 extra={**order, session: day},
                 split=split,
             )
@@ -730,7 +898,7 @@ def history_calls(
         spec,
         rest_path,
         request,
-        symbols=request.symbols,
+        symbols=request.static_symbols,
         fixed=_range_segments(requested) if ranged else {},
         dates=(requested.start, requested.end),
         extra=order,

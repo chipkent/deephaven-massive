@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import types
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 from deephaven import time_table
@@ -13,6 +14,7 @@ from deephaven.execution_context import ExecutionContext, get_exec_ctx
 from deephaven.table_listener import TableUpdate, listen
 from deephaven.update_graph import UpdateGraph, exclusive_lock, shared_lock
 
+from deephaven_massive._errors import LIBRARY_BUG
 from deephaven_massive._tables import execution_context
 from deephaven_massive._tables.execution_context import (
     entered,
@@ -35,12 +37,17 @@ def test_the_update_graph_check_refuses_only_update_graph_threads(
     # The check itself, run on this thread with an update graph that says this is one of its
     # threads (coverage tools on Python 3.11 do not see lines run on Deephaven's own threads).
     graph = types.SimpleNamespace(currentThreadProcessesUpdates=lambda: True)
-    update_thread = types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph))
+    update_thread: ExecutionContext = types.SimpleNamespace(  # type: ignore[assignment]  # a fake
+        update_graph=types.SimpleNamespace(j_update_graph=graph)
+    )
     # The refusal names the way to do a listener's usual job without one.
-    with pytest.raises(
-        ValueError, match=r"update-graph thread.*pass a refreshing symbol table as symbols"
-    ):
-        refuse_update_graph_thread(cast("ExecutionContext", update_thread))
+    refusal = (
+        "A deephaven_massive call cannot run on a Deephaven update-graph thread, such as inside "
+        "a table listener. Make the call outside the listener. To follow a table's changes, "
+        "pass the refreshing table as symbols or call poll()."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
+        refuse_update_graph_thread(update_thread)
     with shared_lock(dh_exec_ctx.update_graph):  # holding the lock is not running the graph
         refuse_update_graph_thread(dh_exec_ctx)
     refuse_update_graph_thread(dh_exec_ctx)
@@ -124,10 +131,10 @@ def _scripted(
     graph.clock = lambda: graph
     graph.exclusiveLock = lambda: graph
     graph.newCondition = lambda: graph
-    return cast(
-        "ExecutionContext",
-        types.SimpleNamespace(update_graph=types.SimpleNamespace(j_update_graph=graph)),
+    scripted: ExecutionContext = types.SimpleNamespace(  # type: ignore[assignment]  # a fake
+        update_graph=types.SimpleNamespace(j_update_graph=graph)
     )
+    return scripted
 
 
 def test_a_signal_from_a_cycle_already_running_makes_the_wait_ask_again(
@@ -147,7 +154,12 @@ def test_a_wait_whose_signal_never_comes_gives_up(
     monkeypatch.setattr(execution_context, "holds_update_graph_lock", lambda _ctx: False)
     with caplog.at_level(logging.WARNING, logger=execution_context.__name__):
         assert not wait_for_update_cycle(_scripted([5, 5], [0], []), 0.5)
-    assert "no update cycle ended within 0.5 s" in caplog.text
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "No update cycle ended within 0.5 s of the wait, after cycle 5. The usual cause is "
+            "another thread holding the update graph's lock."
+        )
+    ]
 
 
 def test_a_wait_gives_up_when_another_thread_takes_the_lock_before_the_cycle(
@@ -157,7 +169,12 @@ def test_a_wait_gives_up_when_another_thread_takes_the_lock_before_the_cycle(
     monkeypatch.setattr(execution_context, "holds_update_graph_lock", lambda _ctx: False)
     with caplog.at_level(logging.WARNING, logger=execution_context.__name__):
         assert not wait_for_update_cycle(_scripted([5], [], [], locks=[True, False]), 0.5)
-    assert "the last finished cycle seen: 5" in caplog.text
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "No update cycle ended within 0.5 s of the wait, after cycle 5. The usual cause is "
+            "another thread holding the update graph's lock."
+        )
+    ]
 
 
 def test_a_wait_gives_up_while_another_thread_holds_the_lock(
@@ -179,15 +196,26 @@ def test_a_wait_gives_up_while_another_thread_holds_the_lock(
     finally:
         done.set()
         thread.join(TIMEOUT)
-    assert "no update cycle ended within 0.2 s" in caplog.text
-    assert "the last finished cycle seen: None" in caplog.text
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "No update cycle ended within 0.2 s of the wait, which never got the update graph's "
+            "lock. The usual cause is another thread holding the lock."
+        )
+    ]
 
 
 @pytest.mark.parametrize("lock", [shared_lock, exclusive_lock], ids=["shared", "exclusive"])
 def test_a_wait_for_an_update_cycle_is_refused_under_the_lock(
     dh_exec_ctx: ExecutionContext, lock: Callable[[UpdateGraph], AbstractContextManager[None]]
 ) -> None:
-    with lock(dh_exec_ctx.update_graph), pytest.raises(RuntimeError, match="would never end"):
+    refusal = (
+        "No update cycle can end while this thread holds the update graph's lock, so the wait "
+        "would never end. " + LIBRARY_BUG
+    )
+    with (
+        lock(dh_exec_ctx.update_graph),
+        pytest.raises(RuntimeError, match=f"^{re.escape(refusal)}$"),
+    ):
         wait_for_update_cycle(dh_exec_ctx, TIMEOUT)
 
 
@@ -209,4 +237,6 @@ def test_a_wait_for_an_update_cycle_is_refused_on_an_update_graph_thread(
         assert heard.wait(TIMEOUT)
     finally:
         handle.stop()
-    assert "update-graph thread" in str(refused[0])
+    assert str(refused[0]).startswith(
+        "A deephaven_massive call cannot run on a Deephaven update-graph thread"
+    )

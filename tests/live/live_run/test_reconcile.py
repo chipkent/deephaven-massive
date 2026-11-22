@@ -10,7 +10,7 @@ from __future__ import annotations
 import csv
 import json
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -90,15 +90,15 @@ def test_streamed_bars_are_compared_with_history_per_symbol_and_minute(
     with dm.MassiveSession(dm.MassiveConfig(api_key="k", rest_base_url=fake_rest.url)) as m:
         reconcile.run_reconcile(
             m,
-            units=["stocks delayed", "indices delayed"],
+            units=["stocks", "indices"],
             stream_folder=streamed,
             day=DAY,
             folder=folder,
             report=lambda *result: seen.append(result),
         )
     assert seen == [
-        ("stocks delayed", "passed", ""),
-        ("indices delayed", "failed", "no streamed bars to compare"),  # nothing was compared
+        ("stocks", "passed", ""),
+        ("indices", "failed", "no streamed bars to compare"),  # nothing was compared
     ]
     assert "adjusted=false" in fake_rest.requests[-1].target
     with (folder / "reconciliation.csv").open(encoding="utf-8") as file:
@@ -169,7 +169,7 @@ def test_each_stream_reads_its_own_class_history() -> None:
     }
     for stream, check in expected.items():
         calls: list[str] = []
-        session = cast("MassiveSession", _Session(calls))
+        session: MassiveSession = _Session(calls)  # type: ignore[assignment]  # records the verbs
         reconcile._history(session, stream, symbols=["X"], first=DAY, last=DAY)
         assert check(calls), (stream, calls)
         assert calls[-2] == "history"
@@ -204,13 +204,13 @@ def test_index_bars_are_compared_without_a_volume(
     with dm.MassiveSession(dm.MassiveConfig(api_key="k", rest_base_url=fake_rest.url)) as m:
         reconcile.run_reconcile(
             m,
-            units=["indices delayed"],
+            units=["indices"],
             stream_folder=streamed,
             day=DAY,
             folder=folder,
             report=lambda *result: seen.append(result),
         )
-    assert seen == [("indices delayed", "passed", "")]
+    assert seen == [("indices", "passed", "")]
     summary = json.loads((folder / "summary.json").read_text())
     assert summary["streams"]["indices-minute-bars"]["match_share"] == 1.0
 
@@ -280,7 +280,7 @@ def _night_reconcile(
     with dm.MassiveSession(dm.MassiveConfig(api_key="k", rest_base_url=fake_rest.url)) as m:
         reconcile.run_night_reconcile(
             m,
-            units=["crypto real-time", "futures delayed"],
+            units=["crypto", "futures"],
             stream_folder=streamed,
             night=NIGHT,
             folder=folder,
@@ -304,8 +304,8 @@ def test_a_nights_bars_are_compared_over_the_night_and_at_its_boundaries(
     )
     seen = _night_reconcile(fake_rest, streamed, tmp_path / "reconcile")
     assert seen == [
-        ("crypto real-time", "passed", ""),
-        ("futures delayed", "failed", "no streamed bars to compare"),
+        ("crypto", "passed", ""),
+        ("futures", "failed", "no streamed bars to compare"),
     ]
     summary = json.loads((tmp_path / "reconcile" / "summary.json").read_text())
     crypto = summary["streams"]["crypto-minute-bars"]
@@ -336,7 +336,7 @@ def test_a_crypto_bar_dated_other_than_its_utc_date_fails_its_unit(
         [(MIDNIGHT, "2026-10-29"), (MIDNIGHT + timedelta(minutes=1), "2026-10-28")],
     )
     seen = _night_reconcile(fake_rest, streamed, tmp_path / "reconcile")
-    assert seen[0] == ("crypto real-time", "failed", "1 bars dated other than their UTC date")
+    assert seen[0] == ("crypto", "failed", "1 bars dated other than their UTC date")
     summary = json.loads((tmp_path / "reconcile" / "summary.json").read_text())
     assert summary["streams"]["crypto-minute-bars"]["00:00 UTC after"]["date_mismatches"] == 1
     with (tmp_path / "reconcile" / "reconciliation.csv").open(encoding="utf-8") as file:

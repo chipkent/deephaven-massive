@@ -28,13 +28,15 @@ cycle could run. Every function calls Java, so none of them runs under `registry
 
 from __future__ import annotations
 
-import importlib
 import logging
 import time
 from typing import Final
 
+import jpy
 from deephaven.execution_context import ExecutionContext
 from deephaven.update_graph import has_exclusive_lock, has_shared_lock
+
+from deephaven_massive._errors import library_bug
 
 __all__ = [
     "entered",
@@ -48,11 +50,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# jpy, Deephaven's bridge to Java, ships no type stubs; imported by name it is untyped, as
-# every other Java object the library touches is.
-_NANOSECONDS: Final = (
-    importlib.import_module("jpy").get_type("java.util.concurrent.TimeUnit").NANOSECONDS
-)
+_NANOSECONDS: Final = jpy.get_type("java.util.concurrent.TimeUnit").NANOSECONDS
 """The unit of the timed lock wait in `wait_for_update_cycle`."""
 
 
@@ -133,10 +131,9 @@ def refuse_update_graph_thread(exec_ctx: ExecutionContext) -> None:
     """
     if exec_ctx.update_graph.j_update_graph.currentThreadProcessesUpdates():
         raise ValueError(
-            "deephaven_massive calls must not run on a Deephaven update-graph thread "
-            "(for example inside a table listener). To change what a live table follows, pass "
-            "a refreshing symbol table as symbols instead: the stream follows its rows as they "
-            "change."
+            "A deephaven_massive call cannot run on a Deephaven update-graph thread, such as "
+            "inside a table listener. Make the call outside the listener. To follow a table's "
+            "changes, pass the refreshing table as symbols or call poll()."
         )
 
 
@@ -208,7 +205,10 @@ def wait_for_update_cycle(exec_ctx: ExecutionContext, timeout: float) -> bool:
     refuse_update_graph_thread(exec_ctx)
     if holds_update_graph_lock(exec_ctx):
         raise RuntimeError(
-            "waiting for an update cycle while holding the update graph's lock would never end"
+            library_bug(
+                "No update cycle can end while this thread holds the update graph's lock, so "
+                "the wait would never end"
+            )
         )
     j_update_graph = exec_ctx.update_graph.j_update_graph
     lock = j_update_graph.exclusiveLock()
@@ -232,12 +232,19 @@ def wait_for_update_cycle(exec_ctx: ExecutionContext, timeout: float) -> bool:
                 break  # no signal before the deadline
         finally:
             lock.unlock()
-    logger.warning(
-        "no update cycle ended within %.1f s of the wait (the last finished cycle seen: %s); "
-        "another thread may hold the update graph's lock",
-        timeout,
-        first,
-    )
+    if first is None:
+        logger.warning(
+            "No update cycle ended within %.1f s of the wait, which never got the update "
+            "graph's lock. The usual cause is another thread holding the lock.",
+            timeout,
+        )
+    else:
+        logger.warning(
+            "No update cycle ended within %.1f s of the wait, after cycle %d. The usual cause "
+            "is another thread holding the update graph's lock.",
+            timeout,
+            first,
+        )
     return False
 
 

@@ -27,6 +27,7 @@ import deephaven_massive as dm
 from tests._live.live_run import stream_capture, stream_night
 from tests._live.live_run.stream_capture import Clock, Stream
 from tests._live.live_run.stream_night import Boundary
+from tests._live.summary import NOT_LISTED
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -78,46 +79,40 @@ def _write_rows(
 
 
 def test_each_unit_crosses_its_own_boundary() -> None:
-    assert stream_night.boundaries("futures delayed", NIGHT) == [
+    assert stream_night.boundaries("futures", NIGHT) == [
         Boundary("16:00 Chicago close", CLOSE, "2026-11-04", "2026-11-05")
     ]
     # On a Sunday futures open for the week at 17:00: nothing trades before the close's hour.
-    [sunday] = stream_night.boundaries("futures real-time", SUNDAY)
+    [sunday] = stream_night.boundaries("futures", SUNDAY)
     assert (sunday.before, sunday.after) == ("", "2026-11-09")
-    assert stream_night.boundaries("crypto real-time", NIGHT) == [
+    assert stream_night.boundaries("crypto", NIGHT) == [
         Boundary("00:00 UTC", MIDNIGHT, "2026-11-04", "2026-11-05")
     ]
 
 
 def test_futures_are_open_but_for_their_pause_and_crypto_all_night() -> None:
-    assert stream_night.open_hours("crypto real-time", NIGHT) == [(START, END)]
-    assert stream_night.open_hours("futures delayed", NIGHT) == [
+    assert stream_night.open_hours("crypto", NIGHT) == [(START, END)]
+    assert stream_night.open_hours("futures", NIGHT) == [
         (START, _utc(22)),
         (OPEN, END),
     ]
-    [(opens, _)] = stream_night.open_hours("futures delayed", SUNDAY)
+    [(opens, _)] = stream_night.open_hours("futures", SUNDAY)
     assert opens == datetime(2026, 11, 8, 23, tzinfo=UTC)
 
 
 def test_each_unit_streams_trades_quotes_and_minute_bars(massive_session: MassiveSession) -> None:
-    streams = stream_night.night_streams(
-        ["crypto real-time", "futures delayed"], tiers={"futures": "developer"}, night=NIGHT
-    )
+    streams = stream_night.night_streams(["crypto", "futures"], night=NIGHT)
     assert [(s.name, s.unit, s.event_column, s.held) for s in streams] == [
-        ("crypto-trades", "crypto real-time", "Timestamp", False),
-        ("crypto-quotes", "crypto real-time", "Timestamp", False),
-        ("crypto-minute-bars", "crypto real-time", "TimestampEnd", True),
-        ("futures-minute-bars", "futures delayed", "TimestampEnd", True),
-        ("futures-trades", "futures delayed", "Timestamp", False),
-        ("futures-quotes", "futures delayed", "Timestamp", False),
+        ("crypto-trades", "crypto", "Timestamp", False),
+        ("crypto-quotes", "crypto", "Timestamp", False),
+        ("crypto-minute-bars", "crypto", "TimestampEnd", True),
+        ("futures-minute-bars", "futures", "TimestampEnd", True),
+        ("futures-trades", "futures", "Timestamp", False),
+        ("futures-quotes", "futures", "Timestamp", False),
     ]
     symbols = {s.name: s.query(massive_session)._request.symbols for s in streams}
     assert set(symbols["crypto-quotes"]) == {"X:BTCUSD", "X:ETHUSD"}
     assert set(symbols["futures-trades"]) == {"ESZ6", "NQZ6"}
-    starter = stream_night.night_streams(
-        ["futures delayed"], tiers={"futures": "starter"}, night=NIGHT
-    )
-    assert [s.name for s in starter] == ["futures-minute-bars"]  # Starter streams bars only
 
 
 # --- the quiet hours --------------------------------------------------------------------------
@@ -130,29 +125,27 @@ def test_an_open_hour_without_a_row_is_quiet_unless_a_gap_covers_it() -> None:
     for hour in range(14):
         rows[f"2026-11-05T{hour:02d}"] = 5
     del rows["2026-11-05T03"]
-    quiet = stream_night.quiet_hours("crypto real-time", NIGHT, rows=rows, gaps=[], end=END)
+    quiet = stream_night.quiet_hours("crypto", NIGHT, rows=rows, gaps=[], end=END)
     assert quiet == [_utc(3, day=5)]
     gap = [(_utc(3, 10, day=5), _utc(3, 20, day=5))]
-    assert stream_night.quiet_hours("crypto real-time", NIGHT, rows=rows, gaps=gap, end=END) == []
+    assert stream_night.quiet_hours("crypto", NIGHT, rows=rows, gaps=gap, end=END) == []
     # An hour after the recording ended is not judged.
     early = _utc(2, day=5)
-    assert stream_night.quiet_hours("crypto real-time", NIGHT, rows=rows, gaps=[], end=early) == []
+    assert stream_night.quiet_hours("crypto", NIGHT, rows=rows, gaps=[], end=early) == []
 
 
-def test_futures_hours_touched_by_their_pause_or_delay_are_not_judged() -> None:
+def test_futures_hours_touched_by_their_pause_are_not_judged() -> None:
     nothing: Counter[str] = Counter()
-    delayed = stream_night.quiet_hours("futures delayed", NIGHT, rows=nothing, gaps=[], end=END)
-    # 22:00 and 23:00 UTC arrive rows of the pause, delayed 10 minutes: judged from 00:00.
-    assert delayed == [_utc(h, day=5) for h in range(14)]
-    real = stream_night.quiet_hours("futures real-time", NIGHT, rows=nothing, gaps=[], end=END)
-    assert real[0] == OPEN
+    quiet = stream_night.quiet_hours("futures", NIGHT, rows=nothing, gaps=[], end=END)
+    # 21:30 to 22:00 UTC is no whole hour, and 22:00 to 23:00 is the pause: judged from 23:00.
+    assert quiet == [OPEN, *(_utc(h, day=5) for h in range(14))]
 
 
 # --- the boundaries -------------------------------------------------------------------------
 
 
 def test_rows_near_a_boundary_are_counted_by_side_and_date(tmp_path: Path) -> None:
-    stream = Stream("futures-trades", "futures delayed", lambda _m: None, "Timestamp", held=False)
+    stream = Stream("futures-trades", "futures", lambda _m: None, "Timestamp", held=False)
     _write_rows(
         tmp_path,
         "futures-trades-2026-11-04T21.parquet",
@@ -168,11 +161,11 @@ def test_rows_near_a_boundary_are_counted_by_side_and_date(tmp_path: Path) -> No
     )
     (tmp_path / "rows" / "futures-trades-2026-11-05T00.parquet").write_bytes(b"PAR1 cut")
     unreadable: list[str] = []
-    [boundary] = stream_night.boundaries("futures delayed", NIGHT)
+    [boundary] = stream_night.boundaries("futures", NIGHT)
     before, after = stream_night.boundary_rows(tmp_path, stream, boundary, unreadable=unreadable)
     assert unreadable == ["futures-trades-2026-11-05T00.parquet"]
     assert before == {
-        "unit": "futures delayed",
+        "unit": "futures",
         "stream": "futures-trades",
         "boundary": "16:00 Chicago close",
         "at": "2026-11-04T22:00:00+00:00",
@@ -191,8 +184,8 @@ def test_rows_near_a_boundary_are_counted_by_side_and_date(tmp_path: Path) -> No
 
 def test_a_row_of_the_pause_belongs_to_the_next_session(tmp_path: Path) -> None:
     """A quote at 16:45 Chicago time, in the pause before the open, is the morning's."""
-    stream = Stream("futures-quotes", "futures real-time", lambda _m: None, "Timestamp", held=False)
-    [boundary] = stream_night.boundaries("futures real-time", NIGHT)
+    stream = Stream("futures-quotes", "futures", lambda _m: None, "Timestamp", held=False)
+    [boundary] = stream_night.boundaries("futures", NIGHT)
     pause = _utc(22, 45)
     _write_rows(tmp_path, "futures-quotes-2026-11-04T22.parquet", [(pause, "2026-11-05")])
     _, after = stream_night.boundary_rows(tmp_path, stream, boundary, unreadable=[])
@@ -205,7 +198,7 @@ def test_a_row_of_the_pause_belongs_to_the_next_session(tmp_path: Path) -> None:
 def test_bars_take_their_side_from_their_start_and_a_closed_side_is_not_judged(
     tmp_path: Path,
 ) -> None:
-    stream = Stream("futures-minute-bars", "futures real-time", lambda _m: None)
+    stream = Stream("futures-minute-bars", "futures", lambda _m: None)
     close = datetime(2026, 11, 8, 22, tzinfo=UTC)
     _write_rows(
         tmp_path,
@@ -213,7 +206,7 @@ def test_bars_take_their_side_from_their_start_and_a_closed_side_is_not_judged(
         [(close - timedelta(minutes=1), "2026-11-07"), (close, "2026-11-09")],
         column="TimestampStart",
     )
-    [boundary] = stream_night.boundaries("futures real-time", SUNDAY)
+    [boundary] = stream_night.boundaries("futures", SUNDAY)
     before, after = stream_night.boundary_rows(tmp_path, stream, boundary, unreadable=[])
     assert (before["rows"], before["expected"], before["wrong"]) == (1, "", 0)
     assert (after["rows"], after["wrong"]) == (1, 0)
@@ -252,14 +245,24 @@ def test_the_hours_gaps_and_reconnects_are_read_from_the_nights_files(tmp_path: 
 def test_a_units_verdict_names_the_first_thing_wrong() -> None:
     def verdict(
         *,
-        failure: str = "",
+        failures: tuple[str, ...] = (),
+        opened: tuple[str, ...] = (),
+        delayed: bool = False,
         gaps: timedelta = timedelta(),
         errors: tuple[str, ...] = (),
         quiet: tuple[datetime, ...] = (),
         wrong: tuple[dict[str, object], ...] = (),
     ) -> tuple[str, str]:
+        refused, broken = stream_capture.split_failures(list(failures), list(opened))
         return stream_night.night_verdict(
-            failure=failure, gaps=gaps, errors=list(errors), quiet=list(quiet), wrong=list(wrong)
+            refused=refused,
+            broken=broken,
+            streams=2,
+            delayed=delayed,
+            gaps=gaps,
+            errors=list(errors),
+            quiet=list(quiet),
+            wrong=list(wrong),
         )
 
     wrong = {
@@ -272,21 +275,33 @@ def test_a_units_verdict_names_the_first_thing_wrong() -> None:
     }
     assert verdict() == ("passed", "")
     assert verdict(gaps=timedelta(minutes=4)) == ("passed", "gaps 4")
-    assert verdict(failure="HTTP 403") == ("failed", "a stream failed: HTTP 403")
+    assert verdict(failures=("socket closed",)) == ("failed", "a stream failed: socket closed")
+    assert verdict(failures=("HTTP 403", "HTTP 403")) == ("refused", "refused: HTTP 403")
+    assert verdict(failures=("HTTP 403",)) == ("passed", "a stream refused: HTTP 403")
+    listed = f"{NOT_LISTED}crypto-trades: add crypto to delayed_subscriptions"
+    assert verdict(opened=(listed, listed)) == ("skipped", listed)
+    assert verdict(opened=(listed,)) == ("passed", f"a stream {listed}")
     assert verdict(gaps=timedelta(minutes=31)) == ("failed", "gaps 31")
     assert verdict(errors=("crypto-trades: KeyError",)) == ("failed", "crypto-trades: KeyError")
-    assert verdict(quiet=(_utc(3, day=5), _utc(4, day=5))) == (
-        "failed",
-        "no rows in 2 hour(s) its market was open, the first from Wed 22:00 EST",
+    why = "no rows in 2 hour(s) its market was open, the first from Wed 22:00 EST"
+    assert verdict(quiet=(_utc(3, day=5), _utc(4, day=5))) == ("failed", why)
+    assert verdict(quiet=(_utc(3, day=5), _utc(4, day=5)), delayed=True) == (
+        "skipped",
+        f"{why}, on the delayed feed",
     )
     assert verdict(wrong=(wrong,)) == (
+        "failed",
+        "futures-trades: 2 rows after 16:00 Chicago close dated 2026-11-04=2, not 2026-11-05",
+    )
+    # The delayed feed's lag excuses a quiet hour, never a row with the wrong `Date`.
+    assert verdict(quiet=(_utc(3, day=5),), wrong=(wrong,), delayed=True) == (
         "failed",
         "futures-trades: 2 rows after 16:00 Chicago close dated 2026-11-04=2, not 2026-11-05",
     )
 
 
 def test_the_summary_gathers_the_nights_findings(tmp_path: Path) -> None:
-    streams = stream_night.night_streams(["crypto real-time"], tiers={}, night=NIGHT)
+    streams = stream_night.night_streams(["crypto"], night=NIGHT)
     _write_rows(
         tmp_path,
         "crypto-trades-2026-11-04T23.parquet",
@@ -298,11 +313,9 @@ def test_the_summary_gathers_the_nights_findings(tmp_path: Path) -> None:
         "stocks-trades,2026-11-04T22:00,4\n"  # no stream of the night: its rows count for none
     )
     summary = stream_night.summarize_night(
-        tmp_path, streams, units=["crypto real-time"], night=NIGHT, end=_utc(1, 30, day=5)
+        tmp_path, streams, units=["crypto"], night=NIGHT, end=_utc(1, 30, day=5)
     )
-    assert summary["quiet_hours"] == {
-        "crypto real-time": [_utc(22).isoformat(), _utc(0, day=5).isoformat()]
-    }
+    assert summary["quiet_hours"] == {"crypto": [_utc(22).isoformat(), _utc(0, day=5).isoformat()]}
     wrong = [b for b in summary["boundaries"] if b["wrong"]]
     assert [(b["stream"], b["side"], b["wrong"]) for b in wrong] == [("crypto-trades", "after", 1)]
     assert len(summary["boundaries"]) == 6  # three streams, two sides
@@ -313,7 +326,7 @@ def test_the_summary_gathers_the_nights_findings(tmp_path: Path) -> None:
     ]
     assert len(_csv(tmp_path / "boundaries.csv")) == 6
     again = stream_night.summarize_night(
-        tmp_path, streams, units=["crypto real-time"], night=NIGHT, end=_utc(1, 30, day=5)
+        tmp_path, streams, units=["crypto"], night=NIGHT, end=_utc(1, 30, day=5)
     )
     assert again == summary  # a summary written twice holds each row once
     assert len(_csv(tmp_path / "hours.csv")) == 2
@@ -377,7 +390,7 @@ def test_a_night_records_its_rows_and_judges_its_units(
     def bars(m: MassiveSession) -> object:
         return m.stocks.bars(["AAPL"], dm.Timespan.MINUTE)
 
-    stream = Stream("crypto-minute-bars", "crypto real-time", bars)
+    stream = Stream("crypto-minute-bars", "crypto", bars)
     monkeypatch.setattr(stream_night, "night_streams", lambda *_a, **_k: [stream])
     harness = make_ws_session()
     # The bar ends at the night's start, on the fake clock, so its date never depends on when the
@@ -416,19 +429,19 @@ def test_a_night_records_its_rows_and_judges_its_units(
     steps = _record_diagnostics_reads(monkeypatch)
     stream_night.run_stream_night(
         harness.session,
-        units=["crypto real-time"],
-        tiers={"currencies": "starter"},
+        units=["crypto"],
+        delayed=frozenset(),
         night=NIGHT,
         folder=tmp_path,
         until=START + timedelta(seconds=25),
         report=lambda *result: seen.append(result),
         clock=Clock(now=clock.now, wait=clock.wait),
     )
-    assert seen == [("crypto real-time", "passed", "")]
+    assert seen == [("crypto", "passed", "")]
     # The final read of failed streams waits for the queued diagnostics rows to show first.
     assert steps[-2:] == ["wait", "read"]
     assert [r["rows"] for r in _csv(tmp_path / "hours.csv")] == ["1"]
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert (summary["night"], summary["gaps_minutes"]) == ("2026-11-04", 0)
-    assert summary["quiet_hours"] == {"crypto real-time": []}
+    assert summary["quiet_hours"] == {"crypto": []}
     assert summary["reconnects"]

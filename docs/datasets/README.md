@@ -44,7 +44,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | [`m.stocks.last_trade`](stocks.last_trade.md) | The latest trade of each US-listed stock. | `fetch()`, `poll()` |
 | [`m.stocks.quotes`](stocks.quotes.md) | National best bid and offer quotes of US-listed stocks, tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.stocks.last_quote`](stocks.last_quote.md) | The latest national best bid and offer of each US-listed stock. | `fetch()`, `poll()` |
-| [`m.stocks.bars`](stocks.bars.md) | Aggregate bars (open, high, low, close, volume) of US-listed stocks. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.stocks.bars`](stocks.bars.md) | Aggregate bars (open, high, low, close, volume) of US-listed stocks. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.stocks.previous_day_bar`](stocks.previous_day_bar.md) | The previous trading day's bar (open, high, low, close, volume) of US stocks. | `fetch()`, `poll()` |
 | [`m.stocks.luld`](stocks.luld.md) | Limit up-limit down price bands of US-listed stocks, as they change. | `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.stocks.imbalances`](stocks.imbalances.md) | Net order imbalances of US-listed stocks ahead of opening and closing auctions. | `blink()`, `append_only()`, `ring()`, `last_by()` |
@@ -82,14 +82,17 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | [`m.options.trades`](options.trades.md) | Trades of US-listed options contracts (OPRA), tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.options.last_trade`](options.last_trade.md) | The latest trade of each US-listed options contract. | `fetch()`, `poll()` |
 | [`m.options.quotes`](options.quotes.md) | Quotes of US-listed options contracts (OPRA), tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
-| [`m.options.bars`](options.bars.md) | Aggregate bars (open, high, low, close, volume) of US-listed options contracts. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.options.bars`](options.bars.md) | Aggregate bars (open, high, low, close, volume) of US-listed options contracts. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.options.previous_day_bar`](options.previous_day_bar.md) | The previous trading day's open, high, low, close, and volume of options contracts. | `fetch()`, `poll()` |
 | [`m.options.fmv`](options.fmv.md) | Massive's fair market value of US-listed options contracts, streamed in real time. | `blink()`, `append_only()`, `ring()`, `last_by()` |
-| [`m.options.admin_messages`](options.admin_messages.md) | OPRA's administrative messages, including FLEX trade notices, streamed in real time. | `blink()`, `append_only()`, `ring()` |
+| [`m.options.admin_messages`](options.admin_messages.md) | OPRA's administrative messages, including FLEX trade notices, live and past. | `blink()`, `append_only()`, `ring()`, `history()` |
 | [`m.options.chain`](options.chain.md) | The snapshot of every contract in one underlying's option chain. | `fetch()`, `poll()` |
 | [`m.options.snapshots`](options.snapshots.md) | The current snapshot of each requested options contract, with its greeks. | `fetch()`, `poll()` |
-| [`m.options.contracts`](options.contracts.md) | Reference data on options contracts: type, exercise style, expiration, and strike. | `fetch()`, `poll()` |
+| [`m.options.contracts`](options.contracts.md) | Options contracts by underlying: call or put, exercise style, expiration, and strike. | `fetch()`, `poll()` |
+| [`m.options.contract_details`](options.contract_details.md) | The options contracts you name: call or put, exercise style, expiration, and strike. | `fetch()`, `poll()` |
 | [`m.options.daily_open_close`](options.daily_open_close.md) | The open, high, low, close, and volume of each options contract on one day. | `fetch()`, `poll()` |
+| [`m.options.open_interest`](options.open_interest.md) | The open interest of each US-listed options contract at the end of each trading day. | `fetch()`, `poll()` |
+| [`m.options.unusual_trades`](options.unusual_trades.md) | Large trades and sweeps of US-listed options contracts, flagged by Massive. | `fetch()`, `poll()` |
 
 ## Futures
 
@@ -97,7 +100,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | --- | --- | --- |
 | [`m.futures.trades`](futures.trades.md) | Trades of futures contracts, tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.futures.quotes`](futures.quotes.md) | Best bid and offer quotes of futures contracts, tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
-| [`m.futures.bars`](futures.bars.md) | Open, high, low, close, and volume bars of futures contracts. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.futures.bars`](futures.bars.md) | Open, high, low, close, and volume bars of futures contracts. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.futures.snapshots`](futures.snapshots.md) | The latest trade, quote, minute bar, and session of each futures contract. | `fetch()`, `poll()` |
 | [`m.futures.contracts`](futures.contracts.md) | The specification of every listed futures contract. | `fetch()`, `poll()` |
 | [`m.futures.products`](futures.products.md) | The specification of every futures product. | `fetch()`, `poll()` |
@@ -110,7 +113,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | Dataset | Summary | Methods |
 | --- | --- | --- |
 | [`m.indices.values`](indices.values.md) | Index levels, tick by tick, as computed by the index providers. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
-| [`m.indices.bars`](indices.bars.md) | Open, high, low, and close index levels over fixed windows of time. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.indices.bars`](indices.bars.md) | Open, high, low, and close index levels over fixed windows of time. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.indices.previous_day_bar`](indices.previous_day_bar.md) | The previous trading day's open, high, low, and close of each index. | `fetch()`, `poll()` |
 | [`m.indices.snapshots`](indices.snapshots.md) | The current state of each index: its level, its session so far, and its status. | `fetch()`, `poll()` |
 | [`m.indices.daily_open_close`](indices.daily_open_close.md) | One day's opening, closing, high, and low levels of each index. | `fetch()`, `poll()` |
@@ -121,7 +124,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | --- | --- | --- |
 | [`m.forex.quotes`](forex.quotes.md) | Foreign exchange quotes: the best bid and ask of each currency pair, tick by tick. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.forex.last_quote`](forex.last_quote.md) | The latest best bid and ask of each currency pair. | `fetch()`, `poll()` |
-| [`m.forex.bars`](forex.bars.md) | Aggregate bars of currency pairs: open, high, low, close, and volume per window. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.forex.bars`](forex.bars.md) | Aggregate bars of currency pairs: open, high, low, close, and volume per window. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.forex.previous_day_bar`](forex.previous_day_bar.md) | The previous UTC day's open, high, low, close, and volume of each currency pair. | `fetch()`, `poll()` |
 | [`m.forex.fmv`](forex.fmv.md) | Massive's fair market value of each currency pair, streamed as it updates. | `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.forex.snapshots`](forex.snapshots.md) | The current state of currency pairs: today's bar, the last minute, and the last quote. | `fetch()`, `poll()` |
@@ -135,7 +138,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | [`m.crypto.trades`](crypto.trades.md) | Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
 | [`m.crypto.last_trade`](crypto.last_trade.md) | The latest trade of each crypto pair. | `fetch()`, `poll()` |
 | [`m.crypto.quotes`](crypto.quotes.md) | Quotes of crypto pairs: each exchange's best bid and ask, as they change. | `blink()`, `append_only()`, `ring()`, `last_by()` |
-| [`m.crypto.bars`](crypto.bars.md) | Open, high, low, close, and volume bars of crypto pairs, over any time window. | `blink()`, `append_only()`, `ring()`, `last_by()`, `history()` |
+| [`m.crypto.bars`](crypto.bars.md) | Open, high, low, close, and volume bars of crypto pairs, over any time window. | `history()`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.crypto.previous_day_bar`](crypto.previous_day_bar.md) | The previous UTC day's open, high, low, close, and volume of each crypto pair. | `fetch()`, `poll()` |
 | [`m.crypto.fmv`](crypto.fmv.md) | Massive's fair market value of crypto pairs, streamed as it updates. | `blink()`, `append_only()`, `ring()`, `last_by()` |
 | [`m.crypto.snapshots`](crypto.snapshots.md) | The current state of crypto pairs: today's, the last minute's, and yesterday's bars. | `fetch()`, `poll()` |
@@ -228,8 +231,8 @@ Each symbol is Massive's ticker, spelled exactly:
 - Pass one symbol as text, several as a list, or a table with a `Symbol` column.
 - A live table works as a watchlist. Symbols you add are read, and symbols you delete stop being read.
 - A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.
-- In text or a list, any other spelling, such as `aapl`, raises `ValueError`, unless the dataset's page says it takes another source's tickers. In a table, that row is skipped and logged.
-- To convert another source's tickers, such as Yahoo's `BRK-B`, use `dm.canonical_symbol`.
+- In text or a list, any other spelling, such as `aapl`, raises `ValueError`, unless the dataset's page says it takes another source's tickers. In a table, that row is skipped, and `m.problems()` lists it.
+- To convert another source's tickers, use `dm.canonicalize_symbols` for a table or `dm.canonical_symbol` for one value. A stock needs the source's convention: `convention=dm.SymbolConvention.YAHOO` converts Yahoo's `BRK-B` to `BRK.B`. A row that doesn't convert gets a null `Symbol`, which every dataset skips.
 
 <a id="start"></a>
 
@@ -237,7 +240,7 @@ Each symbol is Massive's ticker, spelled exactly:
 
 The first day or moment of the range. Give `start` and `end` as two dates or two instants.
 
-- A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It's the day in the market's time zone: New York for stocks, options, and indices, and UTC for forex and crypto. For futures, it's the trading session that ends that day.
+- A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven `LocalDate`. It's the day in the market's time zone: New York for stocks, options, and indices, and UTC for forex and crypto. For index bars of a day or longer, it's the Chicago day, since Massive starts those bars at midnight Chicago time. For futures, it's the trading session that ends that day.
 - An instant is a Python `datetime` with a time zone, a Deephaven `Instant`, or Deephaven time text such as `"2025-06-02T09:30 ET"`.
 - A dataset whose range is a calendar date, such as an ex-dividend date, takes dates only.
 
@@ -293,7 +296,7 @@ Any other parameter Massive documents for the dataset, as a `dict`. Write each d
 
 ### timespan
 
-The unit of each bar, a `dm.Timespan` member such as `dm.Timespan.MINUTE` or `dm.Timespan.DAY`. Futures take `SESSION` in place of `DAY`. On a bars dataset, one-second and one-minute bars with `multiplier=1` also stream. Bars of other lengths are history only.
+The unit of each bar, a `dm.Timespan` member such as `dm.Timespan.MINUTE` or `dm.Timespan.DAY`. `SESSION`, a trading session, is for futures only; a futures `DAY` bar is one session. On a bars dataset, one-second and one-minute bars with `multiplier=1` also stream. Bars of other lengths are history only.
 
 <a id="multiplier"></a>
 
@@ -305,7 +308,21 @@ How many `timespan` units each bar spans, 1 by default. `timespan=dm.Timespan.MI
 
 ### venues
 
-The futures exchanges whose flat files `history()` reads, as a set of `dm.FuturesVenue` members. The default is all four. Pass the ones your plan includes.
+The futures exchanges whose flat files `history()` reads, as a set of `dm.FuturesVenue` members, such as `{dm.FuturesVenue.CME, dm.FuturesVenue.CBOT}`. Each exchange's file of a day holds every contract it trades, so naming fewer exchanges downloads less.
+
+Massive refuses the files of an exchange your plan doesn't include. `history()` reads REST instead when REST can serve the read. When it must read flat files (`dm.ALL`, or `source=dm.HistorySource.FLAT_FILES`):
+
+- Left out, the read tries every exchange and skips each one Massive refuses. It logs one warning naming them. The table's description names them too. For a watchlist, each symbol's `Transport` in `m.symbol_reads()` shows them instead.
+- An exchange you name follows the `refused_venues` cause of [`on_error`](#on_error).
+- If Massive refuses every exchange, the read fails.
+
+<a id="on_error"></a>
+
+### on_error
+
+A `dm.ErrorPolicy` that sets what each kind of problem does in this call, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`. A problem is one bad symbol, row, file line, or refused futures exchange, and each kind is a cause. Each cause the policy leaves unset follows the session's `MassiveConfig.on_error`, then `dm.ErrorPolicy.DEFAULTS`. Leave `on_error` out, or pass None, to take every cause from the session. By default every cause logs, except `refused_venues`, which raises. `help(dm.ErrorPolicy)` lists the causes. [Bad symbols and rows](https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error) says what each value does.
+
+A live call whose policy changes any cause's setting gets its own stream in `m.streams()`.
 
 ## Column types
 

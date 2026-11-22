@@ -9,6 +9,8 @@ from deephaven_massive._massive.net import codec
 
 _LOGGER = "deephaven_massive._massive.net.codec"
 
+_TOO_DEEP = r"^The JSON nests deeper than 512 arrays and objects\.$"
+
 # Documents both decoders must reject, with what makes each malformed.
 MALFORMED = {
     "not UTF-8": b'{"a": "\xff"}',
@@ -109,6 +111,20 @@ def test_stdlib_rejects_malformed_input_with_value_error(data: bytes) -> None:
     assert _value_error_of(data) is not None
 
 
+@pytest.mark.usefixtures("stdlib")
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        (b'{"a": NaN}', "JSON does not allow NaN."),
+        (b'{"a": -Infinity}', "JSON does not allow -Infinity."),
+        (b'{"a": 1e400}', "The JSON number 1e400 is too large for a double."),
+    ],
+    ids=["NaN", "-Infinity", "too large"],
+)
+def test_stdlib_names_the_value_json_does_not_allow(data: bytes, expected: str) -> None:
+    assert str(_value_error_of(data)) == expected
+
+
 @pytest.mark.parametrize("data", MALFORMED.values(), ids=MALFORMED.keys())
 def test_orjson_rejects_the_same_input_with_value_error(
     monkeypatch: pytest.MonkeyPatch, data: bytes
@@ -163,20 +179,20 @@ def test_stdlib_decodes_a_document_exactly_at_the_limit(as_bytes: bool) -> None:
 def test_stdlib_rejects_a_document_one_level_too_deep(as_bytes: bool) -> None:
     # The scan rejects before decoding, so depth 513 never reaches the recursive decoder.
     text = _nested(513)
-    with pytest.raises(ValueError, match="JSON nests deeper than 512 arrays and objects"):
+    with pytest.raises(ValueError, match=_TOO_DEEP):
         codec.loads(text.encode() if as_bytes else text)
 
 
 @pytest.mark.usefixtures("stdlib")
 def test_stdlib_checks_the_depth_of_a_bytearray() -> None:
-    with pytest.raises(ValueError, match="JSON nests deeper than 512 arrays and objects"):
+    with pytest.raises(ValueError, match=_TOO_DEEP):
         codec.loads(bytearray(_nested(513).encode()))
 
 
 @pytest.mark.usefixtures("stdlib")
 def test_stdlib_counts_objects_as_well_as_arrays() -> None:
     text = '{"a":' * 257 + "[" * 256 + "0" + "]" * 256 + "}" * 257
-    with pytest.raises(ValueError, match="nests deeper than 512"):
+    with pytest.raises(ValueError, match=_TOO_DEEP):
         codec.loads(text)
 
 
@@ -205,7 +221,7 @@ def test_stdlib_ignores_brackets_inside_strings(text: str) -> None:
     ids=["closers in a string", "escaped backslash"],
 )
 def test_stdlib_strings_do_not_hide_depth(inner: str) -> None:
-    with pytest.raises(ValueError, match="nests deeper than 512"):
+    with pytest.raises(ValueError, match=_TOO_DEEP):
         codec.loads(_nested(513, inner))
 
 
@@ -220,3 +236,29 @@ def test_orjson_decodes_a_valid_document_as_the_standard_library_does(
 ) -> None:
     monkeypatch.setattr(codec, "_orjson", pytest.importorskip("orjson"))
     assert codec.loads(VALID) == VALID_DECODED == json.loads(VALID)
+
+
+def test_a_document_with_an_integer_orjson_would_round_is_decoded_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # orjson reads an integer past the unsigned 64-bit range as a rounded float, which a double
+    # field would take as Massive's value; such a document goes to the standard library.
+    calls: list[object] = []
+
+    def fake_loads(data: object) -> object:
+        calls.append(data)
+        return {"p": 1.8446744073709552e19}
+
+    monkeypatch.setattr(codec, "_orjson", types.SimpleNamespace(loads=fake_loads))
+    for data in (b'{"p": 18446744073709551617}', '{"p": 18446744073709551617}'):
+        assert codec.loads(data) == {"p": 18446744073709551617}
+    assert calls == []
+    assert codec.loads(b'{"p": 9007199254740993}') == {"p": 1.8446744073709552e19}
+    assert calls == [b'{"p": 9007199254740993}']
+
+
+def test_a_document_with_an_integer_below_the_signed_range_is_decoded_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(codec, "_orjson", types.SimpleNamespace(loads=lambda _data: {"p": -1.0}))
+    assert codec.loads(b'{"p": -9223372036854775809}') == {"p": -9223372036854775809}

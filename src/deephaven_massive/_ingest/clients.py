@@ -26,7 +26,7 @@ import weakref
 from typing import TYPE_CHECKING
 
 from deephaven_massive import _massive
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import SessionClosedError, session_closed
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.rest import RestEndpoints, RestState
@@ -37,12 +37,14 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._enums import AssetClass, ChannelFamily
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._massive import Cancel, FlatFileClient
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import (
         FlatFileTransport,
         HostDecision,
         StreamTransport,
+        Unsplit,
     )
 
 __all__ = ["CONNECTION_SETTINGS", "SessionClients"]
@@ -69,9 +71,10 @@ class SessionClients:
 
         No client is created yet. The lease comes from the process's registry
         (`rate_limits.GOVERNORS`), keyed by the configuration's API key and REST base URL,
-        declaring its `rest_basic_subscriptions`; its release is registered as a session
-        closer. The governor's listener and the source of the `m.rate_limits()` rows are the
-        core's diagnostics, which hold no reference to the core.
+        declaring its `rest_requests_per_minute`; its release is registered as a session
+        closer. The governor's listeners, of its changes and of its pauses, and the source of
+        the `m.rate_limits()` rows are the core's diagnostics, which hold no reference to the
+        core.
 
         Args:
             core: The session's core, for its configuration, its `registry_lock`, its
@@ -84,9 +87,10 @@ class SessionClients:
         self._lease = rate_limits.GOVERNORS.lease(
             api_key=config.api_key,
             base_url=config.rest_base_url,
-            basic=config.rest_basic_subscriptions,
+            limits=config.rest_requests_per_minute,
             label=core.label,
             listener=diagnostics.rate_limits_changed,
+            on_pause=diagnostics.pause_changed,
         )
         core.on_close(self._lease.release)
         diagnostics.watch_rate_limits(
@@ -106,12 +110,12 @@ class SessionClients:
             The core.
 
         Raises:
-            MassiveError: If the core has been garbage-collected: the session is gone, as if
-                closed (`"MassiveSession #1 is closed"`).
+            SessionClosedError: If the core has been garbage-collected: the session is gone, as
+                if closed (`"This session is closed. ..."`).
         """
         core = self._core()
         if core is None:
-            raise MassiveError(f"{self._label} is closed")
+            raise SessionClosedError(session_closed())
         return core
 
     def rest(self) -> RestEndpoints:
@@ -142,7 +146,7 @@ class SessionClients:
             state = self._rest
         if state is None:
             config = core.config
-            warnings = rate_limits.RateLimitNotices(core.label, config.rest_basic_subscriptions)
+            warnings = rate_limits.RateLimitNotices(core.label, config.rest_requests_per_minute)
             candidate = RestState(
                 _massive.RestClient(
                     config.api_key,
@@ -218,16 +222,18 @@ class SessionClients:
         """
         return self.rest().resolve_host(asset_class, family)
 
-    def _crypto_pair(self, symbol: str) -> tuple[str, str]:
+    def _crypto_pair(self, symbol: str, policy: ResolvedPolicy) -> tuple[str, str] | Unsplit:
         """Return a crypto ticker's base and quote through the session's REST transport.
 
         Args:
             symbol: A canonical crypto ticker.
+            policy: The stream's resolved policy (`RestTransport.crypto_pair`).
 
         Returns:
-            `(base, quote)`, cached for the session by the REST transport.
+            `(base, quote)`, from the list the REST transport keeps for the session, or why
+            the pair has none (`Unsplit`).
         """
-        return self.rest().crypto_pair(symbol)
+        return self.rest().crypto_pair(symbol, policy)
 
     def _fetch_rows(
         self, template: str, query: Mapping[str, object], *, bucket: str, cancel: Cancel
@@ -274,7 +280,8 @@ class SessionClients:
         access_key_id, secret_access_key = config.s3_access_key_id, config.s3_secret_access_key
         if access_key_id is None or secret_access_key is None:
             raise ValueError(
-                "flat files need MassiveConfig s3_access_key_id and s3_secret_access_key"
+                "Reading flat files needs S3 credentials. Pass s3_access_key_id and "
+                "s3_secret_access_key to dm.MassiveConfig."
             )
         factory = _massive.FlatFileClient
         with core.registry_lock:

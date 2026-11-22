@@ -194,8 +194,8 @@ def test_the_futures_snapshot_ticker_and_product_code_are_read_where_the_schema_
     # them under `details`, as the schema declares, so no key fix moves them.
     assert not [key for key in overrides.KEY_FIXES if key[0] == "/futures/v1/snapshot"]
     futures = spec.source(Transport.REST, "/futures/v1/snapshot")
-    assert futures.field("DetailsTicker").wire_key == "details.ticker"
-    assert futures.field("DetailsProductCode").wire_key == "details.product_code"
+    assert futures.field("Ticker").wire_key == "details.ticker"
+    assert futures.field("ProductCode").wire_key == "details.product_code"
 
 
 def test_the_option_chain_day_bar_and_break_even_may_be_absent() -> None:
@@ -310,3 +310,64 @@ def test_kind_groups_are_asset_classes_in_their_order() -> None:
     for kind, groups in overrides.KINDS.items():
         assert set(groups) <= set(rank), kind
         assert list(groups) == sorted(groups, key=rank.__getitem__), kind
+
+
+_CHAIN = "/v3/snapshot/options/{underlyingAsset}"
+
+
+def test_every_spelling_cites_a_source_and_gives_a_reason() -> None:
+    for entry in overrides.SPELLINGS.values():
+        assert entry.source
+        assert entry.reason
+        assert entry.long_name == naming.snake(entry.long_name)
+        assert entry.long_name or not entry.whole_key
+    for shared in overrides.SHARED_DESCRIPTIONS.values():
+        assert shared.reason
+        assert len(shared.long_names) >= 2
+        assert all(name == naming.snake(name) for name in shared.long_names)
+
+
+def test_every_shared_description_is_single_spaced_text() -> None:
+    assert all(text == " ".join(text.split()) for text in overrides.SHARED_DESCRIPTIONS)
+
+
+def test_the_option_chain_takes_the_contracts_names_for_its_details() -> None:
+    contracts = spec.source(Transport.REST, "/v3/reference/options/contracts")
+    chain = spec.source(Transport.REST, _CHAIN)
+    names = ("ContractType", "ExerciseStyle", "ExpirationDate", "SharesPerContract", "StrikePrice")
+    for column in names:
+        assert chain.field(column).wire_key.startswith("details.")
+        assert contracts.field(column).wire_type == chain.field(column).wire_type
+    assert chain.field("LastQuoteBidPrice").wire_key == "last_quote.bid"
+    assert not any(field.column.startswith("Details") for field in chain.fields)
+
+
+def test_the_futures_snapshot_takes_the_quote_and_trade_names() -> None:
+    futures = spec.source(Transport.REST, "/futures/v1/snapshot")
+    assert futures.field("ProductCode").wire_key == "details.product_code"
+    assert futures.field("LastQuoteAskPrice").wire_key == "last_quote.ask"
+    assert futures.field("LastQuoteTimestamp").wire_key == "last_quote.last_updated"
+    assert futures.field("LastTradeTimestamp").wire_key == "last_trade.last_updated"
+
+
+def test_the_option_chain_takes_the_v2_snapshots_names_for_its_day_change() -> None:
+    chain = spec.source(Transport.REST, _CHAIN)
+    stocks = spec.source(Transport.REST, "/v2/snapshot/locale/us/markets/stocks/tickers")
+    assert chain.field("TodaysChange").wire_key == "day.change"
+    assert chain.field("TodaysChangePerc").wire_key == "day.change_percent"
+    assert stocks.field("TodaysChange").wire_key == "todaysChange"
+    assert stocks.field("TodaysChangePerc").wire_key == "todaysChangePerc"
+
+
+def test_a_whole_key_spelling_names_a_field() -> None:
+    for (source, key), entry in overrides.SPELLINGS.items():
+        if entry.whole_key:
+            assert key in {f.wire_key for f in spec.source(Transport.REST, source).fields}, key
+
+
+def test_the_conversion_s_last_quote_takes_the_snapshot_s_quote_names() -> None:
+    conversion = spec.source(Transport.REST, "/v1/conversion/{from}/{to}")
+    assert conversion.field("LastQuoteBidPrice").wire_key == "last.bid"
+    assert conversion.field("LastQuoteAskPrice").wire_key == "last.ask"
+    assert conversion.field("LastQuoteExchange").wire_key == "last.exchange"
+    assert conversion.field("LastQuoteParticipantTimestamp").wire_key == "last.timestamp"

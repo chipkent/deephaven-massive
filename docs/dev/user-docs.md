@@ -9,26 +9,29 @@ against this standard. Docstrings follow the `writing-docstrings` skill, which h
 editor grade a public docstring as reference text. PR descriptions follow
 [`pull-requests.md`](pull-requests.md).
 
-The bar is a page an O'Reilly development editor would send to print, and that every reader
-finishes thinking the library is simple. The library is simple: one pattern, a session, a
-query, and a method that returns a Deephaven table. A reader who comes away thinking it's hard
-was misled by the page.
+The bar is a page an O'Reilly development editor would send to print. That editor checks
+organization, clarity, concision, level of detail for the reader, and length, in that order;
+correct sentences come last. Every reader finishes thinking the library is simple, because it
+is: a session, a query, and a method that returns a Deephaven table. A reader who comes away
+thinking it's hard was misled by the page. [How an editor writes](#method) is the method, and
+it applies to every text an agent writes, not only user pages.
 
 Contents:
 
 1. [This project](#this-project): readers, pains, owner requirements, page map, install facts,
    teaching plan
-2. [Facts need sources](#accuracy)
-3. [Scope: only what the reader needs here](#placement)
-4. [The hook](#hook)
-5. [Headings and example titles](#headings)
-6. [Teaching with examples](#teaching)
-7. [Sentences](#sentences)
-8. [AI tells](#ai-tells)
-9. [Terminology](#terminology)
-10. [Section models](#models)
-11. [Anchors](#anchors)
-12. [Grading and the pass bar](#rubric)
+2. [How an editor writes](#method): the eight rules and the budgets
+3. [Facts need sources](#accuracy)
+4. [Scope: only what the reader needs here](#placement)
+5. [The hook](#hook)
+6. [Headings and example titles](#headings)
+7. [Teaching with examples](#teaching)
+8. [Sentences](#sentences)
+9. [AI tells](#ai-tells)
+10. [Terminology](#terminology)
+11. [Section models](#models)
+12. [Anchors](#anchors)
+13. [Grading and the pass bar](#rubric)
 
 <a id="this-project"></a>
 
@@ -64,7 +67,7 @@ and keep numbers out of it unless you cite where they come from.
 | Reader | Pain | What the library changes |
 |---|---|---|
 | Quant researcher | Months go into data infrastructure before an idea is tested, and research code is rewritten for live trading | One query gives history and a live table with the same columns, and the same Deephaven code runs on both |
-| Quant researcher | Finding affordable data and making it usable | 112 datasets, listed by `dm.datasets()`, each with documented columns |
+| Quant researcher | Finding affordable data and making it usable | Over a hundred datasets, listed by `dm.datasets()`, each with documented columns |
 | Quantitative trader | A signal waits on live infrastructure before it trades; screeners don't compute their own signal, live | Their own signal on their own stocks is a live table, a few lines in a browser console |
 | Vibe coder | The assistant builds the prototype but not the real-time parts | Live tables, reconnects, and watchlist-driven subscriptions are already built; the assistant writes table logic |
 | Software engineer | A real-time stack is several systems and most of a year of work | The feed, the processing, and the UI are one Python process of Deephaven tables |
@@ -91,7 +94,7 @@ later date refines an earlier one:
 | Order | Don't bury the lead: the hook, then Install, then the tutorial. Install reaches the first result by the shortest path and sets every key in one step. Reference (environment variables, settings, configuration tables) comes after the tutorial. | 11-05 |
 | Install | Best practice: in order, scannable, every command working as written. Install from PyPI, by package name with no version. Offer `pip` and `uv` as a choice stated up front. Set every key in one step. | 11-03, 11-04 |
 | Configuration | Environment variables say what the reader gets from each. Settings made in code are documented with `MassiveConfig`, the object they belong to. Every configuration concept a page mentions links to its reference page, generated from the code: `docs/configuration.md` for `MassiveConfig` and the settings file. | 11-04, 11-05 |
-| Examples | Each is complete and runs as pasted, with its imports and session. Each says the plan it needs, any setting, and how to run it, then what you see. A free-plan example comes first. The examples form a visible teaching progression, written as a teacher writes. | 11-04 |
+| Examples | Each is complete and runs as pasted, with its imports and session. Under its heading, a `**Plan:**` line names the plans that run it, in Massive's names, and a test checks it against Massive's spec; its prose names no plan (decision 126). Each says any setting and how to run it, then what you see. A free-plan example comes first. The examples form a visible teaching progression, written as a teacher writes. | 11-04 |
 | Terms | Industry-standard words: Massive's for its data, Deephaven's for its operations, practitioners' for market concepts, Python's for Python. | 11-04 |
 | Deephaven and Massive | Describe Deephaven in its own terms, from deephaven.io. Keep Massive's names for its products, datasets, and columns. Dates in examples are ISO strings. | 10-27, 10-28, 11-03 |
 | Coverage | Live tables driven by a watchlist; which plans include each dataset, generated so it follows Massive's changes; split adjustment, documented with the `adjusted` argument; how to filter out a known problem in Massive's data; column meanings on the generated dataset pages. | 10-27, 10-28, 10-30, 11-02 |
@@ -108,7 +111,7 @@ Each fact has one home, and other pages link to it:
 
 | Page | Owns |
 |---|---|
-| `README.md` | The hook, Install, the teaching examples, Configuration (environment variables and the `MassiveConfig` settings a new user needs), next steps, contributing |
+| `README.md` | The hook, Install, the teaching examples and their plans table (generated), Configuration (environment variables and the `MassiveConfig` settings a new user needs), next steps, contributing |
 | `docs/configuration.md` | Every `MassiveConfig` setting, its settings-file key, values, and default, and how to write and load a settings file; the settings are generated from the code |
 | `docs/troubleshooting.md` | Every message and symptom with its fix, the diagnostics tables, the log, reporting a bug |
 | `docs/datasets/` | Each dataset's call, methods, arguments, plans, and columns; generated, never edited by hand |
@@ -148,38 +151,45 @@ Each of these has a source. Check it again before you write:
 - `deephaven server` prints a line starting `Deephaven is running at` and opens the Deephaven
   IDE in the browser, signed in (`deephaven_server/cli.py`). `-Xmx4g` is the example on
   Deephaven's install page; no source gives a minimum memory or a startup time.
-- The `MassiveConfig` settings a new user needs are `rest_basic_subscriptions` (free Basic
-  plans, five requests a minute) and `delayed_subscriptions` (Starter and Developer plans that
-  stream late).
+- The `MassiveConfig` settings a new user needs are `rest_requests_per_minute` (each
+  subscription's request limit, when Massive limits it) and `delayed_subscriptions` (each
+  subscription Massive serves delayed).
 
 <a id="teaching-plan"></a>
 
 ### Teaching plan
 
-Approved by the owner on 2026-11-04. Each example adds one idea, in dependency order: the call
-pattern, static tables, charts, polling, stopping, watchlists, settings, then streaming. Each
-title names the idea, then what the example does. Examples 1 to 7 run on Stocks Basic, the free
-plan, and 8 to 13 on Stocks Starter or higher.
+Approved by the owner on 2026-11-04, with stopping moved last on 2026-11-13, the problems
+table added before it on 2026-11-16, and the options example added on 2026-11-17. The Yahoo conversion became its own example on 2026-11-17, so that
+Example 6 keeps one idea. Each example adds one idea,
+in dependency order: the call pattern, static tables, charts, polling, watchlists, other sources'
+symbols, settings, streaming, options, problems, then stopping. Each title names the idea, then what the
+example does.
+Each example's Plan line follows from the data it reads, and
+`tests/datasets/test_readme_plans.py` checks it against Massive's spec.
 
-| # | Title | Builds on | Plan |
-|---|---|---|---|
-| 1 | Queries: read a week of Apple's daily bars | | Stocks Basic |
-| 2 | Symbol lists: rank every listed US stock by one day's dollar volume | 1 | Stocks Basic |
-| 3 | Date ranges: compare three stocks' price returns over a year | 1, 2 | Stocks Basic |
-| 4 | Charts: plot a stock's daily closes for a year | 3 | Stocks Basic |
-| 5 | Live tables: poll for the latest news headlines | 1 to 3 | Stocks Basic |
-| 6 | Stopping live tables: stop the news feed and keep a snapshot | 5 | Stocks Basic |
-| 7 | Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes | 5, 6 | Stocks Basic |
-| 8 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 | Stocks Starter or higher |
-| 9 | Streaming: stream minute bars for the stocks on your list | 7, 8 | Stocks Starter or higher |
-| 10 | Live calculations: track each stock's change since the previous close | 7, 9 | Stocks Starter or higher |
-| 11 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 9 | Stocks Starter or higher |
-| 12 | Backfill: start with today's minute bars, then continue live | 3, 11 | Stocks Starter or higher |
-| 13 | Dashboards: show a live chart and table together with deephaven.ui | 4, 10 | Stocks Starter or higher |
+| # | Title | Builds on |
+|---|---|---|
+| 1 | Queries: read a week of Apple's daily bars | |
+| 2 | Symbol lists: rank every listed US stock by one day's dollar volume | 1 |
+| 3 | Date ranges: compare three stocks' price returns over a year | 1, 2 |
+| 4 | Charts: plot a stock's daily closes for a year | 3 |
+| 5 | Live tables: poll for the latest news headlines | 1 to 3 |
+| 6 | Loading data for new symbols without restarting: add and remove stocks from a live table of previous closes | 5 |
+| 7 | Symbols from another source: convert Yahoo tickers to Massive's | 6 |
+| 8 | Plans and settings: load your settings from a file and read a delayed market snapshot | 1 |
+| 9 | Streaming: stream minute bars for the stocks on your list | 6, 8 |
+| 10 | Live calculations: track each stock's change since the previous close | 6, 9 |
+| 11 | Table types: keep the latest bar, the last 30 minutes, or the whole stream since you started | 9 |
+| 12 | Backfill: start with today's minute bars, then continue live | 3, 11 |
+| 13 | Dashboards: show a live chart and table together with deephaven.ui | 4, 10 |
+| 14 | Options: read one expiry of a stock's calls | 8 |
+| 15 | Problems: see what went wrong in your tables | 1 |
+| 16 | Stopping live tables: release one table or close the session | 5 |
 
 The owner's decisions behind it:
 
-- Example 7's title is the owner's wording. Examples 3 and 11 say "price returns" and "table
+- Example 6's title is the owner's wording. Examples 3 and 11 say "price returns" and "table
   types" (Deephaven's word), where the approved draft said "returns" and "live-table shapes".
 - Example 8 loads its settings with `dm.MassiveConfig.from_file`. `dm.MassiveConfig()` never
   reads a file, and `DEEPHAVEN_MASSIVE_CONFIG_FILE` names the file only for `from_file()` with
@@ -187,9 +197,118 @@ The owner's decisions behind it:
 - Examples 4 and 13 use the Deephaven Express and deephaven.ui plugins, which
   `deephaven-server` doesn't include, so the install command adds them.
 - Stock streams carry data only while stocks trade, so the streaming examples say so and
-  offer crypto, which trades around the clock. Free-plan examples stay under five requests a
-  minute where they poll.
+  offer crypto, which trades around the clock. Examples that poll stay under five requests a minute.
 - Install ends by starting the server and hands off to Example 1, without repeating its code.
+- Stopping comes last (owner, 2026-11-13: "Why not put the close example as the last one?
+  Simple fix."), so no earlier example closes a session a later one needs. It runs on its own,
+  making the live tables it stops, and says to open a new session after closing ("the close
+  example could have a note about needing to recreate the session to run other examples").
+
+<a id="method"></a>
+
+## How an editor writes
+
+Correct sentences are not enough. A page can be free of every tell and still be unreadable,
+because it is organized for the code and not for the reader. These eight rules are what the
+grader checks first.
+
+### Eight rules
+
+1. **Write for the reader's next action.** Name the reader and what they will do after
+   reading: set a value, fix a row, decide to merge, call a method. Every sentence serves that
+   action. What the code does on the way is mechanism, and mechanism is cut unless the reader
+   acts on it.
+
+2. **Rule first, then the exception.** State the general rule in one short sentence. Then the
+   exception a reader can actually hit, in its own sentence. Never write out a decision tree
+   as prose: "A, and B when C, or D unless E" is a table or three sentences. A case that
+   belongs to another subject moves there, with a link. A case nobody hits is cut.
+
+3. **One case per sentence.** One subject, one verb, one case. Joins that smuggle a second
+   case into a sentence: ", and ... when", ", or ... unless", "; ", ": ", "as X does", "X,
+   say", "until Y". Each is a place to end the sentence.
+
+4. **Three or more parallel cases are a list or a table**, never a paragraph. Term and
+   definition: a list with the term first, as O'Reilly's variable list. Steps: a numbered
+   list. Symptom and fix, before and after, setting and effect: a table with one case per row.
+
+5. **Show, then tell.** Where a reader could misread a rule, give the example before the rule,
+   or the before-and-after. Say why, not only what: "so a table never fails over one bad row."
+
+6. **Use the reader's word, and define any other at first use.** Massive's word for its data,
+   Deephaven's for tables, Python's for Python, and code font for every value, `DEBUG`
+   included. No name coined inside a PR or a plan, no decision or item number in place of the
+   fact. If a term needs defining and the reader won't meet it again, don't use it.
+
+7. **Say it once.** A fact lives on one page, in one sentence. Say it again only through a
+   different channel: an example, a table, a comment in code.
+
+8. **Read it aloud.** If you'd stop for breath mid-sentence, or you wouldn't say it to a
+   colleague over coffee, rewrite it. Aim for sentences of 20 words or fewer on average, and
+   cut every sentence the reader wouldn't miss.
+
+### Budgets
+
+A length a text can't meet is a sign it holds the wrong facts, not a reason to compress.
+
+- A setting's reference entry: the rule, the values, where to see the effect, and the one
+  exception a user hits. About 120 words. It opens "Set `<value>` when ...", never "Change it
+  when ...".
+- A troubleshooting row: one symptom, one cause, one fix.
+- A verification item: three short sentences: what is unknown, what the library does
+  meanwhile, which test settles it.
+- A rule in `AGENTS.md`: the rule in one sentence, the reason in one.
+- A PR description: under about 600 words. The Summary is two to four sentences. "Check
+  before merging" is at most seven one-line items; an approval is its decision number or the
+  quoted question and the owner's quoted, dated answer. No history of the branch's earlier
+  forms, and no table of
+  differences from `main`.
+
+### Examples
+
+Before, the entry for one setting (`docs/configuration.md`, 2026-11-15):
+
+> Under `log` or `ignore`, a pair the list doesn't hold is one Massive has no data for: a
+> stream keeps its other pairs and lists the skipped ones in its `m.streams()` row's `Error`,
+> until a live table's rows are deleted; a `poll()` lists the pair in `Error`; and a `fetch()`
+> of a live table shows it `DONE` with 0 rows in `m.symbol_reads()`. A stream or `fetch()`
+> whose pairs are all skipped opens and gives no rows. A pair the library couldn't look up,
+> because the list couldn't be read, is not skipped when you pass it in code: a stream raises
+> that read's error at the call. [...]
+
+Eleven cases in seven sentences, in the code's order, and no sentence states the rule. After:
+
+> A crypto pair that isn't on Massive's crypto ticker list is a pair Massive has no data
+> for. By default the library skips it and runs the rest of your pairs, so one bad pair never
+> stops a table. Set `raise` when a stream must not run without every pair you asked for.
+>
+> [the three values]
+>
+> To see which pairs were skipped, read the table's `Error` in `m.streams()`. [...]
+>
+> If Massive's ticker list itself can't be read, no pair can be checked, and the failed read
+> is the error. [...]
+
+The rule, then where to look, then the one exception, each its own paragraph.
+
+Before, a troubleshooting row:
+
+> The table skips a row that isn't Massive's exact ticker and lists it in `Error`. A crypto
+> stream does the same with a pair Massive doesn't list, and a `poll()` or `fetch()` gives that
+> pair no rows. In a watchlist made by `dm.canonicalize_symbols`, a row that didn't convert has
+> a null `Symbol`: every dataset skips it, and `Error` doesn't list it.
+
+After, as two rows, each with one symptom:
+
+> A symbol on your watchlist never appears | The row isn't Massive's exact ticker, so the
+> table skips it and names it in `Error`. | Fix the row. `symbols` shows Massive's spelling
+> for each asset class.
+>
+> A converted row never appears | `dm.canonicalize_symbols` couldn't convert it, so its
+> `Symbol` is null and every dataset skips it. | `watchlist.where("isNull(Symbol)")` lists
+> the rows to fix in the table you converted.
+
+The crypto case moved to its own row. The three symptoms stopped sharing one cell.
 
 <a id="accuracy"></a>
 
@@ -286,8 +405,9 @@ Readers scan the first two or three words of a heading (NN/g, *First 2 Words*).
 The examples teach the library, so there's no "How it works" section. They follow worked-example
 research (Sweller), Diátaxis tutorials, and the Rust book:
 
-- **Goal before code.** One to three sentences: the question a trader or researcher asks, the
-  plan it needs, and how to run it. Nothing about how the code works yet.
+- **Goal before code.** A Plan line under the title names the plans that run it. Then one to
+  three sentences: the question a trader or researcher asks, and how to run it. Nothing about
+  how the code works yet.
 - **One new idea per example.** The code is at most about 15 lines, complete, with realistic
   symbols and dates, and brings in one idea the reader hasn't met. Two or three comments label
   steps; they don't narrate.
@@ -304,10 +424,11 @@ research (Sweller), Diátaxis tutorials, and the Rust book:
 
 ## Sentences
 
-- **Point first.** Open each section and paragraph with its point. A reader who reads only
-  first sentences should follow the page.
-- **One idea per sentence**, about 15 to 20 words on average. The subject and its verb sit
-  close together: more than about eight words between them is a digression.
+- **Rule first.** Open each section and paragraph with its rule, then the exception. A
+  reader who reads only first sentences should know what the library does.
+- **One case per sentence**, 20 words or fewer on average. The subject and its verb sit
+  close together. A second case joined by "and ... when", "or ... unless", a semicolon, or a
+  colon is a second sentence.
 - **State a choice up front.** "Create an environment with venv or uv:", then the two blocks
   side by side. Never "do A", other material, then "or you could do B".
 - **One topic per paragraph.** Every sentence's subject is about the paragraph's topic; a
@@ -320,18 +441,22 @@ research (Sweller), Diátaxis tutorials, and the Rust book:
 
 ## AI tells
 
-One tell proves nothing; readers hear a cluster. Structural tells are what made the owner call
-a page AI-written, and a word list can't see them, so check structure first:
+One tell proves nothing; readers hear a cluster. The owner calls two things AI-written: the
+lexical tells a word list finds, and precise, exhaustive prose that enumerates every case the
+code handles. The second passes every word check, so check structure first:
 
 | Tell | Test | Fix |
 |---|---|---|
 | Asides: appositives and parentheticals ("Massive (formerly Polygon.io)", "a watchlist, a table of symbols you edit,") | Delete the aside. Is the point intact? Does this reader need it here? | Delete it, or give it its own sentence where it's needed |
 | Stacked clauses: two or more of ", such as", ", which", ", including", "like" in one sentence | Count them | One per sentence |
+| Case stacking: "A, and B when C, or D unless E"; a semicolon or colon chain | Count the cases in the sentence | One case per sentence, or a table |
+| The code's order: cases listed in the order the implementation checks them, with no sentence stating the rule | Can the reader say the rule after the first sentence? | Rule first, then the exception a reader hits; cut the rest |
+| An enumerated paragraph: three or more parallel cases in prose | Count them | A list or a table |
 | A, digression, "or B" | Does an alternative come more than a sentence after its option? | State "A or B:" up front |
 | Topic drift | Underline each subject. Is each about the topic sentence? | Cut or move the sentence |
 | Repetition | A content word repeated in a heading or sentence; a phrase of four words or more reused on the page; a fact stated twice | Say it once |
 | Invented numbers | Can the number be traced to a source? | Cite it or cut it |
-| Caveat before the point | Does the paragraph open with "If", "On", "Once", or "Until"? | Point first |
+| Caveat before the point | Does the paragraph open with "If", "On", "Once", or "Until"? | Rule first |
 | Defensive justification | Would the reader act differently without the "because"? | Cut it |
 | Narrating code | Does the prose restate what the code says? | Say what to notice instead |
 
@@ -435,7 +560,7 @@ guess. The page passes when every file is right and nothing is left to guess. Th
 
 ### Examples
 
-Each example has a goal-first title, the goal and plan in one to three sentences, one complete
+Each example has a goal-first title, a Plan line, the goal in one to three sentences, one complete
 block, then what to notice and the one idea, and a bridge to the next. See
 [Teaching with examples](#teaching).
 
@@ -477,5 +602,7 @@ rewrites its intent or content, and it judges a revised hook against the approve
 clarity and directness. A page passes when both graders pass it with a mean holistic score of 9
 or more.
 
-A page gets at most two grading rounds. One still short of the bar after the second goes to the
-owner with its graders' score sheets, and nobody loops on it further.
+A page ships only at a passing grade. One still short of the bar after patching is rewritten
+from its outline and graded again by fresh graders, at most three times. If the third grade
+doesn't pass, the owner gets the failing passage and the graders' score sheets as a request
+for help, never as finished text.

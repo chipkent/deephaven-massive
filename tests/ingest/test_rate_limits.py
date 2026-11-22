@@ -16,17 +16,19 @@ from deephaven_massive._enums import Subscription
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.rate_limits import (
     BUCKETS,
-    CONSOLE_ADVICE,
     CONSOLE_PATIENCE,
     LEARN_ONLY,
+    LIVE_TABLE_ADVICE,
     OTHER,
     READ_PATIENCE,
     GovernorRegistry,
     PaceCheck,
     RateLimitNotices,
     ReadShape,
+    Waiter,
     announce,
     bucket_of,
+    console_advice,
     rate_limit_rows,
     read_patience,
 )
@@ -34,11 +36,13 @@ from deephaven_massive._tables.diagnostics import LimitSource, RateLimitState
 from tests._fakes.clock import FakeClock
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from deephaven.execution_context import ExecutionContext
 
 LOGGER = rate_limits.__name__
 URL = "https://api.massive.com"
-BASIC = "You've exceeded the maximum requests per minute"
+PER_MINUTE = "You've exceeded the maximum requests per minute"
 
 
 def _registry(clock: FakeClock) -> GovernorRegistry:
@@ -52,17 +56,23 @@ def _lease(
     *,
     api_key: str = "key-1",
     base_url: str = URL,
-    basic: frozenset[Subscription] = frozenset(),
+    limits: dict[Subscription, int] | None = None,
     label: str = "MassiveSession #1",
     listener: object = None,
+    on_pause: Callable[[_massive.PauseNotice], None] | None = None,
 ) -> rate_limits.GovernorLease:
     return registry.lease(
         api_key=api_key,
         base_url=base_url,
-        basic=basic,
+        limits=limits or {},
         label=label,
         listener=listener if callable(listener) else (lambda: None),
+        on_pause=on_pause or _ignore_pause,
     )
+
+
+def _ignore_pause(notice: _massive.PauseNotice) -> None:
+    del notice
 
 
 def _paced(governor: _massive.RequestGovernor) -> dict[str, int | None]:
@@ -117,15 +127,13 @@ def test_the_stricter_declaration_wins_while_its_session_holds_the_governor(
 ) -> None:
     registry = _registry(FakeClock())
     with caplog.at_level(logging.WARNING, LOGGER):
-        first = _lease(registry, basic=frozenset({Subscription.STOCKS}))
+        first = _lease(registry, limits={Subscription.STOCKS: 5, Subscription.OPTIONS: 8})
         quiet = _lease(registry, label="MassiveSession #2")  # declares nothing: no warning
-        second = _lease(
-            registry, basic=frozenset({Subscription.OPTIONS}), label="MassiveSession #3"
-        )
+        second = _lease(registry, limits={Subscription.OPTIONS: 3}, label="MassiveSession #3")
     governor = first.governor
     assert _paced(governor) == {
         "stocks": 5,
-        "options": 5,
+        "options": 3,
         "indices": None,
         "currencies": None,
         "futures": None,
@@ -133,14 +141,15 @@ def test_the_stricter_declaration_wins_while_its_session_holds_the_governor(
     }
     assert caplog.messages == [
         (
-            "MassiveSession #3 declares rest_basic_subscriptions {options}, but MassiveSession #1, "
-            "which uses the same API key, declares {stocks}; Massive counts their requests "
-            "together, so both pace {options, stocks}"
+            "This session declares rest_requests_per_minute {options: 3}, and another session "
+            "that uses the same API key declares {options: 8, stocks: 5}. Massive counts their "
+            "requests together, so both pace {options: 3, stocks: 5}, the lowest limit declared "
+            "for each subscription."
         )
     ]
     first.release()
     assert _paced(governor)["stocks"] is None
-    assert _paced(governor)["options"] == 5
+    assert _paced(governor)["options"] == 3
     second.release()
     second.release()  # idempotent
     quiet.release()
@@ -149,24 +158,24 @@ def test_the_stricter_declaration_wins_while_its_session_holds_the_governor(
 
 def test_the_same_declaration_twice_is_no_conflict(caplog: pytest.LogCaptureFixture) -> None:
     registry = _registry(FakeClock())
-    basic = frozenset({Subscription.FUTURES})
+    limits = {Subscription.FUTURES: 5}
     with caplog.at_level(logging.WARNING, LOGGER):
-        _lease(registry, basic=basic)
-        _lease(registry, basic=basic, label="MassiveSession #2")
+        _lease(registry, limits=limits)
+        _lease(registry, limits=limits, label="MassiveSession #2")
     assert caplog.messages == []
 
 
 def test_an_idle_entry_outlives_its_last_lease_until_its_window_passes() -> None:
     clock = FakeClock()
     registry = _registry(clock)
-    lease = _lease(registry, basic=frozenset({Subscription.STOCKS}))
+    lease = _lease(registry, limits={Subscription.STOCKS: 5})
     governor = lease.governor
     governor.done(
         governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
     )
     lease.release()
     # A new session soon after (a notebook cell run again) still sees the slot held.
-    again = _lease(registry, basic=frozenset({Subscription.STOCKS}))
+    again = _lease(registry, limits={Subscription.STOCKS: 5})
     assert again.governor is governor
     again.release()
     clock.advance(61.0)
@@ -180,11 +189,38 @@ def test_a_lease_listener_hears_changes_until_the_lease_is_released() -> None:
     heard: list[int] = []
     lease = _lease(registry, listener=lambda: heard.append(1))
     governor = lease.governor
-    governor.declare(set())
+    governor.declare({})
     assert heard == [1]
     lease.release()
-    governor.declare(set())
+    governor.declare({})
     assert heard == [1]
+
+
+def test_a_lease_hears_each_pause_from_the_one_open_until_the_lease_is_released() -> None:
+    # A session that takes its lease mid-pause hears of that pause at once, then of its end,
+    # and of nothing once it has released the lease.
+    clock = FakeClock()
+    registry = _registry(clock)
+    first = _lease(registry, label="MassiveSession #1")
+    governor = first.governor
+    permit = governor.admission("stocks", lane=object()).acquire(_massive.Cancel())
+    governor.refused(permit, retry_after=20.0, message="HTTP 429")
+    heard: list[tuple[str, float, float, bool]] = []
+    second = _lease(
+        registry,
+        label="MassiveSession #2",
+        on_pause=lambda n: heard.append((n.bucket, n.started, n.ends, n.ended)),
+    )
+    start = clock.time()
+    assert heard == [("stocks", start, start + 20.0, False)]
+    clock.advance(20.0)
+    governor.snapshot()  # finds the pause over
+    assert heard[1:] == [("stocks", start, start + 20.0, True)]
+    second.release()
+    permit = governor.admission("stocks", lane=object()).acquire(_massive.Cancel())
+    governor.refused(permit, retry_after=5.0, message="HTTP 429")
+    assert len(heard) == 2
+    first.release()
 
 
 def test_concurrent_leases_share_one_governor() -> None:
@@ -223,25 +259,32 @@ def test_the_registry_counts_the_leases_not_yet_released() -> None:
 
 
 def _error(message: str) -> _massive.WireError:
-    return _massive.WireError(f"HTTP 429 from GET /v3/trades/AAPL (request_id r1): {message}")
+    return _massive.WireError(
+        "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 429 (request_id r1): "
+        f'"{message}".',
+        kind=_massive.WireFailure.REFUSED,
+        request_id="r1",
+    )
 
 
-def test_a_learned_basic_subscription_is_explained_once_per_session(
+def test_a_per_minute_refusal_is_explained_once_per_session(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    warnings = RateLimitNotices("MassiveSession #1", frozenset())
+    warnings = RateLimitNotices("MassiveSession #1", {})
     with caplog.at_level(logging.INFO, LOGGER):
-        warnings.refused("currencies", _error(BASIC), basic=True)
-        warnings.refused("currencies", _error(BASIC), basic=True)
+        warnings.refused("currencies", _error(PER_MINUTE), per_minute=True)
+        warnings.refused("currencies", _error(PER_MINUTE), per_minute=True)
     # Requests pause and resume by themselves: an INFO notice, not a WARNING.
     assert [r.levelno for r in caplog.records] == [logging.INFO]
     assert caplog.messages == [
         (
-            "MassiveSession #1: Massive refused a currencies request with HTTP 429 (HTTP 429 "
-            f"from GET /v3/trades/AAPL (request_id r1): {BASIC}); that is the Basic tier's "
-            "limit of 5 requests per minute, so these requests are paced at that rate from now "
-            "on; declare MassiveConfig(rest_basic_subscriptions={dm.Subscription.CURRENCIES}) "
-            "to pace them from the first request"
+            "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 429 (request_id "
+            f'r1): "{PER_MINUTE}". Massive limits currencies requests per minute. Once the pause '
+            "ends, currencies requests are paced at the number of them Massive answered of those "
+            "sent in the refusal's clock minute, if it answered any. The next log line and "
+            "m.rate_limits() give it. To pace them from the first request, pass "
+            "rest_requests_per_minute={dm.Subscription.CURRENCIES: n} to dm.MassiveConfig, with "
+            "the limit n Massive gives you."
         )
     ]
 
@@ -249,39 +292,60 @@ def test_a_learned_basic_subscription_is_explained_once_per_session(
 def test_a_declared_subscription_refused_points_at_other_users_of_the_account(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    warnings = RateLimitNotices("MassiveSession #2", frozenset({Subscription.STOCKS}))
+    warnings = RateLimitNotices("MassiveSession #2", {Subscription.STOCKS: 5})
     with caplog.at_level(logging.INFO, LOGGER):
-        warnings.refused("stocks", _error(BASIC), basic=True)
-        warnings.refused("options", _error("busy"), basic=False)  # another bucket: its own
-    assert caplog.messages[0].endswith(
-        "its requests are already paced at 5 per minute, so other sessions, processes, or API "
-        "keys of the account are using the same limit; requests pause and resume"
-    )
-    assert caplog.messages[1] == (
-        "MassiveSession #2: Massive refused an options request with HTTP 429 (HTTP 429 from GET "
-        "/v3/trades/AAPL (request_id r1): busy); requests pause and resume; a paid "
-        "subscription has no request limit, so if this persists, send the request id to "
-        "Massive's support"
-    )
+        warnings.refused("stocks", _error(PER_MINUTE), per_minute=True)
+        warnings.refused("options", _error("busy"), per_minute=False)  # another bucket: its own
+    assert caplog.messages == [
+        (
+            "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 429 (request_id "
+            f'r1): "{PER_MINUTE}". Stocks requests are already paced at the 5 per minute '
+            "declared, so either other sessions, processes, or API keys of the account share "
+            "the limit, or 5 is above Massive's limit. They pause and resume by themselves."
+        ),
+        (
+            "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 429 (request_id "
+            'r1): "busy". Options requests pause and resume by themselves. If this persists, '
+            "send request_id r1 to Massive's support."
+        ),
+    ]
+
+
+def test_a_refusal_without_a_request_id_names_none(caplog: pytest.LogCaptureFixture) -> None:
+    warnings = RateLimitNotices("MassiveSession #1", {})
+    answer = 'Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 429: "busy".'
+    with caplog.at_level(logging.INFO, LOGGER):
+        warnings.refused(
+            "stocks",
+            _massive.WireError(answer, kind=_massive.WireFailure.REFUSED),
+            per_minute=False,
+        )
+    assert caplog.messages == [
+        (
+            f"{answer} Stocks requests pause and resume by themselves. If this persists, tell "
+            "Massive's support."
+        )
+    ]
 
 
 def test_a_refusal_outside_the_subscriptions_names_no_subscription(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    warnings = RateLimitNotices("MassiveSession #1", frozenset())
+    warnings = RateLimitNotices("MassiveSession #1", {})
     with caplog.at_level(logging.INFO, LOGGER):
-        warnings.refused(OTHER, _error(BASIC), basic=True)
-    assert caplog.messages[0].startswith(
-        "MassiveSession #1: Massive refused a request outside Massive's subscriptions with "
-    )
-    # Massive counts reference data on its own, at the Basic limit: it is paced, but no
-    # setting declares it, so the WARNING offers none.
-    assert caplog.messages[0].endswith(
-        "that is Massive's limit of 5 requests per minute on reference and other data outside "
-        "the subscriptions, which it counts on their own, so these requests are paced at that "
-        "rate from now on"
-    )
-    assert "MassiveConfig" not in caplog.messages[0]
+        warnings.refused(OTHER, _error(PER_MINUTE), per_minute=True)
+    # Massive counts reference data on its own: the bucket learns its limit, but no setting
+    # declares it, so the notice offers none.
+    assert caplog.messages == [
+        (
+            "Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 429 (request_id "
+            f'r1): "{PER_MINUTE}". That is Massive\'s limit on reference and other data outside '
+            "the subscriptions, which it counts on their own. Once the pause ends, requests "
+            "outside Massive's subscriptions are paced at the number of them Massive answered of "
+            "those sent in the refusal's clock minute, if it answered any. The next log line and "
+            "m.rate_limits() give it."
+        )
+    ]
 
 
 # --- Rows ----------------------------------------------------------------------------------------
@@ -290,7 +354,7 @@ def test_a_refusal_outside_the_subscriptions_names_no_subscription(
 def test_rows_show_each_buckets_state() -> None:
     clock = FakeClock(manual=True, wall=1_800_000_000.0)
     governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=clock)
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     for _ in range(5):
         governor.done(
             governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
@@ -302,7 +366,7 @@ def test_rows_show_each_buckets_state() -> None:
     )
     waiting.start()
     clock.wait_for_sleepers(1)
-    _refuse(governor, "options", BASIC, retry_after=30.0)
+    _refuse(governor, "options", PER_MINUTE, retry_after=30.0)
     rows = {row.bucket: row for row in rate_limit_rows(governor)}
     assert list(rows) == list(BUCKETS)
     stocks, options = rows["stocks"], rows["options"]
@@ -312,9 +376,10 @@ def test_rows_show_each_buckets_state() -> None:
         LimitSource.DECLARED,
     )
     assert (stocks.waiting, stocks.recent_requests, stocks.attempts) == (1, 5, 5)
-    assert (options.state, options.limit_source) == (RateLimitState.PAUSED, LimitSource.LEARNED)
+    # Paused, and learning nothing until the pause ends.
+    assert (options.state, options.limit_source) == (RateLimitState.PAUSED, None)
     assert options.paused_until == 1_800_000_030 * 10**9
-    assert (options.refusals, options.last_refusal) == (1, BASIC)
+    assert (options.refusals, options.last_refusal) == (1, PER_MINUTE)
     assert (rows["indices"].state, rows["indices"].limit_source) == (RateLimitState.READY, None)
     assert rows["indices"].paused_until is None
     # Stamped on the governor's clock, the one `PausedUntil` is read on.
@@ -343,15 +408,15 @@ def test_a_huge_retry_after_leaves_paused_until_a_valid_timestamp(asked: float) 
 
 def test_a_paced_read_announces_its_least_duration(caplog: pytest.LogCaptureFixture) -> None:
     governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     buckets = ["stocks"] * 250 + ["options"] * 3 + ["other"] * 40
     with caplog.at_level(logging.INFO, LOGGER):
         announce(governor, "stocks.trades fetch", buckets)
         announce(governor, "stocks.trades fetch", ["stocks"] * 5)  # all start at once: quiet
     assert caplog.messages == [
         (
-            "stocks.trades fetch: 250 requests; paced at 5 requests a minute (stocks); at that "
-            "pace they take at least 49 min"
+            "stocks.trades fetch: 250 requests, paced at 5 requests a minute for stocks. At that "
+            "pace they take at least 49 min."
         )
     ]
 
@@ -362,7 +427,7 @@ def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_wor
     # In a console command, which holds the update graph's lock, a paced read holds every live
     # table of the server still while it runs: the least duration becomes a WARNING.
     governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     with caplog.at_level(logging.INFO, LOGGER):
         announce(governor, "stocks.bars history", ["stocks"] * 250, pauses_live_tables=True)
         quick = ["stocks"] * 5  # every request starts at once: quiet
@@ -371,40 +436,59 @@ def test_a_paced_read_holding_the_update_graph_lock_warns_that_it_pauses_the_wor
         (
             logging.WARNING,
             (
-                "stocks.bars history: 250 requests; paced at 5 requests a minute (stocks); this "
-                "command will pause every live table on the server for at least 49 min: pass "
-                "wait=False to read in the background"
+                "stocks.bars history: 250 requests, paced at 5 requests a minute for stocks. This "
+                "command will pause every live table on the server for at least 49 min. Leave "
+                "out wait=True to read in the background."
             ),
         )
     ]
 
 
-def test_a_daily_download_of_an_unpaced_subscription_names_the_basic_cost(
+def test_a_read_of_an_unpaced_subscription_announces_nothing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Its limit, if any, is unknown until Massive refuses one of its requests.
     governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
     with caplog.at_level(logging.INFO, LOGGER):
         announce(governor, "stocks.bars history", ["stocks"] * 11, shape=ReadShape.PER_DAY)
-        announce(governor, "stocks.bars history", ["stocks"] * 5, shape=ReadShape.PER_DAY)
         announce(governor, "economy.yields history", ["other"] * 40, shape=ReadShape.PER_DAY)
-        announce(governor, "stocks.trades history", ["stocks"] * 40)  # paged: quiet
+        announce(governor, "stocks.trades history", ["stocks"] * 40)
+    assert caplog.messages == []
+
+
+def test_a_learned_limit_shows_as_learned_and_paces_the_announcement(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
+    for _ in range(3):
+        governor.done(
+            governor.admission("options", lane=object()).acquire(_massive.Cancel()), answered=True
+        )
+    _refuse(governor, "options", PER_MINUTE, retry_after=70.0)
+    governor.done(
+        governor.admission("options", lane=object()).acquire(_massive.Cancel()), answered=True
+    )
+    options = {row.bucket: row for row in rate_limit_rows(governor)}["options"]
+    assert (options.requests_per_minute, options.limit_source) == (3, LimitSource.LEARNED)
+    with caplog.at_level(logging.INFO, LOGGER):
+        announce(governor, "options.bars history", ["options"] * 7, shape=ReadShape.PER_DAY)
     assert caplog.messages == [
         (
-            "stocks.bars history: 11 requests, one per day; if the stocks subscription is on the "
-            "Basic tier (5 requests a minute), they take at least 2 min"
+            "options.bars history: 7 requests, one per day, paced at 3 requests a minute for "
+            "options. At that pace they take at least 2 min."
         )
     ]
 
 
 def test_a_paced_daily_download_states_its_pace(caplog: pytest.LogCaptureFixture) -> None:
     governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     with caplog.at_level(logging.INFO, LOGGER):
         announce(governor, "stocks.bars history", ["stocks"] * 11, shape=ReadShape.PER_DAY)
     assert caplog.messages == [
         (
-            "stocks.bars history: 11 requests, one per day; paced at 5 requests a minute (stocks); "
-            "at that pace they take at least 2 min"
+            "stocks.bars history: 11 requests, one per day, paced at 5 requests a minute for "
+            "stocks. At that pace they take at least 2 min."
         )
     ]
 
@@ -416,23 +500,28 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns_once(
     check = PaceCheck("stocks.snapshots poll()", 30.0)
     with caplog.at_level(logging.WARNING, LOGGER):
         check.check(governor, {"stocks": 4, "other": 50})  # unpaced: fine
-        governor.declare({"stocks"})
+        governor.declare({"stocks": 5})
         check.check(governor, {"stocks": 2})  # 24 s of a 30 s interval: fine
         check.check(governor, {"other": 50, "stocks": 3})  # 36 s: too slow
         check.check(governor, {"stocks": 10})  # warned already
     assert caplog.messages == [
         (
             "stocks.snapshots poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
-            "per minute, so a cycle takes at least 37 s, longer than the 30 s interval; cycles run "
-            "late"
+            "per minute, so a cycle takes at least 37 s, longer than the 30 s interval, and cycles "
+            "run late. To keep them on time, call poll(37) or a longer interval."
         )
     ]
+    # The advice works: a poll at the interval the warning names keeps its cycles on time.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, LOGGER):
+        PaceCheck("stocks.snapshots poll()", 37.0).check(governor, {"other": 50, "stocks": 3})
+    assert caplog.messages == []
 
 
 def test_a_paced_bucket_with_every_slot_held_shows_paced() -> None:
     clock = FakeClock()
     governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=clock)
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     for _ in range(5):
         governor.done(
             governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
@@ -444,14 +533,21 @@ def test_a_paced_bucket_with_every_slot_held_shows_paced() -> None:
     assert change == 61.0  # the rows change when the first slot frees
 
 
-def test_a_learned_basic_goes_with_its_governor() -> None:
+def test_a_learned_limit_goes_with_its_governor() -> None:
     # Once the last session of the key has gone and its governor is idle, what it learned is
     # forgotten: a new governor starts unpaced and relearns from its first refusal.
     clock = FakeClock()
     registry = _registry(clock)
     lease = _lease(registry)
     governor = lease.governor
-    _refuse(governor, "stocks", BASIC, retry_after=5.0)
+    for _ in range(5):
+        governor.done(
+            governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+        )
+    _refuse(governor, "stocks", PER_MINUTE, retry_after=70.0)
+    governor.done(
+        governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
+    )
     assert _paced(governor)["stocks"] == 5
     lease.release()
     clock.advance(61.0)
@@ -459,7 +555,7 @@ def test_a_learned_basic_goes_with_its_governor() -> None:
     again = _lease(registry)
     assert again.governor is not governor
     assert _paced(again.governor)["stocks"] is None
-    assert [s.bucket for s in again.governor.snapshot() if s.learned] == []
+    assert [s.bucket for s in again.governor.snapshot() if s.learned is not None] == []
 
 
 def test_the_default_registry_names_the_other_buckets_requests() -> None:
@@ -467,45 +563,104 @@ def test_the_default_registry_names_the_other_buckets_requests() -> None:
     governor = lease.governor
     permit = governor.admission(OTHER, lane=object()).acquire(_massive.Cancel())
     governor.refused(permit, retry_after=700.0, message="busy")
-    with pytest.raises(_massive.WireError, match="refusing requests outside Massive's"):
+    # No setting declares the other bucket's limit, so the give-up names no setting to pace it.
+    with pytest.raises(
+        _massive.WireError,
+        match=r"^busy The next request goes at .* Retry after that time, or stop the other "
+        r"program\.$",
+    ):
         governor.admission(OTHER, lane=object(), patience=_massive.Patience(0.0)).acquire(
             _massive.Cancel()
         )
-    # The other bucket cannot be declared, but a Basic-worded refusal paces it.
-    with pytest.raises(ValueError, match=r"\['other'\] cannot be declared Basic"):
-        governor.declare({OTHER})
+    # The other bucket cannot be declared; it learns its limit from Massive's refusals.
+    with pytest.raises(
+        ValueError, match=r"^The buckets \['other'\] cannot take a declared limit\. "
+    ):
+        governor.declare({OTHER: 5})
     lease.release()
 
 
-def test_a_read_waits_out_ten_minutes_of_pauses_or_ninety_seconds_under_the_lock(
+CONSOLE_ADVICE = "Leave out wait=True to read in the background."
+"""The give-up advice of a `fetch()` or `history()` call in a console command."""
+
+
+@pytest.mark.parametrize(
+    ("waiter", "free", "console"),
+    [
+        (Waiter.CALL, (READ_PATIENCE, "", ""), (CONSOLE_PATIENCE, CONSOLE_ADVICE, "")),
+        (Waiter.STREAM_OPEN, (READ_PATIENCE, "", ""), (CONSOLE_PATIENCE, "", "")),
+        (
+            Waiter.LIVE_TABLE,
+            (300.0, LIVE_TABLE_ADVICE, "max_outage=300 s"),
+            (CONSOLE_PATIENCE, "", ""),
+        ),
+    ],
+)
+def test_each_waiter_gets_its_patience_and_advice_with_and_without_the_lock(
+    dh_exec_ctx: ExecutionContext,
+    *,
+    waiter: Waiter,
+    free: tuple[float, str, str],
+    console: tuple[float, str, str],
+) -> None:
+    # A caller waits ten minutes, a live table max_outage (300 s here). A console command holds
+    # the update graph's exclusive lock, so every read gives up after 90 s; only a fetch() or
+    # history() call takes wait=True, so only its error advises leaving it out. Only the live
+    # table's limit is a setting of the user's, which its error names.
+    patience = read_patience(dh_exec_ctx, max_outage=300.0, waiter=waiter)
+    assert (patience.seconds, patience.advice, patience.limit) == free
+    with exclusive_lock(dh_exec_ctx.update_graph):
+        held = read_patience(dh_exec_ctx, max_outage=300.0, waiter=waiter)
+    assert (held.seconds, held.advice, held.limit) == console
+
+
+def test_a_waiter_no_case_names_is_refused(dh_exec_ctx: ExecutionContext) -> None:
+    with pytest.raises(AssertionError):
+        read_patience(
+            dh_exec_ctx,
+            max_outage=300.0,
+            waiter="someone",  # type: ignore[arg-type]  # the point: a waiter no case names is refused
+        )
+
+
+def test_the_patience_constants_and_advice_read_as_documented() -> None:
+    assert (READ_PATIENCE, CONSOLE_PATIENCE) == (600.0, 90.0)
+    assert LIVE_TABLE_ADVICE == "Pass a larger max_outage to dm.MassiveConfig to wait longer."
+    assert console_advice(300.0) == CONSOLE_ADVICE
+
+
+def test_a_read_that_feeds_a_live_table_fails_at_its_first_pause_with_no_max_outage(
     dh_exec_ctx: ExecutionContext,
 ) -> None:
-    patience = read_patience(dh_exec_ctx)
-    assert (patience.seconds, patience.advice) == (READ_PATIENCE, "")
-    assert READ_PATIENCE == 600.0
-    # A console command holds the update graph's exclusive lock: the read gives up sooner, and
-    # its give-up error says how to read without the lock.
+    assert read_patience(dh_exec_ctx, max_outage=0.0, waiter=Waiter.LIVE_TABLE).seconds == 0.0
+
+
+@pytest.mark.parametrize("max_outage", [0.0, 90.0])
+def test_the_console_advises_no_background_read_that_would_wait_no_longer(
+    dh_exec_ctx: ExecutionContext, max_outage: float
+) -> None:
+    assert console_advice(max_outage) == ""
     with exclusive_lock(dh_exec_ctx.update_graph):
-        console = read_patience(dh_exec_ctx)
-    assert console.seconds == CONSOLE_PATIENCE == 90.0
-    assert (
-        console.advice
-        == CONSOLE_ADVICE
-        == (
-            "this read ran inside a Deephaven console command, which waits out only 90 s of "
-            "pauses; pass wait=False to fetch() or history() to read in the background, which "
-            "waits out 10 min"
-        )
-    )
-    assert read_patience(dh_exec_ctx) is not read_patience(dh_exec_ctx)  # one per read
+        console = read_patience(dh_exec_ctx, max_outage=max_outage, waiter=Waiter.CALL)
+    assert (console.seconds, console.advice) == (CONSOLE_PATIENCE, "")
+
+
+def test_each_read_gets_a_patience_of_its_own(dh_exec_ctx: ExecutionContext) -> None:
+    first = read_patience(dh_exec_ctx, max_outage=300.0, waiter=Waiter.CALL)
+    assert first is not read_patience(dh_exec_ctx, max_outage=300.0, waiter=Waiter.CALL)
 
 
 def test_the_pace_warning_counts_each_slot_for_61_seconds(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     governor = _massive.RequestGovernor(BUCKETS, learn_only=LEARN_ONLY, clock=FakeClock())
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     with caplog.at_level(logging.WARNING, LOGGER):
         PaceCheck("fits", 61.0).check(governor, {"stocks": 5})  # 5 per 61 s: just fits
         PaceCheck("late", 60.0).check(governor, {"stocks": 5})  # a minute is too short
     assert [record.getMessage().split(":")[0] for record in caplog.records] == ["late"]
+
+
+def test_every_shape_but_paged_says_how_it_counts() -> None:
+    # A paged read's notice adds nothing; a new shape must say how it counts, never say nothing.
+    assert set(rate_limits._SHAPE_WORDS) == set(ReadShape) - {ReadShape.PAGED}

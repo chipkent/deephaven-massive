@@ -25,7 +25,7 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
-from tests._live import index_day_sources
+from tests._live import index_day_sources, refusals
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -63,8 +63,8 @@ LargestError: TypeAlias = (
 )
 LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 
-_SNAPSHOTS_PLAN = "Indices Starter ($49/month)"
-"""The plan of the indices snapshot and the unified snapshot of an index."""
+_INDEX = "I:NDX"
+"""The index the spelling checks read: any index serves, so the Nasdaq-100."""
 
 
 def _raw_requests(
@@ -95,12 +95,6 @@ def _raw_requests(
     )
 
 
-_SNAPSHOT_PATHS = frozenset({"/v3/snapshot/indices", "/v3/snapshot"})
-"""The raw requests that need Indices Starter, left out with Indices on Basic."""
-
-_BASIC_LIBRARY_CALL = "indices.daily_open_close fetch()"
-"""The one library call made with Indices on Basic."""
-
 _TICKER_KEYS = ("T", "ticker", "symbol", "underlying")
 
 
@@ -115,37 +109,32 @@ def _spellings(value: object) -> dict[str, object]:
     return {key: value[key] for key in _TICKER_KEYS if key in value}
 
 
-@pytest.mark.needs("indices:basic")
 @pytest.mark.verifies("26")
 @pytest.mark.requests(2)
 def test_a_percent_encoded_index_ticker_in_a_path_reads_as_the_index(
     live_session: dm.MassiveSession,
     *,
-    index_symbol: str,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether Massive reads a percent-encoded colon in a path (`I%3ASPX`) as `I:SPX`.
+    """Whether Massive reads a percent-encoded colon in a path (`I%3ANDX`) as `I:NDX`.
 
     The library percent-encodes every path value whole, so `/prev` of an index is requested
-    as `/v2/aggs/ticker/I%3A<index>/prev`. Uses `I:SPX`, or `I:NDX` when Indices is on Basic,
-    which excludes SPX. Passes when the library's `fetch()` returns one row for the index. A
-    failure (no row, or a 404) means a colon must be sent unencoded.
+    as `/v2/aggs/ticker/I%3A<index>/prev`. Any index serves the question, so it reads the
+    Nasdaq-100. Passes when the library's `fetch()` returns one row for the index. A failure
+    (no row, or a 404) means a colon must be sent unencoded.
     """
-    rows = table_rows(live_session.indices.previous_day_bar(index_symbol).fetch())
-    evidence(f"library fetch() of /prev for {index_symbol} (sent encoded): {rows}")
-    assert [row["Symbol"] for row in rows] == [index_symbol]
+    rows = table_rows(live_session.indices.previous_day_bar(_INDEX).fetch(wait=True))
+    evidence(f"library fetch() of /prev for {_INDEX} (sent encoded): {rows}")
+    assert [row["Symbol"] for row in rows] == [_INDEX]
 
 
-@pytest.mark.needs("indices:basic")
 @pytest.mark.verifies("44")
-@pytest.mark.requests(5)
+@pytest.mark.requests(11)
 @pytest.mark.timeout(110)
 def test_index_ticker_spelling_on_every_index_endpoint(
     live_session: dm.MassiveSession,
     *,
-    classes_on_basic: frozenset[str],
-    index_symbol: str,
     recent_monday: date,
     live_rest: RestClient,
     table_rows: TableRows,
@@ -153,31 +142,29 @@ def test_index_ticker_spelling_on_every_index_endpoint(
 ) -> None:
     """Which index endpoints spell an index with its `I:` prefix and which without.
 
-    Sends one raw request of each REST endpoint that serves the index (`I:SPX`, or `I:NDX` on
-    Indices Basic), the dated ones for the most recent published Monday: `/prev`, the range,
-    open-close, the indices snapshot, the unified
-    snapshot, and an indicator. Records the ticker keys of the body and of the first row,
-    then the library's `Symbol` for the same datasets. The two snapshots need Indices
-    Starter. With Indices on Basic, which allows 5 requests a minute, it leaves them out and
-    reads the library's `daily_open_close` only, 5 requests in all: the library's `/prev` is
-    checked by the encoded-path test, and its indicator line is left out. Passes when every
-    row the library returns carries the index with its `I:` prefix in `Symbol`, whichever
-    spelling the endpoint sent; the raw lines show which endpoints drop the prefix.
+    Sends one raw request of each REST endpoint that serves the index (`I:NDX`, since any
+    index serves), the dated ones for the most recent published Monday: `/prev`, the range,
+    open-close, the indices snapshot, the unified snapshot, and an indicator, 6 requests.
+    Records the ticker keys of the body and of the first row, then the library's `Symbol` for
+    the same datasets, 5 more. Each request or call Massive refuses is recorded with Massive's
+    refusal and the rest still run; the test skips, quoting the first refusal, when Massive
+    answered no raw request and refused at least one, and no other raw request failed. Passes
+    when every row the library returns carries the index with its `I:` prefix in `Symbol`,
+    whichever spelling the endpoint sent; the raw lines show which endpoints drop the prefix.
     """
     answered = 0
-    basic = "indices" in classes_on_basic
-    if basic:
-        evidence("Indices on Basic: the snapshots and the library's other lines are not read")
-    for path, path_params, query in _raw_requests(index_symbol, recent_monday):
-        if basic and path in _SNAPSHOT_PATHS:
-            continue
+    refused: list[str] = []
+    failed: list[str] = []
+    for path, path_params, query in _raw_requests(_INDEX, recent_monday):
         try:
             page = live_rest.get(source(Transport.REST, path), path_params, query, bucket="indices")
         except WireEntitlementError as error:
-            evidence(f"{path}: not entitled: needs {_SNAPSHOTS_PLAN} ({error})")
+            refused.append(refusals.refusal_line(error))
+            evidence(f"{path}: not entitled: {refused[-1]}")
             continue
         except WireError as error:
-            evidence(f"{path}: {type(error).__name__}: {error}")
+            failed.append(f"{path}: {type(error).__name__}: {error}")
+            evidence(failed[-1])
             continue
         answered += 1
         body = page.body if isinstance(page.body, dict) else {}
@@ -190,31 +177,35 @@ def test_index_ticker_spelling_on_every_index_endpoint(
         if page.rows:
             evidence(f"    first row keys and values: {page.rows[0]}")
     queries = {
-        "indices.previous_day_bar fetch()": live_session.indices.previous_day_bar(
-            index_symbol
-        ).fetch,
-        "indices.snapshots fetch()": live_session.indices.snapshots(index_symbol).fetch,
-        "indices.daily_open_close fetch()": live_session.indices.daily_open_close(
-            index_symbol, recent_monday
-        ).fetch,
-        "snapshots (unified) fetch()": live_session.snapshots(index_symbol).fetch,
-        "indicators.sma fetch()": live_session.indicators.sma(index_symbol, 10, limit=2).fetch,
+        "indices.previous_day_bar fetch()": partial(
+            live_session.indices.previous_day_bar(_INDEX).fetch, wait=True
+        ),
+        "indices.snapshots fetch()": partial(
+            live_session.indices.snapshots(_INDEX).fetch, wait=True
+        ),
+        "indices.daily_open_close fetch()": partial(
+            live_session.indices.daily_open_close(_INDEX, recent_monday).fetch, wait=True
+        ),
+        "snapshots (unified) fetch()": partial(live_session.snapshots(_INDEX).fetch, wait=True),
+        "indicators.sma fetch()": partial(
+            live_session.indicators.sma(_INDEX, 10, limit=2).fetch, wait=True
+        ),
     }
     misspelled: dict[str, list[object]] = {}
     for name, call in queries.items():
-        if basic and name != _BASIC_LIBRARY_CALL:
-            continue
         try:
             symbols = [r["Symbol"] for r in table_rows(call())]
             evidence(f"library {name}: Symbol {symbols}")
-            if any(symbol != index_symbol for symbol in symbols):
+            if any(symbol != _INDEX for symbol in symbols):
                 misspelled[name] = symbols
         except dm.EntitlementError as error:
-            evidence(f"library {name}: not entitled: needs {_SNAPSHOTS_PLAN} ({error})")
+            evidence(f"library {name}: not entitled: {refusals.refusal_line(error)}")
         except dm.MassiveError as error:
             evidence(f"library {name}: {type(error).__name__}: {error}")
-    assert answered
-    assert not misspelled, f"library rows without {index_symbol} in Symbol: {misspelled}"
+    if not answered and refused and not failed:
+        pytest.skip(f"refused: every raw request; the first: {refused[0]}")
+    assert answered, f"no raw request was answered; failed: {failed}"
+    assert not misspelled, f"library rows without {_INDEX} in Symbol: {misspelled}"
 
 
 _STAMP_INDICES = ("I:SPX", "I:AAVE100")
@@ -408,15 +399,18 @@ def _record_library_index_stamps(
     daily = session.indices.bars(index, dm.Timespan.DAY)
     evidence(
         f"library {index} history(REST): "
-        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
+        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest, wait=True))
     )
     prev_bar = session.indices.previous_day_bar(index)
-    evidence(f"library {index} previous_day_bar (/prev): {library_stamps(prev_bar.fetch)}")
+    prev_stamps = library_stamps(partial(prev_bar.fetch, wait=True))
+    evidence(f"library {index} previous_day_bar (/prev): {prev_stamps}")
     refused: list[dm.EntitlementError] = []
     for span in map(dm.Timespan, ("week", *units)):
         query = session.indices.bars(index, span)
         try:
-            outcome = library_stamps(partial(query.history, *stamp_days[span.value], source=rest))
+            outcome = library_stamps(
+                partial(query.history, *stamp_days[span.value], source=rest, wait=True)
+            )
         except dm.EntitlementError as error:
             outcome = f"refused ({error})"
             refused.append(error)
@@ -425,7 +419,6 @@ def _record_library_index_stamps(
         raise refused[0]
 
 
-@pytest.mark.needs("indices:starter")
 @pytest.mark.settles("52", "60")
 @pytest.mark.timeout(100)
 def test_index_day_and_longer_bar_stamps_from_rest(
@@ -455,12 +448,12 @@ def test_index_day_and_longer_bar_stamps_from_rest(
     rebuilt in both zones; the bars of the two whole months and quarters before the current ones and
     of the years from January 1 of last year, each read refused for the plan's history recorded as
     such; and the library's windows for the same requests. Reading it: a day bar matching the
-    Chicago rebuild means index days are Chicago days, and the library's 01:00 New York
-    `TimestampEnd` is right; matching the New York rebuild means the extra hour can go. A week bar
-    matching the whole-week rebuild of `I:AAVE100` means weekend values count, as the library
-    assumes; longer bars stamped 00:00 or 01:00 New York time on their period's first day are ones
-    the library accepts. For `I:SPX` both day rebuilds can agree, since it is computed only during
-    the stock session.
+    Chicago rebuild means index days are Chicago days, and the library's window, from Massive's
+    stamp at midnight in Chicago to the next, is right; matching the New York rebuild means the
+    windows must move. A week bar matching the whole-week rebuild of `I:AAVE100` means weekend
+    values count, as the library assumes; longer bars stamped at midnight in Chicago on their
+    period's first day are ones the library accepts. For `I:SPX` both day rebuilds can agree,
+    since it is computed only during the stock session.
     """
     days = stamp_days["day"]
     complete = {}
@@ -497,7 +490,6 @@ def test_index_day_and_longer_bar_stamps_from_rest(
     assert not any(gaps.values()), f"missing evidence, by index: {gaps}"
 
 
-@pytest.mark.needs("indices:starter", "s3")
 @pytest.mark.settles("52", "60")
 @pytest.mark.timeout(100)
 def test_index_day_bar_stamps_of_the_day_file(
@@ -529,7 +521,9 @@ def test_index_day_bar_stamps_of_the_day_file(
     for index, by_day in files.items():
         day_bar_report(index, days, {_DAY_FILE: by_day})
         daily = live_session.indices.bars(index, dm.Timespan.DAY)
-        outcome = library_stamps(partial(daily.history, *days, source=dm.HistorySource.FLAT_FILES))
+        outcome = library_stamps(
+            partial(daily.history, *days, source=dm.HistorySource.FLAT_FILES, wait=True)
+        )
         evidence(f"library {index} history(FLAT_FILES): {outcome}")
     missing = [(i, d) for i in _STAMP_INDICES for d in days if not files[i].get(d)]
     assert not missing, f"the day files lack {missing}"
@@ -540,29 +534,28 @@ _ROUND_THE_CLOCK = "I:AAVE100"
 """An index that updates around the clock, so its minute file has rows near every midnight."""
 
 
-@pytest.mark.needs("indices:starter", "s3")
 @pytest.mark.timeout(160)
-def test_an_index_minute_file_holds_its_own_new_york_day(
+@pytest.mark.verifies("145")
+def test_an_index_minute_file_holds_its_chicago_day(
     *,
     recent_monday: date,
     flat_file_tickers: FlatFileTickers,
     rest_rows: RestRows,
     evidence: Evidence,
 ) -> None:
-    """Whether a `us_indices/minute_aggs_v1` file holds only its own New York day, as REST does.
+    """Whether an index minute file holds its date's Chicago day, as `history()` reads it.
 
-    `history()` over a range of instants trims each index flat file to its own New York day
-    before it joins REST rows, so a file holding another cut (the Chicago day, 01:00 to 01:00
-    New York time) would lose or double an hour at each seam. Reads the `I:AAVE100` rows of the
-    most recent published Monday's minute file (Monday follows a weekend, when only such an
+    `history()` reads an index minute file of a date as the minutes from midnight to midnight
+    in Chicago, 01:00 to 01:00 New York time, so a window of New York days also reads the file
+    of the day before its first, which holds that day's hour from 00:00 to 01:00. A file cut at
+    another midnight would lose or double an hour at each seam. Reads the `I:AAVE100` rows of
+    the most recent published Monday's minute file (Monday follows a weekend, when only such an
     index updates) and the REST minute bars from the day before to the day after, and records
-    the file's first and last stamps in UTC and New York time, its rows outside the New York
+    the file's first and last stamps in UTC and New York time, its rows outside the Chicago
     day, and the REST minutes of that day the file lacks or adds. Passes when every file row
-    falls inside the New York day, none in the hour after it, and the file adds no minute REST
-    lacks. A failure means the trim cuts index files at the wrong midnight, and the index day
-    zone needs an owner decision. Minutes REST has and the file lacks do not fail it: they
-    are recorded as a gap in Massive's file, which the library cannot fill, since the
-    file's rows still fall on the right day.
+    falls inside the Chicago day and the file adds no minute REST lacks. Minutes REST has and
+    the file lacks do not fail it: they are recorded as a gap in Massive's file, which the
+    library cannot fill, since the file's rows still fall on the right day.
     """
     day = recent_monday
     read = flat_file_tickers(
@@ -571,13 +564,13 @@ def test_an_index_minute_file_holds_its_own_new_york_day(
     assert read is not None, f"{_MINUTE_FILE} has no file for {day}"
     stamps = sorted(int(str(row["window_start"])) // 1_000_000 for row in read[0])
     assert stamps, f"{_MINUTE_FILE} {day} holds no {_ROUND_THE_CLOCK} row"
-    start = datetime(day.year, day.month, day.day, tzinfo=_NEW_YORK)
+    start = datetime(day.year, day.month, day.day, tzinfo=_CHICAGO)
     end = start + timedelta(days=1)
     first, last = int(start.timestamp() * 1000), int(end.timestamp() * 1000)
     evidence(f"{_MINUTE_FILE} {day} {_ROUND_THE_CLOCK}: {len(stamps)} rows")
     evidence(f"first {_wall_clock(stamps[0])}; last {_wall_clock(stamps[-1])}")
     outside = [s for s in stamps if not first <= s < last]
-    evidence(f"rows outside the New York day: {[_wall_clock(s) for s in outside[:10]]}")
+    evidence(f"rows outside the Chicago day: {[_wall_clock(s) for s in outside[:10]]}")
     minutes = rest_rows(
         "/v2/aggs/ticker/{indicesTicker}/range/{multiplier}/{timespan}/{from}/{to}",
         {
@@ -591,15 +584,13 @@ def test_an_index_minute_file_holds_its_own_new_york_day(
     )
     rest_day = {int(m["t"]) for m in minutes if first <= int(m["t"]) < last}
     lacks, adds = sorted(rest_day - set(stamps)), sorted(set(stamps) - rest_day)
-    evidence(f"REST minutes of the New York day: {len(rest_day)}")
+    evidence(f"REST minutes of the Chicago day: {len(rest_day)}")
     evidence(
         f"the file lacks {len(lacks)} (a gap in Massive's file, not asserted): "
         f"{[_wall_clock(s) for s in lacks[:10]]}"
     )
     evidence(f"the file adds {len(adds)}: {[_wall_clock(s) for s in adds[:10]]}")
-    after = [s for s in stamps if last <= s < last + 3_600_000]
-    assert not after, f"the file holds {len(after)} rows from 00:00 to 01:00 New York the next day"
-    assert not outside, f"the file holds {len(outside)} rows outside its New York day"
+    assert not outside, f"the file holds {len(outside)} rows outside its Chicago day"
     assert not adds, f"the file holds {len(adds)} minutes REST does not"
 
 
@@ -627,6 +618,9 @@ _PER_FAMILY = 2
 _TICKERS = "/v3/reference/tickers"
 _PREV = "/v2/aggs/ticker/{indicesTicker}/prev"
 _OPEN_CLOSE = "/v1/open-close/{indicesTicker}/{date}"
+_OPEN_CLOSE_SOURCE = "open-close"
+"""The source name of the daily open and close, whose window the library sets to the Chicago
+day."""
 _NS_PER_MS = 1_000_000
 
 FileRead: TypeAlias = "tuple[list[dict[str, str | None]], frozenset[str]] | None"
@@ -731,6 +725,9 @@ def _record_day(
     if ranged is not None and filed is not None:
         error = index_day_sources.relative_error(ranged, filed)
         evidence(f"{index} {day} day file against the range bar: {error:.2e}")
+    tally.add_open_close(
+        day, verdicts[_OPEN_CLOSE_SOURCE], values=bars[_OPEN_CLOSE_SOURCE], rebuilds=rebuilds
+    )
     compared = _record_minute_file(index, day, minute_file, minutes=minutes, evidence=evidence)
     tally.add_files(
         day,
@@ -825,7 +822,7 @@ def _read_index(
         )
         sources = {
             index_day_sources.RANGE_SOURCE: by_day.get(day),
-            "open-close": open_close,
+            _OPEN_CLOSE_SOURCE: open_close,
             **({"/prev": prev} if prev_day == day else {}),
         }
         day_file, minute_file = files[day]
@@ -844,8 +841,8 @@ def _read_index(
     return tally, bool(ranged and minutes)
 
 
-@pytest.mark.needs("indices:starter", "s3")
 @pytest.mark.settles("60", "80")
+@pytest.mark.requests(110)
 @pytest.mark.timeout(900)
 def test_index_day_windows_and_files_across_many_indices(
     *,
@@ -876,11 +873,13 @@ def test_index_day_windows_and_files_across_many_indices(
     match no window, and which minute files have gaps or other prices; (c) are `I:AAVE100`'s wrong
     values (a day file in no window, or other minute prices) isolated.
 
-    It asserts only that each index has REST day and minute bars and that at least one day file and
-    one minute file were read; everything else is evidence. Cost: 3 ticker-list searches, then per
-    index one 1-day range, one `/prev`, one open-close per day, and one minute range per run of
-    adjacent days (two or three for the usual days): at most about 110 REST requests, on Indices
-    Starter, which has no request limit, and 2 flat files per day.
+    It asserts that each index has REST day and minute bars, that at least one day file and one
+    minute file were read, and that on every day whose two windows rebuild to different prices
+    the daily open and close matches the Chicago day and not the New York one, the window the
+    library gives that row, with at least one such day; everything else is evidence. Cost: 3
+    ticker-list searches, then per index one 1-day range, one `/prev`, one open-close per day,
+    and one minute range per run of adjacent days (two or three for the usual days): at most
+    about 110 REST requests, and 2 flat files per day.
     """
     days = index_check_days
     found = {
@@ -918,5 +917,8 @@ def test_index_day_windows_and_files_across_many_indices(
         evidence(line)
     empty = [tally.index for tally, complete in reads if not complete]
     assert not empty, f"no REST day or minute bars for {empty}"
+    tallies = [tally for tally, _ in reads]
+    failure = index_day_sources.open_close_failure(tallies)
+    assert failure is None, f"{failure} (days {[str(day) for day in days]})"
     assert any(day_file for day_file, _ in files.values()), f"no {_DAY_FILE} file of {days}"
     assert any(minute for _, minute in files.values()), f"no {_MINUTE_FILE} file of {days}"

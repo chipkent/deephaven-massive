@@ -33,9 +33,10 @@ The handler writes one line per record, with the time in UTC:
 `2026-10-28 14:03:07,112Z DEBUG [massive #1 call-7 rest_0] deephaven_massive._massive.rest.client:
 GET ...`. The thread name says which session and which call or stream a line belongs to. On
 stderr, Deephaven copies the lines into its own log, the container's log, and the Deephaven IDE's
-log panel. Turning the log on again replaces the handler and closes the old one. The logger keeps
-`propagate` on, so pytest's `caplog` and any handler a user put on the root logger still see
-every record; Deephaven installs no root handler, so nothing is printed twice there.
+log panel. Turning the log on again replaces the handler and closes the old one, and the library
+never rotates the file. The logger keeps `propagate` on, so pytest's `caplog` and any handler a
+user put on the root logger still see every record; Deephaven installs no root handler, so
+nothing is printed twice there.
 
 Setting the level alone (`logging.getLogger("deephaven_massive").setLevel(logging.DEBUG)`) shows
 nothing below WARNING, because the last-resort handler drops lower levels; that is what this
@@ -54,8 +55,8 @@ the issue text, must be enough for an agent to reproduce and fix the bug:
   episode, with the recovery at INFO. INFO is for decisions and progress. Everything else is
   DEBUG, including an expected error that is also raised to the caller. Expected conditions
   (refusals, plan and rate limits, network failures, the user's own `close()`) never log at
-  ERROR. A `MassiveError` carries its `cause`; `_log_limits.log_failure` logs a failure that
-  fails live tables once, at the level its cause gives.
+  ERROR. A `MassiveError` carries its `is_bug`; `_log_limits.log_failure` logs a failure that
+  fails live tables once, at the level its `is_bug` gives.
 - Each record names what an agent needs to reproduce it: the offending field and value, the
   dataset, the endpoint or channel, the symbol, and the call or stream id. Every layer logs
   what it knows at DEBUG; repeats there are fine. Log too much rather than too little.
@@ -67,6 +68,8 @@ the issue text, must be enough for an agent to reproduce and fix the bug:
   anything reads it, so text built from a server's answer is safe to log. A configured URL
   shows `***@` in place of a user and password in it, in every log line and message
   (`without_userinfo` in `_massive/net/redaction.py`, `MassiveConfig.__repr__`).
+- The log records what explains a slow or failed run: each rate-limit pause and permit wait,
+  why each connection closed, and how long it was up.
 - Log calls use `%` arguments. Every new thread or pool is named after its owner:
   `massive #<session> <role>` for a session's (`SessionCore.thread_prefix`), and
   `massive group #<group> <role>` for a connection group's (`ConnectionGroup.label`). Nothing is
@@ -79,7 +82,8 @@ the planted-secret test, `tests/massive/net/test_redaction.py`, which drives eve
 with distinctive secrets and DEBUG on every logger and finds them in no record or error; and the
 thread-name tests of `tests/ingest/test_ws.py` and `tests/tables/test_poll.py`.
 Reviewers check the rest: that each new decision and failure logs, with its values. Ask: could
-an agent fix this from the log alone?
+an agent fix this from the log alone? How a WARNING or ERROR record's text reads is the
+`writing-error-messages` skill's subject.
 
 This module imports the standard library and the wire package's interface (for the snapshot
 date), which loads no client and no Deephaven, so `dm.enable_debug_logging` works before a
@@ -279,7 +283,9 @@ def _environment_value(name: str) -> str:
     if not value.strip():
         return ""
     if value != value.strip():
-        raise ValueError(f"{name}={value!r} has leading or trailing whitespace; set it without any")
+        raise ValueError(
+            f"{name}={value!r} has leading or trailing whitespace. Set {name} to {value.strip()!r}."
+        )
     return value
 
 
@@ -309,15 +315,18 @@ def configure_from_environment() -> None:
         return
     level = _LEVELS.get(value.upper()) if value else logging.DEBUG
     if level is None:
+        *others, last = _LEVELS
         raise ValueError(
-            f"{LEVEL_VARIABLE}={value!r} is not a logging level; use one of {', '.join(_LEVELS)}"
+            f"{LEVEL_VARIABLE}={value!r} is not a logging level. Set it to "
+            f"{', '.join(others)}, or {last}."
         )
-    source = "the environment" if value else f"the environment; {LEVEL_VARIABLE} unset, so DEBUG"
+    source = "the environment" if value else f"the environment, with {LEVEL_VARIABLE} unset"
     try:
         _install(level, path or LogOutput.STDERR, environment=True, source=source)
     except OSError as error:
         raise OSError(
-            f"{FILE_VARIABLE}={path!r} cannot be opened for appending: {error.strerror or error}"
+            f"{FILE_VARIABLE}={path!r} cannot be opened for appending: "
+            f"{error.strerror or error}. Set it to a file this process can write."
         ) from error
 
 

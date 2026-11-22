@@ -13,14 +13,28 @@ owns that grammar and two things built on it:
   (`canonical_symbol_stock`, `canonical_symbol_option`, `canonical_symbol_future`,
   `canonical_symbol_future_spread`, `canonical_symbol_index`, `canonical_symbol_forex`,
   `canonical_symbol_crypto`) plus one per stock convention (`canonical_symbol_stock_yahoo`,
-  `canonical_symbol_stock_nasdaq`, `canonical_symbol_stock_cms`) for Deephaven query strings, which
-  cannot pass an enum. Each maps None to None, returns canonical text unchanged, converts the
-  spellings its class or convention defines, and raises `ValueError` with a hint for anything else.
+  `canonical_symbol_stock_nasdaq`, `canonical_symbol_stock_cms`) for Deephaven query strings (see
+  below). Each maps None to None,
+  returns canonical text unchanged, converts the spellings its class or convention defines, and,
+  for anything else, does what its `on_error` says: raises `ValueError` with a hint
+  (`OnError.RAISE`, the default), or returns None and logs the value once (`LOG` at WARNING,
+  `IGNORE` at DEBUG). The table converter,
+  `dm.canonicalize_symbols` in `_tables/symbols.py`, takes its verdict and its effect from the
+  same functions (`strict_converter`, `refusal`, `convert_under`), so a value converts, or is
+  refused with one reason, the same way in both.
 
 `option_roots` computes the `OptionRoot` column from canonical option symbols. The spellings
 Massive's transports write instead (`EUR/USD` in WebSocket forex frames, say) are read and
 written by `wire_symbols.py`, on the grammar's public names (`AS_WRITTEN`, `CANONICAL_GRAMMARS`,
 `read_forex_pair`, `read_crypto_pair`).
+
+In a Deephaven query string, a converter is called with positional arguments only, so a keyword
+argument (`convention=`, `on_error=`) is given by putting a `functools.partial` that binds it in
+scope under a bare name. How the call is written decides the column's type: a bare name in scope
+(`f(Ticker)`) gives a typed `String` column, while a scoped call (`dm.canonical_symbol(...)`, or
+any `obj.method(...)`) gives an `Object` column unless cast with `(String)`, because Deephaven
+ignores the type hints of an attribute call. An enum member passes only by attribute access
+(`dm.AssetClass.STOCKS`).
 
 | Class   | Canonical grammar                                  | Converters also accept         |
 |---------|----------------------------------------------------|--------------------------------|
@@ -33,8 +47,9 @@ written by `wire_symbols.py`, on the grammar's public names (`AS_WRITTEN`, `CANO
 
 A futures ticker is a single contract or a combo (a spread, strip, pack, or bundle, which
 Massive's contracts list returns with `type: 'combo'`). A contract is strict: a root, a month
-code, and a one- or two-digit year (`ESZ5`, `0NGH39`). A combo is any run of upper-case letters
-and digits joined by Massive's separators, `-`, `:`, or one space (`GCQ6-GCZ6`, `BOB 02-01 U6`,
+code, and one to three digits: a one- or two-digit year (`ESZ5`, `0NGH39`), or three digits as
+Massive lists daily contracts (`0AF704`). A combo is any run of upper-case letters and digits
+joined by Massive's separators, `-`, `:`, or one space (`GCQ6-GCZ6`, `BOB 02-01 U6`,
 `CL:BF Q6-U6-V6`, `1Y:SA 03M F6`): Massive documents no grammar for combos and lists more forms
 than its samples show, and every ticker Massive itself writes must round-trip, so the forms are
 not enumerated, while whitespace, lower case, and a truncated contract (`ESZ`) are refused.
@@ -49,8 +64,9 @@ take every split from Massive's crypto ticker list and pass it in (`wire_symbols
 Nothing maps one instrument to another: an option root (`SPXW`, `AAPL1`) is never turned into
 its underlying, `BRKB` never into `BRK.B`, and a futures year is never rewritten.
 
-Every function here is pure and thread-safe, makes no Deephaven call, and imports Deephaven for
-type checking only.
+Every function here is thread-safe and makes no Deephaven call, and the module imports Deephaven
+only for its `Table` type. Every function is pure except a converter under `OnError.LOG` or
+`IGNORE`, which records the value once in a process-wide log.
 
 The module is one subject although it runs past 1,000 lines: the checks and every converter
 are the grammar applied, one class at a time, and each converter's message names the canonical
@@ -59,29 +75,49 @@ form the grammar defines.
 
 from __future__ import annotations
 
+import functools
+import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from enum import Enum
 from typing import TYPE_CHECKING, Final, TypeAlias
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from deephaven.table import Table
+from typing_extensions import override
 
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, SymbolConvention, _require_enum
-from deephaven_massive._errors import raises_through
-from deephaven_massive._types import _All
+from deephaven_massive._enums import (
+    AssetClass,
+    ClassFromPrefix,
+    OnError,
+    SymbolConvention,
+    _require_enum,
+)
+from deephaven_massive._errors import BrokenGuaranteeError, library_bug, raises_through
+from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._on_error import effect_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from deephaven.table import Table
+    from deephaven_massive._on_error import OnErrorEffect
+
 
 __all__ = [
+    "ALL",
     "AS_WRITTEN",
     "CANONICAL_GRAMMARS",
+    "CLASS_NOUNS",
+    "LOGGED_VALUES",
     "UNDERLYING_CLASSES",
+    "AllSymbols",
     "NormalizedSymbols",
     "SymbolTable",
+    "SymbolsLike",
+    "as_written_fault",
     "canonical_symbol",
     "canonical_symbol_crypto",
     "canonical_symbol_forex",
@@ -93,8 +129,10 @@ __all__ = [
     "canonical_symbol_stock_cms",
     "canonical_symbol_stock_nasdaq",
     "canonical_symbol_stock_yahoo",
+    "check_convention",
     "check_symbol",
     "check_symbols",
+    "convert_under",
     "forex_codes",
     "is_canonical",
     "is_forex_currency",
@@ -102,8 +140,80 @@ __all__ = [
     "option_roots",
     "read_crypto_pair",
     "read_forex_pair",
+    "refusal",
+    "strict_converter",
     "symbol_class",
 ]
+
+logger = logging.getLogger(__name__)
+
+
+class AllSymbols(Enum):
+    """The type of `dm.ALL`, the value that asks a dataset for every symbol.
+
+    Pass `dm.ALL` itself, as in `m.stocks.trades(dm.ALL)`; name `dm.AllSymbols` only in a type
+    hint, as `dm.SymbolsLike` does. `dm.ALL` is its one member, and an enum member stays itself
+    through a copy or an unpickle, so code tests for it with `symbols is dm.ALL`. It is not a
+    `str`, so it is never mistaken for a ticker.
+    """
+
+    ALL = "ALL"
+
+    @override
+    def __repr__(self) -> str:
+        """Show the public spelling, so the console prints `dm.ALL`, not `<AllSymbols.ALL: 'ALL'>`.
+
+        Returns:
+            `"dm.ALL"`.
+        """
+        return "dm.ALL"
+
+    @override
+    def __str__(self) -> str:
+        """Render as `ALL` in messages and logs, as a query's `repr` does.
+
+        Returns:
+            `"ALL"`.
+        """
+        return "ALL"
+
+
+ALL: Final = AllSymbols.ALL
+"""Every symbol: a stream of the whole market, a whole flat file, or a full-market snapshot.
+
+`ALL` is accepted by the stream methods, by every per-class `snapshots()`, and by `history()`
+when a flat file or a grouped-daily REST path exists. Everywhere else it raises `ValueError`
+naming the alternative.
+"""
+
+SymbolsLike: TypeAlias = str | Sequence[str] | Table | AllSymbols
+"""What a market-data dataset method takes as its `symbols`: the instruments it reads.
+
+Annotate your own code with it when you pass symbols through to a dataset method, such as a
+helper that takes either a list of tickers or a watchlist table. It is one of:
+
+- a `str`: one symbol, such as `"AAPL"`;
+- a sequence of `str`: several symbols, read when the query is built;
+- a Deephaven `Table` with a `Symbol` column: a static table is read when a query method runs,
+  and a live table works as a watchlist, which the query's methods follow as you add and
+  delete rows;
+- `dm.ALL`: every symbol, in the datasets that take it.
+
+Each symbol, and each row of a table, is Massive's exact ticker, such as `"C:EURUSD"`, not
+`"EUR/USD"`; `dm.canonical_symbol` and `dm.canonicalize_symbols` convert other spellings.
+
+Example:
+    ::
+
+        from deephaven.table import Table
+
+        import deephaven_massive as dm
+
+
+        def latest_quotes(m: dm.MassiveSession, symbols: dm.SymbolsLike) -> Table:
+            return m.stocks.quotes(symbols).last_by()
+"""
+
 
 UNDERLYING_CLASSES: Final = frozenset({AssetClass.STOCKS, AssetClass.INDICES})
 """The classes whose tickers an option can be linked to: the ones an `underlying` takes."""
@@ -123,9 +233,16 @@ AS_WRITTEN: Final = re.compile(
 whitespace, and no class prefix. How a futures row's ticker is read, so a row Massive sends is
 never lost to the grammar, and the grammar of a dataset whose symbols are a third party's global
 tickers."""
-_FUTURE: Final = re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,2}$")
-"""A single futures contract: a root of upper-case letters and digits, a month code, and a one-
-or two-digit year (`ESZ5`, `6CH5`, `0NGH39`). `ESZ`, with no year, is no contract."""
+_CLASS_PREFIX: Final = re.compile(r"^[OICX]:")
+"""A class prefix, which `AS_WRITTEN` refuses."""
+_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
+"""A control character, which `AS_WRITTEN` refuses anywhere."""
+_FUTURE: Final = re.compile(r"^[A-Z0-9]+[FGHJKMNQUVXZ][0-9]{1,3}$")
+"""A single futures contract, in the forms Massive's contracts list writes: a root of upper-case
+letters and digits, a month code, and one to three digits. Most contracts end in a one- or
+two-digit year (`ESZ5`, `6CH5`, `NGZ26`, `0NGH39`); daily contracts end in three digits
+(`0AF704`, `GCBX602`), which the library does not read as a date. `ESZ`, with no digit, and
+`ESZ5310`, with four, are no contract."""
 _FUTURES_COMBO: Final = re.compile(r"^(?![OICX]:)[A-Z0-9]+(?:[-: ][A-Z0-9]+)+$")
 """A futures combo (spread, strip, pack, or bundle): runs of upper-case letters and digits, each
 joined to the next by one `-`, `:`, or space, as Massive writes them (`GCQ6-GCZ6`,
@@ -133,9 +250,10 @@ joined to the next by one `-`, `:`, or space, as Massive writes them (`GCQ6-GCZ6
 Massive documents no grammar for combos, so the shape is checked and the forms are not listed:
 a ticker Massive writes always round-trips, while surrounding or doubled whitespace, lower case,
 an empty part, and another class's prefix (`X:BTC-USD`) are refused."""
-_INDEX: Final = re.compile(r"^I:[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*$")
-"""A canonical index ticker: `I:` and letters and digits, as Massive's WebSocket specification
-writes the pattern (`^(I:[a-zA-Z0-9]+)$`), with dotted parts allowed."""
+_INDEX: Final = re.compile(r"^I:[A-Z0-9]+(?:\.[A-Z0-9]+)*$")
+"""A canonical index ticker: `I:` and upper-case letters and digits, with dotted parts allowed.
+Massive's WebSocket specification allows lower case (`^(I:[a-zA-Z0-9]+)$`), but a lower-case
+index ticker is refused as not canonical, as lower case is in the other classes."""
 _FOREX: Final = re.compile(r"^C:[A-Z]{3}[A-Z]{3}$")
 """A canonical forex ticker: `C:` and two three-letter ISO 4217 codes."""
 _CRYPTO: Final = re.compile(r"^X:[A-Z0-9]{4,}$")
@@ -168,7 +286,7 @@ _CLASS_NAMES: Final[dict[AssetClass, str]] = {
     AssetClass.CRYPTO: "crypto",
 }
 """The singular noun of each class, as the per-class converters are named."""
-_CLASS_NOUNS: Final[dict[AssetClass, str]] = {**_CLASS_NAMES, AssetClass.FUTURES: "futures"}
+CLASS_NOUNS: Final[dict[AssetClass, str]] = {**_CLASS_NAMES, AssetClass.FUTURES: "futures"}
 """The noun of each class as messages write it before "ticker" (`a futures ticker`)."""
 
 
@@ -200,8 +318,8 @@ class SymbolTable:
         object.__setattr__(self, "table_id", id(self.table))
 
 
-NormalizedSymbols: TypeAlias = tuple[str, ...] | _All | SymbolTable
-"""A `Symbols` argument after `check_symbols`: a sorted tuple of canonical symbols, `ALL`, or a
+NormalizedSymbols: TypeAlias = tuple[str, ...] | AllSymbols | SymbolTable
+"""A `symbols` argument after `check_symbols`: a sorted tuple of canonical symbols, `ALL`, or a
 boxed symbol table."""
 
 
@@ -239,8 +357,8 @@ def is_futures_contract(text: str) -> bool:
         text: The text.
 
     Returns:
-        True for a root of upper-case letters and digits, a month code, and a one- or two-digit
-        year.
+        True for a root of upper-case letters and digits, a month code, and one to three
+        digits.
     """
     return _FUTURE.fullmatch(text) is not None
 
@@ -327,6 +445,32 @@ def is_canonical(
     return CANONICAL_GRAMMARS[resolved](text)
 
 
+def as_written_fault(text: str) -> str:
+    """Say which rule of `AS_WRITTEN` text breaks, for the message that refuses it.
+
+    Args:
+        text: Text `AS_WRITTEN` refuses.
+
+    Returns:
+        The rule it breaks, worded to follow the text, such as `"has surrounding whitespace"`.
+
+    Raises:
+        BrokenGuaranteeError: If the text breaks none of the rules, so this function and
+            `AS_WRITTEN` disagree.
+    """
+    if not text:
+        return "is empty"
+    if _CLASS_PREFIX.match(text):
+        return f"starts with the class prefix {text[:2]!r}"
+    if _CONTROL.search(text):
+        return "holds a control character"
+    if text != text.strip(" "):
+        return "has surrounding whitespace"
+    raise BrokenGuaranteeError(
+        library_bug(f"{text!r} breaks no rule of a ticker kept as Massive writes it")
+    )
+
+
 def is_forex_currency(code: str) -> bool:
     """Tell whether text is a forex currency code: three upper-case letters, such as `EUR`.
 
@@ -371,7 +515,7 @@ def _class_noun_with_article(asset_class: AssetClass) -> str:
         For example `"a stock"` or `"an index"`.
     """
     article = "an" if asset_class in _VOWEL_CLASSES else "a"
-    return f"{article} {_CLASS_NOUNS[asset_class]}"
+    return f"{article} {CLASS_NOUNS[asset_class]}"
 
 
 def _refuse_surrounding_whitespace(text: str) -> None:
@@ -385,7 +529,7 @@ def _refuse_surrounding_whitespace(text: str) -> None:
             naming the stripped text.
     """
     if text.strip() and text != text.strip():
-        raise ValueError(f"{text!r} has surrounding whitespace; write {text.strip()!r}")
+        raise ValueError(f"{text!r} has surrounding whitespace. Pass {text.strip()!r}.")
 
 
 def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
@@ -397,21 +541,21 @@ def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
 
     Raises:
         ValueError: If the text starts with the prefix of another class, for example
-            `'C:EURUSD' is a forex ticker (prefix C:); call dm.canonical_symbol_forex`.
+            `'C:EURUSD' is a forex ticker, not a stock one. Call
+            dm.canonical_symbol_forex('C:EURUSD').`
     """
     prefix = text[:2].upper()
     other = _CLASS_BY_PREFIX.get(prefix)
     if other is not None and other is not asset_class:
         found, wanted = _class_noun_with_article(other), _class_noun_with_article(asset_class)
         raise ValueError(
-            f"{text!r} is {found} ticker (prefix {prefix}), not {wanted} one; "
-            f"call {_converter_name(other)}"
+            f"{text!r} is {found} ticker, not {wanted} one. "
+            f"Call {_converter_name(other)}({text!r})."
         )
 
 
 _SEPARATORS: Final = frozenset("-/ +=^#$*%@!~")
 """Characters other stock conventions use as separators and Massive never does."""
-_CONVENTIONS: Final = ", ".join(f"dm.SymbolConvention.{c.name}" for c in SymbolConvention)
 
 
 def _convert_stock(text: str) -> str:
@@ -424,9 +568,10 @@ def _convert_stock(text: str) -> str:
         Nothing: it always raises; the return type is the converters' common one.
 
     Raises:
-        ValueError: Always. Separators of another convention (`-`, `/`, a space) name the
-            conventions that convert them; all lower-case text says that case matters and
-            names the upper-case ticker to use if that is the one meant. It is only offered,
+        ValueError: Always. Separators of another convention (`-`, `/`, a space) lead with
+            the fix, Yahoo's convention, and name the others; all lower-case text says that
+            case matters and names the upper-case ticker to use if that is the one meant. It
+            is only offered,
             never converted to: Massive's tickers are case-sensitive, so `kimpl` may mean
             `KIMpL`.
     """
@@ -434,18 +579,20 @@ def _convert_stock(text: str) -> str:
     _refuse_surrounding_whitespace(text)
     if text.strip() and _SEPARATORS.intersection(text):
         raise ValueError(
-            f"{text!r} is not a Massive stock ticker: it uses another convention's separators. "
-            "Name the convention it comes from: dm.canonical_symbol(text, dm.AssetClass.STOCKS, "
-            f"convention=...) with one of {_CONVENTIONS}, or in a query string "
-            "dm.canonical_symbol_stock_yahoo, _nasdaq, or _cms"
+            f"{text!r} is not a Massive stock ticker. If it is Yahoo's spelling, convert it with "
+            f"dm.canonical_symbol({text!r}, dm.AssetClass.STOCKS, "
+            "convention=dm.SymbolConvention.YAHOO), or name dm.SymbolConvention.NASDAQ or "
+            "dm.SymbolConvention.CMS for those spellings."
         )
     if text == text.lower() != text.upper():
         raise ValueError(
-            f"{text!r} is not a Massive stock ticker: tickers are case-sensitive, with an "
-            "upper-case root and possibly a lower-case suffix (KIMpL is a preferred); write "
-            f"Massive's ticker exactly: use {text.upper()!r} if that is the ticker you mean"
+            f"{text!r} is not a Massive stock ticker, because Massive's tickers are "
+            f"case-sensitive. If you mean {text.upper()!r}, pass {text.upper()!r}."
         )
-    raise ValueError(f"{text!r} is not a Massive stock ticker such as 'AAPL', 'BRK.B', or 'KIMpL'")
+    raise ValueError(
+        f"{text!r} is not a Massive stock ticker, which looks like 'AAPL', 'BRK.B', or "
+        "'KIMpL'. Pass the ticker as m.reference.tickers() lists it."
+    )
 
 
 def _convert_option(text: str) -> str:
@@ -461,8 +608,9 @@ def _convert_option(text: str) -> str:
         `O:` and the OCC symbol, upper case.
 
     Raises:
-        ValueError: If the text is no OCC symbol with a real expiry date (an underlying such
-            as `AAPL` is named as one), or names another class.
+        ValueError: If the text is no OCC symbol with a real expiry date: an OCC-shaped
+            symbol whose date does not exist is refused for its date, and an underlying such
+            as `AAPL` is named as one; or if it names another class.
     """
     _refuse_other_prefix(AssetClass.OPTIONS, text)
     body = text.upper().removeprefix("O:")
@@ -472,13 +620,21 @@ def _convert_option(text: str) -> str:
     symbol = f"O:{body}"
     if _occ_ok(symbol):
         return symbol
+    shaped = _OCC.fullmatch(symbol)
+    if shaped is not None:
+        raise ValueError(
+            f"{text!r} has the shape of an OCC option symbol, but its expiry "
+            f"{shaped['expiry']}, read as YYMMDD, is not a real date. Pass the symbol as "
+            "m.options.contracts() lists it."
+        )
     if _STOCK.fullmatch(text) is not None:
         raise ValueError(
-            f"{text!r} is an underlying, not an OCC option symbol such as 'O:AAPL250117C00150000'"
+            f"{text!r} is an underlying, not an OCC option symbol such as "
+            f"'O:AAPL250117C00150000'. Pass a contract's symbol from m.options.contracts({text!r})."
         )
     raise ValueError(
-        f"{text!r} is not an OCC option symbol with a real expiry date, such as "
-        "'O:AAPL250117C00150000'"
+        f"{text!r} is not an OCC option symbol, which looks like 'O:AAPL250117C00150000'. "
+        "Pass the symbol as m.options.contracts() lists it."
     )
 
 
@@ -500,10 +656,9 @@ def _convert_future(text: str) -> str:
     _refuse_other_prefix(AssetClass.FUTURES, text)
     _refuse_surrounding_whitespace(text)
     raise ValueError(
-        f"{text!r} is not a Massive futures ticker: a contract is a root of upper-case letters "
-        "and digits, a month code, and a one- or two-digit year ('ESZ5'), and a combo is runs "
-        "of upper-case letters and digits joined by single '-', ':', or spaces ('GCQ6-GCZ6', "
-        "'BOB 02-01 U6', 'CL:BF Q6-U6-V6')"
+        f"{text!r} is not a Massive futures ticker. A contract looks like 'ESZ5' or 'NGZ26' and "
+        "a spread like 'GCQ6-GCZ6', in upper case. Pass the ticker as m.futures.contracts() "
+        "lists it."
     )
 
 
@@ -524,9 +679,8 @@ def _convert_single_future(text: str) -> str:
         return text
     if _is_spread(text):
         raise ValueError(
-            f"{text!r} is a futures combo (a spread, strip, pack, or bundle), not a single "
-            "contract; call "
-            "dm.canonical_symbol_future_spread"
+            f"{text!r} is a futures combo, such as a spread, not a single contract. "
+            f"Call dm.canonical_symbol_future_spread({text!r})."
         )
     return _convert_future(text)
 
@@ -548,14 +702,14 @@ def _convert_spread(text: str) -> str:
         return text
     if is_futures_contract(text):
         raise ValueError(
-            f"{text!r} is a single futures contract, not a combo; call dm.canonical_symbol_future"
+            f"{text!r} is a single futures contract, not a combo. "
+            f"Call dm.canonical_symbol_future({text!r})."
         )
     _refuse_other_prefix(AssetClass.FUTURES, text)
     _refuse_surrounding_whitespace(text)
     raise ValueError(
-        f"{text!r} is not a Massive futures combo ticker: runs of upper-case letters and digits "
-        "joined by single '-', ':', or spaces, such as 'GCQ6-GCZ6', 'BOB 02-01 U6', or "
-        "'CL:BF Q6-U6-V6'"
+        f"{text!r} is not a Massive futures combo ticker, which looks like 'GCQ6-GCZ6', "
+        "'BOB 02-01 U6', or 'CL:BF Q6-U6-V6'. Pass the ticker as m.futures.contracts() lists it."
     )
 
 
@@ -569,12 +723,22 @@ def _convert_index(text: str) -> str:
         `I:` and the root, such as `I:SPX`.
 
     Raises:
-        ValueError: If the root is not an index ticker, or the text names another class.
+        ValueError: If the root is not an index ticker, or the text names another class. A
+            root with a lower-case letter names the upper-case ticker to use, if that is the
+            one meant; it is only offered, never converted to.
     """
     _refuse_other_prefix(AssetClass.INDICES, text)
     symbol = text if text.startswith("I:") else f"I:{text}"
+    if symbol != symbol.upper() and _INDEX.fullmatch(symbol.upper()) is not None:
+        raise ValueError(
+            f"{text!r} is not a Massive index ticker. Index tickers are upper case. If you mean "
+            f"{symbol.upper()!r}, pass {symbol.upper()!r}."
+        )
     if _INDEX.fullmatch(symbol) is None:
-        raise ValueError(f"{text!r} is not a Massive index ticker such as 'I:SPX'")
+        raise ValueError(
+            f"{text!r} is not a Massive index ticker, which looks like 'I:SPX'. Pass the ticker "
+            "as m.reference.tickers(market=dm.Market.INDICES) lists it."
+        )
     return symbol
 
 
@@ -659,14 +823,14 @@ def _convert_forex(text: str) -> str:
         # Yahoo Finance writes a pair as `EURUSD=X`; reading it would guess at another vendor's
         # grammar, so the message only shows Massive's form.
         raise ValueError(
-            f"cannot read {text!r} as a forex pair: it looks like Yahoo Finance's spelling; "
-            "Massive's forex tickers look like 'C:EURUSD', two three-letter currency codes "
-            "after C:, and this function reads 'EUR/USD', 'EUR-USD', or 'EURUSD'"
+            f"{text!r} is Yahoo Finance's spelling of a forex pair, which the library does not "
+            "read. Write the pair as 'EUR/USD', 'EUR-USD', or 'EURUSD', or pass Massive's "
+            "ticker, such as 'C:EURUSD'."
         )
     if symbol is None:
         raise ValueError(
-            f"cannot read {text!r} as a forex pair of two three-letter codes; write it as "
-            "BASE/QUOTE, such as 'EUR/USD'"
+            f"{text!r} is not a forex pair of two three-letter currency codes. Write it as "
+            "BASE/QUOTE, such as 'EUR/USD'."
         )
     return symbol
 
@@ -690,11 +854,13 @@ def _convert_crypto(text: str) -> str:
     _refuse_other_prefix(AssetClass.CRYPTO, text)
     symbol = read_crypto_pair(text.upper(), ("X:",))
     if symbol is None:
-        raise ValueError(f"cannot read {text!r} as a crypto pair; write it as BASE-QUOTE")
+        raise ValueError(
+            f"{text!r} is not a crypto pair. Write it as BASE-QUOTE, such as 'BTC-USD'."
+        )
     if _CRYPTO.fullmatch(symbol) is None:
         raise ValueError(
-            f"cannot read {text!r} as a crypto pair: it is too short to hold a base currency "
-            "and a quote currency; write it as BASE-QUOTE, such as 'BTC-USD'"
+            f"{text!r} is too short to hold a base currency and a quote currency. Write the pair "
+            "as BASE-QUOTE, such as 'BTC-USD'."
         )
     return symbol
 
@@ -710,8 +876,8 @@ _CONVERTERS: Final[dict[AssetClass, Callable[[str], str]]] = {
 
 _UNDOCUMENTED_SPELLINGS: Final = (
     "Massive documents no spelling for warrants, units, rights, when-issued, "
-    "when-distributed, called, or test issues, so the library converts none of them; pass "
-    "Massive's own ticker, as m.reference.tickers lists it"
+    "when-distributed, called, or test issues, so the library converts none of them. Pass "
+    "Massive's own ticker, as m.reference.tickers() lists it."
 )
 _STOCK_CONVENTIONS: Final[dict[SymbolConvention, tuple[tuple[re.Pattern[str], str], ...]]] = {
     SymbolConvention.YAHOO: (
@@ -753,14 +919,25 @@ def _convert_stock_from(text: str, convention: SymbolConvention) -> str:
 
     Raises:
         ValueError: If the text is not one of the convention's plain, class, or preferred
-            spellings: a Yahoo ticker with a dot is named a foreign listing, and every other
-            refusal says which suffixes the library does not convert.
+            spellings. Surrounding whitespace names the stripped text, empty text says it is
+            empty, all lower-case text names the upper-case form, a Yahoo ticker
+            with a dot is named a foreign listing, and every other refusal says which
+            suffixes the library does not convert.
     """
+    _refuse_surrounding_whitespace(text)
+    if not text.strip():
+        raise ValueError(f"{text!r} is {'only whitespace' if text else 'empty'}, not a ticker.")
     _refuse_other_prefix(AssetClass.STOCKS, text)
+    if text == text.lower() != text.upper():
+        raise ValueError(
+            f"{text!r} is not a {convention.name} ticker. The {convention.name} convention "
+            f"writes tickers in upper case. If you mean {text.upper()!r}, pass {text.upper()!r}."
+        )
     if convention is SymbolConvention.YAHOO and "." in text:
         raise ValueError(
-            f"{text!r} is a Yahoo ticker of a listing outside the US (Yahoo's dot names the "
-            "exchange); Massive's US stock tickers have no such listing"
+            f"{text!r} is a Yahoo ticker of a listing outside the US, since Yahoo's dot names "
+            "the exchange. Massive's stock tickers are US listings, so no Massive ticker matches "
+            "it."
         )
     for pattern, template in _STOCK_CONVENTIONS[convention]:
         match = pattern.fullmatch(text)
@@ -789,12 +966,168 @@ def _require_text(text: object) -> str | None:
     raise TypeError(f"a symbol must be a str or None, not {type(text).__name__}")
 
 
-@raises_through(_require_enum, _require_text)
+LOGGED_VALUES: Final = 20
+"""The most distinct values that do not convert one log reports: a scalar converter's per
+process (`_logged_values`, `_ignored_values`), and one `canonicalize_symbols` table's."""
+
+_logged_values: Final = BoundedLog(logger, limit=LOGGED_VALUES, level=logging.WARNING)
+"""The values a scalar converter could not convert under `OnError.LOG`: each once per process."""
+_ignored_values: Final = BoundedLog(logger, limit=LOGGED_VALUES, level=logging.DEBUG)
+"""The same under `OnError.IGNORE`, at DEBUG."""
+
+
+def check_convention(
+    asset_class: object, convention: object
+) -> tuple[AssetClass, SymbolConvention]:
+    """Check a converter's class and convention, as the scalar and table converters both take them.
+
+    Args:
+        asset_class: The `asset_class` argument.
+        convention: The `convention` argument.
+
+    Returns:
+        The class and the convention.
+
+    Raises:
+        ValueError: If `convention` is a stock convention and the class is not stocks.
+
+    An enum argument of the wrong type raises the `TypeError` of `_require_enum`.
+    """
+    resolved = _require_enum(asset_class, AssetClass, "asset_class")
+    chosen = _require_enum(convention, SymbolConvention, "convention")
+    if chosen is not SymbolConvention.MASSIVE and resolved is not AssetClass.STOCKS:
+        raise ValueError(
+            f"convention=dm.SymbolConvention.{chosen.name} is for stock tickers, not "
+            f"{resolved.value}. Pass asset_class=dm.AssetClass.STOCKS, or leave convention out."
+        )
+    return resolved, chosen
+
+
+def strict_converter(asset_class: AssetClass, convention: SymbolConvention) -> Callable[[str], str]:
+    """Return the one strict verdict on text of a class: its canonical ticker, or `ValueError`.
+
+    The scalar converters and `canonicalize_symbols` both convert through it, so a value is
+    accepted, or refused with one reason, the same way in both.
+
+    Args:
+        asset_class: The class whose grammar and converter apply.
+        convention: The convention the text comes from; a stock convention applies its own
+            grammar alone.
+
+    Returns:
+        A function from text to its canonical ticker, which raises `ValueError`, with the
+        reason and the fix where one exists, for text that does not convert.
+    """
+    if convention is not SymbolConvention.MASSIVE:
+        return functools.partial(_convert_stock_from, convention=convention)
+    grammar = CANONICAL_GRAMMARS[asset_class]
+    converter = _CONVERTERS[asset_class]
+
+    def convert(text: str) -> str:
+        return text if grammar(text) else converter(text)
+
+    return convert
+
+
+def refusal(text: str, convert: Callable[[str], str]) -> str | None:
+    """Return why text does not convert, or None when it does.
+
+    Args:
+        text: The text.
+        convert: The strict verdict (`strict_converter`, or a futures form's converter).
+
+    Returns:
+        The `ValueError` message, or None.
+    """
+    try:
+        convert(text)
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def convert_under(
+    text: str,
+    convert: Callable[[str], str],
+    *,
+    effect: OnErrorEffect,
+    log: BoundedLog,
+    caller: str,
+    consequence: str,
+) -> str | None:
+    """Convert text, doing what an `OnError` setting says with text that does not convert.
+
+    The one place a converter's `on_error` takes effect, for a scalar converter and for each
+    row of `canonicalize_symbols`: under `RAISE` the verdict's `ValueError` propagates; under
+    `LOG` and `IGNORE` the value is logged once, at the effect's level, through the caller's
+    bounded log, and None comes back.
+
+    Args:
+        text: The text.
+        convert: The strict verdict (`strict_converter`, or a futures form's converter).
+        effect: What the caller's `on_error` does (`effect_of`).
+        log: The caller's bounded log of values that did not convert: a scalar converter's
+            process-wide one, or a table's own.
+        caller: The function logged as refusing the value, such as `canonical_symbol`.
+        consequence: What the value becomes, as a verb phrase with the value as its
+            subject, such as `"becomes None"`.
+
+    Returns:
+        The canonical ticker, or None for text that does not convert when the effect does not
+        fail.
+
+    Errors are those of `convert`, under an effect that fails.
+    """
+    if effect.fails:
+        return convert(text)
+    try:
+        return convert(text)
+    except ValueError as error:
+        log.log(text, "%s: %r %s. %s", caller, text, consequence, error)
+        return None
+
+
+def _convert_scalar(
+    text: str | None, convert: Callable[[str], str], *, on_error: object, caller: str
+) -> str | None:
+    """Run a scalar converter: check its text and `on_error`, then convert under the effect.
+
+    Args:
+        text: The `text` argument.
+        convert: The strict verdict.
+        on_error: The `on_error` argument.
+        caller: The converter's name, for its log record.
+
+    Returns:
+        The canonical ticker; None for None, or for text that does not convert under `LOG`
+        and `IGNORE`.
+
+    A `text` that is neither a `str` nor None raises the `TypeError` of `_require_text`, and an
+    `on_error` that is no `OnError` member that of `_require_enum`; other errors are those of
+    `convert_under`.
+    """
+    effect = effect_of(_require_enum(on_error, OnError, "on_error"))
+    value = _require_text(text)
+    if value is None:
+        return None
+    log = _logged_values if effect.level > logging.DEBUG else _ignored_values
+    return convert_under(
+        value,
+        convert,
+        effect=effect,
+        log=log,
+        caller=caller,
+        consequence="becomes None",
+    )
+
+
+@raises_through(_require_enum, _require_text, check_convention)
 def canonical_symbol(
     text: str | None,
     asset_class: AssetClass,
     *,
     convention: SymbolConvention = SymbolConvention.MASSIVE,
+    on_error: OnError = OnError.RAISE,
 ) -> str | None:
     """Convert a symbol of a named asset class to Massive's exact REST ticker.
 
@@ -807,10 +1140,15 @@ def canonical_symbol(
     of Massive's spellings (`GCQ6-GCZ6`) comes back unchanged and anything else raises, with
     the message of `canonical_symbol_future`; a futures dataset's `symbols` take the same two
     forms. The class is never guessed: `SPX` is an index only because
-    the caller says so. In a Deephaven query string, call the per-class functions instead
-    (`canonical_symbol_forex`), which need no enum argument; a function called through the
-    module (`dm.canonical_symbol(...)`) makes an `Object` column unless cast with `(String)`.
-    Pure and thread-safe.
+    the caller says so. Text that does not convert does what `on_error` says: raises, the
+    default, or comes back as None with one log record per distinct value, so a column of
+    mixed spellings in Python can be converted without failing on the first bad one. The same
+    verdict and `on_error` apply to every row of `dm.canonicalize_symbols`. A Deephaven query
+    string passes positional arguments only: call a convention's function
+    (`canonical_symbol_stock_yahoo`), or give `on_error=` through a `functools.partial` of the
+    function, imported under a bare name. A function called through the module
+    (`dm.canonical_symbol(...)`) makes an `Object` column unless cast with `(String)`.
+    Thread-safe.
 
     Example:
         ::
@@ -830,41 +1168,37 @@ def canonical_symbol(
             `YAHOO`, `NASDAQ`, and `CMS`, for stocks only, convert from that convention's
             grammar alone. A stock ticker converts only from a named convention, because `-`
             means a class in Yahoo's and a preferred in Nasdaq's.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only.
 
     Returns:
-        The canonical ticker, or None for None.
+        The canonical ticker; None for None, or, under `OnError.LOG` and `IGNORE`, for text
+        that does not convert.
 
     Raises:
         TypeError: If `asset_class` is not a `dm.AssetClass`, `convention` is not a
-            `dm.SymbolConvention`, or `text` is neither a `str` nor None.
-        ValueError: If `convention` is a stock convention and the class is not stocks, or the
-            text is not a symbol of the class in any accepted spelling. The message gives the
-            reason and, where one exists, the fix: a ticker with another class's prefix names
-            that class's function.
+            `dm.SymbolConvention`, `on_error` is not a `dm.OnError`, or `text` is neither a
+            `str` nor None.
+        ValueError: If `convention` is a stock convention and the class is not stocks, or,
+            under `OnError.RAISE`, the default, if the text is not a symbol of the class in any
+            accepted spelling. The message gives the reason and, where one exists, the fix: a
+            ticker with another class's prefix names that class's function.
     """
-    resolved = _require_enum(asset_class, AssetClass, "asset_class")
-    chosen = _require_enum(convention, SymbolConvention, "convention")
-    if chosen is not SymbolConvention.MASSIVE and resolved is not AssetClass.STOCKS:
-        raise ValueError(
-            f"the {chosen.name} convention applies to stocks only, not {resolved.value}"
-        )
-    value = _require_text(text)
-    if value is None:
-        return None
-    if chosen is not SymbolConvention.MASSIVE:
-        return _convert_stock_from(value, chosen)
-    if CANONICAL_GRAMMARS[resolved](value):
-        return value
-    return _CONVERTERS[resolved](value)
+    resolved, chosen = check_convention(asset_class, convention)
+    return _convert_scalar(
+        text, strict_converter(resolved, chosen), on_error=on_error, caller="canonical_symbol"
+    )
 
 
 @raises_through(canonical_symbol)
-def canonical_symbol_stock(text: str | None) -> str | None:
+def canonical_symbol_stock(text: str | None, *, on_error: OnError = OnError.RAISE) -> str | None:
     """Check a stock ticker in Massive's own spelling, for Python code and query strings.
 
     Massive's spelling is the only one accepted: a ticker from Yahoo, Nasdaq, or a CMS feed
     goes through the function of its convention (`canonical_symbol_stock_yahoo`), because the
-    same `-` means a class in one and a preferred in another. Pure and thread-safe.
+    same `-` means a class in one and a preferred in another. Thread-safe.
 
     Example:
         ::
@@ -883,27 +1217,40 @@ def canonical_symbol_stock(text: str | None) -> str | None:
 
     Args:
         text: The ticker, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_stock, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        The ticker unchanged, or None for None.
+        The ticker unchanged, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
+        does not convert.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is not a Massive stock ticker; the message names the conventions for
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is not a Massive stock ticker;
+            the message names the conventions for
             text with their separators, and the upper-case form for lower-case text.
     """
-    return canonical_symbol(text, AssetClass.STOCKS)
+    return canonical_symbol(text, AssetClass.STOCKS, on_error=on_error)
 
 
 @raises_through(canonical_symbol)
-def canonical_symbol_stock_yahoo(text: str | None) -> str | None:
+def canonical_symbol_stock_yahoo(
+    text: str | None, *, on_error: OnError = OnError.RAISE
+) -> str | None:
     """Convert a Yahoo Finance stock ticker to Massive's: `BRK-B` to `BRK.B`, `BAC-PL` to `BACpL`.
 
     Yahoo writes a share class as `-X` and a preferred as `-P` and its series. Only plain
     tickers, classes, and preferreds with a series convert: Yahoo's bare `-P` is refused (a
     generic preferred and class P read alike), and warrants (`-WT`), units (`-UN`), and rights
     (`-RI`) are refused, since Massive documents no spelling for them, and so is a ticker with a
-    dot, Yahoo's mark of a listing outside the US (`VOD.L`). Pure and thread-safe.
+    dot, Yahoo's mark of a listing outside the US (`VOD.L`). Thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_stock_yahoo`) for a `String` column; called through the module it makes an
@@ -911,27 +1258,42 @@ def canonical_symbol_stock_yahoo(text: str | None) -> str | None:
 
     Args:
         text: The Yahoo ticker, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_stock_yahoo, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        Massive's ticker, or None for None. Only the convention's grammar is read: text it
+        Massive's ticker, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
+        does not convert. Only the convention's grammar is read: text it
         does not spell is refused even when it is a Massive ticker.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is not a plain, class, or preferred Yahoo ticker.
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is not a plain, class, or
+            preferred Yahoo ticker.
     """
-    return canonical_symbol(text, AssetClass.STOCKS, convention=SymbolConvention.YAHOO)
+    return canonical_symbol(
+        text, AssetClass.STOCKS, convention=SymbolConvention.YAHOO, on_error=on_error
+    )
 
 
 @raises_through(canonical_symbol)
-def canonical_symbol_stock_nasdaq(text: str | None) -> str | None:
+def canonical_symbol_stock_nasdaq(
+    text: str | None, *, on_error: OnError = OnError.RAISE
+) -> str | None:
     """Convert a Nasdaq Integrated Platform stock ticker to Massive's: `KIM-L` to `KIMpL`.
 
     Nasdaq's own symbology (the "NASDAQ Symbol" column of `nasdaqtraded.txt`) writes a class as
     `.X` and a preferred as `-` and its optional series. Its other suffixes (`+` warrants, `=`
     units, `^` rights, `#` when issued) are refused, since Massive documents no spelling for
     them. The ACT symbology of the same files writes `.W` for warrants and `.V` for both a
-    class and when-issued, so it is ambiguous and not supported. Pure and thread-safe.
+    class and when-issued, so it is ambiguous and not supported. Thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_stock_nasdaq`) for a `String` column; called through the module it makes an
@@ -939,26 +1301,41 @@ def canonical_symbol_stock_nasdaq(text: str | None) -> str | None:
 
     Args:
         text: The Nasdaq ticker, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_stock_nasdaq, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        Massive's ticker, or None for None. Only the convention's grammar is read: text it
+        Massive's ticker, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
+        does not convert. Only the convention's grammar is read: text it
         does not spell is refused even when it is a Massive ticker.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is not a plain, class, or preferred Nasdaq ticker.
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is not a plain, class, or
+            preferred Nasdaq ticker.
     """
-    return canonical_symbol(text, AssetClass.STOCKS, convention=SymbolConvention.NASDAQ)
+    return canonical_symbol(
+        text, AssetClass.STOCKS, convention=SymbolConvention.NASDAQ, on_error=on_error
+    )
 
 
 @raises_through(canonical_symbol)
-def canonical_symbol_stock_cms(text: str | None) -> str | None:
+def canonical_symbol_stock_cms(
+    text: str | None, *, on_error: OnError = OnError.RAISE
+) -> str | None:
     """Convert a CMS stock ticker to Massive's: `BRK B` to `BRK.B`, `BAC PRL` to `BACpL`.
 
     The CMS convention (the root, a space, and a suffix, as many broker and FIX systems write
     it) spells a class as ` X` and a preferred as ` PR` and its optional series. Its other
     suffixes (` WS`, ` U`, ` RT`, ` WI`) are refused, since Massive documents no spelling for
-    them. Pure and thread-safe.
+    them. Thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_stock_cms`) for a `String` column; called through the module it makes an
@@ -966,25 +1343,38 @@ def canonical_symbol_stock_cms(text: str | None) -> str | None:
 
     Args:
         text: The CMS ticker, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_stock_cms, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        Massive's ticker, or None for None. Only the convention's grammar is read: text it
+        Massive's ticker, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
+        does not convert. Only the convention's grammar is read: text it
         does not spell is refused even when it is a Massive ticker.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is not a plain, class, or preferred CMS ticker.
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is not a plain, class, or
+            preferred CMS ticker.
     """
-    return canonical_symbol(text, AssetClass.STOCKS, convention=SymbolConvention.CMS)
+    return canonical_symbol(
+        text, AssetClass.STOCKS, convention=SymbolConvention.CMS, on_error=on_error
+    )
 
 
 @raises_through(canonical_symbol)
-def canonical_symbol_option(text: str | None) -> str | None:
+def canonical_symbol_option(text: str | None, *, on_error: OnError = OnError.RAISE) -> str | None:
     """Convert an OCC option symbol to Massive's: `AAPL250117C00150000` to `O:AAPL250117C00150000`.
 
     Accepts the symbol with or without `O:` and the 21-character OSI form whose root is padded
     with spaces, in any case. The root is never changed: `SPXW` stays `SPXW` and an adjusted
-    root such as `AAPL1` stays `AAPL1`. Pure and thread-safe.
+    root such as `AAPL1` stays `AAPL1`. Thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_option`) for a `String` column; called through the module it makes an `Object`
@@ -992,28 +1382,40 @@ def canonical_symbol_option(text: str | None) -> str | None:
 
     Args:
         text: The option symbol, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_option, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        `O:` and the OCC symbol, or None for None.
+        `O:` and the OCC symbol, or None for None or, under `OnError.LOG` and `IGNORE`, for text
+        that does not convert.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is no OCC symbol with a real expiry date (an underlying such as
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is no OCC symbol with a real
+            expiry date (an underlying such as
             `AAPL` is named as one), or carries another class's prefix.
     """
-    return canonical_symbol(text, AssetClass.OPTIONS)
+    return canonical_symbol(text, AssetClass.OPTIONS, on_error=on_error)
 
 
-@raises_through(_require_text, _convert_single_future)
-def canonical_symbol_future(text: str | None) -> str | None:
+@raises_through(_require_enum, _require_text, _convert_single_future)
+def canonical_symbol_future(text: str | None, *, on_error: OnError = OnError.RAISE) -> str | None:
     """Check a single futures contract ticker, which Massive's text is exactly: `ESZ5`.
 
-    A contract ticker is a root of upper-case letters and digits, a month code, and a one- or
-    two-digit year, taken as written: nothing is converted
-    or re-cased. A spread is refused with the function that takes it
-    (`canonical_symbol_future_spread`). Beware the year: Massive writes it with one digit
-    (`ESZ5` is December 2025) unless the contract is ten or more years out (`0NGH39`), so
-    `ESZ25` is not `ESZ5`. Pure and thread-safe.
+    A contract ticker is a root of upper-case letters and digits, a month code, and one to
+    three digits, taken as written: nothing is converted or re-cased. Most contracts end in a
+    one- or two-digit year (`ESZ5`, `NGZ26`), and daily contracts in three digits (`0AF704`,
+    `GCBX602`). A spread is refused with the function that takes it
+    (`canonical_symbol_future_spread`). Beware the year: Massive writes it with one digit for
+    most products (`ESZ5` is December 2025) and with two for some (`NGZ26`, `0NGH39`), so
+    `ESZ25` is not `ESZ5`. Thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_future`) for a `String` column; called through the module it makes an
@@ -1021,28 +1423,41 @@ def canonical_symbol_future(text: str | None) -> str | None:
 
     Args:
         text: The contract ticker, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_future, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        The ticker unchanged, or None for None.
+        The ticker unchanged, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
+        does not convert.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is a combo, or not a root, a month code, and a year.
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is a combo, or not a root, a
+            month code, and one to three digits.
     """
-    value = _require_text(text)
-    return None if value is None else _convert_single_future(value)
+    return _convert_scalar(
+        text, _convert_single_future, on_error=on_error, caller="canonical_symbol_future"
+    )
 
 
-@raises_through(_require_text, _convert_spread)
-def canonical_symbol_future_spread(text: str | None) -> str | None:
+@raises_through(_require_enum, _require_text, _convert_spread)
+def canonical_symbol_future_spread(
+    text: str | None, *, on_error: OnError = OnError.RAISE
+) -> str | None:
     """Check a futures combo ticker, exactly as Massive writes it: `GCQ6-GCZ6`, `BOB 02-01 U6`.
 
     Any combo (spread, strip, pack, or bundle) Massive writes is accepted: runs of upper-case
     letters and digits joined by single `-`, `:`, or spaces (`GCQ6-GCZ6`, `BOB 02-01 U6`,
     `CL:BF Q6-U6-V6`, `6A:XF:AUDUSD:Q6`). Massive documents no grammar for combos, so the shape
     is checked rather than a list of forms. Canonical text comes back unchanged; no ticker is
-    built from its legs. A single contract is refused with `canonical_symbol_future`. Pure and
-    thread-safe.
+    built from its legs. A single contract is refused with `canonical_symbol_future`. Thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_future_spread`) for a `String` column; called through the module it makes
@@ -1050,25 +1465,37 @@ def canonical_symbol_future_spread(text: str | None) -> str | None:
 
     Args:
         text: The spread ticker, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_future_spread, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        The ticker unchanged, or None for None.
+        The ticker unchanged, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
+        does not convert.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is a single contract, or not in Massive's combo shape (the
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is a single contract, or not in
+            Massive's combo shape (the
             message describes it).
     """
-    value = _require_text(text)
-    return None if value is None else _convert_spread(value)
+    return _convert_scalar(
+        text, _convert_spread, on_error=on_error, caller="canonical_symbol_future_spread"
+    )
 
 
 @raises_through(canonical_symbol)
-def canonical_symbol_index(text: str | None) -> str | None:
+def canonical_symbol_index(text: str | None, *, on_error: OnError = OnError.RAISE) -> str | None:
     """Convert an index ticker to Massive's: `SPX` to `I:SPX`.
 
     The prefix is added because the caller names the class by calling this function; no
-    ticker is ever recognized as an index by its name. Case is kept. Pure and thread-safe.
+    ticker is ever recognized as an index by its name. Case is kept. Thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_index`) for a `String` column; called through the module it makes an `Object`
@@ -1076,23 +1503,33 @@ def canonical_symbol_index(text: str | None) -> str | None:
 
     Args:
         text: The index ticker, with or without `I:`, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_index, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        `I:` and the ticker, or None for None.
+        `I:` and the ticker, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
+        does not convert.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is not an index ticker or carries another class's prefix.
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is not an index ticker or
+            carries another class's prefix.
     """
-    return canonical_symbol(text, AssetClass.INDICES)
+    return canonical_symbol(text, AssetClass.INDICES, on_error=on_error)
 
 
 @raises_through(canonical_symbol)
-def canonical_symbol_forex(text: str | None) -> str | None:
+def canonical_symbol_forex(text: str | None, *, on_error: OnError = OnError.RAISE) -> str | None:
     """Convert a currency pair to Massive's forex ticker: `EUR/USD` to `C:EURUSD`.
 
-    Accepts `EUR/USD`, `EUR-USD`, and `EURUSD`, with or without `C:`, in any case. Pure and
-    thread-safe.
+    Accepts `EUR/USD`, `EUR-USD`, and `EURUSD`, with or without `C:`, in any case. Thread-safe.
 
     Example:
         ::
@@ -1111,28 +1548,39 @@ def canonical_symbol_forex(text: str | None) -> str | None:
 
     Args:
         text: The pair, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_forex, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        `C:` and the two codes, or None for None.
+        `C:` and the two codes, or None for None or, under `OnError.LOG` and `IGNORE`, for text that
+        does not convert.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is not two three-letter codes, or carries another class's prefix
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is not two three-letter codes,
+            or carries another class's prefix
             (`X:` is crypto). Yahoo Finance's spelling, `EURUSD=X`, is refused with a message that
             shows Massive's form: nothing is guessed from another vendor's grammar.
     """
-    return canonical_symbol(text, AssetClass.FOREX)
+    return canonical_symbol(text, AssetClass.FOREX, on_error=on_error)
 
 
 @raises_through(canonical_symbol)
-def canonical_symbol_crypto(text: str | None) -> str | None:
+def canonical_symbol_crypto(text: str | None, *, on_error: OnError = OnError.RAISE) -> str | None:
     """Convert a crypto pair to Massive's ticker: `BTC-USD` to `X:BTCUSD`.
 
     Accepts `BTC-USD`, `BTC/USD`, and `BTCUSD`, with or without `X:`, in any case, whatever the
     quote currency, and joins the two codes; any such ticker is canonical. A stream, the
     last-trade path, and the daily open/close path need the pair split into its two codes, and
     take the split only from Massive's crypto ticker list, so they refuse a pair that list does
-    not hold; every other verb takes any pair. Pure and thread-safe.
+    not hold; every other verb takes any pair. Thread-safe.
 
     In a Deephaven query string, import it by bare name (`from deephaven_massive import
     canonical_symbol_crypto`) for a `String` column; called through the module it makes an `Object`
@@ -1140,17 +1588,28 @@ def canonical_symbol_crypto(text: str | None) -> str | None:
 
     Args:
         text: The pair, or None.
+        on_error: What text that does not convert does. `OnError.RAISE`, the default,
+            raises `ValueError`; `OnError.LOG` returns None and logs the value once at
+            WARNING, at most `LOGGED_VALUES` values a process; `OnError.IGNORE` returns None
+            and logs it at DEBUG only. A query string passes positional arguments only, so
+            there a bad value fails the whole formula unless the function is in scope as a
+            `functools.partial` that binds `on_error`
+            (`lenient = partial(canonical_symbol_crypto, on_error=dm.OnError.LOG)`, then
+            `lenient(Ticker)`); `dm.canonicalize_symbols` converts a whole table.
 
     Returns:
-        `X:` and the joined pair, or None for None.
+        `X:` and the joined pair, or None for None or, under `OnError.LOG` and `IGNORE`, for text
+        that does not convert.
 
     Raises:
-        TypeError: If `text` is neither a `str` nor None.
-        ValueError: If the text is not a pair of letters and digits, is too short to hold a
+        TypeError: If `text` is neither a `str` nor None, or `on_error` is not a
+            `dm.OnError`.
+        ValueError: Under `OnError.RAISE`, the default, if the text is not a pair of letters and
+            digits, is too short to hold a
             base and a three-letter quote (`BTC` names one currency, not a pair), or carries
             another class's prefix (`C:` is forex).
     """
-    return canonical_symbol(text, AssetClass.CRYPTO)
+    return canonical_symbol(text, AssetClass.CRYPTO, on_error=on_error)
 
 
 # --- checks when a query is built ----------------------------------------------------------------
@@ -1177,10 +1636,10 @@ def check_symbol(
     Raises:
         TypeError: If the value is not a `str`.
         ValueError: If the text is not canonical. A canonical ticker of another class says
-            the dataset takes the other class (`'I:SPX' is an index ticker; this dataset takes
-            stock tickers`); otherwise the message names the canonical form when the class's
-            converter gives one (`'EUR/USD' is not Massive's ticker; use 'C:EURUSD'`), and
-            the converter's reason when it gives none.
+            the dataset takes the other class and names the namespace of that class's
+            datasets; otherwise the message names the canonical form when the class's
+            converter gives one (`'EUR/USD' is not Massive's forex ticker. Pass 'C:EURUSD',
+            ...`), and the converter's reason when it gives none.
     """
     if not isinstance(text, str):
         raise TypeError(f"a symbol must be a str, not {type(text).__name__}")
@@ -1188,32 +1647,33 @@ def check_symbol(
         return text
     if as_written:
         raise ValueError(
-            f"{text!r} is not a ticker as Massive writes it (not empty, no surrounding "
-            "whitespace, no control character, no class prefix)"
+            f"{text!r} {as_written_fault(text)}, and Massive never writes a ticker that way. "
+            "Pass the value as Massive lists it."
         )
     resolved = symbol_class(text) if asset_class is ClassFromPrefix.ANY else asset_class
     other = symbol_class(text)
     if other not in {resolved, AssetClass.STOCKS} and CANONICAL_GRAMMARS[other](text):
         raise ValueError(
-            f"{text!r} is {_class_noun_with_article(other)} ticker; this dataset takes "
-            f"{_CLASS_NOUNS[resolved]} tickers"
+            f"{text!r} is {_class_noun_with_article(other)} ticker, and this dataset takes "
+            f"{CLASS_NOUNS[resolved]} tickers. Pass {_class_noun_with_article(resolved)} "
+            f"ticker, or read {CLASS_NOUNS[other]} data through m.{other.value}."
         )
     try:
         fixed = _CONVERTERS[resolved](text)
     except ValueError as error:
-        raise ValueError(f"{error}; symbols must be Massive's exact tickers") from None
+        raise ValueError(str(error)) from None
     raise ValueError(
-        f"{text!r} is not Massive's ticker; use {fixed!r} (symbols must be Massive's exact "
-        f"tickers, and {_converter_name(resolved)} converts)"
+        f"{text!r} is not Massive's {CLASS_NOUNS[resolved]} ticker. Pass {fixed!r}, which "
+        f"{_converter_name(resolved)}({text!r}) returns."
     )
 
 
 def check_symbols(
     asset_class: AssetClass | ClassFromPrefix,
-    symbols: str | Iterable[str] | _All,
+    symbols: str | Iterable[str] | AllSymbols,
     *,
     as_written: bool = False,
-) -> tuple[str, ...] | _All:
+) -> tuple[str, ...] | AllSymbols:
     """Check a `Symbols` argument other than a table when a query is built.
 
     Rules: `dm.ALL` passes through; a `str` is one symbol; any other iterable of strings,
@@ -1235,10 +1695,10 @@ def check_symbols(
     Raises:
         TypeError: If `symbols` is not a `str`, an iterable of `str`, or `dm.ALL`, or an
             element is not a `str`.
-        ValueError: If no symbols remain (`ValueError("no symbols")`, for example from an
-            exhausted generator), or a symbol is not canonical (`check_symbol`).
+        ValueError: If no symbols remain, for example from an exhausted generator, or a
+            symbol is not canonical (`check_symbol`).
     """
-    if isinstance(symbols, _All):
+    if isinstance(symbols, AllSymbols):
         return symbols
     if isinstance(symbols, str):
         items: tuple[object, ...] = (symbols,)
@@ -1247,13 +1707,13 @@ def check_symbols(
             items = tuple(symbols)
         except TypeError:
             raise TypeError(
-                "symbols must be a str, a sequence of str, a Deephaven Table, or dm.ALL; "
-                f"got {type(symbols).__name__}"
+                "symbols must be a str, a sequence of str, a Deephaven Table, or dm.ALL, "
+                f"not {type(symbols).__name__}"
             ) from None
     if not items:
         raise ValueError(
-            "no symbols: the list is empty; pass at least one ticker, or dm.ALL for every "
-            "ticker where the dataset takes it"
+            "symbols holds no tickers. Pass at least one ticker, or dm.ALL for every ticker "
+            "where the dataset takes it."
         )
     return tuple(sorted({check_symbol(asset_class, i, as_written=as_written) for i in items}))
 

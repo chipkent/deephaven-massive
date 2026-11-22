@@ -11,6 +11,8 @@ def test_the_default_hand_input_is_the_real_tables() -> None:
     assert hand.lexicons is lexicon.LEXICONS
     assert hand.shapes is lexicon.SHAPES
     assert hand.identity is lexicon.IDENTITY
+    assert hand.spellings is overrides.SPELLINGS
+    assert hand.shared_descriptions is overrides.SHARED_DESCRIPTIONS
     assert hand.names is overrides.NAMES
     assert hand.units is overrides.UNITS
     assert hand.tag_conflicts is overrides.TAG_CONFLICTS

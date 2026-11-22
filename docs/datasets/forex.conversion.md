@@ -7,24 +7,27 @@ An amount converted between two currencies at the latest quote.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.forex.conversion(from_currency, to_currency, *, amount=1.0, precision=2)
+m.forex.conversion(from_currency, to_currency, *, amount=1.0, precision=2, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
 - Read from: REST
 - `poll()` by default: `dm.PollMode.REPLACE`, which holds only the latest poll's rows, one row per `Symbol`
-- `poll(interval, mode=dm.PollMode.APPEND)`: appends each new state of a row, identified by `Symbol` and `LastTimestamp`
+- `poll(interval, mode=dm.PollMode.APPEND)`: appends each new state of a row, identified by `Symbol` and `LastQuoteParticipantTimestamp`
 
 [Dataset index](README.md)
 
 ## Arguments
 
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
+
 | Argument | Description |
 | --- | --- |
-| `from_currency` | The currency to convert from, as three upper-case letters, such as `"AUD"`. |
-| `to_currency` | The currency to convert to, such as `"USD"`. |
-| `amount` | The amount to convert, positive and finite; 1.0 by default. |
-| `precision` | The decimal places of the result, 0 to 4; 2 by default. |
+| `from_currency` | The code of the currency to convert from, such as `"AUD"`. Massive answers HTTP 404 to a code it doesn't know, such as `"aud"`, and the read raises `MassiveError`. |
+| `to_currency` | The code of the currency to convert to, such as `"USD"`. |
+| `amount` | The amount to convert, any finite number; 1.0 by default. |
+| `precision` | The decimal places of the result; 2 by default. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -41,34 +44,32 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `symbol`: "The symbol pair that was evaluated from the request." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `Converted` | double | The result of the conversion. |
 | `From` | String | The "from" currency symbol. |
 | `InitialAmount` | double | The amount to convert. |
-| `LastBid` | double | The bid price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
-| `LastAsk` | double | The ask price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
-| `LastExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
-| `LastTimestamp` | Instant | The Unix millisecond timestamp. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastQuoteBidPrice` | double | The bid price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastQuoteAskPrice` | double | The ask price. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastQuoteExchange` | long | The exchange ID. See Exchanges (https://massive.com/docs/rest/forex/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
+| `LastQuoteParticipantTimestamp` | Instant | The Unix millisecond timestamp. From the `last` object: Contains the requested quote data for the specified forex currency pair. |
 | `To` | String | The "to" currency symbol. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `symbol` |
-| `RawSymbol` | `symbol` |
 | `Converted` | `converted` |
 | `From` | `from` |
 | `InitialAmount` | `initialAmount` |
-| `LastBid` | `last.bid` |
-| `LastAsk` | `last.ask` |
-| `LastExchange` | `last.exchange` |
-| `LastTimestamp` | `last.timestamp` |
+| `LastQuoteBidPrice` | `last.bid` |
+| `LastQuoteAskPrice` | `last.ask` |
+| `LastQuoteExchange` | `last.exchange` |
+| `LastQuoteParticipantTimestamp` | `last.timestamp` |
 | `To` | `to` |
 | `TimestampInsert` |  |
 
@@ -80,4 +81,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

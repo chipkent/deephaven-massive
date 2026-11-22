@@ -1,22 +1,27 @@
-"""Log records kept bounded: once per process, per value up to a limit, per failure, or by length.
+"""Log records kept bounded: once per key, per value up to a limit, per failure, or by length.
 
 Some facts are worth logging once rather than on every event, some bad values can arrive
 without end, and some lists can hold thousands of items. The helpers here keep these records
 from flooding the log:
 
 - `log_once` logs a fact the first time its key is seen in the process, and never again: the
-  unit the FMV magnitude rule detected, the WebSocket host chosen for a Business key, a futures
-  one-second bar whose end from Massive is not its start plus one second.
+  unit the FMV magnitude rule detected, a WebSocket bar whose end from Massive is not its start
+  plus its length.
+- `LoggedKeys` holds the facts one owner has logged, such as one `history()` call: a record
+  naming several facts logs only the new ones, and the keys go when the owner drops it.
 - `BoundedLog` logs a record at its level the first time each value is seen, for at most a
   fixed number of distinct values, so a stream of bad values that may never end (a watchlist
   row typed wrong, a symbol spelling Massive keeps sending) keeps both the log and the memory
   it uses bounded.
 - `log_failure` logs a failure that fails a live table, once per failure object, at the level
-  its cause gives (`_errors.ErrorCause`): one connection failure that fails a hundred streams
+  its `is_bug` gives (`_errors.is_bug_of`): one connection failure that fails a hundred streams
   is one record, not a hundred.
 - `bounded_list` renders a list of any length as its count and its first `LIST_LIMIT` items,
-  for a record that names symbols, topics, or stream ids: a stream of 5,000 symbols logs one
-  short line, not 5,000 names.
+  for a DEBUG or INFO record that names symbols, topics, or stream ids: a stream of 5,000
+  symbols logs one short line, not 5,000 names.
+- `prose_list` renders a list as prose for a message a user reads (an error, a WARNING, a
+  table's `Error`): `X:FOOUSD and X:BARUSD`, or `12 symbols, the first 3: AAPL, MSFT, and
+  NVDA`.
 
 All are thread-safe. Each holds a leaf lock only while it updates the keys, values, or failures
 it has seen, never while it logs. The module imports only the standard library and `_errors`,
@@ -31,7 +36,7 @@ import threading
 import weakref
 from typing import TYPE_CHECKING, Final
 
-from deephaven_massive._errors import ErrorCause, MassiveError, cause_of, failure_text
+from deephaven_massive._errors import MassiveError, failure_text, is_bug_of
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -39,18 +44,62 @@ if TYPE_CHECKING:
 __all__ = [
     "LIST_LIMIT",
     "BoundedLog",
+    "LoggedKeys",
     "bounded_list",
     "log_failure",
     "log_once",
     "mark_failure_logged",
+    "prose_list",
 ]
 
 LIST_LIMIT: Final = 20
 """How many items `bounded_list` shows before it only counts the rest."""
 
 
-_logged_lock = threading.Lock()
-_logged: set[str] = set()
+class LoggedKeys:
+    """The keys of the facts one owner has logged, so each is logged once while the owner lives.
+
+    For facts worth stating once per owner rather than once per process: a `history()` call
+    that reads its files again as symbols join keeps one, so each read logs only what no
+    earlier read of the call logged, and the keys go when the call's result is dropped.
+    Thread-safe: one leaf lock guards the keys and is never held while logging.
+
+    Example:
+        ::
+
+            import logging
+
+            from deephaven_massive._log_limits import LoggedKeys
+
+            logged = LoggedKeys()
+            for venue in logged.first_seen(["NYMEX", "CME", "NYMEX"]):
+                logging.getLogger("example").warning("skipping %s", venue)
+    """
+
+    __slots__ = ("_keys", "_lock")
+
+    def __init__(self) -> None:
+        """Start with no fact logged."""
+        self._lock = threading.Lock()
+        self._keys: set[str] = set()
+
+    def first_seen(self, keys: Iterable[str]) -> list[str]:
+        """Return the keys this owner has not seen before, and mark them seen.
+
+        Args:
+            keys: The facts' keys.
+
+        Returns:
+            The keys seen for the first time, in the order given, without repeats.
+        """
+        with self._lock:
+            new = [key for key in dict.fromkeys(keys) if key not in self._keys]
+            self._keys.update(new)
+        return new
+
+
+_logged: Final = LoggedKeys()
+"""The facts `log_once` has logged in the process."""
 
 
 def log_once(
@@ -69,11 +118,8 @@ def log_once(
         *args: The message's arguments.
         level: The logging level; INFO by default.
     """
-    with _logged_lock:
-        if key in _logged:
-            return
-        _logged.add(key)
-    log.log(level, message, *args)
+    if _logged.first_seen((key,)):
+        log.log(level, message, *args)
 
 
 def bounded_list(items: Iterable[object], limit: int = LIST_LIMIT) -> str:
@@ -99,6 +145,43 @@ def bounded_list(items: Iterable[object], limit: int = LIST_LIMIT) -> str:
     return f"{len(listed)} [{', '.join(shown)}]"
 
 
+def prose_list(items: Iterable[object], noun: str, *, shown: int = 3) -> str:
+    """Render a list as prose for a message a user reads, counting what it leaves out.
+
+    Args:
+        items: The items, in the order to show them; each is shown by `str`.
+        noun: What the items are, in the plural, such as `"symbols"`, for the count when
+            items are left out and for an empty list.
+        shown: How many items to show before the rest are only counted; 3 by default.
+
+    Returns:
+        `"X:FOOUSD"`, `"X:FOOUSD and X:BARUSD"`, or `"AAPL, MSFT, and NVDA"` for a list of at
+        most `shown` items; `"12 symbols, the first 3: AAPL, MSFT, and NVDA"` for a longer
+        one; and `"no symbols"` for an empty one.
+
+    Example:
+        ::
+
+            raise ValueError(f"Massive has no data for {prose_list(missing, 'symbols')}.")
+    """
+    listed = [str(item) for item in items]
+    if not listed:
+        return f"no {noun}"
+    if len(listed) > shown:
+        return f"{len(listed)} {noun}, the first {shown}: {_joined(listed[:shown])}"
+    return _joined(listed)
+
+
+def _joined(items: list[str]) -> str:
+    """Return at least one item joined as prose: `A`, `A and B`, or `A, B, and C`."""
+    *first, last = items
+    if not first:
+        return last
+    if len(first) == 1:
+        return f"{first[0]} and {last}"
+    return f"{', '.join(first)}, and {last}"
+
+
 class BoundedLog:
     """Log a record the first time each value is seen, for at most `limit` distinct values.
 
@@ -117,7 +200,7 @@ class BoundedLog:
             from deephaven_massive._log_limits import BoundedLog
 
             bad = BoundedLog(logging.getLogger("example"), limit=10, level=logging.WARNING)
-            bad.log("BRK/B", "%r is not a ticker; its rows are null", "BRK/B")
+            bad.log("BRK/B", "%r is not a ticker. Its rows are null.", "BRK/B")
     """
 
     __slots__ = ("_level", "_limit", "_lock", "_log", "_seen")
@@ -151,7 +234,7 @@ class BoundedLog:
             last = len(self._seen) > self._limit
         if last:
             self._log.log(
-                self._level, "%d values were reported; further ones are not logged", self._limit
+                self._level, "%d values were reported. Further ones are not logged.", self._limit
             )
         else:
             self._log.log(self._level, message, *args)
@@ -189,12 +272,13 @@ def log_failure(
     *args: object,
     expected: int = logging.WARNING,
     exc_info: BaseException | None = None,
+    named: str = "",
 ) -> bool:
-    """Log a failure that fails a live table, once per failure, at the level its cause gives.
+    """Log a failure that fails a live table, once per failure, at the level its `is_bug` gives.
 
-    A defect (`ErrorCause.USER_DEFECT` or `ErrorCause.LIBRARY_DEFECT`, and any exception that is
-    not a `MassiveError`) logs at ERROR, a library defect with how to report it
-    (`_errors.failure_text`); an expected failure logs at `expected`. One `MassiveError` object
+    A bug (`MassiveError.is_bug`, and any exception that is not a `MassiveError`) logs at
+    ERROR, a library bug with how to report it (`_errors.failure_text`); any other failure
+    logs at `expected`. One `MassiveError` object
     is logged once: the connection that fails a hundred streams with one error logs one
     record, and every later call with the same object logs at DEBUG instead. Thread-safe; the
     set of failures logged holds them weakly, so it never keeps one alive.
@@ -206,19 +290,26 @@ def log_failure(
         *args: The message's other arguments, before the failure's text.
         expected: The level of an expected failure; WARNING by default, DEBUG for one the
             caller also raises.
-        exc_info: The exception whose traceback the record carries, or None for none.
+        exc_info: The exception whose traceback the record carries, or None (absent) for none,
+            except that a bug always carries its own.
+        named: What the message names before the failure's text, such as the dataset
+            `"stocks.trades"`; a failure's text that starts with it and a colon loses that
+            start, so the record names it once. Empty for none.
 
     Returns:
         True when this call logged the failure at its level; False when the same failure had
         been logged already, and this call logged at DEBUG.
     """
     first = mark_failure_logged(error)
-    level = expected if cause_of(error) is ErrorCause.EXPECTED else logging.ERROR
+    bug = is_bug_of(error)
+    level = expected if not bug else logging.ERROR
+    if bug and exc_info is None:
+        exc_info = error  # a bug is logged with its traceback, wherever it is absorbed
     log.log(
         level if first else logging.DEBUG,
         message,
         *args,
-        failure_text(error),
+        failure_text(error).removeprefix(f"{named}: ") if named else failure_text(error),
         exc_info=exc_info if first else None,
         stacklevel=2,  # the record names the caller's file and line, not this one's
     )

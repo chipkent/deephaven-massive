@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -19,12 +20,14 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.net import USER_AGENT
-from deephaven_massive._massive.net.errors import WireAuthError, WireError
+from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireAuthError, WireError
 from deephaven_massive._massive.spec.types import (
     DriftReport,
     DriftSample,
     Field,
+    RowFault,
     Source,
     Transport,
     WireType,
@@ -106,7 +109,7 @@ class Recorder:
         self._add(("status", generation, status))
 
     def on_data(self, *args: object) -> None:
-        # The arguments are the generation, channel, rows, rejects, and drift.
+        # The arguments are the generation, channel, rows, marks, and drift.
         self._add(("data", *args))
 
     def on_state(self, state: WsState, detail: float | WireError | None) -> None:
@@ -206,6 +209,7 @@ def make_client(fake_ws_server: FakeMassiveServer) -> Iterator[Callable[..., Har
         made.append(client)
         if start:
             client.start()
+            client.connect()
         return Harness(client, recorder, sleeper, clock)
 
     yield make
@@ -283,7 +287,10 @@ def test_auth_failed_is_fatal_and_never_retried(
     assert isinstance(error, WireAuthError)
     assert error.host == "127.0.0.1"
     assert error.path == "/stocks"
-    assert "authentication failed" in error.message
+    assert error.message == (
+        "Massive answered the authentication at 127.0.0.1/stocks with status auth_failed: "
+        '"authentication failed".'
+    )
     assert len(fake_ws_server.connections) == 1
     assert h.sleeper.waits == []
     assert h.recorder.of("open") == []
@@ -359,6 +366,7 @@ def test_a_silent_server_is_cut_off_by_the_handshake_timeout(
 
     monkeypatch.setattr(loop, "time", skewed)
     h.client.start()
+    h.client.connect()
     fake_ws_server.wait_for(lambda s: bool(s.connections) and s.connections[0].auth is not None)
     late.set()
     loop.call_soon_threadsafe(lambda: None)  # wake the loop to see its clock's jump
@@ -376,19 +384,38 @@ def test_a_silent_server_is_cut_off_by_the_handshake_timeout(
 
 @pytest.fixture(
     params=[
-        ("greeting", _status("auth_success", "early")),  # no `connected` greeting first
-        ("greeting", "not json"),
-        ("reply", "auth_timeout"),  # an unknown reply to the key
+        # No `connected` greeting first.
+        (
+            "greeting",
+            _status("auth_success", "early"),
+            "Massive greeted with the status 'auth_success', not 'connected'.",
+        ),
+        # The JSON decoder's own words, which differ between orjson and the standard library.
+        ("greeting", "not json", None),
+        # An unknown reply to the key.
+        (
+            "reply",
+            "auth_timeout",
+            "Massive answered the key with the status 'auth_timeout' and the message ''.",
+        ),
     ],
     ids=["no-greeting", "not-json", "unknown-reply"],
 )
-def drifted_handshake(request: pytest.FixtureRequest, fake_ws_server: FakeMassiveServer) -> None:
-    """Script the fake's next handshake to break Massive's protocol one way."""
-    step, value = request.param
+def drifted_handshake(
+    request: pytest.FixtureRequest, fake_ws_server: FakeMassiveServer
+) -> str | None:
+    """Script the fake's next handshake to break Massive's protocol one way.
+
+    Returns:
+        The whole text of the error the handshake raises, or None where the JSON decoder words it.
+    """
+    drift: tuple[str, str, str | None] = request.param
+    step, value, expected = drift
     if step == "greeting":
         fake_ws_server.greet_next(value)
     else:
         fake_ws_server.auth_replies.append(value)
+    return expected
 
 
 @pytest.mark.parametrize(
@@ -416,11 +443,12 @@ def test_a_broken_reply_that_echoes_the_key_is_logged_without_it(
     assert KEY not in text
 
 
-@pytest.mark.usefixtures("drifted_handshake")
 def test_a_handshake_that_breaks_protocol_is_logged_and_retried(
+    *,
     make_client: Callable[..., Harness],
     fake_ws_server: FakeMassiveServer,
     caplog: pytest.LogCaptureFixture,
+    drifted_handshake: str | None,
 ) -> None:
     h = make_client()
     h.recorder.wait_open(1)
@@ -428,6 +456,13 @@ def test_a_handshake_that_breaks_protocol_is_logged_and_retried(
     assert len(fake_ws_server.connections) == 2
     [record] = [r for r in caplog.records if "broke protocol" in r.getMessage()]
     assert record.levelno == logging.ERROR
+    assert record.getMessage() == (
+        f"The handshake with {fake_ws_server.url()} broke protocol. {LIBRARY_BUG_REPORT}"
+    )
+    assert record.exc_info is not None
+    assert isinstance(record.exc_info[1], ValueError)
+    if drifted_handshake is not None:
+        assert str(record.exc_info[1]) == drifted_handshake
 
 
 # --- failures while opening the socket ------------------------------------------------------
@@ -558,7 +593,10 @@ def test_a_refused_connection_is_retried(
 
 def test_a_url_must_be_a_websocket_url() -> None:
     for url in ("https://socket.massive.com/stocks", "wss:///stocks"):
-        with pytest.raises(ValueError, match="not a WebSocket URL"):
+        with pytest.raises(
+            ValueError,
+            match=rf"^url={re.escape(repr(url))} is not a ws:// or wss:// URL with a host\.$",
+        ):
             WsClient(
                 url,
                 api_key=KEY,
@@ -662,6 +700,7 @@ def test_subscribe_sends_at_once_and_the_ack_is_decoded(
     h = make_client(start=False, recorder=recorder)
     recorder.open_hook = lambda g: h.client.subscribe(g, ["T.AAPL", "Q.AAPL"])
     h.client.start()
+    h.client.connect()
     recorder.wait_for(lambda e: recorder.count("status")(e) == 2)
     assert recorder.of("status") == [
         (1, Status(kind=StatusKind.ACK, topics=("T.AAPL",), message="subscribed to: T.AAPL")),
@@ -764,8 +803,8 @@ def test_an_odd_value_reads_as_null_alone_with_the_raw_symbol(
     h.on_loop(lambda: h.client.set_required("T", frozenset({"Ticker"}), symbol="Ticker"))
     fake_ws_server.send(load_fixture("massive/ws", "trades_with_bad_row.json").decode())
     h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
-    [(generation, channel, rows, rejects, drift)] = h.recorder.of("data")
-    assert (generation, channel, rejects) == (1, "T", [])
+    [(generation, channel, rows, marks, drift)] = h.recorder.of("data")
+    assert (generation, channel, marks[RowFault.UNCONVERTIBLE_VALUES].rows) == (1, "T", (1,))
     assert [(r[0], r[1]) for r in rows] == [  # the source's Ticker and Price
         ("AAPL", 114.125),
         ("BRK.A", None),
@@ -803,9 +842,10 @@ def test_required_keys_survive_a_reconnect(
     h.recorder.wait_open(2)
     fake_ws_server.send(json.dumps([{"ev": "T", "sym": "AAPL", "p": 1.0}]))
     h.recorder.wait_for(lambda e: h.recorder.count("data")(e) == 1)
-    [(generation, _, rows, [reject], _)] = h.recorder.of("data")
-    assert (generation, rows, reject.symbol) == (2, [], "AAPL")
-    assert "no SipTimestamp (wire key 't'), which the dataset needs" in reject.error.message
+    [(generation, _, rows, marks, _)] = h.recorder.of("data")
+    mark = marks[RowFault.UNREADABLE_KEYS]
+    assert (generation, len(rows), mark.symbols) == (2, 1, ("AAPL",))
+    assert "no SipTimestamp (wire key 't'), which the dataset needs" in mark.reasons[0]
 
 
 def test_a_status_after_authentication_is_delivered_in_order_with_data(
@@ -842,13 +882,16 @@ def test_loop_thread_methods_refuse_other_threads(
     make_client: Callable[..., Harness], method: str, args: tuple[object, ...]
 ) -> None:
     h = make_client()
-    with pytest.raises(RuntimeError, match=rf"WsClient\.{method} must be called on the client"):
+    expected = (
+        f"WsClient.{method} runs only on the client's loop thread, and another thread called it."
+    )
+    with pytest.raises(RuntimeError, match=rf"^{re.escape(expected)}$"):
         getattr(h.client, method)(*args)
 
 
 def test_set_required_rejects_an_unknown_column(make_client: Callable[..., Harness]) -> None:
     h = make_client()
-    with pytest.raises(ValueError, match=r"has no columns \['Bid'\]"):
+    with pytest.raises(ValueError, match=r"^Source 'stocks/T' has no columns \['Bid'\]\.$"):
         h.on_loop(lambda: h.client.set_required("T", frozenset({"Bid"})))
 
 
@@ -872,6 +915,7 @@ def test_close_during_a_long_backoff_returns_within_a_second(
         max_reconnect_backoff=120.0,
     )
     client.start()
+    client.connect()
     recorder.wait_state(WsState.RECONNECTING)
     began = time.monotonic()
     client.close()
@@ -899,6 +943,7 @@ def test_close_from_a_callback_stops_the_client(
     h = make_client(start=False, recorder=recorder)
     recorder.open_hook = lambda _: h.client.close()
     h.client.start()
+    h.client.connect()
     assert h.client.join(10.0)
     assert recorder.states() == [WsState.CONNECTING, WsState.CLOSED]
 
@@ -910,7 +955,46 @@ def test_close_before_start_ends_at_once(
     assert h.client.join(0.0)  # never started: nothing to wait for
     h.client.close()
     h.client.start()
+    h.client.connect()
     assert h.client.join(10.0)
+    assert h.recorder.states() == [WsState.CLOSED]
+    assert fake_ws_server.connections == []
+
+
+def test_a_started_client_opens_no_socket_until_connect(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    # The loop runs from start(): a posted call runs, yet no socket opens until connect().
+    h = make_client(start=False)
+    h.client.start()
+    assert h.on_loop(lambda: "ran") == "ran"
+    assert h.recorder.states() == []
+    assert fake_ws_server.connections == []
+    h.client.connect()
+    h.client.connect()  # a second call opens no second socket
+    h.recorder.wait_open(1)
+    assert h.recorder.states() == [WsState.CONNECTING]
+    assert len(fake_ws_server.connections) == 1
+
+
+def test_connect_before_start_connects_once_the_thread_runs(
+    make_client: Callable[..., Harness],
+) -> None:
+    h = make_client(start=False)
+    h.client.connect()
+    h.client.start()
+    h.recorder.wait_open(1)
+
+
+def test_close_before_connect_reports_closed_and_opens_no_socket(
+    make_client: Callable[..., Harness], fake_ws_server: FakeMassiveServer
+) -> None:
+    h = make_client(start=False)
+    h.client.start()
+    assert h.on_loop(lambda: "ran") == "ran"  # the client waits for connect()
+    h.client.close()
+    assert h.client.join(10.0)
+    h.client.connect()  # after the client ended: does nothing
     assert h.recorder.states() == [WsState.CLOSED]
     assert fake_ws_server.connections == []
 
@@ -938,18 +1022,23 @@ def test_a_raising_callback_stops_the_client_and_is_logged(
 
     recorder.open_hook = boom
     h.client.start()
+    h.client.connect()
     assert h.client.join(10.0)
     fake_ws_server.wait_for(lambda s: s.connections[0].close_code is not None)
-    assert "stopped on an internal error" in caplog.text
+    [record] = [r for r in caplog.records if "stopped on an internal error" in r.getMessage()]
+    assert record.getMessage() == (
+        f"The WebSocket client for {fake_ws_server.url()} stopped on an internal error. "
+        f"{LIBRARY_BUG_REPORT}"
+    )
     assert recorder.states() == [WsState.CONNECTING, WsState.FAILED]
     error = recorder.of("state")[-1][1]
     assert type(error) is WireError
-    assert error.client_defect  # a bug in the client, which the library reports as a defect
-    assert not error.unreadable
+    # A bug in the client, which the library reports as a defect.
+    assert error.kind is WireFailure.CLIENT_DEFECT
     assert isinstance(error.__cause__, ZeroDivisionError)
     assert error.message == (
-        "the WebSocket client for 127.0.0.1/stocks stopped on an internal error: "
-        "ZeroDivisionError()"
+        "The WebSocket client for 127.0.0.1/stocks stopped on an internal error: "
+        "ZeroDivisionError()."
     )
 
 
@@ -968,7 +1057,9 @@ def test_an_unexpected_error_while_connecting_fails_the_client(
 
 
 def test_an_on_state_that_raises_at_the_end_is_logged(
-    make_client: Callable[..., Harness], caplog: pytest.LogCaptureFixture
+    make_client: Callable[..., Harness],
+    fake_ws_server: FakeMassiveServer,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     recorder = Recorder()
 
@@ -980,7 +1071,10 @@ def test_an_on_state_that_raises_at_the_end_is_logged(
     assert h.client.join(10.0)
     # CONNECTING raised, which failed the client; FAILED raised too, and was only logged.
     assert recorder.states() == [WsState.CONNECTING, WsState.FAILED]
-    assert "on_state raised while the client for" in caplog.text
+    [record] = [r for r in caplog.records if "on_state raised" in r.getMessage()]
+    assert record.getMessage() == (
+        f"on_state raised while the client for {fake_ws_server.url()} ended. {LIBRARY_BUG_REPORT}"
+    )
 
 
 # --- free-threaded stress -----------------------------------------------------------------------
@@ -1033,6 +1127,7 @@ def test_16_clients_at_once(
         harnesses.append(h)
     for h in harnesses:
         h.client.start()
+        h.client.connect()
     for h in harnesses:
         h.recorder.wait_for(lambda e: any(x[0] == "status" for x in e))
     acked = sorted(h.recorder.of("status")[0][1].topics[0] for h in harnesses)

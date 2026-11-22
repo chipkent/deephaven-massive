@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from tests._live.live_run.machine_checks import Item
-    from tests._live.live_run.run_probe import ProbeResult
+    from tests._live.live_run.probe_result import ProbeResult
 
 KEY = "PLANTED-context-key-0a7f"
 
@@ -61,4 +61,4 @@ def test_the_defaults_print_sleep_and_keep_awake_nothing(tmp_path: Path) -> None
 
 def test_a_runs_memory_starts_empty() -> None:
     memory = RunMemory()
-    assert (memory.probed_at, memory.retries, memory.not_before) == (None, 0, None)
+    assert (memory.probed_at, memory.retries, memory.latest_probe) == (None, 0, None)

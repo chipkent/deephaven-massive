@@ -4,7 +4,6 @@ import csv
 import io
 import logging
 from collections.abc import Callable
-from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -14,13 +13,12 @@ from deephaven_massive._datasets.symbols import is_canonical
 from deephaven_massive._datasets.wire_symbols import (
     WireSymbols,
     canonical_from_wire,
-    unreadable_symbol_message,
+    is_index_option,
+    unreadable_symbol_reason,
     wire_spellings,
     ws_symbol,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
-from deephaven_massive._errors import LIBRARY_BUG
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._enums import AssetClass, ClassFromPrefix
 
 STK, OPT, FUT, IDX, FX, CRY = (
     AssetClass.STOCKS,
@@ -47,8 +45,10 @@ STK, OPT, FUT, IDX, FX, CRY = (
 )
 def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
     # A crypto split comes from Massive's crypto ticker list, given here as `pairs`.
-    split = cast("tuple[str, str]", tuple(expected.split("-")))
-    pairs = {symbol: split} if asset_class is CRY else {}
+    pairs: dict[str, tuple[str, str]] = {}
+    if asset_class is CRY:
+        base, quote = expected.split("-")
+        pairs = {symbol: (base, quote)}
     assert ws_symbol(asset_class, symbol, pairs) == expected
 
 
@@ -74,7 +74,7 @@ def test_ws_symbol(asset_class: AssetClass, symbol: str, expected: str) -> None:
         (CRY, "BTC--USD", None),
         (IDX, "I:SPX", "I:SPX"),
         (IDX, "SPX", "I:SPX"),  # the endpoint's class adds the prefix
-        (IDX, "spx", "I:spx"),  # never re-cased
+        (IDX, "spx", None),  # case is never folded, and lower case is no index ticker
         (IDX, "S P X", None),
         (FUT, "BOB 02-01 U6", "BOB 02-01 U6"),
         (FUT, "ZZ:NEW COMBO Z6", "ZZ:NEW COMBO Z6"),  # a row keeps a form not seen yet
@@ -135,45 +135,27 @@ def test_the_vendored_crypto_tickers_read_back_from_their_websocket_form(
     for row in rows:
         ticker, websocket = row["ticker"], row["websocket"]
         assert is_canonical(CRY, ticker)
-        split = cast("tuple[str, str]", tuple(websocket.split("-")))
+        base, quote = websocket.split("-")
+        split = (base, quote)
         assert ws_symbol(CRY, ticker, {ticker: split}) == websocket
         assert canonical_from_wire(CRY, websocket) == ticker
 
 
-def test_the_unreadable_symbol_message_names_the_spellings_the_setting_and_the_bug() -> None:
-    message = unreadable_symbol_message("forex.quotes", ["b", "a"])
-    assert message.startswith("forex.quotes: Massive sent the symbols 'a', 'b', spellings the")
-    one = unreadable_symbol_message("forex.quotes", ["a"])
-    assert one.startswith("forex.quotes: Massive sent the symbol 'a', a spelling the library")
-    assert "'unreadable_symbols: log' in the settings file" in message
-    assert "MassiveConfig(unreadable_symbols=dm.OnError.LOG)" in message
-    assert message.endswith(LIBRARY_BUG)
-
-
-@pytest.fixture
-def fresh_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
-    log = logging.getLogger(wire_symbols.__name__)
-    monkeypatch.setattr(
-        wire_symbols, "_logged_spellings", BoundedLog(log, limit=2, level=logging.ERROR)
-    )
-    monkeypatch.setattr(
-        wire_symbols, "_ignored_spellings", BoundedLog(log, limit=2, level=logging.DEBUG)
+def test_the_unreadable_symbol_reason_names_the_spelling() -> None:
+    assert unreadable_symbol_reason("a") == (
+        "Massive sent the symbol 'a', a spelling the library cannot read as Massive's ticker"
     )
 
 
-@pytest.mark.usefixtures("fresh_warnings")
-def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    reader = WireSymbols("forex.quotes", FX, OnError.LOG)
+def test_wire_symbols_read_a_column_and_log_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    # What a spelling it cannot read does is the reader's setting, applied by the caller.
+    reader = WireSymbols("forex.quotes", FX)
     raw = pa.array(["EUR/USD", None, "??", "X:EUR-USD", "??", "!!", "##"])
     cache: dict[str, str | None] = {}
     with caplog.at_level(logging.DEBUG, logger=wire_symbols.__name__):
         read = reader.read(raw, cache)
-        reader.read(raw, {})  # a fresh read reports no spelling twice
     assert read.symbols.to_pylist() == ["C:EURUSD", None, None, "C:EURUSD", None, None, None]
-    assert read.raw.to_pylist() == [None, None, "??", None, "??", "!!", "##"]
-    assert read.unreadable == ("!!", "##", "??")
+    assert read.unreadable_rows.to_pylist() == [False, False, True, False, True, True, True]
     assert cache == {
         "EUR/USD": "C:EURUSD",
         "??": None,
@@ -181,42 +163,6 @@ def test_wire_symbols_read_a_column_and_keep_what_they_cannot(
         "!!": None,
         "##": None,
     }
-    # Two spellings are reported, then one record says the rest are not.
-    messages = [r.getMessage() for r in caplog.records]
-    assert messages == [
-        (
-            "forex.quotes: Massive sent the symbol '!!', a spelling the library cannot read; its "
-            f"rows have a null Symbol and keep the text in RawSymbol. {LIBRARY_BUG}"
-        ),
-        (
-            "forex.quotes: Massive sent the symbol '##', a spelling the library cannot read; its "
-            f"rows have a null Symbol and keep the text in RawSymbol. {LIBRARY_BUG}"
-        ),
-        "2 values were reported; further ones are not logged",
-    ]
-    assert {r.levelno for r in caplog.records} == {logging.ERROR}  # a gap in the library
-
-
-@pytest.mark.usefixtures("fresh_warnings")
-def test_wire_symbols_keep_what_they_cannot_read_quietly_under_ignore(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    reader = WireSymbols("forex.quotes", FX, OnError.IGNORE)
-    assert reader.keeps
-    with caplog.at_level(logging.DEBUG, logger=wire_symbols.__name__):
-        read = reader.read(pa.array(["??", "C:EURUSD"]), {})
-    assert read.raw.to_pylist() == ["??", None]
-    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
-
-
-@pytest.mark.usefixtures("fresh_warnings")
-def test_wire_symbols_log_nothing_under_raise(caplog: pytest.LogCaptureFixture) -> None:
-    reader = WireSymbols("forex.quotes", FX, OnError.RAISE)
-    assert not reader.keeps
-    with caplog.at_level(logging.DEBUG, logger=wire_symbols.__name__):
-        read = reader.read(pa.array(["??", "C:EURUSD"]), {})
-    assert read.unreadable == ("??",)
-    assert read.symbols.to_pylist() == [None, "C:EURUSD"]
     assert caplog.records == []
 
 
@@ -262,3 +208,18 @@ def test_an_option_on_an_index_gets_its_prefix_by_its_cfi_code() -> None:
         None,
         "SPX",  # a futures code, not an option's
     ]
+
+
+def test_a_class_with_no_spellings_is_a_defect() -> None:
+    # Every class names its file spellings; a new one fails until it does, never reads as stocks.
+    with pytest.raises(AssertionError):
+        wire_spellings("bonds", "X:Y")  # type: ignore[arg-type]  # the point: refused at run time
+
+
+@pytest.mark.parametrize(
+    ("cfi", "expected"), [("OCEICS", True), ("OPEICS", True), ("OCASPS", False), ("ESVUFR", False)]
+)
+def test_a_cfi_code_marks_an_option_on_an_index_by_its_fourth_letter(
+    cfi: str, *, expected: bool
+) -> None:
+    assert is_index_option(cfi) is expected

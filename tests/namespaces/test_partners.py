@@ -5,11 +5,13 @@ generated sources (the catalog gates, the schema each spec yields, the fixtures 
 vendor's samples) and each factory's validation and the request it builds.
 """
 
+import functools
 import inspect
 import json
+import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import new_table
@@ -22,15 +24,22 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import ClassFromPrefix, Order, PollMode
 from deephaven_massive._ingest.rest_requests import page_size
-from deephaven_massive._massive import RestPath, Transport, sources
-from deephaven_massive._namespaces import partners
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query, query_class
+from deephaven_massive._massive import Transport, sources
 from deephaven_massive._session import CATALOG
+from deephaven_massive.namespaces import _partners as partners
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import FetchQuery
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
-    from deephaven_massive._types import FilterValue
+    from deephaven_massive._datasets.filters import FilterValue
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 FIXTURES = "namespaces/partners"
 
@@ -98,12 +107,21 @@ def spec_of(name: str) -> DatasetSpec:
     return CATALOG.by_name[name]
 
 
-def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:
+def factory(session: dm.MassiveSession, name: str) -> Callable[..., FetchQuery]:
     # "partners.benzinga.ratings" is reached as session.partners.benzinga.ratings.
-    target: Any = session
+    target: object = session
     for part in name.split("."):
         target = getattr(target, part)
-    return cast("Callable[..., Query]", target)
+    assert callable(target)
+    method = target
+
+    @functools.wraps(method)
+    def make(*args: object, **kwargs: object) -> FetchQuery:
+        query = method(*args, **kwargs)
+        assert isinstance(query, FetchQuery)
+        return query
+
+    return make
 
 
 def fixture_rows(load_fixture: Callable[[str, str], bytes], name: str) -> list[dict[str, Any]]:
@@ -117,11 +135,11 @@ def fixture_rows(load_fixture: Callable[[str, str], bytes], name: str) -> list[d
 
 def test_vendors_are_nested(massive_session: dm.MassiveSession) -> None:
     vendors = massive_session.partners
-    assert type(vendors) is partners._Partners
-    assert type(vendors.benzinga) is partners._Benzinga
-    assert type(vendors.etf_global) is partners._EtfGlobal
-    assert type(vendors.tmx) is partners._Tmx
-    assert type(vendors.fable) is partners._Fable
+    assert type(vendors) is partners.PartnersNamespace
+    assert type(vendors.benzinga) is partners.PartnersBenzingaNamespace
+    assert type(vendors.etf_global) is partners.PartnersEtfGlobalNamespace
+    assert type(vendors.tmx) is partners.PartnersTmxNamespace
+    assert type(vendors.fable) is partners.PartnersFableNamespace
     for vendor in (vendors.benzinga, vendors.etf_global, vendors.tmx, vendors.fable):
         assert isinstance(vendor, Namespace)
         assert vendor._core is massive_session._core
@@ -139,7 +157,7 @@ def test_each_dataset_is_one_rest_list_path(name: str) -> None:
     path, _ = DATASETS[name]
     assert spec.fetch_path == path
     assert spec.sources == ((Transport.REST, path),)
-    assert query_class(spec) is Query
+    assert query_class(spec) is FetchQuery
     assert spec.kind is None
 
 
@@ -319,7 +337,7 @@ def test_every_poll_key_tells_fixture_rows_apart(
 def a_sort_field(spec: DatasetSpec) -> str:
     # A `sort` every REST path of the dataset takes: one of the listed fields where the spec
     # lists them, else a field of the rows of the first path.
-    paths = [cast("RestPath", CATALOG.source(Transport.REST, p)) for p in spec.rest_paths]
+    paths = [CATALOG.rest_path(p) for p in spec.rest_paths]
     sorts = [p for path in paths for p in path.params if p.name == "sort"]
     listed = [p.values for p in sorts if p.values]
     if listed:
@@ -331,7 +349,7 @@ def a_sort_field(spec: DatasetSpec) -> str:
 def test_list_factories_build_the_request(massive_session: dm.MassiveSession, name: str) -> None:
     sort = a_sort_field(spec_of(name))
     q = factory(massive_session, name)(["MSFT", "AAPL"], sort=sort, order=Order.DESC, limit=10)
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._spec is spec_of(name)
     request = q._request
     assert request.symbols == ("AAPL", "MSFT")
@@ -361,29 +379,33 @@ def test_datasets_without_instruments_take_no_symbols(name: str) -> None:
 def _class_of(name: str) -> str:
     vendor = name.split(".")[1]
     return {
-        "benzinga": "_Benzinga",
-        "etf_global": "_EtfGlobal",
-        "tmx": "_Tmx",
-        "fable": "_Fable",
+        "benzinga": "PartnersBenzingaNamespace",
+        "etf_global": "PartnersEtfGlobalNamespace",
+        "tmx": "PartnersTmxNamespace",
+        "fable": "PartnersFableNamespace",
     }[vendor]
 
 
 @pytest.mark.parametrize("name", [*LIST_WITH_SYMBOLS, "partners.benzinga.news"])
 def test_all_is_refused_by_list_datasets(massive_session: dm.MassiveSession, name: str) -> None:
     make = factory(massive_session, name)
-    with pytest.raises(ValueError, match=r"does not accept dm\.ALL; leave symbols out"):
+    every = f"{name} does not take dm.ALL. Leave symbols out to read every ticker."
+    with pytest.raises(ValueError, match=whole(every)):
         make(symbols=dm.ALL)
+    assert make()._request.symbols is None  # the advice
 
 
 @pytest.mark.parametrize("name", LIST_WITH_SYMBOLS)
 def test_stock_datasets_refuse_another_class(massive_session: dm.MassiveSession, name: str) -> None:
     # The TMX calendar keeps tickers as written, but no class prefix passes there either.
     message = (
-        "is not a ticker as Massive writes it"
+        "starts with the class prefix 'X:', and Massive never writes a ticker that way. Pass "
+        "the value as Massive lists it."
         if name == "partners.tmx.corporate_events"
-        else "is a crypto ticker; this dataset takes stock tickers"
+        else "is a crypto ticker, and this dataset takes stock tickers. Pass a stock ticker, or "
+        "read crypto data through m.crypto."
     )
-    with pytest.raises(ValueError, match=rf"^'X:BTCUSD' {message}"):
+    with pytest.raises(ValueError, match=rf"^'X:BTCUSD' {re.escape(message)}$"):
         factory(massive_session, name)("X:BTCUSD")
 
 
@@ -409,26 +431,30 @@ def test_symbols_may_be_a_table(massive_session: dm.MassiveSession, name: str) -
 def test_an_exhausted_generator_is_refused(massive_session: dm.MassiveSession, name: str) -> None:
     symbols = (symbol for symbol in ["AAPL"])
     assert list(symbols) == ["AAPL"]
-    with pytest.raises(ValueError, match="no symbols"):
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
         factory(massive_session, name)(symbols)
 
 
 def test_consensus_ratings_fan_out_per_symbol(massive_session: dm.MassiveSession) -> None:
     q = massive_session.partners.benzinga.consensus_ratings(["MSFT", "AAPL"])
-    assert type(q) is Query
+    assert type(q) is FetchQuery
     assert q._request.symbols == ("AAPL", "MSFT")
     assert q._request.params == ()
     spec = q._spec
     assert spec.per_symbol
     assert spec.symbol_param is None
     assert spec.poll_keys == ("Symbol",)
-    with pytest.raises(ValueError, match="takes one ticker per request"):
+    every = "partners.benzinga.consensus_ratings does not take dm.ALL. Pass a list of tickers."
+    with pytest.raises(ValueError, match=whole(every)):
         massive_session.partners.benzinga.consensus_ratings(dm.ALL)
     # One row per stock: no sort, order, or limit; filters choose the ratings aggregated.
-    assert list(inspect.signature(partners._Benzinga.consensus_ratings).parameters) == [
+    assert list(
+        inspect.signature(partners.PartnersBenzingaNamespace.consensus_ratings).parameters
+    ) == [
         "self",
         "symbols",
         "filters",
+        "on_error",
     ]
     window: dict[str, FilterValue] = {"date_gte": "2024-10-01", "date_lt": date(2025, 1, 1)}
     q = massive_session.partners.benzinga.consensus_ratings("AAPL", filters=window)
@@ -466,7 +492,10 @@ def test_news_selects_articles_by_ticker_and_time(massive_session: dm.MassiveSes
 def test_the_time_axis_is_set_only_by_start_and_end(
     massive_session: dm.MassiveSession, name: str, axis_filter: str
 ) -> None:
-    with pytest.raises(ValueError, match="through start= and end="):
+    refusal = (
+        f"The filter {axis_filter!r} sets the time range of {name}. Pass start= and end= instead."
+    )
+    with pytest.raises(ValueError, match=whole(refusal)):
         factory(massive_session, name)(filters={axis_filter: "2025-01-01"})
 
 
@@ -484,9 +513,9 @@ def test_a_range_must_not_end_before_it_starts(
     make = factory(massive_session, name)
     q = make(start="2025-07-01", end="2025-07-01")  # one whole day
     assert q._request.start == q._request.end == date(2025, 7, 1)
-    with pytest.raises(ValueError, match="must not be after end"):
+    with pytest.raises(ValueError, match="is after end="):
         make(start="2025-07-02", end="2025-07-01")
-    with pytest.raises(ValueError, match="needs a timezone"):
+    with pytest.raises(ValueError, match="has no timezone"):
         make(start="2025-07-01T09:30")
 
 
@@ -503,7 +532,8 @@ def test_a_range_must_not_end_before_it_starts(
 def test_the_symbol_parameter_is_set_only_by_symbols(
     massive_session: dm.MassiveSession, name: str, reserved: str
 ) -> None:
-    with pytest.raises(ValueError, match="is set through symbols=, not filters"):
+    refusal = f"The filter {reserved!r} sets the symbols of {name}. Pass symbols= instead."
+    with pytest.raises(ValueError, match=whole(refusal)):
         factory(massive_session, name)(filters={reserved: "AAPL"})
 
 
@@ -532,11 +562,15 @@ def test_filters_reach_the_endpoint_parameters(
 @pytest.mark.parametrize(
     "case",
     [
-        ("partners.fable.merchant_aggregates", {"channel": "mail"}, r"takes one of \['online'"),
+        (
+            "partners.fable.merchant_aggregates",
+            {"channel": "mail"},
+            r"is not one of its values\. Pass one of 'online'",
+        ),
         (
             "partners.fable.merchant_hierarchy",
             {"listing_status": "listed"},
-            r"takes one of \['public'",
+            r"is not one of its values\. Pass one of 'public'",
         ),
         ("partners.benzinga.earnings", {"importance": "high"}, "takes integer values"),
         ("partners.benzinga.analysts", {"ticker": "AAPL"}, "has no filter 'ticker'"),
@@ -553,17 +587,17 @@ def test_bad_filters_are_refused(
 @pytest.mark.parametrize("name", LIST_DATASETS)
 def test_order_is_an_enum(massive_session: dm.MassiveSession, name: str) -> None:
     with pytest.raises(TypeError, match=r"order must be dm\.Order"):
-        factory(massive_session, name)(sort="date", order=cast("Order", "desc"))
+        factory(massive_session, name)(sort="date", order="desc")
 
 
 def test_bad_types_are_refused(massive_session: dm.MassiveSession) -> None:
     ratings = massive_session.partners.benzinga.ratings
     with pytest.raises(TypeError, match="sort must be a str"):
-        ratings(sort=cast("str", 1))
-    with pytest.raises(ValueError, match="limit must be positive"):
+        ratings(sort=1)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(ValueError, match=whole("limit=0 is not positive.")):
         ratings(limit=0)
     with pytest.raises(TypeError, match="filters must be a mapping"):
-        ratings(filters=cast("dict[str, str]", [("date", "2025-01-01")]))
+        ratings(filters=[("date", "2025-01-01")])  # type: ignore[arg-type]  # the point: refused at run time
 
 
 # The docstrings: a summary, then a link to the dataset's generated page.
@@ -587,9 +621,11 @@ def test_each_factory_links_its_dataset_page(name: str) -> None:
 def expected_value(value: object, column_type: ColumnType) -> object:
     # A wire value as the result table holds it; a date stays its ISO text.
     if column_type is ColumnType.INSTANT:
-        return datetime.fromisoformat(cast("str", value))
+        assert isinstance(value, str)
+        return datetime.fromisoformat(value)
     if column_type is ColumnType.DOUBLE:
-        return float(cast("float", value))
+        assert isinstance(value, int | float)
+        return float(value)
     if column_type is ColumnType.STRING and not isinstance(value, str):
         return value  # JSON text: compared parsed
     return value
@@ -611,7 +647,9 @@ def test_fetch_returns_every_fixture_value(
     target = path.replace("{ticker}", "AAPL")
     fake_rest.reply(target, Reply(body))
     make = factory(rest_session, name)
-    table = (make("AAPL") if name == "partners.benzinga.consensus_ratings" else make()).fetch()
+    table = (make("AAPL") if name == "partners.benzinga.consensus_ratings" else make()).fetch(
+        wait=True
+    )
 
     # One request, for the documented maximum page, and nothing the caller did not set.
     size = page_size(spec, CATALOG.rest_path(path))
@@ -648,7 +686,7 @@ def test_list_requests_send_symbols_sort_filters_and_page(
         order=Order.DESC,
         limit=10,
         filters={"date_gte": date(2025, 1, 2), "rating_action_any_of": ["upgrades", "downgrades"]},
-    ).fetch()
+    ).fetch(wait=True)
     assert fake_rest.get_queries() == [
         (
             "/benzinga/v1/ratings",
@@ -669,7 +707,7 @@ def test_etf_symbols_filter_the_fund(
     fake_rest.reply("/etf-global/v1/constituents", Reply(envelope([])))
     rest_session.partners.etf_global.constituents(
         "SPY", filters={"effective_date": "2025-09-18"}
-    ).fetch()
+    ).fetch(wait=True)
     assert fake_rest.get_queries() == [
         (
             "/etf-global/v1/constituents",
@@ -689,7 +727,7 @@ def test_news_sends_an_instant_range_and_tickers(
     end = datetime(2025, 6, 3, 14, 30, tzinfo=UTC)
     rest_session.partners.benzinga.news(
         symbols=["NVDA", "AAPL"], start=datetime(2025, 6, 2, 4, tzinfo=UTC), end=end
-    ).fetch()
+    ).fetch(wait=True)
     ((path, query),) = fake_rest.get_queries()
     assert path == "/benzinga/v2/news"
     assert query.pop("tickers.any_of") == ["AAPL,NVDA"]
@@ -700,7 +738,7 @@ def test_news_sends_an_instant_range_and_tickers(
     assert datetime.fromisoformat(bounds["published.gte"][0]) == datetime(2025, 6, 2, 4, tzinfo=UTC)
     assert datetime.fromisoformat(bounds["published.lt"][0]) == end
     two_days = rest_session.partners.benzinga.news(start="2025-06-02", end=date(2025, 6, 3))
-    two_days.fetch()
+    two_days.fetch(wait=True)
     ((_, query),) = fake_rest.get_queries()[1:]
     assert datetime.fromisoformat(query["published.lt"][0]) == datetime(2025, 6, 4, 4, tzinfo=UTC)
 
@@ -717,7 +755,7 @@ def test_a_date_range_is_whole_days(
 ) -> None:
     path, _ = DATASETS[name]
     fake_rest.reply(path, Reply(envelope([])))
-    factory(rest_session, name)(start="2025-07-01", end=date(2025, 7, 31)).fetch()
+    factory(rest_session, name)(start="2025-07-01", end=date(2025, 7, 31)).fetch(wait=True)
     ((_, query),) = fake_rest.get_queries()
     assert query[f"{axis}.gte"] == ["2025-07-01"]
     assert query[f"{axis}.lte"] == ["2025-07-31"]
@@ -728,28 +766,26 @@ def test_consensus_ratings_send_one_request_per_symbol(
     fake_rest: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
 ) -> None:
-    # `Symbol` is the row's own ticker; one Massive spells in a way the library cannot read
-    # leaves `Symbol` null and keeps the spelling in `RawSymbol`.
+    # `Symbol` is the row's own ticker; a row Massive spells in a way the library cannot read
+    # is withheld, and the readable row beside it lands.
     echoes = {
-        "BRK.B": {"ticker": "BRK/B", "buy_ratings": 6},
-        "MSFT": {"ticker": "MSFT", "buy_ratings": 9},
+        "BRK.B": [{"ticker": "BRK/B", "buy_ratings": 6}, {"ticker": "BRK.B", "buy_ratings": 7}],
+        "MSFT": [{"ticker": "MSFT", "buy_ratings": 9}],
     }
-    for ticker, row in echoes.items():
-        fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope([row])))
+    for ticker, page in echoes.items():
+        fake_rest.reply(f"/benzinga/v1/consensus-ratings/{ticker}", Reply(envelope(page)))
     table = rest_session.partners.benzinga.consensus_ratings(
         ["MSFT", "BRK.B"], filters={"date_gte": "2024-10-01", "date_lt": "2025-01-01"}
-    ).fetch()
+    ).fetch(wait=True)
     window = {"date.gte": ["2024-10-01"], "date.lt": ["2025-01-01"], "limit": ["50000"]}
     assert sorted(fake_rest.get_queries()) == [
         ("/benzinga/v1/consensus-ratings/BRK.B", window),
         ("/benzinga/v1/consensus-ratings/MSFT", window),
     ]
     assert "Ticker" not in table.column_names
-    out = dh_to_pylist(table.view(["Symbol", "RawSymbol", "BuyRatings"]))
-    assert sorted((r["RawSymbol"] or "", r["Symbol"], r["BuyRatings"]) for r in out) == [
-        ("", "MSFT", 9),
-        ("BRK/B", None, 6),
-    ]
+    assert "RawSymbol" not in table.column_names
+    out = dh_to_pylist(table.view(["Symbol", "BuyRatings"]))
+    assert sorted((r["Symbol"], r["BuyRatings"]) for r in out) == [("BRK.B", 7), ("MSFT", 9)]
 
 
 def test_a_consensus_row_without_its_ticker_fails(
@@ -759,7 +795,7 @@ def test_a_consensus_row_without_its_ticker_fails(
     # row with a null `Symbol`.
     fake_rest.reply("/benzinga/v1/consensus-ratings/MSFT", Reply(envelope([{"buy_ratings": 9}])))
     with pytest.raises(dm.MassiveError, match="ticker"):
-        rest_session.partners.benzinga.consensus_ratings("MSFT").fetch()
+        rest_session.partners.benzinga.consensus_ratings("MSFT").fetch(wait=True)
 
 
 @pytest.mark.parametrize(("name", "param"), SYMBOL_PARAMS.items())
@@ -769,7 +805,7 @@ def test_every_symbol_list_goes_in_one_request(
     path, _ = DATASETS[name]
     spec = spec_of(name)
     fake_rest.reply(path, Reply(envelope([])))
-    factory(rest_session, name)(symbols=["MSFT", "AAPL"]).fetch()
+    factory(rest_session, name)(symbols=["MSFT", "AAPL"]).fetch(wait=True)
     assert fake_rest.get_queries() == [
         (path, {param: ["AAPL,MSFT"], "limit": [str(page_size(spec, CATALOG.rest_path(path)))]})
     ]
@@ -792,7 +828,7 @@ def test_an_event_without_a_ticker_has_a_null_symbol(
         {"tmx_record_id": "B2", "isin": "CA0000000001", "date": "2025-07-24"},
     ]
     fake_rest.reply("/tmx/v1/corporate-events", Reply(envelope(rows)))
-    table = rest_session.partners.tmx.corporate_events().fetch()
+    table = rest_session.partners.tmx.corporate_events().fetch(wait=True)
     out = dh_to_pylist(table.view(["Symbol", "Isin", "TmxRecordId"]))
     assert out == [
         {"Symbol": "ROL", "Isin": "US7757111049", "TmxRecordId": "A1"},
@@ -820,7 +856,7 @@ def test_tmx_rows_keep_global_tickers_as_written(
 
     rows_ = [event("ERIC B", "R1", "XSTO"), event("7203", "R2", "XTKS")]
     fake_rest.reply("/tmx/v1/corporate-events", Reply(envelope(rows_)))
-    table = rest_session.partners.tmx.corporate_events(symbols=["ERIC B", "7203"]).fetch()
+    table = rest_session.partners.tmx.corporate_events(symbols=["ERIC B", "7203"]).fetch(wait=True)
     assert sorted(row[0] for row in table.iter_tuple(cols="Symbol")) == ["7203", "ERIC B"]
     ((_, query),) = fake_rest.get_queries()
     assert query["ticker.any_of"] == ["7203,ERIC B"]
@@ -837,7 +873,7 @@ def test_the_vendor_analyst_insights_sample_without_a_ticker_has_a_null_symbol(
     body = json.loads(load_fixture(FIXTURES, "benzinga_analyst_insights_vendor_sample.json"))
     assert "ticker" not in body["results"][0]
     fake_rest.reply("/benzinga/v1/analyst-insights", Reply(body))
-    table = rest_session.partners.benzinga.analyst_insights().fetch()
+    table = rest_session.partners.benzinga.analyst_insights().fetch(wait=True)
     out = dh_to_pylist(table.view(["Symbol", "BenzingaId", "Firm"]))
     assert out == [{"Symbol": None, "BenzingaId": "681363c1fd0258abcbedc074", "Firm": "Needham"}]
 
@@ -856,6 +892,6 @@ def test_a_benzinga_row_without_a_ticker_has_a_null_symbol(
     rows = fixture_rows(load_fixture, name)[:1]
     rows = [{key: value for key, value in rows[0].items() if key != "ticker"}]
     fake_rest.reply(path, Reply(envelope(rows)))
-    table = factory(rest_session, name)().fetch()
+    table = factory(rest_session, name)().fetch(wait=True)
     out = dh_to_pylist(table.view(["Symbol", "BenzingaId"]))
     assert out == [{"Symbol": None, "BenzingaId": rows[0]["benzinga_id"]}]

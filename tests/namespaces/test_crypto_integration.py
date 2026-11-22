@@ -19,6 +19,7 @@ import logging
 import math
 import time
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -50,6 +51,7 @@ WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
+SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
 CryptoReport: TypeAlias = "Callable[..., list[str]]"
 
 _PAIR = "X:BTCUSD"
@@ -144,14 +146,14 @@ def _same(left: Sequence[Any], right: Sequence[Any]) -> bool:
 def _library_rows(call: Callable[[], Table], table_rows: TableRows) -> list[dict[str, Any]] | str:
     """Run one library call and describe its outcome.
 
-    A refusal is not an outcome to record: it propagates, so the test fails (the declared plan
-    covers the data) rather than reporting it as an answer.
+    A refusal is not an outcome to record: it propagates, and the test skips, quoting Massive,
+    rather than reporting it as an answer.
 
     Returns:
         The result's rows, or the text of the `MassiveError` (other than a refusal) it raised.
 
     Raises:
-        EntitlementError: When the call is refused.
+        EntitlementError: When the call is refused; the live tests' hook skips the test.
     """
     try:
         return table_rows(call())
@@ -226,14 +228,12 @@ def _assert_one_utc_day(
     assert _same(_prices(grouped[0]), _prices(prev)), "the grouped bar is not /prev's day"
 
 
-@pytest.mark.needs("currencies:basic")
 @pytest.mark.verifies("1")
-@pytest.mark.requests(4)
+@pytest.mark.requests(6)
 @pytest.mark.timeout(100)
 def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     live_session: dm.MassiveSession,
     *,
-    classes_on_basic: frozenset[str],
     rest_rows: RestRows,
     table_rows: TableRows,
     instant_text: Text,
@@ -251,9 +251,8 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     boundary is served with a WARNING, and the minute-rebuild test says which day it covers. The
     volumes are evidence, not asserted: on 2026-11-03 the range bar of 2026-11-02 carried 12811.42
     against 12791.71 from `/prev` and grouped daily, which the day's minute bars sum to; a
-    difference is Massive's to explain. With Currencies on Basic, which allows 5 requests a
-    minute, it leaves out the library's `previous_day_bar` and `dm.ALL` history, which read the
-    same `/prev` and grouped daily as the raw requests.
+    difference is Massive's to explain. The library's `previous_day_bar` and `dm.ALL` history,
+    which read the same `/prev` and grouped daily as the raw requests, are recorded too.
     """
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -291,25 +290,20 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
                 f"{_errors(_ohlcv(bar), _ohlcv(prev))[4]}"
             )
     bars = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
-    evidence(
-        "library history(REST): "
-        f"{_library_rows(lambda: bars.history(day, day, source=dm.HistorySource.REST), table_rows)}"
-    )
+    rest = partial(bars.history, day, day, source=dm.HistorySource.REST, wait=True)
+    evidence(f"library history(REST): {_library_rows(rest, table_rows)}")
     _assert_one_utc_day(day, prev, ranged=ranged, grouped=grouped)
-    if "currencies" in classes_on_basic:
-        evidence("Currencies on Basic: the library's previous_day_bar and dm.ALL are not read")
-        return
     prev_bar = live_session.crypto.previous_day_bar(_PAIR)
-    evidence(f"library previous_day_bar (/prev): {_library_rows(prev_bar.fetch, table_rows)}")
+    prev_rows = _library_rows(partial(prev_bar.fetch, wait=True), table_rows)
+    evidence(f"library previous_day_bar (/prev): {prev_rows}")
     every = live_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
     outcome = _library_rows(
-        lambda: every.history(day, day, source=dm.HistorySource.REST), table_rows
+        lambda: every.history(day, day, source=dm.HistorySource.REST, wait=True), table_rows
     )
     shown = outcome if isinstance(outcome, str) else f"{len(outcome)} rows"
     evidence(f"library dm.ALL history(REST) (grouped daily): {shown}")
 
 
-@pytest.mark.needs("currencies:starter", "s3")
 @pytest.mark.verifies("1")
 @pytest.mark.timeout(100)
 def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
@@ -364,7 +358,9 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
             )
     flat = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
     outcome = _library_rows(
-        lambda: flat.history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES),
+        lambda: flat.history(
+            recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES, wait=True
+        ),
         table_rows,
     )
     evidence(f"library history(FLAT_FILES): {outcome}")
@@ -378,7 +374,6 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     assert any(_same(values, _ohlcv(b)) for b in same_day), "the file row is not the range bar"
 
 
-@pytest.mark.needs("currencies:basic")
 @pytest.mark.verifies("38")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -461,7 +456,6 @@ def _canonical(raw: Iterable[str]) -> set[str]:
     return {canonical_from_wire(dm.AssetClass.CRYPTO, text) or text for text in raw}
 
 
-@pytest.mark.needs("currencies:starter", "s3")
 @pytest.mark.verifies("39")
 @pytest.mark.timeout(100)
 def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
@@ -491,7 +485,6 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     assert grouped == filed, "grouped daily and the day file hold different pairs"
 
 
-@pytest.mark.needs("currencies:basic")
 @pytest.mark.verifies("33")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -519,7 +512,7 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
         evidence(line)
     first, last = recent_week[0] - timedelta(days=7), recent_week[1]
     kept = live_session.crypto.bars(_PAIR, dm.Timespan.WEEK).history(
-        first, last, source=dm.HistorySource.REST
+        first, last, source=dm.HistorySource.REST, wait=True
     )
     stamps = [instant_text(row["TimestampStart"]) for row in table_rows(kept)]
     evidence(f"library history {first}..{last} keeps the bars stamped {stamps}")
@@ -527,14 +520,12 @@ def test_crypto_week_bars_start_on_monday_or_sunday(
     assert not misses, f"week bars closer to another window than the library's: {misses}"
 
 
-@pytest.mark.needs("currencies:basic")
 @pytest.mark.settles("49")
-@pytest.mark.requests(5)
+@pytest.mark.requests(10)
 @pytest.mark.timeout(100)
 def test_crypto_ticker_list_currencies_join(
     live_rest: RestClient,
     *,
-    classes_on_basic: frozenset[str],
     crypto_report: CryptoReport,
     evidence: Evidence,
 ) -> None:
@@ -545,21 +536,18 @@ def test_crypto_ticker_list_currencies_join(
     `/v3/reference/tickers?market=crypto` once per session, every page, first with
     `active=true`, then with `active=false` so a delisted pair splits too, and refuses a pair
     the list lacks or whose `base_currency_symbol` and `currency_symbol` do not join to its
-    ticker (`X:` + base + quote). Reads the same two lists, in pages of 1,000 rows. With
-    Currencies on Basic, which allows 5 requests a minute, it reads at most 3 pages of
-    listed pairs and 2 of delisted ones, so the test sends 5 requests, and a read cut short
-    is marked so; on a paid plan it reads every page.
+    ticker (`X:` + base + quote). Reads the same two lists, every page of 1,000 rows, one
+    request a page: on 2026-11-10 Massive listed 624 pairs, one page, and the test declares
+    ten requests in all.
 
     Records each list's size, the tickers in both lists, the tickers without the `X:` prefix,
     and every row whose currencies do not join to its ticker. Reading it: no such row confirms
     that the list splits every pair it holds; each one is a pair the library refuses on those
     paths, which needs a split from elsewhere or stays refused; a large delisted list means
-    the session's first read of it is slow on Basic.
+    the session's first read of it is slow where Massive limits the requests a minute.
     """
-    basic = "currencies" in classes_on_basic
-    limits = (3 * _TICKERS_PAGE, 2 * _TICKERS_PAGE) if basic else (None, None)
     reads = []
-    for active, limit in zip((True, False), limits, strict=True):
+    for active in (True, False):
         # Paced as Currencies: whether Massive charges a lookup filtered by market to its
         # class is an open question, so the run never risks a refusal over it.
         pages = live_rest.pages(
@@ -567,17 +555,13 @@ def test_crypto_ticker_list_currencies_join(
             {},
             {"market": "crypto", "active": active, "limit": _TICKERS_PAGE},
             bucket="currencies",
-            limit=limit,
         )
         reads.append([row for page in pages for row in page.rows])
-    if basic:
-        evidence("Currencies on Basic: at most 3 pages of listed and 2 of delisted pairs are read")
-    for line in crypto_report(*reads, listed_limit=limits[0], delisted_limit=limits[1]):
+    for line in crypto_report(*reads, listed_limit=None, delisted_limit=None):
         evidence(line)
     assert reads[0], "Massive listed no crypto pair"
 
 
-@pytest.mark.needs("currencies:business")
 @pytest.mark.verifies("3")
 @pytest.mark.timeout(160)
 def test_fmv_frames_convert_to_a_current_instant(
@@ -587,6 +571,7 @@ def test_fmv_frames_convert_to_a_current_instant(
     wait_rows: WaitRows,
     wait_acked: WaitAcked,
     stream_report: Report,
+    skip_if_not_entitled: SkipIfNotEntitled,
     instant_text: Text,
     evidence: Evidence,
 ) -> None:
@@ -594,11 +579,10 @@ def test_fmv_frames_convert_to_a_current_instant(
 
     `FMV` `t` is documented in nanoseconds while the sample shows milliseconds, so the
     library reads each value by its magnitude and logs once which unit the column arrived
-    in. Streams `X:BTCUSD`'s fair market value (the cheapest Business plan is Currencies
-    Business), asserts that Massive acknowledged the topic, and records the first rows, their
-    age, and that log line. Crypto trades around the clock, so rows are required. Passes when
-    the first row's instant is within a day of now; the logged unit settles which unit
-    Massive sends.
+    in. Streams `X:BTCUSD`'s fair market value, asserts that Massive acknowledged the topic,
+    and records the first rows, their age, and that log line; a refused stream skips, quoting
+    Massive. Crypto trades around the clock, so rows are required. Passes when the first
+    row's instant is within a day of now; the logged unit settles which unit Massive sends.
     """
     caplog.set_level(logging.INFO, logger="deephaven_massive")
     table = live_session.crypto.fmv(_PAIR).append_only()
@@ -606,6 +590,7 @@ def test_fmv_frames_convert_to_a_current_instant(
     rows = wait_rows(live_session, table, time.monotonic() + _STREAM_WAIT)
     for line in stream_report(live_session):
         evidence(line)
+    skip_if_not_entitled(live_session)
     live_session.release(table)
     detected = [r.getMessage() for r in caplog.records if "read by magnitude" in r.message]
     evidence(f"magnitude rule log: {detected}")

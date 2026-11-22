@@ -7,7 +7,7 @@ Best bid and offer quotes of futures contracts, tick by tick.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.futures.quotes(symbols, *, venues=frozenset(dm.FuturesVenue))
+m.futures.quotes(symbols, *, venues=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`, `history(start, end=None)`
@@ -22,7 +22,8 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Contract tickers such as `"ESZ5"`, a contracts table, or `dm.ALL` for every contract. |
-| [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. |
+| [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. Left out, it reads every exchange your plan allows. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -44,9 +45,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description | Read from |
 | --- | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The futures contract identifier, including the base symbol and contract expiration (e.g., GCJ5 for the April 2025 gold contract)."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket |
-| `Date` | String | The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd text: Massive's `session_end_date` from REST and the flat files. The WebSocket sends none, so a streamed row gets the session Massive's futures schedules place it in (between two sessions, the next one). A row they cannot place has a null Date, since the 17:00 Chicago rule can be wrong around a holiday, and the stream keeps running: a spread, a contract whose schedule lookup failed or did not load before the stream opened, or a row outside the loaded schedule logs a WARNING (once per product and date); a contract still being looked up (one a live watchlist or dm.ALL adds) logs at DEBUG only; a row with no readable symbol has a null Date too. From REST and flat files `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format." | REST, flat files, WebSocket |
+| `Date` | String | The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd text: Massive's `session_end_date` from REST and the flat files. The WebSocket sends none, so a streamed row gets the session Massive's futures schedules place it in (between two sessions, the next one). A streamed row waits until its product's schedule has loaded, usually under a second, and is never published without a date. A row Massive's futures lists or schedules can't date is left out, as `dm.ErrorPolicy`'s `unlisted_contracts` and `unscheduled_products` describe. From REST and flat files `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format." | REST, flat files, WebSocket |
 | `Timestamp` | Instant | The row's event time. From REST and flat files `timestamp`: "The time when the quote was generated at the exchange to nanosecond precision."; WebSocket `t`: "The timestamp in Unix MS." | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. | REST, flat files, WebSocket |
 | `BidPrice` | double | The bid price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket |
 | `BidSize` | double | The quote size represents the number of futures contracts available at the given bid price. | REST, flat files, WebSocket |
 | `AskPrice` | double | The ask price is expressed per unit of the underlying asset, and you apply the contract multiplier to get the full contract value. | REST, flat files, WebSocket |
@@ -61,7 +61,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
@@ -70,7 +70,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Symbol` | `ticker` | `ticker` | `sym` |
 | `Date` | `session_end_date` | `session_end_date` |  |
 | `Timestamp` | `timestamp` | `timestamp` | `t` |
-| `RawSymbol` | `ticker` | `ticker` | `sym` |
 | `BidPrice` | `bid_price` | `bid_price` | `bp` |
 | `BidSize` | `bid_size` | `bid_size` | `bs` |
 | `AskPrice` | `ask_price` | `ask_price` | `ap` |
@@ -96,4 +95,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

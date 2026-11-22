@@ -2,7 +2,6 @@
 
 import dataclasses
 from datetime import UTC, date, datetime
-from typing import Any, cast
 
 import pytest
 
@@ -14,10 +13,10 @@ from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import RowTimes
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, Direction, Order, Timespan
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._ingest import rest_requests
 from deephaven_massive._massive import RestPath, Transport
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import QueryBase
+from deephaven_massive._tables.transports import Unsplit
 
 R = Transport.REST
 
@@ -102,17 +101,14 @@ FUTURES_BARS = DatasetSpec(
 NEWS_PATH = "/v2/reference/news"
 
 
-def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
-    # An indicator is computed over bars of a timespan, which its factory always sets.
-    if spec is SMA:
-        kwargs.setdefault("timespan", Timespan.MINUTE)
-    # A list dataset's symbols only filter it, as its factory says.
-    kwargs.setdefault("symbols_optional", spec.symbol_param is not None)
-    return build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
+def _rest_path(template: str) -> RestPath:
+    path = _massive.source(R, template)
+    assert isinstance(path, RestPath)
+    return path
 
 
 def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> None:
-    path = cast("RestPath", _massive.source(R, SMA_CRYPTO))
+    path = _rest_path(SMA_CRYPTO)
     day = date(2025, 3, 3)
     instant = datetime(2025, 3, 3, 12, tzinfo=UTC)
     query = {
@@ -139,7 +135,7 @@ def test_date_filters_on_instant_parameters_keep_their_calendar_meaning() -> Non
     # bound that a date would move by one unit.
     given = {"timestamp.gte": instant, "timestamp.lte": instant, "timestamp.gt": instant}
     assert rest_requests._filter_days(path, given, ClassFromPrefix.ANY) == given
-    dividends = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
+    dividends = _rest_path(DIVIDENDS_PATH)
     assert rest_requests._filter_days(
         dividends, {"ex_dividend_date.gte": day}, ClassFromPrefix.ANY
     ) == {"ex_dividend_date.gte": day}
@@ -168,16 +164,23 @@ def test_a_dataset_without_pairs_refuses_a_pair_path() -> None:
         fetch_path=CRYPTO_LAST_PATH,
         keys={(R, CRYPTO_LAST_PATH): SourceKeys(symbol=KeySpec("from", from_request=True))},
     )
-    path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
-    with pytest.raises(ValueError, match="only forex and crypto symbols are currency pairs"):
+    path = _rest_path(CRYPTO_LAST_PATH)
+    with pytest.raises(
+        ValueError,
+        match=r"^stocks\.pair asked for a currency pair, which only forex and crypto have\. This "
+        r"is a bug in deephaven-massive\. ",
+    ):
         rest_requests.plan_calls(
             spec, path, Request(symbols=("AAPL",)), symbols=("AAPL",), split=split_pair
         )
 
 
 def test_a_per_symbol_path_needs_explicit_symbols() -> None:
-    path = cast("RestPath", _massive.source(R, CRYPTO_LAST_PATH))
-    with pytest.raises(ValueError, match="needs explicit symbols"):
+    path = _rest_path(CRYPTO_LAST_PATH)
+    with pytest.raises(
+        ValueError,
+        match=r"^crypto\.last needs the symbols named\. Pass them in place of dm\.ALL\.$",
+    ):
         rest_requests.plan_calls(
             CRYPTO_LAST, path, Request(symbols=dm.ALL), symbols=dm.ALL, split=split_pair
         )
@@ -191,7 +194,7 @@ def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
         symbol_param="ticker",
         keys={(R, "/v2/reference/news"): SourceKeys()},
     )
-    path = cast("RestPath", _massive.source(R, "/v2/reference/news"))
+    path = _rest_path("/v2/reference/news")
     calls = rest_requests.plan_calls(
         news, path, Request(), symbols=("AAPL", "MSFT"), split=split_pair
     )
@@ -201,7 +204,7 @@ def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
     ]
     assert rest_requests.plan_calls(news, path, Request(), symbols=(), split=split_pair) == []
     # A path that takes no symbols ignores them: one request.
-    movers = cast("RestPath", _massive.source(R, MOVERS_PATH))
+    movers = _rest_path(MOVERS_PATH)
     request = Request(params=(("direction", Direction.LOSERS),))
     (call,) = rest_requests.plan_calls(
         MOVERS, movers, request, symbols=("AAPL", "MSFT"), split=split_pair
@@ -227,7 +230,7 @@ def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None
         per_symbol=True,
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
     )
-    path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
+    path = _rest_path(DIVIDENDS_PATH)
     calls = rest_requests.plan_calls(spec, path, Request(), symbols=("A", "B"), split=split_pair)
     assert [dict(c.query) for c in calls] == [
         {"limit": 5000, "ticker.any_of": ("A",)},
@@ -243,7 +246,7 @@ def test_a_symbol_filled_into_a_query_parameter() -> None:
         fetch_path=DIVIDENDS_PATH,
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
     )
-    path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
+    path = _rest_path(DIVIDENDS_PATH)
     calls = rest_requests.plan_calls(spec, path, Request(), symbols=("A",), split=split_pair)
     assert [(c.symbol, dict(c.path_params), dict(c.query)) for c in calls] == [
         ("A", {}, {"limit": 5000, "ticker": "A"})
@@ -278,7 +281,7 @@ def test_history_asks_for_ascending_order(
         history_path=path,
         time_axis=time_axis,
     )
-    rest_path = cast("RestPath", _massive.source(R, path))
+    rest_path = _rest_path(path)
     assert rest_requests._ascending(spec, rest_path, Request()) == expected
     # A direction the caller set is kept.
     assert rest_requests._ascending(spec, rest_path, Request(params=(("order", "desc"),))) == {}
@@ -287,7 +290,7 @@ def test_history_asks_for_ascending_order(
 def test_a_caller_direction_folded_into_sort_is_not_overridden() -> None:
     # The futures aggregates take no `order`: a caller's `order` folds into `sort`, and the
     # ascending default stays out of the way.
-    rest_path = cast("RestPath", _massive.source(R, FUTURES_AGGS_PATH))
+    rest_path = _rest_path(FUTURES_AGGS_PATH)
     mine = Request(
         symbols=("ESZ5",),
         timespan=Timespan.MINUTE,
@@ -315,7 +318,7 @@ def test_ascending_prefers_the_axis_field_among_several_ascending_sorts() -> Non
         history_path=FUTURES_AGGS_PATH,
         time_axis=("window_start.gte", "window_start.lt"),
     )
-    aggs = cast("RestPath", _massive.source(R, FUTURES_AGGS_PATH))
+    aggs = _rest_path(FUTURES_AGGS_PATH)
     values = ("ticker.asc", "window_start.asc", "window_start.desc")
     params = tuple(
         dataclasses.replace(p, values=values) if p.name == "sort" else p for p in aggs.params
@@ -343,10 +346,10 @@ def axis_spec(lower: str, upper: str, path: str = TRADES_PATH) -> DatasetSpec:
     )
 
 
-def axis(spec: DatasetSpec, start: object, end: object) -> dict[str, object]:
-    path = cast("RestPath", _massive.source(R, cast("str", spec.history_path)))
-    dates = (cast("Any", start), cast("Any", end))
-    return rest_requests.axis_query(spec, path, dates=dates, asset_class=spec.asset_class)
+def axis(spec: DatasetSpec, start: date | None, end: date | None) -> dict[str, object]:
+    assert spec.history_path is not None
+    path = _rest_path(spec.history_path)
+    return rest_requests.axis_query(spec, path, dates=(start, end), asset_class=spec.asset_class)
 
 
 def test_date_axes_are_whole_days_and_shift_for_exclusive_ends() -> None:
@@ -364,7 +367,7 @@ def test_timestamp_axes_take_midnights_in_the_day_zone() -> None:
     out = axis(spec, date(2025, 3, 3), date(2025, 3, 3))
     assert out["timestamp.gte"] == datetime(2025, 3, 3, 5, tzinfo=UTC)
     # A dataset without an asset class bounds its days in New York.
-    path = cast("RestPath", _massive.source(R, SMA_STOCK))
+    path = _rest_path(SMA_STOCK)
     unclassed = rest_requests.axis_query(
         SMA, path, dates=(date(2025, 7, 1), None), asset_class=SMA.asset_class
     )
@@ -418,7 +421,7 @@ def test_an_axis_the_path_lacks_or_of_another_kind() -> None:
     assert (
         rest_requests.axis_query(
             MOVERS,
-            cast("RestPath", _massive.source(R, MOVERS_PATH)),
+            _rest_path(MOVERS_PATH),
             dates=(None, None),
             asset_class=MOVERS.asset_class,
         )
@@ -427,7 +430,7 @@ def test_an_axis_the_path_lacks_or_of_another_kind() -> None:
 
 
 def test_an_empty_symbol_tuple_plans_no_request() -> None:
-    path = cast("RestPath", _massive.source(R, INDEX_SNAPSHOT_PATH))
+    path = _rest_path(INDEX_SNAPSHOT_PATH)
     assert (
         rest_requests.plan_calls(INDEX_SNAPSHOTS, path, Request(), symbols=(), split=split_pair)
         == []
@@ -445,7 +448,7 @@ def test_futures_date_bounds_are_whole_sessions() -> None:
         time_axis=("timestamp.gte", "timestamp.lt"),
         keys={(R, path): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
     )
-    rest_path = cast("RestPath", _massive.source(R, path))
+    rest_path = _rest_path(path)
     out = rest_requests.axis_query(
         spec, rest_path, dates=(date(2025, 3, 4), date(2025, 3, 4)), asset_class=spec.asset_class
     )
@@ -474,11 +477,11 @@ def test_the_page_size_is_the_documented_maximum_unless_the_dataset_sets_one() -
         fetch_path=DIVIDENDS_PATH,
         keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
     )
-    path = cast("RestPath", _massive.source(R, DIVIDENDS_PATH))
+    path = _rest_path(DIVIDENDS_PATH)
     assert rest_requests.page_size(dividends, path) == 5000
     assert rest_requests.page_size(dataclasses.replace(dividends, page_size=100), path) == 100
     # A path without `limit` has no page size, whatever the dataset sets.
-    movers = cast("RestPath", _massive.source(R, MOVERS_PATH))
+    movers = _rest_path(MOVERS_PATH)
     assert rest_requests.page_size(MOVERS, movers) is None
 
 
@@ -497,7 +500,7 @@ def test_a_path_without_a_documented_maximum_sends_only_the_row_cap() -> None:
             )
         },
     )
-    path = cast("RestPath", _massive.source(R, RANGE_PATH))
+    path = _rest_path(RANGE_PATH)
     assert rest_requests.page_size(bars, path) is None
     _, query = rest_requests.shared_params(bars, path, Request(), fixed={})
     assert "limit" not in query
@@ -507,3 +510,68 @@ def test_a_path_without_a_documented_maximum_sends_only_the_row_cap() -> None:
         dataclasses.replace(bars, page_size=50_000), path, Request(), fixed={}
     )
     assert query["limit"] == 50_000
+
+
+def test_symbol_request_fills_a_pair_with_its_two_currencies() -> None:
+    path = _rest_path(CRYPTO_LAST_PATH)
+    assert rest_requests._symbol_request(
+        CRYPTO_LAST, "X:BTCUSD", path, targets=["from"], param=None, split=split_pair
+    ) == ("X:BTCUSD", {"from": "BTC", "to": "USD"}, {}, None)
+
+
+def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
+    news = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="reference.news",
+        fetch_path="/v2/reference/news",
+        symbol_param="ticker",
+        keys={(R, "/v2/reference/news"): SourceKeys()},
+    )
+    path = _rest_path("/v2/reference/news")
+    assert rest_requests._symbol_request(
+        news, "AAPL", path, targets=[], param="ticker", split=split_pair
+    ) == ("AAPL", {}, {"ticker": "AAPL"}, None)
+
+
+def test_a_pair_with_no_split_is_a_call_that_is_never_sent() -> None:
+    # The call carries why, so the read reports the pair without sending anything.
+    path = _rest_path(CRYPTO_LAST_PATH)
+    missing = Unsplit("not listed", no_data=True)
+    calls = rest_requests.plan_calls(
+        CRYPTO_LAST, path, Request(), symbols=("X:DOTUSD",), split=lambda _: missing
+    )
+    assert [(call.symbol, call.path_params, call.unsplit) for call in calls] == [
+        ("X:DOTUSD", {}, missing)
+    ]
+
+
+def test_a_split_with_an_outcome_no_case_names_is_refused() -> None:
+    path = _rest_path(CRYPTO_LAST_PATH)
+    with pytest.raises(AssertionError):
+        rest_requests.plan_calls(
+            CRYPTO_LAST,
+            path,
+            Request(),
+            symbols=("X:DOTUSD",),
+            split=lambda _: None,  # type: ignore[arg-type,return-value]  # the point: refused
+        )
+
+
+def test_fetch_paths_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="paths has no rule for a value of type object"):
+        rest_requests.fetch_paths(MOVERS, object())  # type: ignore[arg-type]  # the point: refused at run time
+
+
+def test_a_capped_call_asks_only_for_the_rows_still_wanted() -> None:
+    path = _rest_path(INDEX_SNAPSHOT_PATH)
+    largest = rest_requests.page_size(INDEX_SNAPSHOTS, path)
+    call = rest_requests.Call({}, {"ticker.any_of": ("I:SPX",), "limit": largest})
+    capped = rest_requests.capped_call(INDEX_SNAPSHOTS, path, call, cap=3)
+    assert capped.query == {"ticker.any_of": ("I:SPX",), "limit": 3}
+    # A cap above the page size keeps the page size.
+    assert largest is not None
+    wide = rest_requests.capped_call(INDEX_SNAPSHOTS, path, call, cap=largest + 1)
+    assert wide.query["limit"] == largest
+    # A path without a page size sends the call as planned.
+    last = rest_requests.Call({"from": "BTC", "to": "USD"}, {})
+    assert rest_requests.capped_call(CRYPTO_LAST, _rest_path(CRYPTO_LAST_PATH), last, cap=3) is last

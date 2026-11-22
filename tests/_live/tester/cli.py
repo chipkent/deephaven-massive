@@ -8,12 +8,13 @@
   `ready: no`, and saves the same lines in `DIR/setup-check.txt` for the bug report. The
   console install is the Python at `PATH` (`~/dh-massive/bin/python` by default)
   or the Docker image `NAME`. Exit 0 when no item failed, else 1.
-- `examples [--folder DIR]` starts an embedded Deephaven server, runs every example of
-  `docs/tester-examples/` in order (`examples.run_examples`), and saves what each did under
-  `DIR/examples-output/`. The examples write their debug log and diagnostics to `DIR` too. It
-  first asks Massive which plan the key holds per subscription, and writes the settings file
-  the paid examples read for those plans. Exit 0 when no example failed (a refusal by the
-  key's plan is not a failure), else 1.
+- `examples [--folder DIR]` runs, in the embedded Deephaven server the script started, every
+  example of `docs/tester-examples/` in order (`examples.run_examples`), and saves what each
+  did under `DIR/examples-output/`. The examples write their debug log and diagnostics to
+  `DIR` too. It first reads which subscriptions the tester's own settings file lists as
+  delayed (`examples.listed_delayed`), and writes the settings file the live examples read
+  with them. Exit 0 when no example failed (a refusal by Massive is not a failure), else 1. A
+  settings file the library refuses raises its error.
 - `bug-report [--folder DIR]` writes `DIR/bug-report-<UTC time>.zip` (`bug_report`). Exit 0
   when the zip was written, 1 when a secret was found and nothing was written.
 
@@ -25,7 +26,6 @@ environment, and every line printed is cleaned of them.
 from __future__ import annotations
 
 import argparse
-import importlib
 import os
 import sys
 from datetime import UTC, datetime
@@ -33,11 +33,11 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Final
 
 from tests._live.live_run.children import run_command
-from tests._live.live_run.cli import credentials
 from tests._live.live_run.commands import NO_KEY
 from tests._live.live_run.machine_checks import check_machine, ready
-from tests._live.live_run.run_probe import probe_key
+from tests._live.live_run.run_probe import credentials, probe_key
 from tests._live.live_run.secret_scrub import SecretFilter
+from tests._live.tester import examples
 from tests._live.tester.bug_report import build_bundle
 from tests._live.tester.setup_check import check_setup
 
@@ -134,11 +134,49 @@ def check_both(
     )
 
 
+def run_examples(
+    root: Path,
+    folder: Path,
+    listed: tuple[str, ...] | None,
+    *,
+    secrets: SecretFilter,
+    echo: Callable[[str], None],
+) -> int:
+    """Run the `examples` command: every example, with a settings file of the tester's listing.
+
+    Args:
+        root: The repository root, which holds the examples.
+        folder: The tester's folder.
+        listed: The subscriptions the tester's own settings file lists as delayed, or None
+            without a file (`examples.listed_delayed`).
+        secrets: The secrets to keep out of what is saved and printed.
+        echo: Prints one line.
+
+    Returns:
+        1 when an example failed, else 0.
+    """
+    if listed is None:
+        listed = ()
+        echo(f"no settings file at {examples.SETTINGS_PATH}: no subscription is listed delayed")
+    echo(f"settings: {examples.settings_text(listed).strip()}")
+    outcomes = examples.run_examples(
+        examples.example_files(root / EXAMPLES_FOLDER),
+        folder / "examples-output",
+        folder,
+        secrets=secrets,
+        echo=echo,
+        delayed=listed,
+    )
+    failed = [o.name for o in outcomes if o.status == examples.FAILED]
+    echo(f"saved to {folder / 'examples-output'}")
+    echo(f"failed: {', '.join(failed)}" if failed else "no example failed")
+    return 1 if failed else 0
+
+
 def main(
     argv: list[str],
     *,
     root: Path,
-    start_server: Callable[[], None],
     environ: MutableMapping[str, str] = os.environ,
     stdout: IO[str] = sys.stdout,
     check: Callable[[Path, argparse.Namespace, MutableMapping[str, str]], list[Item]] = (
@@ -148,8 +186,8 @@ def main(
         describe_machine
     ),
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
-    plans: Callable[[MutableMapping[str, str]], dict[str, str] | None] = (
-        lambda environ: probe_key(credentials(environ), now=datetime.now(UTC)).tiers
+    delayed: Callable[[MutableMapping[str, str]], tuple[str, ...] | None] = (
+        examples.listed_delayed
     ),
 ) -> int:
     """Parse the command line and run the command.
@@ -157,14 +195,14 @@ def main(
     Args:
         argv: The arguments, without the program's name.
         root: The repository root.
-        start_server: Starts an embedded Deephaven server; only `examples` calls it.
         environ: The environment.
         stdout: Where the command prints.
         check: Checks both setups and the key (`check_both`).
         describe: Describes the machine for a bug report (`describe_machine`).
         now: Reads the time, which names a bug report's zip.
-        plans: Asks Massive which plan the key holds per subscription, for the settings file
-            the paid examples read; None when it cannot tell. Only `examples` calls it.
+        delayed: Reads the subscriptions the tester's own settings file lists as delayed, for
+            the settings file the live examples read; None without a file. Only `examples`
+            calls it.
 
     Returns:
         The exit status: 0; 1 when an item of the check failed, an example failed, or a
@@ -197,25 +235,7 @@ def main(
         (folder / CHECK_OUTPUT).write_text(text, encoding="utf-8")
         return 0 if ready(items) else 1
     if arguments.command == "examples":
-        start_server()
-        examples = importlib.import_module("tests._live.tester.examples")
-        tiers = plans(environ)
-        if tiers is None:
-            tiers = {}
-            echo("could not tell the key's plans; the examples run as on the free plan")
-        echo(f"settings: {examples.settings_text(tiers).strip()}")
-        outcomes = examples.run_examples(
-            examples.example_files(root / EXAMPLES_FOLDER),
-            folder / "examples-output",
-            folder,
-            secrets=secrets,
-            echo=echo,
-            tiers=tiers,
-        )
-        failed = [o.name for o in outcomes if o.status == examples.FAILED]
-        echo(f"saved to {folder / 'examples-output'}")
-        echo(f"failed: {', '.join(failed)}" if failed else "no example failed")
-        return 1 if failed else 0
+        return run_examples(root, folder, delayed(environ), secrets=secrets, echo=echo)
     stamp = now().strftime("%Y%m%dT%H%M%SZ")
     environment = describe(root, folder, environ)
     target, finds = build_bundle(folder, environment=environment, secrets=secrets, stamp=stamp)

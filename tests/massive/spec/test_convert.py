@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 from datetime import date
+from decimal import Decimal
 from types import NoneType
 
 import pytest
@@ -45,7 +46,11 @@ def test_a_double_takes_any_number_but_not_a_bool() -> None:
     assert convert(WireType.DOUBLE, 3) == 3.0
     assert type(convert(WireType.DOUBLE, 3)) is float
     assert convert(WireType.DOUBLE, 2.5) == 2.5
-    for value in (False, "2.5", 10**400, [1.0]):
+    # Every integer a double holds exactly converts, however large; one it would round does not.
+    assert convert(WireType.DOUBLE, 2**53) == 2.0**53
+    assert convert(WireType.DOUBLE, 2**60) == 2.0**60
+    assert convert(WireType.DOUBLE, -(2**53)) == -(2.0**53)
+    for value in (False, "2.5", 10**400, [1.0], 2**53 + 1, -(2**60) - 1):
         _refused(WireType.DOUBLE, value)
 
 
@@ -505,3 +510,43 @@ def test_a_decimal_text_column_refuses_what_one_value_refuses(value: object) -> 
         read = column_converter(price, arrow_checks_numbers=arrow)
         for column in ([value], ["7676.5", value], [None, value, "7679"], [value, value]):
             assert read(list(column)) is None, column
+
+
+def test_items_fit_takes_lists_of_items_sent_as_is() -> None:
+    texts = frozenset({str})
+    assert convert_module._items_fit([["a", "b"], None, []], texts, long_items=False)
+    assert not convert_module._items_fit([["a", 1]], texts, long_items=False)
+
+
+def test_items_fit_range_checks_long_items_only_when_asked() -> None:
+    ints = frozenset({int})
+    big: list[object] = [[2**63]]
+    assert convert_module._items_fit(big, ints, long_items=False)
+    assert not convert_module._items_fit(big, ints, long_items=True)
+    assert convert_module._items_fit(
+        [[2**63 - 1, None]], frozenset({int, NoneType}), long_items=True
+    )
+
+
+@pytest.mark.parametrize("value", [Decimal("1.5"), True, "1.5"], ids=["decimal", "bool", "text"])
+def test_a_double_column_reader_refuses_a_type_its_caller_never_passes(value: object) -> None:
+    # The column reader admits only integers, floats, and nulls; anything else is a defect that
+    # must raise, never become a null.
+    with pytest.raises(TypeError, match=r"^a double column holds a \w+, which its reader does"):
+        convert_module._as_floats([1.5, None, value])
+
+
+@pytest.mark.parametrize("value", [(1, 2), "12", 7], ids=["tuple", "text", "int"])
+def test_a_list_column_reader_refuses_a_value_that_is_no_list(value: object) -> None:
+    # Only lists and nulls reach the item check; any other value must raise, never skip it.
+    with pytest.raises(TypeError, match=r"^a list column holds a \w+, which its reader does"):
+        convert_module._items_fit([[1], None, value], frozenset({int}), long_items=True)
+
+
+def test_the_null_path_of_a_number_or_text_column_refuses_another_type() -> None:
+    # A column with nulls reads its values one by one; a value of a type its caller never
+    # passes must raise, never be left out of the range check or the pattern test.
+    with pytest.raises(TypeError, match=r"^an integer column holds a bool, which its reader"):
+        convert_module._in_int64([1, None, True])
+    with pytest.raises(TypeError, match=r"^a decimal-text column holds a int, which its reader"):
+        convert_module._decimal_texts(["1.5", None, 2])

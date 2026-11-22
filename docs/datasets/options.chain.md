@@ -7,7 +7,7 @@ The snapshot of every contract in one underlying's option chain.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.options.chain(underlying, *, contract_type=None, sort=None, order=None, limit=None, filters=None)
+m.options.chain(underlying, *, contract_type=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -23,12 +23,13 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 | Argument | Description |
 | --- | --- |
-| `underlying` | The underlying's exact Massive ticker, a stock or an index, such as `"AAPL"` or `"I:SPX"`. A table of them in a `Symbol` column works too. `dm.ALL` is refused; use `snapshots(dm.ALL)` for every contract. |
+| `underlying` | The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A table of stock or index tickers in a `Symbol` column works too. `dm.ALL` is refused; use `snapshots(dm.ALL)` for every contract. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`sort`](README.md#sort) | `"ticker"`, `"expiration_date"`, or `"strike_price"`. |
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A table of underlyings caps every underlying's requests instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"expiration_date": "2026-12-18"}`. Keys: `expiration_date`, `expiration_date_gt`, `expiration_date_gte`, `expiration_date_lt`, `expiration_date_lte`, `strike_price`, `strike_price_gt`, `strike_price_gte`, `strike_price_lt`, `strike_price_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -48,23 +49,22 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `details.ticker`: "The ticker symbol for the asset. From the `details` object: The details for this contract." |
 | `OptionRoot` | String | The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its last 15 characters (expiry, type, and strike), such as `SPXW` for `O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract keeps its own root, such as `AAPL1`. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `BreakEvenPrice` | double | The price of the underlying asset for the contract to break even. For a call, this value is (strike price + premium paid). For a put, this value is (strike price - premium paid). |
+| `TodaysChange` | double | The value of the price change for the contract from the previous trading day. From the `day` object: The most recent daily bar for this contract. |
+| `TodaysChangePerc` | double | The percent of the price change for the contract from the previous trading day. From the `day` object: The most recent daily bar for this contract. |
 | `DayOpen` | double | The open price for the contract of the day. From the `day` object: The most recent daily bar for this contract. |
 | `DayHigh` | double | The highest price for the contract of the day. From the `day` object: The most recent daily bar for this contract. |
 | `DayLow` | double | The lowest price for the contract of the day. From the `day` object: The most recent daily bar for this contract. |
 | `DayClose` | double | The closing price for the contract of the day. From the `day` object: The most recent daily bar for this contract. |
 | `DayVolume` | double | The trading volume for the contract of the day. From the `day` object: The most recent daily bar for this contract. |
 | `DayVwap` | double | The trading volume weighted average price for the contract of the day. From the `day` object: The most recent daily bar for this contract. |
-| `DayChange` | double | The value of the price change for the contract from the previous trading day. From the `day` object: The most recent daily bar for this contract. |
-| `DayChangePercent` | double | The percent of the price change for the contract from the previous trading day. From the `day` object: The most recent daily bar for this contract. |
 | `DayLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `day` object: The most recent daily bar for this contract. |
 | `DayPreviousClose` | double | The closing price for the contract of previous trading day. From the `day` object: The most recent daily bar for this contract. |
-| `DetailsContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. |
-| `DetailsExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. |
-| `DetailsExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. |
-| `DetailsSharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. |
-| `DetailsStrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. |
+| `ContractType` | String | The type of contract. Can be "put", "call", or in some rare cases, "other". From the `details` object: The details for this contract. |
+| `ExerciseStyle` | String | The exercise style of this contract. See this link (https://en.wikipedia.org/wiki/Option_style) for more details on exercise styles. From the `details` object: The details for this contract. |
+| `ExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. |
+| `SharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. |
+| `StrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. |
 | `Fmv` | double | Fair Market Value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). |
 | `FmvLastUpdated` | Instant | If Fair Market Value (FMV) is available, this field is the nanosecond timestamp of the last FMV calculation. |
 | `GreeksDelta` | double | The change in the option's price per $0.01 increment in the price of the underlying asset. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
@@ -72,9 +72,9 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `GreeksTheta` | double | The change in the option's price per day. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
 | `GreeksVega` | double | The change in the option's price per 1% increment in volatility. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
 | `ImpliedVolatility` | double | The market's forecast for the volatility of the underlying asset, based on this option's current price. |
-| `LastQuoteBid` | double | The bid price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
+| `LastQuoteBidPrice` | double | The bid price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteBidSize` | double | The bid size. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
-| `LastQuoteAsk` | double | The ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
+| `LastQuoteAskPrice` | double | The ask price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteAskSize` | double | The ask size. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteBidExchange` | long | The bid side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteAskExchange` | long | The ask side exchange ID. See Exchanges (https://massive.com/docs/rest/options/market-operations/exchanges) for Massive's mapping of exchange IDs. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
@@ -98,7 +98,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
@@ -106,23 +106,22 @@ The Massive field behind each column, by source. An empty cell means the source 
 | --- | --- |
 | `Symbol` | `details.ticker` |
 | `OptionRoot` | `details.ticker` |
-| `RawSymbol` | `details.ticker` |
 | `BreakEvenPrice` | `break_even_price` |
+| `TodaysChange` | `day.change` |
+| `TodaysChangePerc` | `day.change_percent` |
 | `DayOpen` | `day.open` |
 | `DayHigh` | `day.high` |
 | `DayLow` | `day.low` |
 | `DayClose` | `day.close` |
 | `DayVolume` | `day.volume` |
 | `DayVwap` | `day.vwap` |
-| `DayChange` | `day.change` |
-| `DayChangePercent` | `day.change_percent` |
 | `DayLastUpdated` | `day.last_updated` |
 | `DayPreviousClose` | `day.previous_close` |
-| `DetailsContractType` | `details.contract_type` |
-| `DetailsExerciseStyle` | `details.exercise_style` |
-| `DetailsExpirationDate` | `details.expiration_date` |
-| `DetailsSharesPerContract` | `details.shares_per_contract` |
-| `DetailsStrikePrice` | `details.strike_price` |
+| `ContractType` | `details.contract_type` |
+| `ExerciseStyle` | `details.exercise_style` |
+| `ExpirationDate` | `details.expiration_date` |
+| `SharesPerContract` | `details.shares_per_contract` |
+| `StrikePrice` | `details.strike_price` |
 | `Fmv` | `fmv` |
 | `FmvLastUpdated` | `fmv_last_updated` |
 | `GreeksDelta` | `greeks.delta` |
@@ -130,9 +129,9 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `GreeksTheta` | `greeks.theta` |
 | `GreeksVega` | `greeks.vega` |
 | `ImpliedVolatility` | `implied_volatility` |
-| `LastQuoteBid` | `last_quote.bid` |
+| `LastQuoteBidPrice` | `last_quote.bid` |
 | `LastQuoteBidSize` | `last_quote.bid_size` |
-| `LastQuoteAsk` | `last_quote.ask` |
+| `LastQuoteAskPrice` | `last_quote.ask` |
 | `LastQuoteAskSize` | `last_quote.ask_size` |
 | `LastQuoteBidExchange` | `last_quote.bid_exchange` |
 | `LastQuoteAskExchange` | `last_quote.ask_exchange` |
@@ -162,4 +161,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

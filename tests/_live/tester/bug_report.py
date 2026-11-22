@@ -8,11 +8,11 @@ default):
 
 - `bug-report.md`, the tester's own report;
 - `setup-check.txt`, what `scripts/tester.py check` printed last: the console's versions,
-  whether both setups hold the same commit, and the plan of each subscription;
+  whether both setups hold the same commit, and whether Massive accepted the key;
 - `massive-debug.log`, the library's debug log, and `server.log`, the Deephaven server's
   output;
-- `diagnostics/`, the CSV files of `m.streams()`, `m.connections()`, `m.rate_limits()`, and
-  `m.symbol_reads()`;
+- `diagnostics/`, the CSV files of `m.problems()`, `m.streams()`, `m.connections()`,
+  `m.rate_limits()`, and `m.symbol_reads()`;
 - `examples-output/`, what `scripts/tester.py examples` saved;
 - `environment.json`, which it writes: the operating system, Python, Java, the commit, the
   library's and its dependencies' versions, which secret variables are set (never their
@@ -21,12 +21,12 @@ default):
 **The secret rules.** Only text files are collected (`TEXT_SUFFIXES`); a file larger than
 `MAX_FILE_BYTES` keeps only its end. Each passes through the live-run program's secret
 filter (`SecretFilter.clean`): the exact values of `MASSIVE_API_KEY`,
-`MASSIVE_DELAYED_API_KEY`, `MASSIVE_S3_ACCESS_KEY_ID`, and `MASSIVE_S3_SECRET_ACCESS_KEY`
-(plain and URL-encoded) and a proxy URL's password become `***`, as do the values of `apiKey=`
-parameters and of `Authorization` and `X-Amz-` headers. Then every collected file is scanned
-for each secret, plain, URL-encoded, and base64-encoded (`secret_scrub.scan`), and when one is
-found, no zip is written and the finds are returned instead. The command refuses to run
-without `MASSIVE_API_KEY`, since a scan for no secret would prove nothing.
+`MASSIVE_S3_ACCESS_KEY_ID`, and `MASSIVE_S3_SECRET_ACCESS_KEY` (plain and URL-encoded) and a
+proxy URL's password become `***`, as do the values of `apiKey=` parameters and of
+`Authorization` and `X-Amz-` headers. Then every collected file is scanned for each secret,
+plain, URL-encoded, and base64-encoded (`secret_scrub.scan`), and when one is found, no zip
+is written and the finds are returned instead. The command refuses to run without
+`MASSIVE_API_KEY`, since a scan for no secret would prove nothing.
 
 The zip is `bug-report-<UTC time>.zip` in the tester's folder; the staging folder it is built
 from is removed either way.

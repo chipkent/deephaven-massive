@@ -45,12 +45,14 @@ row by row logs why at DEBUG.
   Each extra or unconvertible key carries a sample (`DriftReport.samples`): its value in the
   first row that had it, so the library's WARNING can quote it.
 
-A key the caller names in `required` (the dataset's key columns for this path) that is absent,
-null, or does not fit in a row means the row cannot be placed: the row is dropped and counted
-(`DriftReport.dropped_rows`, with the first row's reason in `dropped_reason`). Whether a page
-whose every row was dropped is an error is the library's decision. A dropped row, and a row
-holding a value that does not fit, is logged whole at DEBUG (up to 2,000 characters of its
-JSON) on this module's logger, so the log shows every field it held.
+**Marks.** Every row of the page is in the batch. A row the decoder cannot read whole is
+marked in the returned `RowMarks`: `RowFault.UNREADABLE_KEYS` when a key the caller names in
+`required` (the dataset's key columns for this path) is absent, null, or does not fit, so the
+row cannot be placed; else `RowFault.UNCONVERTIBLE_VALUES` when another value does not fit and
+reads as null. A key-marked row's other values are still read, but add no `missing` or
+`unconvertible` drift: the row's fault is its key. What happens to a marked row is the
+library's decision. A marked row is logged whole at DEBUG (up to 2,000 characters of its JSON)
+on this module's logger, so the log shows every field it held.
 
 The function is safe from any thread and changes nothing but its own result and that DEBUG
 line. This module imports only the standard library, `pyarrow`, `net`, and `spec`.
@@ -61,8 +63,8 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import logging
-from types import MappingProxyType, NoneType
-from typing import TYPE_CHECKING, Final, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final
 
 import pyarrow as pa
 
@@ -74,12 +76,18 @@ from deephaven_massive._massive.spec.convert import (
     missing_key_message,
     row_excerpt,
 )
-from deephaven_massive._massive.spec.types import DriftReport, DriftSample, WireType
+from deephaven_massive._massive.spec.types import (
+    DriftReport,
+    DriftSample,
+    RowFault,
+    RowMarker,
+    WireType,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Mapping, Sequence
 
-    from deephaven_massive._massive.spec.types import Field, RestPath
+    from deephaven_massive._massive.spec.types import Field, RestPath, RowMarks
 
 _log = logging.getLogger(__name__)
 
@@ -178,14 +186,18 @@ def _row(
 
 
 def to_batch(
-    rows: Sequence[Mapping[str, object]], rest_path: RestPath, *, required: Collection[str]
-) -> tuple[pa.RecordBatch, DriftReport]:
+    rows: Sequence[Mapping[str, object]],
+    rest_path: RestPath,
+    *,
+    required: Collection[str],
+    symbol: str | None = None,
+) -> tuple[pa.RecordBatch, DriftReport, RowMarks]:
     """Convert a page's rows into one Arrow batch of the path's fields, and report drift.
 
     Call it on each `Page.rows` the REST client returns; the library then renames, merges,
     and converts the batch into its dataset's table. It allocates the batch and nothing else,
-    and never raises for a row: an odd value is drift, and a row that cannot be placed is
-    dropped and counted.
+    and never raises for a row: an odd value is drift, and a row it cannot read whole is
+    marked.
 
     Args:
         rows: The page's rows, decoded JSON objects in server order.
@@ -193,30 +205,38 @@ def to_batch(
         required: The long-form columns every row must carry with a value: the dataset's key
             columns for this path that it does not fill from the request (its `Symbol` and
             `Timestamp` sources, for instance). Empty when the dataset declares no key.
+        symbol: The long-form column holding each row's symbol, whose text a mark quotes
+            (`RowMark.symbols`); None when the rows carry none or the caller needs none.
 
     Returns:
         The batch, one column per field named by `Field.column` and typed by the module's
-        table, one row per input row that was not dropped, in server order; and the
-        `DriftReport` of the rows (`extra`, `missing`, `unconvertible`, and the dropped rows;
-        `statuses` is always empty here). A row is dropped when a `required` column is absent,
-        null, or holds a value that does not fit; `dropped_reason` is then the path's template,
-        the first such row's index, and the clause `spec.convert` shares with every decoder
-        (the field, the expected type, and the first 200 characters of the value's JSON text).
-        Any other value that does not fit its field's type or named conversion is null, its
-        wire key in `unconvertible`.
+        table, one row per input row, in server order; the `DriftReport` of the rows
+        (`extra`, `missing`, and `unconvertible`; `statuses` is always empty here, and no row
+        is dropped); and the marks of the rows it could not read whole. A row whose `required`
+        column is absent, null, or holds a value that does not fit is marked
+        `RowFault.UNREADABLE_KEYS`; one whose other value does not fit its field's type or
+        named conversion is null there, its wire key in `unconvertible`, and the row marked
+        `RowFault.UNCONVERTIBLE_VALUES`. A mark's reason is the path's template, the row's
+        index, and the clause `spec.convert` shares with every decoder (the field, the
+        expected type, and the first 200 characters of the value's JSON text).
 
     Raises:
-        ValueError: If `required` names a column the path does not have.
+        ValueError: If `required` or `symbol` names a column the path does not have.
     """
     fields = rest_path.fields
-    unknown = set(required) - {f.column for f in fields}
+    unknown = (set(required) | ({symbol} if symbol is not None else set())) - {
+        f.column for f in fields
+    }
     if unknown:
-        raise ValueError(f"{rest_path.template} has no columns {sorted(unknown)}")
+        raise ValueError(f"The path {rest_path.template!r} has no columns {sorted(unknown)}.")
     objects = _prefixes(fields)
+    marker = RowMarker()
     reading = _by_column(rows, fields, objects=objects, required=required)
     if isinstance(reading, str):
         _log.debug("%s: reading %d rows one by one: %s", rest_path.template, len(rows), reading)
-        reading = _by_row(rows, rest_path, objects=objects, required=required)
+        reading = _by_row(
+            rows, rest_path, objects=objects, required=required, symbol=symbol, marker=marker
+        )
     schema = pa.schema([pa.field(f.column, _ARROW[f.wire_type]) for f in fields])
     batch = pa.RecordBatch.from_arrays(reading.arrays, schema=schema)
     ignored = sorted(rest_path.ignored_keys & reading.extra.keys())
@@ -225,14 +245,13 @@ def to_batch(
         for key in ignored:
             del reading.extra[key]
     odd = {**reading.extra, **reading.unconvertible}
-    return batch, DriftReport(
+    drift = DriftReport(
         extra=frozenset(reading.extra),
         missing=frozenset(reading.missing),
         unconvertible=frozenset(reading.unconvertible),
-        dropped_rows=reading.dropped,
-        dropped_reason=reading.reason,
         samples={key: DriftSample(None, excerpt(value)) for key, value in odd.items()},
     )
+    return batch, drift, marker.marks()
 
 
 @dataclasses.dataclass(slots=True)
@@ -240,21 +259,42 @@ class _Reading:
     """A page read into columns, and what the reading found.
 
     Attributes:
-        arrays: The columns, one per field, holding the rows that were not dropped.
+        arrays: The columns, one per field, holding every row.
         extra: The undeclared keys, with the first value of each.
-        missing: The wire keys of the vendor-required fields some row lacked or held as null.
-        unconvertible: The wire keys whose value did not fit in some row, with the first such
-            value; read as null.
-        dropped: How many rows were dropped for a required column.
-        reason: Why the first dropped row was dropped; `""` when none was.
+        missing: The wire keys of the vendor-required fields some row whose keys could be read
+            lacked or held as null.
+        unconvertible: The wire keys whose value did not fit in some row whose keys could be
+            read, with the first such value; read as null.
     """
 
     arrays: list[pa.Array]
     extra: dict[str, object]
     missing: set[str]
     unconvertible: dict[str, object] = dataclasses.field(default_factory=dict)
-    dropped: int = 0
-    reason: str = ""
+
+
+def _objects_under(
+    holders: Sequence[Mapping[str, object]], key: str
+) -> list[Mapping[str, object]] | None:
+    """Return the object each holder keeps under a key, an empty one where it holds none.
+
+    Args:
+        holders: The rows, or the objects one level into them.
+        key: The key to read in each.
+
+    Returns:
+        One object per holder; or None when some holder keeps a value that is not an object.
+    """
+    found: list[Mapping[str, object]] = []
+    for holder in holders:
+        value = holder.get(key)
+        if value is None:
+            found.append(_NO_OBJECT)
+        elif type(value) is dict:
+            found.append(value)
+        else:
+            return None
+    return found
 
 
 def _by_column(
@@ -285,18 +325,17 @@ def _by_column(
         required: The long-form columns every row must carry with a value.
 
     Returns:
-        The reading, with no value found unconvertible and no row dropped; or, when the page
+        The reading, with no value found unconvertible and no row marked; or, when the page
         must be read row by row, why.
     """
     # Each object the fields reach into, one per row, by its dotted prefix; "" is the rows.
     levels: dict[str, Sequence[Mapping[str, object]]] = {"": rows}
     for prefix in sorted(objects, key=lambda name: name.count(".")):
         parent, _, key = prefix.rpartition(".")
-        found = [level.get(key) for level in levels[parent]]
-        if not set(map(type, found)) <= {dict, NoneType}:
+        found = _objects_under(levels[parent], key)
+        if found is None:
             return f"the wire key {prefix!r} holds a value that is not an object"
-        objects_found = [_NO_OBJECT if value is None else value for value in found]
-        levels[prefix] = cast("list[Mapping[str, object]]", objects_found)
+        levels[prefix] = found
     extra: dict[str, object] = {}
     for prefix, level in levels.items():
         _undeclared(level, prefix, fields, objects=objects, into=extra)
@@ -357,8 +396,8 @@ def _array(field: Field, values: list[object]) -> pa.Array | None:
 
     Arrow checks the numbers in one native pass. When it refuses one (an integer out of the
     64-bit range, or one a double cannot hold exactly), the column is read again with every
-    number checked and converted in Python, which rounds such an integer in a `double` column as
-    the converter does.
+    number checked in Python, which refuses an integer a `double` column would round, so the
+    page is read row by row and that value marked.
 
     Returns:
         The array; or None when `spec.convert.column_converter` cannot vouch for a value, so the
@@ -381,22 +420,29 @@ def _by_row(
     *,
     objects: frozenset[str],
     required: Collection[str],
+    symbol: str | None,
+    marker: RowMarker,
 ) -> _Reading:
-    """Convert a page row by row, judging each value on its own.
+    """Convert a page row by row, judging each value on its own, and mark the odd rows.
 
     The reference reading of a page: `to_batch` takes it when `_by_column` cannot vouch for the
-    fast path. Each row is walked key by key, and each value checked and converted on its own.
-    A row whose required column is absent, null, or does not fit is dropped; any other value
-    that does not fit is null. Each such row is logged whole at DEBUG (`_logged`).
+    fast path. Each row is walked key by key, and each value checked and converted on its own;
+    every row is kept. A row whose required column is absent, null, or does not fit is marked
+    `RowFault.UNREADABLE_KEYS`, and its other values add no drift; a row whose other value does
+    not fit is null there and marked `RowFault.UNCONVERTIBLE_VALUES`. Each marked row is logged
+    whole at DEBUG (`_logged`).
 
     Args:
         rows: The page's rows.
         rest_path: The path the rows came from.
         objects: The dotted prefixes of the fields' wire keys (`_prefixes`).
         required: The long-form columns every row must carry with a value.
+        symbol: The long-form column whose text a mark quotes, or None.
+        marker: Receives the marks.
 
     Returns:
-        The reading of the rows kept, with the values that did not fit and the rows dropped.
+        The reading of every row, with the values that did not fit in the rows whose keys could
+        be read.
     """
     fields = rest_path.fields
     keys = frozenset(f.wire_key for f in fields)
@@ -406,39 +452,82 @@ def _by_row(
         odd: dict[str, object] = {}
         found = _row(row, keys=keys, objects=objects, extra=reading.extra, odd=odd)
         problems = [
-            f"wire key {key!r} expects an object, got {excerpt(v)}" for key, v in odd.items()
+            (
+                _object_column(key, rest_path),
+                f"wire key {key!r} expects an object, got {excerpt(v)}",
+            )
+            for key, v in odd.items()
         ]
         values: list[object] = []
         absent: list[str] = []
-        dropped = ""
+        key_problem: tuple[str, str] | None = None
         for f in fields:
             raw = found.get(f.wire_key)
             value, problem = _value(f, raw)
+            values.append(value)
             if f.column in required and (raw is None or problem is not None):
-                dropped = problem or missing_key_message(f)
-                break
-            if problem is not None:
+                key_problem = key_problem or (f.column, problem or missing_key_message(f))
+            elif problem is not None:
                 odd.setdefault(f.wire_key, raw)
-                problems.append(problem)
+                problems.append((f.column, problem))
             elif raw is None and f.required:
                 absent.append(f.wire_key)
-            values.append(value)
-        if dropped:
-            message = _logged(rest_path, index=index, row=row, problem=dropped)
-            reading.dropped += 1
-            reading.reason = reading.reason or message
+        for value, cells in zip(values, columns, strict=True):
+            cells.append(value)
+        quoted = _quoted(found, rest_path, symbol)
+        if key_problem is not None:
+            column, problem = key_problem
+            reason = _logged(rest_path, index=index, row=row, problem=problem)
+            marker.mark(RowFault.UNREADABLE_KEYS, index, field=column, reason=reason, symbol=quoted)
             continue
         if problems:
-            _logged(rest_path, index=index, row=row, problem="; ".join(problems))
+            reason = _logged(
+                rest_path, index=index, row=row, problem="; ".join(p for _, p in problems)
+            )
+            marker.mark(
+                RowFault.UNCONVERTIBLE_VALUES,
+                index,
+                field=problems[0][0],
+                reason=reason,
+                symbol=quoted,
+            )
         reading.missing.update(absent)
         for key, value in odd.items():
             reading.unconvertible.setdefault(key, value)
-        for value, column in zip(values, columns, strict=True):
-            column.append(value)
     reading.arrays = [
         pa.array(c, type=_ARROW[f.wire_type]) for c, f in zip(columns, fields, strict=True)
     ]
     return reading
+
+
+def _quoted(found: Mapping[str, object], rest_path: RestPath, symbol: str | None) -> str | None:
+    """Return a row's symbol as sent, for its mark.
+
+    Args:
+        found: The row's values by wire key (`_row`).
+        rest_path: The path, for the symbol column's wire key.
+        symbol: The long-form column holding the symbol, or None.
+
+    Returns:
+        The symbol's text; None when no column was named or the value is missing or not text.
+    """
+    if symbol is None:
+        return None
+    value = found.get(next(f.wire_key for f in rest_path.fields if f.column == symbol))
+    return value if isinstance(value, str) else None
+
+
+def _object_column(key: str, rest_path: RestPath) -> str:
+    """Return the column of the first field under a wire key that holds no object.
+
+    Args:
+        key: The dotted wire key of an object the fields reach into.
+        rest_path: The path, for its fields.
+
+    Returns:
+        The long-form column of the first field under the key.
+    """
+    return next(f.column for f in rest_path.fields if f.wire_key.startswith(f"{key}."))
 
 
 def _value(field: Field, value: object) -> tuple[object, str | None]:
@@ -461,7 +550,7 @@ def _value(field: Field, value: object) -> tuple[object, str | None]:
 
 
 def _logged(rest_path: RestPath, *, index: int, row: Mapping[str, object], problem: str) -> str:
-    """Log a row the reading dropped or nulled a value of, whole, at DEBUG; return its reason.
+    """Log a row the reading marked, whole, at DEBUG; return its reason.
 
     Args:
         rest_path: The path the row came from.

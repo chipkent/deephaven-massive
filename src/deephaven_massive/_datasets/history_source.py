@@ -15,8 +15,11 @@ only `warn_unfilled` logs.
   end or after now, whose `TimestampStart` lies before the range's start, or (for futures bars
   of several sessions or longer) that has not certainly ended, is dropped once its time
   columns are filled (`HistoryWindow.bars`).
-- `partition_dates` turns a window into the dates of the flat files it needs, in the asset
-  class's day zone; a futures date names a trading session.
+- `partition_dates` turns a window into the dates it covers, in the asset class's day zone;
+  a futures date names a trading session. `file_dates` turns it into the dates of the flat
+  files it needs, and `file_days` says which instants each of those files holds: the class's
+  day, except where Massive cuts a prefix's files at midnight in another zone (an index
+  minute file holds the Chicago day, 01:00 to 01:00 New York time).
 - `rest_history_problem` says why REST cannot serve a request, if it cannot: the dataset has
   no REST history endpoint, or the symbols are `dm.ALL` and the request is not daily bars with
   a grouped-daily endpoint.
@@ -48,26 +51,31 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, NamedTuple, cast
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 from deephaven_massive._datasets.bar_periods import (
     bar_starts,
     futures_bar_request,
     futures_first_bucket_day,
+    futures_session_unit,
     intraday,
 )
 from deephaven_massive._datasets.catalog import timespan_key
-from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
+from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS, joined_with_and
 from deephaven_massive._datasets.dates import (
     DaySpan,
     TimeRange,
+    bar_zone,
     bounds,
     day_class,
     day_end,
+    day_start,
     day_zone,
+    midnight,
 )
 from deephaven_massive._datasets.filters import filter_key, param_family
 from deephaven_massive._datasets.futures_sessions import (
+    CHICAGO,
     futures_session,
     futures_session_before,
     futures_session_end,
@@ -76,27 +84,39 @@ from deephaven_massive._datasets.futures_sessions import (
     weekday_on_or_before,
 )
 from deephaven_massive._datasets.row_times import BarBounds, FuturesBarCompletion, StartRule
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, HistorySource, Timespan
+from deephaven_massive._errors import (
+    BrokenGuaranteeError,
+    library_bug,
+    required,
+    unmatched_form,
+)
+from deephaven_massive._log_limits import prose_list
 from deephaven_massive._massive import ParamKind, Transport, source
-from deephaven_massive._types import _All
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from datetime import tzinfo
 
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
+    from deephaven_massive._datasets.dates import DateLike
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._log_limits import BoundedLog
-    from deephaven_massive._types import DateLike
 
 __all__ = [
     "HISTORY_TRANSPORTS",
     "PUBLICATION_NOTE",
     "Alternative",
+    "FileDays",
     "HistoryWindow",
     "SourceChoice",
     "choose_source",
     "current_partition",
+    "file_dates",
+    "file_days",
     "flat_file_prefix",
     "history_window",
     "partition_dates",
@@ -145,7 +165,7 @@ def session_date_param(spec: DatasetSpec) -> str:
     Returns:
         The parameter's wire name.
     """
-    rest_path = source(Transport.REST, cast("str", spec.history_path))
+    rest_path = source(Transport.REST, required(spec.history_path, f"{spec.name}'s history path"))
     [name] = [param.name for param in rest_path.params if param.kind is ParamKind.DATE]
     return name
 
@@ -173,7 +193,7 @@ class HistoryWindow:
             None for futures trades and quotes named by date, which are requested one
             session at a time.
         bars: For a dataset of bars, the window its bars must lie in once their time columns
-            are filled (`row_times.within`); the transports drop every other bar. None for
+            are filled (`row_times.whole`); the transports drop every other bar. None for
             ticks, which have no bar window.
         now: The instant the window was built for: the end of a range that ends now, and
             the instant by which a kept bar has ended. An aware UTC `datetime`.
@@ -205,16 +225,17 @@ def history_window(
 ) -> HistoryWindow:
     """Return what a `history()` call reads and keeps.
 
-    The bounds follow `dates.bounds`: two dates are whole days (for futures, sessions), two
-    datetimes a half-open range of instants, and an `end` of None reads through now. Ticks are
-    kept inside the range. A bar is kept only when its whole window lies inside the range and
-    has ended by now: its `TimestampStart` must be no earlier than the range's start
-    (`bar_periods.bar_starts` selects the starts that fit), and its `TimestampEnd` no later than
-    `HistoryWindow.bars.latest`. The end is conservative, so a bar whose window might reach past
-    the range is left out: an index day bar ends at 01:00 New York time. A futures bar of a
-    session or longer named by datetimes is kept by its own window, `TimestampStart` and
-    `TimestampEnd` as filled, and only once it has certainly ended
-    (`bar_periods.futures_bar_ended`); named by dates, by the rules of `_futures_sessions`.
+    The bounds follow `dates.bounds`: two dates are whole days (for futures, sessions; for bars of a
+    day or longer, days of the class's bar zone, `dates.bar_zone`, so an index date is the Chicago
+    day its bar covers), two datetimes a half-open range of instants, and an `end` of None reads
+    through now. Ticks are kept inside the range. A bar is kept only when its whole window lies
+    inside the range and has ended by now: its `TimestampStart` must be no earlier than the range's
+    start (`bar_periods.bar_starts` selects the starts that fit), and its `TimestampEnd` no later
+    than `HistoryWindow.bars.latest`, so a bar whose window reaches past the range is left out: an
+    index day bar ends at 01:00 New York time, midnight in Chicago. A futures bar of a session or
+    longer named by datetimes is kept by its own window, `TimestampStart` and `TimestampEnd` as
+    filled, and only once it has certainly ended (`bar_periods.futures_bar_ended`); named by dates,
+    by the rules of `_futures_sessions`.
 
     Args:
         spec: The dataset.
@@ -239,8 +260,12 @@ def history_window(
     futures = asset_class is AssetClass.FUTURES
     if isinstance(span, DaySpan) and futures:
         return _futures_sessions(spec, request, span, now=moment)
-    instants = span if isinstance(span, TimeRange) else span.instants(day_zone(asset_class))
     timespan = request.timespan
+    long_bars = spec.is_bars and timespan is not None and not intraday(timespan)
+    if isinstance(span, TimeRange):
+        instants = span
+    else:
+        instants = span.instants(bar_zone(asset_class) if long_bars else day_zone(asset_class))
     if not spec.is_bars or timespan is None:
         return HistoryWindow(span, instants, None, instants, now=moment)
     ended = TimeRange(instants.start, min(instants.end, moment))
@@ -261,6 +286,12 @@ def history_window(
             whole.earliest.isoformat(),
             whole.latest.isoformat(),
         )
+        return HistoryWindow(span, ended, None, instants, whole, now=moment)
+    if request.multiplier < 1 or (timespan is Timespan.SESSION and not futures):
+        # The library has no bar period to fit to the range here: a session outside futures,
+        # or a bar of no units or fewer. The range is requested as given, so Massive answers
+        # it, rather than the library returning no rows without a request.
+        whole = BarBounds(instants.start, min(last, moment), StartRule.RANGE)
         return HistoryWindow(span, ended, None, instants, whole, now=moment)
     keep = bar_starts(asset_class, ended, timespan=timespan, multiplier=request.multiplier)
     # Futures intraday bars named by instants take `window_start` exactly. The aggregates' `{from}`
@@ -312,8 +343,9 @@ def _futures_sessions(
         reserved = {filter_key(name) for name in param_family(session_date_param(spec))}
         if any(key in reserved for key, _ in request.filters):
             raise ValueError(
-                f"{spec.name}: history() dates set session_end_date themselves; drop the "
-                "session_end_date filter, or pass datetimes to combine it with a time range"
+                f"{spec.name}: history() with dates sets session_end_date itself, so it takes no "
+                "session_end_date filter. Leave the filter out, or pass datetimes as start and "
+                "end to combine it with a time range."
             )
         return HistoryWindow(span, None, span, None, now=now)
     multiplier = request.multiplier
@@ -325,7 +357,7 @@ def _futures_sessions(
         ended = TimeRange(requested.start, min(requested.end, now))
         keep = bar_starts(AssetClass.FUTURES, ended, timespan=timespan, multiplier=multiplier)
         return HistoryWindow(span, keep, span, requested, whole, now=now)
-    if timespan is Timespan.SESSION and multiplier == 1:
+    if futures_session_unit(timespan) and multiplier == 1:
         whole = BarBounds(futures_session_open(span.first), latest, StartRule.LABEL)
         # Only finished sessions, and no session ends on a Saturday or Sunday.
         last = min(span.last, futures_session(now) - _ONE_DAY)
@@ -354,7 +386,7 @@ def _futures_sessions(
 
 
 def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...]:
-    """Return the dates of the flat files a `history()` window needs, oldest first.
+    """Return the dates a `history()` window covers, oldest first.
 
     For futures named by date they are the sessions kept (`HistoryWindow.sessions`). For
     futures named by instants they are the sessions of the first and last kept instant and
@@ -381,6 +413,93 @@ def partition_dates(spec: DatasetSpec, window: HistoryWindow) -> tuple[date, ...
         first, last = futures_session(times.start), futures_session_before(times.end)
         return DaySpan(first, last).days()
     return times.partition_dates(day_zone(spec.asset_class))
+
+
+_FILE_DAY_ZONES: Final[Mapping[str, tzinfo]] = MappingProxyType(
+    {"us_indices/day_aggs_v1": CHICAGO, "us_indices/minute_aggs_v1": CHICAGO}
+)
+"""The prefixes whose file of a date holds that date's day in another zone than the class's.
+
+Massive's index minute file of a date holds the bars from midnight to midnight in Chicago,
+01:00 to 01:00 New York time, while REST and the indices' documented days are New York's, so
+the New York day's first hour lies in the previous date's file. Its index day file of a date
+holds the bar of that Chicago day, stamped at its midnight (`dates.BAR_ZONES`). Every other
+prefix's file holds its class's day (for futures, its session)."""
+
+
+@dataclass(frozen=True)
+class FileDays:
+    """Which instants each flat file of one request holds: the day its date names.
+
+    The file of a date holds `[start(day), start(day + 1))`. Frozen, so reader threads may
+    share it.
+
+    Attributes:
+        asset_class: The dataset's class, whose day rules (`dates.day_start`; for futures,
+            the session's hours) cut the files when `zone` is None.
+        zone: The zone at whose midnight Massive cuts the files when it is not the class's
+            day zone (`_FILE_DAY_ZONES`); None when the files hold the class's days.
+    """
+
+    asset_class: AssetClass
+    zone: tzinfo | None
+
+    def start(self, day: date) -> datetime:
+        """Return the first instant the file of a date holds, the previous file's end.
+
+        Args:
+            day: The file's date.
+
+        Returns:
+            Midnight of the date in `zone`, or the date's start under the class's day rules.
+        """
+        if self.zone is None:
+            return day_start(self.asset_class, day)
+        return midnight(day, self.zone)
+
+
+def file_days(spec: DatasetSpec, request: Request) -> FileDays:
+    """Return which instants each flat file of a request holds.
+
+    Args:
+        spec: The dataset, which has flat files.
+        request: The normalized arguments; for bars, the timespan selects the prefix.
+
+    Returns:
+        The files' days: the class's, or midnight to midnight in the zone Massive cuts the
+        prefix's files in (`_FILE_DAY_ZONES`).
+    """
+    prefix = flat_file_prefix(spec, request)
+    # Every prefix not in the table holds its class's days (for futures, its sessions), the
+    # library's own days, so None is the answer for it, not a guess.
+    zone = None if prefix is None else _FILE_DAY_ZONES.get(prefix)
+    return FileDays(spec.single_class, zone)
+
+
+def file_dates(spec: DatasetSpec, request: Request, window: HistoryWindow) -> tuple[date, ...]:
+    """Return the dates of the flat files a `history()` window needs, oldest first.
+
+    They are the `partition_dates`, except for a prefix whose files Massive cuts at midnight in
+    another zone (`file_days`): then they are the dates, in that zone, of the kept range's first
+    and last instant and every date between. A window of New York days of an index's minute
+    bars so also reads the file of the day before its first, which holds the first day's hour
+    from 00:00 to 01:00 New York time; the read keeps only the window's rows of it.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments; for bars, the timespan selects the prefix.
+        window: The call's window (`history_window`).
+
+    Returns:
+        The files' dates; none for an empty window.
+    """
+    zone = file_days(spec, request).zone
+    if zone is None:
+        return partition_dates(spec, window)
+    times = window.times
+    if times is None or times.empty:
+        return ()
+    return times.partition_dates(zone)
 
 
 def current_partition(spec: DatasetSpec, *, now: datetime | None = None) -> date:
@@ -441,9 +560,19 @@ def rest_history_problem(spec: DatasetSpec, request: Request) -> str | None:
     grouped = (
         spec.has_grouped_daily and request.timespan is Timespan.DAY and request.multiplier == 1
     )
-    if isinstance(request.symbols, _All) and not grouped:
+    if isinstance(request.symbols, AllSymbols) and not grouped:
         return f"{spec.name} history over REST needs explicit symbols"
     return None
+
+
+class _FlatFileProblem(NamedTuple):
+    """One lasting reason flat files cannot serve a request, and what the caller can do."""
+
+    why: str
+    """The reason, as a clause that starts lower case or with a code name, with no period."""
+    fix: str
+    """The sentence that tells the caller what to do, or empty when nothing the caller passes
+    lets flat files serve the request."""
 
 
 def _flat_file_problems(
@@ -451,7 +580,7 @@ def _flat_file_problems(
     request: Request,
     *,
     config: MassiveConfig,
-) -> list[str]:
+) -> list[_FlatFileProblem]:
     """List every lasting reason flat files cannot serve a request; empty when none holds.
 
     These reasons do not change with time: credentials, the dataset's files, and adjustment.
@@ -463,28 +592,60 @@ def _flat_file_problems(
         config: The session's configuration (credentials).
 
     Returns:
-        One human-readable reason per violated constraint, in a fixed order: credentials, the
-        dataset's files, adjustment.
+        One reason per violated constraint, in a fixed order: credentials, the dataset's
+        files, adjustment.
     """
     problems = []
     if config.s3_access_key_id is None:
         problems.append(
-            "no S3 credentials are configured (MassiveConfig s3_access_key_id and "
-            "s3_secret_access_key, or MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY)"
+            _FlatFileProblem(
+                "no S3 credentials are set",
+                "Set s3_access_key_id and s3_secret_access_key in dm.MassiveConfig, or the "
+                "environment variables MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY.",
+            )
         )
     if flat_file_prefix(spec, request) is None:
         if spec.is_bars and spec.flat_file_prefixes:
-            spans = ", ".join(f"1-{span}" for span in spec.flat_file_prefixes)
-            problems.append(f"{spec.name} flat files hold only {spans} bars")
+            spans = joined_with_and([f"1-{span}" for span in spec.flat_file_prefixes])
+            # Futures day bars are read from REST; the session files hold session bars, which
+            # are not yet shown to be the same bars.
+            day = request.timespan is Timespan.DAY and Timespan.SESSION in spec.flat_file_prefixes
+            fix = "Pass timespan=dm.Timespan.SESSION for each contract's daily bars." if day else ""
+            problems.append(_FlatFileProblem(f"{spec.name} flat files hold only {spans} bars", fix))
         else:
-            problems.append(f"{spec.name} has no flat files")
+            problems.append(_FlatFileProblem(f"{spec.name} has no flat files", ""))
     if request.adjusted is True:
         problems.append(
-            "adjusted=True needs REST, since flat-file bars are unadjusted (as traded) and one "
-            "history() never mixes adjusted and unadjusted prices; pass adjusted=False for "
-            "the flat files"
+            _FlatFileProblem(
+                "flat-file bars are as traded and adjusted=True asks for split-adjusted ones",
+                "Pass adjusted=False.",
+            )
         )
     return problems
+
+
+def _whys(problems: list[_FlatFileProblem]) -> str:
+    """Join the reasons of flat-file problems as one clause.
+
+    Args:
+        problems: At least one problem.
+
+    Returns:
+        The reasons joined with `and`.
+    """
+    return prose_list((problem.why for problem in problems), "reasons", shown=len(problems))
+
+
+def _fixes(problems: list[_FlatFileProblem]) -> str:
+    """Join the fixes of flat-file problems, each a sentence, with a leading space.
+
+    Args:
+        problems: The problems.
+
+    Returns:
+        The fixes, each after a space, or empty when none has one.
+    """
+    return "".join(f" {problem.fix}" for problem in problems if problem.fix)
 
 
 class Alternative(StrEnum):
@@ -551,49 +712,86 @@ def choose_source(
     flat = _flat_file_problems(spec, request, config=config)
     if requested is HistorySource.FLAT_FILES:
         if flat:
-            raise ValueError(f"{spec.name} cannot be read from flat files: {'; '.join(flat)}")
+            raise ValueError(
+                f"{spec.name} cannot be read from flat files, since {_whys(flat)}.{_fixes(flat)}"
+            )
         return SourceChoice(HistorySource.FLAT_FILES, "requested")
     rest = rest_history_problem(spec, request)
     if (
         rest is not None
         and request.adjusted is True
         and len(flat) == 1
-        and isinstance(request.symbols, _All)
+        and isinstance(request.symbols, AllSymbols)
     ):
         # Only adjustment holds flat files back, and only dm.ALL holds REST back: say so.
         raise ValueError(
-            f"{spec.name} history of every symbol (dm.ALL) with adjusted=True has no source: "
-            "only REST serves split-adjusted bars, and REST reads bars one symbol at a time "
-            "(every symbol at once only for 1-day bars), while flat files hold as-traded "
-            "prices. Pass adjusted=False to read the as-traded flat files, or name the symbols "
-            "to read adjusted bars from REST"
+            f"{spec.name} history with symbols=dm.ALL and adjusted=True has no source. Only "
+            "REST serves split-adjusted bars, and REST reads these bars one symbol at a time. "
+            "Pass adjusted=False, or name the symbols."
         )
     if flat and rest is not None:
         raise ValueError(
-            f"{spec.name} history has no possible source. "
-            f"Flat files: {'; '.join(flat)}. REST: {rest}."
+            f"{spec.name} history has no source. Flat files cannot serve it, since "
+            f"{_whys(flat)}. REST cannot serve it, since {rest}.{_fixes(flat)}"
         )
     if rest is not None:
         return SourceChoice(HistorySource.FLAT_FILES, f"REST cannot serve it: {rest}")
-    threshold = config.flat_file_symbol_threshold
-    many = not isinstance(request.symbols, tuple) or len(request.symbols) >= threshold
     if flat:
         return SourceChoice(
             HistorySource.REST,
-            f"flat files cannot serve it: {'; '.join(flat)}",
+            f"flat files cannot serve it, since {_whys(flat)}",
             Alternative.UNAVAILABLE,
         )
-    if not isinstance(request.symbols, tuple):
+    count = _listed_count(request.symbols)
+    if count is None:
         return SourceChoice(HistorySource.FLAT_FILES, "every symbol", Alternative.AVAILABLE)
-    count = len(request.symbols)
-    if many:
-        reason = f"{count} symbols >= flat_file_symbol_threshold {threshold}"
+    threshold = config.flat_file_symbol_threshold
+    if count >= threshold:
+        reason = f"{_symbols(count)}, at least flat_file_symbol_threshold={threshold}"
         return SourceChoice(HistorySource.FLAT_FILES, reason, Alternative.AVAILABLE)
     return SourceChoice(
         HistorySource.REST,
-        f"{count} symbols < flat_file_symbol_threshold {threshold}",
+        f"{_symbols(count)}, fewer than flat_file_symbol_threshold={threshold}",
         Alternative.AVAILABLE,
     )
+
+
+def _symbols(count: int) -> str:
+    """Count symbols in words, for the reason of a choice.
+
+    Args:
+        count: How many symbols a call lists.
+
+    Returns:
+        `1 symbol`, or the count and `symbols`, such as `3 symbols`.
+    """
+    return f"{count} symbol" if count == 1 else f"{count} symbols"
+
+
+def _listed_count(symbols: NormalizedSymbols | None) -> int | None:
+    """Count the symbols a `history()` call lists, for the flat-file threshold.
+
+    Args:
+        symbols: The request's static symbols.
+
+    Returns:
+        The length of a symbol list; None for `dm.ALL` and for a dataset without instruments,
+        which read every symbol.
+
+    Raises:
+        BrokenGuaranteeError: For a symbol table, which `history()` reads into a list before it
+            chooses a source, or a form of symbols with no rule here.
+    """
+    match symbols:
+        case tuple():
+            return len(symbols)
+        case AllSymbols() | None:
+            return None
+        case SymbolTable():
+            problem = "the history source choice got a symbol table, which history() reads first"
+            raise BrokenGuaranteeError(library_bug(problem))
+        case _:
+            raise BrokenGuaranteeError(unmatched_form("the history source choice", symbols))
 
 
 def warn_unfilled(
@@ -615,25 +813,34 @@ def warn_unfilled(
         choice: The `AUTO` choice.
         catalog: The session's catalog, which knows the columns each source fills.
         warnings: The session's once-per-session warnings (`SessionCore.warnings`).
+
+    Raises:
+        BrokenGuaranteeError: If the choice is neither `REST` nor `FLAT_FILES`, which `AUTO`
+            resolves to.
     """
     if choice.alternative is Alternative.UNAVAILABLE:
         return  # the result cannot change, and the caller cannot pick the other source
-    other = HistorySource.FLAT_FILES if choice.source is HistorySource.REST else HistorySource.REST
+    if choice.source is HistorySource.REST:
+        other = HistorySource.FLAT_FILES
+    elif choice.source is HistorySource.FLAT_FILES:
+        other = HistorySource.REST
+    else:
+        raise BrokenGuaranteeError(library_bug(f"{spec.name} history() chose {choice.source}"))
     missing = catalog.history_columns(spec, HISTORY_TRANSPORTS[other]) - (
         catalog.history_columns(spec, HISTORY_TRANSPORTS[choice.source])
     )
     if not missing:
         return
     columns = ", ".join(sorted(missing))
-    remedy = f"pass source=dm.HistorySource.{other.name} to get them"
     warnings.log(
         f"history source {spec.name} {choice.source.name}: {columns}",
-        "%s history: AUTO read %s (%s); the read leaves %s null, which the other source, "
-        "%s, fills: %s (logged once per session)",
+        "%s history: source=dm.HistorySource.AUTO read %s for %s, and that read leaves %s "
+        "null, which %s "
+        "fills. Pass source=dm.HistorySource.%s to fill them.",
         spec.name,
         TRANSPORT_LABELS[HISTORY_TRANSPORTS[choice.source]],
         choice.reason,
-        columns,
+        prose_list(sorted(missing), "columns", shown=len(missing)),
         TRANSPORT_LABELS[HISTORY_TRANSPORTS[other]],
-        remedy,
+        other.name,
     )

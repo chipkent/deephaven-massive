@@ -1,0 +1,71 @@
+"""The query classes: what a dataset method returns, and the methods that turn it into a table.
+
+Every dataset method, such as `m.stocks.trades(["AAPL"])`, returns a query. A query describes a
+read and reads nothing until you call one of its methods, and each method returns a Deephaven
+table of one shape: `fetch()` reads what Massive has now, `poll(interval)` reads it again on a
+timer, the stream methods (`blink()`, `append_only()`, `ring(capacity)`, `last_by()`) follow a
+live feed, and `history(start, end)` reads a past range. Which of these a query has depends on
+what Massive serves for its dataset, and the query's class says so:
+
+- `FetchQuery`: a REST dataset, with `fetch()` and `poll()`.
+- `StreamQuery`: a live stream, with `blink()`, `append_only()`, `ring()`, and `last_by()`.
+- `NoSymbolStreamQuery`: any live stream whose rows name no symbol, with `blink()`,
+  `append_only()`, and `ring()` but no `last_by()`. Annotate with it to take any such stream.
+- `HistoryQuery`: any query with `history()`, and the query of bars Massive doesn't stream.
+- `StreamHistoryQuery`: a stream that also has history, with all five of those methods.
+- `NoSymbolStreamHistoryQuery`: a stream whose rows name no symbol, with history, such as
+  `m.options.admin_messages()`. It has `blink()`, `append_only()`, `ring()`, and `history()`,
+  but no `last_by()`.
+- `Query`: the base class of all of them, with `columns()`, for code that takes any query.
+
+You never construct a query: you get one from a dataset method. Import a class from here to
+annotate your own code, such as a helper that keeps each symbol's latest row of any stream::
+
+    from deephaven.table import Table
+
+    import deephaven_massive as dm
+    from deephaven_massive.queries import StreamQuery
+
+
+    def latest(query: StreamQuery) -> Table:
+        return query.last_by()
+
+
+    m = dm.MassiveSession()
+    quotes = latest(m.stocks.quotes(["AAPL", "MSFT"]))
+
+A helper that takes any stream, with or without symbols, annotates its query
+`StreamQuery | NoSymbolStreamQuery`.
+
+A `bars()` call returns a `StreamHistoryQuery` for the bars Massive streams, 1-second and
+1-minute bars at `multiplier=1`, and a `HistoryQuery` for any other bars, and declares both.
+A type checker allows a stream method on its result only after you check the class::
+
+    from deephaven_massive.queries import StreamHistoryQuery
+
+    minute = m.stocks.bars("AAPL", dm.Timespan.MINUTE)
+    assert isinstance(minute, StreamHistoryQuery)  # 1-minute bars stream
+    live = minute.last_by()
+
+`dm.datasets()` lists every dataset with its methods, and `help()` on a class describes each
+method.
+"""
+
+from deephaven_massive.queries._fetch import FetchQuery
+from deephaven_massive.queries._history import (
+    HistoryQuery,
+    NoSymbolStreamHistoryQuery,
+    StreamHistoryQuery,
+)
+from deephaven_massive.queries._query import Query
+from deephaven_massive.queries._stream import NoSymbolStreamQuery, StreamQuery
+
+__all__ = [
+    "FetchQuery",
+    "HistoryQuery",
+    "NoSymbolStreamHistoryQuery",
+    "NoSymbolStreamQuery",
+    "Query",
+    "StreamHistoryQuery",
+    "StreamQuery",
+]

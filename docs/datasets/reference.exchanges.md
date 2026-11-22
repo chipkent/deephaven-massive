@@ -7,7 +7,7 @@ The exchanges, trade reporting facilities, and SIPs Massive knows, with their co
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.exchanges(*, asset_class=None, locale=None)
+m.reference.exchanges(*, asset_class=None, locale=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -18,10 +18,13 @@ m.reference.exchanges(*, asset_class=None, locale=None)
 
 ## Arguments
 
+A linked argument follows its rule under [shared arguments](README.md#shared-arguments) on the dataset index.
+
 | Argument | Description |
 | --- | --- |
 | `asset_class` | The asset class whose exchanges to list. Leave it out for every class. Massive lists no index exchanges. |
 | `locale` | The locale whose exchanges to list. Leave it out for both. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -61,7 +64,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
@@ -90,4 +93,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

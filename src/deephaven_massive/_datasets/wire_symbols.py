@@ -6,10 +6,11 @@ frames, `BTC-USD` in WebSocket crypto frames, `X:EUR-USD` in the forex quotes fl
 This module holds both directions of that mapping, which every transport applies:
 
 - **Reading.** `canonical_from_wire` reads every spelling the library knows into the canonical
-  form, and `WireSymbols` applies it to a column of rows (`ReadSymbols`) and the session's
-  `unreadable_symbols` setting to what it cannot read: a bounded ERROR record per spelling
-  under `LOG`, a bounded DEBUG record under `IGNORE`, or the failure
-  `unreadable_symbol_message` words under `RAISE`. An index endpoint may send an index without its
+  form, and `WireSymbols` applies it to a column of rows (`ReadSymbols`). A row whose spelling
+  it cannot read is withheld by its reader (`withheld.withhold_rows`), whose
+  `unreadable_symbols` setting decides whether that fails the read; the row is an
+  `unreadable_symbols` problem of the table, which the session's problem reporter logs. An
+  index endpoint may send an index without its
   `I:` prefix, so `canonical_from_wire` adds it there, from the endpoint's class alone: no
   conversion ever looks a name up.
 - **Writing.** `wire_spellings` lists every spelling a flat file may write, for its row
@@ -20,18 +21,18 @@ This module holds both directions of that mapping, which every transport applies
   without its `I:` (`SPX`) and finds no contract for `I:SPX`, while the option chain takes
   and writes `I:SPX`. `contracts_underlying` writes the spelling the contracts list takes, and
   `index_underlyings` reads its rows' underlyings back into the canonical form, by the CFI
-  code each row carries.
+  code each row carries; `is_index_option` reads one CFI code.
 
 The grammar these read and write, and its checks and converters, are `symbols.py`'s. Every
-function here is pure and thread-safe and makes no Deephaven call; the one shared state is the
-process-wide bound on the records of unreadable spellings.
+function here is pure and thread-safe and makes no Deephaven call.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -44,12 +45,10 @@ from deephaven_massive._datasets.symbols import (
     read_forex_pair,
     symbol_class,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
-from deephaven_massive._errors import LIBRARY_BUG
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._enums import AssetClass, ClassFromPrefix
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Mapping
 
 
 __all__ = [
@@ -58,7 +57,8 @@ __all__ = [
     "canonical_from_wire",
     "contracts_underlying",
     "index_underlyings",
-    "unreadable_symbol_message",
+    "is_index_option",
+    "unreadable_symbol_reason",
     "wire_spellings",
     "ws_symbol",
 ]
@@ -140,8 +140,14 @@ def wire_spellings(asset_class: AssetClass, symbol: str) -> tuple[str, ...]:
         return (*joined, *dashed)
     elif asset_class is AssetClass.INDICES:
         return symbol, symbol[2:]
+    elif (
+        asset_class is AssetClass.STOCKS
+        or asset_class is AssetClass.OPTIONS
+        or asset_class is AssetClass.FUTURES
+    ):
+        return (symbol,)  # the files write these classes' canonical text
     else:
-        return (symbol,)
+        assert_never(asset_class)  # a new class needs its spellings here
     return tuple(f"{p}{base}{s}{quote}" for p in prefixes for s in ("", "/", "-"))
 
 
@@ -192,6 +198,19 @@ then its type and exercise style, then `I`, the underlying's kind (`OCEICS` for 
 `OCASPS`, with `S` for a stock, for an AAPL call)."""
 
 
+def is_index_option(cfi: str) -> bool:
+    """Tell whether a contract's CFI code (ISO 10962) marks an option on an index.
+
+    Args:
+        cfi: The contract's CFI code, such as `"OCEICS"` for an SPX call.
+
+    Returns:
+        True for an option on an index (`_OPTION_ON_AN_INDEX`); False for any other code,
+        such as `"OCASPS"` for a stock's call.
+    """
+    return re.match(_OPTION_ON_AN_INDEX, cfi) is not None
+
+
 def contracts_underlying(symbol: str) -> str:
     """Return an underlying as Massive's options contracts list takes it: an index bare.
 
@@ -230,38 +249,18 @@ def index_underlyings(underlyings: pa.Array, cfi: pa.Array) -> pa.Array:
     return pc.if_else(on_index, prefixed, underlyings)
 
 
-_UNREADABLE_LIMIT: Final = 100
-"""The most unreadable wire spellings logged per process; one record then says the rest are
-not."""
-
-_logged_spellings: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.ERROR)
-"""The spellings logged under `OnError.LOG`: at ERROR, since each is a gap in the library."""
-
-_ignored_spellings: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.DEBUG)
-"""The spellings logged under `OnError.IGNORE`: at DEBUG only."""
-
-
-def unreadable_symbol_message(dataset: str, spellings: Iterable[str]) -> str:
-    """Say which symbols Massive sent in a spelling the library cannot read, and what to do.
-
-    Such a spelling is a gap in the library's grammar, never the caller's fault, so the message
-    asks for a bug report and names the setting that keeps the rows meanwhile.
+def unreadable_symbol_reason(text: str) -> str:
+    """Say why a row whose symbol the library cannot read is withheld.
 
     Args:
-        dataset: The dataset that received them, such as `forex.quotes`.
-        spellings: The texts, as sent.
+        text: The symbol as Massive sent it.
 
     Returns:
-        The message a failed request or stream carries under `OnError.RAISE`.
+        The reason, which names the spelling as Massive sent it; whether Massive's lists hold
+        it, which would make it the library's to read, the site cannot know.
     """
-    texts = sorted(spellings)
-    listed = ", ".join(repr(s) for s in texts)
-    sent = f"the symbols {listed}, spellings" if texts[1:] else f"the symbol {listed}, a spelling"
     return (
-        f"{dataset}: Massive sent {sent} the library cannot read as Massive's ticker. To keep "
-        "such rows with a null Symbol and the text in RawSymbol meanwhile, pass "
-        "MassiveConfig(unreadable_symbols=dm.OnError.LOG), or write 'unreadable_symbols: log' "
-        f"in the settings file. {LIBRARY_BUG}"
+        f"Massive sent the symbol {text!r}, a spelling the library cannot read as Massive's ticker"
     )
 
 
@@ -272,51 +271,33 @@ class ReadSymbols:
     Attributes:
         symbols: The canonical symbols, one per row; null for a null wire symbol and for a
             spelling the library cannot read.
-        raw: The wire text where the spelling could not be read, null elsewhere: the
-            `RawSymbol` column of a session that keeps such rows.
-        unreadable: The distinct spellings that could not be read, sorted; empty for a clean
-            batch.
+        unreadable_rows: The rows whose wire symbol is a spelling the library cannot read.
     """
 
     symbols: pa.Array
-    raw: pa.Array
-    unreadable: tuple[str, ...]
+    unreadable_rows: pa.Array
 
 
 @dataclass(frozen=True, slots=True)
 class WireSymbols:
-    """How one dataset reads the symbols its rows carry, and what an unreadable one does.
+    """How one dataset reads the symbols its rows carry.
 
     Built once per transport plan (REST converter, WebSocket channel plan, flat-file
-    transform) from the dataset and the session's `MassiveConfig.unreadable_symbols`;
-    immutable and shared by every thread of the plan.
+    transform); immutable and shared by every thread of the plan. Its reader withholds a row
+    whose spelling it cannot read, and each stream or read applies its own policy to it, since
+    one WebSocket plan serves streams of several policies.
 
     Attributes:
         dataset: The dataset name, for messages.
         asset_class: The dataset's class (`canonical_from_wire`), or `ClassFromPrefix.ANY`
             for one that spans classes.
-        unreadable: The session's setting for a spelling `canonical_from_wire` cannot read:
-            under `OnError.LOG` each new spelling is logged once at ERROR with the library-bug
-            text, and under `IGNORE` at DEBUG (a bounded number per process); under both its
-            rows keep the text in `ReadSymbols.raw`. Under `RAISE` the caller fails the request
-            or stream with `unreadable_symbol_message`.
         as_written: True for a dataset whose symbols are kept as Massive writes them
             (`canonical_from_wire`).
     """
 
     dataset: str
     asset_class: AssetClass | ClassFromPrefix
-    unreadable: OnError
     as_written: bool = False
-
-    @property
-    def keeps(self) -> bool:
-        """Tell whether a row whose spelling cannot be read is kept, with its text in `RawSymbol`.
-
-        Returns:
-            True under `OnError.LOG` and `IGNORE`; False under `RAISE`, which fails it.
-        """
-        return self.unreadable is not OnError.RAISE
 
     def read(self, raw: pa.Array, cache: dict[str, str | None]) -> ReadSymbols:
         """Read a column of wire symbols, calling `canonical_from_wire` once per distinct text.
@@ -328,10 +309,8 @@ class WireSymbols:
                 an empty one to read a batch afresh.
 
         Returns:
-            The canonical symbols, the unreadable texts, and the distinct unreadable spellings.
-            Each new unreadable spelling is logged once: at ERROR with the library-bug text
-            under `LOG`, at DEBUG under `IGNORE`; never under `RAISE`, whose failure the caller
-            reports.
+            The canonical symbols, and the rows whose spelling cannot be read. Nothing is
+            logged: the caller withholds those rows.
         """
         known = cache
         distinct = pc.call_function("unique", [raw])
@@ -344,19 +323,6 @@ class WireSymbols:
         mapped = pa.array([None if t is None else known[t] for t in texts], pa.string())
         index = pc.call_function("index_in", [raw], pc.SetLookupOptions(value_set=distinct))
         symbols = pc.take(mapped, index)
-        unreadable = tuple(sorted(t for t in texts if t is not None and known[t] is None))
         missing = pc.call_function("is_null", [symbols])
         unread = pc.call_function("and", [missing, pc.call_function("is_valid", [raw])])
-        kept = pc.call_function("if_else", [unread, raw, pa.scalar(None, pa.string())])
-        if self.keeps:
-            spellings = _logged_spellings if self.unreadable is OnError.LOG else _ignored_spellings
-            for text in unreadable:
-                spellings.log(
-                    f"{self.dataset}\0{text}",
-                    "%s: Massive sent the symbol %r, a spelling the library cannot read; its "
-                    "rows have a null Symbol and keep the text in RawSymbol. %s",
-                    self.dataset,
-                    text,
-                    LIBRARY_BUG,
-                )
-        return ReadSymbols(symbols, kept, unreadable)
+        return ReadSymbols(symbols, unread)

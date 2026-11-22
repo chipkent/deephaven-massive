@@ -1,0 +1,109 @@
+"""A fixture for the message layout check; a docstring may hold a semicolon.
+
+One function per fault, then the cases that pass. Stored as text, not as a module, so that
+nothing imports or lints it.
+"""
+
+import logging
+
+from deephaven_massive._log_limits import bounded_list
+
+logger = logging.getLogger("fixture")
+
+_FIX = "pass the spelling Massive uses; a module constant holds the fix."
+
+
+def a_semicolon_in_a_message(symbol: str) -> None:
+    raise ValueError(f"{symbol!r} is not a ticker; pass the spelling Massive uses.")
+
+
+def a_newline_in_a_message() -> None:
+    logger.warning("The first line.\nThe second line.")
+
+
+def a_list_rendered_by_bounded_list(symbols: list[str]) -> None:
+    logger.error("Massive has no data for %s.", bounded_list(symbols))
+
+
+def a_semicolon_in_a_local_fragment(symbol: str) -> None:
+    fix = "remove it; or pass on_error."
+    raise ValueError(f"{symbol!r} has no data. {fix}")
+
+
+def a_site_over_the_limit(dataset: str) -> None:
+    raise ValueError(
+        f"{dataset}: Massive sent rows the library cannot read whole, so it withheld them, and "
+        "this message goes on to explain, at a length no reader wants, what a withheld row is, "
+        "why the library never publishes one with a null or a guess in it, where the user finds "
+        "the rows it withheld, and which setting goes on without them, when a link would do. "
+        "It ends here, past the limit, so the check fails it, and the fix is a shorter message."
+    )
+
+
+def a_semicolon_in_a_module_constant(symbol: str) -> None:
+    raise ValueError(f"{symbol!r} is not a ticker. {_FIX}")
+
+
+def a_list_rendered_by_bounded_list_through_a_local(symbols: list[str]) -> None:
+    named = bounded_list(symbols)
+    raise ValueError(f"Massive has no data for {named}.")
+
+
+# The cases that pass.
+
+
+def a_value_with_a_semicolon_is_not_a_literal(answer: str) -> None:
+    logger.warning("Massive answered %s", answer)
+
+
+def bounded_list_in_a_quiet_record(symbols: list[str]) -> None:
+    logger.debug("subscribed %s; %s", bounded_list(symbols), "a; b")
+    logger.log(logging.INFO, "subscribed %s", bounded_list(symbols))
+    raise ValueError("No symbols were subscribed.")
+
+
+def bounded_list_for_a_quiet_record_in_a_scope_that_raises(symbols: object) -> str:
+    if isinstance(symbols, list):
+        return bounded_list(symbols)
+    raise TypeError("symbols must be a list.")
+
+
+_SETTINGS = {
+    "first": (
+        "A long description of the first setting, which a message never renders whole: a site "
+        "that names this dict renders its keys, so the check leaves its values out of the "
+        "site's literal text, though the two descriptions together pass the limit."
+    ),
+    "second": (
+        "A long description of the second setting, which a message never renders whole: a site "
+        "that names this dict renders its keys, so the check leaves its values out of the "
+        "site's literal text, though the two descriptions together pass the limit."
+    ),
+}
+
+
+def a_site_naming_a_dict_renders_only_its_keys(name: str) -> None:
+    raise ValueError(f"{name!r} is not a setting. Write one of {sorted(_SETTINGS)}.")
+
+
+def a_long_text_split_over_two_sites(first: bool) -> None:
+    if first:
+        raise ValueError(
+            "The first message is long, but under the limit on its own: a message is judged by "
+            "the literal text its own site holds, never by the text of the scope around it, so "
+            "two messages in one function may each be long."
+        )
+    raise ValueError(
+        "The second message is as long as the first, and together they pass the limit, but a "
+        "scope holding two long messages is not a long message. It ends here, well under it."
+    )
+
+
+def an_outer_scope_without_a_site() -> str:
+    text = "a; b"
+
+    def inner() -> None:
+        raise ValueError("The inner message is the inner scope's.")
+
+    inner()
+    return text

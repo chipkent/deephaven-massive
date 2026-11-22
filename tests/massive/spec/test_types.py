@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-from typing import TYPE_CHECKING, Any, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -11,6 +12,8 @@ from deephaven_massive._massive.spec.types import (
     Conversion,
     DriftReport,
     DriftSample,
+    Feed,
+    FeedHost,
     Field,
     Membership,
     Param,
@@ -19,10 +22,14 @@ from deephaven_massive._massive.spec.types import (
     PlanTerms,
     Provenance,
     RestPath,
+    RowFault,
+    RowMark,
+    RowMarker,
     Source,
     Transport,
     WireType,
     WireUnit,
+    WsChannel,
 )
 
 if TYPE_CHECKING:
@@ -149,7 +156,7 @@ def test_a_projection_is_copied_and_read_only() -> None:
     mapping["value"] = "Value"
     assert membership.projection == {"last_updated": "Timestamp"}
     with pytest.raises(TypeError):
-        cast("dict[str, str]", membership.projection)["value"] = "Value"
+        membership.projection["value"] = "Value"  # type: ignore[index]  # the point: read-only
 
 
 def test_memberships_with_equal_projections_are_equal_and_hashable() -> None:
@@ -205,6 +212,13 @@ def test_a_timestamp_param_without_a_unit_is_rejected() -> None:
 def test_a_unit_on_anything_but_a_timestamp_param_is_rejected(kind: ParamKind) -> None:
     with pytest.raises(ValueError, match="'p': a timestamp needs a unit"):
         Param(name="p", kind=kind, unit=WireUnit.MS)
+
+
+def test_a_timestamp_param_in_the_field_only_unit_is_rejected() -> None:
+    # `MS_OR_NS` tells units apart by a value's size, so it cannot say how to send an instant:
+    # refused where the parameter is built, never a bare KeyError where a value is sent.
+    with pytest.raises(ValueError, match=r"^parameter 't\.gte': the unit ms\|ns is for fields"):
+        Param(name="t.gte", kind=ParamKind.TIMESTAMP, unit=WireUnit.MS_OR_NS)
 
 
 # Source.
@@ -343,6 +357,45 @@ def test_a_rest_path_transport_cannot_be_passed() -> None:
         RestPath(**kwargs)
 
 
+_SOCKET = FeedHost(feed=Feed.REAL_TIME, host="socket.massive.com")
+_DELAYED = FeedHost(feed=Feed.DELAYED, host="delayed.massive.com")
+
+
+def test_a_channel_is_a_websocket_source_with_its_hosts() -> None:
+    channel = WsChannel(key="stocks/T", fields=(_price(),), hosts=(_DELAYED, _SOCKET))
+    assert isinstance(channel, Source)
+    assert channel.transport is Transport.WS
+    assert channel.hosts == (_DELAYED, _SOCKET)
+
+
+def test_a_channel_transport_cannot_be_passed() -> None:
+    kwargs: dict[str, Any] = {"key": "stocks/T", "fields": (), "transport": Transport.REST}
+    with pytest.raises(TypeError, match="transport"):
+        WsChannel(**kwargs)
+
+
+def test_a_channel_lists_each_feed_once() -> None:
+    other = FeedHost(feed=Feed.REAL_TIME, host="other.massive.com")
+    with pytest.raises(ValueError, match=r"'stocks/T': repeated feeds \['Real-Time'\]"):
+        WsChannel(key="stocks/T", fields=(), hosts=(_SOCKET, other))
+    with pytest.raises(ValueError, match=r"repeated wire keys \[.p.\]"):
+        WsChannel(key="stocks/T", fields=(_price(), _price()))
+
+
+@pytest.mark.parametrize(
+    ("hosts", "only"),
+    [
+        ((_SOCKET,), "socket.massive.com"),
+        ((_DELAYED, _SOCKET), None),
+        ((_SOCKET, FeedHost(feed=Feed.BUSINESS, host="socket.massive.com")), "socket.massive.com"),
+        ((), None),
+    ],
+    ids=["one", "two hosts", "one host for two feeds", "none"],
+)
+def test_a_channel_s_only_host(hosts: tuple[FeedHost, ...], only: str | None) -> None:
+    assert WsChannel(key="stocks/T", fields=(), hosts=hosts).only_host == only
+
+
 def test_a_rest_path_checks_the_source_invariants() -> None:
     with pytest.raises(ValueError, match=r"repeated wire keys \[.p.\]"):
         RestPath(key="/x", fields=(_price(), _price()))
@@ -475,7 +528,7 @@ def test_provenance_urls_are_copied_and_read_only() -> None:
     urls.clear()
     assert provenance.urls == {(Transport.WS, "stocks/T"): (_URL,)}
     with pytest.raises(TypeError):
-        cast("dict[tuple[Transport, str], str]", provenance.urls)[Transport.WS, "x"] = _URL
+        provenance.urls[Transport.WS, "x"] = _URL  # type: ignore[index]  # the point: read-only
 
 
 def test_provenance_plans_are_copied_and_read_only() -> None:
@@ -491,7 +544,7 @@ def test_provenance_plans_are_copied_and_read_only() -> None:
     assert provenance.plans == {_URL: page}
     assert page.plans[0].history is None
     with pytest.raises(TypeError):
-        cast("dict[str, PlanAccess]", provenance.plans)["x"] = page
+        provenance.plans["x"] = page  # type: ignore[index]  # the point: read-only
     assert Provenance(fetched=dt.date(2026, 10, 27), urls={}).plans == {}
 
 
@@ -501,7 +554,7 @@ def test_provenance_titles_are_copied_and_read_only() -> None:
     titles.clear()
     assert provenance.titles == {_URL: "Trades"}
     with pytest.raises(TypeError):
-        cast("dict[str, str]", provenance.titles)["x"] = "X"
+        provenance.titles["x"] = "X"  # type: ignore[index]  # the point: read-only
     assert Provenance(fetched=dt.date(2026, 10, 27), urls={}).titles == {}
 
 
@@ -565,3 +618,28 @@ def test_common_type_is_the_narrowest_type_that_holds_both(
 ) -> None:
     assert first.common_type(second) is joined
     assert second.common_type(first) is joined
+
+
+def test_a_row_mark_needs_one_entry_per_row_in_ascending_order() -> None:
+    with pytest.raises(ValueError, match="one field, reason, and symbol per row"):
+        RowMark(rows=(0, 1), fields=("A",), reasons=("x", "y"), symbols=(None, None))
+    with pytest.raises(ValueError, match=r"must ascend: \(1, 1\)"):
+        RowMark(rows=(1, 1), fields=("A", "A"), reasons=("x", "y"), symbols=(None, None))
+
+
+def test_a_marker_keeps_each_row_s_first_fault_and_sorts_the_rows() -> None:
+    marker = RowMarker()
+    assert marker.marks() == {}
+    keys, values = RowFault.UNREADABLE_KEYS, RowFault.UNCONVERTIBLE_VALUES
+    assert marker.mark(values, 5, field="Price", reason="p", symbol="B")
+    assert marker.mark(keys, 2, field="Timestamp", reason="t", symbol=None)
+    assert not marker.mark(keys, 5, field="Timestamp", reason="later", symbol="B")
+    assert marker.mark(values, 1, field="Size", reason="s", symbol="A")
+    marks = marker.marks()
+    assert marks == {
+        keys: RowMark(rows=(2,), fields=("Timestamp",), reasons=("t",), symbols=(None,)),
+        values: RowMark(
+            rows=(1, 5), fields=("Size", "Price"), reasons=("s", "p"), symbols=("A", "B")
+        ),
+    }
+    assert isinstance(marks, MappingProxyType)  # read-only, so they may cross threads

@@ -25,13 +25,13 @@ All five are thread-safe.
 
 from __future__ import annotations
 
-import importlib
 import logging
 import threading
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
+import jpy
 import pyarrow as pa
 import pyarrow.compute as pc
 from deephaven import arrow as dh_arrow
@@ -43,6 +43,7 @@ from deephaven.table import Table
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import Recency
+from deephaven_massive._errors import required_instance
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -65,9 +66,6 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# jpy, the Python-Java bridge Deephaven runs on, ships no type information, so it is loaded
-# as a plain module object.
-jpy = importlib.import_module("jpy")
 _JString = jpy.get_type("java.lang.String")
 _System = jpy.get_type("java.lang.System")
 _LinkedHashMap = jpy.get_type("java.util.LinkedHashMap")
@@ -76,10 +74,9 @@ _ArrayBackedColumnSource = jpy.get_type(
     "io.deephaven.engine.table.impl.sources.ArrayBackedColumnSource"
 )
 
-# `dtypes.Instant` is annotated as `type` by deephaven-core although it is a `DType`
-# instance, so the table is typed by value and narrowed on lookup.
-_DH_TYPES: Final[Mapping[ColumnType, object]] = {
-    ColumnType.INSTANT: dtypes.Instant,
+_DH_TYPES: Final[Mapping[ColumnType, dtypes.DType]] = {
+    # deephaven-core annotates `dtypes.Instant` as `type`, though it is a `DType`.
+    ColumnType.INSTANT: required_instance(dtypes.Instant, dtypes.DType, "dtypes.Instant"),
     ColumnType.DOUBLE: dtypes.double,
     ColumnType.LONG: dtypes.long,
     ColumnType.INT: dtypes.int32,
@@ -103,7 +100,7 @@ def dh_type(column_type: ColumnType) -> dtypes.DType:
     Returns:
         The Deephaven `DType`, such as `dtypes.Instant`.
     """
-    return cast("dtypes.DType", _DH_TYPES[column_type])
+    return _DH_TYPES[column_type]
 
 
 def col_defs(schema: Schema) -> dict[str, dtypes.DType]:
@@ -261,7 +258,7 @@ def _holds_no_string(batch: pa.RecordBatch, name: str) -> bool:
         True when the batch has rows and every row of the column is null or an empty list,
         its first and last offsets equal.
     """
-    offsets = cast("pa.ListArray", batch.column(name)).offsets
+    offsets = batch.column(name).offsets
     return batch.num_rows > 0 and bool(offsets[0].as_py() == offsets[-1].as_py())
 
 
@@ -294,7 +291,7 @@ class _DatePool:
         with self._lock:
             found = self._arrays.get(text)
             if found is None:
-                found = self._arrays[text] = cast("object", jpy.array("java.lang.String", [text]))
+                found = self._arrays[text] = jpy.array("java.lang.String", [text])
             return found
 
 
@@ -459,7 +456,7 @@ def describe(table: Table, spec: DatasetSpec, schema: Schema, *, note: str | Non
         )
         described = described.withDescription(text)
     except RuntimeError as error:  # jpy's form of a Java exception
-        raise RuntimeError(f"describing a {spec.name} result failed: {error}") from error
+        raise RuntimeError(f"Describing a {spec.name} result failed: {error}") from error
     return Table(j_table=described)
 
 
@@ -471,16 +468,14 @@ def recency_note(recency: Recency, *, host: str) -> str:
         host: The stream's WebSocket host.
 
     Returns:
-        For example `"Live data from Massive's delayed feed (delayed.massive.com), 15 minutes
-        behind (10 for futures)."`; `UNKNOWN` never claims real-time.
+        For example `"Live delayed data from delayed.massive.com, 15 minutes behind (10 for
+        futures)."`; `UNKNOWN` never claims real-time.
     """
     if recency is Recency.REALTIME:
-        return f"Live data from Massive's real-time feed ({host})."
+        return f"Live real-time data from {host}."
     if recency is Recency.DELAYED:
-        return (
-            f"Live data from Massive's delayed feed ({host}), 15 minutes behind (10 for futures)."
-        )
-    return f"Live data from {host}, a pinned host whose recency the library does not know."
+        return f"Live delayed data from {host}, 15 minutes behind (10 for futures)."
+    return f"Live data from {host}. Massive hasn't said whether the data is real-time or delayed."
 
 
 def rest_recency_note(
@@ -520,12 +515,12 @@ COLUMN_TABLE_DESCRIPTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "Name": "The column name.",
         "Type": (
             "The column's Deephaven type: long, int, double, Boolean, String, Instant, long[], or "
-            "String[]; a calendar date is ISO yyyy-MM-dd text, a String."
+            "String[]. A calendar date is ISO yyyy-MM-dd text, a String."
         ),
-        "Description": "What the column holds; empty when Massive gives no description.",
+        "Description": "What the column holds, or empty when Massive gives no description.",
         "SuppliedBy": (
             "The transports whose sources fill the column for this dataset, spelled REST, flat "
-            'files, and WebSocket, in that order, joined by ", "; a column the transport '
+            'files, and WebSocket, in that order, joined by ", ". A column the transport '
             "serving a call does not fill is null in its result."
         ),
     }

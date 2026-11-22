@@ -99,7 +99,7 @@ def test_a_sessions_debug_log_holds_no_secret(
     )
     try:
         with dm.MassiveSession(config) as m:
-            m.reference.market_status().fetch()
+            m.reference.market_status().fetch(wait=True)
     finally:
         dm.disable_debug_logging()
     assert "GET" in path.read_text(encoding="utf-8")  # the requests were logged at DEBUG

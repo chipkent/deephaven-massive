@@ -11,6 +11,7 @@ import pytest
 from deephaven import empty_table, ui
 
 import deephaven_massive as dm
+from deephaven_massive import _session
 from tests._live import doc_examples
 from tests._live.calendar import NEW_YORK
 
@@ -95,6 +96,37 @@ def test_the_intro_is_the_text_before_the_first_anchor(page: Path, tmp_path: Pat
     assert [b.code for b in doc_examples.intro_blocks(plain)] == ["only = 1\n"]
 
 
+def test_examples_group_each_block_with_the_blocks_that_continue_it(page: Path) -> None:
+    assert doc_examples.examples(page) == [
+        doc_examples.Example("", [doc_examples.Block("intro = 1\n", continues=False)]),
+        doc_examples.Example(
+            "first",
+            [
+                doc_examples.Block("x = 1\n", continues=False),
+                doc_examples.Block("y = x + 1\n", continues=True),
+            ],
+        ),
+        doc_examples.Example("second", [doc_examples.Block("z = 3\n", continues=False)]),
+    ]
+
+
+def test_an_example_continues_across_a_section_and_may_start_continuing(tmp_path: Path) -> None:
+    path = tmp_path / "page.md"
+    path.write_text(
+        '```python continues\na = 1\n```\n<a id="next"></a>\n```python continues\nb = a\n```\n',
+        encoding="utf-8",
+    )
+    assert doc_examples.examples(path) == [
+        doc_examples.Example(
+            "",
+            [
+                doc_examples.Block("a = 1\n", continues=True),
+                doc_examples.Block("b = a\n", continues=True),
+            ],
+        )
+    ]
+
+
 @pytest.mark.parametrize(("delayed", "line"), [(True, "[stocks]"), (False, "[]")])
 def test_the_readmes_commands_save_each_plans_settings_file(
     tmp_path: Path, *, delayed: bool, line: str
@@ -167,7 +199,7 @@ def test_recorded_sessions_close_every_session_the_examples_open(
         dm.MassiveSession(config)  # unreachable at once, as a console's replaced `m` is
         assert "open" in repr(first)
     assert "closed" in repr(first)
-    assert "MassiveSession" not in vars(dm)
+    assert dm.MassiveSession is _session.MassiveSession
 
 
 def test_dashboard_panels_read_each_panels_title_and_content() -> None:
@@ -193,10 +225,10 @@ def test_the_live_run_covers_every_readme_example() -> None:
         for anchor in re.findall(r'<a id="([a-z0-9-]+)"></a>', text)
         if doc_examples.section_blocks(_README, anchor)
     }
-    assert doc_examples.intro_blocks(_README)  # the hook, which the free examples' test runs
+    assert doc_examples.intro_blocks(_README)  # the hook, which the history examples' test runs
     covered = {
-        *doc_examples.FREE_SECTIONS,
-        *doc_examples.PAID_SECTIONS,
+        *doc_examples.HISTORY_SECTIONS,
+        *doc_examples.LIVE_SECTIONS,
         *doc_examples.UNRUN_SECTIONS,
     }
     assert with_code == covered

@@ -4,19 +4,19 @@ Each test records what Massive sent (`evidence`). A test marked `settles` assert
 requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
 asserts the answer the library assumes, and fails when Massive no longer gives it. Raw rows come
 from the wire REST client, because "a key is missing" and "a key holds an empty list" look the same
-once the library has read them; the library's own answer is recorded beside them. How to run these
-tests is in `docs/live-tests.md`.
+once the library has read them; the library's own answer is recorded beside them. The underlying
+and contract-symbol tests send values the library refuses or used to (`tests/_live/bad_values.py`)
+and record whether Massive refuses them too. How to run these tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dt_time
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, assert_never
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -24,6 +24,8 @@ from deephaven import dtypes, new_table
 from deephaven.column import string_col
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.wire_symbols import is_index_option
+from deephaven_massive._ingest.rate_limits import OTHER
 from deephaven_massive._massive import (
     RestClient,
     Transport,
@@ -31,7 +33,8 @@ from deephaven_massive._massive import (
     WireError,
     source,
 )
-from tests._live import calendar, greeks
+from tests._live import bad_values, calendar, greeks, option_requests, refusals
+from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -40,8 +43,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
     from deephaven.table_factory import InputTable
 
-    from deephaven_massive._query import Query
-    from tests._live.plans import LivePlans
+    from deephaven_massive.queries import FetchQuery
 
 pytestmark = pytest.mark.integration
 
@@ -71,21 +73,15 @@ PeriodBarReport: TypeAlias = (
 LibraryStamps: TypeAlias = "Callable[[Callable[[], Table]], str]"
 StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
+SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
 
-_CONTRACTS = "/v3/reference/options/contracts"
+_CONTRACTS = option_requests.CONTRACTS
 _NEW_YORK = ZoneInfo("America/New_York")
 _CHAIN = "/v3/snapshot/options/{underlyingAsset}"
 _SNAPSHOT = "/v3/snapshot"
 
 _UNDERLYINGS = ("SPX", "I:SPX", "SPXW", "NDX", "NDXP", "VIX", "VIXW", "BRK.B", "BRKB")
 """Underlyings whose spelling the options endpoints may not agree on."""
-
-_BASIC_UNDERLYINGS = ("SPX", "I:SPX", "BRK.B", "BRKB")
-"""The underlyings read with Options on Basic, one contracts request each: an index with and
-without its prefix, and `BRK.B` with and without its dot."""
-
-_SNAPSHOT_PLAN = "Options Starter ($29/month)"
-"""The plan of the chain and unified snapshots of options."""
 
 _CONTRACT_PAGE = 1000
 _CHAIN_PAGE = 250
@@ -105,7 +101,8 @@ _ADJUSTED: tuple[tuple[str, str, date], ...] = (
 )
 """(contract root, underlying, a day the contracts were listed): three adjusted roots, after a
 spin-off, a special dividend, and a split. Adjusted roots are rare and named by hand, so the
-older ones lie beyond a short history; the test reads only those the plan keeps."""
+older ones lie beyond a short history; a root whose day Massive refuses the key is recorded with
+Massive's refusal and passed over."""
 
 
 _OCC_TAIL = 15
@@ -127,7 +124,7 @@ def _raw(
     """Read the raw rows of a request's first page; record a refusal as evidence.
 
     A rejection (an unknown underlying) is itself evidence, so it is recorded and the check
-    goes on; so is a snapshot refused for want of Options Starter, labelled "not entitled".
+    goes on; so is a snapshot Massive refuses, labelled "not entitled" with Massive's refusal.
 
     Returns:
         The rows; empty after a rejection or a refused snapshot.
@@ -142,23 +139,23 @@ def _raw(
     except WireEntitlementError as error:
         if path == _CONTRACTS:
             raise
-        evidence(f"{path} {dict(params)}: not entitled: needs {_SNAPSHOT_PLAN} ({error})")
+        evidence(f"{path} {dict(params)}: not entitled: {refusals.refusal_line(error)}")
         return []
     except WireError as error:
         evidence(f"{path} {dict(params)}: {type(error).__name__}: {error}")
         return []
 
 
-def _library(build: Callable[[], Query], table_rows: TableRows) -> list[dict[str, Any]] | str:
+def _library(build: Callable[[], FetchQuery], table_rows: TableRows) -> list[dict[str, Any]] | str:
     """Build one library query, fetch it, and describe the outcome.
 
     Returns:
         The result's rows, or the text of the error building or fetching raised.
     """
     try:
-        return table_rows(build().fetch())
+        return table_rows(build().fetch(wait=True))
     except dm.EntitlementError as error:
-        return f"not entitled: needs {_SNAPSHOT_PLAN} ({error})"
+        return f"not entitled: {refusals.refusal_line(error)}"
     except (dm.MassiveError, ValueError) as error:
         return f"{type(error).__name__}: {error}"
 
@@ -177,7 +174,7 @@ def _root_contracts(
         The root's contracts; empty after a rejection, which is recorded.
 
     Raises:
-        WireEntitlementError: When the listing is refused for want of a plan.
+        WireEntitlementError: When Massive refuses the key the listing.
     """
     prefix = f"O:{root}"
     found: list[dict[str, Any]] = []
@@ -204,15 +201,13 @@ def _root_contracts(
     return found
 
 
-@pytest.mark.needs("options:basic")
 @pytest.mark.settles("45")
-@pytest.mark.requests(4)
+@pytest.mark.requests(45)
 @pytest.mark.timeout(100)
 def test_underlying_spelling_on_the_options_endpoints(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
-    classes_on_basic: frozenset[str],
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
@@ -221,10 +216,9 @@ def test_underlying_spelling_on_the_options_endpoints(
     For `SPX`, `I:SPX`, `SPXW`, `NDX`, `NDXP`, `VIX`, `VIXW`, `BRK.B`, and `BRKB`, records one
     full page of the contracts reference (the roots it lists and the `underlying_ticker` values),
     one page of the chain snapshot (`underlying_asset.ticker`), the unified snapshot's
-    `underlying_asset.ticker` of one contract, and the library's `chain()` and `contracts()`.
-    With Options on Basic, which has no snapshots and allows 5 requests a minute, it records
-    only the contracts page of `SPX`, `I:SPX`, `BRK.B`, and `BRKB`, which still shows which
-    spelling of an index and of `BRK.B` the reference answers. Reading it: the spelling that
+    `underlying_asset.ticker` of one contract, and the library's `chain()` and `contracts()`:
+    up to 45 requests. A snapshot Massive refuses is recorded with Massive's refusal and the
+    rest still run. Reading it: the spelling that
     answers is the one the library must send for `underlying=`; a root such as `SPXW` listed
     under `SPX` means roots and underlyings differ. The chain path sends `I:SPX`
     percent-encoded, so an `I:SPX` chain result counts only if the encoded-colon check of the
@@ -232,13 +226,7 @@ def test_underlying_spelling_on_the_options_endpoints(
     """
     answered = 0
     options = live_session.options
-    basic = "options" in classes_on_basic
-    if basic:
-        evidence(
-            "Options on Basic: the contracts reference of "
-            f"{', '.join(_BASIC_UNDERLYINGS)} only; the snapshots need {_SNAPSHOT_PLAN}"
-        )
-    for underlying in _BASIC_UNDERLYINGS if basic else _UNDERLYINGS:
+    for underlying in _UNDERLYINGS:
         contracts = _raw(
             live_rest,
             _CONTRACTS,
@@ -251,9 +239,6 @@ def test_underlying_spelling_on_the_options_endpoints(
             f"{underlying}: contracts {len(contracts)} rows; roots {roots}; "
             f"underlying_ticker {spelled}"
         )
-        if basic:
-            answered += bool(contracts)
-            continue
         chain = _raw(
             live_rest,
             _CHAIN,
@@ -291,56 +276,60 @@ def test_underlying_spelling_on_the_options_endpoints(
     assert answered
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.verifies("46")
+@pytest.mark.requests(13)
 @pytest.mark.timeout(400)
 def test_deliverable_fields_of_adjusted_and_standard_contracts(
     live_session: dm.MassiveSession,
     *,
     live_rest: RestClient,
-    plan_history_start: Callable[[str], date | None],
     recent_monday: date,
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
     """How the contracts reference describes adjusted and standard deliverables.
 
-    Lists the contracts of the adjusted roots `DELL1` (as of 2021-11-15, after a spin-off),
-    `FF1` (2024-04-15, a special dividend), and `AAPL7` (2014-06-10, the 7:1 split), and of
-    standard `AAPL` and `SPX` contracts (the most recent published Monday), looked up by
-    underlying (following pages until the root is passed) and by root, and records
-    `additional_underlyings` (or `<missing>`), `cfi`, `correction`, and `shares_per_contract`
-    of up to three of each, and the library's columns for the first. A root listed before the
-    first day the key's Options plan keeps, by the documented history windows, is not read; its
-    line says "outside the plan's history". Passes when some root was read and no standard
-    contract carries a non-empty `additional_underlyings`, so null and `[]` both mark a standard
-    deliverable, as the chain's documented recipe assumes. Reading the rest: an adjusted
-    contract with no list (a split's, which changes only the share count) means only `Cfi` or
-    the root's trailing digit can tell it from a standard one. A root found by neither lookup,
-    with the page counts showing the listing was read past it, is not kept by Massive for that
-    day.
+    Lists the contracts of the adjusted roots `DELL1` (as of 2021-11-15, after a spin-off), `FF1`
+    (2024-04-15, a special dividend), and `AAPL7` (2014-06-10, the 7:1 split), and of standard
+    `AAPL` and `SPX` contracts (the most recent published Monday), looked up by underlying
+    (following pages until the root is passed) and by root, and records `additional_underlyings` (or
+    `<missing>`), `cfi`, `correction`, and `shares_per_contract` of up to three of each, and the
+    library's columns for the first. Every root is asked for; a root whose day Massive refuses the
+    key (its refusal of the data timeframe) is recorded, "outside the plan's history" with Massive's
+    refusal, and the rest still run. Passes when some root was read and no standard contract carries
+    a non-empty `additional_underlyings`, so null and `[]` both mark a standard deliverable, as the
+    chain's documented recipe assumes. Reading the rest: an adjusted contract with no list (a
+    split's, which changes only the share count) means only `Cfi` or the root's trailing digit can
+    tell it from a standard one. A root found by neither lookup, with the page counts showing the
+    listing was read past it, is not kept by Massive for that day.
+
+    Raises:
+        WireEntitlementError: When Massive refuses a listing for another reason than its day;
+            the live tests' hook skips the test, quoting Massive.
     """
-    first = plan_history_start("options")
     found = 0
     standard = (("AAPL", "AAPL", recent_monday), ("SPX", "SPX", recent_monday))
     roots = (*_ADJUSTED, *standard)
     listed_extra: list[str] = []
     for root, underlying, listed in roots:
         evidence(f"{root} (underlying {underlying}, as of {listed}):")
-        if first is not None and listed < first:
-            evidence(f"    outside the plan's history: {listed} is before {first}")
+        try:
+            matching = [
+                row
+                for expired in (False, True)
+                for lookup in dict.fromkeys((underlying, root))
+                for row in _root_contracts(
+                    live_rest,
+                    root,
+                    query={"underlying_ticker": lookup, "as_of": listed, "expired": expired},
+                    evidence=evidence,
+                )
+            ]
+        except WireEntitlementError as error:
+            if not refusals.is_timeframe_refusal(error):
+                raise
+            evidence(f"    outside the plan's history (Massive: {refusals.refusal_line(error)})")
             continue
-        matching = [
-            row
-            for expired in (False, True)
-            for lookup in dict.fromkeys((underlying, root))
-            for row in _root_contracts(
-                live_rest,
-                root,
-                query={"underlying_ticker": lookup, "as_of": listed, "expired": expired},
-                evidence=evidence,
-            )
-        ]
         rows = list({str(row["ticker"]): row for row in matching}.values())
         found += bool(rows)
         evidence(f"    {len(rows)} contracts of root {root}")
@@ -352,14 +341,14 @@ def test_deliverable_fields_of_adjusted_and_standard_contracts(
         if rows:
             ticker = str(rows[0]["ticker"])
             outcome = _library(
-                partial(live_session.options.contracts, symbols=ticker, as_of=listed), table_rows
+                partial(live_session.options.contract_details, ticker, as_of=listed), table_rows
             )
             shown = (
                 outcome
                 if isinstance(outcome, str)
                 else [{k: r.get(k) for k in _DELIVERABLE_COLUMNS} for r in outcome]
             )
-            evidence(f"    library contracts({ticker}): {shown}")
+            evidence(f"    library contract_details({ticker}): {shown}")
     assert found
     assert not listed_extra, f"standard contracts with further deliverables: {listed_extra[:5]}"
 
@@ -520,12 +509,12 @@ def _stamp_contract_weeks(
     daily = session.options.bars(ticker, dm.Timespan.DAY)
     evidence(
         f"library {ticker} history(REST): "
-        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest))
+        + library_stamps(partial(daily.history, *stamp_days["day"], source=rest, wait=True))
     )
     weekly = session.options.bars(ticker, dm.Timespan.WEEK)
     evidence(
         f"library {ticker} week history: "
-        + library_stamps(partial(weekly.history, *stamp_days["week"], source=rest))
+        + library_stamps(partial(weekly.history, *stamp_days["week"], source=rest, wait=True))
     )
     return complete
 
@@ -556,11 +545,11 @@ def _prev_bars(
         evidence(f"{ticker} /prev: {type(error).__name__}: {error}")
         return []
     previous = session.options.previous_day_bar(ticker)
-    evidence(f"library {ticker} previous_day_bar fetch() (/prev): {library_stamps(previous.fetch)}")
+    prev_stamps = library_stamps(partial(previous.fetch, wait=True))
+    evidence(f"library {ticker} previous_day_bar fetch() (/prev): {prev_stamps}")
     return found
 
 
-@pytest.mark.needs("options:starter", "stocks:basic")
 @pytest.mark.verifies("51")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(130)
@@ -660,7 +649,6 @@ def test_option_day_and_week_bar_stamps_from_rest(
     assert not odd, f"(source, ticker, day, stamp ms) the library does not expect: {odd}"
 
 
-@pytest.mark.needs("options:starter", "s3", "stocks:basic")
 @pytest.mark.verifies("51")
 @pytest.mark.requests(1)
 @pytest.mark.timeout(100)
@@ -702,7 +690,7 @@ def test_option_day_bar_stamps_of_the_day_file(
         day_bar_report(ticker, days, {_DAY_FILE: files[ticker]})
         as_traded = live_session.options.bars(ticker, dm.Timespan.DAY, adjusted=False)
         outcome = library_stamps(
-            partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES)
+            partial(as_traded.history, *days, source=dm.HistorySource.FLAT_FILES, wait=True)
         )
         evidence(f"library {ticker} history(FLAT_FILES): {outcome}")
     assert all(chosen.values()), f"the day files hold no candidate on both days: {roots}"
@@ -728,7 +716,6 @@ listed options, and the lowest-strike call a contracts listing returns first may
 all."""
 
 
-@pytest.mark.needs("options:developer")
 @pytest.mark.settles("57")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(100)
@@ -743,8 +730,9 @@ def test_option_bars_across_the_underlyings_split(
     Reads the day bars of one expired NVDA call across NVDA's 10-for-1 split of 2024-06-10,
     under its ticker before the split, `O:NVDA240621C01200000`, and after it,
     `O:NVDA240621C00120000`, from three days before the split to two days after, with
-    `adjusted=true` and `adjusted=false`. It needs Options Developer: Basic and Starter keep two
-    years of history, and the split is older. Fails unless the `adjusted=true` reads of the two
+    `adjusted=true` and `adjusted=false`. The split is more than two years old, so Massive may
+    refuse a key its days; the test then skips, quoting Massive and the earliest day asked.
+    Fails unless the `adjusted=true` reads of the two
     tickers together have bars on both sides of the split, without which nothing can be read from
     them. Reading it: prices before the split that differ by its ratio between the two reads mean
     options are adjusted in full like stocks; equal prices mean the contract's history is kept as
@@ -760,6 +748,7 @@ def test_option_bars_across_the_underlyings_split(
                     _SPLIT_DAY - timedelta(days=3),
                     _SPLIT_DAY + timedelta(days=2),
                     source=dm.HistorySource.REST,
+                    wait=True,
                 )
             )
             if adjusted:
@@ -794,7 +783,6 @@ def _underlyings_until(
         pause.wait(0.25)
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.timeout(300)
 def test_the_chain_follows_a_live_table_of_underlyings(
     live_session: dm.MassiveSession,
@@ -815,7 +803,7 @@ def test_the_chain_follows_a_live_table_of_underlyings(
     underlyings = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     underlyings.add(new_table([string_col("Symbol", ["SPY"])]))
     query = m.options.chain(underlyings, contract_type=dm.ContractType.CALL, limit=20)
-    result = query.fetch()
+    result = query.fetch(wait=True)
     try:
         first = _underlyings_until(table_rows, result, lambda seen: seen == {"SPY"})
         evidence(f"at the call: {sorted(first)}, {result.size} rows")
@@ -833,7 +821,6 @@ _ADMIN_WAIT = 60.0
 """Seconds the admin messages test waits for Massive's acknowledgement, and then for a row."""
 
 
-@pytest.mark.needs("options:advanced")
 @pytest.mark.verifies("82")
 @pytest.mark.timeout(150)
 def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
@@ -842,17 +829,18 @@ def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
     wait_acked: WaitAcked,
     table_rows: TableRows,
     stream_report: StreamReport,
+    skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
     """Whether Massive acknowledges `AD.*` on the real-time options feed, and what rows carry.
 
-    With Options Advanced held, streams `m.options.admin_messages()`, which subscribes every
-    exchange (`AD.*`) on `socket.massive.com`, and records the connection, the stream, and up
-    to five rows: each one's exchange, sequence number, SIP timestamp, and text as OPRA sent it.
-    Passes when Massive acknowledged the topic, which it does whether or not the market is open,
-    the stream still runs, and every row that arrived has its `Timestamp` and `Message`.
-    Messages come only with FLEX activity or an exchange's notice, so no row is required; a
-    refusal fails the test, since Options Advanced includes the channel.
+    Streams `m.options.admin_messages()`, which subscribes every exchange (`AD.*`) on
+    `socket.massive.com`, and records the connection, the stream, and up to five rows: each
+    one's exchange, sequence number, SIP timestamp, and text as OPRA sent it. Passes when
+    Massive acknowledged the topic, which it does whether or not the market is open, the
+    stream still runs, and every row that arrived has its `Timestamp` and `Message`. Messages
+    come only with FLEX activity or an exchange's notice, so no row is required. Massive's
+    refusal skips the test, quoting Massive; the refusal test checks what it says.
     """
     table = live_session.options.admin_messages().append_only()
     acked = wait_acked(live_session, 1, time.monotonic() + _ADMIN_WAIT)
@@ -868,6 +856,7 @@ def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
         for r in table_rows(live_session.streams())
         if r["Dataset"] == "options.admin_messages"
     ]
+    skip_if_not_entitled(live_session)
     live_session.release(table)
     evidence(f"AD.* acknowledged topics {acked}; stream {states}; rows received: {len(rows)}")
     for row in rows[:5]:
@@ -881,40 +870,31 @@ def test_admin_messages_stream_every_exchange_on_the_real_time_feed(
 
 
 _ADMIN_PAGE = "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.admin_messages.md"
-"""The dataset page of the admin messages, whose plan table every refusal of them links."""
-
-_ADMIN_PLANS = frozenset({"advanced", "business_expansion"})
-"""The Options plans that include the admin messages: Advanced, and Business with the expansion,
-which covers it."""
+"""The dataset page of the admin messages, whose table of the plans that include them every
+refusal of them links."""
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.verifies("82")
 @pytest.mark.timeout(150)
-def test_admin_messages_on_a_plan_without_them_name_the_plans_that_have_them(
+def test_a_refusal_of_the_admin_messages_links_the_datasets_plans(
     live_config: dm.MassiveConfig,
-    live_plans: LivePlans,
     *,
     table_rows: TableRows,
     stream_report: StreamReport,
     evidence: Evidence,
 ) -> None:
-    """What an Options plan without the admin messages answers, and whether it links their plans.
+    """What a refusal of the admin messages says, and whether it links the dataset's page.
 
-    On Options Starter, Developer, or Business, streams `m.options.admin_messages()` from a
-    session whose `delayed_subscriptions` leaves options out, as the dataset requires. On a
-    plan Massive labels delayed the call raises `dm.EntitlementError`; on base Business the
-    stream's row turns `FAILED` with Massive's refusal of `AD.*`. Passes when one of the two
-    happens and its message ends with the link to the dataset's page of plans. Skips on a plan
-    that includes the channel, which the real-time test checks.
+    Streams `m.options.admin_messages()` from a session whose `delayed_subscriptions` leaves
+    options out (and any delayed host pin of options). When Massive labels the key's options
+    data delayed, the call raises the delayed-data `dm.EntitlementError` every options stream
+    gets, naming `delayed_subscriptions`; when Massive refuses `AD.*`, the stream's row turns
+    `FAILED` with Massive's refusal. Passes when one of the two happens and Massive's refusal
+    ends with the link to the dataset's page of plans. Skips when Massive serves the admin
+    messages, which the real-time test checks.
     """
-    if live_plans.tiers["options"] in _ADMIN_PLANS:
-        pytest.skip("the key's Options plan includes the admin messages; the real-time test runs")
-    config = dataclasses.replace(
-        live_config,
-        delayed_subscriptions=live_config.delayed_subscriptions - {dm.Subscription.OPTIONS},
-    )
-    session = dm.MassiveSession(config)
+    listed = live_config.delayed_subscriptions - {dm.Subscription.OPTIONS}
+    session = dm.MassiveSession(with_delayed(live_config, listed))
     try:
         try:
             table = session.options.admin_messages().append_only()
@@ -940,9 +920,15 @@ def test_admin_messages_on_a_plan_without_them_name_the_plans_that_have_them(
             session.release(table)
     finally:
         session.close()
-    evidence(f"options {live_plans.tiers['options']}: {outcome}: {message}")
+    evidence(f"options admin messages: {outcome}: {message}")
+    if outcome == "RUNNING":
+        pytest.skip("Massive served the admin messages; the real-time test covers them")
     assert outcome in {"refused at the call", "FAILED"}, f"the admin messages stream is {outcome}"
-    assert message.endswith(_ADMIN_PAGE), "the refusal does not link the dataset's plans"
+    if outcome == "refused at the call":
+        assert "would be delayed" in message, "the call's refusal is not the delayed-data error"
+        assert "delayed_subscriptions" in message
+    else:
+        assert message.endswith(_ADMIN_PAGE), "the refusal does not link the dataset's plans"
 
 
 _GAMMA_CONTRACTS = 5
@@ -952,7 +938,6 @@ _GAMMA_DAYS = (20, 50)
 """The days to expiry of the calls the gamma check reads: far enough that gamma is smooth."""
 
 
-@pytest.mark.needs("options:starter")
 @pytest.mark.settles("83")
 @pytest.mark.timeout(120)
 def test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent(
@@ -980,13 +965,13 @@ def test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent(
         pytest.skip(f"no call near SPY's {spot} carries greeks now")
     now = datetime.now(UTC)
     units = []
-    for row in table_rows(live_session.options.snapshots(symbols).fetch()):
+    for row in table_rows(live_session.options.snapshots(symbols).fetch(wait=True)):
         expiry = datetime.combine(
-            date.fromisoformat(row["DetailsExpirationDate"]), dt_time(16, 0), _NEW_YORK
+            date.fromisoformat(row["ExpirationDate"]), dt_time(16, 0), _NEW_YORK
         )
         textbook = greeks.black_scholes_gamma(
             spot=spot,
-            strike=row["DetailsStrikePrice"],
+            strike=row["StrikePrice"],
             years=(expiry - now).total_seconds() / (365 * 24 * 3600),
             volatility=row["ImpliedVolatility"],
             rate=rate,
@@ -1006,7 +991,7 @@ def _risk_free_rate(
 ) -> tuple[float, str]:
     """Return the newest 3-month Treasury yield as a fraction, and a line that names it."""
     start = (today - timedelta(days=14)).isoformat()
-    yields = table_rows(live_session.economy.treasury_yields(start=start).fetch())
+    yields = table_rows(live_session.economy.treasury_yields(start=start).fetch(wait=True))
     dated = [row for row in yields if row["Yield3Month"] is not None]
     assert dated, f"no 3-month Treasury yield since {start}"
     newest = max(dated, key=lambda r: r["Date"])
@@ -1027,15 +1012,679 @@ def _calls_near_the_money(
         "expiration_date_lte": (today + timedelta(days=_GAMMA_DAYS[1])).isoformat(),
     }
     calls = partial(live_session.options.chain, "SPY", contract_type=dm.ContractType.CALL)
-    first = table_rows(calls(limit=1, filters=window).fetch())
+    first = table_rows(calls(limit=1, filters=window).fetch(wait=True))
     spot = first[0]["UnderlyingAssetPrice"] if first else None
     if spot is None:
-        bars = table_rows(live_session.stocks.previous_day_bar("SPY").fetch())
+        bars = table_rows(live_session.stocks.previous_day_bar("SPY").fetch(wait=True))
         assert len(bars) == 1, f"SPY has {len(bars)} previous-day bars, not one"
         spot = bars[0]["Close"]
         assert spot is not None, "SPY's previous-day bar has no close"
     near = {"strike_price_gte": spot * 0.98, "strike_price_lte": spot * 1.02}
-    chain = table_rows(calls(filters={**window, **near}).fetch())
+    chain = table_rows(calls(filters={**window, **near}).fetch(wait=True))
     priced = [r for r in chain if r["GreeksGamma"] and r["ImpliedVolatility"]]
-    priced.sort(key=lambda r: abs(r["DetailsStrikePrice"] - spot))
+    priced.sort(key=lambda r: abs(r["StrikePrice"] - spot))
     return float(spot), [r["Symbol"] for r in priced[:_GAMMA_CONTRACTS]]
+
+
+@pytest.mark.settles("103")
+@pytest.mark.requests(2)
+def test_massive_answers_a_chain_of_a_currency_or_crypto_pair(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the option chain answers for `C:EURUSD` and `X:BTCUSD` as the underlying.
+
+    The library sends any canonical ticker as the chain's `underlying`. DATA counts the
+    contracts on the pair sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN, evidence)
+
+
+@pytest.mark.settles("108")
+@pytest.mark.requests(1)
+def test_massive_answers_a_chain_of_an_option_contract(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the option chain answers for `O:AAPL250117C00150000`, a contract, as the underlying.
+
+    The library sends any canonical ticker as the chain's `underlying`. ERROR means Massive
+    judges it; EMPTY, or DATA, means it answers with no error, and the library should refuse
+    it. DATA counts the contracts on the contract sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CHAIN_CONTRACT, evidence)
+
+
+@pytest.mark.settles("103")
+@pytest.mark.requests(2)
+def test_massive_answers_contracts_of_a_currency_or_crypto_pair(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the contracts list answers to `underlying_ticker` `C:EURUSD` and `X:BTCUSD`.
+
+    The library takes only a stock or index ticker as `underlying`. DATA counts the
+    contracts on the pair sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CONTRACTS, evidence)
+
+
+@pytest.mark.settles("109")
+@pytest.mark.requests(1)
+def test_massive_answers_contracts_of_an_option_contract(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the contracts list answers to `underlying_ticker` `O:AAPL250117C00150000`.
+
+    The library sends any canonical ticker but a pair as `underlying`. ERROR means Massive
+    judges it; EMPTY, or DATA, means it answers with no error, and the library should refuse
+    it. DATA counts the contracts on the contract sent.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.UNDERLYING_CONTRACTS_CONTRACT, evidence)
+
+
+@pytest.mark.settles("104")
+@pytest.mark.requests(1)
+def test_massive_answers_contract_details_of_a_stock_ticker(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """What the contract overview answers for `AAPL`, a stock rather than a contract.
+
+    `m.options.contract_details` refuses an underlying passed as `symbols` and names
+    `m.options.contracts`. DATA counts the rows describing a contract named `AAPL`.
+    """
+    assert bad_values.ask_all(live_rest, bad_values.CONTRACT_SYMBOL, evidence)
+
+
+_CONTRACT = "/v3/reference/options/contracts/{options_ticker}"
+_SAMPLE_ROOTS = ("SPY", "SPXW", "AMCR1")
+"""A standard, a weekly, and an adjusted root: Massive's own examples of roots that differ from
+their underlying."""
+
+
+def _page(client: RestClient, request: option_requests.Request) -> list[dict[str, Any]]:
+    """Read the raw rows of the first page of an `option_requests` request.
+
+    Returns:
+        The rows.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key access to the path; the live-test
+            hook skips, quoting it.
+    """
+    path, query = request
+    return client.get(source(Transport.REST, path), {}, query, bucket="options").rows
+
+
+_STANDING_ROOTS = ("SPY", "SPXW")
+"""The sample roots whose contracts always have open interest; an adjusted root's may have
+none on the day read."""
+
+
+def _root_samples(client: RestClient, evidence: Evidence) -> dict[str, list[dict[str, Any]]]:
+    """Read one page of the latest open interest of each sample root, each root on its own.
+
+    A shared page could hold one root's rows alone, so each root gets its own request. Records
+    each root's row count; an adjusted root with no rows is recorded, not failed.
+
+    Returns:
+        Each sample root's rows.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key access to the open interest; the
+            live-test hook skips, quoting it.
+    """
+    samples = {
+        root: _page(client, option_requests.open_interest(root=root, limit=100))
+        for root in _SAMPLE_ROOTS
+    }
+    evidence(f"open interest rows per root: { {k: len(v) for k, v in samples.items()} }")
+    return samples
+
+
+@pytest.mark.verifies("140")
+@pytest.mark.requests(5)
+def test_root_is_the_ticker_s_occ_root(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Massive's `root` of the open interest and unusual trades is each ticker's OCC root.
+
+    Reads one page of open interest of each of the roots `SPY`, `SPXW`, and `AMCR1`, one page of
+    the latest unusual trades of any root, and the library's open interest of `SPXW`, and
+    records the roots and counts. Fails when `SPY`, `SPXW`, or the library's read has no row,
+    since the check would then rest on nothing, and on any row whose `root` is not its ticker's
+    root: the two datasets then can't give Massive's `root` the name `OptionRoot`. A refusal
+    skips the test, quoting Massive.
+    """
+    samples = _root_samples(live_rest, evidence)
+    trades = _page(live_rest, option_requests.unusual_trades(limit=300))
+    rows = [row for found in samples.values() for row in found] + trades
+    differ = [(r.get("ticker"), r.get("root")) for r in rows if r.get("root") != _root(r["ticker"])]
+    roots = sorted({str(r.get("root")) for r in trades})
+    evidence(f"{len(trades)} unusual trades of roots {roots[:30]}")
+    evidence(f"rows whose root is unlike the ticker's: {differ[:10]}")
+    library = table_rows(live_session.options.open_interest(root="SPXW", limit=5).fetch(wait=True))
+    evidence(f"library SPXW: {[(r['Symbol'], r['OptionRoot']) for r in library]}")
+    assert all(samples[root] for root in _STANDING_ROOTS)
+    assert library
+    assert not differ
+    assert all(r["OptionRoot"] == _root(r["Symbol"]) for r in library)
+
+
+_UNDERLYING_ROOTS = ("SPX", "SPXW", "NDX", "VIX", "RUT", "DJT", "AMCR1", "AAPL")
+"""Roots whose underlying the two new datasets must name as the contracts reference does: index
+roots and their weeklies, the stock `DJT`, an adjusted root, and a plain stock. `DJT` is also on
+Massive's index list (`I:DJT`, the Dow Jones Transportation Average), so its rows go through the
+per-root lookup, whose CFI code (`OPASPS`) puts its options on the stock. Shared tickers found in
+Massive's data are compared by
+`test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_reference`."""
+
+_PER_ROOT = 2
+"""Contracts compared per root and dataset."""
+
+
+def _contracts_underlying(
+    session: dm.MassiveSession, ticker: str, *, day: str, table_rows: TableRows
+) -> str | None:
+    """Read one contract's canonical `Underlying` from `m.options.contract_details()` as of a day.
+
+    Returns:
+        The contract's `Underlying`, or None when the reference has no row for it.
+    """
+    found = table_rows(session.options.contract_details(ticker, as_of=day).fetch(wait=True))
+    return str(found[0]["Underlying"]) if found else None
+
+
+def _row_day(row: Mapping[str, Any]) -> str:
+    """Return the trading day of a raw open interest or unusual trades row, as ISO text.
+
+    An open interest row has its `date`; an unusual trade has only its SIP timestamp, read in
+    New York time.
+
+    Returns:
+        The day.
+    """
+    return (
+        str(row.get("date") or "")
+        or datetime.fromtimestamp(int(row["sip_timestamp"]) / 1e9, _NEW_YORK).date().isoformat()
+    )
+
+
+RowSource: TypeAlias = Literal["open interest", "unusual trades"]
+"""The dataset a raw row came from."""
+
+Sample: TypeAlias = "tuple[RowSource, dict[str, Any]]"
+"""A raw row to compare, with the dataset it came from."""
+
+
+def _published_underlyings(
+    session: dm.MassiveSession,
+    source_name: RowSource,
+    ticker: str,
+    *,
+    day: str,
+    table_rows: TableRows,
+) -> list[str]:
+    """Read the library's `Underlying` of one contract on one day from the dataset named.
+
+    Returns:
+        The `Underlying` of each row, from `m.options.open_interest()` for "open interest" and
+        `m.options.unusual_trades()` for "unusual trades".
+    """
+    match source_name:
+        case "open interest":
+            library = session.options.open_interest(ticker, start=day, end=day)
+        case "unusual trades":
+            library = session.options.unusual_trades(ticker, start=day, end=day)
+        case _:
+            assert_never(source_name)
+    return [str(r["Underlying"]) for r in table_rows(library.fetch(wait=True))]
+
+
+@pytest.mark.verifies("141")
+@pytest.mark.requests(95)
+@pytest.mark.timeout(600)
+def test_underlying_matches_the_contracts_reference(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Both new datasets name each contract's underlying as `m.options.contract_details()` does.
+
+    For the roots `SPX`, `SPXW`, `NDX`, `VIX`, `RUT`, `DJT`, `AMCR1`, and `AAPL`, reads up to
+    two contracts each from one page of open interest per root and from one page of the latest
+    unusual trades, and two expired `SPXW` contracts from a year earlier. Then it reads each
+    contract's `Underlying` from `m.options.contract_details()` as of the row's day. It checks two
+    things for every contract read:
+
+    - Massive's own `underlying_ticker` equals the reference's `Underlying` apart from an
+      index's `I:` prefix, so Massive folds weekly and adjusted roots as the reference does;
+    - the library's `Underlying` on `m.options.open_interest()` and `m.options.unusual_trades()`
+      of those contracts equals the reference's exactly, `I:SPX` included.
+
+    Records every comparison and the roots no row was found for. Fails on any mismatch, or
+    when `SPX` and `AAPL` give no open-interest row, since an index and a stock must both be
+    compared. A refusal skips the test, quoting Massive.
+    """
+    rows: list[Sample] = []
+    for root in _UNDERLYING_ROOTS:
+        found = _page(live_rest, option_requests.open_interest(root=root, limit=50))
+        rows += [("open interest", r) for r in found[:_PER_ROOT]]
+    # Expired contracts, a year back, which the reference must find as of their day.
+    year_ago = datetime.now(_NEW_YORK).date() - timedelta(days=365)
+    expired = _page(
+        live_rest, option_requests.open_interest(root="SPXW", through=year_ago, limit=2)
+    )
+    rows += [("open interest", r) for r in expired]
+    trades = _page(live_rest, option_requests.unusual_trades(limit=1000))
+    for root in _UNDERLYING_ROOTS:
+        rows += [("unusual trades", r) for r in trades if r.get("root") == root][:_PER_ROOT]
+    seen = {str(r.get("root")) for _, r in rows}
+    evidence(f"roots with rows: {sorted(seen)}; without: {sorted(set(_UNDERLYING_ROOTS) - seen)}")
+    folded: list[str] = []
+    wrong: list[str] = []
+    for source_name, row in rows:
+        ticker = str(row["ticker"])
+        day = _row_day(row)
+        reference = _contracts_underlying(live_session, ticker, day=day, table_rows=table_rows)
+        sent = row.get("underlying_ticker")
+        published = _published_underlyings(
+            live_session, source_name, ticker, day=day, table_rows=table_rows
+        )
+        evidence(
+            f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r}, "
+            f"library {sorted(set(published))}"
+        )
+        if reference is None:
+            continue
+        if sent != reference.removeprefix("I:"):
+            folded.append(f"{ticker}: {sent!r} vs {reference!r}")
+        if any(value != reference for value in published):
+            wrong.append(f"{source_name} {ticker}: {published[:3]} vs {reference!r}")
+    assert {"SPX", "AAPL"} <= {str(r.get("root")) for s, r in rows if s == "open interest"}
+    assert not folded, folded
+    assert not wrong, wrong
+
+
+@pytest.mark.verifies("142")
+@pytest.mark.requests(1)
+def test_unusual_trade_prices_are_per_share(live_rest: RestClient, *, evidence: Evidence) -> None:
+    """An unusual trade's `price` is per share of the underlying, not per contract.
+
+    Reads one page of unusual trades and checks Massive's own rule for `block_premium`, a
+    notional premium of price x size x 100 of $100,000 or more, on the trades of standard roots
+    that carry a price and a size: every flagged trade meets it and every other trade falls
+    short. Fails when either set breaks the rule, which would mean
+    the price is not per share and the column's corrected description is wrong. A refusal
+    skips the test, quoting Massive.
+    """
+    rows = _page(live_rest, option_requests.unusual_trades(limit=1000))
+    # A trade without a price or size can't be checked; an adjusted root (`AAPL1`) may have
+    # another multiplier than the 100 shares Massive's rule assumes, so only standard roots
+    # are judged.
+    judged = [
+        r
+        for r in rows
+        if r.get("price") is not None
+        and r.get("size") is not None
+        and not any(c.isdigit() for c in _root(str(r["ticker"])))
+    ]
+    premium = {id(r): float(r["price"]) * float(r["size"]) * 100 for r in judged}
+    flagged = [r for r in judged if "block_premium" in (r.get("flags") or [])]
+    others = [r for r in judged if "block_premium" not in (r.get("flags") or [])]
+    low = [(r["ticker"], r["price"], r["size"]) for r in flagged if premium[id(r)] < 100_000]
+    high = [(r["ticker"], r["price"], r["size"]) for r in others if premium[id(r)] >= 100_000]
+    evidence(
+        f"{len(rows)} trades, {len(judged)} judged: {len(flagged)} block_premium, "
+        f"{len(others)} other; flagged under $100,000 {low[:5]}; unflagged at $100,000 or "
+        f"more {high[:5]}"
+    )
+    assert flagged
+    assert not low
+    assert not high
+
+
+@pytest.mark.requests(1)
+def test_admin_message_history_reads_a_day_of_every_exchange(
+    live_session: dm.MassiveSession,
+    *,
+    previous_trading_day: date,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """`history()` of the admin messages reads a past day's archive with the stream's columns.
+
+    Reads the last trading day before the run and records how many messages each exchange sent,
+    with one message's text. Fails when the call fails or its columns are not the stream's; a
+    day with no message passes, since OPRA sends admin messages only with FLEX activity or an
+    exchange's notice. A refusal skips the test, quoting Massive.
+    """
+    query = live_session.options.admin_messages()
+    table = query.history(previous_trading_day, previous_trading_day, wait=True)
+    found = table_rows(table)
+    exchanges = sorted({int(r["Exchange"]) for r in found})
+    first = repr(found[0]["Message"]) if found else "none"
+    evidence(
+        f"{previous_trading_day}: {len(found)} messages from exchanges {exchanges}; first {first}"
+    )
+    assert list(table.column_names) == [str(r["Name"]) for r in table_rows(query.columns())]
+    assert all(r["Date"] == previous_trading_day.isoformat() for r in found)
+
+
+def _tickers(client: RestClient, request: option_requests.Request) -> tuple[set[str], int]:
+    """Read every page of a ticker list.
+
+    Returns:
+        The tickers, each without an index's `I:`, and the pages read.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key the list; the live-test hook skips,
+            quoting it.
+    """
+    path, query = request
+    tickers: set[str] = set()
+    pages = 0
+    for found in client.pages(source(Transport.REST, path), {}, query, bucket=OTHER):
+        pages += 1
+        tickers |= {str(r["ticker"]).removeprefix("I:") for r in found.rows if r.get("ticker")}
+    return tickers, pages
+
+
+def _index_list(client: RestClient, evidence: Evidence) -> set[str]:
+    """Read Massive's whole index list, active and retired, as the library's pre-filter does.
+
+    Records its size and pages.
+
+    Returns:
+        Each listed index's bare ticker, such as `SPX`.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key the list.
+    """
+    active, active_pages = _tickers(client, option_requests.index_list(active=True))
+    retired, retired_pages = _tickers(client, option_requests.index_list(active=False))
+    listed = active | retired
+    evidence(f"index list: {len(listed)} indices in {active_pages + retired_pages} pages")
+    return listed
+
+
+_INDEX_UNDERLYINGS = ("I:SPX", "I:NDX", "I:VIX", "I:RUT", "I:XSP", "I:DJX", "I:OEX")
+"""Indices with listed options, whose contracts' underlyings must be on Massive's index list."""
+
+
+@pytest.mark.verifies("143")
+@pytest.mark.requests(60)
+@pytest.mark.timeout(600)
+def test_index_option_underlyings_are_on_the_index_list(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Every sampled option on an index names an index on Massive's index list.
+
+    Reads Massive's whole index list, active and retired, then up to 20 contracts each of
+    `I:SPX`, `I:NDX`, `I:VIX`, `I:RUT`, `I:XSP`, `I:DJX`, and `I:OEX` from
+    `m.options.contracts()`. For every contract whose CFI code marks an option on an index:
+
+    - its bare underlying must be on the list;
+    - the bare underlying one whole-market page of open interest gives its root, the value the
+      open interest's and unusual trades' pre-filter reads, must be on the list too.
+
+    An underlying Massive lists no contract for is recorded, not failed. Also records the list's
+    pages and how many distinct roots of that page name a listed index: the Contract Overview
+    requests a first whole-market read sends. The `requests` marker assumes the list fits in
+    50 pages of 1,000. A refusal skips the test, quoting Massive.
+    """
+    listed = _index_list(live_rest, evidence)
+    market = _page(live_rest, option_requests.open_interest(limit=50000))
+    roots = {str(r.get("root")): str(r.get("underlying_ticker")) for r in market}
+    off_list: list[str] = []
+    compared = 0
+    for underlying in _INDEX_UNDERLYINGS:
+        rows = table_rows(
+            live_session.options.contracts(underlying=underlying, limit=20).fetch(wait=True)
+        )
+        on_index = [r for r in rows if is_index_option(str(r.get("Cfi") or ""))]
+        compared += len(on_index)
+        named = sorted({str(r["Underlying"]) for r in on_index})
+        evidence(f"{underlying}: {len(rows)} contracts, {len(on_index)} on an index: {named}")
+        off_list += [n for n in named if n.removeprefix("I:") not in listed]
+        for root in sorted({str(r["OptionRoot"]) for r in on_index} & roots.keys()):
+            evidence(f"open interest of root {root} names {roots[root]!r}")
+            if roots[root] not in listed:
+                off_list.append(f"open interest root {root}: {roots[root]!r}")
+    index_named = sorted(root for root, under in roots.items() if under in listed)
+    evidence(
+        f"one whole-market page of open interest: {len(market)} rows, {len(roots)} roots, "
+        f"{len(index_named)} naming a listed index {index_named[:40]}"
+    )
+    assert compared
+    assert not off_list, off_list
+
+
+_CANDIDATES = 25
+"""Tickers on both the index list and the active stock list whose contracts are read in one run.
+The overlap is too long to read whole, so each day reads another window of it."""
+
+_PER_SEARCH = 8
+"""The most collision roots compared from each search: the whole-market pages, and the stock
+list."""
+
+
+def _market_collisions(
+    client: RestClient, listed: Collection[str], evidence: Evidence
+) -> dict[str, Sample]:
+    """Find the collision roots of one whole-market page of open interest and of unusual trades.
+
+    A collision root is one whose bare underlying is on the index list. Records each page's
+    size and the collision roots with the underlying Massive wrote.
+
+    Returns:
+        One row of each collision root, by root.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key either dataset.
+    """
+    found: dict[str, Sample] = {}
+    reads: tuple[tuple[RowSource, option_requests.Request], ...] = (
+        ("open interest", option_requests.open_interest(limit=50000)),
+        ("unusual trades", option_requests.unusual_trades(limit=1000)),
+    )
+    for source_name, request in reads:
+        rows = _page(client, request)
+        roots = {_root(str(r["ticker"])) for r in rows}
+        for row in rows:
+            if str(row.get("underlying_ticker")) in listed:
+                found.setdefault(_root(str(row["ticker"])), (source_name, row))
+        evidence(f"one whole-market page of {source_name}: {len(rows)} rows, {len(roots)} roots")
+    named = {root: row.get("underlying_ticker") for root, (_, row) in sorted(found.items())}
+    evidence(f"roots of those pages whose bare underlying is on the index list: {named}")
+    return found
+
+
+def _stock_side_roots(
+    client: RestClient, listed: Collection[str], evidence: Evidence
+) -> dict[str, str]:
+    """Search for options on a stock or fund whose ticker is also on the index list.
+
+    Reads Massive's active stock list, takes the tickers also on the index list, and reads one
+    page of today's contracts of `_CANDIDATES` of them, a window that moves each day. The
+    contracts list takes an index bare, so one ticker's page may hold an index's options and a
+    stock's: each root is sorted by its contracts' CFI codes. Records the overlap, the window,
+    and every root found with its kinds.
+
+    Returns:
+        A contract of each root whose CFI code marks an option on something other than an
+        index, by root.
+
+    Raises:
+        WireEntitlementError: When Massive refuses the key the stock list or the contracts.
+    """
+    stocks, pages = _tickers(client, option_requests.stock_list())
+    shared = sorted(set(stocks) & set(listed))
+    evidence(
+        f"active stock list: {len(stocks)} tickers in {pages} pages; {len(shared)} also on the "
+        f"index list: {shared[:100]}"
+    )
+    if not shared:
+        return {}
+    count = min(_CANDIDATES, len(shared))
+    start = datetime.now(_NEW_YORK).date().toordinal() * _CANDIDATES % len(shared)
+    window = (shared + shared)[start : start + count]
+    evidence(f"contracts read for {count} of them, from position {start}: {window}")
+    other: dict[str, str] = {}
+    for ticker in window:
+        path, query = option_requests.contracts(underlying=ticker, limit=_CONTRACT_PAGE)
+        rows = _raw(client, path, params=query, evidence=evidence)
+        kinds: dict[str, set[str]] = {}
+        for row in rows:
+            cfi = row.get("cfi")
+            # A contract without a CFI code says nothing about its underlying's kind.
+            kind = "no CFI" if not cfi else "index" if is_index_option(str(cfi)) else "other"
+            root = _root(str(row["ticker"]))
+            kinds.setdefault(root, set()).add(kind)
+            if kind == "other":
+                other.setdefault(root, str(row["ticker"]))
+        shown = {root: sorted(found) for root, found in sorted(kinds.items())}
+        evidence(f"    {ticker}: {len(rows)} contracts; roots by CFI kind {shown}")
+    return other
+
+
+def _compare_collision(
+    session: dm.MassiveSession,
+    sample: Sample,
+    *,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> tuple[str, list[str]]:
+    """Compare one collision row's underlying: Massive's, the reference's, and the library's.
+
+    Reads the contract's `Underlying` and `Cfi` from `m.options.contract_details()` as of the
+    row's day, and the library's `Underlying` of the same contract and day from the row's
+    dataset, and records all of them. A contract the reference has no row for can't be
+    classified, so the library withholds its rows and the read of it alone fails with a
+    `RowDataError`: that is recorded, and the contract is not compared.
+
+    Returns:
+        The side the reference puts the contract on ("index", "other", "no CFI", or "not
+        compared" when the reference or the library has no row), and each mismatch found,
+        including Massive's underlying against the reference when the library has no row, and
+        a library read that fails for a contract the reference classifies.
+
+    Raises:
+        EntitlementError: When the library refuses the read, Massive's refusal or delayed data
+            the settings don't list; the live-test hook skips the test.
+    """
+    source_name, row = sample
+    ticker = str(row["ticker"])
+    day = _row_day(row)
+    found = table_rows(session.options.contract_details(ticker, as_of=day).fetch(wait=True))
+    sent = row.get("underlying_ticker")
+    reference = str(found[0]["Underlying"]) if found else None
+    cfi = found[0]["Cfi"] if found else None
+    try:
+        published = _published_underlyings(
+            session, source_name, ticker, day=day, table_rows=table_rows
+        )
+    except dm.EntitlementError:
+        # A refusal is not a mismatch: the live-test hook skips the test for it.
+        raise
+    except dm.MassiveError as error:
+        evidence(
+            f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r} "
+            f"(CFI {cfi!r}), library read failed: {type(error).__name__}: {error}"
+        )
+        failed = [] if reference is None else [f"{source_name} {ticker}: library read failed"]
+        return "not compared", failed
+    evidence(
+        f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r} (CFI {cfi!r}), "
+        f"library {sorted(set(published))}"
+    )
+    if reference is None:
+        return "not compared", []
+    problems: list[str] = []
+    if sent != reference.removeprefix("I:"):
+        problems.append(f"{ticker}: Massive {sent!r} vs {reference!r}")
+    if not published:
+        return "not compared", problems
+    # A contract the reference gives no CFI code keeps Massive's bare ticker in the library.
+    side = "no CFI" if not cfi else "index" if is_index_option(str(cfi)) else "other"
+    problems += [
+        f"{source_name} {ticker}: library {value!r} vs {reference!r}"
+        for value in sorted(set(published))
+        if value != reference
+    ]
+    return side, problems
+
+
+@pytest.mark.verifies("141")
+@pytest.mark.requests(150)
+@pytest.mark.timeout(900)
+def test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_reference(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Where a root's bare underlying is on the index list, both datasets name it as the reference.
+
+    Such a root is the one case the library's index-list pre-filter can't settle: its rows get
+    their `Underlying` from the Contract Overview of the root's first contract. It may be an
+    option on that index (expected `I:X`) or on a stock or fund that shares the index's ticker
+    (expected bare `X`). The test finds both from Massive's data rather than naming them:
+
+    - it reads Massive's whole index list, active and retired, as the library does;
+    - it takes the collision roots of one whole-market page each of open interest and unusual
+      trades: roots whose bare underlying is on the list;
+    - it reads the active stock list and one page of today's contracts of 25 of the tickers
+      on both lists (another window each day), and takes the roots whose CFI code marks an
+      option on something other than an index, each with one page of its open interest.
+
+    For up to eight roots of each search it compares one row: Massive's `underlying_ticker`
+    must equal `m.options.contract_details()`'s `Underlying` apart from `I:`, and the library's
+    `Underlying` of the same contract and day must equal it exactly. Records every collision
+    found, every comparison and the side its CFI code puts it on, and says plainly when no
+    option on a stock or fund sharing an index's ticker was found, so the stock side went
+    unchecked. Fails on any mismatch, or when no option on an index was compared.
+
+    Up to about 150 requests: the index list twice (about 16 pages each, once by the test and once
+    by the library's pre-filter), the stock list (the marker assumes up to 35 pages), two
+    whole-market pages, 25 contracts pages, up to eight root pages of open interest, and up to
+    three per compared root (the reference, the library's read, and its root lookup). A
+    refusal skips the test, quoting Massive.
+    """
+    listed = _index_list(live_rest, evidence)
+    market = _market_collisions(live_rest, listed, evidence)
+    stock_roots = _stock_side_roots(live_rest, listed, evidence)
+    sampled = sorted(market)[:_PER_SEARCH]
+    samples = [market[root] for root in sampled]
+    for root in sorted(stock_roots.keys() - set(sampled))[:_PER_SEARCH]:
+        if root in market:
+            samples.append(market[root])
+            continue
+        rows = _page(live_rest, option_requests.open_interest(root=root, limit=5))
+        evidence(f"open interest of root {root} ({stock_roots[root]}): {len(rows)} rows")
+        samples += [("open interest", row) for row in rows[:1]]
+    sides: dict[str, list[str]] = {}
+    problems: list[str] = []
+    for sample in samples:
+        side, found = _compare_collision(
+            live_session, sample, table_rows=table_rows, evidence=evidence
+        )
+        sides.setdefault(side, []).append(str(sample[1]["ticker"]))
+        problems += found
+    evidence(f"contracts compared by the side their CFI code puts them on: {sides}")
+    if not sides.get("other"):
+        evidence(
+            "STOCK SIDE NOT CHECKED: no option on a stock or fund whose ticker is on the index "
+            "list was found and compared in the pages read, so this run checked options on an "
+            "index only"
+        )
+    assert sides.get("index"), "no option on an index was compared"
+    assert not problems, problems

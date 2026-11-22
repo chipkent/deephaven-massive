@@ -247,8 +247,11 @@ live-checks.log
 live-evidence-*.log
 # The DEBUG log of each pytest run that selected a live test (tests/_live/debug_log_file.py).
 live-debug-logs/
-# The plans the live tests probed today; it names the key only by a digest.
-.live-plans.json
 
 # Extra project environments, such as the free-threaded one (UV_PROJECT_ENVIRONMENT=.venv-314t).
 .venv-*/
+
+# The PR-description draft the writing-a-pr-description skill has each agent write at the root
+# of its worktree, and any log: a run's output, never source.
+.git-pr-body.md
+*.log

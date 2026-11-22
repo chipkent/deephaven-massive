@@ -6,7 +6,7 @@ fixed range, drops each one removed, and on a re-add either reuses the earlier d
 each symbol's read. The test follows a watchlist of daily bars from REST over a past week,
 adds Apple and a ticker with no data, removes and re-adds Apple under each member, and
 records what `m.symbol_reads()` shows at each step. Unadjusted bars keep it independent of
-splits. It sends about four requests, so it fits the Basic limit. How to run these tests is in
+splits. It sends about four requests. How to run these tests is in
 `docs/live-tests.md`.
 """
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from deephaven import dtypes, input_table, new_table
@@ -23,12 +23,14 @@ from deephaven.execution_context import get_exec_ctx
 from deephaven.update_graph import shared_lock
 
 import deephaven_massive as dm
+from tests._live import refusals, summary
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import TypeAlias
 
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
 pytestmark = pytest.mark.integration
 
@@ -44,11 +46,19 @@ _NO_DATA = "ZZZZQ"
 """A stock ticker in Massive's grammar that names no listed stock, so it has no bars."""
 
 _WAIT = 90.0
-"""Seconds a step may take: a request may wait for the Basic plan's per-minute slot."""
+"""Seconds a step may take: a request of a subscription Massive limits may wait for a later
+minute."""
 
 
-def _wait_for(read: Callable[[], Reads], done: Callable[[Reads], bool]) -> Reads:
-    """Read `m.symbol_reads()` rows until `done` holds.
+def _wait_for(
+    read: Callable[[], Reads], done: Callable[[Reads], bool], *, evidence: Evidence
+) -> Reads:
+    """Read `m.symbol_reads()` rows until `done` holds, or a symbol's read fails.
+
+    A symbol added after the call fails alone, as its `FAILED` row, and raises nothing. When
+    every failed read is Massive's refusal (`refusals.is_entitlement_text`, such as an HTTP 403),
+    the test skips, quoting the first; any other failure fails it. Either way the failed rows
+    are recorded.
 
     Returns:
         The rows that satisfied it, by symbol.
@@ -57,15 +67,22 @@ def _wait_for(read: Callable[[], Reads], done: Callable[[Reads], bool]) -> Reads
     deadline = time.monotonic() + _WAIT
     while True:
         rows = read()
+        failed = {symbol: row["Error"] for symbol, row in rows.items() if row["State"] == "FAILED"}
+        if failed:
+            evidence(f"failed symbol reads: {failed}")
+            others = {s: e for s, e in failed.items() if not refusals.is_entitlement_text(e)}
+            assert not others, f"a symbol's read failed for a reason other than a refusal: {others}"
+            refusal = " ".join(str(next(iter(failed.values()))).split())
+            pytest.skip(f"{summary.REFUSED}{refusal}")
         if done(rows):
             return rows
         assert time.monotonic() < deadline, f"m.symbol_reads() never got there: {rows}"
         pause.wait(0.25)
 
 
-def _change(table: Table, *, add: str | None = None, delete: str | None = None) -> None:
+def _change(table: InputTable, *, add: str | None = None, delete: str | None = None) -> None:
     """Add a symbol to the watchlist, or delete one from it."""
-    editable = cast("Any", table)
+    editable = table
     if add is not None:
         editable.add(new_table([string_col("Symbol", [add])]))
     if delete is not None:
@@ -127,7 +144,6 @@ def _aapl_rows(table_rows: TableRows, result: Table) -> int:
     return sum(1 for row in table_rows(result) if row["Symbol"] == "AAPL")
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.requests(4)
 @pytest.mark.timeout(400)
 def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
@@ -147,13 +163,16 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
     removal; under `NEVER` the re-added AAPL is `DONE` with the same `ReadAt`, `Rows`, and
     `Attempts`, and a `ReadAt` before its new `AddedAt`; and under `ALWAYS` the re-added AAPL is
     `LOADING` or `DONE` with a later `ReadAt`. `m.rate_limits()` is recorded only: every
-    session of the key shares it.
+    session of the key shares it. A symbol's read Massive refuses skips the test, quoting the
+    refusal; any other failed read fails it.
     """
     m = live_session
     with shared_lock(get_exec_ctx().update_graph):  # created before any cycle can refresh it
         wl = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     query = m.stocks.bars(wl, dm.Timespan.DAY, adjusted=False)
-    never = query.history(_START, _END, source=dm.HistorySource.REST, reread=dm.Reread.NEVER)
+    never = query.history(
+        _START, _END, source=dm.HistorySource.REST, reread=dm.Reread.NEVER, wait=True
+    )
     seen = _Diagnostics(m, table_rows)
     held = [never, seen.streams, seen.symbol_reads]
     try:
@@ -163,6 +182,7 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
         first = _wait_for(
             lambda: seen.reads(never_id),
             lambda rows: {rows.get(s, {}).get("State") for s in ("AAPL", _NO_DATA)} == {"DONE"},
+            evidence=evidence,
         )
         evidence(f"NEVER, first reads: {first}")
         assert seen.stream(never_id)["Kind"] == "read"
@@ -173,7 +193,9 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
 
         _change(wl, delete="AAPL")
         removed = _wait_for(
-            lambda: seen.reads(never_id), lambda rows: rows["AAPL"]["State"] == "REMOVED"
+            lambda: seen.reads(never_id),
+            lambda rows: rows["AAPL"]["State"] == "REMOVED",
+            evidence=evidence,
         )
         evidence(f"NEVER, after the removal: {removed['AAPL']}")
         assert _aapl_rows(table_rows, never) == 0
@@ -185,18 +207,20 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
                 rows["AAPL"]["State"] == "DONE"
                 and rows["AAPL"]["AddedAt"] > first["AAPL"]["AddedAt"]
             ),
+            evidence=evidence,
         )["AAPL"]
         evidence(f"NEVER, after the re-add: {back}")
         for column in ("ReadAt", "Rows", "Attempts"):
             assert back[column] == first["AAPL"][column], column
         assert back["ReadAt"] < back["AddedAt"]
 
-        always = query.history(_START, _END, source=dm.HistorySource.REST)
+        always = query.history(_START, _END, source=dm.HistorySource.REST, wait=True)
         held.append(always)
         always_id = seen.newest_read(never_id)
         before = _wait_for(
             lambda: seen.reads(always_id),
             lambda rows: rows.get("AAPL", {}).get("State") == "DONE",
+            evidence=evidence,
         )["AAPL"]
         _change(wl, delete="AAPL")
         _change(wl, add="AAPL")
@@ -212,6 +236,7 @@ def test_a_followed_history_reads_reuses_and_rereads_a_symbol(
                     )
                 )
             ),
+            evidence=evidence,
         )["AAPL"]
         evidence(f"ALWAYS, before: {before}; after the re-add: {again}")
         limits = m.rate_limits()

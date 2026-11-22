@@ -78,6 +78,9 @@ dependencies = [
     # without the GIL, so importing it leaves the GIL off on 3.14t. BaseLoader and the YAMLError
     # exceptions are much older.
     "pyyaml>=6.0.3",
+    # The library marks each method it overrides with `override`, which the standard library
+    # has only from Python 3.12; 4.4.0 is the first release that defines it.
+    "typing_extensions>=4.4.0",
 ]
 
 [project.optional-dependencies]
@@ -118,6 +121,24 @@ dev = [
     # or later; 0.20.0 and later ask for 42.2, above the deephaven-core floor).
     "deephaven-plugin-ui>=0.40.0",
     "deephaven-plugin-plotly-express>=0.19.0",
+    # The documentation site's griffe extension, under scripts/, subclasses griffe.Extension,
+    # which mypy checks with this package's types. 2.0.0 is the first release of griffe's
+    # library under this name; Extension and the on_instance hook are older.
+    "griffelib>=2.0.0",
+]
+# The documentation site's generator, which `uv run --only-group site` installs without the
+# project or the dev tools; docs/dev/docs-site.md describes the site.
+site = [
+    # 0.0.70 is the first release that reads exclude_docs, which keeps every page but the
+    # published ones out of a site built from the repository root.
+    "zensical>=0.0.70",
+    # The API reference plugin, which reads the docstrings with griffe without importing the
+    # package. 2.0.0 is the first release whose mkdocstrings Zensical loads; 1.x needs an
+    # mkdocstrings without the mkdocstrings.handlers module Zensical imports.
+    "mkdocstrings-python>=2.0.0",
+    # The griffe extension that renders the docstrings' examples (scripts/site_literal_blocks.py)
+    # marks its hook with override; 4.4.0 is the first release that has it.
+    "typing_extensions>=4.4.0",
 ]
 
 [tool.hatch.version]
@@ -165,9 +186,9 @@ namespace-packages = ["tests", "scripts"]
 
 [tool.ruff.lint]
 # Besides ALL: the preview rules selected by name. DOC201 and DOC501 check that docstring
-# Returns and Raises sections cover the code; PLR0904, PLR0914, and PLR0916 are the
-# pylint limits on public methods, local variables, and boolean expressions.
-select = ["ALL", "DOC201", "DOC501", "PLR0904", "PLR0914", "PLR0916"]
+# Returns and Raises sections cover the code; PLR0904, PLR0914, PLR0916, and PLR1702 are the
+# pylint limits on public methods, local variables, boolean expressions, and nested blocks.
+select = ["ALL", "DOC201", "DOC501", "PLR0904", "PLR0914", "PLR0916", "PLR1702"]
 # Preview is on so the preview rules above can be selected by name; explicit-preview-rules keeps
 # every other preview rule off. Preview also switches some stable rules (F401, UP007, the S3xx
 # family, ...) to their preview behavior.
@@ -187,6 +208,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"src/**" = [
+    "S101",  # assert only states a fact the code has just established, never an input check
+]
 "tests/**" = [
     "S101",  # pytest uses bare assert statements
     "PLR2004",  # literal expected values in assertions are the point of a test
@@ -199,6 +223,9 @@ ignore = [
     "D102",  # test docstrings are optional (any that exist must be well formed)
     "D103",  # test docstrings are optional (any that exist must be well formed)
     "D107",  # test docstrings are optional (any that exist must be well formed)
+    # Complexity limits target library logic; a branchy test is split or parametrized by
+    # judgment, not by a count.
+    "C901",
 ]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
@@ -211,14 +238,13 @@ ignore = [
 "massive".msg = "The library has its own clients; see deephaven_massive._massive"
 
 [tool.ruff.lint.mccabe]
-max-complexity = 12
+max-complexity = 10
 
 [tool.ruff.lint.pylint]
 max-positional-args = 3
-# A namespace class has one public factory method per dataset, so its size is the API's: the
-# stocks namespace holds 21, its two nested namespaces included. The limit still catches any
-# other class that grows past it.
-max-public-methods = 24
+# Ruff's default. Only a class whose size is the API's (`MassiveSession` and the stocks
+# namespace) passes it, through a `noqa` that says so; any other class splits instead.
+max-public-methods = 20
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -259,6 +285,11 @@ explicit_package_bases = true
 module = ["pyarrow.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# jpy, Deephaven's bridge to Java, is a compiled module with no type information.
+module = ["jpy"]
+ignore_missing_imports = true
+
 
 # ---------------------------------------------------------------------------------------------
 # Pyright (non-gating second checker)
@@ -278,31 +309,34 @@ strict = true
 filterwarnings = ["error"]
 # The options every pytest run starts with, CI's included. `-ra` lists each skipped or failed
 # test at the end of the run. `--import-mode=importlib` imports test files without adding their
-# directories to sys.path. `-m` picks which tests run: it leaves out the live tests, which call
-# Massive's real servers, the benchmark sweep, which only prints timings, and the soak tests,
-# which run for minutes or hours. Pass your own `-m` to replace it: `uv run pytest -m
-# integration` runs only the live tests (each skips itself unless MASSIVE_API_KEY is set),
-# `uv run pytest -m benchmark` runs only the sweep, and `uv run pytest -m soak` runs only the
-# soak tests (docs/dev/soak-tests.md).
+# directories to sys.path. `-p tests.embedded_server` starts the embedded Deephaven server
+# before any conftest imports the library, which needs it. `-m` picks which tests run: it
+# leaves out the live tests, which call Massive's real servers, the benchmark sweep, which only
+# prints timings, and the soak tests, which run for minutes or hours. Pass your own `-m` to
+# replace it: `uv run pytest -m integration` runs only the live tests (each skips itself unless
+# MASSIVE_API_KEY is set), `uv run pytest -m benchmark` runs only the sweep, and
+# `uv run pytest -m soak` runs only the soak tests (docs/dev/soak-tests.md).
 addopts = [
     "-ra",
     "--import-mode=importlib",
+    "-p",
+    "tests.embedded_server",
     "-m",
     "not integration and not benchmark and not soak",
 ]
 # Each entry is `name(arguments): what the marker means`, shown by `uv run pytest --markers`.
 markers = [
     "integration: a live test, one that calls Massive's real servers. Every test in a file named test_*_integration.py has this marker, and no other test does. A plain run leaves these tests out; run them with -m integration and MASSIVE_API_KEY set.",
-    "integration_limits: a live test that deliberately goes over the number of subscriptions or connections Massive allows. It also has the integration marker, but -m integration leaves it out; run it with -m integration_limits.",
+    "integration_limits: a live test that disturbs the key's WebSocket connections, by testing Massive's limits on subscriptions, frames, and connections, or by subscribing a whole channel. It also has the integration marker, but -m integration leaves it out; run it with -m integration_limits.",
     "integration_smoke: a live test that calls every dataset with every kind of query once and checks the columns that come back, so it can run unattended. It also has the integration marker, but -m integration leaves it out; run it with -m integration_smoke.",
-    "integration_rate_limits: a live test that sends a class on the free Basic plan more than its 5 REST requests a minute on purpose, to record how Massive refuses them and how the library learns the limit. It needs at least one asset class left on Basic and no other client of the key, and it waits out whole minutes. It also has the integration marker, but -m integration leaves it out; run it with -m integration_rate_limits.",
-    "needs(*plans): the Massive plans a live test requires. Write each plan as <asset class>:<plan>, such as stocks:starter; as <asset class>:delayed, for a plan of that class on the delayed feed (such as Futures Starter or Developer), when the question is what a delayed plan receives; as s3, for the flat-file credentials; or as some:basic, for at least one asset class left on the free Basic plan. The test is skipped unless the key holds them: the first live test of a run asks Massive which plans the key holds, unless MASSIVE_LIVE_PLANS declares them.",
+    "integration_all_symbols: a live test that streams every symbol of an asset class (dm.ALL) on the key's WebSocket for minutes, taking over the key's own connection the whole time. It also has the integration marker, but -m integration leaves it out; run it with -m integration_all_symbols, with no other client of the key.",
+    "integration_rate_limits: a live test that sends a subscription more REST requests than Massive allows in a minute on purpose, to record how Massive refuses them and how the library learns the limit. It spends a subscription your settings file lists in rest_requests_per_minute, whatever the file's order: the first listed of indices, futures, options, stocks, and currencies (of indices, currencies, and stocks for the ticker lookup), and skips when none is listed; it needs no other client of the key and waits out whole minutes. It also has the integration marker, but -m integration leaves it out; run it with -m integration_rate_limits.",
     "settles(*items): the open questions a live test records evidence for, which a person reads. The summary at the end of the run lists them as ran once every test of them passed.",
     "verifies(*items): the open questions whose answer a live test asserts: it fails unless Massive still behaves as the library assumes. The summary at the end of the run lists them as verified once every test of them passed.",
-    "requests(count): the most REST requests a live test sends to one asset class when that class is on the free Basic plan, which allows 5 requests a minute. A test that may read a class on Basic declares at most 5, reading fewer symbols or pages there than on a paid plan, so it never waits more than about a minute; a unit test enforces this, and a live run skips a test that declares more while its class is on Basic. Its time limit grows with this count. A test without the marker counts as 10.",
+    "requests(count): the most REST requests a live test sends to one subscription. Massive may limit a subscription to a few requests a minute, so the test's time limit grows with this count, and the line printed while a request waits counts down from it. A test without the marker counts as 10.",
     "jvm_held: a test whose own Deephaven formula passes the test's local variables to the JVM. Before the leak check fails the test, it asks the JVM to free unused memory once.",
     "benchmark: one point of a benchmark sweep, a test that prints timings and never fails on them. A plain run leaves these tests out; run them with -m benchmark.",
-    "soak: a long stress test that drives the library against the fake servers under heavy load (a fast feed, many streams, and constant churn) for MASSIVE_SOAK_SECONDS seconds, 20 by default. It fails on a lost or repeated row, a hang, or memory or threads that keep growing. A plain run leaves these tests out; run them with -m soak, as docs/dev/soak-tests.md describes.",
+    "soak: a long stress test that drives the library against the fake servers under heavy load (a fast feed, many streams, and constant churn) for --soak-seconds seconds, 20 by default. It fails on a lost or repeated row, a hang, or memory or threads that keep growing. A plain run leaves these tests out; run them with -m soak, as docs/dev/soak-tests.md describes.",
 ]
 testpaths = ["tests"]
 # Puts the repository root on sys.path, which --import-mode=importlib does not do itself, so

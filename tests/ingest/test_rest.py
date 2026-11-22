@@ -7,13 +7,13 @@ import logging
 import math
 import re
 import threading
-import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
-from types import SimpleNamespace
-from typing import Any, NoReturn, cast
+from types import MethodType
+from typing import Any, NoReturn, ParamSpec, TypedDict
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -23,10 +23,11 @@ from deephaven import new_table
 from deephaven.column import string_col
 from deephaven.table import Table
 from deephaven.update_graph import shared_lock
+from typing_extensions import Unpack, override
 
 import deephaven_massive as dm
 from deephaven_massive import _log_limits, _massive, _session
-from deephaven_massive._datasets import history_source, wire_symbols
+from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import history_window
@@ -45,7 +46,14 @@ from deephaven_massive._enums import (
     Subscription,
     Timespan,
 )
-from deephaven_massive._errors import LIBRARY_BUG, RowDataError, UnlistedPairError
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    BrokenGuaranteeError,
+    CutShortError,
+    RowDataError,
+    UnavailableSymbolError,
+    session_closed,
+)
 from deephaven_massive._ingest import (
     crypto_tickers,
     host_decision,
@@ -54,22 +62,32 @@ from deephaven_massive._ingest import (
     rest_requests,
     shared_lookup,
 )
-from deephaven_massive._ingest.crypto_tickers import LIST_KEY, CryptoTickers
+from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, CryptoTickers
+from deephaven_massive._ingest.rate_limits import Waiter
 from deephaven_massive._ingest.shared_lookup import SharedLookup
-from deephaven_massive._log_limits import BoundedLog
+from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Cancel, RestPath, Transport
-from deephaven_massive._namespaces import futures as futures_ns
-from deephaven_massive._namespaces import options as options_ns
-from deephaven_massive._namespaces import reference
-from deephaven_massive._namespaces import stocks as stocks_ns
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import HistoryQuery, Query, QueryBase
-from deephaven_massive._tables import poll
+from deephaven_massive._tables import poll, problem_reporter
+from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.problem_events import ProblemCause, ProblemEvent
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.session_core import SessionCore
-from deephaven_massive._tables.transports import HostDecision, SymbolFailure, SymbolRows
-from deephaven_massive._types import override
+from deephaven_massive._tables.transports import (
+    HostDecision,
+    SymbolFailure,
+    SymbolOutcome,
+    SymbolRows,
+)
+from deephaven_massive.namespaces import _crypto as crypto_ns
+from deephaven_massive.namespaces import _futures as futures_ns
+from deephaven_massive.namespaces import _options as options_ns
+from deephaven_massive.namespaces import _reference as reference
+from deephaven_massive.namespaces import _stocks as stocks_ns
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import FetchQuery, HistoryQuery, Query
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 
@@ -84,6 +102,39 @@ RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[s
 NS = 10**9
 TIMEOUT = 10.0
 """Seconds of real time a test waits for an event before it fails."""
+
+
+def alarms(caplog: pytest.LogCaptureFixture) -> list[str]:
+    # The problem reporter's WARNINGs: the first problem of each cause on each table or read.
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == problem_reporter.__name__ and r.levelno == logging.WARNING
+    ]
+
+
+def record_problems(m: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> list[ProblemEvent]:
+    # The problems the session's reads report, in order; they still reach its reporter, which
+    # logs the alarm, and m.problems().
+    events: list[ProblemEvent] = []
+    report = m._core.problems
+
+    def recorded(found: Sequence[ProblemEvent]) -> None:
+        events.extend(found)
+        report(found)
+
+    monkeypatch.setattr(m._core, "problems", recorded)
+    return events
+
+
+def no_data_alarm(dataset: str, read: int, symbol: str, *, why: str) -> str:
+    # The WARNING of a read's first symbol Massive has no data for.
+    return (
+        f"{dataset} table {read}: unavailable_symbols: {symbol}: Massive has no data for it "
+        f"{why} (at {dataset}). m.problems() lists it and every later unavailable_symbols "
+        "problem of this table, which the log shows at DEBUG only."
+    )
+
 
 DIVIDENDS_PATH = "/stocks/v1/dividends"
 DIVIDENDS = DatasetSpec(
@@ -123,7 +174,24 @@ CONTRACTS = DatasetSpec(
     name="options.contracts",
     asset_class=AssetClass.OPTIONS,
     fetch_path=CONTRACTS_PATH,
-    detail_path=CONTRACT_PATH,
+    keys={(R, CONTRACTS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+)
+CONTRACT_DETAILS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="options.contract_details",
+    asset_class=AssetClass.OPTIONS,
+    fetch_path=CONTRACT_PATH,
+    keys={(R, CONTRACT_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+    per_symbol=True,
+)
+# A contract is read on the per-contract path, which takes neither `order` nor the list's
+# filters, so a parameter one path of a call lacks can be tested.
+ROUTED = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="options.routed",
+    asset_class=AssetClass.OPTIONS,
+    fetch_path=CONTRACTS_PATH,
+    fetch_paths_by_class={AssetClass.OPTIONS: CONTRACT_PATH},
     keys={
         (R, CONTRACTS_PATH): SourceKeys(symbol=KeySpec("Ticker")),
         (R, CONTRACT_PATH): SourceKeys(symbol=KeySpec("Ticker")),
@@ -354,6 +422,8 @@ SPECS = (
     CRYPTO_LAST,
     MOVERS,
     CONTRACTS,
+    CONTRACT_DETAILS,
+    ROUTED,
     SMA,
     CONVERSION,
     INDEX_SNAPSHOTS,
@@ -393,19 +463,55 @@ def session(
     m.close()
 
 
-def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> QueryBase:
+def _endpoints(m: dm.MassiveSession) -> rest.RestEndpoints:
+    transport = m._core.rest_transport()
+    assert isinstance(transport, rest.RestEndpoints)
+    return transport
+
+
+_P = ParamSpec("_P")
+
+
+class ReadArguments(TypedDict, total=False):
+    """The keywords `build_query` takes besides the dataset, the query type, and the bounds."""
+
+    symbols: dm.SymbolsLike | None
+    symbols_optional: bool
+    all_alternative: str | None
+    timespan: Timespan | None
+    multiplier: int
+    venues: AbstractSet[dm.FuturesVenue] | None
+    adjusted: bool | None
+    params: Mapping[str, object] | None
+    arguments: Mapping[str, str] | None
+    filters: Mapping[str, dm.FilterValue] | None
+    limit: int | None
+    values: ValueTable | None
+    on_error: dm.ErrorPolicy | None
+
+
+class QueryArguments(ReadArguments, total=False):
+    """Every keyword `build_query` takes besides the session, the dataset, and the query type."""
+
+    start: dm.DateLike | None
+    end: dm.DateLike | None
+
+
+def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: Unpack[QueryArguments]) -> Query:
     # An indicator is computed over bars of a timespan, which its factory always sets.
     if spec is SMA:
         kwargs.setdefault("timespan", Timespan.MINUTE)
     # A list dataset's symbols only filter it, as its factory says.
     kwargs.setdefault("symbols_optional", spec.symbol_param is not None)
-    return build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
+    return build_query(m._core, spec, query_type=Query, **kwargs)
 
 
-def fetch(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> list[dict[str, Any]]:
+def fetch(
+    m: dm.MassiveSession, spec: DatasetSpec, **kwargs: Unpack[QueryArguments]
+) -> list[dict[str, Any]]:
     q = query(m, spec, **kwargs)
-    assert isinstance(q, Query)
-    return rows(q.fetch())
+    assert isinstance(q, FetchQuery)
+    return rows(q.fetch(wait=True))
 
 
 def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
@@ -465,8 +571,8 @@ def test_iso_text_in_a_date_filter_is_sent_as_its_date(
     fake_rest.reply(CONSTITUENTS_PATH, Reply(envelope([])))
     q = query(session, CONSTITUENTS, symbols="SPY", filters={"effective_date": "2025-09-18"})
     assert q._request.filters == (("effective_date", date(2025, 9, 18)),)
-    assert isinstance(q, Query)
-    q.fetch()
+    assert isinstance(q, FetchQuery)
+    q.fetch(wait=True)
     ((_, sent_query),) = fake_rest.get_queries()
     assert sent_query["effective_date"] == ["2025-09-18"]
     assert sent_query["composite_ticker"] == ["SPY"]
@@ -628,7 +734,7 @@ def test_the_futures_calendars_lookups_take_a_patience_each(
 ) -> None:
     fake_rest.reply("/futures/v1/schedules", Reply(envelope([{"product_code": "ES"}])))
     patiences = _Patiences(monkeypatch)
-    transport = cast("rest.RestEndpoints", session._core.rest_transport())
+    transport = _endpoints(session)
     rows = transport.fetch_rows(
         "/futures/v1/schedules", {"product_code": "ES"}, bucket="futures", cancel=Cancel()
     )
@@ -648,11 +754,99 @@ def test_the_crypto_ticker_list_takes_one_patience_for_its_pages(
         "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
     )
     patiences = _Patiences(monkeypatch)
-    reader = cast("Any", session._core.rest_transport())._reader("crypto pairs")
+    reader = _endpoints(session)._reader(
+        "crypto pairs", session._core.policy, waiter=Waiter.LIVE_TABLE
+    )
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")
     assert reader.crypto_pair("X:DOTUSD") == ("DOT", "USD")  # the kept list takes no patience
     assert [bucket for bucket, _ in patiences.claims] == ["other", "other"]
     assert patiences.shared()
+
+
+class _Seconds:
+    """Record the patience, in seconds, every claim of the rate governor is opened with."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.seen: list[float] = []
+        admission = _massive.RequestGovernor.admission
+        seen = self.seen
+
+        def recording(
+            governor: _massive.RequestGovernor,
+            bucket: str,
+            *,
+            lane: object,
+            patience: _massive.Patience,
+        ) -> object:
+            seen.append(patience.seconds)
+            return admission(governor, bucket, lane=lane, patience=patience)
+
+        monkeypatch.setattr(_massive.RequestGovernor, "admission", recording)
+
+
+@pytest.mark.parametrize("stop", [None, Cancel()], ids=["waited", "background"])
+def test_a_read_no_caller_waits_for_waits_out_max_outage_of_pauses(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    stop: Cancel | None,
+) -> None:
+    # A background read has a stop token: its pauses are limited by max_outage (300 s by
+    # default), the time a live table may stay cut off from Massive. A read its caller waits
+    # for keeps ten minutes.
+    fake_rest.reply(RATINGS_PATH, Reply(envelope([])))
+    seconds = _Seconds(monkeypatch)
+    q = query(session, RATINGS)
+    assert isinstance(q, FetchQuery)
+    _endpoints(session).fetch(RATINGS, q._static_request(1), call=1, stop=stop)
+    assert seconds.seen == [600.0 if stop is None else 300.0]
+
+
+def test_a_poll_cycle_waits_out_max_outage_of_pauses(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A poll() cycle feeds a live table: its pauses are limited by max_outage (300 s by
+    # default), not the ten minutes of a read its caller waits for.
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
+    seconds = _Seconds(monkeypatch)
+    q = query(session, DIVIDENDS, symbols=["AAPL"])
+    assert isinstance(q, FetchQuery)
+    table = q.poll(60)
+    pause = threading.Event()
+    for _ in range(3000):
+        if seconds.seen:
+            break
+        pause.wait(0.01)
+    session.release(table)
+    assert seconds.seen[:1] == [300.0]
+
+
+def test_a_stream_s_lookups_wait_out_max_outage_and_a_host_decision_ten_minutes(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    snapshots: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The futures schedules and the crypto ticker list are read for a stream no caller waits
+    # on; a host decision is made by the call that opens the stream.
+    fake_rest.reply("/futures/v1/schedules", Reply(envelope([])))
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=true&limit=1000",
+        Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])),
+    )
+    fake_rest.reply(
+        "/v3/reference/tickers?market=crypto&active=false&limit=1000", Reply(envelope([]))
+    )
+    seconds = _Seconds(monkeypatch)
+    transport = _endpoints(session)
+    transport.fetch_rows("/futures/v1/schedules", {}, bucket="futures", cancel=Cancel())
+    assert transport.crypto_pair("X:DOTUSD", session._core.policy) == ("DOT", "USD")
+    assert seconds.seen == [300.0, 300.0, 300.0]
+    del seconds.seen[:]
+    session._core.rest_transport().resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
+    assert seconds.seen == [600.0]
 
 
 def test_an_aware_datetime_on_an_inclusive_instant_filter_is_sent_as_given(
@@ -794,7 +988,7 @@ def test_an_ambiguous_crypto_pair_takes_its_split_from_the_ticker_list_read_once
             session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": date(2025, 3, 3)}
         )
         assert [(r["Symbol"], r["Open"]) for r in out] == [("X:DOTUSD", 4.5)]
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     assert reader.crypto_pair("X:SHIBUSD") == ("SHIB", "USD")  # from the second page
     # It ends in BTC, which is a quote too; only the list says its quote is WBTC.
     assert reader.crypto_pair("X:ETHWBTC") == ("ETH", "WBTC")
@@ -822,7 +1016,7 @@ def test_a_host_decision_that_breaks_is_a_library_defect_logged_at_error(
     [record] = caplog.records
     assert (record.levelno, record.getMessage()) == (
         logging.ERROR,
-        f"deciding the stocks WebSocket host failed: RuntimeError('the rule broke'). {LIBRARY_BUG}",
+        f"Deciding the stocks WebSocket host failed: RuntimeError('the rule broke'). {LIBRARY_BUG}",
     )
 
 
@@ -864,7 +1058,7 @@ def _wait_for_pair(
 def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     *, session: dm.MassiveSession, outcome: str
 ) -> None:
-    reader = cast("Any", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     future = _WatchedFuture()
     results, waiter = _wait_for_pair(reader, future)
     refused = dm.EntitlementError("refused", status=403)
@@ -876,7 +1070,10 @@ def test_a_caller_waiting_on_the_crypto_ticker_list_takes_its_outcome(
     (result,) = results
     if outcome == "fails":
         assert isinstance(result, dm.EntitlementError)
-        assert str(result).endswith("reading Massive's crypto tickers failed: refused")
+        assert str(result) == (
+            "'X:DOTUSD' cannot be split into its two currencies, since reading Massive's crypto "
+            "ticker list failed. refused"
+        )
         # Each waiter raises a copy, so no exception object is raised on two threads.
         assert isinstance(result.__cause__, dm.EntitlementError)
         assert result.__cause__ is not refused
@@ -942,7 +1139,7 @@ class _Listeners:
 
 
 def _manual_session(
-    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+    fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, *, max_outage: float = 300.0
 ) -> tuple[dm.MassiveSession, FakeClock]:
     # A session whose governor runs on a manual clock: each pause lasts until the test moves
     # time past it.
@@ -956,7 +1153,9 @@ def _manual_session(
     )
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry(create))
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
+    m = dm.MassiveSession(
+        dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, max_outage=max_outage)
+    )
     return m, clock
 
 
@@ -972,7 +1171,7 @@ DELISTED_TARGET = "/v3/reference/tickers?market=crypto&active=false&limit=1000"
 
 def _split_dot(m: dm.MassiveSession) -> Callable[[], object]:
     # A call that splits X:DOTUSD from the session's crypto ticker list.
-    reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, waiter=Waiter.LIVE_TABLE)
     return functools.partial(reader.crypto_pair, "X:DOTUSD")
 
 
@@ -981,9 +1180,11 @@ def _gave_up_after_two_pauses(result: object) -> None:
     # pause takes it past that, after it spent 60 s.
     assert isinstance(result, dm.MassiveError)
     assert result.status == 429
+    # The governor's sentences say why the read gave up.
     assert re.search(
-        r"rate limited: Massive is refusing .*this read waits out at most 90 s of pauses and "
-        r"has spent 60 s",
+        r'with HTTP 429: "slow down"\. The next request goes at .*, past the 90 s this read '
+        r"waits for Massive's pauses, of which it has already waited 60 s\. .* m\.rate_limits\(\) "
+        r"shows each subscription's pace\. .*\.$",
         str(result),
     )
 
@@ -997,7 +1198,8 @@ def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
     console: str,
 ) -> None:
     # Two callers need the list at once; `console` names the one inside a console command
-    # (90 s of pauses), the other waits out 600 s. Massive pauses the list twice for 60 s.
+    # (90 s of pauses), the other, a stream's lookup no caller waits for, waits out
+    # max_outage (300 s). Massive pauses the list twice for 60 s.
     m, clock = _manual_session(fake_rest, monkeypatch)
     listeners = _Listeners(monkeypatch)
     fake_rest.reply(LIST_TARGET, PAUSE, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
@@ -1026,7 +1228,7 @@ def test_a_caller_joining_the_crypto_ticker_list_waits_with_its_own_patience(
         m.close()
     assert len(fake_rest.get_queries()) == 4  # the list's three attempts, then the delisted page
     assert (listeners.buckets, listeners.live) == (["other"], [])  # heard, then removed
-    patience = 90 if console == "joiner" else 600
+    patience = 90 if console == "joiner" else 300
     assert (
         f"{m._core.label}: waits for the crypto ticker list another caller is making, through "
         f"at most {patience} s of its pauses"
@@ -1044,19 +1246,23 @@ def test_a_caller_waiting_on_an_interrupted_lookup_makes_it_itself(
     m, clock = _manual_session(fake_rest, monkeypatch)
     fake_rest.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
-    client = cast("rest.RestEndpoints", m._core.rest_transport())._state.client
-    pages = client.pages
+    client = _endpoints(m)._state.client
     claimed = threading.Event()
     interrupt = threading.Event()
 
-    def interrupted(*args: object, **kwargs: object) -> Iterator[_massive.Page]:
-        if not claimed.is_set():  # the maker, interrupted (as by Ctrl-C) once a caller joined
-            claimed.set()
-            assert interrupt.wait(TIMEOUT)
-            raise KeyboardInterrupt
-        return pages(*cast("Any", args), **cast("Any", kwargs))
+    def interrupting(
+        pages: Callable[_P, Iterator[_massive.Page]],
+    ) -> Callable[_P, Iterator[_massive.Page]]:
+        def interrupted(*args: _P.args, **kwargs: _P.kwargs) -> Iterator[_massive.Page]:
+            if not claimed.is_set():  # the maker, interrupted (as by Ctrl-C) once a caller joined
+                claimed.set()
+                assert interrupt.wait(TIMEOUT)
+                raise KeyboardInterrupt
+            return pages(*args, **kwargs)
 
-    monkeypatch.setattr(client, "pages", interrupted)
+        return interrupted
+
+    monkeypatch.setattr(client, "pages", interrupting(client.pages))
     caplog.set_level(logging.INFO, LOGGER)
     caplog.set_level(logging.INFO, SHARED_LOGGER)
     try:
@@ -1086,7 +1292,7 @@ def test_a_stopped_read_stops_its_crypto_ticker_list_and_a_waiter_reads_it_itsel
     fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     stop = Cancel()
-    reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, waiter=Waiter.LIVE_TABLE)
     caplog.set_level(logging.INFO, LOGGER)
     caplog.set_level(logging.INFO, SHARED_LOGGER)
     try:
@@ -1119,7 +1325,7 @@ def test_a_refusal_as_the_maker_stops_is_copied_to_its_waiters(
     # refusal is Massive's answer, not the stop's cancellation, so the waiter raises a copy of
     # it rather than asking again.
     m, clock = _manual_session(fake_rest, monkeypatch)
-    client = cast("rest.RestEndpoints", m._core.rest_transport())._state.client
+    client = _endpoints(m)._state.client
     claimed = threading.Event()
     refuse = threading.Event()
     stop = Cancel()
@@ -1130,10 +1336,12 @@ def test_a_refusal_as_the_maker_stops_is_copied_to_its_waiters(
         claimed.set()
         assert refuse.wait(TIMEOUT)
         stop.set()  # the maker's table is released as the refusal arrives
-        raise _massive.WireError("HTTP 403 for GET /v3/reference/tickers", status=403)
+        raise _massive.WireError(
+            "HTTP 403 for GET /v3/reference/tickers", status=403, kind=_massive.WireFailure.REFUSED
+        )
 
     monkeypatch.setattr(client, "pages", refused)
-    reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, waiter=Waiter.LIVE_TABLE)
     try:
         maker = _Caller(
             m, functools.partial(reader.crypto_pair, "X:DOTUSD", cancel=stop), console=False
@@ -1162,7 +1370,7 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
     fake_rest.reply(LIST_TARGET, PAUSE, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     fake_rest.reply(DELISTED_TARGET, Reply(envelope([])))
     stop = Cancel()
-    reader = cast("Any", m._core.rest_transport())._reader("crypto pairs")
+    reader = _endpoints(m)._reader("crypto pairs", m._core.policy, waiter=Waiter.LIVE_TABLE)
     try:
         maker = _Caller(m, _split_dot(m), console=False)
         clock.wait_for_deadlines([60.0])
@@ -1173,7 +1381,12 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
         stop.set()
         stopped = joiner.join()
         assert isinstance(stopped, dm.MassiveError)
-        assert str(stopped).endswith("waiting for the crypto ticker list: cancelled")
+        assert str(stopped) == (
+            "'X:DOTUSD' cannot be split into its two currencies, since reading Massive's crypto "
+            "ticker list failed. Waiting for the crypto ticker list ended. The read stopped "
+            "because its table was released or its session closed. Call the method again for a "
+            "new table."
+        )
         clock.advance(60.0)
         assert maker.join() == ("DOT", "USD")
     finally:
@@ -1191,7 +1404,7 @@ def test_a_stopped_fetch_reads_no_crypto_ticker_list(
     stop = Cancel()
     stop.set()
     with pytest.raises(dm.MassiveError, match="cancelled"):
-        rest.fetch(CRYPTO_OPEN_CLOSE, pair._request, call=1, stop=stop, unlisted=dm.OnError.RAISE)
+        rest.fetch(CRYPTO_OPEN_CLOSE, pair._request, call=1, stop=stop)
     assert fake_rest.requests == []
 
 
@@ -1215,7 +1428,7 @@ def test_a_stopped_history_splits_its_pairs_with_its_stop_token(
     stop = Cancel()
     stop.set()
     with pytest.raises(KeyboardInterrupt):
-        transport.history(CRYPTO_BARS, request, window, call=1, stop=stop)
+        transport.history(CRYPTO_BARS, request, window, call=1, tally=ReadTally(), stop=stop)
     (split,) = splits
     with pytest.raises(dm.MassiveError, match="cancelled"):
         split("X:DOTUSD")
@@ -1245,7 +1458,10 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
         joiner = _Caller(m, decide, console=console == "joiner")
         clock.wait_for_deadlines([60.0, math.inf])
         clock.advance(60.0)
-        _gave_up_after_two_pauses((joiner if console == "joiner" else maker).join())
+        gave_up = (joiner if console == "joiner" else maker).join()
+        _gave_up_after_two_pauses(gave_up)
+        # A stream verb takes no wait=True, so its give-up error advises nothing about one.
+        assert "wait=True" not in str(gave_up)
         clock.wait_for_deadlines([120.0])  # the other caller decides on
         clock.advance(60.0)
         decision = (maker if console == "joiner" else joiner).join()
@@ -1259,6 +1475,42 @@ def test_a_caller_waiting_on_a_host_decision_waits_with_its_own_patience(
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER]
 
 
+def test_a_poll_with_a_max_outage_of_zero_fails_at_its_first_rate_limit_pause(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, dh_to_pylist: ToPylist
+) -> None:
+    # A poll() cycle feeds a live table, so its reads wait out at most max_outage of pauses:
+    # with zero, the first pause fails the cycle, and so the table. The governor's clock is
+    # manual, so a cycle that waited out the pause instead would never end.
+    m, _ = _manual_session(fake_rest, monkeypatch, max_outage=0)
+    fake_rest.reply(DIVIDENDS_PATH, PAUSE)
+    try:
+        q = query(m, DIVIDENDS, symbols=["AAPL"])
+        assert isinstance(q, FetchQuery)
+        assert _failed_soon(q.poll(60))
+        assert m._core.diagnostics.wait_until_shown(TIMEOUT)
+        (row,) = dh_to_pylist(m.streams())
+    finally:
+        m.close()
+    # The pause outlasts max_outage, a setting of the user's, which the error names.
+    assert re.fullmatch(
+        r"stocks\.dividends poll\(\): every cycle since \S+Z has failed for 0 s, "
+        + re.escape(
+            "reaching max_outage=0 s, so this table stopped and the rows since then may be "
+            "missing. The latest error: Massive answered GET "
+            "/stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 with HTTP 429: "
+            '"slow down". The next request goes at 2027-01-15 08:01:00 UTC, past max_outage=0 s. '
+            "The usual cause is another program using the same Massive account, which shares "
+            "its limit, and m.rate_limits() shows each subscription's pace. Retry after that "
+            "time, stop the other program, or pass "
+            "rest_requests_per_minute={dm.Subscription.STOCKS: n} to dm.MassiveConfig, with "
+            "the limit n Massive gives you. Pass a larger max_outage to dm.MassiveConfig to "
+            "wait longer. Call m.stocks.dividends again for a new live table."
+        ),
+        row["Error"],
+    )
+    assert len(fake_rest.get_queries()) == 1
+
+
 def _lookup(m: dm.MassiveSession, kind: str) -> Callable[[], object]:
     # A call that needs one of the session's shared lookups: the crypto ticker list or the
     # stocks WebSocket host decision.
@@ -1270,7 +1522,7 @@ def _lookup(m: dm.MassiveSession, kind: str) -> Callable[[], object]:
 
 def _claim(m: dm.MassiveSession, kind: str) -> tuple[Future[Any], bool]:
     # Claim the shared lookup of `kind`, as a caller does before making or joining it.
-    state = cast("rest.RestEndpoints", m._core.rest_transport())._state
+    state = _endpoints(m)._state
     if kind == "crypto":
         return state.crypto._lookup._claim(LIST_KEY)
     return state.hosts._claim((AssetClass.STOCKS, ChannelFamily.TICK))
@@ -1295,7 +1547,7 @@ def test_a_failed_lookup_is_never_returned_as_known(
     future, created = _claim(session, kind)
     assert created
     future.set_exception(failure)  # failed, and not yet forgotten: what the late reader sees
-    state = cast("rest.RestEndpoints", session._core.rest_transport())._state
+    state = _endpoints(session)._state
     if kind == "crypto":
         assert state.crypto._lookup.known(LIST_KEY) is None
     else:
@@ -1323,14 +1575,12 @@ def test_a_lookup_that_fails_as_a_late_caller_looks_is_made_again(
     # maker forgets the lookup and fails it. The late caller must make the lookup itself.
     snapshots.reply(LIST_TARGET, Reply(envelope([_ticker("X:DOTUSD", "DOT", "USD")])))
     snapshots.reply(DELISTED_TARGET, Reply(envelope([])))
-    state = cast("rest.RestEndpoints", session._core.rest_transport())._state
+    state = _endpoints(session)._state
     key = (AssetClass.STOCKS, ChannelFamily.TICK)
     claimed, created = _claim(session, kind)
     assert created
     succeeded = shared_lookup._succeeded_result
-    lookup = cast(
-        "SharedLookup[Any, Any]", state.crypto._lookup if kind == "crypto" else state.hosts
-    )
+    lookup = state.crypto._lookup if kind == "crypto" else state.hosts
     claimed_key: Any = LIST_KEY if kind == "crypto" else key
 
     def maker_fails_meanwhile(future: Future[Any] | None) -> object:
@@ -1355,7 +1605,7 @@ def test_a_lookup_that_fails_as_a_late_caller_looks_is_made_again(
 def test_an_interrupt_before_a_lookup_leaves_nothing_claimed(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
-    def interrupted(_: object) -> NoReturn:  # Ctrl-C while asking Deephaven for the patience
+    def interrupted(*_: object, **__: object) -> NoReturn:  # Ctrl-C while asking Deephaven
         raise KeyboardInterrupt
 
     monkeypatch.setattr(rest, "read_patience", interrupted)
@@ -1446,48 +1696,42 @@ def _failed_soon(table: Table) -> bool:
     return False
 
 
-def test_a_poll_of_a_pair_massive_does_not_list_follows_unlisted_symbols(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_a_poll_plans_a_pair_massive_does_not_list_as_a_call_with_no_data(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # A pair passed in code is planned at the call and raises. A symbol table's pairs are
-    # planned each cycle: under LOG the unlisted one is left out with one WARNING, and under
-    # RAISE the table fails at its first cycle.
+    # A pair Massive's list does not hold has no data, as a 404 has: the cycle plans it as a
+    # call it never sends, whether the pair came in code or in a table. Under RAISE such a
+    # pair fails the table at its first cycle, in code or in a table, never at the call.
     serve_pairs(fake_rest)
     params = {"date": date(2025, 3, 3)}
-    static = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
-    assert isinstance(static, Query)
-    with pytest.raises(UnlistedPairError, match=r"^'X:DOTUSD' cannot be split"):
-        static.poll(60)
-    reader = cast("Any", session._core.rest_transport())._reader("poll")
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
     watch = SymbolTable(new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])]))
     request = Request(symbols=watch, params=(("date", date(2025, 3, 3)),))
-    with caplog.at_level(logging.DEBUG, LOGGER):
-        for _ in range(2):
-            planned, left_out = reader._plan_cycle(
-                CRYPTO_OPEN_CLOSE, request, ("X:BTCUSD", "X:DOTUSD"), cancel=Cancel()
-            )
-            assert [call.symbol for _, calls in planned for call in calls] == ["X:BTCUSD"]
-            assert left_out == ["X:DOTUSD (not in Massive's crypto ticker list)"]
-    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert [r.getMessage() for r in warned] == [
-        (
-            "crypto.daily_open_close poll(): 'X:DOTUSD' cannot be split into its two "
-            "currencies: Massive's reference data does not list it; it is left out and the "
-            "table's other symbols are read. Delete its row, or set "
-            "dm.MassiveConfig(unlisted_symbols=dm.OnError.RAISE) to fail instead"
-        )
-    ]  # once a session: the second cycle logs at DEBUG
+    planned, left_out = reader._plan_cycle(
+        CRYPTO_OPEN_CLOSE, request, ("X:BTCUSD", "X:DOTUSD"), cancel=Cancel()
+    )
+    calls = [call for _, calls in planned for call in calls]
+    assert [(call.symbol, call.unsplit) for call in calls] == [
+        ("X:BTCUSD", None),
+        ("X:DOTUSD", NOT_LISTED),
+    ]
+    assert left_out == []
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE),
     )
     with dm.MassiveSession(config) as strict:
         serve_pairs(fake_rest)
+        in_code = query(strict, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+        assert isinstance(in_code, FetchQuery)
+        assert _failed_soon(in_code.poll(60))
         table = query(strict, CRYPTO_OPEN_CLOSE, symbols=watch.table, params=params)
-        assert isinstance(table, Query)
+        assert isinstance(table, FetchQuery)
         assert _failed_soon(table.poll(60))
 
 
-def test_a_fetch_of_a_symbol_table_follows_unlisted_symbols(
+def test_a_fetch_reports_a_pair_massive_does_not_list_as_a_symbol_with_no_data(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     last = {
@@ -1501,31 +1745,35 @@ def test_a_fetch_of_a_symbol_table_follows_unlisted_symbols(
     fake_rest.reply("/v1/last/crypto/BTC/USD", btc, btc, btc)
     serve_pairs(fake_rest)
     table = new_table([string_col("Symbol", ["X:BTCUSD", "X:DOTUSD"])])
-    with caplog.at_level(logging.WARNING, LOGGER):
+    with caplog.at_level(logging.WARNING):
         out = fetch(session, CRYPTO_LAST, symbols=table)  # LOG, the default
     assert [r["Symbol"] for r in out] == ["X:BTCUSD"]
     assert [path for path, _ in sent_data(fake_rest)] == ["/v1/last/crypto/BTC/USD"]
-    assert len(caplog.records) == 1
-    assert caplog.messages[0].startswith("crypto.last fetch(): 'X:DOTUSD' cannot be split")
-    # A pair in code always raises; a table whose every pair is unlisted would read nothing.
-    with pytest.raises(UnlistedPairError, match="X:DOTUSD"):
-        fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"])
-    with pytest.raises(dm.MassiveError, match=r"no symbol of the symbol table is a crypto pair"):
-        fetch(session, CRYPTO_LAST, symbols=new_table([string_col("Symbol", ["X:DOTUSD"])]))
+    assert caplog.messages == [
+        no_data_alarm(
+            "crypto.last", 1, "X:DOTUSD", why="(Massive's crypto ticker list does not hold it)"
+        )
+    ]
+    # A pair Massive has no data for gives no rows, passed in code or in a table, alone too.
+    assert fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"]) == []
+    unlisted = new_table([string_col("Symbol", ["X:DOTUSD"])])
+    assert fetch(session, CRYPTO_LAST, symbols=unlisted) == []
     for setting in (dm.OnError.IGNORE, dm.OnError.RAISE):
         config = dm.MassiveConfig(
-            api_key="test-key", rest_base_url=fake_rest.url, unlisted_symbols=setting
+            api_key="test-key",
+            rest_base_url=fake_rest.url,
+            on_error=dm.ErrorPolicy(unavailable_symbols=setting),
         )
         with dm.MassiveSession(config) as other:
             serve_pairs(fake_rest)
             caplog.clear()
-            with caplog.at_level(logging.WARNING, LOGGER):
+            with caplog.at_level(logging.WARNING):
                 if setting is dm.OnError.RAISE:
-                    with pytest.raises(UnlistedPairError, match="X:DOTUSD"):
+                    with pytest.raises(UnavailableSymbolError, match="X:DOTUSD"):
                         fetch(other, CRYPTO_LAST, symbols=table)
                 else:
                     assert len(fetch(other, CRYPTO_LAST, symbols=table)) == 1
-            assert caplog.records == []  # IGNORE logs only at DEBUG
+            assert caplog.records == []  # IGNORE logs only at DEBUG, and RAISE fails
 
 
 def test_date_bounds_on_an_instant_axis_are_sent_as_the_days_instants(
@@ -1565,7 +1813,23 @@ def test_limit_caps_rows_across_requests(
     out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=3)
     assert len(out) == 3
     # A cap below the page size is the page size: no request asks for rows it cannot keep.
-    assert [q["limit"] for _, q in fake_rest.get_queries()] == [["3"], ["3"]]
+    # The second request asks only for the row still wanted.
+    assert [q["limit"] for _, q in fake_rest.get_queries()] == [["3"], ["1"]]
+
+
+def test_limit_sends_no_request_once_its_rows_have_arrived(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The symbols take two requests, but the first answers every row the call asked for.
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND, AAPL_DIVIDEND])))
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=2)
+    assert len(out) == 2
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["A,B"]]
+    assert (
+        "stocks.dividends: limit=2 rows arrived after 1 of 2 planned requests; the other 1 are "
+        "not sent"
+    ) in caplog.messages
 
 
 def test_limit_caps_each_symbol_s_rows_where_a_request_names_one_symbol(
@@ -1618,11 +1882,20 @@ def test_order_without_sort_fails_where_no_path_has_order(session: dm.MassiveSes
 def test_order_without_sort_fails_on_a_chosen_path_without_order(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # The contracts list path has `order`; the per-contract detail path has neither.
-    q = query(session, CONTRACTS, symbols=["O:SPY251219C00600000"], params={"order": Order.ASC})
-    assert isinstance(q, Query)
-    with pytest.raises(ValueError, match=r"does not take \['order'\]"):
-        q.fetch()
+    q = query(session, ROUTED, symbols=["O:SPY251219C00600000"], params={"order": Order.ASC})
+    assert isinstance(q, FetchQuery)
+    with pytest.raises(ValueError, match=r"^options\.routed does not take order\.$"):
+        q.fetch(wait=True)
+    assert fake_rest.requests == []
+
+
+def test_a_filter_a_chosen_path_lacks_fails_never_drops(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    q = query(session, ROUTED, symbols=["O:SPY251219C00600000"], filters={"strike_price_gte": 1})
+    assert isinstance(q, FetchQuery)
+    with pytest.raises(ValueError, match=r"^options\.routed does not take strike_price_gte\.$"):
+        q.fetch(wait=True)
     assert fake_rest.requests == []
 
 
@@ -1651,7 +1924,7 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
         Reply({"status": "success", "request_id": "r1", "symbol": "BTC-USD", "last": last}),
     )
     serve_pairs(fake_rest)
-    with caplog.at_level(logging.WARNING, LOGGER):
+    with caplog.at_level(logging.WARNING):
         out = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD"])
     assert sorted(path for path, _ in sent_data(fake_rest)) == [
         "/v1/last/crypto/BTC/USD",
@@ -1662,9 +1935,8 @@ def test_a_currency_pair_fills_from_and_to_and_the_symbol_from_the_request(
         ("X:BTCUSD", 97000.5, 1704310200000 * 10**6)
     ]
     assert caplog.messages == [
-        (
-            "crypto.last: no data for 1 [X:ETHUSD]: Massive answered HTTP 404 from "
-            "/v1/last/crypto/{from}/{to}, so they are left out"
+        no_data_alarm(
+            "crypto.last", 1, "X:ETHUSD", why="(HTTP 404 from GET /v1/last/crypto/ETH/USD)"
         )
     ]
 
@@ -1719,39 +1991,31 @@ def test_symbols_route_to_their_class_path_and_send_only_its_parameters(
     assert [(r["Symbol"], r["Value"]) for r in out] == [("AAPL", 185.0), ("X:BTCUSD", 97000.0)]
 
 
-def test_an_explicit_adjusted_fails_on_a_path_without_it(
+@pytest.mark.parametrize("adjusted", [False, True])
+def test_a_crypto_pair_path_leaves_adjusted_out_whatever_its_value(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, adjusted: bool
+) -> None:
+    # `adjusted` is split adjustment and a crypto pair has no splits, so the crypto path,
+    # which doesn't declare it, gets the same request either way; the stock path gets it.
+    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": [_SMA_VALUE]})))
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(envelope({"values": [_SMA_VALUE]})))
+    watch = new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])])
+    out = fetch(session, SMA, symbols=watch, adjusted=adjusted)
+    assert sorted(r["Symbol"] for r in out) == ["AAPL", "X:BTCUSD"]
+    requests = dict(fake_rest.get_queries())
+    assert requests["/v1/indicators/sma/AAPL"]["adjusted"] == [str(adjusted).lower()]
+    assert "adjusted" not in requests["/v1/indicators/sma/X:BTCUSD"]
+
+
+def test_an_explicit_adjusted_fails_on_another_path_without_it(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
-    assert isinstance(q, Query)
-    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
-        q.fetch()
+    # A path that isn't a crypto pair's and lacks `adjusted` would drop unadjusted prices.
+    q = query(session, DIVIDENDS, symbols=["AAPL"], adjusted=False)
+    assert isinstance(q, FetchQuery)
+    with pytest.raises(ValueError, match=r"^stocks\.dividends does not take adjusted=False\.$"):
+        q.fetch(wait=True)
     assert fake_rest.requests == []
-    fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
-    fetch(session, SMA, symbols=["AAPL"], adjusted=False)
-    assert fake_rest.get_queries()[0][1]["adjusted"] == ["false"]
-
-
-def test_a_per_symbol_detail_path_serves_named_symbols(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    contract = {"ticker": "O:SPY250117C00600000", "strike_price": 600.0}
-    fake_rest.reply(CONTRACTS_PATH, Reply(envelope([contract])))
-    fake_rest.reply(
-        "/v3/reference/options/contracts/O%3ASPY250117C00600000", Reply(envelope(contract))
-    )
-    listed = fetch(session, CONTRACTS, filters={"strike_price_gte": 500})
-    named = fetch(session, CONTRACTS, symbols=["O:SPY250117C00600000"])
-    assert [path for path, _ in fake_rest.get_queries()] == [
-        CONTRACTS_PATH,
-        "/v3/reference/options/contracts/O:SPY250117C00600000",
-    ]
-    assert listed == named
-    # A filter of the list path cannot reach the detail path: it fails, never drops.
-    q = query(session, CONTRACTS, symbols=["O:SPY250117C00600000"], filters={"strike_price_gte": 1})
-    assert isinstance(q, Query)
-    with pytest.raises(ValueError, match=r"does not take \['strike_price_gte'\]"):
-        q.fetch()
 
 
 def test_row_symbols_are_canonical(
@@ -1770,40 +2034,90 @@ def test_row_symbols_are_canonical(
     fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
     out = fetch(session, CONVERSION, params={"from": "AUD", "to": "USD", "amount": 100})
     assert [(r["Symbol"], r["Converted"]) for r in out] == [("C:AUDUSD", 65.5)]
-    assert out[0]["RawSymbol"] is None  # the default session keeps the column, null when read
+    assert "RawSymbol" not in out[0]
     assert fake_rest.get_queries()[0] == ("/v1/conversion/AUD/USD", {"amount": ["100"]})
     # Under RAISE, a spelling the library cannot read fails the request, naming it.
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unreadable_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE),
     )
     with dm.MassiveSession(config) as strict:
-        assert "RawSymbol" not in fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]
-        with pytest.raises(
-            dm.MassiveError,
-            match=r"^forex\.conversion: Massive sent the symbol 'not a pair', a spelling the "
-            r"library cannot read as Massive's ticker\. To keep such rows .* This is a bug in "
-            r"deephaven-massive\.",
-        ):
+        assert (
+            fetch(strict, CONVERSION, params={"from": "AUD", "to": "USD"})[0]["Converted"] == 65.5
+        )
+        # Under RAISE the row's cause fails the read first.
+        with pytest.raises(RowDataError) as info:
             fetch(strict, CONVERSION, params={"from": "AUD", "to": "XXX"})
+        assert str(info.value) == (
+            "forex.conversion: Massive sent 1 row the library cannot read whole, so it withheld "
+            "it: 1 under unreadable_symbols. Massive sent the symbol 'not a pair', a spelling "
+            "the library cannot read as Massive's ticker. To go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
+        )
 
 
-def test_an_unreadable_row_symbol_is_kept_in_raw_symbol_by_default(
-    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def dividend(ticker: str, row_id: str) -> dict[str, object]:
+    # One dividend row of a ticker as Massive spells it.
+    return {**AAPL_DIVIDEND, "ticker": ticker, "id": row_id}
+
+
+def test_an_unreadable_row_symbol_is_withheld_by_default(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
-    fresh = BoundedLog(logging.getLogger(wire_symbols.__name__), limit=5, level=logging.ERROR)
-    monkeypatch.setattr(wire_symbols, "_logged_spellings", fresh)
-    body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX", "symbol": "?"}
-    fake_rest.reply("/v1/conversion/AUD/XXX", Reply(body))
-    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
-    with dm.MassiveSession(config) as m, caplog.at_level(logging.WARNING, wire_symbols.__name__):
-        (row,) = fetch(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
-        q = query(m, CONVERSION, params={"from": "AUD", "to": "XXX"})
-        assert "RawSymbol" in [name for (name,) in q.columns().iter_tuple(cols="Name")]
-    assert (row["Symbol"], row["RawSymbol"]) == (None, "?")
-    (record,) = [r for r in caplog.records if r.name == wire_symbols.__name__]
-    assert record.levelno == logging.ERROR
-    assert record.getMessage().startswith("forex.conversion: Massive sent the symbol '?'")
+    events = record_problems(session, monkeypatch)
+    rows = [dividend("a b", "E9"), AAPL_DIVIDEND]
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(rows)))
+    with caplog.at_level(logging.WARNING):
+        out = fetch(session, DIVIDENDS, symbols=["AAPL"])
+    assert [(r["Id"], r["Symbol"]) for r in out] == [("E1", "AAPL")]
+    assert "RawSymbol" not in out[0]
+    assert [(e.cause, e.symbol, e.field, e.rows, e.stream_id) for e in events] == [
+        (ProblemCause.UNREADABLE_SYMBOLS, "a b", "Symbol", 1, 1)  # of the read, call 1
+    ]
+    assert events[0].detail.startswith("Massive sent the symbol 'a b'")
+    (alarm,) = alarms(caplog)
+    assert alarm.startswith("stocks.dividends table 1: unreadable_symbols: 1 row of a b, ")
+
+
+@pytest.mark.parametrize(
+    ("cause", "page"),
+    [
+        ("unreadable_symbols", [dividend("a b", "E9"), AAPL_DIVIDEND]),
+        ("unconvertible_values", [{**AAPL_DIVIDEND, "frequency": 4.5}, AAPL_DIVIDEND]),
+        (
+            "unreadable_keys",
+            [{k: v for k, v in AAPL_DIVIDEND.items() if k != "ticker"}, AAPL_DIVIDEND],
+        ),
+    ],
+)
+def test_a_withheld_rows_cause_under_raise_fails_the_read(
+    *, fake_rest: FakeRestServer, cause: str, page: list[dict[str, object]]
+) -> None:
+    # The good row beside it does not save the read: the cause's setting fails it.
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(page)))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(**{cause: dm.OnError.RAISE}),
+    )
+    with dm.MassiveSession(config) as m, pytest.raises(RowDataError) as info:
+        fetch(m, DIVIDENDS, symbols=["AAPL"])
+    hint = (
+        f"To go on without such rows, pass on_error=dm.ErrorPolicy({cause}=dm.OnError.LOG) to the "
+        "call or to dm.MassiveConfig."
+    )
+    assert re.fullmatch(
+        r"stocks\.dividends: Massive sent 1 row the library cannot read whole, so it withheld "
+        rf"it: 1 under {cause}\. \S.*\. {re.escape(hint)}",
+        str(info.value),
+    )
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
 
 
 def test_a_reactive_symbol_table_is_read_once_for_fetch(
@@ -1819,19 +2133,22 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
     # A table whose rows are all bad raises rather than read nothing.
     with pytest.raises(
         ValueError,
-        match=r"^m\.indices\.snapshots\(\): no row of the symbol table is a ticker this dataset "
-        r"takes, so the result would follow nothing: skipping 1 symbol-table value this dataset "
-        r"does not take: 'SPX'; fix or delete that row, or report it at https://",
+        match=r"^m\.indices\.snapshots\(\): No row of the symbol table is a ticker this dataset "
+        r"takes, so the result would follow nothing\. The table holds 'SPX'\. Fix or delete those "
+        r"rows, or report them at https://github\.com/chipkent/deephaven-massive/issues if Massive "
+        r"itself writes them\.$",
     ):
         fetch(session, INDEX_SNAPSHOTS, symbols=new_table([string_col("Symbol", ["SPX"])]))
     # Under RAISE, a bad row raises at once, naming the fix.
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, noncanonical_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE),
     )
     with dm.MassiveSession(config) as strict:
         bad = new_table([string_col("Symbol", ["SPX", "I:VIX"])])
         with pytest.raises(
-            ValueError, match=r"^indices\.snapshots: a symbol table holds 'SPX' .*use 'I:SPX'"
+            ValueError, match=r"^indices\.snapshots: A symbol table holds 'SPX'\. .*Pass 'I:SPX'"
         ):
             fetch(strict, INDEX_SNAPSHOTS, symbols=bad)
 
@@ -1857,45 +2174,59 @@ def test_error_rows_of_a_snapshot_are_kept_and_logged_once(
     # One WARNING per page, naming each ticker once per session.
     assert [r.message for r in caplog.records if "error rows" in r.message] == [
         (
-            f"indices.snapshots: Massive answered error rows from {INDEX_SNAPSHOT_PATH} for 2 "
-            "[I:VIX (NOT_ENTITLED: Not entitled), I:RUT (NOT_ENTITLED: Not entitled)]; the rows "
-            "are kept with their Error and Message columns"
+            'indices.snapshots: Massive answered error rows for I:VIX with "NOT_ENTITLED: Not '
+            'entitled" and I:RUT with "NOT_ENTITLED: Not entitled". The rows are kept, with '
+            "Massive's answer in their Error and Message columns."
         )
     ]
 
 
 def test_the_first_part_of_a_page_gives_a_drift_sample(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A snapshot page is read in two parts, its good rows and then its error rows; a field both
     # parts carry is sampled from the good rows, read first, whatever the rows' order.
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "x", "new": "from error"}
     spx = {"ticker": "I:SPX", "value": 1.0, "last_updated": 1704310200000000000, "new": "good"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused, spx])))
-    with caplog.at_level(logging.WARNING):
-        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
-    [drift] = [m for m in caplog.messages if "'new' is not in the schema" in m]
-    assert drift.endswith('; first value "good"')
+    events = record_problems(session, monkeypatch)
+    fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
+    [drift] = [e for e in events if e.cause is ProblemCause.SCHEMA_DRIFT]
+    assert drift.field == "new"
+    assert drift.detail.endswith(' Its first value: "good".')
 
 
-def test_drift_is_reported_once_per_field_and_status(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_drift_is_a_problem_of_each_read_and_its_status_is_logged_once(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_rest.reply(
         DIVIDENDS_PATH,
         Reply(envelope([{**AAPL_DIVIDEND, "brand_new": 1}], status="PARTIAL")),
     )
+    events = record_problems(session, monkeypatch)
     with caplog.at_level(logging.WARNING):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
         fetch(session, DIVIDENDS, symbols=["AAPL"])
-    assert caplog.text.count("'brand_new' is not in the schema") == 1
-    assert caplog.text.count("undocumented response status 'PARTIAL'") == 1
-    # The WARNING says where the field was seen and the first value it held.
-    assert "(schema drift) at GET /stocks/v1/dividends; first value 1\n" in caplog.text
+    assert caplog.text.count("with status 'PARTIAL', which Massive does not document") == 1
+    # Each read's drift is its own problem, with the field and the first value it held; each
+    # read's first warns once.
+    assert [(e.cause, e.field, e.stream_id) for e in events] == [
+        (ProblemCause.SCHEMA_DRIFT, "brand_new", 1),
+        (ProblemCause.SCHEMA_DRIFT, "brand_new", 2),
+    ]
+    assert all(e.detail.endswith(" Its first value: 1.") for e in events)
+    assert [a.split(":")[0] for a in alarms(caplog)] == [
+        "stocks.dividends table 1",
+        "stocks.dividends table 2",
+    ]
 
 
 def test_drift_of_a_per_symbol_request_names_the_symbol(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     last = {"conditions": [1], "exchange": 1, "price": 1.5, "size": 0.1, "timestamp": 1704310200000}
     body = {
@@ -1906,12 +2237,15 @@ def test_drift_of_a_per_symbol_request_names_the_symbol(
     }
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(body))
     serve_pairs(fake_rest)
-    with caplog.at_level(logging.WARNING):
-        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
-    assert (
-        "crypto.last: REST field 'new' is not in the schema; it is dropped (schema drift) "
-        f'at GET {CRYPTO_LAST_PATH}; symbol X:BTCUSD; first value "x"'
-    ) in caplog.messages
+    events = record_problems(session, monkeypatch)
+    fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
+    (drift,) = events
+    assert (drift.cause, drift.field, drift.where) == (
+        ProblemCause.SCHEMA_DRIFT,
+        "new",
+        f"GET {CRYPTO_LAST_PATH}",
+    )
+    assert drift.detail.endswith(' It was first sent for X:BTCUSD. Its first value: "x".')
 
 
 def test_a_row_without_its_symbol_is_a_data_failure(
@@ -1920,35 +2254,51 @@ def test_a_row_without_its_symbol_is_a_data_failure(
     row = {key: value for key, value in AAPL_DIVIDEND.items() if key != "ticker"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([row])))
     with (
-        caplog.at_level(logging.ERROR, LOGGER),
+        caplog.at_level(logging.DEBUG),
         pytest.raises(RowDataError, match=r"^stocks.dividends: "),
     ):
         fetch(session, DIVIDENDS, symbols=["AAPL"])
-    # Logged at ERROR with the same text, after the id of the call that failed.
-    assert re.search(r"call 1 failed after \d+\.\d{3} s: stocks\.dividends: ", caplog.text)
+    # Massive's data, no bug: nothing logs at ERROR, and the call that raised it logs its
+    # failure at DEBUG with the same text, after the call's id.
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    [failed] = [r for r in caplog.records if "call 1 failed" in r.getMessage()]
+    assert failed.levelno == logging.DEBUG
+    assert re.search(r"call 1 failed after \d+\.\d{3} s: stocks\.dividends: ", failed.getMessage())
 
 
 def test_one_odd_row_costs_the_call_only_itself(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A row without its symbol is dropped and counted; a value that does not fit is null.
+    # A row without its symbol and one with a value that does not fit are withheld and
+    # counted; the good row beside them lands.
     nameless = {key: value for key, value in AAPL_DIVIDEND.items() if key != "ticker"}
     odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([nameless, odd, AAPL_DIVIDEND])))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
         out = fetch(session, DIVIDENDS, symbols=["AAPL"])
-    assert [(r["Id"], r["Frequency"]) for r in out] == [("E2", None), ("E1", 4)]
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings == [
+    assert [(r["Id"], r["Frequency"]) for r in out] == [("E1", 4)]
+    assert sorted((e.cause, e.symbol, e.field, e.rows) for e in events) == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Frequency", 1),
+        (ProblemCause.UNREADABLE_KEYS, None, "Ticker", 1),
+    ]
+    # The first of each cause warns, pointing at m.problems().
+    assert sorted(alarms(caplog)) == [
         (
-            "stocks.dividends: REST field 'frequency' held a value that does not fit its type; it "
-            f"reads as null (schema drift) at GET {DIVIDENDS_PATH}; first value 4.5"
+            "stocks.dividends table 1: unconvertible_values: 1 row of AAPL, "
+            + next(e.detail for e in events if e.cause is ProblemCause.UNCONVERTIBLE_VALUES)
+            + f" (at REST GET {DIVIDENDS_PATH}). m.problems() lists it and every later "
+            "unconvertible_values problem of this table, which the log shows at DEBUG only."
         ),
         (
-            "stocks.dividends: dropped 1 REST row(s) whose key cannot be read, the first at GET "
-            f"{DIVIDENDS_PATH}: {DIVIDENDS_PATH}: row 0: no Ticker (wire key 'ticker'), which the "
-            "dataset needs; such rows are dropped and counted: the running count is logged at "
-            "DEBUG and shown in the SchemaDrift of each live table that lost them"
+            f"stocks.dividends table 1: unreadable_keys: 1 row, {DIVIDENDS_PATH}: row 0: no "
+            f"Ticker (wire key 'ticker'), which the dataset needs (at REST GET {DIVIDENDS_PATH}). "
+            "m.problems() lists it and every later unreadable_keys problem of this table, which "
+            "the log shows at DEBUG only."
         ),
     ]
 
@@ -1977,9 +2327,14 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
 ) -> None:
     nanos = 1704310200000000000  # nanoseconds where the indicators send milliseconds
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": [{"timestamp": nanos}]})))
-    mismatch = r"timestamp unit mismatch for indicators\.sma\.Timestamp"
-    with pytest.raises(RowDataError, match=mismatch):
+    with pytest.raises(RowDataError) as info:
         fetch(session, SMA, symbols=["AAPL"])
+    assert str(info.value) == (
+        "indicators.sma: the library could read none of the 1 rows of the read's symbols and "
+        "window from GET /v1/indicators/sma/AAPL whole, so it withheld them all. "
+        "Timestamp unit mismatch for indicators.sma.TimestampStart: 1704310200000000000 ms "
+        "overflows 64-bit nanoseconds. m.problems() counts the withheld rows by cause and symbol."
+    )
 
 
 # --- Errors ---------------------------------------------------------------------------------------
@@ -1993,8 +2348,8 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
             DIVIDENDS_PATH,
             ["AAPL"],
             (
-                "stocks.dividends: the Stocks subscription of your plan does not include this "
-                "data; Massive answered HTTP 403 from GET /stocks/v1/dividends?"
+                "stocks.dividends: Massive refused this read for the Stocks subscription. "
+                "Massive answered GET /stocks/v1/dividends?limit=1000&ticker.any_of=AAPL"
             ),
         ),
         (
@@ -2002,8 +2357,8 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
             CONTRACTS_PATH,
             None,
             (
-                "options.contracts: your account does not include this data; Massive answered "
-                "HTTP 403 from GET /v3/reference/options/contracts?"
+                "options.contracts: Massive refused this read for your account. Massive answered "
+                "GET /v3/reference/options/contracts?limit=1000"
             ),
         ),
     ],
@@ -2019,10 +2374,9 @@ def test_a_refusal_names_the_dataset_and_its_subscription(
 ) -> None:
     fake_rest.reply(path, Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403))
     with pytest.raises(dm.EntitlementError) as info:
-        fetch(session, spec, **({} if symbols is None else {"symbols": symbols}))
-    assert str(info.value).startswith(refusal)
-    assert str(info.value).endswith("upgrade")
-    assert (info.value.status, info.value.cause) == (403, dm.ErrorCause.EXPECTED)
+        fetch(session, spec, symbols=symbols)
+    assert str(info.value) == f'{refusal} on 127.0.0.1 with HTTP 403: "upgrade".'
+    assert (info.value.status, info.value.source) == (403, dm.ErrorSource.MASSIVE)
 
 
 def test_a_refusal_names_the_alternative_where_one_exists(
@@ -2034,13 +2388,18 @@ def test_a_refusal_names_the_alternative_where_one_exists(
     serve_pairs(fake_rest)
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
-    assert str(info.value).startswith(
-        "crypto.last: the Currencies subscription of your plan does not include this data; "
-        "Massive answered HTTP 403 from GET /v1/last/crypto/BTC/USD"
+    assert str(info.value) == (
+        "crypto.last: Massive refused this read for the Currencies subscription. Massive "
+        'answered GET /v1/last/crypto/BTC/USD on 127.0.0.1 with HTTP 403: "{}". Call '
+        "m.crypto.snapshots with the same symbols, which carries the same values."
     )
-    assert str(info.value).endswith(
-        "; try m.crypto.snapshots(...), which carries the same values and is in more plans"
+    # The advice works: the alternative the message names serves the same symbol.
+    fake_rest.reply(
+        "/v2/snapshot/locale/global/markets/crypto/tickers",
+        Reply({"status": "OK", "tickers": [{"ticker": "X:BTCUSD", "todaysChange": 1.0}]}),
     )
+    (row,) = fetch(session, crypto_ns.SNAPSHOTS, symbols=["X:BTCUSD"])
+    assert row["Symbol"] == "X:BTCUSD"
 
 
 @pytest.mark.parametrize(
@@ -2061,7 +2420,7 @@ def test_refusals_raise_their_public_errors(
     with caplog.at_level(logging.DEBUG), pytest.raises(error) as info:
         fetch(session, DIVIDENDS, symbols=["AAPL"])
     assert (info.value.status, info.value.request_id) == (status, "r9")
-    assert info.value.cause is dm.ErrorCause.EXPECTED
+    assert info.value.source is dm.ErrorSource.MASSIVE
     # A refusal the caller receives is expected: the call logs it at DEBUG, never higher.
     failed = [r for r in caplog.records if r.getMessage().startswith("call ")]
     assert [r.levelno for r in failed if "failed" in r.getMessage()] == [logging.DEBUG]
@@ -2083,14 +2442,17 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     refusal = {"status": "ERROR", "request_id": "r7", "message": "slow down"}
     fake_rest.reply(DIVIDENDS_PATH, Reply(refusal, status=429, headers={"Retry-After": "700"}))
     given_up = (
-        r"^rate limited: Massive is refusing stocks requests with HTTP 429 \(latest refusal: "
-        r".*r7.*\)\. Its next request, a probe, goes at 2027-01-15T08:10:00\+00:00 "
-        r"\(.* local time\), but this read waits out at most 300 s of pauses and has spent "
-        r"0 s of its patience\. The usual cause is another program or process using the same "
-        r"Massive account, whose limit they share\. "
-        r"To go on: retry after that time; stop the other program; or, if this subscription is "
-        r"on the Basic tier, declare it Basic \(rest_basic_subscriptions\) so its requests are "
-        r"paced, or upgrade it\. m\.rate_limits\(\) shows each subscription's state$"
+        "^"
+        + re.escape(
+            "Massive answered GET /stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 "
+            'with HTTP 429 (request_id r7): "slow down". The next request goes at 2027-01-15 '
+            "08:10:00 UTC, past the 300 s this read waits for Massive's pauses. The usual cause is "
+            "another program using the same Massive account, which shares its limit, and "
+            "m.rate_limits() shows each subscription's pace. Retry after that time, stop the "
+            "other program, or pass rest_requests_per_minute={dm.Subscription.STOCKS: n} to "
+            "dm.MassiveConfig, with the limit n Massive gives you."
+        )
+        + "$"
     )
     with caplog.at_level(logging.INFO):
         for _ in range(2):
@@ -2103,13 +2465,14 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     warnings = [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.INFO and "with HTTP 429 (" in r.getMessage()
+        if r.levelno == logging.INFO and "pause and resume" in r.getMessage()
     ]
     assert len(warnings) == 1
-    assert warnings[0].startswith(
-        f"{session._core.label}: Massive refused a stocks request with HTTP 429 (HTTP 429 from GET "
+    assert warnings[0] == (
+        "Massive answered GET /stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 "
+        'with HTTP 429 (request_id r7): "slow down". Stocks requests pause and resume by '
+        "themselves. If this persists, send request_id r7 to Massive's support."
     )
-    assert warnings[0].endswith("send the request id to Massive's support")
     assert "test-key" not in caplog.text
 
 
@@ -2125,19 +2488,24 @@ def test_a_failed_symbol_fails_the_whole_fan_out(
 def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
     transport = session._core.rest_transport()
     session.close()
-    with pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"):
-        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1, unlisted=dm.OnError.RAISE)
+    with pytest.raises(dm.MassiveError, match="^" + re.escape(session_closed()) + "$"):
+        transport.fetch(DIVIDENDS, Request(symbols=("AAPL",)), call=1)
 
 
 # --- History -----------------------------------------------------------------------------------
 
 
 def history(
-    m: dm.MassiveSession, spec: DatasetSpec, *, start: object, end: object, **kwargs: object
+    m: dm.MassiveSession,
+    spec: DatasetSpec,
+    *,
+    start: dm.DateLike,
+    end: dm.DateLike | None,
+    **kwargs: Unpack[ReadArguments],
 ) -> list[dict[str, Any]]:
     q = query(m, spec, **kwargs)
     assert isinstance(q, HistoryQuery)
-    return rows(q.history(cast("Any", start), cast("Any", end), source=HistorySource.REST))
+    return rows(q.history(start, end, source=HistorySource.REST, wait=True))
 
 
 def test_history_bounds_a_timestamp_axis_exactly_and_pages(
@@ -2162,6 +2530,153 @@ def test_history_bounds_a_timestamp_axis_exactly_and_pages(
         "stocks.trades history: source=REST requests=2, waiting out at most 600 s of pauses"
         in caplog.text
     )
+
+
+MIDNIGHT = epoch_ns(datetime(2025, 3, 3, 5, tzinfo=UTC))
+"""The start of the 2025-03-03 window: midnight in New York."""
+
+
+def window_trade(offset: int, price: object) -> dict[str, object]:
+    # A trade `offset` nanoseconds after the window's start; a negative offset lies outside it.
+    return {"sip_timestamp": MIDNIGHT + offset, "price": price, "size": 10}
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        pytest.param([window_trade(1, "x"), window_trade(2, "y")], id="every-row-inside"),
+        # The good rows outside the window count neither way.
+        pytest.param(
+            [window_trade(-2, 1.0), window_trade(1, "x"), window_trade(-1, 2.0)], id="good-outside"
+        ),
+    ],
+)
+def test_a_read_whose_rows_in_the_window_are_all_unreadable_fails(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, page: list[dict[str, object]]
+) -> None:
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope(page)))
+    with pytest.raises(
+        RowDataError,
+        match=r"^stocks\.trades: the library could read none of the \d rows of the read's symbols "
+        r"and window from GET /v3/trades/AAPL whole",
+    ):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+
+
+def serve_pages(fake_rest: FakeRestServer, pages: Sequence[list[dict[str, object]]]) -> None:
+    # Serve AAPL's trades as the given pages, each pointing to the next.
+    first = TRADES_PATH.format(stockTicker="AAPL")
+    for index, rows in enumerate(pages):
+        target = first if index == 0 else f"{first}?cursor={index}"
+        last = index == len(pages) - 1
+        following = None if last else f"{fake_rest.url}{first}?cursor={index + 1}"
+        fake_rest.reply(target, Reply(envelope(rows, next_url=following)))
+
+
+@pytest.mark.parametrize("bad", [0, 10], ids=["first-page", "last-page"])
+def test_a_page_whose_rows_are_all_unreadable_beside_pages_read_whole_fails_nothing(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    bad: int,
+) -> None:
+    # The read is judged across its pages: ten pages read whole and one of an unreadable row
+    # give the ten rows, and the one row is withheld and reported.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    pages = [[window_trade(index + 1, float(index))] for index in range(11)]
+    pages[bad] = [window_trade(bad + 1, "x")]
+    serve_pages(fake_rest, pages)
+    out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+    assert [r["Price"] for r in out] == [float(i) for i in range(11) if i != bad]
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)
+    ]
+
+
+def test_a_read_of_many_pages_whose_rows_are_all_unreadable_fails(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    serve_pages(fake_rest, [[window_trade(index + 1, "x")] for index in range(11)])
+    with pytest.raises(RowDataError, match=r"could read none of the 11 rows of the read's"):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+
+
+def read_aapl_and_msft_by_symbol(
+    session: dm.MassiveSession, fake_rest: FakeRestServer, *, msft_price: object
+) -> Mapping[str, SymbolOutcome]:
+    # Read AAPL, whose only row is withheld, and MSFT, by symbol, as a followed table does;
+    # a `msft_price` of None has Massive answer HTTP 404 for MSFT: it has no data.
+    aapl = TRADES_PATH.format(stockTicker="AAPL")
+    fake_rest.reply(aapl, Reply(envelope([window_trade(1, "x")])))
+    msft = TRADES_PATH.format(stockTicker="MSFT")
+    rows = None if msft_price is None else [window_trade(1, msft_price)]
+    fake_rest.reply(msft, Reply(status=404) if rows is None else Reply(envelope(rows)))
+    day = date(2025, 3, 3)
+    asked = Request(start=day, end=day, on_error=session._core.policy)
+    window = history_window(TRADES, asked, start=day, end=day, classes=())
+    transport = session._core.rest_transport()
+    tally = ReadTally()
+    out = transport.history_by_symbol(
+        TRADES, asked, window, symbols=["AAPL", "MSFT"], call=1, tally=tally
+    )
+    return tally.judge(TRADES.name, out)
+
+
+def test_a_symbol_whose_rows_are_all_unreadable_beside_one_read_whole_gets_no_rows(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    out = read_aapl_and_msft_by_symbol(session, fake_rest, msft_price=1.0)
+    aapl, msft = out["AAPL"], out["MSFT"]
+    assert isinstance(aapl, SymbolRows)
+    assert isinstance(msft, SymbolRows)
+    assert aapl.table.size == 0
+    assert msft.table.size == 1
+
+
+def test_a_read_by_symbol_whose_rows_are_all_unreadable_fails_each_symbol_alone(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Each symbol fails, as a failed request fails its own, so a followed table goes on.
+    out = read_aapl_and_msft_by_symbol(session, fake_rest, msft_price="y")
+    for symbol in ("AAPL", "MSFT"):
+        failed = out[symbol]
+        assert isinstance(failed, SymbolFailure)
+        assert isinstance(failed.error, RowDataError)
+        assert "could read none of the 2 rows of the read's symbols" in str(failed.error)
+
+
+def test_a_symbol_massive_has_no_data_for_keeps_its_rows_when_the_read_fails(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # MSFT had no rows to read: its empty rows stand, and only AAPL fails.
+    out = read_aapl_and_msft_by_symbol(session, fake_rest, msft_price=None)
+    aapl, msft = out["AAPL"], out["MSFT"]
+    assert isinstance(aapl, SymbolFailure)
+    assert isinstance(aapl.error, RowDataError)
+    assert isinstance(msft, SymbolRows)
+    assert (msft.table.size, msft.no_data) == (0, True)
+
+
+def test_unreadable_rows_outside_the_window_are_neither_published_nor_reported(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    page = [
+        window_trade(-2, "x"),
+        window_trade(1, 1.0),
+        window_trade(-1, "y"),
+        window_trade(2, 2.0),
+    ]
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope(page)))
+    out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
+    assert [r["Price"] for r in out] == [1.0, 2.0]
+    assert events == []
 
 
 def test_bars_fill_the_range_segments_in_milliseconds(
@@ -2228,7 +2743,7 @@ def test_all_daily_bars_request_only_the_days_asked_for(
     request = dataclasses.replace(q._request, start=first, end=last)
     window = history_window(BARS, request, start=first, end=last, classes=())
     table = session._core.rest_transport().history(
-        BARS, request, window, call=1, days=[date(2025, 3, 4)]
+        BARS, request, window, call=1, tally=ReadTally(), days=[date(2025, 3, 4)]
     )
     assert [(r["Symbol"], r["Close"]) for r in rows(table)] == [("MSFT", 3.0)]
     assert [path for path, _ in fake_rest.get_queries()] == [GROUPED_PATH.format(date="2025-03-04")]
@@ -2305,8 +2820,12 @@ def test_futures_trades_by_date_read_each_session_by_its_date(
     assert [r["Timestamp"] for r in out] == [sunday["timestamp"], tuesday["timestamp"]]
 
 
-def test_a_futures_session_without_data_is_left_out_with_its_own_warning(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_a_futures_session_without_data_is_left_out_as_its_own_problem(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Each session is its own request series, so a 404 on a later session after rows of an
     # earlier one is that session's: it has no data, and the call goes on.
@@ -2314,18 +2833,24 @@ def test_a_futures_session_without_data_is_left_out_with_its_own_warning(
     fake_rest.reply(session_target("ESH5", "2025-01-21"), Reply(envelope([trade])))
     fake_rest.reply(session_target("ESH5", "2025-01-22"), Reply(status=404))
     fake_rest.reply(session_target("ESH5", "2025-01-23"), Reply(status=404))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
         out = history(
             session, FUTURES_TRADES, start="2025-01-21", end="2025-01-23", symbols=["ESH5"]
         )
     assert [r["Timestamp"] for r in out] == [trade["timestamp"]]
-    # One WARNING for the read, naming each session.
-    assert caplog.messages == [
+    # A problem for each session, and one WARNING for the read, naming the first.
+    why = "(HTTP 404 from GET /futures/v1/trades/ESH5)"
+    assert [(e.cause, e.symbol, e.detail) for e in events] == [
         (
-            "futures.trades: no data for 2 [ESH5 for the session 2025-01-22, ESH5 for the session "
-            "2025-01-23]: Massive answered HTTP 404 from /futures/v1/trades/{ticker}, so they are "
-            "left out"
+            ProblemCause.UNAVAILABLE_SYMBOLS,
+            "ESH5",
+            f"Massive has no data for it for the session {day} {why}",
         )
+        for day in ("2025-01-22", "2025-01-23")
+    ]
+    assert caplog.messages == [
+        no_data_alarm("futures.trades", 1, "ESH5", why=f"for the session 2025-01-22 {why}")
     ]
 
 
@@ -2359,11 +2884,7 @@ def test_futures_sessions_skip_weekends_and_come_in_date_order(
         ("ESH5", "2024-04-01"),
         ("NQH5", "2024-04-01"),
     ]
-    assert (
-        "futures.trades history: 6 requests, one per session and symbol, more where a session "
-        "spans several pages; if the futures subscription is on the Basic tier (5 requests a "
-        "minute), they take at least 1 min"
-    ) in caplog.messages
+    assert "requests a minute" not in caplog.text  # unpaced: no limit is known to announce
 
 
 def test_a_short_session_download_is_not_announced(
@@ -2383,13 +2904,18 @@ def test_a_session_end_date_filter_needs_datetimes(
 ) -> None:
     q = query(session, FUTURES_TRADES, symbols=["ESH5"], filters={"session_end_date": "2025-01-21"})
     assert isinstance(q, HistoryQuery)
-    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
-        q.history("2025-01-21", "2025-01-21", source=HistorySource.REST)
+    refused = (
+        "futures.trades: history() with dates sets session_end_date itself, so it takes no "
+        "session_end_date filter. Leave the filter out, or pass datetimes as start and end to "
+        "combine it with a time range."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refused)}$"):
+        q.history("2025-01-21", "2025-01-21", source=HistorySource.REST, wait=True)
     assert fake_rest.get_queries() == []
     # With datetimes, the filter and the time range travel together.
     fake_rest.reply(FUTURES_TRADES_PATH.format(ticker="ESH5"), Reply(envelope([])))
     start = datetime(2025, 1, 21, 8, tzinfo=CHICAGO)
-    q.history(start, start + timedelta(hours=1), source=HistorySource.REST)
+    q.history(start, start + timedelta(hours=1), source=HistorySource.REST, wait=True)
     sent_query = fake_rest.get_queries()[0][1]
     assert sent_query["session_end_date"] == ["2025-01-21"]
     assert sent_query["timestamp.gte"] == [str(epoch_ns(start))]
@@ -2499,6 +3025,65 @@ def test_a_listed_subscription_decides_the_delayed_feed(
         m.close()
 
 
+@pytest.mark.parametrize(
+    ("reply", "recency", "evidence"),
+    [
+        (
+            Reply(envelope([{"ticker": "I:SPX", "value": 5900.25}])),
+            "UNKNOWN",
+            "websocket_hosts, no timeframe in the indices snapshot",
+        ),
+        (
+            Reply(envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}])),
+            "DELAYED",
+            "websocket_hosts, timeframe=DELAYED",
+        ),
+        (
+            Reply(envelope([{"ticker": "I:SPX", "timeframe": "REAL-TIME"}])),
+            "REALTIME",
+            "websocket_hosts, timeframe=REAL-TIME",
+        ),
+        (
+            Reply(b'{"status":"ERROR","request_id":"x1"}', status=401),
+            "UNKNOWN",
+            "websocket_hosts, the host check's snapshot (/v3/snapshot/indices) failed: ",
+        ),
+    ],
+    ids=["no label", "delayed", "real-time", "failed"],
+)
+def test_a_pinned_host_s_row_shows_massive_s_label(
+    *,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    reply: Reply,
+    recency: str,
+    evidence: str,
+) -> None:
+    # A pinned business.massive.com never shows real-time by its name; a failed read leaves
+    # it UNKNOWN, decided and connected, never a failed decision.
+    m = dm.MassiveSession(
+        dm.MassiveConfig(
+            api_key="test-key",
+            rest_base_url=fake_rest.url,
+            websocket_hosts={AssetClass.INDICES: "business.massive.com"},
+        )
+    )
+    try:
+        fake_rest.reply(INDEX_SNAPSHOT_PATH, reply)
+        decision = m._core.rest_transport().resolve_host(AssetClass.INDICES, ChannelFamily.TICK)
+        assert (decision.host, decision.recency) == ("business.massive.com", Recency(recency))
+        (row,) = connection_rows(m, dh_to_pylist)
+        assert (row["Host"], row["Recency"], row["State"]) == (
+            "business.massive.com",
+            recency,
+            "CONNECTED",
+        )
+        assert row["Evidence"].startswith(evidence)
+        assert row["LastError"] is None
+    finally:
+        m.close()
+
+
 def test_a_failed_decision_is_not_cached(
     *,
     session: dm.MassiveSession,
@@ -2527,7 +3112,7 @@ def test_a_defect_while_deciding_caches_nothing(
         raise KeyError("bug")
 
     monkeypatch.setattr(host_decision, "decide", broken)
-    transport = cast("rest.RestEndpoints", session._core.rest_transport())
+    transport = _endpoints(session)
     with pytest.raises(KeyError):
         transport.resolve_host(AssetClass.STOCKS, ChannelFamily.TICK)
     _, owner = transport._state.hosts._claim((AssetClass.STOCKS, ChannelFamily.TICK))
@@ -2612,19 +3197,23 @@ def test_columns_a_path_does_not_carry_are_null(
     assert (row["Symbol"], row["CashAmount"], row["StrikePrice"]) == ("AAPL", 0.25, None)
 
 
-def test_a_missing_symbol_and_an_error_row_warn_once_per_session(
+def test_a_missing_symbol_warns_once_per_read_and_an_error_row_once_per_session(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
     serve_pairs(fake_rest)
-    with caplog.at_level(logging.WARNING, LOGGER):
+    with caplog.at_level(logging.WARNING):
         for _ in range(2):
             assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
             (row,) = fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
             assert (row["Symbol"], row["Error"]) == ("I:VIX", "NOT_ENTITLED")
-    assert caplog.text.count("no data for 1 [X:ETHUSD]") == 1
-    assert caplog.text.count("for 1 [I:VIX (NOT_ENTITLED: Not entitled)]") == 1
+    # Each read is its own table in m.problems(), so each warns of its first missing symbol.
+    why = "(HTTP 404 from GET /v1/last/crypto/ETH/USD)"
+    assert alarms(caplog) == [
+        no_data_alarm("crypto.last", read, "X:ETHUSD", why=why) for read in (1, 3)
+    ]
+    assert caplog.text.count('error rows for I:VIX with "NOT_ENTITLED: Not entitled".') == 1
 
 
 def test_a_read_fans_out_on_the_callers_pool(
@@ -2636,14 +3225,14 @@ def test_a_read_fans_out_on_the_callers_pool(
             f"/v1/last/crypto/{pair}",
             Reply({"status": "success", "request_id": "r", "symbol": pair, "last": last}),
         )
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD", "X:ETHUSD"))
     calls = rest_requests.plan_calls(
-        CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair
+        CRYPTO_LAST, path, request, symbols=request.static_symbols, split=split_pair
     )
     with ThreadPoolExecutor(2) as pool:
-        table, requests = reader.read(
+        table, requests, _ = reader.read(
             CRYPTO_LAST,
             path,
             calls,
@@ -2651,49 +3240,10 @@ def test_a_read_fans_out_on_the_callers_pool(
             limit=None,
             executor=pool,
             patience=_massive.Patience(math.inf),
+            tally=ReadTally(),
         )
         assert not pool._shutdown  # the caller's pool stays open
     assert (table.num_rows, requests) == (2, 2)
-
-
-class _RefusalError(ValueError):
-    """A path's refusal of a parameter, which a test can hold weakly to see it freed."""
-
-
-def test_a_parameter_one_path_refuses_leaves_no_cycle(
-    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The crypto path refuses `adjusted` and the stock path takes it, so the check passes. The
-    # crypto path's error must be freed when the check returns, not left in a reference cycle
-    # with the check's frame: that cycle holds the reader, and through it the session, until
-    # the cyclic collector runs. The collector stays off, so only reference counting frees it.
-    refusals: list[weakref.ref[_RefusalError]] = []
-    real = rest_requests.shared_params
-
-    def base(
-        spec: DatasetSpec, rest_path: RestPath, request: Request, *, fixed: Mapping[str, object]
-    ) -> tuple[dict[str, object], dict[str, object]]:
-        try:
-            return real(spec, rest_path, request, fixed=fixed)
-        except ValueError as error:
-            refusal = _RefusalError(str(error))
-            refusals.append(weakref.ref(refusal))
-            try:
-                raise refusal from None
-            finally:
-                del refusal  # this frame must not hold its own error
-
-    monkeypatch.setattr(rest, "shared_params", base)
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("poll")
-    enabled = gc.isenabled()
-    gc.disable()
-    try:
-        reader.check_parameters(SMA, Request(adjusted=False))
-        assert len(refusals) == 1
-        assert refusals[0]() is None
-    finally:
-        if enabled:
-            gc.enable()
 
 
 def test_a_failed_history_is_logged_and_raised(
@@ -2717,23 +3267,30 @@ def test_a_404_without_a_symbol_fails_the_call(
 def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without_data(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     request = Request(symbols=("X:BTCUSD",))
     calls = rest_requests.plan_calls(
-        CRYPTO_LAST, path, request, symbols=request.symbols, split=split_pair
+        CRYPTO_LAST, path, request, symbols=request.static_symbols, split=split_pair
     )
 
     def pages(*_: object, **__: object) -> NoReturn:
         # The session closes while the symbol's request is on the wire, which then ends in 404.
         reader.state.close()
-        raise _massive.WireError("HTTP 404 from GET /v1/last/crypto/BTC/USD", status=404)
+        raise _massive.WireError(
+            "HTTP 404 from GET /v1/last/crypto/BTC/USD",
+            status=404,
+            kind=_massive.WireFailure.REFUSED,
+        )
 
     monkeypatch.setattr(reader.state.client, "pages", pages)
     with (
         caplog.at_level(logging.DEBUG, LOGGER),
         ThreadPoolExecutor(1) as pool,
-        pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"),
+        pytest.raises(
+            dm.MassiveError,
+            match="^" + re.escape(session_closed()) + "$",
+        ),
     ):
         reader.read(
             CRYPTO_LAST,
@@ -2743,10 +3300,11 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
             limit=None,
             executor=pool,
             patience=_massive.Patience(math.inf),
+            tally=ReadTally(),
         )
     assert "has no data" not in caplog.text  # the symbol is not dropped as missing
     assert (
-        f"crypto.last: HTTP 404 for X:BTCUSD from {CRYPTO_LAST_PATH} arrived after "
+        "crypto.last: HTTP 404 for X:BTCUSD from GET /v1/last/crypto/BTC/USD arrived after "
         f"{session._core.label} closed; the call reports the close"
     ) in caplog.messages
 
@@ -2765,9 +3323,9 @@ def test_an_error_row_needs_only_its_symbol(
     )
     refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     table, _ = reader.read_fetch(
-        timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",), unlisted=dm.OnError.RAISE
+        timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",), tally=ReadTally()
     )
     assert table.column("Symbol").to_pylist() == ["I:VIX"]
     assert table.column("Timestamp").to_pylist() == [None]
@@ -2777,7 +3335,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"{}", status=401))
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     path = reader.rest_path(CRYPTO_LAST_PATH)
     symbols = ("X:BTCUSD", "X:ETHUSD", "X:SOLUSD", "X:XRPUSD")
     calls = rest_requests.plan_calls(
@@ -2821,6 +3379,7 @@ def test_a_failed_call_cancels_the_calls_not_yet_started(
             limit=None,
             executor=pool,
             patience=_massive.Patience(math.inf),
+            tally=ReadTally(),
         )
     # The one worker may take the next call before the read cancels it; the rest never start.
     assert len(fake_rest.get_queries()) <= 2
@@ -2843,22 +3402,41 @@ def test_a_decision_is_shared_even_if_recording_it_fails(
     assert len(snapshots.requests) == 1
 
 
+def test_a_poll_checks_each_value_of_a_table_as_the_parameter_it_is_sent_as(
+    *, session: dm.MassiveSession
+) -> None:
+    # Each value of a table of underlyings is sent as `underlying_ticker`, which the contracts
+    # list takes and a named contract's path doesn't.
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
+    with entered(session._core.exec_ctx):
+        table = new_table([string_col("Underlying", ["SPY"])])
+    underlyings = ValueTable(
+        "underlying", "underlying_ticker", "Underlying", underlying=True, table=table
+    )
+    reader.check_parameters(CONTRACTS, Request(value_table=underlyings))
+    named = Request(symbols=("O:SPY250117C00600000",), value_table=underlyings)
+    with pytest.raises(
+        ValueError, match=r"^options\.contract_details does not take underlying_ticker\.$"
+    ):
+        reader.check_parameters(CONTRACT_DETAILS, named)
+
+
 def test_a_parameter_no_fetch_path_takes_fails_a_reactive_poll_at_once(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     watch = new_table([string_col("Symbol", ["X:BTCUSD"])])
     q = query(session, SMA, symbols=watch, params={"bogus": 1})
-    assert isinstance(q, Query)
-    with pytest.raises(ValueError, match=r"does not take \['bogus'\]"):
+    assert isinstance(q, FetchQuery)
+    with pytest.raises(ValueError, match=r"^indicators\.sma does not take bogus\.$"):
         q.poll(60)
     assert fake_rest.requests == []
 
 
 def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> None:
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     request = Request(symbols=(), adjusted=False)  # no path would take `adjusted` here
     assert reader.plan_fetch(DIVIDENDS, request, ()) == []
-    table, requests = reader.read_fetch(DIVIDENDS, request, symbols=(), unlisted=dm.OnError.RAISE)
+    table, requests = reader.read_fetch(DIVIDENDS, request, symbols=(), tally=ReadTally())
     assert (table.num_rows, requests) == (0, 0)
     assert table.schema.names[0] == "Symbol"
 
@@ -2875,10 +3453,13 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
     with caplog.at_level(logging.WARNING, LOGGER):
         (row,) = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
     assert row["Symbol"] == "X:BTCUSD"
-    assert (
-        "error rows from /v1/last/crypto/{from}/{to} for 1 [X:BTCUSD (NOT_ENTITLED: Not entitled)]"
-        in caplog.text
-    )
+    assert [r.getMessage() for r in caplog.records if "error rows" in r.getMessage()] == [
+        (
+            'crypto.last: Massive answered error rows for X:BTCUSD with "NOT_ENTITLED: Not '
+            "entitled\". The rows are kept, with Massive's answer in their Error and Message "
+            "columns."
+        )
+    ]
 
 
 def test_a_nanosecond_inclusive_axis_fails_a_reactive_poll_at_once(
@@ -2893,7 +3474,7 @@ def test_a_nanosecond_inclusive_axis_fails_a_reactive_poll_at_once(
         time_axis=("timestamp.gte", "timestamp.lte"),
         keys={(R, path): SourceKeys(symbol=KeySpec("ticker", from_request=True))},
     )
-    transport = cast("rest.RestEndpoints", session._core.rest_transport())
+    transport = _endpoints(session)
     watch = SymbolTable(new_table([string_col("Symbol", ["ESZ5"])]))
     request = Request(symbols=watch, end=date(2025, 3, 4))
     with pytest.raises(ValueError, match=r"timestamp\.lte takes nanoseconds"):
@@ -2982,39 +3563,54 @@ def test_an_empty_range_returns_every_column_without_a_request(
     moment = datetime(2025, 3, 3, 15, tzinfo=UTC)
     q = query(session, TRADES, symbols=["AAPL"])
     assert isinstance(q, HistoryQuery)
-    table = q.history(moment, moment, source=source)
+    table = q.history(moment, moment, source=source, wait=True)
     assert table.size == 0
     assert "Timestamp" in table.column_names
     # So is a range too short to hold one whole bar.
     bars = query(session, BARS, symbols=["AAPL"], timespan=Timespan.MONTH, adjusted=False)
     assert isinstance(bars, HistoryQuery)
-    assert bars.history("2025-03-05", "2025-03-20", source=source).size == 0
+    assert bars.history("2025-03-05", "2025-03-20", source=source, wait=True).size == 0
     assert fake_rest.get_queries() == []
 
 
-def test_a_long_grouped_daily_download_is_announced(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_a_long_grouped_daily_download_of_a_paced_subscription_is_announced(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    paced = dm.MassiveSession(
+        dm.MassiveConfig(
+            api_key="test-key",
+            rest_base_url=fake_rest.url,
+            rest_requests_per_minute={dm.Subscription.STOCKS: 5},
+        )
+    )
     for day in range(3, 18):
         fake_rest.reply(GROUPED_PATH.format(date=f"2025-03-{day:02d}"), Reply(envelope([])))
-    with caplog.at_level(logging.INFO):
-        history(
-            session,
-            BARS,
-            start="2025-03-03",
-            end="2025-03-17",
-            symbols=dm.ALL,
-            timespan=Timespan.DAY,
-            adjusted=True,
-        )
+    try:
+        with caplog.at_level(logging.INFO):
+            history(
+                paced,
+                BARS,
+                start="2025-03-03",
+                end="2025-03-17",
+                symbols=dm.ALL,
+                timespan=Timespan.DAY,
+                adjusted=True,
+            )
+    finally:
+        paced.close()
     # Stocks have no grouped day on a Saturday or Sunday: 11 weekdays, not 15 days.
     days = sorted(path.rsplit("/", 1)[1] for path, _ in fake_rest.get_queries())
     assert len(days) == 11
     assert all(date.fromisoformat(day).weekday() < 5 for day in days)
     assert (
-        "stocks.bars history: 11 requests, one per day; if the stocks subscription is on the "
-        "Basic tier (5 requests a minute), they take at least 2 min"
-    ) in caplog.text
+        "stocks.bars history: 11 requests, one per day, paced at 5 requests a minute for "
+        "stocks. At that pace they take at least 2 min."
+    ) in caplog.messages
+
+
+ISSUES = "https://github.com/chipkent/deephaven-massive/issues"
+"""Where an unexpected bar stamp's WARNING asks for it to be reported."""
 
 
 def unexpected_stamps(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -3022,12 +3618,16 @@ def unexpected_stamps(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+        if r.levelno == logging.WARNING and "cannot tell which day this one covers" in r.message
     ]
 
 
 def test_forex_day_bars_are_stamped_at_the_utc_days_start(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The range's 00:00 UTC stays and the day's last millisecond moves to 00:00 UTC.
     march_3, march_4 = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 4))
@@ -3053,7 +3653,14 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
     fake_rest.reply(
         grouped,
         Reply(envelope([{"T": "C:EURUSD", "t": last_ms, "c": 3.0}])),
-        Reply(envelope([{"T": "C:EURUSD", "t": new_york, "c": 3.0}])),
+        Reply(
+            envelope(
+                [
+                    {"T": "C:EURUSD", "t": new_york, "c": 3.0},
+                    {"T": "C:GBPUSD", "t": last_ms, "c": 4.0},
+                ]
+            )
+        ),
     )
     every = history(
         session,
@@ -3066,10 +3673,11 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
     )
     assert [(r["Symbol"], r["TimestampStart"]) for r in every] == [("C:EURUSD", march_3 * 10**6)]
     assert not unexpected_stamps(caplog)
-    # A stamp at midnight New York time may be another day cut: the bar keeps it, with no
-    # Date, and ends a day later, so a range of 03-03 alone does not hold its whole window;
-    # one WARNING names the symbol and the stamp, since bars are stamped before the window
-    # keeps them.
+    # A stamp at midnight New York time may be another day cut: which day the bar covers
+    # would be a guess, so it is withheld and reported, beside the pair stamped as Massive
+    # does; one WARNING names the symbol and the stamp.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
     with caplog.at_level(logging.WARNING):
         odd = history(
             session,
@@ -3080,13 +3688,19 @@ def test_forex_day_bars_are_stamped_at_the_utc_days_start(
             timespan=Timespan.DAY,
             adjusted=True,
         )
-    assert odd == []
+    assert [(r["Symbol"], r["Close"]) for r in odd] == [("C:GBPUSD", 4.0)]
+    assert [(e.cause, e.symbol, e.field) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "C:EURUSD", "TimestampStart")
+    ]
+    assert events[0].detail == (
+        "stamped at 2025-03-03T05:00:00+00:00, which Massive is not known to use for a 1-day bar"
+    )
     [warning] = unexpected_stamps(caplog)
-    assert warning.startswith(
-        "forex.bars: a 1-day bar of C:EURUSD from /v2/aggs/grouped/locale/global/market/fx/{date} "
-        "is stamped 2025-03-03T05:00:00+00:00, which is not a stamp Massive is known to use for "
-        "such a bar (00:00:00.000, 23:59:59.999 in UTC). The library cannot tell which day it "
-        "covers, so the row is served as sent"
+    assert warning == (
+        "forex.bars: Massive sent a 1-day bar of C:EURUSD stamped 2025-03-03T05:00:00+00:00. "
+        "Massive is known to stamp bars of 1 day at 00:00:00.000 and 23:59:59.999 in UTC, so the "
+        "library cannot tell which day this one covers and withholds it. Report the stamp at "
+        f"{ISSUES} so the library can learn which day such bars cover."
     )
 
 
@@ -3122,22 +3736,19 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
 ) -> None:
     caplog.set_level(logging.WARNING)
     # A two-day bar stamped at midnight New York time may hold hours of the next day: it is
-    # served at its stamp, ends two days later, and logs one WARNING.
+    # withheld and logs one WARNING; a page of no other bar fails the read.
     start, end = utc_ms(date(2025, 3, 3)), utc_ms(date(2025, 3, 7)) - 1
     two_days = f"/v2/aggs/ticker/X:BTCUSD/range/2/day/{start}/{end}".replace(":", "%3A")
     new_york = ny_ms(date(2025, 3, 3))
     fake_rest.reply(two_days, Reply(envelope([{"t": new_york, "c": 1.0}])))
-    out = crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
-    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Close"]) for r in out] == [
-        (None, new_york * 10**6, (new_york + 2 * 86_400_000) * 10**6, 1.0)
-    ]
+    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+        crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
     [warning] = unexpected_stamps(caplog)
-    assert warning.startswith(
-        "crypto.bars: a bar of X:BTCUSD from /v2/aggs/ticker/{cryptoTicker}/range/{multiplier}/"
-        "{timespan}/{from}/{to} is stamped 2025-03-03T05:00:00+00:00, which is not a stamp "
-        "Massive is known to use for such a bar (00:00:00.000 in UTC). The library cannot tell "
-        "which day it covers, so the row is served as sent: TimestampStart is Massive's stamp, "
-        "TimestampEnd that stamp plus 2 days"
+    assert warning == (
+        "crypto.bars: Massive sent a bar of X:BTCUSD stamped 2025-03-03T05:00:00+00:00. Massive "
+        "is known to stamp bars of 2 days at 00:00:00.000 in UTC, so the library cannot tell "
+        f"which day this one covers and withholds it. Report the stamp at {ISSUES} so the "
+        "library can learn which day such bars cover."
     )
     caplog.clear()
     # Massive stamps a crypto week at 00:00 UTC on its Sunday (2026-10-11 in the live check),
@@ -3155,15 +3766,17 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
         (sunday * 10**6, after * 10**6, 2.0)
     ]
     assert not unexpected_stamps(caplog)
-    # A week bar stamped on another day may cover another week: it keeps its stamp and ends
-    # a week later, after the range, so this range does not hold it; its form warns.
-    out = crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
-    assert out == []
+    # A week bar stamped on another day may cover another week: it is withheld, and its form
+    # warns.
+    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+        crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
     [warning] = unexpected_stamps(caplog)
-    assert (
-        "is stamped 2026-10-12T00:00:00+00:00, which is not a stamp Massive is known to use for "
-        "such a bar (00:00:00.000 in UTC, on a Sunday)"
-    ) in warning
+    assert warning == (
+        "crypto.bars: Massive sent a bar of X:BTCUSD stamped 2026-10-12T00:00:00+00:00. Massive "
+        "is known to stamp bars of 1 week at 00:00:00.000 in UTC, on a Sunday, so the library "
+        f"cannot tell which day this one covers and withholds it. Report the stamp at {ISSUES} "
+        "so the library can learn which day such bars cover."
+    )
     caplog.clear()
 
     # A month bar must be stamped on its 1st.
@@ -3181,12 +3794,16 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
         (first * 10**6, april * 10**6, 3.0)
     ]
     assert not unexpected_stamps(caplog)
-    # A month bar stamped on the 2nd ends on April 2, after the range.
-    out = crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
-    assert out == []
+    # A month bar stamped on the 2nd is withheld.
+    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+        crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
     [warning] = unexpected_stamps(caplog)
-    assert "is stamped 2025-03-02T00:00:00+00:00" in warning
-    assert "on the 1st of a month)" in warning
+    assert warning == (
+        "crypto.bars: Massive sent a bar of X:BTCUSD stamped 2025-03-02T00:00:00+00:00. Massive "
+        "is known to stamp bars of 1 month at 00:00:00.000 in UTC, on the 1st of a month, so the "
+        "library cannot tell which day this one covers and withholds it. Report the stamp at "
+        f"{ISSUES} so the library can learn which day such bars cover."
+    )
 
 
 def test_forex_grouped_daily_keeps_its_sunday_but_not_its_saturday(
@@ -3215,7 +3832,7 @@ def test_forex_grouped_daily_keeps_its_sunday_but_not_its_saturday(
 
 
 def governor_of(m: dm.MassiveSession) -> _massive.RequestGovernor:
-    return cast("rest.RestEndpoints", m._core.rest_transport())._state.client.governor
+    return _endpoints(m)._state.client.governor
 
 
 def requests_by_bucket(m: dm.MassiveSession) -> dict[str, int]:
@@ -3273,7 +3890,7 @@ def test_each_path_logs_its_bucket_and_why_once(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_log_limits, "_logged", set())  # as in a fresh process
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())  # as in a fresh process
     snapshots.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
     snapshots.reply(NEWS_PATH, Reply(envelope([])))
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
@@ -3281,12 +3898,12 @@ def test_each_path_logs_its_bucket_and_why_once(
         fetch(session, DIVIDENDS, symbols=["MSFT"])  # the same path and bucket: not logged again
         fetch(session, NEWS)
     charged = [message for message in caplog.messages if " is charged to the " in message]
-    later = "; later requests of this path charged to it are not logged"
-    stocks = "is charged to the stocks bucket: its data's class"
-    other = "is charged to the other bucket: a reference endpoint"
+    later = ". Later requests of this path charged to it are not logged."
+    stocks = "is charged to the stocks bucket as its data's class"
+    other = "is charged to the other bucket as a reference endpoint"
     assert charged == [
-        f"{DIVIDENDS.name} {DIVIDENDS_PATH} (symbols: AAPL) {stocks}{later}",
-        f"{NEWS.name} {NEWS_PATH} (symbols: none) {other}{later}",
+        f"{DIVIDENDS.name} {DIVIDENDS_PATH}, symbols AAPL, {stocks}{later}",
+        f"{NEWS.name} {NEWS_PATH}, symbols none, {other}{later}",
     ]
     # Each fetch names its patience once, in its own line, not once per request.
     reads = [m for m in caplog.messages if " fetch: " in m]
@@ -3309,7 +3926,7 @@ def test_a_session_charges_reads_and_host_decisions_to_their_buckets(
     assert requests_by_bucket(session) == {"stocks": 2, "other": 1}
 
 
-def test_a_learned_basic_subscription_is_paced_and_shown(
+def test_a_learned_limit_is_paced_and_shown(
     *,
     fake_rest: FakeRestServer,
     rest_clock: FakeClock,
@@ -3319,17 +3936,20 @@ def test_a_learned_basic_subscription_is_paced_and_shown(
 ) -> None:
     monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    basic = Reply({"message": "You've exceeded the maximum requests per minute"}, status=429)
-    fake_rest.reply(DIVIDENDS_PATH, basic, Reply(envelope([AAPL_DIVIDEND])))
+    per_minute = Reply({"message": "You've exceeded the maximum requests per minute"}, status=429)
+    ok = Reply(envelope([AAPL_DIVIDEND]))
+    fake_rest.reply(DIVIDENDS_PATH, ok, ok, ok, per_minute, ok)
     try:
         with caplog.at_level(logging.INFO):
-            assert [r["Symbol"] for r in fetch(m, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
+            for _ in range(4):  # three answered, then one refused and retried after a window
+                assert [r["Symbol"] for r in fetch(m, DIVIDENDS, symbols=["AAPL"])] == ["AAPL"]
         assert rest_clock.waits == [61.0]
-        assert "that is the Basic tier's limit of 5 requests per minute" in caplog.text
+        assert "Massive limits these requests per minute" in caplog.text
+        assert "so they are paced at 3 per minute from now on" in caplog.text
         assert m._core.diagnostics.wait_until_shown(30)
         stocks = next(r for r in dh_to_pylist(m.rate_limits()) if r["Bucket"] == "stocks")
-        assert (stocks["RequestsPerMinute"], stocks["LimitSource"]) == (5, "LEARNED")
-        assert (stocks["Attempts"], stocks["Refusals"]) == (2, 1)
+        assert (stocks["RequestsPerMinute"], stocks["LimitSource"]) == (3, "LEARNED")
+        assert (stocks["Attempts"], stocks["Refusals"]) == (5, 1)
     finally:
         m.close()
 
@@ -3341,7 +3961,7 @@ def test_a_paced_fetch_announces_how_long_it_takes(
     config = dm.MassiveConfig(
         api_key="test-key",
         rest_base_url=fake_rest.url,
-        rest_basic_subscriptions={dm.Subscription.CURRENCIES},
+        rest_requests_per_minute={dm.Subscription.CURRENCIES: 5},
     )
     m = dm.MassiveSession(config)
     pairs = ["C:EURUSD", "C:GBPUSD", "C:AUDUSD", "C:USDJPY", "C:USDCHF", "C:NZDUSD"]
@@ -3355,8 +3975,8 @@ def test_a_paced_fetch_announces_how_long_it_takes(
     finally:
         m.close()
     assert (
-        "forex.conversion fetch: 6 requests; paced at 5 requests a minute (currencies); at that "
-        "pace they take at least 1 min"
+        "forex.conversion fetch: 6 requests, paced at 5 requests a minute for currencies. At "
+        "that pace they take at least 1 min."
     ) in caplog.messages
 
 
@@ -3377,7 +3997,7 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
         api_key="test-key",
         rest_base_url=fake_rest.url,
         max_concurrency=3,
-        rest_basic_subscriptions={dm.Subscription.CURRENCIES},
+        rest_requests_per_minute={dm.Subscription.CURRENCIES: 5},
     )
     m = dm.MassiveSession(config)
     governor = governor_of(m)
@@ -3422,12 +4042,12 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
     config = dm.MassiveConfig(
         api_key="test-key",
         rest_base_url=fake_rest.url,
-        rest_basic_subscriptions={dm.Subscription.STOCKS},
+        rest_requests_per_minute={dm.Subscription.STOCKS: 5},
     )
     m = dm.MassiveSession(config)
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([])))
     q = query(m, DIVIDENDS, symbols=["A", "B", "C", "D", "E", "F"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     warned = threading.Event()
 
     class _Late(logging.Handler):
@@ -3448,8 +4068,8 @@ def test_a_poll_whose_cycles_outlast_their_interval_warns(
         m.close()
     assert (
         "stocks.dividends poll(): each cycle makes 3 stocks requests, but they are paced at 5 "
-        "per minute, so a cycle takes at least 37 s, longer than the 30 s interval; cycles run "
-        "late"
+        "per minute, so a cycle takes at least 37 s, longer than the 30 s interval, and cycles "
+        "run late. To keep them on time, call poll(37) or a longer interval."
     ) in caplog.messages
 
 
@@ -3457,7 +4077,7 @@ def test_a_fan_out_raises_the_real_failure_not_a_call_it_cancelled(
     session: dm.MassiveSession,
 ) -> None:
     # The first call only fails because the second one's failure cancelled its wait.
-    reader = cast("rest.RestEndpoints", session._core.rest_transport())._reader("call-1")
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     stop = _massive.Cancel()
 
     def run(call: rest_requests.Call) -> NoReturn:
@@ -3488,7 +4108,7 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
     config = dm.MassiveConfig(
         api_key="test-key",
         rest_base_url=fake_rest.url,
-        rest_basic_subscriptions={dm.Subscription.STOCKS},
+        rest_requests_per_minute={dm.Subscription.STOCKS: 5},
     )
     m = dm.MassiveSession(config)
     governor = governor_of(m)
@@ -3497,7 +4117,7 @@ def test_a_poll_nothing_uses_stops_waiting_for_a_slot(
             governor.admission("stocks", lane=object()).acquire(_massive.Cancel()), answered=True
         )
     q = query(m, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     left = threading.Event()
 
     def on_change() -> None:  # the governor's notice once the cycle gives up its place
@@ -3605,7 +4225,9 @@ def test_every_row_of_a_page_shares_the_instant_the_page_arrived(
     )
     q = query(session, TRADES, symbols=["AAPL"])
     assert isinstance(q, HistoryQuery)
-    out = rows(q.history("2025-03-03", "2025-03-03", source=HistorySource.REST), arrival=True)
+    out = rows(
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.REST, wait=True), arrival=True
+    )
     first = {row["TimestampInsert"] for row in out if row["Price"] == 1.0}
     second = {row["TimestampInsert"] for row in out if row["Price"] == 2.0}
     assert len(first) == len(second) == 1
@@ -3624,8 +4246,8 @@ def test_a_tick_dataset_dates_each_row_in_its_day_zone(
     other = {"ticker": "I:NDX", "value": 2.0, "last_updated": late}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([snapshot, other])))
     q = query(session, INDEX_LEVELS, symbols=["I:NDX", "I:SPX"])
-    assert isinstance(q, Query)
-    table = q.fetch()
+    assert isinstance(q, FetchQuery)
+    table = q.fetch(wait=True)
     row = rows(table)[0]
     assert (row["Symbol"], row["Date"], row["Timestamp"]) == ("I:SPX", "2025-03-03", late)
     assert string_objects(table, "Date") == 1  # the two rows share one stored string
@@ -3636,16 +4258,13 @@ def test_a_symbol_with_no_data_returns_no_rows(
 ) -> None:
     # Massive answers HTTP 404 for a symbol it has nothing for: no rows, one WARNING.
     fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    with caplog.at_level(logging.WARNING):
         out = history(
             session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["MSFT", "ZZZZ"]
         )
     assert out == []
     assert caplog.messages == [
-        (
-            "stocks.trades: no data for 1 [ZZZZ]: Massive answered HTTP 404 from "
-            "/v3/trades/{stockTicker}, so they are left out"
-        )
+        no_data_alarm("stocks.trades", 1, "ZZZZ", why="(HTTP 404 from GET /v3/trades/ZZZZ)")
     ]
 
 
@@ -3659,13 +4278,16 @@ def test_a_404_after_the_first_page_means_the_data_was_cut_short(
         TRADES_PATH.format(stockTicker="AAPL"),
         Reply(envelope([{"sip_timestamp": start}], next_url=f"{fake_rest.url}{gone}")),
     )
-    with pytest.raises(dm.MassiveError, match="AAPL's data was cut short") as info:
+    with pytest.raises(dm.MassiveError) as info:
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
-    assert str(info.value).startswith(
-        "stocks.trades: AAPL's data was cut short: Massive answered HTTP 404 for page 2 of "
-        "/v3/trades/{stockTicker} after 1 page had arrived; retry the call"
+    assert str(info.value) == (
+        "stocks.trades: the rows of AAPL were cut short after 1 page arrived. Massive answered "
+        'GET /v3/trades/AAPL?cursor=gone on 127.0.0.1 with HTTP 404: "{"status":"NOT_FOUND"}". '
+        "Call m.stocks.trades again to read AAPL from the start."
     )
     assert info.value.status == 404
+    # Unlike any other 404: a new call starts over with a new cursor.
+    assert info.value.is_retryable
 
 
 def daily_bars(m: dm.MassiveSession, *, adjusted: bool) -> list[dict[str, Any]]:
@@ -3703,11 +4325,12 @@ def test_every_page_of_bars_must_echo_the_requested_adjustment(
     fake_rest.reply(second, Reply(envelope(later, adjusted=False)))
     with pytest.raises(
         dm.MassiveError,
-        match=r"^stocks\.bars: Massive answered /v2/aggs/ticker/\{stocksTicker\}/range/.* with "
-        r"adjusted=False although adjusted=True was requested, so the call would mix "
-        r"split-adjusted and as-traded prices; retry it$",
-    ):
+        match=r"^stocks\.bars: Massive answered with bars of adjusted=False, and the call asked "
+        r"for adjusted=True\. The table would mix split-adjusted and as-traded prices, so the "
+        r"read stopped\. Call m\.stocks\.bars again\.$",
+    ) as mixed:
         daily_bars(session, adjusted=True)
+    assert mixed.value.is_retryable  # the next answer may agree with the request
     assert [r["Close"] for r in daily_bars(session, adjusted=False)] == [1.0, 2.0]
 
 
@@ -3719,8 +4342,12 @@ def test_a_page_without_its_adjusted_echo_warns_once_per_path(
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
             assert [r["Close"] for r in daily_bars(session, adjusted=True)] == [1.0]
-    assert caplog.text.count("answered without its adjusted echo") == 1
-    assert "(adjusted=True requested) cannot be checked" in caplog.text
+    assert caplog.messages == [
+        (
+            "stocks.bars: Massive answered without saying whether its bars are adjusted, so the "
+            "library cannot check that they match adjusted=True."
+        )
+    ]
 
 
 def test_only_bars_with_an_explicit_adjustment_are_checked(
@@ -3821,6 +4448,47 @@ def test_a_futures_session_bar_ends_when_its_session_is_over(
     )
 
 
+@pytest.mark.parametrize(
+    "on_error",
+    [None, dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)],
+    ids=["default", "raise"],
+)
+def test_a_bar_outside_the_whole_bar_window_is_neither_withheld_nor_counted(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    on_error: dm.ErrorPolicy | None,
+) -> None:
+    # At noon on 03-28 the two-session bucket of 03-27 and 03-28 is still open, so it is not
+    # the read's, though its label lies in the range. Its close can't be read, yet the read
+    # gives no rows, reports nothing, and never fails.
+    noon = datetime(2024, 3, 28, 12, tzinfo=CHICAGO)
+    monkeypatch.setattr(history_source, "_now", lambda: noon)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    row = {
+        "ticker": "ESM4",
+        "session_end_date": "2024-03-28",
+        "window_start": epoch_ns(datetime(2024, 3, 27, tzinfo=UTC)),
+        "close": "x",
+    }
+    fake_rest.reply("/futures/v1/aggs/ESM4", Reply(envelope([row])))
+    out = history(
+        session,
+        FUTURES_BARS,
+        start="2024-03-25",
+        end=None,
+        symbols=["ESM4"],
+        timespan=Timespan.SESSION,
+        multiplier=2,
+        on_error=on_error,
+    )
+    assert fake_rest.get_queries()
+    assert out == []
+    assert events == []
+
+
 def test_fetch_rows_reads_every_page_raw(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
@@ -3830,7 +4498,7 @@ def test_fetch_rows_reads_every_page_raw(
         "/futures/v1/schedules",
         Reply(envelope([{"product_code": "GC"}], next_url=f"{fake_rest.url}{target}")),
     )
-    transport = cast("rest.RestEndpoints", session._core.rest_transport())
+    transport = _endpoints(session)
     query = {"product_code.any_of": ("ES", "GC")}
     out = transport.fetch_rows("/futures/v1/schedules", query, bucket="futures", cancel=Cancel())
     assert out == [{"product_code": "GC"}, {"product_code": "ES", "extra": 2}]
@@ -3855,23 +4523,62 @@ def test_fetch_rows_reads_every_page_raw(
 
 def _join_reads(m: dm.MassiveSession) -> None:
     # Waits for every background read of the session to end.
-    for state in list(m._core._workers.values()):
-        cast("Any", state.fail).__self__.thread.join(30.0)
+    for state in list(m._core.workers._workers.values()):
+        assert isinstance(state.fail, MethodType)  # a read's own `fail`
+        read = state.fail.__self__
+        assert isinstance(read, BackgroundRead)
+        read.join(30.0)
 
 
 def test_a_background_fetch_checks_its_parameters_with_no_request(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     rest = session._core.rest_transport()
-    q = query(session, SMA, symbols=["X:BTCUSD"], adjusted=False)
-    assert isinstance(q, Query)
-    with pytest.raises(ValueError, match=r"cryptoTicker\} does not take \['adjusted'\]"):
+    q = query(session, SMA, symbols=["X:BTCUSD"], params={"bogus": 1})
+    assert isinstance(q, FetchQuery)
+    with pytest.raises(ValueError, match=r"^indicators\.sma does not take bogus\.$"):
         q.fetch(wait=False)
-    # A crypto pair is not split by the check, which would read Massive's ticker list.
+    # The check splits no crypto pair, which would read Massive's list.
     pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
     rest.check_fetch(CRYPTO_OPEN_CLOSE, pair._request)
     assert fake_rest.requests == []
-    assert session._core._workers == {}
+    assert session._core.workers._workers == {}
+
+
+def test_a_pair_massive_does_not_list_fails_a_fetch_under_raise_never_at_the_call(
+    *, fake_rest: FakeRestServer
+) -> None:
+    # As a 404 under RAISE does: the read fails, and a call that waits raises; nothing is
+    # decided at the call, and only the crypto ticker list is read.
+    serve_pairs(fake_rest)
+    params = {"date": "2025-03-03"}
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE),
+    )
+    with dm.MassiveSession(config) as session:
+        pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+        assert isinstance(pair, FetchQuery)
+        background = pair.fetch()
+        assert background.is_refreshing
+        session.release(background)
+        with pytest.raises(UnavailableSymbolError, match=r": Massive has no data for X:DOTUSD\. "):
+            pair.fetch(wait=True)
+        assert sent_data(fake_rest) == []
+
+
+def test_a_fetch_of_a_pair_massive_does_not_list_gives_no_rows(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive has no data for a pair its crypto ticker list does not hold: under the default
+    # LOG it gives no rows, and only the crypto ticker list is read.
+    serve_pairs(fake_rest)
+    params = {"date": "2025-03-03"}
+    pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params=params)
+    assert isinstance(pair, FetchQuery)
+    assert pair.fetch(wait=True).size == 0
+    assert sent_data(fake_rest) == []
 
 
 def test_a_background_fetch_lands_the_rows_the_read_requested(
@@ -3879,7 +4586,7 @@ def test_a_background_fetch_lands_the_rows_the_read_requested(
 ) -> None:
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
     q = query(session, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.fetch(wait=False)
     _join_reads(session)
     # The read's own row says how it ended; a failure shows its error here. It shows DONE
@@ -3913,7 +4620,7 @@ def test_a_set_stop_token_ends_a_read_before_its_first_request(
     stop.set()
     q = query(session, DIVIDENDS, symbols=["AAPL"])
     with pytest.raises(dm.MassiveError):
-        rest.fetch(DIVIDENDS, q._request, call=1, stop=stop, unlisted=dm.OnError.RAISE)
+        rest.fetch(DIVIDENDS, q._request, call=1, stop=stop)
     assert fake_rest.requests == []
 
 
@@ -3937,12 +4644,11 @@ def test_a_delayed_row_fails_a_real_time_fetch(
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
     assert str(info.value) == (
-        "indices.snapshots data for I:SPX would be delayed (Massive reports timeframe=DELAYED), "
-        "and "
-        "dm.Subscription.INDICES is not in MassiveConfig.delayed_subscriptions, so the library "
-        "serves only real-time indices data. To accept delayed indices data (its streams then "
-        "use Massive's delayed feed too): "
-        "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.INDICES})"
+        "indices.snapshots data for I:SPX would be delayed, since Massive reports "
+        "timeframe=DELAYED, and dm.Subscription.INDICES is not in delayed_subscriptions, so the "
+        "library serves only real-time indices data. To accept delayed indices data, whose "
+        "streams then use Massive's delayed feed too, pass "
+        "delayed_subscriptions={dm.Subscription.INDICES} to dm.MassiveConfig."
     )
 
 
@@ -3966,8 +4672,8 @@ def test_a_listed_subscription_serves_delayed_rest_data_and_says_so(
             Reply(envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}], status="DELAYED")),
         )
         q = query(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
-        assert isinstance(q, Query)
-        table = q.fetch()
+        assert isinstance(q, FetchQuery)
+        table = q.fetch(wait=True)
         assert [r["Symbol"] for r in rows(table)] == ["I:SPX"]
         description = table.attributes()["TableDescription"]
         assert description.endswith(
@@ -3985,8 +4691,8 @@ def test_an_unlisted_fetch_says_it_was_checked_like_its_poll(
         INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX", "timeframe": "REAL-TIME"}]))
     )
     q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
-    assert isinstance(q, Query)
-    table = q.fetch()
+    assert isinstance(q, FetchQuery)
+    table = q.fetch(wait=True)
     assert table.attributes()["TableDescription"].endswith(
         "Checked for delayed data: a response Massive labels DELAYED fails the table unless "
         "MassiveConfig.delayed_subscriptions lists its subscription."
@@ -4038,11 +4744,13 @@ def test_a_delayed_label_fails_an_indicator_poll(
         "/v1/indicators/sma/AAPL", Reply(envelope({"values": [_SMA_VALUE]}, status="DELAYED"))
     )
     q = query(session, SMA, symbols=["AAPL"], start="2025-03-03", end="2025-03-04")
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)  # polled, so current whatever its window
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["Error"])
     assert row["State"] == "FAILED"
-    assert "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.STOCKS})" in row["Error"]
+    assert row["Error"].endswith(
+        "pass delayed_subscriptions={dm.Subscription.STOCKS} to dm.MassiveConfig."
+    )
     session.release(table)
 
 
@@ -4102,9 +4810,9 @@ def test_a_delayed_refusal_names_five_refused_tickers_and_counts_the_rest(
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, INDEX_SNAPSHOTS, symbols=[*names, "I:COMP"])
     assert str(info.value).startswith(
-        "indices.snapshots data for I:SPX, I:NDX, I:DJI, I:VIX, I:RUT and 2 more would be delayed "
-        "(Massive reports last_quote.timeframe=DELAYED), and dm.Subscription.INDICES is not in "
-        "MassiveConfig.delayed_subscriptions"
+        "indices.snapshots data for I:SPX, I:NDX, I:DJI, I:VIX, I:RUT and 2 more would be delayed, "
+        "since Massive reports last_quote.timeframe=DELAYED, and dm.Subscription.INDICES is not in "
+        "delayed_subscriptions"
     )
 
 
@@ -4115,7 +4823,7 @@ def test_a_delayed_envelope_names_the_requested_tickers(
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
     assert str(info.value).startswith(
-        "indices.snapshots data for I:SPX would be delayed (Massive reports status=DELAYED)"
+        "indices.snapshots data for I:SPX would be delayed, since Massive reports status=DELAYED,"
     )
 
 
@@ -4126,7 +4834,7 @@ def test_a_delayed_label_fails_a_real_time_poll_table(
         INDEX_SNAPSHOT_PATH, Reply(envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}]))
     )
     q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)
     assert table.attributes()["TableDescription"].endswith(
         "Checked for delayed data: a response Massive labels DELAYED fails the table unless "
@@ -4134,7 +4842,9 @@ def test_a_delayed_label_fails_a_real_time_poll_table(
     )
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["Error"])
     assert (row["State"], row["Recency"]) == ("FAILED", "UNKNOWN")  # never real-time unproven
-    assert "dm.MassiveConfig(delayed_subscriptions={dm.Subscription.INDICES})" in row["Error"]
+    assert row["Error"].endswith(
+        "pass delayed_subscriptions={dm.Subscription.INDICES} to dm.MassiveConfig."
+    )
     session.release(table)
 
 
@@ -4161,7 +4871,7 @@ def test_a_poll_tables_recency_follows_the_labels_it_was_sent(
     try:
         fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([row])))
         q = query(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
-        assert isinstance(q, Query)
+        assert isinstance(q, FetchQuery)
         table = q.poll(60)
         (seen,) = rows_when(m.streams(), lambda rows: bool(rows) and rows[0]["RowsPublished"])
         assert seen["Recency"] == shown
@@ -4179,7 +4889,7 @@ def test_a_poll_of_data_no_label_describes_shows_no_recency(
     recency: str | None,
 ) -> None:
     q = query(session, spec)
-    assert isinstance(q, Query)
+    assert isinstance(q, FetchQuery)
     table = q.poll(60)
     assert "Checked for delayed data" not in table.attributes()["TableDescription"]
     (row,) = rows_when(session.streams(), bool)
@@ -4204,8 +4914,8 @@ def test_a_delayed_stock_row_fails_a_unified_snapshot(
     with pytest.raises(dm.EntitlementError) as info:
         _unified(session, "AAPL")
     assert str(info.value).startswith(
-        "snapshots data for AAPL would be delayed (Massive reports last_trade.timeframe=DELAYED), "
-        "and dm.Subscription.STOCKS is not in MassiveConfig.delayed_subscriptions"
+        "snapshots data for AAPL would be delayed, since Massive reports "
+        "last_trade.timeframe=DELAYED, and dm.Subscription.STOCKS is not in delayed_subscriptions"
     )
 
 
@@ -4288,19 +4998,24 @@ def test_a_unified_row_without_a_ticker_or_a_request_without_one_refuses_nothing
         ),
     )
     q = query(session, UNIFIED)
-    assert isinstance(q, Query)
-    assert q.fetch().size == 1  # the row without a ticker is dropped as unreadable
+    assert isinstance(q, FetchQuery)
+    assert q.fetch(wait=True).size == 1  # the row without a ticker is dropped as unreadable
 
 
 # --- Bounded and explaining log records ---------------------------------------------------------
 
 
-def test_the_missing_symbols_of_a_read_warn_once_together_and_each_at_debug(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_the_missing_symbols_of_a_read_warn_once_and_each_is_a_problem(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
+    events = record_problems(session, monkeypatch)
     with caplog.at_level(logging.DEBUG, LOGGER):
-        for _ in range(2):  # the second read names no new symbol, so it warns of nothing
+        for _ in range(2):  # each read is its own table: each warns of its first
             history(
                 session,
                 TRADES,
@@ -4308,17 +5023,90 @@ def test_the_missing_symbols_of_a_read_warn_once_together_and_each_at_debug(
                 end="2025-03-03",
                 symbols=["MSFT", "YYYY", "ZZZZ"],
             )
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warnings == [
-        (
-            "stocks.trades: no data for 2 [YYYY, ZZZZ]: Massive answered HTTP 404 from "
-            "/v3/trades/{stockTicker}, so they are left out"
-        )
+    why = {symbol: f"(HTTP 404 from GET /v3/trades/{symbol})" for symbol in ("YYYY", "ZZZZ")}
+    assert alarms(caplog) == [
+        no_data_alarm("stocks.trades", read, "YYYY", why=why["YYYY"]) for read in (1, 2)
     ]
-    debug = [r.getMessage() for r in caplog.records if "has no data" in r.getMessage()]
-    assert len(debug) == 4  # each symbol of each read
-    assert all(r.startswith("stocks.trades: ") and "HTTP 404 from" in r for r in debug)
-    assert any("ZZZZ has no data (HTTP 404 from /v3/trades/{stockTicker}" in r for r in debug)
+    # Each symbol of each read is a problem, logged at DEBUG, and the read names them
+    # together at DEBUG.
+    assert [(e.cause, e.stream_id, e.symbol, e.detail) for e in events] == [
+        (
+            ProblemCause.UNAVAILABLE_SYMBOLS,
+            read,
+            symbol,
+            f"Massive has no data for it {why[symbol]}",
+        )
+        for read in (1, 2)
+        for symbol in ("YYYY", "ZZZZ")
+    ]
+    debug = [r.getMessage() for r in caplog.records if r.name == LOGGER]
+    each = [m for m in debug if " has no data (" in m]
+    assert len(each) == 4  # each symbol of each read
+    assert all(m.startswith("stocks.trades: ") and "HTTP 404 from" in m for m in each)
+    together = [m for m in debug if "Massive has no data for" in m]
+    pair = f"[YYYY {why['YYYY']}, ZZZZ {why['ZZZZ']}]"
+    left_out = f"stocks.trades: Massive has no data for 2 {pair}, so they are"
+    assert together == [f"{left_out} left out"] * 2
+
+
+def test_a_symbol_without_data_is_listed_when_another_request_fails_the_read(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ZZZZ answers HTTP 404 and its call completes; only then does AAPL's request fail. The
+    # read raises AAPL's failure, and m.problems() still lists ZZZZ.
+    fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(b"oops", status=500))
+    events = record_problems(session, monkeypatch)
+    answered = threading.Event()
+
+    def gating(call: Callable[_P, object]) -> Callable[_P, object]:
+        def gated(*args: _P.args, **kwargs: _P.kwargs) -> object:
+            one = args[2]  # after the reader and the converter
+            assert isinstance(one, rest_requests.Call)
+            if one.symbol == "AAPL":
+                assert answered.wait(TIMEOUT)
+                return call(*args, **kwargs)
+            try:
+                return call(*args, **kwargs)
+            finally:
+                answered.set()
+
+        return gated
+
+    monkeypatch.setattr(rest.RestReader, "_call", gating(rest.RestReader._call))
+    with pytest.raises(dm.MassiveError, match="HTTP 500"):
+        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "ZZZZ"])
+    why = "(HTTP 404 from GET /v3/trades/ZZZZ)"
+    assert [(e.cause, e.symbol, e.detail) for e in events] == [
+        (ProblemCause.UNAVAILABLE_SYMBOLS, "ZZZZ", f"Massive has no data for it {why}")
+    ]
+
+
+def test_a_symbol_without_data_is_listed_when_a_later_path_fails_a_poll_cycle(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cycle reads the stock path, where ZZZZ answers HTTP 404, then the crypto path, where
+    # X:BTCUSD's request fails. The cycle raises that failure, and m.problems() still lists ZZZZ.
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(b"oops", status=500))
+    events = record_problems(session, monkeypatch)
+    symbols = ("ZZZZ", "X:BTCUSD")
+    q = query(session, SMA, symbols=list(symbols))
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
+    with ThreadPoolExecutor(1) as pool, pytest.raises(dm.MassiveError, match="HTTP 500"):
+        reader.read_cycle(
+            SMA,
+            q._request,
+            symbols=symbols,
+            values=None,
+            record=lambda _: None,
+            on_recency=lambda _: None,
+            executor=pool,
+            cancel=Cancel(),
+            pace=rate_limits.PaceCheck("indicators.sma poll()", 60.0),
+        )
+    why = "(HTTP 404 from GET /v1/indicators/sma/ZZZZ)"
+    assert [(e.cause, e.symbol, e.detail) for e in events] == [
+        (ProblemCause.UNAVAILABLE_SYMBOLS, "ZZZZ", f"Massive has no data for it {why}")
+    ]
 
 
 def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data(
@@ -4328,15 +5116,17 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
     day = date(2025, 3, 3)
     no_data = (
-        r"^stocks\.trades: no data for 1 \[ZZZZ\]: Massive answered HTTP 404 from "
-        r"/v3/trades/\{stockTicker\}\. Remove the symbol, or set "
-        r"MassiveConfig\(unavailable_symbols=dm\.OnError\.LOG\)"
+        r"^stocks\.trades: Massive has no data for ZZZZ\. Remove it, or, to read the others, "
+        r"pass on_error=dm\.ErrorPolicy\(unavailable_symbols=dm\.OnError\.LOG\) to the call "
+        r"or to dm\.MassiveConfig\.$"
     )
 
     def session_with(setting: dm.OnError) -> dm.MassiveSession:
         return dm.MassiveSession(
             dm.MassiveConfig(
-                api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=setting
+                api_key="test-key",
+                rest_base_url=fake_rest.url,
+                on_error=dm.ErrorPolicy(unavailable_symbols=setting),
             )
         )
 
@@ -4344,21 +5134,81 @@ def test_unavailable_symbols_decides_what_a_read_does_with_a_symbol_without_data
     with session_with(dm.OnError.IGNORE) as m, caplog.at_level(logging.DEBUG, LOGGER):
         history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"])
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("no data for 1 [ZZZZ]" in r.getMessage() for r in caplog.records)
+    assert any("no data for 1 [ZZZZ (" in r.getMessage() for r in caplog.records)
     with session_with(dm.OnError.RAISE) as m:
         # A static read fails, naming the symbol and the setting that would leave it out.
-        with pytest.raises(rest.UnavailableSymbolError, match=no_data):
+        with pytest.raises(UnavailableSymbolError, match=no_data):
             history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"])
         # A read by symbol fails that symbol alone; the others keep their rows.
-        asked = Request(start=day, end=day)
+        asked = Request(start=day, end=day, on_error=m._core.policy)
         window = history_window(TRADES, asked, start=day, end=day, classes=())
         transport = m._core.rest_transport()
-        out = transport.history_by_symbol(TRADES, asked, window, symbols=["MSFT", "ZZZZ"], call=1)
+        out = transport.history_by_symbol(
+            TRADES, asked, window, symbols=["MSFT", "ZZZZ"], call=1, tally=ReadTally()
+        )
     assert isinstance(out["MSFT"], SymbolRows)
     failed = out["ZZZZ"]
     assert isinstance(failed, SymbolFailure)
-    assert isinstance(failed.error, rest.UnavailableSymbolError)
+    assert isinstance(failed.error, UnavailableSymbolError)
     assert re.match(no_data, str(failed.error))
+
+
+@pytest.mark.parametrize("setting", [dm.OnError.RAISE, dm.OnError.LOG])
+def test_each_rest_verb_follows_the_call_s_unavailable_symbols_over_the_session_s(
+    setting: dm.OnError, *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The session and the call disagree: the call's setting decides whether a symbol without
+    # data fails history() and fetch(), and, under RAISE, poll().
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    other = dm.OnError.LOG if setting is dm.OnError.RAISE else dm.OnError.RAISE
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=other),
+    )
+    call = dm.ErrorPolicy(unavailable_symbols=setting)
+    fake_rest.reply(TRADES_PATH.format(stockTicker="MSFT"), Reply(envelope([])))
+    serve_pairs(fake_rest)
+    day = date(2025, 3, 3)
+    with dm.MassiveSession(config) as m:
+        pair = query(
+            m, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": day}, on_error=call
+        )
+        assert isinstance(pair, FetchQuery)
+        if setting is dm.OnError.LOG:
+            history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"], on_error=call)
+            assert pair.fetch(wait=True).size == 0
+            return
+        with pytest.raises(UnavailableSymbolError, match=r"Massive has no data for ZZZZ\. "):
+            history(m, TRADES, start=day, end=day, symbols=["MSFT", "ZZZZ"], on_error=call)
+        with pytest.raises(UnavailableSymbolError, match=r"Massive has no data for X:DOTUSD\. "):
+            pair.fetch(wait=True)
+        assert _failed_soon(pair.poll(60))
+
+
+def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A call under RAISE fails on the row's cause; under the session's LOG the row is withheld,
+    # and a page whose only row is withheld fails as one the library could read none of.
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    body = {"status": "success", "request_id": "r1", "from": "AUD", "to": "XXX"}
+    fake_rest.reply("/v1/conversion/AUD/XXX", Reply({**body, "symbol": "not a pair"}))
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
+    strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
+    params = {"from": "AUD", "to": "XXX"}
+    with dm.MassiveSession(config) as m:
+        with pytest.raises(dm.MassiveError) as info:
+            fetch(m, CONVERSION, params=params, on_error=strict)
+        assert str(info.value) == (
+            "forex.conversion: Massive sent 1 row the library cannot read whole, so it withheld "
+            "it: 1 under unreadable_symbols. Massive sent the symbol 'not a pair', a spelling "
+            "the library cannot read as Massive's ticker. To go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
+        )
+        with pytest.raises(dm.MassiveError, match=r"could read none of the 1 rows"):
+            fetch(m, CONVERSION, params=params)
 
 
 def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
@@ -4370,18 +5220,16 @@ def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
     with caplog.at_level(logging.DEBUG, LOGGER):
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
     (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warning.startswith(
-        f"indices.snapshots: Massive answered error rows from {INDEX_SNAPSHOT_PATH} for 25 "
-        "[I:X00 (NOT_ENTITLED: Not entitled), "
-    )
-    assert warning.endswith(
-        "I:X19 (NOT_ENTITLED: Not entitled), +5 more]; the rows are kept with their Error and "
-        "Message columns"
+    assert warning == (
+        "indices.snapshots: Massive answered error rows for 25 tickers, the first 3: I:X00 with "
+        '"NOT_ENTITLED: Not entitled", I:X01 with "NOT_ENTITLED: Not entitled", and I:X02 with '
+        '"NOT_ENTITLED: Not entitled". The rows are kept, with Massive\'s answer in their Error '
+        "and Message columns."
     )
     debug = [r.getMessage() for r in caplog.records if "an error row" in r.getMessage()]
     assert debug[-1] == (
         f"indices.snapshots: Massive answered an error row from {INDEX_SNAPSHOT_PATH} for "
-        "I:X24 (NOT_ENTITLED: Not entitled)"
+        'I:X24 with "NOT_ENTITLED: Not entitled"'
     )
     assert len(debug) == 25
 
@@ -4395,18 +5243,23 @@ def test_an_error_row_answer_is_cut_in_the_warning_and_whole_at_debug(
     with caplog.at_level(logging.DEBUG, LOGGER):
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
     (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    shown = "I:VIX (NOT_ENTITLED: " + message
-    assert f"for 1 [{shown[: rest._ANSWER_SHOWN - 1]}…]; the rows are kept" in warning
-    assert any(f"for {shown})" in r.getMessage() for r in caplog.records)
+    shown = 'I:VIX with "NOT_ENTITLED: ' + message
+    assert warning == (
+        f"indices.snapshots: Massive answered error rows for {shown[: rest._ANSWER_SHOWN - 1]}…. "
+        "The rows are kept, with Massive's answer in their Error and Message columns."
+    )
+    assert any(f'for {shown}"' in r.getMessage() for r in caplog.records)
 
 
 def test_the_facts_a_session_warned_about_are_bounded(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(rest, "_FACTS_LIMIT", 2)
-    state = rest.RestState(
-        cast("_massive.RestClient", SimpleNamespace(governor=None)), "MassiveSession #9"
+    governor = _massive.RequestGovernor(("stocks",), clock=FakeClock())
+    client = _massive.RestClient(  # sends no request
+        "k", base_url="http://127.0.0.1:9", max_concurrency=1, governor=governor
     )
+    state = rest.RestState(client, "MassiveSession #9")
     with caplog.at_level(logging.DEBUG, LOGGER):
         assert [state.first("x", "a"), state.first("x", "b"), state.first("x", "a")] == [
             True,
@@ -4418,6 +5271,7 @@ def test_the_facts_a_session_warned_about_are_bounded(
     assert caplog.messages == [
         "MassiveSession #9: forgot the 2 facts already warned about, past the limit of 2"
     ]
+    state.close()
 
 
 def test_each_page_logs_its_rows_after_each_step(
@@ -4442,7 +5296,8 @@ def test_each_page_logs_its_rows_after_each_step(
     assert pages == [
         (
             "stocks.bars: page 1 of /v2/aggs/ticker/{stocksTicker}/range/{multiplier}/{timespan}/"
-            "{from}/{to} for AAPL: 4 rows read, 4 converted, 2 in the window, 2 kept as whole bars"
+            "{from}/{to} for AAPL: 4 rows read, 4 converted, 2 in the window, 0 withheld, 2 kept "
+            "as whole bars"
         )
     ]
 
@@ -4461,9 +5316,9 @@ def test_an_unknown_recency_label_warns_once_per_subscription_and_value(
             assert [r["Symbol"] for r in out] == ["I:SPX", "I:NDX"]  # served
     assert caplog.messages == [
         (
-            f"indices.snapshots: {INDEX_SNAPSHOT_PATH} answered timeframe='SOMETIMES', which is "
-            "neither DELAYED nor REAL-TIME, for indices data; the library cannot tell whether "
-            "the row is delayed and serves it"
+            "indices.snapshots: Massive labels indices data timeframe='SOMETIMES', which is "
+            "neither DELAYED nor REAL-TIME. The library cannot tell whether those rows are "
+            "delayed, and serves them."
         )
     ]
 
@@ -4477,12 +5332,19 @@ def _listed(*rows: tuple[int, list[str]]) -> Reply:
 
 
 def test_a_row_is_listed_under_each_named_ticker_it_lists(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # One request names both tickers; a row listing both is each one's, in its list's order,
-    # and a row listing neither keeps a null Symbol, with one WARNING a session.
+    # and a row listing neither is left out, as a row outside the window is: no event, and one
+    # WARNING a session.
     page = _listed((1, ["MSFT", "AAPL"]), (2, ["AAPL"]), (3, ["TSLA"]))
     fake_rest.reply(LISTED_PATH, page, page)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
     with caplog.at_level(logging.WARNING, LOGGER):
         for _ in range(2):
             out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
@@ -4490,15 +5352,15 @@ def test_a_row_is_listed_under_each_named_ticker_it_lists(
                 (1, "MSFT"),
                 (1, "AAPL"),
                 (2, "AAPL"),
-                (3, None),
             ]
     assert [q["tickers.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]] * 2
-    assert [m for m in caplog.messages if "list none" in m] == [
+    assert [m for m in caplog.messages if "lists none" in m] == [
         (
-            "partners.benzinga.news: 1 rows Massive returned from /benzinga/v2/news list none "
-            "of the request's tickers (2 [AAPL, MSFT]) in Tickers, so their Symbol is null"
+            "partners.benzinga.news: Massive sent 1 rows from /benzinga/v2/news whose Tickers "
+            "lists none of the requested tickers AAPL and MSFT, so they are left out."
         )
     ]
+    assert events == []
 
 
 def test_one_named_ticker_is_every_row_s_and_none_leaves_symbol_null(
@@ -4510,13 +5372,41 @@ def test_one_named_ticker_is_every_row_s_and_none_leaves_symbol_null(
     assert [r["Symbol"] for r in fetch(session, LISTED)] == [None]
 
 
-def test_listing_a_row_under_each_ticker_can_pass_the_limit(
+def test_limit_counts_the_rows_massive_sent_not_those_kept(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # `limit` caps the rows Massive returns; each is then listed under its named tickers.
+    # The first request's two rows reach the cap though one is withheld, as the client stops
+    # paging at the rows that arrived: the second request is not sent.
+    odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([odd, AAPL_DIVIDEND])))
+    out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=2)
+    assert [r["Id"] for r in out] == ["E1"]
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["A,B"]]
+
+
+def test_a_read_mixing_per_symbol_and_shared_requests_is_a_library_defect() -> None:
+    # Neither cap fits such a plan, and no dataset makes one.
+    path = RestPath(key="/x", fields=(), params=())
+    planned = [(path, [rest_requests.Call({}, {}, "AAPL"), rest_requests.Call({}, {})])]
+    with pytest.raises(
+        BrokenGuaranteeError,
+        match=r"^stocks\.dividends planned requests of one symbol beside requests of several, so "
+        r"limit can cap neither each symbol nor the whole call\. This is a bug in "
+        r"deephaven-massive\. ",
+    ):
+        rest._per_symbol("stocks.dividends", planned)
+    assert rest._per_symbol("stocks.dividends", [(path, [rest_requests.Call({}, {})])]) is False
+    assert rest._per_symbol("stocks.dividends", []) is False
+
+
+def test_limit_caps_the_rows_listed_under_each_ticker(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive caps its rows at the limit; listing a row under each named ticker it lists can
+    # give more, and the cap is on the call's rows, so the copy past it is cut.
     fake_rest.reply(LISTED_PATH, _listed((1, ["AAPL", "MSFT"])))
     out = fetch(session, LISTED, symbols=["AAPL", "MSFT"], limit=1)
-    assert [r["Symbol"] for r in out] == ["AAPL", "MSFT"]
+    assert [r["Symbol"] for r in out] == ["AAPL"]
     assert fake_rest.get_queries()[0][1]["limit"] == ["1"]
 
 
@@ -4528,7 +5418,7 @@ def _value_cycle(m: dm.MassiveSession, values: tuple[str, ...]) -> poll.CycleRow
     with entered(m._core.exec_ctx):
         table = new_table([string_col("ProductCode", list(values))])
     boxed = ValueTable("product_code", "product_code", "ProductCode", underlying=False, table=table)
-    reader = cast("rest.RestEndpoints", m._core.rest_transport())._reader("poll")
+    reader = _endpoints(m)._reader("poll", m._core.policy, waiter=Waiter.LIVE_TABLE)
     with ThreadPoolExecutor(1) as pool:
         return reader.read_cycle(
             futures_ns.PRODUCTS,
@@ -4553,9 +5443,50 @@ def test_a_poll_cycle_reads_each_value_and_leaves_out_one_massive_has_no_data_fo
         read = _value_cycle(rest_session, ("ES", "NQ"))
     assert read.rows.column("ProductCode").to_pylist() == ["ES"]
     assert read.requests == 1
-    assert read.left_out == ("NQ (HTTP 404: no data)",)
+    assert read.left_out == ("NQ (HTTP 404 from GET /futures/v1/products?product_code=NQ)",)
     assert [query["product_code"] for _, query in fake_rest.get_queries()] == [["ES"], ["NQ"]]
     assert any("NQ" in message and "no data" in message for message in caplog.messages)
+
+
+def test_a_poll_cycle_names_the_path_of_a_value_massive_has_no_data_for(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # An underlying goes in the path, so the left-out value names that path.
+    with entered(rest_session._core.exec_ctx):
+        table = new_table([string_col("Symbol", ["ZZZZ"])])
+    boxed = ValueTable("underlying", "underlyingAsset", "Symbol", underlying=True, table=table)
+    fake_rest.reply("/v3/snapshot/options/ZZZZ", Reply({"status": "NOT_FOUND"}, status=404))
+    reader = _endpoints(rest_session)._reader(
+        "poll", rest_session._core.policy, waiter=Waiter.LIVE_TABLE
+    )
+    with ThreadPoolExecutor(1) as pool:
+        read = reader.read_cycle(
+            options_ns.CHAIN,
+            Request(value_table=boxed),
+            symbols=None,
+            values=("ZZZZ",),
+            record=lambda _: None,
+            on_recency=lambda _: None,
+            executor=pool,
+            cancel=Cancel(),
+            pace=rate_limits.PaceCheck("options.chain poll()", 60.0),
+        )
+    assert read.left_out == ("ZZZZ (HTTP 404 from GET /v3/snapshot/options/ZZZZ)",)
+
+
+def test_a_poll_cycle_s_values_share_one_patience(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each value is read as if passed alone, but the cycle's pauses together stay within one
+    # patience: a second value never starts a budget of its own.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    nq = Reply(envelope([{"product_code": "NQ", "name": "E-mini Nasdaq-100"}]))
+    fake_rest.reply("/futures/v1/products", es, nq)
+    patiences = _Patiences(monkeypatch)
+    read = _value_cycle(rest_session, ("ES", "NQ"))
+    assert read.requests == len(patiences.claims) == 2
+    assert patiences.shared()
+    assert read.patience == 600.0
 
 
 def test_a_poll_cycle_raises_a_value_s_failure_other_than_no_data(
@@ -4567,8 +5498,251 @@ def test_a_poll_cycle_raises_a_value_s_failure_other_than_no_data(
         _value_cycle(rest_session, ("ES",))
 
 
+def test_a_poll_cycle_judges_its_values_as_one_read(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # NQ's only row is unreadable: beside ES's, it is withheld; alone, the cycle fails.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    nq = Reply(envelope([{"product_code": "NQ", "last_updated": "no time"}]))
+    fake_rest.reply("/futures/v1/products", es, nq, nq, nq)
+    read = _value_cycle(rest_session, ("ES", "NQ"))
+    assert read.rows.column("ProductCode").to_pylist() == ["ES"]
+    with pytest.raises(RowDataError, match="could read none of the 2 rows"):
+        _value_cycle(rest_session, ("NQ", "YM"))
+
+
 def test_a_poll_cycle_of_an_empty_table_of_values_reads_nothing(
     rest_session: dm.MassiveSession,
 ) -> None:
     read = _value_cycle(rest_session, ())
     assert (read.rows.num_rows, read.requests, read.left_out) == (0, 0, ())
+
+
+def _not_found(
+    m: dm.MassiveSession, error: _massive.WireError, *, symbol: str | None, requests: int
+) -> object:
+    reader = _endpoints(m)._reader("call-1", m._core.policy, waiter=Waiter.CALL)
+    return reader._not_found(
+        error,
+        spec=TRADES,
+        call=rest_requests.Call({"stockTicker": symbol}, {}, symbol),
+        requested=f"GET /v3/trades/{symbol}",
+        bucket="stocks",
+        window=None,
+        kept=[],
+        requests=requests,
+    )
+
+
+def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
+    session: dm.MassiveSession,
+) -> None:
+    error = _massive.WireError(
+        "not found", status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
+    )
+    outcome = _not_found(session, error, symbol="ZZZZ", requests=0)
+    missing = rest._Missing("ZZZZ", "(HTTP 404 from GET /v3/trades/ZZZZ)")
+    assert outcome == rest._Outcome((), 1, missing=missing)
+    assert str(missing) == "ZZZZ (HTTP 404 from GET /v3/trades/ZZZZ)"
+
+
+def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:
+    answer = 'Massive answered GET /v3/trades/AAPL on api.massive.com with HTTP 404: "gone".'
+    error = _massive.WireError(
+        answer, status=404, request_id="r1", kind=_massive.WireFailure.REFUSED
+    )
+    with pytest.raises(
+        CutShortError,
+        match=rf"^stocks\.trades: the rows of AAPL were cut short after 2 pages arrived\. "
+        rf"{re.escape(answer)} Call m\.stocks\.trades again to read AAPL from the start\.$",
+    ) as info:
+        _not_found(session, error, symbol="AAPL", requests=2)
+    assert info.value.request_id == "r1"
+
+
+@pytest.mark.parametrize(
+    ("status", "symbol"), [(404, None), (500, "AAPL")], ids=["no-symbol", "not-404"]
+)
+def test_only_a_per_symbol_404_is_about_the_symbol(
+    *, session: dm.MassiveSession, status: int, symbol: str | None
+) -> None:
+    error = _massive.WireError("failed", status=status, kind=_massive.WireFailure.REFUSED)
+    with pytest.raises(dm.MassiveError) as info:
+        _not_found(session, error, symbol=symbol, requests=0)
+    assert not isinstance(info.value, CutShortError)
+    assert info.value.status == status
+
+
+def _recency(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    fixed: Subscription | None = None,
+    listed: frozenset[Subscription] = frozenset(),
+) -> rest._PageRecency:
+    return rest._page_recency(rows, fixed=fixed, listed=listed, symbol_key="ticker", symbol=None)
+
+
+def test_page_recency_refuses_each_unlisted_subscriptions_delayed_rows() -> None:
+    found = _recency(
+        [
+            {"ticker": "AAPL", "timeframe": "DELAYED"},
+            {"ticker": "MSFT", "last_trade": {"timeframe": "DELAYED"}},
+            {"ticker": "AAPL", "timeframe": "DELAYED"},
+            {"ticker": "X:BTCUSD", "timeframe": "DELAYED"},
+            {"ticker": "I:SPX", "timeframe": "REAL-TIME"},
+        ]
+    )
+    assert found.delayed
+    assert found.real_time
+    # The first evidence is kept; a currency's delay is shown but never refused.
+    assert found.refused == {Subscription.STOCKS: (("AAPL", "MSFT"), "timeframe=DELAYED")}
+    assert found.unknown == ()
+
+
+def test_page_recency_passes_a_listed_subscription_and_collects_unknown_labels() -> None:
+    found = _recency(
+        [{"ticker": "AAPL", "timeframe": "DELAYED"}, {"timeframe": "SOON"}],
+        fixed=Subscription.STOCKS,
+        listed=frozenset({Subscription.STOCKS}),
+    )
+    assert found.delayed
+    assert not found.real_time
+    assert found.refused == {}
+    assert found.unknown == ((Subscription.STOCKS, ("timeframe", "SOON")),)
+
+
+def test_page_recency_holds_no_row_whose_subscription_is_unknown() -> None:
+    found = _recency([{"timeframe": "DELAYED"}, {"ticker": "AAPL"}])
+    assert found == rest._PageRecency(delayed=False, real_time=False, refused={}, unknown=())
+
+
+def test_a_call_with_no_data_is_never_counted_as_a_request(session: dm.MassiveSession) -> None:
+    # A pair Massive's list does not hold is never sent, so pacing and announcements skip it.
+    path = (
+        _endpoints(session)
+        ._reader("call-1", session._core.policy, waiter=Waiter.CALL)
+        .rest_path(CRYPTO_LAST_PATH)
+    )
+    sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD")
+    unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED)
+    assert len(rest._buckets(CRYPTO_LAST, [(path, [sent, unsent])])) == 1
+
+
+def test_a_stream_splits_a_pair_through_the_sessions_rest_transport(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The WebSocket transport's lookup reaches the session's one crypto ticker list.
+    serve_pairs(fake_rest)
+    ports = session._core._ports
+    assert isinstance(ports, SessionClients)
+    assert ports._crypto_pair("X:BTCUSD", session._core.policy) == ("BTC", "USD")
+    assert ports._crypto_pair("X:NOPEUSD", session._core.policy) == NOT_LISTED
+
+
+def test_a_pair_whose_currencies_do_not_join_is_left_out_and_named_in_a_poll(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A poll leaves it out of the cycle, and a read lists it as an unreadable_symbols problem
+    # of its table, never as a symbol with no data.
+    unjoined = _ticker("X:DOTUSD", "DOT", "USDT")
+    fake_rest.reply(TICKERS_PATH, Reply(envelope([unjoined])), Reply(envelope([])))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
+    request = Request(symbols=("X:DOTUSD",), params=(("date", date(2025, 3, 3)),))
+    _, left_out = reader._plan_cycle(CRYPTO_OPEN_CLOSE, request, ("X:DOTUSD",), cancel=Cancel())
+    assert left_out == [
+        (
+            "X:DOTUSD (Massive's reference data gives the currencies 'DOT' and 'USDT', which do "
+            "not join to it)"
+        )
+    ]
+    with caplog.at_level(logging.WARNING, LOGGER):
+        assert fetch(session, CRYPTO_LAST, symbols=["X:DOTUSD"]) == []
+    assert [r for r in caplog.records if r.name == LOGGER] == []  # not as no data
+    assert sent_data(fake_rest) == []
+    # The read, not the plan, lists it: once, for the fetch that left it out.
+    [event] = events
+    assert (event.cause, event.symbol, event.field, event.policy) == (
+        ProblemCause.UNREADABLE_SYMBOLS,
+        "X:DOTUSD",
+        "Symbol",
+        dm.OnError.LOG,
+    )
+    assert event.detail.endswith("which do not join to it; the pair is never requested")
+
+
+def test_ignored_withheld_rows_log_no_warning_but_still_reach_the_session(
+    *,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Under IGNORE a withheld row logs nothing above DEBUG, and its event still reaches the
+    # session; under RAISE the event reaches the session before the read fails.
+    odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
+    page = Reply(envelope([odd, AAPL_DIVIDEND]))
+    fake_rest.reply(DIVIDENDS_PATH, page, page)
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
+    with dm.MassiveSession(config) as m:
+        events: list[ProblemEvent] = []
+        monkeypatch.setattr(m._core, "problems", events.extend)
+        quiet = dm.ErrorPolicy(unconvertible_values=dm.OnError.IGNORE)
+        with caplog.at_level(logging.DEBUG, LOGGER):
+            out = fetch(m, DIVIDENDS, symbols=["AAPL"], on_error=quiet)
+        assert [r["Id"] for r in out] == ["E1"]
+        withheld = [r for r in caplog.records if "withheld 1 REST row" in r.getMessage()]
+        assert withheld == []
+        strict = dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)
+        with pytest.raises(RowDataError) as info:
+            fetch(m, DIVIDENDS, symbols=["AAPL"], on_error=strict)
+        assert str(info.value) == (
+            "stocks.dividends: Massive sent 1 row the library cannot read whole, so it withheld "
+            "it: 1 under unconvertible_values. /stocks/v1/dividends: row 0: Frequency (wire key "
+            "'frequency') expects long, got 4.5. To go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
+        )
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Frequency", 1)
+    ] * 2
+
+
+def test_a_row_whose_ticker_list_cannot_be_read_is_withheld_not_left_out(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Its list may hold a named ticker, so it is no row outside the request: it is withheld and
+    # reported, beside the row that lists MSFT.
+    page = Reply(
+        envelope([{"benzinga_id": 1, "tickers": ["MSFT"]}, {"benzinga_id": 2, "tickers": "MSFT"}])
+    )
+    fake_rest.reply(LISTED_PATH, page)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
+    assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [(1, "MSFT")]
+    assert [(e.cause, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Tickers", 1)
+    ]
+
+
+def test_a_marked_row_whose_readable_list_names_none_of_the_tickers_is_left_out(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Its list was read and names none of the request's tickers, so whatever else is wrong with
+    # it, it is no row of the request: left out, with no event and no failure.
+    page = Reply(
+        envelope(
+            [{"benzinga_id": 1, "tickers": ["MSFT"]}, {"benzinga_id": "x", "tickers": ["TSLA"]}]
+        )
+    )
+    fake_rest.reply(LISTED_PATH, page)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
+    assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [(1, "MSFT")]
+    assert events == []

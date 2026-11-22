@@ -23,6 +23,7 @@ from deephaven_massive._massive.spec.types import (
     Transport,
     WireType,
     WireUnit,
+    WsChannel,
 )
 
 if TYPE_CHECKING:
@@ -92,7 +93,8 @@ def test_every_transport_loads_its_generated_file(
     loaded = spec.sources(transport)
     text = resources.files(spec).joinpath(name).read_text(encoding="utf-8")
     assert list(loaded) == [entry["key"] for entry in json.loads(text)["sources"]]
-    assert all(type(value) is Source and value.transport is transport for value in loaded.values())
+    kind = WsChannel if transport is Transport.WS else Source
+    assert all(type(value) is kind and value.transport is transport for value in loaded.values())
     assert unloaded[transport] is loaded
 
 
@@ -167,24 +169,32 @@ _FIELD = {
 
 def test_the_schemas_load_without_the_refresh_package() -> None:
     # An installed wheel has no `refresh/`: block it and load the schemas in a fresh process.
-    # The script is a literal; `-P` keeps the working directory off `sys.path`.
+    # The wire package needs no Deephaven, so the process starts no JVM: it registers a bare
+    # `deephaven_massive` package in place of running the library's `__init__`, which imports
+    # Deephaven, then imports the wire package whole, as the library does. The script is a
+    # literal; `-P` keeps the working directory off `sys.path`.
     result = subprocess.run(
         [
             sys.executable,
             "-P",
             "-c",
             (
-                "import sys\n"
+                "import importlib.util, sys, types\n"
                 "class Block:\n"
                 "    def find_spec(self, name, path=None, target=None):\n"
                 "        if name.startswith('deephaven_massive._massive.refresh'):\n"
                 "            raise ImportError(name)\n"
                 "sys.meta_path.insert(0, Block())\n"
+                "found = importlib.util.find_spec('deephaven_massive')\n"
+                "package = types.ModuleType('deephaven_massive')\n"
+                "package.__path__ = list(found.submodule_search_locations)\n"
+                "sys.modules['deephaven_massive'] = package\n"
+                "import deephaven_massive._massive\n"
                 "from deephaven_massive._massive import spec\n"
                 "from deephaven_massive._massive.spec.types import Transport\n"
                 "for transport in Transport:\n"
                 "    found = spec.sources(transport).values()\n"
-                "    print(len(found), sum(len(s.memberships) for s in found))\n"
+                "    print('counts', len(found), sum(len(s.memberships) for s in found))\n"
             ),
         ],
         capture_output=True,
@@ -192,12 +202,12 @@ def test_the_schemas_load_without_the_refresh_package() -> None:
         check=True,
     )
     expected = [
-        f"{len(found)} {sum(len(s.memberships) for s in found)}"
+        f"counts {len(found)} {sum(len(s.memberships) for s in found)}"
         for found in (spec.sources(transport).values() for transport in Transport)
     ]
     assert result.stdout.splitlines() == expected
     # Every channel and prefix belongs to a kind, so memberships are read where they matter.
-    assert all(count.split()[1] != "0" for count in expected)
+    assert all(count.split()[2] != "0" for count in expected)
 
 
 # --- Descriptions and provenance -----------------------------------------------------------
@@ -231,10 +241,8 @@ def test_every_description_is_joined_into_its_field() -> None:
 
 def test_a_field_the_vendor_does_not_describe_loads_as_empty() -> None:
     futures = spec.source(Transport.REST, "/futures/v1/snapshot")
-    assert futures.field("DetailsTicker").description == ""
-    assert futures.field("DetailsSettlementDate").description == (
-        "The day that this contract is settled."
-    )
+    assert futures.field("Ticker").description == ""
+    assert futures.field("SettlementDate").description == ("The day that this contract is settled.")
 
 
 def test_provenance_gives_the_fetch_date_and_every_source_url() -> None:
@@ -260,7 +268,7 @@ _URL = "https://massive.com/docs/rest/x.md"
 
 def _descriptions(**change: object) -> str:
     document = {
-        "generated_by": "python -m deephaven_massive._massive.refresh",
+        "generated_by": "python scripts/refresh.py",
         "fetched": "2026-10-27",
         "urls": {"REST": {"/v1/x": [_URL]}},
         "descriptions": {"REST": {"/v1/x": {"price": "The price."}}},

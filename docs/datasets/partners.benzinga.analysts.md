@@ -7,7 +7,7 @@ Benzinga's profiles of sell-side analysts, with each analyst's firm and track re
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.partners.benzinga.analysts(*, sort=None, order=None, limit=None, filters=None)
+m.partners.benzinga.analysts(*, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -26,6 +26,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"firm_name": "Wedbush"}`. Keys: `benzinga_firm_id`, `benzinga_firm_id_any_of`, `benzinga_firm_id_gt`, `benzinga_firm_id_gte`, `benzinga_firm_id_lt`, `benzinga_firm_id_lte`, `benzinga_id`, `benzinga_id_any_of`, `benzinga_id_gt`, `benzinga_id_gte`, `benzinga_id_lt`, `benzinga_id_lte`, `firm_name`, `firm_name_any_of`, `firm_name_gt`, `firm_name_gte`, `firm_name_lt`, `firm_name_lte`, `full_name`, `full_name_any_of`, `full_name_gt`, `full_name_gte`, `full_name_lt`, `full_name_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -57,7 +58,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
@@ -84,4 +85,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

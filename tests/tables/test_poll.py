@@ -6,12 +6,13 @@ import functools
 import gc
 import logging
 import queue
+import re
 import threading
 import weakref
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
-from typing import TYPE_CHECKING, Any, cast
+from datetime import datetime, timedelta
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -19,21 +20,28 @@ from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.execution_context import ExecutionContext
+from deephaven.liveness_scope import LivenessScope
 from deephaven.stream.table_publisher import TablePublisher
 from deephaven.table import Table
 from deephaven.table_factory import InputTable
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _session
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._datasets.row_times import ISSUES_URL
-from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
+from deephaven_massive._datasets.symbols import AllSymbols, NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
-from deephaven_massive._errors import PermanentError, RowDataError
+from deephaven_massive._error_policy import resolve_policy
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    BrokenGuaranteeError,
+    PermanentError,
+    RowDataError,
+)
+from deephaven_massive._ingest.rest import RestEndpoints
 from deephaven_massive._massive import Cancel, DriftReport, Transport
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import Query
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.liveness import (
     ResultRecord,
@@ -42,13 +50,17 @@ from deephaven_massive._tables.liveness import (
     release_scope,
 )
 from deephaven_massive._tables.poll import LIVE_COLUMN, Pollers, open_poll
-from deephaven_massive._types import override
+from deephaven_massive._tables.problem_events import (
+    Problem,
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+)
+from deephaven_massive._tables.session_core import SessionCore
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import FetchQuery
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
-
-if TYPE_CHECKING:
-    from deephaven.liveness_scope import LivenessScope
-
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
@@ -56,6 +68,8 @@ if TYPE_CHECKING:
 
 R = Transport.REST
 TIMEOUT = 30.0
+# The modes a poller runs in: `poll()` resolves AUTO to the dataset's own mode first.
+POLLER_MODES = [PollMode.REPLACE, PollMode.UPSERT, PollMode.APPEND]
 LOGGER = "deephaven_massive._tables.poll"
 
 
@@ -70,11 +84,30 @@ DIVIDENDS = DatasetSpec(
 )
 ToPylist = Callable[[Table], list[dict[str, Any]]]
 
-GOOD = "last good cycle at 2027-01-15T08:00:00Z"
-"""The `Error` suffix of a failing cycle after the first, good cycle at the fake clock's start."""
+GOOD = "The last good cycle ran at 2027-01-15T08:00:00Z."
 
-NO_GOOD = "no good cycle since the poll started at 2027-01-15T08:00:00Z"
-"""The `Error` suffix of a failing cycle before any good one."""
+
+def answered(status: int, text: str) -> str:
+    """Return the message of Massive's answer to the poll's request, as the REST client words it."""
+    return f'Massive answered GET {PATH} on api.massive.com with HTTP {status}: "{text}".'
+
+
+ANSWER_503 = answered(503, "Service Unavailable")
+ANSWER_429 = answered(429, "You've exceeded the maximum requests per minute")
+ANSWER_403 = answered(403, "You are not entitled to this data")
+ANSWER_401 = answered(401, "Unknown API Key")
+"""The suffix of a failing cycle's text after the first, good cycle at the fake clock's start."""
+
+NO_GOOD = "No cycle has succeeded since the poll started at 2027-01-15T08:00:00Z."
+"""The suffix of a failing cycle's text before any good one."""
+
+FAILED_AFTER_GOOD = "A cycle failed after the last good one at 2027-01-15T08:00:00Z: "
+"""The start of a failed cycle's `Detail` after the first, good cycle at the fake clock's start."""
+
+FAILED = ProblemCause.POLL_CYCLE_FAILED
+LATE = ProblemCause.POLL_CYCLE_LATE
+UNAVAILABLE = ProblemCause.UNAVAILABLE_SYMBOLS
+NONCANONICAL = ProblemCause.NONCANONICAL_SYMBOLS
 
 
 class Script:
@@ -84,7 +117,7 @@ class Script:
         self.outcomes: queue.SimpleQueue[object] = queue.SimpleQueue()
         self.symbols: list[NormalizedSymbols | None] = []
         self.values: list[tuple[str, ...] | None] = []
-        self.drift: DriftReport | None = None
+        self.stream_ids: list[int] = []  # the table each cycle reads for
         # What each cycle's pages show about their recency, as the REST transport reports it.
         self.recency: tuple[Recency, ...] = ()
         self.took = 0.0  # how far each cycle's read moves the clock
@@ -108,6 +141,7 @@ class Script:
     def __call__(
         self,
         *,
+        stream_id: int,
         symbols: NormalizedSymbols | None,
         values: tuple[str, ...] | None,
         record: Callable[[DriftReport], None],
@@ -117,11 +151,10 @@ class Script:
     ) -> poll.CycleRows:
         self.symbols.append(symbols)
         self.values.append(values)
+        self.stream_ids.append(stream_id)
         self.cancel = cancel
         if self.keep_record:  # a test calls it to deliver a page while the cycle runs
             self.record = record
-        if self.drift is not None:
-            record(self.drift)
         for shown in self.recency:
             on_recency(shown)
         outcome = self.outcomes.get(timeout=TIMEOUT)
@@ -131,7 +164,8 @@ class Script:
             record(DriftReport())
         if isinstance(outcome, BaseException):
             raise outcome
-        return poll.CycleRows(cast("pa.Table", outcome), 3, 600.0, self.left_out)
+        assert isinstance(outcome, pa.Table)
+        return poll.CycleRows(outcome, 3, 600.0, self.left_out)
 
 
 @pytest.fixture
@@ -161,10 +195,25 @@ def pollers(massive_session: dm.MassiveSession) -> Pollers:
     return RecordingPollers(massive_session._core.label)
 
 
+@pytest.fixture
+def published_failures(monkeypatch: pytest.MonkeyPatch) -> list[dm.MassiveError]:
+    # Records each error a table is failed with, and fails the table with it.
+    published: list[dm.MassiveError] = []
+    publish = TablePublisher.publish_failure
+
+    def recording(publisher: TablePublisher, error: Exception) -> None:
+        assert isinstance(error, dm.MassiveError)  # a poll fails its table with no other
+        published.append(error)
+        publish(publisher, error)
+
+    monkeypatch.setattr(TablePublisher, "publish_failure", recording)
+    return published
+
+
 def start(
     m: dm.MassiveSession,
     *,
-    script: Script,
+    script: poll.CycleReader,
     pollers: Pollers,
     clock: FakeClock,
     mode: PollMode = PollMode.REPLACE,
@@ -172,11 +221,14 @@ def start(
     stop: threading.Event | None = None,
     interval: float = 60.0,
     values: ValueTable | None = None,
+    call: dm.ErrorPolicy | None = None,
 ) -> Table:
+    # `call` is the call's own policy, resolved over the session's as a dataset method does.
+    policy = resolve_policy(call, m._core.config.on_error)
     return open_poll(
         m._core,
         spec=DIVIDENDS,
-        request=Request(symbols=symbols, value_table=values),
+        request=Request(symbols=symbols, value_table=values, on_error=policy),
         interval=timedelta(seconds=interval),
         mode=mode,
         query="<Query test>",
@@ -188,6 +240,18 @@ def start(
         clock=clock,
         stop=threading.Event() if stop is None else stop,
     )
+
+
+def raise_noncanonical(
+    m: dm.MassiveSession, raised_by: str, monkeypatch: pytest.MonkeyPatch
+) -> dm.ErrorPolicy | None:
+    # Sets `noncanonical_symbols` to RAISE on the session ("session"), or returns it as the
+    # call's policy over a session that logs ("call").
+    strict = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    if raised_by == "call":
+        return strict
+    monkeypatch.setattr(m._core, "config", dataclasses.replace(m._core.config, on_error=strict))
+    return None
 
 
 def until(condition: Callable[[], bool]) -> None:
@@ -212,6 +276,21 @@ def next_cycle(clock: FakeClock, interval: float = 60.0) -> None:
     until(lambda: len(clock.waits) > waits)
 
 
+def problems_of(
+    m: dm.MassiveSession, to_pylist: ToPylist, cause: ProblemCause
+) -> list[dict[str, Any]]:
+    # The session's m.problems() rows of one cause, once every problem queued so far is
+    # shown, by symbol and then oldest first.
+    assert m._core.diagnostics.wait_until_shown(TIMEOUT)
+    rows = [row for row in to_pylist(m.problems()) if row["Cause"] == cause.value]
+    return sorted(rows, key=lambda row: (row["Symbol"] or "", row["FirstSeen"]))
+
+
+def utc(stamp: datetime) -> str:
+    # A timestamp of m.problems() as the library's UTC text, such as "2027-01-15T08:01:00Z".
+    return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def fail_one_poll_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
     # Makes the next Arrow-to-Deephaven conversion on a poll thread fail once. The patch is
     # process-wide and the diagnostics thread converts its batches through the same function,
@@ -225,6 +304,13 @@ def fail_one_poll_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
         return convert(data)
 
     monkeypatch.setattr(dh_arrow, "to_table", flaky)
+
+
+def _pollers_of(m: dm.MassiveSession) -> Pollers:
+    # The session's own pollers, kept by its REST transport.
+    transport = m._core.rest_transport()
+    assert isinstance(transport, RestEndpoints)
+    return transport._state.pollers
 
 
 def poller_of(pollers: Pollers) -> poll.Poller:
@@ -286,7 +372,7 @@ def test_upsert_keyed_on_every_column_keeps_each_distinct_row(
     # left to aggregate, so the table holds each distinct row once, across cycles, with the
     # time of the latest cycle that returned it.
     spec = _session.CATALOG.by_name["reference.related_companies"]
-    schema = _session.CATALOG.dataset_schema(spec, raw_symbol=False)
+    schema = _session.CATALOG.dataset_schema(spec)
     assert {*spec.poll_keys, "TimestampInsert"} == set(schema.column_names)
     deferred: list[LivenessScope] = []  # nothing fails the table: it stays empty
     scope = new_scope()
@@ -342,7 +428,7 @@ def test_append_appends_only_keys_not_seen_before(
     assert all(wait <= 60 for wait in clock.waits)
 
 
-@pytest.mark.parametrize("mode", list(PollMode))
+@pytest.mark.parametrize("mode", POLLER_MODES)
 def test_every_mode_is_described_and_ticks(
     *,
     massive_session: dm.MassiveSession,
@@ -377,7 +463,6 @@ def test_the_streams_row_follows_the_cycles_and_the_release(
     stream_rows: Callable[[], list[dict[str, Any]]],
     drain: Callable[[], None],
 ) -> None:
-    script.drift = DriftReport(extra=frozenset({"brand_new"}))
     script.rows(("AAPL", 1.0), ("MSFT", 2.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     clock.wait_for_sleepers(1)
@@ -391,7 +476,6 @@ def test_the_streams_row_follows_the_cycles_and_the_release(
     )
     assert (row["SymbolCount"], row["Symbols"], row["HeldResults"]) == (2, "AAPL, MSFT", 1)
     assert (row["RowsPublished"], row["RequestsPerCycle"], row["State"]) == (2, 3, "RUNNING")
-    assert row["SchemaDrift"] == "REST:brand_new+"
     poller = poller_of(pollers)
     massive_session.release(table)
     drain()
@@ -421,7 +505,7 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
         until(lambda: len(pairs(table, dh_to_pylist)) == 2)
         script.rows(("AAPL", 1.0), ("MSFT", 2.0))
         next_cycle(clock)  # the same rows again: read, but nothing new to publish
-        script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+        script.fail(dm.MassiveError(ANSWER_503))
         next_cycle(clock)
     patience = "waiting out at most 600 s of pauses; left out: none"
     assert caplog.messages == [
@@ -439,13 +523,41 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
             f"0.000 s, {patience}"
         ),
         (
-            "stocks.dividends poll() stream 1: a cycle failed, and the next one runs as scheduled: "
-            "HTTP 503 from GET /stocks/v1/dividends"
+            f"stocks.dividends poll() stream 1: a cycle failed. {ANSWER_503} Nothing to do: the "
+            "next cycle runs as scheduled."
         ),
     ]
 
 
-def test_late_cycles_warn_once_and_on_time_cycles_say_so(
+def test_a_run_of_failures_warns_once_whatever_their_source_but_a_bug_logs_an_error(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script.rows(("AAPL", 1.0))
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
+    failures = [
+        dm.MassiveError(ANSWER_503, status=503),
+        dm.MassiveError("connection reset", source=dm.ErrorSource.NETWORK),
+        dm.MassiveError(ANSWER_503, status=503),
+        dm.MassiveError("a row broke", source=dm.ErrorSource.LIBRARY),
+    ]
+    with caplog.at_level(logging.DEBUG, LOGGER):
+        for failure in failures:
+            script.fail(failure)
+            next_cycle(clock)
+    failed = [r for r in caplog.records if "a cycle failed" in r.getMessage()]
+    # One outage of Massive's and the network's: one WARNING. The bug starts a run of its own.
+    assert [r.levelno for r in failed] == [logging.WARNING, logging.ERROR]
+    assert [r.exc_info is not None for r in failed] == [False, True]  # the bug, with its trace
+
+
+def test_late_cycles_warn_once_and_are_one_span_until_a_cycle_is_on_time(
     *,
     massive_session: dm.MassiveSession,
     script: Script,
@@ -466,6 +578,15 @@ def test_late_cycles_warn_once_and_on_time_cycles_say_so(
         script.rows(("AAPL", 3.0))
         clock.advance(60)
         until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0)])
+        # The run is one span from the first late cycle's start, open while cycles are late.
+        (late,) = problems_of(massive_session, dh_to_pylist, LATE)
+        assert (late["StreamId"], late["Action"], utc(late["SpanStart"])) == (
+            1,
+            "DELAYED",
+            "2027-01-15T08:01:00Z",
+        )
+        assert late["Detail"] == "a cycle took 90 s, longer than the 60 s interval"
+        assert late["EndedAt"] is None
         script.took = 0.0
         script.rows(("AAPL", 4.0))  # in time again: INFO
         until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 4.0)])
@@ -475,8 +596,9 @@ def test_late_cycles_warn_once_and_on_time_cycles_say_so(
             logging.WARNING,
             (
                 "stocks.dividends poll() stream 1: a cycle took 90 s, longer than the 60 s "
-                "interval, so the table updates late; m.rate_limits() shows whether its requests "
-                "are paced or paused by Massive's rate limit"
+                "interval, so the table updates late. m.problems() lists the run of late cycles. "
+                "Read m.rate_limits() to see whether Massive's rate limit paces or pauses the "
+                "requests."
             ),
         ),
         (
@@ -484,6 +606,9 @@ def test_late_cycles_warn_once_and_on_time_cycles_say_so(
             "stocks.dividends poll() stream 1: cycles end within the 60 s interval again",
         ),
     ]
+    # The cycle in time ends the span.
+    (late,) = problems_of(massive_session, dh_to_pylist, LATE)
+    assert (utc(late["SpanStart"]), late["EndedAt"] is not None) == ("2027-01-15T08:01:00Z", True)
 
 
 def test_the_poller_and_its_pool_are_named_after_the_session_and_the_stream(
@@ -499,7 +624,7 @@ def test_the_poller_and_its_pool_are_named_after_the_session_and_the_stream(
 
     # Held until the end: a table nothing refers to may be collected, which stops its poller
     # before its first cycle.
-    table = start(massive_session, script=cast("Script", read), pollers=pollers, clock=clock)
+    table = start(massive_session, script=read, pollers=pollers, clock=clock)
     poller, pool = names.get(timeout=TIMEOUT)
     prefix = massive_session._core.thread_prefix
     assert poller == f"{prefix} poll-1"
@@ -515,14 +640,14 @@ def test_an_entitlement_error_fails_the_table_and_ends_the_poller(
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
 ) -> None:
-    script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
+    script.fail(dm.EntitlementError(ANSWER_403))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     poller = poller_of(pollers)
     poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
-    assert (row["State"], row["Error"]) == ("FAILED", "HTTP 403 from GET /stocks/v1/dividends")
+    assert (row["State"], row["Error"]) == ("FAILED", ANSWER_403)
     massive_session.release(table)
     assert stream_rows()[0]["State"] == "FAILED"  # a failed row keeps its state
 
@@ -539,9 +664,9 @@ def test_polls_refused_for_one_entitlement_log_one_warning(
     # the dataset refused this way logs a WARNING, the later ones only DEBUG. A refusal of
     # another kind is a cause of its own and warns again.
     refusals = [
-        dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends", status=403),
-        dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends", status=403),
-        dm.AuthenticationError("HTTP 401 from GET /stocks/v1/dividends", status=401),
+        dm.EntitlementError(ANSWER_403, status=403),
+        dm.EntitlementError(ANSWER_403, status=403),
+        dm.AuthenticationError(ANSWER_401, status=401),
     ]
     tables = []
     with caplog.at_level(logging.DEBUG, LOGGER):
@@ -551,20 +676,27 @@ def test_polls_refused_for_one_entitlement_log_one_warning(
             poller = poller_of(pollers)
             poller.thread.join(TIMEOUT)
             assert not poller.thread.is_alive()
-    failed = [(r.levelno, r.getMessage()) for r in caplog.records if "failed: HTTP" in r.message]
+    failed = [
+        (r.levelno, r.getMessage())
+        for r in caplog.records
+        if "failed: Massive answered" in r.message
+    ]
     assert [level for level, _ in failed if level >= logging.WARNING] == [
         logging.WARNING,
         logging.WARNING,
     ]
     warned = [message for level, message in failed if level == logging.WARNING]
     assert warned[0] == (
-        "stocks.dividends poll() stream 1 failed: HTTP 403 from GET /stocks/v1/dividends (each "
-        "later poll() table of stocks.dividends refused this way logs at DEBUG)"
+        f"stocks.dividends poll() stream 1 failed: {ANSWER_403} Later poll() tables of "
+        "stocks.dividends refused this way log at DEBUG. See m.streams() for each failed table."
     )
-    assert warned[1].startswith("stocks.dividends poll() stream 3 failed: HTTP 401")
+    assert warned[1] == (
+        f"stocks.dividends poll() stream 3 failed: {ANSWER_401} Later poll() tables of "
+        "stocks.dividends refused this way log at DEBUG. See m.streams() for each failed table."
+    )
     # Every refusal still logs at DEBUG with its own stream.
     debug = [message for level, message in failed if level == logging.DEBUG]
-    assert [m.split(" failed")[0] for m in debug] == [
+    assert [m.split(" failed:")[0] for m in debug] == [
         f"stocks.dividends poll() stream {n}" for n in (1, 2, 3)
     ]
     for table in tables:
@@ -584,7 +716,7 @@ def test_a_failure_is_recorded_before_the_table_fails(
     core = massive_session._core
     record, publish = core.fail_stream, TablePublisher.publish_failure
 
-    def recording(stream_id: int, error: str) -> None:
+    def recording(stream_id: int, error: dm.MassiveError) -> None:
         order.append("recorded")
         record(stream_id, error)
 
@@ -594,7 +726,7 @@ def test_a_failure_is_recorded_before_the_table_fails(
 
     monkeypatch.setattr(core, "fail_stream", recording)
     monkeypatch.setattr(TablePublisher, "publish_failure", failing)
-    script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
+    script.fail(dm.EntitlementError(ANSWER_403))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     poller = poller_of(pollers)
     poller.thread.join(TIMEOUT)
@@ -623,7 +755,7 @@ def test_authentication_and_data_failures_fail_the_table(
     until(lambda: bool(table.j_table.isFailed()))
 
 
-def test_other_errors_keep_the_rows_and_the_next_cycle_clears_them(
+def test_other_errors_keep_the_rows_and_are_a_gap_until_the_next_good_cycle(
     *,
     massive_session: dm.MassiveSession,
     script: Script,
@@ -636,13 +768,21 @@ def test_other_errors_keep_the_rows_and_the_next_cycle_clears_them(
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
-    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    script.fail(dm.MassiveError(ANSWER_503))
     with caplog.at_level(logging.INFO, LOGGER):
         next_cycle(clock)
     (row,) = stream_rows()
-    assert (row["State"], row["Error"]) == (
-        "RUNNING",
-        f"HTTP 503 from GET /stocks/v1/dividends; {GOOD}",
+    assert (row["State"], row["Error"]) == ("RUNNING", None)  # Error names only a stop
+    (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert (gap["StreamId"], gap["Action"], utc(gap["SpanStart"]), gap["EndedAt"]) == (
+        1,
+        "GAP",
+        "2027-01-15T08:01:00Z",
+        None,
+    )
+    assert gap["Detail"] == (
+        "A cycle failed after the last good one at 2027-01-15T08:00:00Z: Massive answered GET "
+        '/stocks/v1/dividends on api.massive.com with HTTP 503: "Service Unavailable".'
     )
     assert pairs(table, dh_to_pylist) == [("AAPL", 1.0)]
     # An expected failure: one WARNING for the run.
@@ -650,13 +790,13 @@ def test_other_errors_keep_the_rows_and_the_next_cycle_clears_them(
         (
             logging.WARNING,
             (
-                "stocks.dividends poll() stream 1: a cycle failed, and the next one runs as "
-                "scheduled: HTTP 503 from GET /stocks/v1/dividends"
+                f"stocks.dividends poll() stream 1: a cycle failed. {ANSWER_503} Nothing to do: "
+                "the next cycle runs as scheduled."
             ),
         )
     ]
     caplog.clear()
-    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    script.fail(dm.MassiveError(ANSWER_503))
     with caplog.at_level(logging.INFO, LOGGER):
         next_cycle(clock)
     assert caplog.records == []  # the same run: DEBUG only
@@ -666,41 +806,50 @@ def test_other_errors_keep_the_rows_and_the_next_cycle_clears_them(
     # A defect is never hidden behind the outage: it starts its own run, at ERROR.
     [defect] = caplog.records
     assert defect.levelno == logging.ERROR
-    assert defect.getMessage().startswith(
-        "stocks.dividends poll() stream 1: the cycle failed. This is a bug in deephaven-massive."
+    assert defect.getMessage() == (
+        "stocks.dividends poll() stream 1: a cycle failed on an unexpected error. The next cycle "
+        f"runs as scheduled. {LIBRARY_BUG}"
     )
-    assert stream_rows()[0]["Error"] == f"a defect; {GOOD}"
-    assert stream_rows()[0]["Gaps"] is None  # a gap is recorded once it ends
+    # The same span, from the run's first failed cycle, names the latest error.
+    (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert (utc(gap["SpanStart"]), gap["EndedAt"], gap["Detail"]) == (
+        "2027-01-15T08:01:00Z",
+        None,
+        f"{FAILED_AFTER_GOOD}a defect",
+    )
+    assert stream_rows()[0]["Error"] is None
     caplog.clear()
     script.rows(("AAPL", 2.0))
     with caplog.at_level(logging.INFO, LOGGER):
         next_cycle(clock)
         until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 2.0)])
-    # The Error clears, but the time over which rows may be missing stays on the row.
-    (row,) = stream_rows()
-    assert (row["Error"], row["Gaps"]) == (
-        None,
-        "2027-01-15T08:01:00Z to 2027-01-15T08:04:00Z",
-    )
+    # The good cycle ends the span, and its row stays in m.problems().
+    (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert (utc(gap["SpanStart"]), gap["EndedAt"] is not None) == ("2027-01-15T08:01:00Z", True)
+    assert stream_rows()[0]["Error"] is None
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (
             logging.INFO,
             (
                 "stocks.dividends poll() stream 1: a cycle succeeded again; rows from "
-                "2027-01-15T08:01:00Z to 2027-01-15T08:04:00Z may be missing, recorded in its "
-                "Gaps"
+                "2027-01-15T08:01:00Z to 2027-01-15T08:04:00Z may be missing, recorded in "
+                "m.problems()"
             ),
         )
     ]
-    # A later run of failures adds a second gap; the first one stays.
-    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    # A later run of failures is a second span; the first one stays, ended.
+    script.fail(dm.MassiveError(ANSWER_503))
     next_cycle(clock)
+    (_, second) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert (utc(second["SpanStart"]), second["EndedAt"]) == ("2027-01-15T08:05:00Z", None)
     script.rows(("AAPL", 3.0))
     next_cycle(clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0)])
-    assert stream_rows()[0]["Gaps"] == (
-        "2027-01-15T08:01:00Z to 2027-01-15T08:04:00Z; 2027-01-15T08:05:00Z to 2027-01-15T08:06:00Z"
-    )
+    gaps = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert [(utc(g["SpanStart"]), g["EndedAt"] is not None) for g in gaps] == [
+        ("2027-01-15T08:01:00Z", True),
+        ("2027-01-15T08:05:00Z", True),
+    ]
 
 
 def _last_cycle_fails_the_table(clock: FakeClock, pollers: Pollers) -> None:
@@ -712,7 +861,7 @@ def _last_cycle_fails_the_table(clock: FakeClock, pollers: Pollers) -> None:
     assert not poller.thread.is_alive()
 
 
-@pytest.mark.parametrize("mode", list(PollMode))
+@pytest.mark.parametrize("mode", POLLER_MODES)
 def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     *,
     massive_session: dm.MassiveSession,
@@ -720,34 +869,49 @@ def test_cycles_failing_for_max_outage_fail_the_table_in_every_mode(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    published_failures: list[dm.MassiveError],
+    dh_to_pylist: ToPylist,
     mode: PollMode,
 ) -> None:
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock, mode=mode)
-    error = dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends")
+    error = dm.MassiveError(ANSWER_503, status=503)
     for _ in range(5):  # failures at 60 to 300 s: the table runs and names its last good cycle
         script.fail(error)
         next_cycle(clock)
         (row,) = stream_rows()
-        assert (row["State"], row["Error"]) == ("RUNNING", f"{error}; {GOOD}")
+        assert (row["State"], row["Error"]) == ("RUNNING", None)
+        (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+        assert (gap["Detail"], gap["EndedAt"]) == (f"{FAILED_AFTER_GOOD}{error}", None)
     script.rows()  # a good cycle with no new row: quiet data, which ends the run of failures
     next_cycle(clock)
-    good_again = "last good cycle at 2027-01-15T08:06:00Z"
+    good_again = "A cycle failed after the last good one at 2027-01-15T08:06:00Z: "
     for _ in range(5):  # failures at 420 to 660 s: under 300 s since the run's first
         script.fail(error)
         next_cycle(clock)
-    assert stream_rows()[0]["Error"] == f"{error}; {good_again}"
+    assert stream_rows()[0]["State"] == "RUNNING"
+    first, second = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert first["EndedAt"] is not None
+    assert (utc(second["SpanStart"]), second["Detail"], second["EndedAt"]) == (
+        "2027-01-15T08:07:00Z",
+        f"{good_again}{error}",
+        None,
+    )
     script.fail(error)  # 300 s after the run's first failure: max_outage
     _last_cycle_fails_the_table(clock, pollers)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     failure = (
-        f"stocks.dividends poll(): {good_again}; every cycle since 2027-01-15T08:07:00Z has "
-        "failed, for 300 s, longer than MassiveConfig.max_outage (300 s); the rows since then "
-        "may be missing, so this table stopped; call the verb again for a new live table. The "
-        f"latest error: {error}"
+        "stocks.dividends poll(): every cycle since 2027-01-15T08:07:00Z has failed for 300 s, "
+        "reaching max_outage=300 s, so this table stopped and the rows since then may be "
+        f"missing. The latest error: {ANSWER_503} Call m.stocks.dividends again for a new live "
+        "table."
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
+    # Massive's outage may be over by the next call, as the latest error says.
+    assert [e.is_retryable for e in published_failures] == [True]
+    # Chained to the latest error, so a bug's traceback reaches the failure's log record.
+    assert [str(e.__cause__) for e in published_failures] == [str(error)]
 
 
 @pytest.mark.parametrize(
@@ -762,24 +926,29 @@ def test_one_failure_long_after_the_last_good_cycle_keeps_the_table(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_to_pylist: ToPylist,
     interval: float,
     took: float,
 ) -> None:
     # The last good cycle began well over max_outage before the failure, but the failing cycle
     # received a page just before it failed: the table keeps running, and the next good cycle
-    # clears it.
+    # ends its gap.
     script.clock, script.took, script.late_page = clock, took, True
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock, interval=interval)
-    error = dm.MassiveError("HTTP 429 from GET /stocks/v1/dividends")
+    error = dm.MassiveError(ANSWER_429)
     script.fail(error)
     next_cycle(clock, interval)
     (row,) = stream_rows()
-    assert (row["State"], row["Error"]) == ("RUNNING", f"{error}; {GOOD}")
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert (gap["Detail"], gap["EndedAt"]) == (f"{FAILED_AFTER_GOOD}{error}", None)
     script.rows(("AAPL", 2.0))
     next_cycle(clock, interval)
     (row,) = stream_rows()
     assert (row["State"], row["Error"]) == ("RUNNING", None)
+    (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert gap["EndedAt"] is not None
     assert not table.j_table.isFailed()
 
 
@@ -789,23 +958,26 @@ def test_a_gap_starts_where_the_failed_cycle_started_not_at_its_last_page(
     script: Script,
     pollers: Pollers,
     clock: FakeClock,
-    stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Each cycle reads for 40 s and receives a page at its end. The failing cycle starts at
     # 08:01:40 and fails after its page at 08:02:20: it published nothing, so its rows are
-    # missing from its start, not from its last page.
+    # missing from its start, not from its last page, to the next good cycle's start.
     script.clock, script.took, script.late_page = clock, 40.0, True
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
-    script.fail(dm.MassiveError("HTTP 503 from GET /stocks/v1/dividends"))
+    script.fail(dm.MassiveError(ANSWER_503))
     next_cycle(clock)
     script.rows(("AAPL", 2.0))
-    next_cycle(clock)
-    (row,) = stream_rows()
-    assert (row["Error"], row["Gaps"]) == (
-        None,
-        "2027-01-15T08:01:40Z to 2027-01-15T08:03:20Z",
-    )
+    with caplog.at_level(logging.INFO, LOGGER):
+        next_cycle(clock)
+    (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert (utc(gap["SpanStart"]), gap["EndedAt"] is not None) == ("2027-01-15T08:01:40Z", True)
+    assert (
+        "stocks.dividends poll() stream 1: a cycle succeeded again; rows from "
+        "2027-01-15T08:01:40Z to 2027-01-15T08:03:20Z may be missing, recorded in m.problems()"
+    ) in caplog.messages
     del table
 
 
@@ -823,13 +995,13 @@ def test_a_failed_cycle_that_received_no_page_counts_its_whole_run(
     table = start(massive_session, script=script, pollers=pollers, clock=clock, interval=600.0)
     clock.wait_for_sleepers(1)
     script.clock, script.took = clock, 400.0
-    error = dm.MassiveError("HTTP 429 from GET /stocks/v1/dividends")
+    error = dm.MassiveError(ANSWER_429)
     script.fail(error)
     clock.advance(600.0)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert "every cycle since 2027-01-15T08:10:00Z has failed, for 400 s" in row["Error"]
+    assert "every cycle since 2027-01-15T08:10:00Z has failed for 400 s" in row["Error"]
 
 
 def _second_cycle_running(script: Script, clock: FakeClock) -> None:
@@ -846,26 +1018,43 @@ def test_a_cycle_running_past_its_interval_is_marked_until_it_ends(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_to_pylist: ToPylist,
 ) -> None:
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     _second_cycle_running(script, clock)
     clock.advance(60.0)  # exactly its interval: not late yet
     pollers.check_running()
-    assert stream_rows()[0]["Error"] is None
+    assert problems_of(massive_session, dh_to_pylist, LATE) == []
     clock.advance(1.0)
     pollers.check_running()
     pollers.check_running()  # marked once
-    late = f"cycle running since 2027-01-15T08:01:00Z; {GOOD}"
-    assert stream_rows()[0]["Error"] == late
+    late = f"A cycle has run since 2027-01-15T08:01:00Z. {GOOD}"
+    (span,) = problems_of(massive_session, dh_to_pylist, LATE)
+    assert (span["Action"], utc(span["SpanStart"]), span["Detail"], span["EndedAt"]) == (
+        "DELAYED",
+        "2027-01-15T08:01:00Z",
+        late,
+        None,
+    )
+    assert stream_rows()[0]["Error"] is None
     script.rows(("AAPL", 2.0))  # the cycle ends late, so the next one starts at once
     until(lambda: len(script.symbols) == 3)
     pollers.check_running()  # the second cycle has ended: nothing to mark
+    # The cycle ended late: the same span holds, now naming how long it took.
+    (span,) = problems_of(massive_session, dh_to_pylist, LATE)
+    assert (utc(span["SpanStart"]), span["Detail"], span["EndedAt"]) == (
+        "2027-01-15T08:01:00Z",
+        "a cycle took 61 s, longer than the 60 s interval",
+        None,
+    )
     (row,) = stream_rows()
     assert (row["State"], row["Error"]) == ("RUNNING", None)
     assert not table.j_table.isFailed()
-    script.rows()  # the third cycle ends, and the poller waits for the next
+    script.rows()  # the third cycle ends in time, which ends the span
     clock.wait_for_sleepers(1)
+    (span,) = problems_of(massive_session, dh_to_pylist, LATE)
+    assert span["EndedAt"] is not None
 
 
 def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
@@ -875,6 +1064,7 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    published_failures: list[dm.MassiveError],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     script.rows(("AAPL", 1.0))
@@ -898,12 +1088,16 @@ def test_a_late_cycle_fails_only_once_it_receives_no_page_for_max_outage(
     poller_of(pollers).thread.join(TIMEOUT)
     (row,) = stream_rows()
     failure = (
-        f"stocks.dividends poll(): {GOOD}; the cycle running since 2027-01-15T08:01:00Z has "
-        "received nothing for 301 s, longer than MassiveConfig.max_outage (300 s); the rows "
-        "since then may be missing, so this table stopped; call the verb again for a new live "
-        "table"
+        "stocks.dividends poll(): the cycle running since 2027-01-15T08:01:00Z has received "
+        "nothing for 301 s, longer than max_outage=300 s, so this table stopped and the rows "
+        "since then may be missing. The last good cycle ran at 2027-01-15T08:00:00Z. Call "
+        "m.stocks.dividends again for a new live table."
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
+    # No page came: the network's, and data may flow again.
+    assert [(e.source, e.is_retryable) for e in published_failures] == [
+        (dm.ErrorSource.NETWORK, True)
+    ]
     assert (
         "stocks.dividends poll() stream 1: no page for 301 s, max_outage is 300 s; failing it"
         in caplog.messages
@@ -956,7 +1150,7 @@ def test_the_watch_thread_checks_running_cycles_and_ends_with_its_last_poller(
     script: Script,
     pollers: Pollers,
     clock: FakeClock,
-    stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_to_pylist: ToPylist,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -966,8 +1160,13 @@ def test_the_watch_thread_checks_running_cycles_and_ends_with_its_last_poller(
         table = start(massive_session, script=script, pollers=pollers, clock=clock)
         _second_cycle_running(script, clock)
         clock.advance(61.0)
-        late = f"cycle running since 2027-01-15T08:01:00Z; {GOOD}"
-        until(lambda: stream_rows()[0]["Error"] == late)  # marked by the thread itself
+        late = f"A cycle has run since 2027-01-15T08:01:00Z. {GOOD}"
+
+        def marked() -> bool:
+            spans = problems_of(massive_session, dh_to_pylist, LATE)
+            return [span["Detail"] for span in spans] == [late]
+
+        until(marked)  # marked by the thread itself
         script.rows(("AAPL", 2.0))
         until(lambda: len(script.symbols) == 3)
         poller = poller_of(pollers)
@@ -1013,7 +1212,8 @@ def test_a_failing_check_is_logged_and_the_others_still_run(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     script.rows(("AAPL", 1.0))
-    start(massive_session, script=script, pollers=pollers, clock=clock)
+    # Held to the end: a collected table stops its poller before the check can reach it.
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
     checked: list[poll.Poller] = []
 
     def broken(self: poll.Poller) -> None:
@@ -1024,7 +1224,10 @@ def test_a_failing_check_is_logged_and_the_others_still_run(
     with caplog.at_level(logging.ERROR, LOGGER):
         pollers.check_running()
     assert checked == [poller_of(pollers)]
-    assert any("checking a poll()'s running cycle failed" in m for m in caplog.messages)
+    assert caplog.messages == [
+        f"A check of a poll() table's running cycle failed. The library goes on. {LIBRARY_BUG}"
+    ]
+    del table
 
 
 def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
@@ -1034,23 +1237,39 @@ def test_a_zero_max_outage_fails_a_poll_at_its_first_failed_cycle(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_to_pylist: ToPylist,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     core = massive_session._core
     monkeypatch.setattr(core, "config", dataclasses.replace(core.config, max_outage=0))
     script.fail(RuntimeError("a defect"))
-    table = start(massive_session, script=script, pollers=pollers, clock=clock)
-    poller = poller_of(pollers)
-    poller.thread.join(TIMEOUT)
-    until(lambda: bool(table.j_table.isFailed()))
+    with caplog.at_level(logging.ERROR, LOGGER):
+        table = start(massive_session, script=script, pollers=pollers, clock=clock)
+        poller = poller_of(pollers)
+        poller.thread.join(TIMEOUT)
+        until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     failure = (
-        f"stocks.dividends poll(): {NO_GOOD}; every cycle since 2027-01-15T08:00:00Z has "
-        "failed, for 0 s, longer than MassiveConfig.max_outage (0 s); the rows since then may "
-        "be missing, so this table stopped; call the verb again for a new live table. The "
-        "latest error: a defect"
+        "stocks.dividends poll(): every cycle since 2027-01-15T08:00:00Z has failed for 0 s, "
+        "reaching max_outage=0 s, so this table stopped and the rows since then may be "
+        "missing. The latest error: a defect. Call m.stocks.dividends again for a new live table. "
+        + LIBRARY_BUG
     )
     assert (row["State"], row["Error"]) == ("FAILED", failure)
+    assert (
+        "stocks.dividends poll() stream 1 failed: every cycle since 2027-01-15T08:00:00Z has "
+        "failed for 0 s, reaching max_outage=0 s, so this table stopped and the rows since then "
+        "may be missing. The latest error: a defect. Call m.stocks.dividends again for a new "
+        "live table. "
+        f"{LIBRARY_BUG}"
+    ) in caplog.messages
+    # As the message says, calling the method again gives a new live table.
+    script.rows(("AAPL", 1.0))
+    again = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(again, dh_to_pylist) == [("AAPL", 1.0)])
+    assert [r["State"] for r in stream_rows()] == ["FAILED", "RUNNING"]
+    massive_session.release(again)
 
 
 def test_a_reactive_symbol_table_is_read_each_cycle(
@@ -1064,7 +1283,6 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
 ) -> None:
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["MSFT", "AAPL", None])]))
-    script.drift = DriftReport(missing=frozenset({"ticker"}))  # every cycle: shown once
     script.rows()
     table = start(
         massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
@@ -1076,7 +1294,7 @@ def test_a_reactive_symbol_table_is_read_each_cycle(
     script.rows()
     next_cycle(clock)
     assert script.symbols[-1] == ("AAPL", "IBM", "MSFT")
-    assert stream_rows()[0]["SchemaDrift"] == "REST:ticker-"
+    assert stream_rows()[0]["SymbolCount"] == 3
     del table
 
 
@@ -1100,6 +1318,7 @@ def test_a_table_of_values_is_read_each_cycle_and_a_bad_value_is_skipped(
     pollers: Pollers,
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_to_pylist: ToPylist,
 ) -> None:
     codes, values = product_codes(dh_input_table, "NQ", "ES", " CL")
     script.rows()
@@ -1108,18 +1327,31 @@ def test_a_table_of_values_is_read_each_cycle_and_a_bad_value_is_skipped(
     )
     clock.wait_for_sleepers(1)
     assert script.values == [("ES", "NQ")]  # the code with a leading space is never requested
-    (row,) = stream_rows()
-    assert row["Error"].startswith(
-        "skipping 1 symbol-table value this dataset does not take: ' CL'"
+    assert stream_rows()[0]["Error"] is None
+    (skipped,) = problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+    assert (skipped["StreamId"], skipped["Symbol"], skipped["Field"], skipped["Action"]) == (
+        1,
+        " CL",
+        "ProductCode",
+        "SKIPPED",
     )
+    assert skipped["Detail"] == (
+        "stocks.dividends: A symbol table holds ' CL', which has surrounding whitespace, and "
+        "Massive never writes a ticker that way. Fix the row to the value Massive lists, or "
+        "delete it."
+    )
+    assert skipped["EndedAt"] is None
     codes.add(new_table([string_col("ProductCode", ["6E"])]))
     until(lambda: codes.size == 4)
     script.rows()
     next_cycle(clock)
     assert script.values[-1] == ("6E", "ES", "NQ")
+    (skipped,) = problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+    assert (skipped["Symbol"], skipped["EndedAt"]) == (" CL", None)  # still held: still skipped
     del table
 
 
+@pytest.mark.parametrize("raised_by", ["session", "call"])
 def test_a_bad_value_fails_the_poll_under_raise(
     *,
     dh_input_table: Callable[..., InputTable],
@@ -1129,14 +1361,19 @@ def test_a_bad_value_fails_the_poll_under_raise(
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
+    raised_by: str,
 ) -> None:
-    core = massive_session._core
-    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
-    monkeypatch.setattr(core, "config", strict)
+    call = raise_noncanonical(massive_session, raised_by, monkeypatch)
     codes, values = product_codes(dh_input_table, "ES")
     script.rows()
     table = start(
-        massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
+        massive_session,
+        script=script,
+        pollers=pollers,
+        clock=clock,
+        symbols=None,
+        values=values,
+        call=call,
     )
     clock.wait_for_sleepers(1)
     codes.add(new_table([string_col("ProductCode", [" CL"])]))
@@ -1146,7 +1383,7 @@ def test_a_bad_value_fails_the_poll_under_raise(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("stocks.dividends: a symbol table holds ' CL'")
+    assert row["Error"].startswith("stocks.dividends: A symbol table holds ' CL'")
     assert script.values == [("ES",)]
 
 
@@ -1174,10 +1411,11 @@ def test_a_failing_upstream_watchlist_fails_the_poll(
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert "failed upstream, so the result can no longer follow it" in row["Error"]
+    assert "has failed, so the library can no longer read it" in row["Error"]
     assert script.symbols == [("AAPL",)]
 
 
+@pytest.mark.parametrize("raised_by", ["session", "call"])
 def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_raise(
     *,
     massive_session: dm.MassiveSession,
@@ -1187,15 +1425,19 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
     stream_rows: Callable[[], list[dict[str, Any]]],
     monkeypatch: pytest.MonkeyPatch,
     dh_input_table: Callable[..., InputTable],
+    raised_by: str,
 ) -> None:
-    core = massive_session._core
-    strict = dataclasses.replace(core.config, noncanonical_symbols=dm.OnError.RAISE)
-    monkeypatch.setattr(core, "config", strict)
+    call = raise_noncanonical(massive_session, raised_by, monkeypatch)
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL"])]))
     script.rows()
     table = start(
-        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+        massive_session,
+        script=script,
+        pollers=pollers,
+        clock=clock,
+        symbols=SymbolTable(watch),
+        call=call,
     )
     clock.wait_for_sleepers(1)
     watch.add(new_table([string_col("Symbol", ["msft"])]))
@@ -1205,8 +1447,8 @@ def test_a_late_symbol_table_row_that_is_not_canonical_fails_the_table_under_rai
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = stream_rows()
     assert row["State"] == "FAILED"
-    assert row["Error"].startswith("stocks.dividends: a symbol table holds 'msft'")
-    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS), which" in row["Error"]
+    assert row["Error"].startswith("stocks.dividends: A symbol table holds 'msft'")
+    assert "dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, convention=" in row["Error"]
     assert script.symbols == [("AAPL",)]
 
 
@@ -1218,6 +1460,7 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
     clock: FakeClock,
     stream_rows: Callable[[], list[dict[str, Any]]],
     dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
 ) -> None:
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
@@ -1228,21 +1471,208 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
     clock.wait_for_sleepers(1)
     assert script.symbols == [("AAPL",)]  # the bad row is never requested
     (row,) = stream_rows()
-    assert row["Error"] == (
-        "skipping 1 symbol-table value this dataset does not take: 'msft'; fix or delete that "
-        f"row, or report it at {ISSUES_URL} if Massive itself writes it"
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    (skipped,) = problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+    assert (skipped["StreamId"], skipped["Symbol"], skipped["Action"], skipped["Policy"]) == (
+        1,
+        "msft",
+        "SKIPPED",
+        "log",
     )
-    watch.delete(new_table([string_col("Symbol", ["msft"])]))  # deleting it clears the text
+    assert skipped["Detail"].startswith(
+        "stocks.dividends: A symbol table holds 'msft'. 'msft' is not a Massive stock ticker, "
+    )
+    assert skipped["Detail"].endswith(
+        f"If Massive itself writes 'msft', report it at {ISSUES_URL}, since the library does not "
+        "know that form yet."
+    )
+    assert skipped["EndedAt"] is None
+    watch.delete(new_table([string_col("Symbol", ["msft"])]))  # deleting it ends the span
     watch.add(new_table([string_col("Symbol", ["MSFT"])]))  # and the fixed row is requested
     until(lambda: watch.size == 2 and "msft" not in [r[0] for r in watch.iter_tuple()])
     script.rows()
     next_cycle(clock)
     assert script.symbols[-1] == ("AAPL", "MSFT")
+    (skipped,) = problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+    assert (skipped["Symbol"], skipped["EndedAt"] is not None) == ("msft", True)
     (row,) = stream_rows()
     assert row["State"] == "RUNNING"
     assert row["Error"] is None
     failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
     assert not failed
+
+
+def test_a_skipped_symbol_table_row_is_shown_while_its_cycle_fails(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    stream_rows: Callable[[], list[dict[str, Any]]],
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
+) -> None:
+    # The first cycle's read fails: the row it skipped is listed all the same, since the row
+    # holds it whether or not a read succeeds.
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL", "msft"])]))
+    script.fail(dm.MassiveError(ANSWER_503))
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(watch)
+    )
+    clock.wait_for_sleepers(1)
+    assert script.symbols == [("AAPL",)]
+    (row,) = stream_rows()
+    assert row["State"] == "RUNNING"
+    (skipped,) = problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+    assert (skipped["Symbol"], skipped["Action"], skipped["EndedAt"]) == ("msft", "SKIPPED", None)
+    assert problems_of(massive_session, dh_to_pylist, FAILED)
+    del table
+
+
+def test_a_value_canonicalize_symbols_refuses_is_shown_until_its_row_is_deleted(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
+) -> None:
+    # The converted table holds a null for the refused value, which the poll skips like any
+    # null; the poll still lists the value among its problems while the input holds it.
+    source = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    source.add(new_table([string_col("Symbol", ["AAPL", "no pe!"])]))
+    converted = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=SymbolTable(converted)
+    )
+    clock.wait_for_sleepers(1)
+    assert script.symbols == [("AAPL",)]
+
+    def refused() -> list[tuple[object, ...]]:
+        return [
+            (r["StreamId"], r["Symbol"], r["Action"], r["EndedAt"] is not None)
+            for r in problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+        ]
+
+    assert refused() == [(1, "no pe!", "SKIPPED", False)]
+    source.delete(new_table([string_col("Symbol", ["no pe!"])]))
+    until(lambda: refused() == [(1, "no pe!", "SKIPPED", True)])
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
+
+
+def test_a_value_canonicalize_symbols_refuses_in_a_table_of_values_is_shown(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
+) -> None:
+    # A table of underlyings passed through canonicalize_symbols, as in
+    # m.options.contracts(underlying=table).poll(60): the converter nulls the refused value,
+    # which the poll skips like any null, yet the poll lists it while the input holds it. Each
+    # spell of it is a span: refused, fixed, refused again, then deleted.
+    source = dh_input_table({"Id": dtypes.string, "Symbol": dtypes.string}, key_cols="Id")
+    source.add(new_table([string_col("Id", ["1", "2"]), string_col("Symbol", ["AAPL", "no pe!"])]))
+    converted = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    values = ValueTable(
+        "underlying", "underlying_ticker", "Symbol", underlying=True, table=converted
+    )
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
+    )
+    clock.wait_for_sleepers(1)
+    assert script.values == [("AAPL",)]
+
+    def refused() -> list[tuple[object, ...]]:
+        return sorted(
+            (r["StreamId"], r["Symbol"], r["Field"], r["Action"], r["EndedAt"] is not None)
+            for r in problems_of(massive_session, dh_to_pylist, NONCANONICAL)
+        )
+
+    assert refused() == [(1, "no pe!", "Symbol", "SKIPPED", False)]
+    source.add(new_table([string_col("Id", ["2"]), string_col("Symbol", ["MSFT"])]))  # fixed
+    until(lambda: refused() == [(1, "no pe!", "Symbol", "SKIPPED", True)])
+    source.add(new_table([string_col("Id", ["3"]), string_col("Symbol", ["no pe!"])]))
+    until(lambda: len(refused()) == 2)  # refused again: a span of its own
+    assert refused() == [
+        (1, "no pe!", "Symbol", "SKIPPED", False),
+        (1, "no pe!", "Symbol", "SKIPPED", True),
+    ]
+    source.delete(new_table([string_col("Id", ["3"])]))  # deleted
+    until(lambda: refused() == [(1, "no pe!", "Symbol", "SKIPPED", True)] * 2)
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
+
+
+def test_a_refused_value_of_another_column_is_no_problem_of_the_poll(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
+) -> None:
+    # The table's Symbol column was converted, but the poll reads its ProductCode column, whose
+    # values are all good: the converter's refusals belong to a column the poll never reads.
+    source = dh_input_table(
+        {"Id": dtypes.string, "Symbol": dtypes.string, "ProductCode": dtypes.string},
+        key_cols="Id",
+    )
+    source.add(
+        new_table(
+            [
+                string_col("Id", ["1", "2"]),
+                string_col("Symbol", ["AAPL", "no pe!"]),
+                string_col("ProductCode", ["ES", "NQ"]),
+            ]
+        )
+    )
+    converted = dm.canonicalize_symbols(source, dm.AssetClass.STOCKS)
+    values = ValueTable(
+        "product_code", "product_code", "ProductCode", underlying=False, table=converted
+    )
+    script.rows()
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, symbols=None, values=values
+    )
+    clock.wait_for_sleepers(1)
+    assert script.values == [("ES", "NQ")]
+    assert problems_of(massive_session, dh_to_pylist, NONCANONICAL) == []
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
+
+
+def test_a_freed_session_gets_no_problem_of_the_symbol_table(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The skipped values hold the session weakly: once it is freed, their reports go nowhere.
+    core = massive_session._core
+    reported: list[Problem] = []
+    monkeypatch.setattr(core, "problems", reported.extend)
+    problem = ProblemEvent(
+        cause=NONCANONICAL,
+        action=ProblemAction.SKIPPED,
+        dataset=DIVIDENDS.name,
+        stream_id=1,
+        where="a symbol table",
+        symbol="msft",
+        field=None,
+        rows=1,
+        detail="a symbol table holds 'msft'",
+        at=1,
+        policy=dm.OnError.LOG,
+    )
+    poll._report_problems(lambda: core, [problem])
+    poll._report_problems(lambda: None, [problem])
+    assert reported == [problem]
 
 
 # --- Lifetime ------------------------------------------------------------------------------------
@@ -1256,7 +1686,7 @@ def test_close_stops_every_poller_and_marks_the_rows(
     dh_to_pylist: ToPylist,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    pollers = cast("Any", massive_session._core.rest_transport())._state.pollers
+    pollers = _pollers_of(massive_session)
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
@@ -1277,7 +1707,10 @@ def test_close_stops_every_poller_and_marks_the_rows(
     (row,) = dh_to_pylist(streams)  # a view taken before the close keeps the final rows
     assert (row["State"], row["Error"]) == (
         "CLOSED",
-        f"{massive_session._core.label} was closed; this table no longer updates",
+        (
+            "This session was closed, so this table no longer updates. Open a new "
+            "dm.MassiveSession() to read again."
+        ),
     )
     del streams
     with pytest.raises(dm.MassiveError, match="is closed"):
@@ -1297,8 +1730,10 @@ def test_a_poll_racing_close_after_registering_never_starts(
     # fails, its result is released, and the poller never runs.
     track = ResultRegistry.track
 
-    def track_then_close(self: ResultRegistry, *args: object) -> ResultRecord:
-        record = track(self, *cast("tuple[Table, LivenessScope, Callable[[], None]]", args))
+    def track_then_close(
+        self: ResultRegistry, *args: *tuple[Table, LivenessScope, Callable[[], None]]
+    ) -> ResultRecord:
+        record = track(self, *args)
         massive_session.close()
         return record
 
@@ -1310,7 +1745,7 @@ def test_a_poll_racing_close_after_registering_never_starts(
     assert poller.stopped
     assert poller.thread.ident is None  # never started
     drain()
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_a_poll_racing_close_never_starts(
@@ -1318,14 +1753,14 @@ def test_a_poll_racing_close_never_starts(
 ) -> None:
     pollers = Pollers("label")
     pollers.close()
-    with pytest.raises(dm.MassiveError, match="label is closed"):
+    with pytest.raises(dm.MassiveError, match=r"^This session is closed"):
         start(massive_session, script=script, pollers=pollers, clock=clock)
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
     # A session closed before the row is registered refuses it too.
     massive_session.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
         start(massive_session, script=script, pollers=Pollers("open"), clock=clock)
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
 
 
 def test_a_failed_registration_releases_everything(
@@ -1345,7 +1780,7 @@ def test_a_failed_registration_releases_everything(
         start(massive_session, script=script, pollers=pollers, clock=clock)
     monkeypatch.undo()
     assert pollers._live == set()
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
     (row,) = stream_rows()
     assert (row["State"], row["HeldResults"]) == ("RELEASED", 0)
 
@@ -1373,7 +1808,7 @@ def test_an_interrupt_before_registration_releases_the_table(
     monkeypatch.undo()
     until(stop.is_set)
     assert pollers._live == set()
-    assert massive_session._core._workers == {}
+    assert massive_session._core.workers._workers == {}
 
 
 def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
@@ -1394,7 +1829,7 @@ def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
         raise RuntimeError("refused")
 
     monkeypatch.setattr(TablePublisher, "publish_failure", refused)
-    script.fail(dm.EntitlementError("HTTP 403 from GET /stocks/v1/dividends"))
+    script.fail(dm.EntitlementError(ANSWER_403))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     poller = poller_of(pollers)
     poller.thread.join(TIMEOUT)
@@ -1402,9 +1837,9 @@ def test_a_failure_that_cannot_fail_the_table_ends_the_poller_with_a_log(
     assert escaped == []
     assert not poller.fail(dm.MassiveError("closed"))  # counted as failed: not tried again
     assert (
-        "stocks.dividends poll() stream 1: could not fail its table with HTTP 403 from GET "
-        "/stocks/v1/dividends"
-    ) in caplog.text
+        "stocks.dividends poll() stream 1: could not fail the table, so it stops updating with "
+        f"no error. The error was: {ANSWER_403} {LIBRARY_BUG}"
+    ) in caplog.messages
     monkeypatch.undo()
     massive_session.release(table)
 
@@ -1438,7 +1873,7 @@ def test_a_poll_keeps_its_session_alive_while_its_table_is_used(
     *, script: Script, clock: FakeClock, fake_rest: FakeRestServer
 ) -> None:
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
-    pollers = cast("Any", m._core.rest_transport())._state.pollers
+    pollers = _pollers_of(m)
     script.rows()
     tables = [start(m, script=script, pollers=pollers, clock=clock)]
     poller = poller_of(pollers)
@@ -1492,7 +1927,7 @@ def test_a_poll_keeps_polling_while_a_derived_table_remains(
     clock.advance(60)
     poller.thread.join(TIMEOUT)
     assert not poller.thread.is_alive()
-    until(lambda: not massive_session._core._workers)
+    until(lambda: not massive_session._core.workers._workers)
 
 
 def test_a_poll_fails_once_and_publishes_nothing_after(
@@ -1530,29 +1965,46 @@ def test_a_failure_after_the_close_fails_the_poll_with_the_close(
     poller = poller_of(pollers)
     clock.wait_for_sleepers(1)
     core = massive_session._core
-    closed = f"{core.label} was closed; this table no longer updates"
+    closed = (
+        "This session was closed, so this table no longer updates. Open a new "
+        "dm.MassiveSession() to read again."
+    )
     monkeypatch.setattr(core, "fail_stream", lambda _stream_id, _error: closed)
-    failures: list[str] = []
+    failures: list[Exception] = []
     publisher = poller._publisher
 
     class _Recording:
+        def add(self, table: Table) -> None:
+            publisher.add(table)
+
         def publish_failure(self, error: Exception) -> None:
-            failures.append(str(error))
+            failures.append(error)
             publisher.publish_failure(error)
 
-    poller._publisher = cast("Any", _Recording())
+    poller._publisher = _Recording()
     with caplog.at_level(logging.ERROR, LOGGER):
         assert poller.fail(dm.AuthenticationError("HTTP 401"))
-    assert failures == [closed]
+    assert [str(e) for e in failures] == [closed]
+    assert isinstance(failures[0], dm.SessionClosedError)
     assert not caplog.records
     until(lambda: bool(table.j_table.isFailed()))
     poller.thread.join(TIMEOUT)
 
 
-def test_a_cycle_after_the_core_is_gone_ends_the_poller(
-    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
-) -> None:
-    poller = poll.Poller(
+class _UnusedPublisher:
+    # The publisher of a poller that never publishes: it is never started.
+    def add(self, table: Table) -> None:
+        raise AssertionError(table)
+
+    def publish_failure(self, error: Exception) -> None:
+        raise AssertionError(error)
+
+
+def _unstarted_poller(
+    massive_session: dm.MassiveSession, script: Script, pollers: Pollers
+) -> poll.Poller:
+    # A poller that is never started or added to `pollers`.
+    return poll.Poller(
         massive_session._core,
         spec=DIVIDENDS,
         request=Request(),
@@ -1562,13 +2014,38 @@ def test_a_cycle_after_the_core_is_gone_ends_the_poller(
         read=script,
         pollers=pollers,
         clock=poll.CLOCK,
-        publisher=cast("Any", None),
+        publisher=_UnusedPublisher(),
         stop=Cancel(),
     )
-    poller._core = cast("Any", lambda: None)
+
+
+def test_a_cycle_after_the_core_is_gone_ends_the_poller(
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
+) -> None:
+    poller = _unstarted_poller(massive_session, script, pollers)
+
+    def gone() -> SessionCore | None:
+        return None  # the core was collected
+
+    poller._core = gone
     with ThreadPoolExecutor(1) as pool:
         assert poller._cycle(pool) is False
     assert poller._end_reason() == "its session is gone"
+
+
+def test_a_late_cycle_after_the_core_is_gone_opens_no_span(
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
+) -> None:
+    # The session is freed while a cycle ends late: no span opens, since nothing would end it.
+    poller = _unstarted_poller(massive_session, script, pollers)
+
+    def gone() -> SessionCore | None:
+        return None  # the core was collected
+
+    poller._core = gone
+    poller._note_pace(5.0)  # longer than the 1 s interval
+    assert poller._late
+    assert poller._late_spans.update({}) is None  # no span was opened
 
 
 def test_a_stop_during_a_cycle_publishes_nothing(
@@ -1577,10 +2054,27 @@ def test_a_stop_during_a_cycle_publishes_nothing(
     gate = threading.Event()
     reading = threading.Event()
 
-    def slow(**kwargs: object) -> poll.CycleRows:
+    def slow(
+        *,
+        stream_id: int,
+        symbols: tuple[str, ...] | AllSymbols | None,
+        values: tuple[str, ...] | None,
+        record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
+        executor: ThreadPoolExecutor,
+        cancel: threading.Event,
+    ) -> poll.CycleRows:
         reading.set()
         gate.wait(TIMEOUT)
-        return script(**cast("dict[str, Any]", kwargs))
+        return script(
+            stream_id=stream_id,
+            symbols=symbols,
+            values=values,
+            record=record,
+            on_recency=on_recency,
+            executor=executor,
+            cancel=cancel,
+        )
 
     for _ in range(3):
         script.rows(("AAPL", 1.0))
@@ -1659,9 +2153,9 @@ def test_an_error_after_a_stop_is_not_reported(
 
 
 def test_pollers_forget_and_ignore_unknown(
-    *, massive_session: dm.MassiveSession, pollers: Pollers
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
 ) -> None:
-    pollers.discard(cast("Any", object()))
+    pollers.discard(_unstarted_poller(massive_session, script, pollers))  # one it never had
     assert not pollers.closed
     pollers.close()
     pollers.close()
@@ -1697,8 +2191,7 @@ def test_query_poll_reads_the_fetch_path(
     dh_to_pylist: ToPylist,
 ) -> None:
     fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}])))
-    q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    q = build_query(rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"])
     table = q.poll(60)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 0.25)])
     clock.wait_for_sleepers(1)
@@ -1708,9 +2201,10 @@ def test_query_poll_reads_the_fetch_path(
 def test_a_bad_parameter_fails_poll_at_once(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"], params={"bogus": 1})
-    assert isinstance(q, Query)
-    with pytest.raises(ValueError, match=r"does not take \['bogus'\]"):
+    q = build_query(
+        rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"], params={"bogus": 1}
+    )
+    with pytest.raises(ValueError, match=r"^stocks\.dividends does not take bogus\.$"):
         q.poll(60)
     assert fake_rest.requests == []
 
@@ -1724,14 +2218,15 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
 ) -> None:
     fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}])))
     watch = new_table([string_col("Symbol", ["AAPL"])])
-    q = build_query(rest_session._core, DIVIDENDS, symbols=watch)
-    assert isinstance(q, Query)
+    q = build_query(rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=watch)
     bad = build_query(
-        rest_session._core, DIVIDENDS, symbols=new_table([string_col("Symbol", ["aapl"])])
+        rest_session._core,
+        DIVIDENDS,
+        query_type=FetchQuery,
+        symbols=new_table([string_col("Symbol", ["aapl"])]),
     )
-    assert isinstance(bad, Query)
     with pytest.raises(
-        ValueError, match=r"^m\.stocks\.dividends\(\): no row of the symbol table is"
+        ValueError, match=r"^m\.stocks\.dividends\(\): No row of the symbol table is"
     ):
         bad.poll(60)
     table = q.poll(60, mode=PollMode.UPSERT)
@@ -1739,8 +2234,33 @@ def test_a_reactive_symbol_table_reaches_the_reader_each_cycle(
     assert "ticker.any_of=AAPL" in fake_rest.requests[0].target
 
 
+def test_a_poll_fails_on_a_late_bad_row_when_its_call_raises_and_the_session_logs(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "cash_amount": 0.25}])))
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    strict = dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+    q = build_query(
+        rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=watch, on_error=strict
+    )
+    table = q.poll(60)
+    clock.wait_for_sleepers(1)
+    watch.add(new_table([string_col("Symbol", ["msft"])]))
+    until(lambda: watch.size == 2)
+    clock.advance(60)
+    until(lambda: bool(table.j_table.isFailed()))
+    assert len(fake_rest.requests) == 1
+
+
 SMA_STOCK = "/v1/indicators/sma/{stockTicker}"
 SMA_CRYPTO = "/v1/indicators/sma/{cryptoTicker}"
+SMA_MSFT_404 = "(HTTP 404 from GET /v1/indicators/sma/MSFT)"
+"""Why MSFT is left out of an SMA read: Massive answered its request with HTTP 404."""
 SMA = DatasetSpec(
     summary="A dataset for the tests.",
     name="indicators.sma",
@@ -1752,6 +2272,22 @@ SMA = DatasetSpec(
             symbol=KeySpec("stockTicker", from_request=True), time=KeySpec("Timestamp")
         ),
         (R, SMA_CRYPTO): SourceKeys(
+            symbol=KeySpec("cryptoTicker", from_request=True), time=KeySpec("Timestamp")
+        ),
+    },
+)
+MACD_CRYPTO = "/v1/indicators/macd/{cryptoTicker}"
+WINDOWED = DatasetSpec(
+    summary="A dataset for the tests: its crypto path takes no `window`, its stock path does.",
+    name="indicators.windowed",
+    fetch_path=SMA_STOCK,
+    fetch_paths_by_class={AssetClass.CRYPTO: MACD_CRYPTO},
+    poll_keys=("Symbol", "Timestamp"),
+    keys={
+        (R, SMA_STOCK): SourceKeys(
+            symbol=KeySpec("stockTicker", from_request=True), time=KeySpec("Timestamp")
+        ),
+        (R, MACD_CRYPTO): SourceKeys(
             symbol=KeySpec("cryptoTicker", from_request=True), time=KeySpec("Timestamp")
         ),
     },
@@ -1771,7 +2307,7 @@ INDEX_SNAPSHOTS = DatasetSpec(
 def routed_session(
     fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch, clock: FakeClock
 ) -> Iterator[dm.MassiveSession]:
-    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
+    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, WINDOWED, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url))
     yield m
@@ -1805,8 +2341,7 @@ def test_an_emptied_symbol_table_evicts_every_key(
     )
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["I:SPX"])]))
-    q = build_query(routed_session._core, spec, symbols=watch)
-    assert isinstance(q, Query)
+    q = build_query(routed_session._core, spec, query_type=FetchQuery, symbols=watch)
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: symbols_of(table, dh_to_pylist) == ["I:SPX"])
     watch.delete(new_table([string_col("Symbol", ["I:SPX"])]))
@@ -1823,53 +2358,75 @@ def test_an_emptied_symbol_table_evicts_every_key(
 SMA_VALUE = Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 1.0}]}))
 """One indicator value, as Massive answers a symbol's indicator path."""
 
-CRYPTO_REFUSED = "X:BTCUSD (/v1/indicators/sma/{cryptoTicker} does not take ['adjusted'])"
-"""The `Error` text of a crypto symbol whose path does not take `adjusted`."""
+REPORTER = "deephaven_massive._tables.problem_reporter"
+"""The logger of the session's problem reporter, which warns of a table's first problem."""
 
 
-def test_a_symbol_routed_to_a_path_without_the_parameter_is_left_out_and_listed(
+def unavailable(m: dm.MassiveSession, to_pylist: ToPylist) -> list[tuple[str, str, int, str]]:
+    # Each unavailable symbol's row of m.problems(): its symbol, action, count, and detail.
+    return [
+        (row["Symbol"], row["Action"], row["Occurrences"], row["Detail"])
+        for row in problems_of(m, to_pylist, UNAVAILABLE)
+    ]
+
+
+def test_a_parameter_one_fetch_path_lacks_fails_a_watchlist_poll_as_a_list_at_the_call(
     *,
     routed_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
-    clock: FakeClock,
-    dh_to_pylist: ToPylist,
-    caplog: pytest.LogCaptureFixture,
     dh_input_table: Callable[..., InputTable],
 ) -> None:
-    # One symbol never fails the table: the crypto pair's path does not take `adjusted`, so
-    # it is left out of each cycle and named in the Error, and the stock is polled.
+    # The stock path takes `window` and the crypto path doesn't. The watchlist holds only a
+    # stock now, but it may later hold a pair, so the poll fails at once, as a list holding a
+    # pair would, rather than leave the pair out of every cycle.
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
+    q = build_query(
+        routed_session._core,
+        WINDOWED,
+        query_type=FetchQuery,
+        symbols=watch,
+        params={"window": 20},
+    )
+    refused = r"^indicators\.windowed does not take window\.$"
+    with pytest.raises(ValueError, match=refused):
+        q.poll(60)
+    with pytest.raises(ValueError, match=refused):
+        build_query(
+            routed_session._core,
+            WINDOWED,
+            query_type=FetchQuery,
+            symbols=["AAPL", "X:BTCUSD"],
+            params={"window": 20},
+        ).poll(60)
+    assert fake_rest.requests == []
+
+
+def test_an_unadjusted_poll_reads_a_crypto_pair_without_adjusted(
+    *,
+    routed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # A crypto pair has no splits, so `adjusted=False` means nothing for it: its request leaves
+    # `adjusted` out, and the stock's request sends it.
     fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", SMA_VALUE)
     watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
     watch.add(new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])]))
-    q = build_query(routed_session._core, SMA, symbols=watch, adjusted=False)
-    assert isinstance(q, Query)
-    with caplog.at_level(logging.DEBUG, "deephaven_massive._ingest.rest"):
-        table = q.poll(60)  # the stock path takes `adjusted`, so nothing fails up front
-        until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
-        clock.wait_for_sleepers(1)
-        (row,) = streams_of(routed_session, dh_to_pylist)
-        assert (row["State"], row["Error"]) == (
-            "RUNNING",
-            f"no rows this cycle for 1 symbol: {CRYPTO_REFUSED}",
-        )
-        assert row["Path"] == f"{SMA_STOCK}, {SMA_CRYPTO}"
-        next_cycle(clock)  # the next cycle leaves it out again, logging only at DEBUG
-    assert not table.j_table.isFailed()
-    left = [r for r in caplog.records if "X:BTCUSD] left out of the cycle" in r.getMessage()]
-    assert [r.levelno for r in left] == [logging.WARNING, logging.DEBUG]
-    assert left[0].getMessage() == (
-        "indicators.sma poll(): 1 [X:BTCUSD] left out of the cycle: "
-        "/v1/indicators/sma/{cryptoTicker} does not take ['adjusted']; the table lists it in "
-        "its Error and polls the other symbols"
-    )
-    # Once the symbol leaves the table, the Error clears.
-    watch.delete(new_table([string_col("Symbol", ["X:BTCUSD"])]))
-    until(lambda: dh_to_pylist(watch) == [{"Symbol": "AAPL"}])
-    next_cycle(clock)
-    clock.wait_for_sleepers(1)
+    q = build_query(routed_session._core, SMA, query_type=FetchQuery, symbols=watch, adjusted=False)
+    table = q.poll(60)
+    until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL", "X:BTCUSD"])
+    requests = dict(fake_rest.get_queries())
+    assert requests["/v1/indicators/sma/AAPL"]["adjusted"] == ["false"]
+    assert "adjusted" not in requests["/v1/indicators/sma/X:BTCUSD"]
     (row,) = streams_of(routed_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == ("RUNNING", None)
-    assert all("X%3ABTCUSD" not in r.target for r in fake_rest.requests)
+    assert (row["State"], row["Error"], row["Path"]) == (
+        "RUNNING",
+        None,
+        f"{SMA_STOCK}, {SMA_CRYPTO}",
+    )
 
 
 def test_a_replace_poll_lists_a_symbol_massive_has_no_data_for(
@@ -1879,27 +2436,25 @@ def test_a_replace_poll_lists_a_symbol_massive_has_no_data_for(
     clock: FakeClock,
     dh_to_pylist: ToPylist,
 ) -> None:
-    # A 404 for one symbol removes its rows from a REPLACE table; the Error says why, until
-    # Massive has data for it again.
+    # A 404 for one symbol removes its rows from a REPLACE table; m.problems() lists each
+    # cycle that leaves it out, and none once Massive has data for it again.
     fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
     fake_rest.reply("/v1/indicators/sma/MSFT", SMA_VALUE, Reply(b"{}", status=404), SMA_VALUE)
-    q = build_query(routed_session._core, SMA, symbols=["AAPL", "MSFT"])
-    assert isinstance(q, Query)
+    q = build_query(routed_session._core, SMA, query_type=FetchQuery, symbols=["AAPL", "MSFT"])
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL", "MSFT"])
+    assert unavailable(routed_session, dh_to_pylist) == []
     next_cycle(clock)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
     clock.wait_for_sleepers(1)
     (row,) = streams_of(routed_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == (
-        "RUNNING",
-        "no rows this cycle for 1 symbol: MSFT (HTTP 404: no data)",
-    )
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    no_data = ("MSFT", "SKIPPED", 1, f"Massive has no data for it {SMA_MSFT_404}")
+    assert unavailable(routed_session, dh_to_pylist) == [no_data]
     next_cycle(clock)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL", "MSFT"])
     clock.wait_for_sleepers(1)
-    (row,) = streams_of(routed_session, dh_to_pylist)
-    assert row["Error"] is None
+    assert unavailable(routed_session, dh_to_pylist) == [no_data]  # this cycle left none out
 
 
 @pytest.fixture
@@ -1910,7 +2465,9 @@ def ignoring_session(
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.IGNORE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.IGNORE),
     )
     m = dm.MassiveSession(config)
     yield m
@@ -1925,7 +2482,9 @@ def raising_session(
     monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA, INDEX_SNAPSHOTS)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     config = dm.MassiveConfig(
-        api_key="test-key", rest_base_url=fake_rest.url, unavailable_symbols=dm.OnError.RAISE
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE),
     )
     m = dm.MassiveSession(config)
     yield m
@@ -1940,53 +2499,35 @@ def test_ignore_leaves_unavailable_symbols_out_with_no_warning(
     dh_to_pylist: ToPylist,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The crypto pair's path refuses `adjusted`, and Massive has no data for MSFT: both are
-    # left out and listed, and nothing is logged above DEBUG.
+    # Massive has no data for MSFT: it is left out and listed, and nothing is logged above
+    # DEBUG.
     fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
     fake_rest.reply("/v1/indicators/sma/MSFT", Reply(b"{}", status=404))
-    watch = new_table([string_col("Symbol", ["AAPL", "MSFT", "X:BTCUSD"])])
-    q = build_query(ignoring_session._core, SMA, symbols=watch, adjusted=False)
-    assert isinstance(q, Query)
-    with caplog.at_level(logging.DEBUG, "deephaven_massive._ingest.rest"):
+    watch = new_table([string_col("Symbol", ["AAPL", "MSFT"])])
+    q = build_query(ignoring_session._core, SMA, query_type=FetchQuery, symbols=watch)
+    with (
+        caplog.at_level(logging.DEBUG, "deephaven_massive._ingest.rest"),
+        caplog.at_level(logging.DEBUG, REPORTER),
+    ):
         table = q.poll(60, mode=PollMode.REPLACE)
         until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
         clock.wait_for_sleepers(1)
-    (row,) = streams_of(ignoring_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == (
-        "RUNNING",
-        f"no rows this cycle for 2 symbols: {CRYPTO_REFUSED}; MSFT (HTTP 404: no data)",
-    )
+        (row,) = streams_of(ignoring_session, dh_to_pylist)
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    assert unavailable(ignoring_session, dh_to_pylist) == [
+        ("MSFT", "SKIPPED", 1, f"Massive has no data for it {SMA_MSFT_404}"),
+    ]
+    policies = {r["Policy"] for r in problems_of(ignoring_session, dh_to_pylist, UNAVAILABLE)}
+    assert policies == {"ignore"}
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert any("X:BTCUSD] left out of the cycle" in r.getMessage() for r in caplog.records)
-    assert any("no data for 1 [MSFT]" in r.getMessage() for r in caplog.records)
+    assert any(r.name == REPORTER for r in caplog.records)  # the problems log at DEBUG
+    assert any("no data for 1 [MSFT (" in r.getMessage() for r in caplog.records)
     # A fetch() of the same session follows the same setting: the symbol is left out quietly.
     caplog.clear()
-    fetched = build_query(ignoring_session._core, SMA, symbols=["MSFT"])
-    assert isinstance(fetched, Query)
+    fetched = build_query(ignoring_session._core, SMA, query_type=FetchQuery, symbols=["MSFT"])
     with caplog.at_level(logging.WARNING, "deephaven_massive._ingest.rest"):
-        fetched.fetch()
+        fetched.fetch(wait=True)
     assert caplog.records == []
-
-
-def test_raise_fails_a_poll_on_a_symbol_whose_path_refuses_a_parameter(
-    *,
-    raising_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    dh_to_pylist: ToPylist,
-) -> None:
-    watch = new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])])
-    q = build_query(raising_session._core, SMA, symbols=watch, adjusted=False)
-    assert isinstance(q, Query)
-    table = q.poll(60)
-    until(lambda: bool(table.j_table.isFailed()))
-    until(lambda: streams_of(raising_session, dh_to_pylist)[0]["State"] == "FAILED")
-    (row,) = streams_of(raising_session, dh_to_pylist)
-    assert row["Error"] == (
-        "indicators.sma poll(): X:BTCUSD cannot be polled: /v1/indicators/sma/{cryptoTicker} "
-        "does not take ['adjusted']. Remove the symbol, or set MassiveConfig("
-        "unavailable_symbols=dm.OnError.LOG) to leave it out and keep polling the others"
-    )
-    assert fake_rest.requests == []
 
 
 def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
@@ -1997,36 +2538,16 @@ def test_raise_fails_a_poll_on_a_symbol_massive_has_no_data_for(
 ) -> None:
     fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
     fake_rest.reply("/v1/indicators/sma/MSFT", Reply(b"{}", status=404))
-    q = build_query(raising_session._core, SMA, symbols=["AAPL", "MSFT"])
-    assert isinstance(q, Query)
+    q = build_query(raising_session._core, SMA, query_type=FetchQuery, symbols=["AAPL", "MSFT"])
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: bool(table.j_table.isFailed()))
     until(lambda: streams_of(raising_session, dh_to_pylist)[0]["State"] == "FAILED")
     (row,) = streams_of(raising_session, dh_to_pylist)
     assert row["Error"] == (
-        "indicators.sma poll(): MSFT cannot be polled: HTTP 404 from "
-        "/v1/indicators/sma/{stockTicker}: no data. Remove the symbol, or set MassiveConfig("
-        "unavailable_symbols=dm.OnError.LOG) to leave it out and keep polling the others"
+        "indicators.sma: Massive has no data for MSFT. Remove it, or, to read the others, pass "
+        "on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
     )
-
-
-def test_a_long_list_of_left_out_symbols_is_counted(
-    *,
-    massive_session: dm.MassiveSession,
-    script: Script,
-    pollers: Pollers,
-    clock: FakeClock,
-    stream_rows: Callable[[], list[dict[str, Any]]],
-) -> None:
-    script.left_out = tuple(f"S{n} (HTTP 404: no data)" for n in range(poll.LEFT_OUT_SHOWN + 2))
-    script.rows(("AAPL", 1.0))
-    table = start(massive_session, script=script, pollers=pollers, clock=clock)
-    clock.wait_for_sleepers(1)
-    shown = "; ".join(script.left_out[: poll.LEFT_OUT_SHOWN])
-    assert stream_rows()[0]["Error"] == (
-        f"no rows this cycle for {poll.LEFT_OUT_SHOWN + 2} symbols: {shown} and 2 more"
-    )
-    del table
 
 
 def test_a_cycle_reports_its_pages_drift(
@@ -2037,34 +2558,83 @@ def test_a_cycle_reports_its_pages_drift(
     dh_to_pylist: ToPylist,
 ) -> None:
     fake_rest.reply(PATH, Reply(envelope([{"ticker": "AAPL", "brand_new": 1}])))
-    q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    q = build_query(rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"])
     table = q.poll(60)
     clock.wait_for_sleepers(1)
-    drift = streams_of(rest_session, dh_to_pylist)[0]["SchemaDrift"]
-    assert drift == "REST:brand_new+, REST:distribution_type-"
+    # The field Massive's documentation lacks is a problem; a documented field the page
+    # lacks is Massive's null, and none.
+    (drift,) = problems_of(rest_session, dh_to_pylist, ProblemCause.SCHEMA_DRIFT)
+    assert (drift["StreamId"], drift["Field"], drift["Action"], drift["Occurrences"]) == (
+        1,
+        "brand_new",
+        "PUBLISHED",
+        1,
+    )
+    assert drift["Detail"] == (
+        "Massive sent the field 'brand_new', which its documentation lacks, so the rows are "
+        "published without it. Its first value: 1."
+    )
     del table
 
 
-def test_a_cycle_with_odd_rows_keeps_the_table_and_shows_the_drift(
+def test_a_cycle_with_odd_rows_keeps_the_table_and_lists_the_withheld_rows(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     clock: FakeClock,
     dh_to_pylist: ToPylist,
 ) -> None:
-    # A row without its symbol is dropped, a value that does not fit is null, and the table
-    # keeps polling: one odd row never fails it.
-    rows = [{"id": "x"}, {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0}]
+    # A row without its symbol and one with a value that does not fit are withheld, and the
+    # table keeps polling with the readable row: one odd row never fails it.
+    rows = [
+        {"id": "x"},
+        {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0},
+        {"ticker": "AAPL", "id": "b", "frequency": 4, "cash_amount": 2.0},
+    ]
     fake_rest.reply(PATH, Reply(envelope(rows)))
-    q = build_query(rest_session._core, DIVIDENDS, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    q = build_query(rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"])
     table = q.poll(60)
     clock.wait_for_sleepers(1)
     (row,) = streams_of(rest_session, dh_to_pylist)
     assert (row["State"], row["Error"], row["RowsPublished"]) == ("RUNNING", None, 1)
-    assert "REST:frequency?" in row["SchemaDrift"]
-    assert [(r["Id"], r["Frequency"]) for r in dh_to_pylist(table)] == [("a", None)]
+    # Each withheld row is a problem of its cause; the table's other row still lands.
+    withheld = {
+        (r["Cause"], r["Symbol"], r["Field"], r["Action"], r["Rows"])
+        for r in dh_to_pylist(rest_session.problems())
+    }
+    assert withheld == {
+        ("unreadable_keys", None, "Ticker", "WITHHELD", 1),
+        ("unconvertible_values", "AAPL", "Frequency", "WITHHELD", 1),
+    }
+    assert [(r["Id"], r["Frequency"]) for r in dh_to_pylist(table)] == [("b", 4)]
+    del table
+
+
+def test_an_odd_row_read_again_each_cycle_adds_its_rows_to_one_problem_row(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Each cycle reads the same two odd rows again: one event per cycle, of two rows, adds
+    # to the same m.problems() row.
+    rows = [
+        {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0},
+        {"ticker": "AAPL", "id": "b", "frequency": 5.5, "cash_amount": 2.0},
+        {"ticker": "AAPL", "id": "c", "frequency": 4, "cash_amount": 3.0},
+    ]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"])
+    table = q.poll(60)
+    for cycle in (1, 2, 3):
+        if cycle > 1:
+            next_cycle(clock)
+        clock.wait_for_sleepers(1)
+        (withheld,) = problems_of(rest_session, dh_to_pylist, ProblemCause.UNCONVERTIBLE_VALUES)
+        found = (withheld["Symbol"], withheld["Field"], withheld["Rows"], withheld["Occurrences"])
+        assert found == ("AAPL", "Frequency", 2 * cycle, cycle)
+    assert [r["Id"] for r in dh_to_pylist(table)] == ["c"]
     del table
 
 
@@ -2090,10 +2660,21 @@ def test_a_failure_while_publishing_keeps_the_poller(
     script.rows(("AAPL", 1.0))
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     clock.wait_for_sleepers(1)
-    assert stream_rows()[0]["Error"] == f"publish failed; {NO_GOOD}"
+    assert stream_rows()[0]["Error"] is None
+    (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert (utc(gap["SpanStart"]), gap["Detail"], gap["EndedAt"]) == (
+        "2027-01-15T08:00:00Z",
+        (
+            "A cycle failed, and none has succeeded since the poll started at "
+            "2027-01-15T08:00:00Z: publish failed"
+        ),
+        None,
+    )
     script.rows(("AAPL", 2.0))
     next_cycle(clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 2.0)])
+    (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert gap["EndedAt"] is not None
 
 
 def test_a_failed_publish_still_evicts_the_keys_it_dropped(
@@ -2112,54 +2693,21 @@ def test_a_failed_publish_still_evicts_the_keys_it_dropped(
     fail_one_poll_conversion(monkeypatch)
     script.rows(("AAPL", 3.0))  # drops MSFT, but this cycle's publish fails
     next_cycle(clock)
-    assert stream_rows()[0]["Error"] == f"conversion failed; {GOOD}"
+    assert stream_rows()[0]["Error"] is None
+    (gap,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    detail = f"{FAILED_AFTER_GOOD}conversion failed"
+    assert (gap["Detail"], gap["EndedAt"]) == (detail, None)
     assert pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)]
     script.rows(("AAPL", 4.0))  # the next cycle still tombstones MSFT
     next_cycle(clock)
     until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 4.0)])
 
 
-def test_an_emptied_table_never_checks_the_paths_it_no_longer_reads(
-    *,
-    routed_session: dm.MassiveSession,
-    fake_rest: FakeRestServer,
-    clock: FakeClock,
-    dh_to_pylist: ToPylist,
-    dh_input_table: Callable[..., InputTable],
-) -> None:
-    # The default path lacks `adjusted`; only the stock symbols' path takes it.
-    crypto_first = DatasetSpec(
-        summary="A dataset for the tests.",
-        name="indicators.crypto_first",
-        fetch_path=SMA_CRYPTO,
-        fetch_paths_by_class={AssetClass.STOCKS: SMA_STOCK},
-        poll_keys=("Symbol", "Timestamp"),
-        keys=SMA.keys,
-    )
-    fake_rest.reply(
-        "/v1/indicators/sma/AAPL",
-        Reply(envelope({"values": [{"timestamp": 1704310200000, "value": 1.0}]})),
-    )
-    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
-    watch.add(new_table([string_col("Symbol", ["AAPL"])]))
-    q = build_query(routed_session._core, crypto_first, symbols=watch, adjusted=False)
-    assert isinstance(q, Query)
-    table = q.poll(60, mode=PollMode.REPLACE)
-    until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
-    watch.delete(new_table([string_col("Symbol", ["AAPL"])]))
-    until(lambda: dh_to_pylist(watch) == [])
-    next_cycle(clock)
-    until(lambda: symbols_of(table, dh_to_pylist) == [])
-    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
-    assert not failed
-
-
 def test_the_path_column_names_the_paths_static_symbols_read(
     *, routed_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToPylist
 ) -> None:
     fake_rest.reply("/v1/indicators/sma/AAPL", Reply(envelope({"values": []})))
-    q = build_query(routed_session._core, SMA, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    q = build_query(routed_session._core, SMA, query_type=FetchQuery, symbols=["AAPL"])
     table = q.poll(60)
     (row,) = streams_of(routed_session, dh_to_pylist)
     assert row["Path"] == SMA_STOCK
@@ -2200,8 +2748,7 @@ def page(*rows: tuple[str, float]) -> Reply:
 
 def feed(m: dm.MassiveSession) -> Table:
     # The default mode of the feed, APPEND.
-    q = build_query(m._core, FEED, symbols=["AAPL"], start="2025-01-02")
-    assert isinstance(q, Query)
+    q = build_query(m._core, FEED, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02")
     return q.poll(60)
 
 
@@ -2286,8 +2833,7 @@ def test_append_appends_each_revision_of_a_keyed_row(
         Reply(envelope([state("2026-01-02", 2.0)])),
         Reply(envelope([state("2026-01-02", 9.0)])),
     )
-    q = build_query(feed_session._core, snapshot, symbols=["AAPL"])
-    assert isinstance(q, Query)
+    q = build_query(feed_session._core, snapshot, query_type=FetchQuery, symbols=["AAPL"])
     table = q.poll(60, mode=PollMode.APPEND)
     until(lambda: len(dh_to_pylist(table)) == 1)
     for _ in range(3):
@@ -2311,7 +2857,10 @@ def test_a_failed_append_remembers_nothing(
     fail_one_poll_conversion(monkeypatch)
     next_cycle(clock)  # b's cycle fails to publish
     assert feed_session._core.diagnostics.wait_until_shown(30.0)
-    assert dh_to_pylist(feed_session.streams())[0]["Error"] == f"conversion failed; {GOOD}"
+    assert dh_to_pylist(feed_session.streams())[0]["Error"] is None
+    (gap,) = problems_of(feed_session, dh_to_pylist, FAILED)
+    detail = f"{FAILED_AFTER_GOOD}conversion failed"
+    assert (gap["Detail"], gap["EndedAt"]) == (detail, None)
     assert ids(table, dh_to_pylist) == [("a", 1.0)]
     next_cycle(clock)  # so the next cycle appends b, and still skips a
     until(lambda: ids(table, dh_to_pylist) == [("a", 1.0), ("b", 2.0)])
@@ -2323,42 +2872,122 @@ NULL_CURRENCY = {"id": "b", "ticker": "AAPL", "currency": None}
 
 @pytest.mark.parametrize("mode", list(PollMode))
 @pytest.mark.parametrize(
-    ("poll_keys", "bad", "message"),
+    ("poll_keys", "bad", "field"),
     [
-        (
-            ("Id",),
-            NULL_ID,
-            "row 1 of the cycle has a null poll key 'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}",
-        ),
+        (("Id",), NULL_ID, "Id"),
         # Every key column is checked, not only the first.
-        (
-            ("Id", "Currency"),
-            NULL_CURRENCY,
-            "row 1 of the cycle has a null poll key 'Currency': {'Symbol': 'AAPL', 'Id': 'b'}",
-        ),
+        (("Id", "Currency"), NULL_CURRENCY, "Currency"),
     ],
     ids=["first column", "second column"],
 )
-def test_a_null_poll_key_fails_the_table_in_every_mode(
+def test_a_row_with_a_null_poll_key_is_withheld_in_every_mode(
     *,
     feed_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     dh_to_pylist: ToPylist,
+    monkeypatch: pytest.MonkeyPatch,
     mode: PollMode,
     poll_keys: tuple[str, ...],
     bad: dict[str, object],
-    message: str,
+    field: str,
 ) -> None:
+    # The row the table cannot key is withheld and reported; the good row is published, and
+    # the table goes on.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(feed_session._core, "problems", events.extend)
     rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, bad]
     fake_rest.reply(PATH, Reply(envelope(rows)))
     spec = dataclasses.replace(FEED, poll_keys=poll_keys)
-    q = build_query(feed_session._core, spec, symbols=["AAPL"], start="2025-01-02")
-    assert isinstance(q, Query)
+    q = build_query(
+        feed_session._core, spec, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02"
+    )
     table = q.poll(60, mode=mode)
+    until(lambda: [row["Id"] for row in dh_to_pylist(table)] == ["a"])
+    until(lambda: len(events) == 1)
+    failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
+    assert not failed
+    ((cause, symbol, column, count, reason),) = [
+        (e.cause, e.symbol, e.field, e.rows, e.detail) for e in events
+    ]
+    assert (cause, symbol, column, count) == (ProblemCause.UNREADABLE_KEYS, "AAPL", field, 1)
+    assert reason.startswith(f"row 1 of the cycle has a null key column {field!r}: ")
+    (row,) = streams_of(feed_session, dh_to_pylist)
+    assert (row["State"], row["RowsPublished"]) == ("RUNNING", 1)
+
+
+def test_a_row_with_a_null_poll_key_fails_the_table_under_raise(
+    *, feed_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToPylist
+) -> None:
+    rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, NULL_ID]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(
+        feed_session._core,
+        FEED,
+        query_type=FetchQuery,
+        symbols=["AAPL"],
+        start="2025-01-02",
+        on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.RAISE),
+    )
+    table = q.poll(60, mode=PollMode.APPEND)
     until(lambda: bool(table.j_table.isFailed()))
     (row,) = streams_of(feed_session, dh_to_pylist)
-    assert (row["State"], row["Error"]) == ("FAILED", f"stocks.dividends poll(): {message}")
+    assert row["State"] == "FAILED"
+    assert row["Error"] == (
+        "stocks.dividends poll(): Massive sent 1 row the library cannot read whole, so it "
+        "withheld it: 1 under unreadable_keys. Row 1 of the cycle has a null key column 'Id': "
+        "{'Symbol': 'AAPL', 'Currency': 'USD'}. To go on without such rows, pass "
+        "on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
     assert row["RowsPublished"] == 0  # nothing of the cycle was published
+
+
+def test_a_row_with_a_null_poll_key_is_withheld_quietly_under_ignore(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rows = [{"id": "a", "ticker": "AAPL", "currency": "USD"}, NULL_ID]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    q = build_query(
+        feed_session._core,
+        FEED,
+        query_type=FetchQuery,
+        symbols=["AAPL"],
+        start="2025-01-02",
+        on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.IGNORE),
+    )
+    with caplog.at_level(logging.WARNING):
+        table = q.poll(60, mode=PollMode.APPEND)
+        until(lambda: [row["Id"] for row in dh_to_pylist(table)] == ["a"])
+        (row,) = streams_of(feed_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
+    [listed] = problems_of(feed_session, dh_to_pylist, ProblemCause.UNREADABLE_KEYS)
+    assert (listed["Rows"], listed["Policy"]) == (1, "ignore")
+    assert not [m for m in caplog.messages if "withheld" in m or "null poll key" in m]
+
+
+def test_a_cycle_whose_every_row_has_a_null_poll_key_fails_the_table(
+    *, feed_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToPylist
+) -> None:
+    # A problem of every row the cycle read fails the table, whatever the policy.
+    fake_rest.reply(PATH, Reply(envelope([NULL_ID, {**NULL_ID, "ticker": "MSFT"}])))
+    q = build_query(
+        feed_session._core, FEED, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02"
+    )
+    table = q.poll(60, mode=PollMode.APPEND)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = streams_of(feed_session, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"] == (
+        "stocks.dividends poll(): every one of the 2 rows Massive sent this cycle has a null "
+        "key column, so the library withheld them all. Row 0 of the cycle has a null key "
+        "column 'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}. m.problems() counts the withheld "
+        "rows by cause and symbol."
+    )
+    assert row["RowsPublished"] == 0
 
 
 @pytest.mark.parametrize("mode", list(PollMode))
@@ -2369,14 +2998,15 @@ def test_a_null_in_a_nullable_poll_key_is_a_value(
     dh_to_pylist: ToPylist,
     mode: PollMode,
 ) -> None:
-    # `Currency` may be null; `Id` may not, so its null still fails the table.
+    # `Currency` may be null: the row is published.
     spec = dataclasses.replace(
         FEED, poll_keys=("Id", "Currency"), nullable_poll_keys={"Currency": "for the tests"}
     )
     rows = [{"id": "a", "ticker": "AAPL", "currency": None}, {"id": "b", "ticker": "AAPL"}]
     fake_rest.reply(PATH, Reply(envelope(rows)))
-    q = build_query(feed_session._core, spec, symbols=["AAPL"], start="2025-01-02")
-    assert isinstance(q, Query)
+    q = build_query(
+        feed_session._core, spec, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02"
+    )
     table = q.poll(60, mode=mode)
     until(lambda: sorted(row["Id"] for row in dh_to_pylist(table)) == ["a", "b"])
     failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
@@ -2385,16 +3015,18 @@ def test_a_null_in_a_nullable_poll_key_is_a_value(
     assert (found["State"], found["RowsPublished"]) == ("RUNNING", 2)
 
 
-def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
+def test_a_nan_poll_key_is_withheld_and_a_long_row_is_truncated(
     *,
     massive_session: dm.MassiveSession,
     script: Script,
     pollers: Pollers,
     clock: FakeClock,
-    stream_rows: Callable[[], list[dict[str, Any]]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A NaN never equals itself, so as a key it would append its row again every cycle.
-    script.rows(("x" * 400, float("nan")))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(massive_session._core, "problems", events.extend)
+    script.rows(("x" * 400, float("nan")), ("AAPL", 1.0))
     table = open_poll(
         massive_session._core,
         spec=dataclasses.replace(DIVIDENDS, poll_keys=("CashAmount",)),
@@ -2410,11 +3042,12 @@ def test_a_nan_poll_key_fails_and_a_long_row_is_truncated(
         clock=clock,
         stop=threading.Event(),
     )
-    until(lambda: bool(table.j_table.isFailed()))
-    (row,) = stream_rows()
-    prefix = "stocks.dividends poll(): row 0 of the cycle has a null poll key 'CashAmount': "
-    assert row["Error"].startswith(prefix + "{'Symbol': 'xxx")
-    rendered = row["Error"].removeprefix(prefix)
+    until(lambda: table.size == 1)
+    until(lambda: len(events) == 1)
+    (event,) = events
+    prefix = "row 0 of the cycle has a null key column 'CashAmount': "
+    assert event.detail.startswith(prefix + "{'Symbol': 'xxx")
+    rendered = event.detail.removeprefix(prefix)
     assert len(rendered) == 300
     assert rendered.endswith("xxx...")
 
@@ -2441,7 +3074,7 @@ def test_polled_rows_share_one_stored_string_per_date(
 
 
 @pytest.mark.parametrize("mode", list(PollMode))
-def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
+def test_an_unreadable_symbols_row_is_withheld_from_a_poll_table(
     *,
     fake_rest: FakeRestServer,
     monkeypatch: pytest.MonkeyPatch,
@@ -2449,9 +3082,8 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
     dh_to_pylist: ToPylist,
     mode: PollMode,
 ) -> None:
-    # Under WARN a row Massive spelled in a way the library cannot read keeps a null Symbol
-    # and its text in RawSymbol; keyed on Symbol, it neither fails the null-key check nor
-    # merges with another such row, and REPLACE removes it by its text.
+    # A row Massive spelled in a way the library cannot read is withheld every cycle and
+    # reported; keyed on Symbol, the table holds the readable row and never fails.
     monkeypatch.setattr(_session, "CATALOG", Catalog((FEED,)))
     monkeypatch.setattr(poll, "CLOCK", clock)
     spec = dataclasses.replace(FEED, poll_keys=("Symbol",))
@@ -2463,22 +3095,28 @@ def test_a_warn_session_keys_an_unreadable_symbol_by_its_text(
     fake_rest.reply(PATH, Reply(envelope(rows)), Reply(envelope(rows[:2])))
     config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
     with dm.MassiveSession(config) as m:
-        q = build_query(m._core, spec, symbols=["AAPL"], start="2025-01-02")
-        assert isinstance(q, Query)
+        events: list[ProblemEvent] = []
+        monkeypatch.setattr(m._core, "problems", events.extend)
+        q = build_query(m._core, spec, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02")
         table = q.poll(60, mode=mode)
-        expected = [("a", "AAPL", None), ("b", None, "@@1"), ("c", None, "@@2")]
 
-        def held() -> list[tuple[str, str | None, str | None]]:
-            return sorted((r["Id"], r["Symbol"], r["RawSymbol"]) for r in dh_to_pylist(table))
+        def held() -> list[tuple[str, str | None]]:
+            return sorted((r["Id"], r["Symbol"]) for r in dh_to_pylist(table))
 
-        until(lambda: held() == expected)
-        next_cycle(clock)  # @@2 leaves: REPLACE removes its row alone; the others keep it
+        until(lambda: held() == [("a", "AAPL")])
+        assert "RawSymbol" not in table.column_names
+        next_cycle(clock)
         until(lambda: len(fake_rest.requests) == 2)
-        until(lambda: held() == (expected[:2] if mode is PollMode.REPLACE else expected))
         assert m._core.diagnostics.wait_until_shown(30.0)
-        assert held() == (expected[:2] if mode is PollMode.REPLACE else expected)
+        assert held() == [("a", "AAPL")]
         failed = bool(table.j_table.isFailed())  # pytest cannot describe a Java method
         assert not failed
+        until(lambda: len(events) == 3)
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNREADABLE_SYMBOLS, "@@1", 1),
+        (ProblemCause.UNREADABLE_SYMBOLS, "@@2", 1),
+        (ProblemCause.UNREADABLE_SYMBOLS, "@@1", 1),
+    ]
 
 
 def test_the_errors_a_retry_cannot_fix_are_permanent() -> None:
@@ -2591,7 +3229,7 @@ def test_append_identities_hold_a_list_poll_key(
     until(lambda: holdings(table, dh_to_pylist) == [("C1", ("A",), 1.0), ("C1", ("B",), 3.0)])
 
 
-@pytest.mark.parametrize("mode", list(PollMode))
+@pytest.mark.parametrize("mode", POLLER_MODES)
 def test_a_list_poll_key_is_order_sensitive(
     *,
     massive_session: dm.MassiveSession,
@@ -2677,12 +3315,11 @@ def open_poll_case(
     # the poller waits for the next; then derives and listens.
     fake_rest.reply(PATH, ROW)
     watchlist: InputTable | None = None
-    symbols: object = ["AAPL"]
+    symbols: dm.SymbolsLike = ["AAPL"]
     if watched:
         symbols = watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
         watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
-    q = build_query(m._core, DIVIDENDS, symbols=cast("Any", symbols))
-    assert isinstance(q, Query)
+    q = build_query(m._core, DIVIDENDS, query_type=FetchQuery, symbols=symbols)
     case = PollCase(m, fake_rest, clock, q.poll(60, mode=mode), race, cycles_ended, watchlist)
     until(lambda: case.table.size == 1)
     clock.wait_for_sleepers(1)
@@ -2870,3 +3507,75 @@ def test_a_polls_blink_table_is_created_under_the_update_graphs_shared_lock(
     table = start(massive_session, script=script, pollers=pollers, clock=clock)
     assert blink_creations[before:] == [True]
     massive_session.release(table)
+
+
+def test_symbol_count_raises_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="count has no rule for a value of type object"):
+        poll._symbol_count(object())  # type: ignore[arg-type]  # the point: refused at run time
+
+
+def test_logged_symbols_name_each_form_and_raise_for_a_form_with_no_rule() -> None:
+    assert poll._logged_symbols(("AAPL", "MSFT")) == "2 [AAPL, MSFT]"
+    assert poll._logged_symbols(dm.ALL) == "ALL"
+    assert poll._logged_symbols(None) == "none"
+    with pytest.raises(BrokenGuaranteeError, match="has no rule for a value of type object"):
+        poll._logged_symbols(object())  # type: ignore[arg-type]  # the point: refused at run time
+
+
+def test_a_poller_refuses_a_mode_no_cycle_publishes_by(
+    *, massive_session: dm.MassiveSession, script: Script, pollers: Pollers
+) -> None:
+    # AUTO is resolved before a poller starts; a mode with no publish rule must not be upserted.
+    refused = re.escape(f"stocks.dividends poll() has no rule for mode AUTO. {LIBRARY_BUG}")
+    refused = f"^{refused}$"
+    with pytest.raises(BrokenGuaranteeError, match=refused):
+        poll.Poller(
+            massive_session._core,
+            spec=DIVIDENDS,
+            request=Request(),
+            interval=timedelta(seconds=1),
+            mode=PollMode.AUTO,
+            stream_id=99,
+            read=script,
+            pollers=pollers,
+            clock=poll.CLOCK,
+            publisher=_UnusedPublisher(),
+            stop=Cancel(),
+        )
+
+
+def test_a_poll_failed_by_a_withheld_row_still_shows_its_count(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Under RAISE the table fails on the withheld row, and m.problems() still counts it.
+    rows = [
+        {"ticker": "AAPL", "id": "a", "frequency": 4.5, "cash_amount": 1.0},
+        {"ticker": "AAPL", "id": "b", "frequency": 4, "cash_amount": 2.0},
+    ]
+    fake_rest.reply(PATH, Reply(envelope(rows)))
+    strict = dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)
+    q = build_query(
+        rest_session._core, DIVIDENDS, query_type=FetchQuery, symbols=["AAPL"], on_error=strict
+    )
+    table = q.poll(60)
+    until(lambda: bool(table.j_table.isFailed()))
+    (row,) = streams_of(rest_session, dh_to_pylist)
+    assert row["Error"] == (
+        "stocks.dividends: Massive sent 1 row the library cannot read whole, so it withheld it: "
+        "1 under unconvertible_values. /stocks/v1/dividends: row 0: Frequency (wire key "
+        "'frequency') expects long, got 4.5. To go on without such rows, pass "
+        "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    (withheld,) = problems_of(rest_session, dh_to_pylist, ProblemCause.UNCONVERTIBLE_VALUES)
+    assert (withheld["StreamId"], withheld["Field"], withheld["Rows"], withheld["Policy"]) == (
+        1,
+        "Frequency",
+        1,
+        "raise",
+    )
+    rest_session.release(table)

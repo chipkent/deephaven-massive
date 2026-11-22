@@ -13,6 +13,7 @@ import dataclasses
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -41,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[3]
 REST = "https://massive.com/docs/rest/"
 WS = "https://massive.com/docs/websocket/"
 FLAT = "https://massive.com/docs/flat-files/"
-COMMAND = "uv run python -m deephaven_massive._massive.refresh"
+COMMAND = "uv run python scripts/refresh.py"
 NO_HAND = HandInput(
     lexicons={},
     shapes={},
@@ -58,6 +59,8 @@ NO_HAND = HandInput(
     kinds={},
     sample_errors=(),
     projections={},
+    spellings={},
+    shared_descriptions={},
     transport_only={},
     venues={},
     undeclared_fields={},
@@ -110,7 +113,8 @@ def rest_page(path: str) -> str:
 
 def ws_page(cluster: str, channel: str) -> str:
     return (
-        f"### A feed\n\n| Real-Time | `wss://socket.massive.com/{cluster}` |\n\n"
+        "### A feed\n\n## Connection\n\n| Feed | URL |\n| --- | --- |\n"
+        f"| Real-Time | `wss://socket.massive.com/{cluster}` |\n\n"
         f"The channel prefix for this feed is `{channel}`.\n"
     )
 
@@ -831,7 +835,7 @@ def test_the_report_lists_each_section_found_with_its_action() -> None:
         "## Deprecations (1)\n\n"
         "Action: replace the dataset's path, or add it to `EXCLUSIONS` with its reason.\n\n"
         "- REST `/v1/old`: deprecated\n\n"
-        f"Reproduce this report with `{COMMAND} --check` in a source checkout.\n"
+        f"Reproduce this report with `{COMMAND} --check --report drift.md` in a source checkout.\n"
     )
     changes = (Drift(section=Section.CHANGES, area="REST", item="/v1/x", detail="new"),)
     text = Report(items=changes, fetched=FETCHED, bucket_listed=False).text()
@@ -1032,7 +1036,11 @@ def test_check_adds_the_gate_stops_of_the_live_sources(tmp_path: Path) -> None:
 def test_check_lets_a_bucket_failure_through(tmp_path: Path, fake_s3: FakeS3) -> None:
     before = store(make(), tmp_path / "vendor")
     fake_s3.refuse("", status=403, code="AccessDenied", message="No")
-    with pytest.raises(WireEntitlementError, match=r"^HTTP 403 for s3://flatfiles/ at ") as info:
+    expected = (
+        "Massive answered the list of s3://flatfiles/ at https://files.massive.com with HTTP 403 "
+        '(request_id 4442587FB7D0A2F9): "AccessDenied: No".'
+    )
+    with pytest.raises(WireEntitlementError, match=rf"^{re.escape(expected)}$") as info:
         drift.check(
             snapshot_directory=before,
             get=served(make()).__getitem__,

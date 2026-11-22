@@ -55,7 +55,6 @@ from deephaven_massive._datasets.column_descriptions import (
     KEY_SENTENCES,
     OPTION_ROOT,
     OTHER_ROWS,
-    RAW_SYMBOL,
     SYMBOL,
     TRANSPORT_ORDER,
     Contribution,
@@ -66,7 +65,7 @@ from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._datasets.row_times import DATE, END, INSERT, START, TIMESTAMP, RowTimes
 from deephaven_massive._datasets.source_columns import key_column, kind_position, rename
 from deephaven_massive._enums import AssetClass
-from deephaven_massive._errors import MassiveError
+from deephaven_massive._errors import ErrorSource, MassiveError
 from deephaven_massive._massive import Transport, WireType
 
 if TYPE_CHECKING:
@@ -330,7 +329,8 @@ class Schema:
             ) as e:
                 raise MassiveError(
                     f"schema mismatch in {self.name}.{column.name} "
-                    f"(expected {column.type.value}): {e}"
+                    f"(expected {column.type.value}): {e}",
+                    source=ErrorSource.LIBRARY,  # the library's own rows: a bug in it
                 ) from e
         return pa.Table.from_arrays(arrays, schema=self.arrow_schema())
 
@@ -421,7 +421,7 @@ def filled_columns(
     library fills for every row whatever the source (`Date`, `TimestampStart`,
     `TimestampEnd`, `TimestampInsert`, as the dataset has them), so two calls for different
     sources of one dataset differ only by what their sources carry. The derived columns
-    (`OptionRoot`, `RawSymbol`), which every transport computes alike, are left out.
+    (`OptionRoot`), which every transport computes alike, are left out.
 
     Args:
         spec: The dataset.
@@ -503,44 +503,32 @@ def _column(
     )
 
 
-def _reads_symbol(spec: DatasetSpec) -> bool:
-    """Tell whether some source of a dataset carries its symbol in its rows.
-
-    Args:
-        spec: The dataset.
-
-    Returns:
-        True when a declared `symbol` key is read from rows, not filled from the request: only
-        then can Massive send a spelling the library cannot read.
-    """
-    return any(
-        keys.symbol is not None and not keys.symbol.from_request for keys in spec.keys.values()
-    )
-
-
-def _derived(spec: DatasetSpec, symbol: Column | None, *, raw_symbol: bool) -> list[Column]:
-    """Return a dataset's derived columns, which no source carries and the transports compute.
+def _derived(
+    spec: DatasetSpec, symbol: Column | None, *, carried: Mapping[str, Column]
+) -> list[Column]:
+    """Return a dataset's derived columns, which the transports compute from `Symbol`.
 
     Args:
         spec: The dataset.
         symbol: Its `Symbol` column, or None for a dataset without one.
-        raw_symbol: Whether the session keeps unreadable symbols in `RawSymbol`.
+        carried: The columns the dataset's own sources carry, by name. A derived column among
+            them is Massive's value, which takes the derived column's place: the library
+            computes none beside it.
 
     Returns:
         `OptionRoot` for an options dataset, or one whose rows include options contracts
-        (`DatasetSpec.option_rows`), with a `Symbol`, then `RawSymbol` when `raw_symbol` is
-        set and the dataset reads its symbol from rows. Each is a `String` column with the
-        transports and wire keys of `Symbol`, from which it is computed.
+        (`DatasetSpec.option_rows`), with a `Symbol`: a `String` column with the transports
+        and wire keys of `Symbol`, from which it is computed, or the carried column.
     """
     if symbol is None:
         return []
     options = spec.asset_class is AssetClass.OPTIONS or spec.option_rows
     names = [OPTION_ROOT] if options else []
-    if raw_symbol and _reads_symbol(spec):
-        names.append(RAW_SYMBOL)
     mixed = OTHER_ROWS if spec.option_rows else ""
     return [
-        Column(
+        carried[name]
+        if name in carried
+        else Column(
             name,
             ColumnType.STRING,
             with_sentence(DERIVED_SENTENCES[name], mixed if name == OPTION_ROOT else ""),
@@ -555,8 +543,6 @@ def dataset_schema(
     spec: DatasetSpec,
     members: Sequence[DatasetSpec],
     source: Callable[[Transport, str], Source],
-    *,
-    raw_symbol: bool = False,
 ) -> Schema:
     """Merge the renamed columns of every member's sources into one dataset's schema.
 
@@ -605,10 +591,12 @@ def dataset_schema(
     A dataset's note on a column (`DatasetSpec.column_notes`) follows its description. A column
     whose sources carry no description gets `""`, and nothing fails.
 
-    Derived columns, which no source carries and every transport computes from `Symbol`, follow
-    the leading key columns, with the library's own description: `OptionRoot` on every options
-    dataset with a `Symbol` (`symbols.option_roots`), and `RawSymbol` when `raw_symbol` is set
-    and the dataset reads its symbol from rows.
+    Derived columns, which every transport computes from `Symbol`, follow the leading key
+    columns, with the library's own description: `OptionRoot` on every options dataset with a
+    `Symbol` (`symbols.option_roots`). Where a REST source of the dataset carries the column
+    itself (Massive's `root`, spelled `OptionRoot`), that column takes the place, with
+    Massive's description, and the REST rows keep Massive's value; no WebSocket channel or flat
+    file carries the column.
 
     Args:
         spec: The dataset whose schema is built; it names the schema, decides the leading
@@ -617,8 +605,6 @@ def dataset_schema(
         members: The datasets whose sources merge, in member order: the datasets of the
             dataset's kind (`Catalog.members`), or the dataset alone when it is in no kind.
         source: Returns the generated source of a transport and key.
-        raw_symbol: True for a session whose `unreadable_symbols` is `LOG` or `IGNORE`, which
-            keeps the text of an unreadable symbol in `RawSymbol`.
 
     Returns:
         The schema, named after the dataset.
@@ -686,6 +672,7 @@ def dataset_schema(
     derived = _derived(
         spec,
         next((c for c in columns if c.name == "Symbol" and "Symbol" in declared), None),
-        raw_symbol=raw_symbol,
+        carried={c.name: c for c in columns if c.name in own},
     )
-    return Schema(spec.name, (*columns[: len(leading)], *derived, *columns[len(leading) :]))
+    others = [c for c in columns[len(leading) :] if c not in derived]
+    return Schema(spec.name, (*columns[: len(leading)], *derived, *others))

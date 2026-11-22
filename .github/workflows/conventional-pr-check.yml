@@ -1,9 +1,9 @@
 name: 'Conventional PR'
 
 on:
-  # The check reads only the title. A push cannot change it, so pushes do not run the check; an
-  # edit that leaves the title alone, such as a rewritten description, skips the job below. The
-  # check is not a required one, so a new commit without its status blocks nothing.
+  # The title check reads only the title, so it runs when the title is new or changed. The
+  # description check reads the description and the diff, so it also runs on a push. Neither
+  # is a required check, so a new commit without its status blocks nothing.
   #
   # pull_request_target runs this file, and the checkout below fetches the script, as they are
   # on the base branch, never the pull request's own copies: a pull request cannot change the
@@ -14,10 +14,13 @@ on:
       - opened
       - reopened
       - edited
+      - synchronize
 
 jobs:
   pr-check:
-    if: github.event.action != 'edited' || github.event.changes.title != null
+    if: >-
+      github.event.action != 'synchronize'
+      && (github.event.action != 'edited' || github.event.changes.title != null)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -64,4 +67,77 @@ jobs:
         uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
         with:
           header: pr-title-lint-error
+          delete: true
+
+  pr-body:
+    # The description meets the approval rules of AGENTS.md: no item that asks the owner
+    # anything, no approval claimed without its decision or the question and the owner's
+    # dated answer, and a rule change with its record (scripts/check_pr_body.py).
+    # The diff and the file list come from git, read-only: GitHub's diff API refuses a pull
+    # request past 20,000 lines, and git has no such limit.
+    # A retargeted PR (changes.base) has a new diff, so it is rechecked like an edited body.
+    if: >-
+      github.event.action != 'edited'
+      || github.event.changes.body != null
+      || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The decisions on the base branch, so a cited decision counts only once it is on main.
+          sparse-checkout: |
+            scripts/check_pr_body.py
+            docs/dev/decisions
+          sparse-checkout-cone-mode: false
+
+      - name: Check the description against the approval rules
+        id: lint_pr_body
+        env:
+          # The description reaches the script through a file, never pasted into the command,
+          # so no description can run as shell code.
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/body.md"
+          # The pull request's commits are fetched as data into a repository of their own and
+          # only diffed, never checked out or run. The token reaches git through the
+          # environment for the fetch alone, never the command line or a saved config.
+          repo="$RUNNER_TEMP/pr-diff"
+          git init -q "$repo"
+          header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+          GIT_CONFIG_VALUE_0="$header" \
+            git -C "$repo" fetch -q --no-tags "https://github.com/$GITHUB_REPOSITORY" \
+            "+refs/heads/${BASE_REF}:refs/pr/base" "+refs/pull/${PR_NUMBER}/head:refs/pr/head"
+          unset header
+          # Three dots diff from the merge base, as GitHub's pull request diff does.
+          git -C "$repo" diff pr/base...pr/head > "$RUNNER_TEMP/diff.patch"
+          git -C "$repo" diff --name-only pr/base...pr/head > "$RUNNER_TEMP/files"
+          args=()
+          while IFS= read -r path; do
+            [ -n "$path" ] && args+=(--changed-file "$path")
+          done < "$RUNNER_TEMP/files"
+          python3 -I scripts/check_pr_body.py --body-file "$RUNNER_TEMP/body.md" \
+            --diff-file "$RUNNER_TEMP/diff.patch" "${args[@]}"
+
+      - uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        if: always() && (steps.lint_pr_body.outputs.error_message != null)
+        with:
+          header: pr-body-lint-error
+          message: |
+            The pull request description breaks the project's approval rules (`AGENTS.md`, an approval is a decision file or the owner's answer to a question; `docs/dev/pull-requests.md`). A question for the owner goes to the owner directly, and the pull request opens after the answer; an approval cites its decision or shows the question with the owner's dated answer. Edit the description with `gh pr edit <number> --body-file .git-pr-body.md`, and the check runs again.
+
+            ${{ steps.lint_pr_body.outputs.error_message }}
+
+      - if: ${{ steps.lint_pr_body.outputs.error_message == null }}
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: pr-body-lint-error
           delete: true

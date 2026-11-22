@@ -13,11 +13,11 @@ never imports the code that does the I/O:
 - `StreamHandle`: a live stream as `StreamTransport.open_stream` hands it to the core.
 - `HostDecision`: which WebSocket host serves an (asset class, channel family), and why, as
   `RestTransport.resolve_host` decides it.
-- `SymbolRows`, `SymbolFailure`, and `FailureKind`: what a read by symbol
-  (`RestTransport.fetch_by_symbol`, `RestTransport.history_by_symbol`,
-  `FlatFileTransport.history_by_symbol`) returns for each symbol: its rows, or the failure that
-  ended its read and whether a later read may succeed. A table that follows a live symbol
-  table reads each symbol this way, so one symbol's failure never fails the others.
+- `SymbolRows` and `SymbolFailure`: what a read by symbol (`RestTransport.fetch_by_symbol`,
+  `RestTransport.history_by_symbol`, `FlatFileTransport.history_by_symbol`) returns for each
+  symbol: its rows, or the failure that ended its read, whose `is_retryable` says whether a
+  later read may succeed. A table that follows a live symbol table reads each symbol this way,
+  so one symbol's failure never fails the others.
 
 Everything here is a protocol or an immutable value: no I/O, no threads, and no Deephaven call.
 """
@@ -25,7 +25,6 @@ Everything here is a protocol or an immutable value: no I/O, no threads, and no 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 if TYPE_CHECKING:
@@ -39,11 +38,19 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
-    from deephaven_massive._enums import AssetClass, ChannelFamily, OnError, PollMode, Recency
+    from deephaven_massive._enums import (
+        AssetClass,
+        ChannelFamily,
+        FuturesVenue,
+        PollMode,
+        Recency,
+    )
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._errors import MassiveError
+    from deephaven_massive._log_limits import LoggedKeys
+    from deephaven_massive._tables.read_tally import ReadTally
 
 __all__ = [
-    "FailureKind",
     "FlatFileRead",
     "FlatFileTransport",
     "HostDecision",
@@ -54,7 +61,25 @@ __all__ = [
     "SymbolFailure",
     "SymbolOutcome",
     "SymbolRows",
+    "Unsplit",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class Unsplit:
+    """Why a crypto pair has no split into its two currencies (`RestTransport.crypto_pair`).
+
+    Attributes:
+        why: The reason, for the log and a table's `Error`, such as `"Massive's crypto ticker
+            list does not hold it"`.
+        no_data: True when Massive's crypto ticker list does not hold the pair: Massive has no
+            data for it, and `ErrorPolicy.unavailable_symbols` applies. False when the list
+            holds it with currencies that do not join to it: data the library cannot read,
+            which the lookup has already reported under `unreadable_symbols`.
+    """
+
+    why: str
+    no_data: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +91,9 @@ class HostDecision:
 
     Attributes:
         host: The hostname, such as `"delayed.massive.com"`.
-        recency: Whether the host serves real-time or delayed data (`host_decision.recency_of`),
-            or `UNKNOWN` for a pinned host the library does not know.
+        recency: Whether Massive serves the host's data real-time or delayed, as Massive's
+            answers and the session's settings show it (`host_decision.decide`), or `UNKNOWN`
+            when nothing shows it.
         evidence: Why: a human-readable account of the decision, shown in `m.connections()`.
     """
 
@@ -82,7 +108,7 @@ class StreamHandle:
 
     The transport creates the stream's publisher (`BlinkPublisher`) and blink table inside `scope`
     (the stream scope) and registers the blink table's `on_shutdown_callback`, where the stream's
-    registry record is dropped (`SessionCore.stream_shut_down`) and topic reference counts are
+    registry record is dropped (`SharedStreams.shut_down`) and topic reference counts are
     released. The session's registry record holds the handle until the record is deleted (its holds
     released and its blink table shut down), and releases `scope` when the last result is released.
     Holding the handle holds `stop_watch`, and through it a reactive stream's watchlist listener,
@@ -124,28 +150,6 @@ class StreamHandle:
     recency: Recency = field(kw_only=True)
 
 
-class FailureKind(StrEnum):
-    """Whether a symbol's failed read may succeed if the same read is made again later.
-
-    Part of a `SymbolFailure`; the transport decides it from the error
-    (`_ingest/symbol_reads.py`), and the caller decides what to do with it, such as reading a
-    transient failure again after a pause.
-    """
-
-    TRANSIENT = "transient"
-    """The cause may pass: a rate limit that outlasted the read's patience (HTTP 429), a
-    server error that outlasted the client's retries (HTTP 5xx), a network failure, or a
-    symbol's later page that answered HTTP 404, so its data was cut short."""
-
-    PERMANENT = "permanent"
-    """The same read would fail again for this session's entitlements: the plan does not
-    include the data (`EntitlementError`; an upgrade of the plan lifts it, so a later read may
-    then succeed), Massive's rows break the dataset's schema (`RowDataError`), a crypto pair
-    Massive's ticker list does not hold, a parameter the symbol's path does not take, a table
-    without the dataset's columns (a defect of the library), or any other refusal, such as
-    the HTTP 404 of a path Massive retired."""
-
-
 @dataclass(frozen=True, slots=True)
 class SymbolRows:
     """One symbol's complete rows from a read by symbol.
@@ -160,26 +164,33 @@ class SymbolRows:
         source: Where the rows came from, as users read it: `"REST"`, `"flat files"`, or
             `"flat files and REST"` when REST served the days the files lack; None when the
             maker did not say.
+        skipped: Why the read sent no request for the symbol and gave it no rows: a crypto
+            pair whose currencies, as Massive's crypto ticker list gives them, don't make up its
+            ticker. `m.symbol_reads()` shows it in `Error`. None when the symbol was read.
+        no_data: True when Massive has no data for the symbol (HTTP 404 on its first
+            request), so its empty rows stand even when the rest of its read fails because
+            the library could read none of its rows whole (`ReadTally.judge`).
     """
 
     table: Table
     source: str | None = None
+    skipped: str | None = None
+    no_data: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class SymbolFailure:
-    """Why one symbol's read from a read by symbol failed, and whether it may succeed later.
+    """Why one symbol's read from a read by symbol failed.
 
     Immutable. Every symbol of a batched read (one request that names several symbols, or one
     flat-file scan) that failed holds the same error object.
 
     Attributes:
-        error: The failure, as a static `fetch()` or `history()` of the symbol would raise it.
-        kind: Whether a later read may succeed (`FailureKind`).
+        error: The failure, as a static `fetch()` or `history()` of the symbol would raise it;
+            its `is_retryable` says whether the same read made later may succeed.
     """
 
     error: MassiveError
-    kind: FailureKind
 
 
 SymbolOutcome: TypeAlias = SymbolRows | SymbolFailure
@@ -221,23 +232,25 @@ class RestTransport(Protocol):
         """
         ...
 
-    def crypto_pair(self, symbol: str) -> tuple[str, str]:
-        """Return a crypto ticker's base and quote, looking them up in Massive if needed.
+    def crypto_pair(self, symbol: str, policy: ResolvedPolicy) -> tuple[str, str] | Unsplit:
+        """Return a crypto ticker's base and quote, or why Massive has no data for it.
 
-        Called by the WebSocket transport for each crypto ticker of a stream, before it starts
-        or on its `symbol changes` worker. The first such call of the session blocks while it
+        Called by the WebSocket transport for each crypto ticker of a stream, on its
+        `symbol changes` worker. The first such call of the session blocks while it
         reads Massive's crypto ticker list (`/v3/reference/tickers?market=crypto`, every page,
         listed and delisted pairs), which the session then keeps; a failed read is read again by
         the next call.
 
         Args:
             symbol: A canonical crypto ticker.
+            policy: The stream's resolved policy; its `unreadable_symbols` decides what a
+                listed ticker whose currencies do not join does.
 
         Returns:
-            `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`.
+            `(base, quote)`, such as `("DOT", "USD")` for `X:DOTUSD`; or, for a ticker the list
+            gives no split for, why (`Unsplit`).
 
-        A failed read, or a ticker the list does not hold, raises a `MassiveError` naming the
-        ticker.
+        A failed read raises a `MassiveError` naming the ticker.
         """
         ...
 
@@ -248,7 +261,6 @@ class RestTransport(Protocol):
         *,
         call: int,
         stop: threading.Event | None = None,
-        unlisted: OnError,
     ) -> Table:
         """Return every row the dataset's `fetch` endpoint returns for the request, static.
 
@@ -261,11 +273,6 @@ class RestTransport(Protocol):
                 read's requests stop waiting for the rate governor and no new one starts, so
                 the call ends soon with an error the caller ignores. None for a call only the
                 session's close stops.
-            unlisted: What a crypto pair that Massive's crypto ticker list does not hold does,
-                on a path that takes the pair as two currencies: `OnError.RAISE` raises (always
-                for symbols passed in code); `LOG` and `IGNORE`, the session's
-                `MassiveConfig.unlisted_symbols` for a symbol table's pairs, leave it out and
-                log it once, at WARNING or at DEBUG.
 
         Returns:
             A static table with the dataset's columns, in its schema's order.
@@ -276,25 +283,25 @@ class RestTransport(Protocol):
             AuthenticationError: If Massive rejects the API key (HTTP 401).
             EntitlementError: If the plan does not include the endpoint (HTTP 403).
             MassiveError: If a rate limit outlives the retries, a row breaks the dataset's
-                schema, a symbol's later page answers HTTP 404, a crypto pair cannot be split
-                under `RAISE`, every symbol is a pair Massive does not list under `LOG` or
-                `IGNORE`, or a request fails in any other way.
+                schema, a symbol's later page answers HTTP 404, Massive has no data for a
+                symbol under `unavailable_symbols=RAISE`, or a request fails in any other way.
         """
         ...
 
     def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
-        """Check, with no request, that `fetch` can plan its requests for the request.
+        """Check that `fetch` can plan its requests for the request, before any data request.
 
-        A background `fetch(wait=False)` calls it on the caller thread, so a parameter a path
-        does not take raises there, at the call, as `fetch` raises it before its first request.
-        The plan splits no crypto pair (that may read Massive's ticker list): the read does.
+        A background `fetch()` calls it on the caller thread, so a parameter a path does not
+        take raises there, at the call, as `fetch` raises it before its first request. A
+        `fetch()` that follows a symbol table calls it with the table, and every path a symbol
+        of the table could reach is checked.
 
         Args:
             spec: The dataset.
-            request: The normalized arguments, with static symbols.
+            request: The normalized arguments, with static symbols or a symbol table.
 
         Raises:
-            ValueError: The request sets a parameter a path of the call does not take.
+            ValueError: The request sets a parameter a path the call could read does not take.
         """
         ...
 
@@ -329,8 +336,8 @@ class RestTransport(Protocol):
             call: The id of the verb call the read serves, which its log lines and thread
                 names carry.
             stop: A read's stop token (`IngestPorts.read_stop`): once set, the requests stop
-                waiting for the rate governor and the symbols not yet read fail as
-                `TRANSIENT`; the caller ignores the outcomes. None for a read only the
+                waiting for the rate governor and the symbols not yet read fail with a
+                retryable error; the caller ignores the outcomes. None for a read only the
                 session's close stops.
 
         Returns:
@@ -401,14 +408,9 @@ class RestTransport(Protocol):
             ValueError: Before the table exists, if a path the call reads does not take a
                 parameter or filter the request sets, even when another of its paths does.
                 Over a reactive symbol table, whose symbols choose the paths at each cycle,
-                only a parameter that no fetch path takes raises here; one the cycle's path
-                lacks fails the table then.
-            AuthenticationError: If Massive rejects the API key while the call reads its
-                crypto ticker list to split a crypto ticker.
-            EntitlementError: If the plan does not include that list (HTTP 403).
-            MassiveError: If the session is closed, or a crypto ticker cannot be split into
-                its currencies (Massive's crypto ticker list cannot be read or does not hold
-                it). A cycle's failure later fails the table instead of raising.
+                a parameter that any of the dataset's fetch paths lacks raises here.
+            SessionClosedError: If the session is closed. A cycle's failure later fails the
+                table instead of raising.
         """
         ...
 
@@ -419,6 +421,7 @@ class RestTransport(Protocol):
         window: HistoryWindow,
         *,
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
         days: Sequence[date] | None = None,
     ) -> Table:
@@ -430,6 +433,11 @@ class RestTransport(Protocol):
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
             call: The verb call's id, as `fetch` takes it.
+            tally: The whole `history()` call's count of its rows and of those withheld
+                (`ReadTally`), which every page adds to; this read never checks it, since it
+                may be one part of a call that also reads flat files. The caller checks it
+                after the call's last part, and fails the call when the library could read
+                none of its rows whole.
             stop: A background read's stop token, as `fetch` takes it.
             days: For `dm.ALL`, read one request per day, the only days of the window to
                 request (the days the flat files lack); None for every day of the window.
@@ -450,10 +458,11 @@ class RestTransport(Protocol):
         ...
 
     def check_history(self, spec: DatasetSpec, request: Request, window: HistoryWindow) -> None:
-        """Check, with no request, that `history` can plan its requests over `window`.
+        """Check that `history` can plan its REST requests over `window`, before any data request.
 
-        The `check_fetch` of a background `history(..., source=REST or AUTO, wait=False)` that
-        chose REST.
+        The `check_fetch` of a background `history()` that REST serves or may serve: one that
+        chose REST, or one that reads flat files under `AUTO` and reads from REST the days the
+        files lack.
 
         Args:
             spec: The dataset; `history()` has checked that REST can serve the request.
@@ -473,6 +482,7 @@ class RestTransport(Protocol):
         *,
         symbols: Sequence[str],
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> Mapping[str, SymbolOutcome]:
         """Read REST `history` for each symbol over `window` and return each one's outcome.
@@ -490,6 +500,8 @@ class RestTransport(Protocol):
             window: The call's window (`history_window`, built for the call's instant).
             symbols: The canonical symbols to read; a repeated one is read once.
             call: The verb call's id, as `fetch_by_symbol` takes it.
+            tally: The whole read's count of its rows and of those withheld, as `history`
+                takes it; the caller judges it after the read's last part (`ReadTally.judge`).
             stop: A read's stop token, as `fetch_by_symbol` takes it.
 
         Returns:
@@ -513,10 +525,10 @@ class StreamTransport(Protocol):
         Runs on the caller thread; may resolve the host with one REST call. Must not hold the
         session's registry lock while calling Deephaven. The session has already registered the
         stream under `stream_id`, so `SessionCore.fail_stream(stream_id, ...)` and
-        `SessionCore.stream_shut_down(stream_id)` may be called from the moment the publisher
+        `SharedStreams.shut_down(stream_id)` may be called from the moment the publisher
         exists, even before this method returns. The publisher is named
         `massive.{dataset}#{stream_id}`, and the blink table's `on_shutdown_callback` must first
-        call `SessionCore.stream_shut_down(stream_id)` and only then release the stream's topics.
+        call `SharedStreams.shut_down(stream_id)` and only then release the stream's topics.
         The returned handle carries `stream_id`. If the open raises anything, even
         `KeyboardInterrupt`, the transport has released the stream scope and the stream's
         references (its connection lease and topics) before the exception propagates.
@@ -532,41 +544,13 @@ class StreamTransport(Protocol):
 
         Raises:
             ValueError: If explicit options contracts would put more than 1,000 topics on the
-                session's `/options` connection, or the stream is real-time only (fair market
-                value, `DatasetSpec.real_time_only`) and `MassiveConfig.delayed_subscriptions`
-                lists its subscription.
+                session's `/options` connection.
             AuthenticationError: If Massive rejects the API key on the request that decides the
                 WebSocket host.
             EntitlementError: If Massive labels the subscription's snapshot delayed and the
-                subscription is not in `MassiveConfig.delayed_subscriptions`, or the stream is
-                real-time only.
+                subscription is not in `MassiveConfig.delayed_subscriptions`.
             MassiveError: If the session is closed, the host cannot be decided, or Massive's
                 crypto ticker list cannot be read or does not hold a crypto pair.
-        """
-        ...
-
-    def tradable_pairs(self, spec: DatasetSpec, symbols: tuple[str, ...]) -> tuple[str, ...]:
-        """Return the pairs of a static symbol table, read at the call, a stream can subscribe.
-
-        Called only for a crypto dataset. A pair that Massive's crypto ticker list does not
-        hold, or that a failed read of the list cannot split, follows
-        `MassiveConfig.unlisted_symbols`: left out (and logged once) under `LOG` and `IGNORE`,
-        raised under `RAISE`. Runs on the verb's thread, before the stream starts; may block for
-        one read of the list.
-
-        Args:
-            spec: A crypto dataset.
-            symbols: The table's canonical symbols, sorted.
-
-        Returns:
-            The symbols a stream can subscribe, in order.
-
-        Raises:
-            AuthenticationError: Under `RAISE`, if Massive rejects the key on the read of the
-                list.
-            EntitlementError: Under `RAISE`, if the plan does not include reference data.
-            MassiveError: Under `RAISE`, if a pair cannot be split; under `LOG` and `IGNORE`,
-                if no pair can, so the result would follow nothing.
         """
         ...
 
@@ -599,6 +583,9 @@ class FlatFileRead:
             though a later day's file exists, which the read took for days without trading
             and skipped, oldest first; empty for none. The table's description names them,
             since the inference may be wrong and Massive's file may simply be missing.
+        refused: The futures venues whose files S3 refused and the read skipped, every file of
+            each over the whole range, in `FuturesVenue` order (`Request.refused_venues`);
+            empty for none. The table's description names them.
     """
 
     parts: tuple[tuple[date, Table], ...]
@@ -607,6 +594,7 @@ class FlatFileRead:
     uncertain: tuple[date, ...] = ()
     absent: tuple[date, ...] = ()
     skipped: tuple[date, ...] = ()
+    refused: tuple[FuturesVenue, ...] = ()
 
 
 class FlatFileTransport(Protocol):
@@ -639,7 +627,7 @@ class FlatFileTransport(Protocol):
             spec: The dataset, with a flat-file prefix for the request.
             request: The normalized arguments, with static symbols and the parsed bounds.
             window: The call's window, which holds rows.
-            dates: The partition dates to read (`partition_dates`).
+            dates: The dates of the files to read (`file_dates`).
             call: The verb call's id.
             forced: True for `source=FLAT_FILES`, which never reads REST.
             stop: A background read's stop token, or None for a blocking read.
@@ -648,7 +636,8 @@ class FlatFileTransport(Protocol):
             The static table; the description's source sentence when REST served any of it,
             which replaces the sentence of the source choice (None when only the flat files
             did); and the sentences the description adds on what the files may lack: the days
-            taken for holidays and the sessions that may be incomplete (None for neither).
+            taken for holidays, the sessions that may be incomplete, and the futures venues
+            skipped because S3 refused them (None for none).
 
         Raises:
             AuthenticationError: If S3 rejects the credentials and REST may not serve the call.
@@ -668,6 +657,8 @@ class FlatFileTransport(Protocol):
         dates: Sequence[date],
         call: int,
         infer_holidays: bool,
+        logged: LoggedKeys,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> FlatFileRead:
         """Return the rows of `window` from the dataset's flat files, static.
@@ -678,24 +669,32 @@ class FlatFileTransport(Protocol):
                 symbols (never a reactive table).
             window: What the call reads and keeps (`history_window` in
                 `_datasets/history_source.py`).
-            dates: The partition dates to read (`partition_dates` in `_datasets/history_source.py`).
+            dates: The dates of the files to read (`file_dates` in `_datasets/history_source.py`).
             call: The verb call's id (`next_stream_id`), which its log lines and thread names
                 carry.
             infer_holidays: True when no other source can serve the call: a missing trading
-                day's file with a later day's file is a day without trading. False to return
-                every missing trading day as unread.
+                day's file with a later day's file is a day without trading, and a futures
+                venue S3 refuses is skipped when `request.refused_venues` is `LOG` or
+                `IGNORE`. False to return every missing trading day as unread and to raise
+                every refusal.
+            logged: The facts the call has logged (`LoggedKeys`): each refused venue is
+                logged once per call, and the call drops the record when it ends.
+            tally: The whole `history()` call's count of its rows and of those withheld, as
+                `RestTransport.history` takes it.
             stop: A background read's stop token (`IngestPorts.read_stop`): once set, every
                 file read stops at its next block and no new one starts. None for a call only
                 the session's close stops.
 
         Returns:
             The read (`FlatFileRead`): the files' tables by day, an empty table with every
-            column, and the days the files could not serve.
+            column, the days the files could not serve, and the futures venues skipped.
 
         Raises:
             AuthenticationError: If S3 rejects the flat-file credentials.
             EntitlementError: If the plan does not include the files (S3 answers 403); for
-                futures files the message names the venue and the `venue=` parameter.
+                futures files the message names the venue, `venues=`, and the
+                `refused_venues` cause. A skipped venue raises nothing, unless S3
+                refused every venue of the call.
             MassiveError: If the bucket or endpoint is wrong, or a read fails in any other
                 way. A bar of a day or longer stamped at a time Massive is not known to use is
                 returned and logs a WARNING; it raises nothing.
@@ -712,6 +711,7 @@ class FlatFileTransport(Protocol):
         dates: Sequence[date],
         call: int,
         forced: bool,
+        logged: LoggedKeys,
         stop: threading.Event | None = None,
     ) -> Mapping[str, SymbolOutcome]:
         """Read flat-file `history()` for each symbol, each with its own outcome.
@@ -729,9 +729,11 @@ class FlatFileTransport(Protocol):
             request: The normalized arguments, with the parsed bounds; its symbols are ignored.
             window: The call's window (`history_window`, built for the call's instant).
             symbols: The canonical symbols to read; a repeated one is read once.
-            dates: The partition dates to read (`partition_dates`).
+            dates: The dates of the files to read (`file_dates`).
             call: The verb call's id.
             forced: True for `source=FLAT_FILES`, which never reads REST.
+            logged: The facts the call has logged (`LoggedKeys`), which the followed table
+                keeps across its reads, so each refused venue is logged once per call.
             stop: A read's stop token, as `RestTransport.fetch_by_symbol` takes it.
 
         Returns:

@@ -8,13 +8,15 @@ fake REST and WebSocket servers, so nothing reaches Massive. Every block therefo
 own imports and session. `dm.MassiveSession()` builds a new session whose REST client talks to
 the fake REST server and whose streams connect to the fake WebSocket server.
 A block fenced as `python continues` is the second step of an example, which the reader runs
-in the same console after the block before it, so it runs in that block's namespace. A block
+in the same console after the block before it, so it runs in that block's namespace. Each
+example, a block with the blocks that continue it, is a test case of its own, and the
+examples' tables are checked where each example makes them. A block
 fenced as `python skip-test` does not run; only the blocks `SKIPPED_BLOCKS` names may be. The
 README's settings file is written by running its shell commands, with `HOME` in a temporary
-folder, and the settings page's example file loads as the page says. Five README sections also
-run alone against scripted replies, and the tests check that
-their tables hold what the README says they hold: the whole-market day, the watchlist that
-adds and removes stocks, the settings file, the change since yesterday's close, and the
+folder, and the settings page's example file loads as the page says. Six README sections also
+run alone against scripted replies, and the tests check that their tables hold what the README
+says they hold: the whole-market day, the watchlist that adds and removes stocks, the
+conversion of Yahoo tickers, the settings file, the change since yesterday's close, and the
 backfill of today's minutes. The helpers that read a page's blocks and run them are shared with
 the live run of the README's examples, `tests/live/test_doc_examples_integration.py`, from
 `tests/_live/doc_examples.py`.
@@ -28,16 +30,18 @@ URL, that every cited page and anchor exists, and that every relative link of a 
 of the tester guide) resolves.
 """
 
+import ast
 import dataclasses
 import json
 import re
 import runpy
 import threading
+from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
 from datetime import time as dt_time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import deephaven
@@ -50,15 +54,21 @@ from deephaven.table_factory import InputTable
 import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._enums import Recency
+from deephaven_massive._error_policy import ResolvedPolicy
+from deephaven_massive._errors import NEW_SESSION
 from deephaven_massive._ingest import ws
+from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._massive import Source, WsClient
 from deephaven_massive._tables.transports import HostDecision
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 from tests._fakes.ws import FakeMassiveServer
 from tests._live.doc_examples import (
+    Block,
     Console,
+    Example,
     blocks,
     dashboard_panels,
+    examples,
     fences,
     forget,
     merged,
@@ -133,11 +143,12 @@ def _bar(day: str, close: float, volume: float) -> dict[str, object]:
 _CRYPTO_PAIRS: dict[str, tuple[str, str]] = {"X:BTCUSD": ("BTC", "USD"), "X:ETHUSD": ("ETH", "USD")}
 
 
-def _crypto_pair(symbol: str) -> tuple[str, str]:
+def _crypto_pair(symbol: str, policy: ResolvedPolicy) -> tuple[str, str]:
     """Answer a crypto lookup as Massive's crypto ticker list does, for the examples' pairs.
 
     Args:
         symbol: The crypto ticker, such as `"X:BTCUSD"`.
+        policy: The stream's policy, which no example's pair needs.
 
     Returns:
         The pair's base and quote currencies.
@@ -202,7 +213,9 @@ def readme_server(
             crypto_pair=_crypto_pair,
             client_factory=client,
         )
-        cast("Any", made._core._ports)._streams = connections
+        clients = made._core._ports
+        assert isinstance(clients, SessionClients)
+        clients._streams = connections
         made._core.on_close(connections.close)
         opened.append(made)
         return made
@@ -213,10 +226,7 @@ def readme_server(
     yield fake_rest
     for made in opened:
         made.close()
-    # The package resolves `MassiveSession` lazily, so the name is not bound in the module;
-    # undoing the patch would bind it, so the binding is removed after the undo.
     monkeypatch.undo()
-    vars(dm).pop("MassiveSession", None)
 
 
 # --- Every example runs ------------------------------------------------------------------------
@@ -241,11 +251,67 @@ _PROMISED: dict[str, tuple[str, ...]] = {
 }
 
 
+def _bound(code_blocks: Sequence[Block]) -> set[str]:
+    """Return every name the blocks' code binds, read from its syntax without running it."""
+    return {
+        node.id
+        for block in code_blocks
+        for node in ast.walk(ast.parse(block.code))
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+
+
+def _makes(page: Path) -> list[frozenset[str]]:
+    """Return, for each example of a page, the promised tables it is the last to bind.
+
+    A reader who runs the whole page sees each name as the last example to bind it left it,
+    so that example is the one whose run must leave a table under the name.
+
+    Args:
+        page: The user page.
+
+    Returns:
+        One set of names per example of `examples(page)`, in order.
+    """
+    claimed: set[str] = set()
+    makes: list[frozenset[str]] = []
+    for example in reversed(examples(page)):
+        made = _bound(example.blocks) & set(_PROMISED.get(_name(page), ())) - claimed
+        claimed |= made
+        makes.append(frozenset(made))
+    return makes[::-1]
+
+
+def _example_params() -> list[object]:
+    """Return every example of every user page as a test case, each named by its section.
+
+    Each case holds the page, the example, and the promised tables it makes (`_makes`). A
+    section's second example and later ones are numbered, such as
+    `docs/configuration.md#load-a-settings-file-2`, and the examples before a page's first
+    anchor are its `intro`.
+
+    Returns:
+        The cases, page by page, in each page's order.
+    """
+    params: list[object] = []
+    for page in USER_PAGES:
+        seen: Counter[str] = Counter()
+        for example, makes in zip(examples(page), _makes(page), strict=True):
+            section = example.anchor or "intro"
+            seen[section] += 1
+            number = "" if seen[section] == 1 else f"-{seen[section]}"
+            name = f"{_name(page)}#{section}{number}"
+            params.append(pytest.param(page, example, makes, id=name))
+    return params
+
+
 @pytest.mark.jvm_held  # the scripts' formulas hand their globals, the session too, to the JVM
-@pytest.mark.parametrize("page", USER_PAGES, ids=_name)
+@pytest.mark.parametrize(("page", "example", "makes"), _example_params())
 def test_every_user_page_example_runs_alone(
     *,
     page: Path,
+    example: Example,
+    makes: frozenset[str],
     readme_server: FakeRestServer,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -271,16 +337,29 @@ def test_every_user_page_example_runs_alone(
     write_settings_file(README, tmp_path, delayed=True)
     # Every path the examples read answers an empty page.
     readme_server.reply_default(Reply(envelope([])))
-    page_blocks = blocks(page.read_text(encoding="utf-8"))
-    namespaces = run_blocks(page_blocks, tmp_path, page.stem, console_command=console_command)
+    namespaces = run_blocks(example.blocks, tmp_path, page.stem, console_command=console_command)
     names = merged(namespaces)
-    for name in _PROMISED.get(_name(page), ()):
+    for name in makes:
         assert isinstance(names[name], Table), name
-    if any("input_table(" in block.code for block in page_blocks):
-        assert locked  # the watchlist examples made input tables
+    if any("input_table(" in block.code for block in example.blocks):
+        assert locked  # the watchlist example made input tables
     assert all(locked), locked  # and every one held the lock, whatever their count
     names.clear()
     forget(namespaces)
+
+
+@pytest.mark.parametrize("page", USER_PAGES, ids=_name)
+def test_every_block_of_a_page_runs_in_one_example(page: Path) -> None:
+    # The examples split the page's blocks without losing, repeating, or reordering one.
+    found = [block for example in examples(page) for block in example.blocks]
+    assert found == blocks(page.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("page", USER_PAGES, ids=_name)
+def test_every_promised_table_has_an_example_that_makes_it(page: Path) -> None:
+    # The example that makes each promised table checks, when it runs, that it is a table.
+    made = set().union(*_makes(page))
+    assert made == set(_PROMISED.get(_name(page), ()))
 
 
 def test_the_readme_has_its_examples() -> None:
@@ -350,6 +429,31 @@ def test_every_page_and_section_a_docstring_cites_exists() -> None:
         if not (ROOT / page).is_file() or (anchor and anchor not in _anchors(ROOT / page))
     ]
     assert missing == []
+
+
+_MESSAGE_LINK = re.compile(r"troubleshooting\.md#([A-Za-z0-9_-]+)")
+"""A link to a section of the troubleshooting page, as a message or a docstring writes it."""
+
+
+def _message_links() -> list[tuple[str, int, str]]:
+    """Return each link to a troubleshooting section in the library, by file, line, and anchor."""
+    return [
+        (path, number, anchor)
+        for path, text in _sources().items()
+        for number, line in enumerate(text.splitlines(), start=1)
+        for anchor in _MESSAGE_LINK.findall(line)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "line", "anchor"),
+    _message_links(),
+    ids=[f"{path}:{line}#{anchor}" for path, line, anchor in _message_links()],
+)
+def test_every_docs_link_in_a_message_has_its_anchor(path: str, line: int, anchor: str) -> None:
+    # A message links a troubleshooting section only when no call can be named as the fix, so
+    # the section must exist: a renamed anchor would send the user to the top of the page.
+    assert anchor in _anchors(TROUBLESHOOTING), f"{path}:{line}: no section #{anchor}"
 
 
 def test_the_citations_are_found() -> None:
@@ -508,7 +612,9 @@ def test_the_backfill_example_merges_history_with_live_bars(
     live |= {"s": _ms("2024-06-14T19:00:00"), "e": _ms("2024-06-14T19:01:00")}
     fake_ws_server.send(json.dumps([live]))
     rows = _wait_for_rows(names["spy"], lambda rows: len(rows) == 2, dh_to_pylist)
-    # Today's minute from history, then the live minute after it, oldest first.
+    # Today's minute from history and the live minute after it. History reads in the
+    # background, so either may land first: the rows are compared oldest first.
+    rows.sort(key=lambda r: r["TimestampStart"])
     assert [(r["Symbol"], r["Close"]) for r in rows] == [("SPY", 541.0), ("SPY", 542.0)]
     assert [r["TimestampStart"] for r in rows] == [
         datetime(2024, 6, 14, 13, 30, tzinfo=UTC),
@@ -538,9 +644,10 @@ def test_the_whole_market_example_ranks_the_day(
     [block] = section_blocks(README, "whole-market-day")
     [names] = run_blocks([block], tmp_path, "whole_market", console_command=console_command)
 
-    # One row per stock, ranked by dollars traded, largest first.
-    assert {r["Symbol"] for r in dh_to_pylist(names["day"])} == {"UP", "BIG", "FLAT"}
-    busiest = dh_to_pylist(names["busiest"])
+    # One row per stock, ranked by dollars traded, largest first, once the background read lands.
+    day_rows = _wait_for_rows(names["day"], lambda rows: len(rows) == 3, dh_to_pylist)
+    assert {r["Symbol"] for r in day_rows} == {"UP", "BIG", "FLAT"}
+    busiest = _wait_for_rows(names["busiest"], lambda rows: len(rows) == 3, dh_to_pylist)
     assert [r["Symbol"] for r in busiest] == ["BIG", "UP", "FLAT"]
     assert [r["DollarVolume"] for r in busiest] == pytest.approx(
         [50_000_000, 20_000_000, 15_000_000]
@@ -587,6 +694,37 @@ def test_the_watchlist_example_adds_and_removes_stocks(
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_yahoo_example_converts_each_ticker_and_nulls_the_one_it_cannot(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    for number, symbol in enumerate(("AAPL", "BRK.B", "BACpL")):
+        previous = _bar("2026-10-29", 100.0 + number, 1_000) | {"T": symbol}
+        readme_server.reply(
+            f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
+        )
+    [block] = section_blocks(README, "convert-symbols")
+    [names] = run_blocks([block], tmp_path, "yahoo", console_command=console_command)
+
+    # Every row stays, the original text beside Massive's ticker, and ^GSPC's Symbol is null.
+    rows = dh_to_pylist(names["stocks"])
+    assert [(r["Yahoo"], r["Symbol"]) for r in rows] == [
+        ("AAPL", "AAPL"),
+        ("BRK-B", "BRK.B"),
+        ("BAC-PL", "BACpL"),
+        ("^GSPC", None),
+    ]
+    assert [r["Yahoo"] for r in dh_to_pylist(names["stocks"].where("isNull(Symbol)"))] == ["^GSPC"]
+    # The closes hold a row for each converted ticker and none for the null row.
+    closes = _wait_for_rows(names["yahoo_closes"], lambda rows: len(rows) == 3, dh_to_pylist)
+    assert {r["Symbol"] for r in closes} == {"AAPL", "BRK.B", "BACpL"}
+    names.clear()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
 def test_the_settings_example_reads_the_file_its_commands_write(
     *,
     readme_server: FakeRestServer,
@@ -598,7 +736,7 @@ def test_the_settings_example_reads_the_file_its_commands_write(
     readme_server.reply_default(Reply(envelope([])))
     [block] = section_blocks(README, "what-your-plan-allows")
     [names] = run_blocks([block], tmp_path, "settings", console_command=console_command)
-    # The file accepts the delayed Stocks feed, the setting Starter and Developer need.
+    # The file lists stocks as a subscription Massive serves the key delayed.
     assert names["config"].delayed_subscriptions == {dm.Subscription.STOCKS}
     assert isinstance(names["snapshot"], Table)
     names.clear()
@@ -631,7 +769,7 @@ def test_the_settings_pages_complete_example_sets_every_setting(
     assert set(re.findall(r"^(\w+):", text, re.MULTILINE)) == settings
     assert config.delayed_subscriptions == {dm.Subscription.STOCKS, dm.Subscription.OPTIONS}
     assert config.websocket_hosts == {dm.AssetClass.INDICES: "business.massive.com"}
-    assert config.noncanonical_symbols is dm.OnError.RAISE
+    assert config.on_error.noncanonical_symbols is dm.OnError.RAISE
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
@@ -715,8 +853,10 @@ def test_the_returns_example_gives_each_stock_its_return(
         )
     [block] = section_blocks(README, "compare-stocks")
     [names] = run_blocks([block], tmp_path, "returns", console_command=console_command)
-    # One row per stock, its first and last close, and the percent return between them.
-    returns = {r["Symbol"]: r for r in dh_to_pylist(names["returns"])}
+    # The read runs in the background: one row per stock once it lands, its first and last
+    # close, and the percent return between them.
+    rows = _wait_for_rows(names["returns"], lambda rows: len(rows) == 3, dh_to_pylist)
+    returns = {r["Symbol"]: r for r in rows}
     assert {s: (r["Start"], r["End"]) for s, r in returns.items()} == {
         "AAPL": (200.0, 250.0),
         "MSFT": (400.0, 380.0),
@@ -787,11 +927,10 @@ def failure_text() -> Iterator[Callable[[Table], _Failure]]:
 
 
 @pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
-def test_the_news_example_lists_the_newest_first_and_stopping_keeps_its_rows(
+def test_the_news_example_lists_the_newest_first(
     *,
     readme_server: FakeRestServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
-    failure_text: Callable[[Table], _Failure],
     tmp_path: Path,
     console_command: Callable[[Callable[[], None]], None],
 ) -> None:
@@ -803,19 +942,96 @@ def test_the_news_example_lists_the_newest_first_and_stopping_keeps_its_rows(
     published = [r["PublishedUtc"] for r in rows]
     assert published == sorted(published, reverse=True)
     assert {r["Symbol"] for r in rows} == {"AAPL", "NVDA", "TSLA"}
-    failures = {name: failure_text(news[name]) for name in ("headlines", "latest")}
-    # Example 6, in the same console: the session closes, and the tables keep their rows.
-    stopped = console.run(section_blocks(README, "stop-live-tables"), "kept")
-    pace = threading.Event()  # never set; only paces the wait for the failures
+    news.clear()
+    console.close()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_problems_example_lists_the_ticker_massive_does_not_know(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    fixture = Path(__file__).parent / "data" / "namespaces" / "reference" / "ticker_details.json"
+    readme_server.reply(
+        "/v3/reference/tickers/AAPL", Reply(json.loads(fixture.read_text(encoding="utf-8")))
+    )
+    readme_server.reply("/v3/reference/tickers/ZZZZ", Reply(status=404))
+    console = Console(tmp_path, console_command)
+    diagnostics = ("streams", "connections", "rate_limits", "symbol_reads")
+    ran = console.run(section_blocks(README, "see-problems"), "problems", "details", *diagnostics)
+    _wait_for_rows(ran["details"], lambda rows: len(rows) == 1, dh_to_pylist)
+    rows = _wait_for_rows(ran["problems"], lambda rows: len(rows) == 1, dh_to_pylist)
+    # The row the README describes: its cause, its symbol, and Massive's answer.
+    assert [(r["Cause"], r["Symbol"], r["Action"]) for r in rows] == [
+        ("unavailable_symbols", "ZZZZ", "SKIPPED")
+    ]
+    assert "HTTP 404" in rows[0]["Detail"]
+    # Each diagnostics table the example opens is a live table of the session. As the README
+    # says, streams holds the details read, which ends DONE, and symbol_reads stays empty.
+    assert all(ran[name].is_refreshing for name in diagnostics)
+    streams = _wait_for_rows(
+        ran["streams"], lambda rows: [r["State"] for r in rows] == ["DONE"], dh_to_pylist
+    )
+    assert streams[0]["Query"].startswith("m.reference.ticker_details(")
+    assert dh_to_pylist(ran["symbol_reads"]) == []
+    assert dh_to_pylist(ran["connections"]) == []  # the example opens no stream
+    ran.clear()
+    console.close()
+
+
+@pytest.mark.jvm_held  # the script's formulas hand its globals, the session too, to the JVM
+def test_the_stopping_example_runs_alone_releases_a_table_and_closes_the_session(
+    *,
+    readme_server: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    failure_text: Callable[[Table], _Failure],
+    tmp_path: Path,
+    console_command: Callable[[Callable[[], None]], None],
+) -> None:
+    for number, symbol in enumerate(("AAPL", "MSFT")):
+        previous = _bar("2026-10-29", 100.0 + number, 1_000) | {"T": symbol}
+        readme_server.reply(
+            f"/v2/aggs/ticker/{symbol}/prev", Reply(envelope([previous], ticker=symbol))
+        )
+    readme_server.reply("/v2/reference/news", Reply(envelope(_articles())))
+    start, release, stop = section_blocks(README, "stop-live-tables")
+    assert release.continues
+    assert stop.continues
+    # The example's first block runs in a fresh console: it needs no earlier example's names.
+    console = Console(tmp_path, console_command)
+    live = console.run([start], "closes", "headlines")
+    _wait_for_rows(live["closes"], lambda rows: len(rows) == 2, dh_to_pylist)
+    rows = _wait_for_rows(live["headlines"], lambda rows: len(rows) == 6, dh_to_pylist)
+    closed = failure_text(live["headlines"])
+    console.run([release])
+    # The released poll has no holder left, and the session keeps the other running.
+    streams = console.run([], "m")["m"].streams()
+    released = {"stocks.previous_day_bar": ("RELEASED", 0), "reference.news": ("RUNNING", 1)}
+    pace = threading.Event()  # never set; only paces the waits
+    states: dict[str, tuple[object, object]] = {}
     for _ in range(500):
-        if all(failure.text() is not None for failure in failures.values()):
+        states = {r["Dataset"]: (r["State"], r["HeldResults"]) for r in dh_to_pylist(streams)}
+        if states == released:
             break
         pace.wait(0.02)
-    for failure in failures.values():
-        assert "was closed; this table no longer updates" in str(failure.text())
-    assert dh_to_pylist(news["latest"]) == rows
+    assert states == released
+    del streams
+    stopped = console.run([stop], "kept", "m")
+    for _ in range(500):
+        if closed.text() is not None:
+            break
+        pace.wait(0.02)
+    # Closing fails the session's live tables, which keep their rows; `kept` is a static copy.
+    assert "This session was closed, so this table no longer updates. " + NEW_SESSION in str(
+        closed.text()
+    )
+    assert dh_to_pylist(live["headlines"]) == rows
     assert dh_to_pylist(stopped["kept"]) == rows
-    news.clear()
+    assert stopped["m"]._core.closed
+    live.clear()
     stopped.clear()
     console.close()
 

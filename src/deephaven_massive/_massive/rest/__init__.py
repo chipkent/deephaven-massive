@@ -8,8 +8,9 @@ are the library's. It may import only `net` and `spec` from `_massive`.
   with bearer authentication, retries transient failures per `net.retry`, takes a permit of
   the governor before every attempt, and follows `next_url` pages on its own host only.
 - `RequestGovernor` (`rest.governor`): one per API key and REST origin, shared by the clients
-  that use them. It paces each Basic subscription at 5 requests per minute and pauses a
-  subscription Massive refused with HTTP 429; `BucketState` is one subscription's snapshot.
+  that use them. It paces each subscription at the limit the user declared or the one it
+  learned from Massive's refusal, and pauses a subscription Massive refused with HTTP 429;
+  `BucketState` is one subscription's snapshot.
 - `Page` (`rest.response`): one decoded 200 response: its envelope `status` and `request_id`,
   its rows, and its body. Decoding is strict; a malformed body raises `WireError`.
 - `to_batch` (`rest.batch`): a page's rows as one Arrow batch of the path's generated fields,
@@ -27,7 +28,7 @@ Example:
             "my-key", base_url="https://api.massive.com", max_concurrency=8, governor=governor
         )
         page = client.get(trades, {"stockTicker": "AAPL"}, {"limit": 1000}, bucket="stocks")
-        batch, drift = to_batch(page.rows, trades, required={"SipTimestamp"})
+        batch, drift, marks = to_batch(page.rows, trades, required={"SipTimestamp"})
         client.close()
 
     where `trades` is the `RestPath` of `/v3/trades/{stockTicker}`.

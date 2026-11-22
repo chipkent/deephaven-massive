@@ -28,11 +28,12 @@ per distinct symbol, every epoch run through the timestamp routine as a vectoriz
 widened to the dataset schema, and the library's time columns filled (`row_times.TimeRule`): `Date`,
 a bar's end, and `TimestampInsert`, the instant each row's frame arrived. Futures messages carry no
 session date, so a futures row's `Date` is the 17:00 Chicago rule's, corrected by the connection's
-`FuturesSessionDates` (the WebSocket transport's schedule calendar), which never waits; a row its
-schedules cannot place gets a null `Date` (the calendar logs it), since the rule's date can be wrong
-there, and the stream keeps running with its `Error` untouched. A row whose time column fails the
-bound cannot be placed, so it is dropped from the batch and counted, and any other timestamp that
-fails it is null and reported as schema drift; neither fails a stream. The batch becomes one static
+`FuturesSessionDates` (the WebSocket transport's schedule calendar), which never waits. A futures
+row it cannot date yet is held, not published, until it can (`HeldRows`), and then published
+before its ticker's newer rows; one Massive's lists or schedules can't date is withheld
+(`futures_problems`). A row the library cannot read whole (its time column, a value, or its
+symbol) is withheld from the batch and reported as a problem of each stream that would have
+received it; it fails no stream. The batch becomes one static
 Deephaven table (`deephaven.arrow.to_table`), shared by the dataset's streams on the channel
 (`SharedBatch`). Each `dm.ALL` stream, and each symbol stream that holds every symbol of the batch,
 gets the whole batch; a symbol stream that holds none of them gets nothing. A symbol stream that
@@ -53,15 +54,17 @@ streams.
 **Failures.** The connection's loop thread never calls Java, so it hands every stream failure
 (a refused topic, a rejected key) to the flush thread's control queue; the flush thread fails
 the stream's table with `publish_failure` and records it with `SessionCore.fail_stream`, once
-per stream. Drift goes through the same queue: the flush thread logs it once per (dataset,
-transport, field) through each session's `DriftRegistry`, counts the rows dropped because a
-key could not be read, and adds it to each receiving stream's `SchemaDrift`
-(`SessionCore.record_stream_drift`). One odd row never fails a stream; but once
+per stream. Drift goes through the same queue: the flush thread hands each receiving stream's
+session a `schema_drift` problem per field Massive's documentation lacks, and each stream's
+withheld rows as problems of their cause (`SessionCore.problems`), outside the flush lock. One
+odd row never fails a stream; but once
 `DROPPED_RUN_LIMIT` rows of a dataset on a channel in a row have been dropped, with none
-published between them, the dataset's streams on the channel fail, since Massive's format has
-most likely changed and the streams would otherwise stay empty without an error. A reactive
+published between them, the dataset's streams on the channel fail with a `RowDataError`,
+Massive's data, since the streams would otherwise stay empty without an error. A reactive
 stream's watchlist that fails queues the stream's failure on its session's reaper
-(`StreamSink.fail_later`), since the listener reports it on an update-graph thread.
+(`StreamSink.fail_later`), since the listener reports it on an update-graph thread. Rows that
+wait for a flush past `row_memory.HELD_BYTES_LIMIT` fail every stream of the connection
+(`Flusher`).
 
 **Threads and locks.** The flush thread creates only static tables, enters the execution
 context of the session that created its connection through its own wrapper (sessions share a
@@ -78,23 +81,21 @@ same sinks under the same flush lock.
 
 from __future__ import annotations
 
-import dataclasses
 import functools
 import logging
 import queue
 import threading
 import time
 import weakref
-from collections import Counter
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Final, TypeAlias, TypeVar
 
 import pyarrow as pa
 import pyarrow.compute as pc
 from deephaven import new_table
 from deephaven.column import string_col
 
-from deephaven_massive._datasets.column_descriptions import OPTION_ROOT, RAW_SYMBOL
+from deephaven_massive._datasets.column_descriptions import OPTION_ROOT
 from deephaven_massive._datasets.row_times import TimeRule, time_column
 from deephaven_massive._datasets.source_columns import (
     RoundedFields,
@@ -102,25 +103,51 @@ from deephaven_massive._datasets.source_columns import (
     rename,
     required_fields,
 )
-from deephaven_massive._datasets.symbols import SymbolTable, option_roots
+from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, option_roots
 from deephaven_massive._datasets.timestamps import (
     first_failure,
     masked_instants,
     mismatch_message,
 )
-from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_message
-from deephaven_massive._enums import NotBars, OnError
-from deephaven_massive._errors import LIBRARY_BUG, ErrorCause, MassiveError, library_bug
-from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
-from deephaven_massive._massive import DriftReport, DriftSample, Transport, WireType
+from deephaven_massive._datasets.wire_symbols import WireSymbols, unreadable_symbol_reason
+from deephaven_massive._enums import NotBars
+from deephaven_massive._errors import (
+    LIBRARY_BUG,
+    ErrorSource,
+    MassiveError,
+    RowDataError,
+    SessionClosedError,
+    copy_error,
+    library_bug,
+    new_live_table,
+    required,
+)
+from deephaven_massive._log_limits import log_failure, mark_failure_logged
+from deephaven_massive._massive import DriftReport, RowFault, Transport, WireType
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import col_defs, dataset_table
-from deephaven_massive._tables.diagnostics import NotePart, StreamUpdate
+from deephaven_massive._tables.diagnostics import StreamUpdate, utc_text
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.futures_problems import DISCARDS, futures_events
 from deephaven_massive._tables.liveness import new_scope, release_scope
-from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker, drift_events
+from deephaven_massive._tables.publisher import blink_publisher
+from deephaven_massive._tables.refused_values import refused_values_of
+from deephaven_massive._tables.row_memory import HELD_BYTES_LIMIT, frame_bytes
 from deephaven_massive._tables.transports import StreamHandle
-from deephaven_massive._tables.watchlist import SymbolRowRule, SymbolWatch, skipped_rows_text
-from deephaven_massive._types import _All
+from deephaven_massive._tables.watchlist import SkippedValues, SymbolRowRule, SymbolWatch
+from deephaven_massive._tables.withheld import (
+    FAULT,
+    MARK_COLUMNS,
+    WITHHELD_LISTED,
+    Failure,
+    Withheld,
+    failure_of,
+    mark_failures,
+    reason_sentence,
+    with_marks,
+    withhold_rows,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -134,6 +161,12 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.symbols import NormalizedSymbols
     from deephaven_massive._datasets.timestamps import TimeUnit
     from deephaven_massive._enums import AssetClass, Recency
+    from deephaven_massive._error_policy import ResolvedPolicy
+    from deephaven_massive._massive import RowMarks
+    from deephaven_massive._tables.futures_dates import DateCorrector, FuturesSessionDates
+    from deephaven_massive._tables.held_rows import HeldRows, Settled
+    from deephaven_massive._tables.problem_events import Problem, ProblemSpans
+    from deephaven_massive._tables.publisher import Publisher
     from deephaven_massive._tables.session_core import SessionCore
 
 __all__ = [
@@ -144,7 +177,6 @@ __all__ = [
     "SYMBOL_CACHE_LIMIT",
     "ChannelPlan",
     "Flusher",
-    "FuturesSessionDates",
     "OpenedStream",
     "SharedBatch",
     "StreamSink",
@@ -161,8 +193,9 @@ BACKLOG_WARNING_ROWS: Final = 1_000_000
 Rows wait between two flushes (`MassiveConfig.flush_interval`), so a connection normally holds
 only a few flush intervals' worth. A backlog this large means the flushes are falling behind the
 wire: the update graph is stalled or too slow for the stream (a `dm.ALL` burst at the open, for
-example). Nothing is dropped, so memory grows with the backlog; the WARNING says so, once each
-time the backlog crosses this level, and again only after it has fallen below half of it.
+example). Nothing is dropped below `row_memory.HELD_BYTES_LIMIT`, so memory grows with the
+backlog; the WARNING says so, once each time the backlog crosses this level, and again only
+after it has fallen below half of it.
 """
 
 DROPPED_RUN_LIMIT: Final = 100
@@ -176,10 +209,10 @@ dropped for one dataset on one channel of a connection, across flushes and symbo
 of it published between them, every stream of the dataset on the channel fails, naming the
 first dropped row's reason. A published row starts the count again. Each symbol has the same
 run of its own, which other symbols' rows do not end: once this many of one symbol's rows in a
-row have been dropped, with none of its rows published, the streams that name that symbol
-fail, so a symbol Massive stopped sending readably never freezes them without an error. A
-`dm.ALL` stream is never failed for one symbol; its `Error` names the symbol as possibly stale,
-without failing the stream, until a row of the symbol is published again.
+row have been dropped, with none of its rows published, every stream that holds the symbol (by
+name, or `dm.ALL`) marks it stale, a `stale_symbol_data` span of `m.problems()`, without failing,
+until a row of the symbol is published again. So a symbol Massive stopped sending readably
+never freezes a table without a word, and never fails the other symbols' rows.
 """
 
 SYMBOL_CACHE_LIMIT: Final = 100_000
@@ -234,86 +267,20 @@ raw integer count (converted by its unit afterwards), an ISO-8601 instant as int
 nanoseconds, a date as a `datetime.date`, and a list as a list of integers or of text."""
 
 
-class FuturesSessionDates(Protocol):
-    """The schedule calendar that corrects streamed futures rows' session dates.
-
-    The WebSocket transport gives a futures connection's flusher one
-    (`_ingest/futures_calendar.py`); `ChannelPlan.convert` hands it the rule's dates of every
-    futures row. It never waits on the network.
-    """
-
-    def correct(self, symbols: pa.Array, instants: pa.Array, dates: pa.Array) -> pa.Array:
-        """Return the rows' session dates, corrected by the schedules.
-
-        Args:
-            symbols: The rows' canonical symbols, `string`.
-            instants: The rows' instants (a tick's time, a bar's start), epoch nanoseconds,
-                `int64`.
-            dates: The 17:00 Chicago rule's session dates, ISO text.
-
-        Returns:
-            The dates to keep, ISO text, one per row; null for a row the schedules cannot
-            place, whose rule date may be wrong.
-        """
-        ...
-
-
 @dataclass(frozen=True, slots=True)
 class Converted:
     """One channel's rows of one flush, converted for one dataset by `ChannelPlan.convert`.
 
     Attributes:
-        batch: The rows in the dataset's schema, without the rows dropped.
-        drift: The drift of the rows' timestamps: the rows dropped because their time column
-            fails the timestamp routine (`dropped_rows`, with the first one's reason), and
-            the wire keys of the other epoch fields that held a value it fails, read as null
-            (`unconvertible`, with the first such value).
-        unreadable: Under the session's `unreadable_symbols=RAISE`, the failure of the rows
-            whose symbol is a spelling the library cannot read, which were dropped: it fails
-            every stream of the dataset on the channel, since none can tell whose row it was;
-            `""` when there was none.
+        batch: The rows read whole, in the dataset's schema.
+        withheld: The rows the library could not read whole, withheld from `batch`.
         symbols: The batch's distinct canonical symbols, so a stream that receives none of
             them, or all of them, needs no filter.
-        null_symbols: True when some row of the batch has no valid symbol (a null `Symbol`).
-        dropped_symbols: How many rows of each canonical symbol were dropped because their
-            time column fails the timestamp routine; a row with no valid symbol is not
-            counted here.
     """
 
     batch: pa.Table
-    drift: DriftReport
-    unreadable: str = ""
+    withheld: Withheld
     symbols: frozenset[str] = frozenset()
-    null_symbols: bool = False
-    dropped_symbols: Mapping[str, int] = dataclasses.field(default_factory=dict)
-
-
-STALE_SYMBOLS_SHOWN: Final = 3
-"""How many stale symbols a `dm.ALL` stream's `Error` names before it only counts the rest."""
-
-
-def _stale_text(stale: Mapping[str, str]) -> str:
-    """Word a `dm.ALL` stream's warning about the symbols whose rows are being dropped.
-
-    Args:
-        stale: Each such symbol, in the order found, with the first dropped row's reason.
-
-    Returns:
-        `"rows for ESH5 are being dropped (<reason>); its last values may be stale"`, or for
-        several the first `STALE_SYMBOLS_SHOWN` and how many more; `""` for none.
-    """
-    if not stale:
-        return ""
-    symbols = list(stale)
-    shown = ", ".join(symbols[:STALE_SYMBOLS_SHOWN])
-    more = len(symbols) - STALE_SYMBOLS_SHOWN
-    if more > 0:
-        shown += f" and {more} more"
-    whose = "its" if len(symbols) == 1 else "their"
-    return (
-        f"rows for {shown} are being dropped ({stale[symbols[0]]}); {whose} last values may "
-        "be stale"
-    )
 
 
 _K = TypeVar("_K")
@@ -346,25 +313,6 @@ def _extend_run(
         return None
     runs.pop(key, None)
     return count, first
-
-
-def _counted_symbols(symbols: pa.Array, rows: pa.Array | None) -> dict[str, int]:
-    """Count the rows of each symbol a mask selects.
-
-    Args:
-        symbols: The rows' canonical symbols, null where a row has none that is valid.
-        rows: The mask of the rows to count, or None for none.
-
-    Returns:
-        Each symbol's count of selected rows; a null symbol is left out. Only the selected
-        rows' distinct symbols reach Python.
-    """
-    if rows is None:
-        return {}
-    counts = pc.value_counts(pc.drop_null(pc.filter(symbols, rows)))
-    return dict(
-        zip(counts.field("values").to_pylist(), counts.field("counts").to_pylist(), strict=True)
-    )
 
 
 class SharedBatch:
@@ -417,7 +365,7 @@ class SharedBatch:
         """
         if self._partition is None:
             self._partition = self.table.partition_by(_SYMBOL)
-        return cast("Table", self._partition.get_constituent(symbol))
+        return required(self._partition.get_constituent(symbol), f"the batch's rows of {symbol}")
 
 
 @dataclass(frozen=True, eq=False, slots=True)
@@ -430,8 +378,7 @@ class ChannelPlan:
     Attributes:
         dataset: The dataset name, such as `"stocks.trades"`.
         asset_class: The dataset's class.
-        symbols: How the wire's symbols become canonical (`WireSymbols`), and what a spelling
-            the library cannot read does.
+        symbols: How the wire's symbols become canonical (`WireSymbols`).
         channel: The channel, such as `"T"`.
         wire_schema: The Arrow schema of the decoded rows: one field per column of the
             channel's source that the dataset keeps, named by its long-form column.
@@ -477,8 +424,6 @@ class ChannelPlan:
         catalog: Catalog,
         spec: DatasetSpec,
         channel: str,
-        *,
-        unreadable_symbols: OnError,
     ) -> ChannelPlan:
         """Prepare the reading of a channel's rows for a dataset.
 
@@ -486,8 +431,6 @@ class ChannelPlan:
             catalog: The catalog, for the generated source and the dataset's merged schema.
             spec: A WebSocket dataset (with channels, so with an asset class).
             channel: One of its channels.
-            unreadable_symbols: The session's setting for a symbol spelling the library cannot
-                read; `LOG` and `IGNORE` also add the `RawSymbol` column to the schema.
 
         Returns:
             The plan.
@@ -500,18 +443,18 @@ class ChannelPlan:
         An unknown source raises the `KeyError` of `Catalog.source`, and a bad key declaration
         the `ValueError` of `source_columns.rename`.
         """
-        asset_class = cast("AssetClass", spec.asset_class)
+        asset_class = spec.single_class
         key = f"{asset_class.value}/{channel}"
         source = catalog.source(Transport.WS, key)
         renamed = rename(spec, source)
         symbol = spec.keys_for(Transport.WS, key).symbol
         if spec.names_symbols and (symbol is None or symbol.from_request):
-            raise ValueError(f"{spec.name}: the WebSocket source {key} declares no symbol key")
+            raise ValueError(f"{spec.name}: the WebSocket source {key} declares no symbol key.")
         # A WebSocket source has no key filled from a request: every column has its field.
         fields = {c.column: (c, f) for c in renamed if (f := c.field) is not None}
         # A decoded row holds its values in the order of the source's fields.
         position = {f.wire_key: i for i, f in enumerate(source.fields)}
-        schema = catalog.dataset_schema(spec, raw_symbol=unreadable_symbols is not OnError.RAISE)
+        schema = catalog.dataset_schema(spec)
         symbol_field = None if symbol is None else fields[key_column(spec, "symbol", symbol)][1]
         # A bars channel serves one timespan, always of one unit; any other channel has none.
         span = next(span for span, name in spec.channels.items() if name == channel)
@@ -519,9 +462,7 @@ class ChannelPlan:
         return cls(
             dataset=spec.name,
             asset_class=asset_class,
-            symbols=WireSymbols(
-                spec.name, asset_class, unreadable_symbols, spec.symbols_as_written
-            ),
+            symbols=WireSymbols(spec.name, asset_class, spec.symbols_as_written),
             channel=channel,
             wire_schema=pa.schema(
                 [pa.field(f.column, _WIRE_ARROW[c.wire_type]) for c, f in fields.values()]
@@ -545,10 +486,11 @@ class ChannelPlan:
     def convert(
         self,
         rows: Sequence[Sequence[object]],
+        marks: Sequence[tuple[int, RowMarks]],
         symbols: dict[str, str | None],
         *,
         arrived: Sequence[int],
-        sessions: FuturesSessionDates | None = None,
+        sessions: DateCorrector | None = None,
     ) -> Converted:
         """Turn one flush's rows of the channel into a batch of the dataset's schema.
 
@@ -556,18 +498,19 @@ class ChannelPlan:
         rows turned into columns in one call, each column converted to Arrow in one call), each
         distinct raw symbol is read once (`WireSymbols.read`, remembered in `symbols`), every
         epoch column runs through the masked timestamp routine, every column is widened to its
-        dataset type (a whole number the widening rounds is reported as drift,
-        `RoundedFields`), the derived columns (`OptionRoot`, `RawSymbol`) are computed, and the
-        library's time columns are filled (`row_times.TimeRule.fill`). A row whose time column
-        overflows or lies outside 1990 to 2100 is dropped and counted; any other timestamp that
-        does is null and reported as drift. A row whose symbol is a spelling the library cannot
-        read is dropped and reported too, failing every stream of the dataset on the channel
-        (it cannot be routed to one), when the session's `unreadable_symbols` is `RAISE`; under
-        `LOG` and `IGNORE` it is kept with a null `Symbol` and the text in `RawSymbol`.
+        dataset type, and the derived column (`OptionRoot`) is computed. Every row the library
+        cannot read whole is then withheld (`withheld.withhold_rows`): a row the client marked
+        (a key it could not read, a value that does not fit), a row whose time column overflows
+        or lies outside 1990 to 2100, whose symbol is a spelling the library cannot read, whose
+        other epoch value fails the routine, or whose whole number its `double` column would
+        round. The library's time columns are filled on the rows left
+        (`row_times.TimeRule.fill`).
 
         Args:
             rows: The decoded rows, each a tuple of the values of the source's fields, in the
                 order of `Source.fields` (`FrameDecoder` in the wire package).
+            marks: The client's marks of the rows: each frame's first row in `rows` with its
+                marks.
             symbols: The caller's map from raw to canonical symbol (None for an unreadable
                 spelling), read and extended here; one per flush thread and plan, so it needs
                 no lock.
@@ -577,8 +520,7 @@ class ChannelPlan:
                 session dates; None keeps the 17:00 Chicago rule's.
 
         Returns:
-            The batch without the dropped rows, the drift of its timestamps, the failure of
-            its unreadable symbols, and the batch's distinct symbols.
+            The rows read whole, the rows withheld, and the batch's distinct symbols.
         """
         values = list(zip(*rows, strict=True)) if rows else None  # one tuple per source field
         wire = pa.Table.from_arrays(
@@ -590,115 +532,100 @@ class ChannelPlan:
             ],
             schema=self.wire_schema,
         )
+        sent = None if self.symbol_field is None else wire.column(self.symbol_field)
+        wire = with_marks(wire, marks, sent=None if sent is None else sent.combine_chunks())
         count = wire.num_rows
-        dropped: pa.Array | None = None
-        late: pa.Array | None = None  # the rows whose time column fails the routine
-        unreadable = ""
-        found: list[DriftReport] = []
+        failures: list[Failure] = []
         arrays: dict[str, pa.Array] = {}
-        raw = pa.nulls(count, pa.string())
         rounded = RoundedFields()
         for column_type, name, field, unit in self.columns:
-            bad = None
             if name == OPTION_ROOT:
                 values = option_roots(arrays[_SYMBOL])
-            elif name == RAW_SYMBOL:
-                values = raw
             elif field is None:
                 values = pa.nulls(count, column_type.arrow_type)
             elif name == _SYMBOL:
-                values, raw, bad, unreadable = self._read_symbols(wire.column(field), symbols)
+                values = self._symbols(wire.column(field).combine_chunks(), symbols, failures)
             elif unit is not None:
-                values, bad = self._instants(name, unit, wire.column(field), found=found)
-                late = bad if bad is not None else late
+                values = self._instants(name, unit, wire.column(field), failures=failures)
             else:
                 values = wire.column(field).combine_chunks()
-            if bad is not None:
-                dropped = bad if dropped is None else pc.call_function("or", [dropped, bad])
             arrays[name] = rounded.widen(
-                values, column_type.arrow_type, wire_key=self.wire_keys.get(name)
+                values, column_type.arrow_type, wire_key=self.wire_keys.get(name), column=name
             )
-        found.append(rounded.drift())
         batch = pa.Table.from_arrays(list(arrays.values()), schema=self.arrow_schema)
-        batch = self.times.fill(
-            batch,
-            received=pa.array(arrived, pa.int64()),
+        for name in MARK_COLUMNS:
+            batch = batch.append_column(name, wire.column(name))
+        batch = mark_failures(batch, (*failures, *rounded.failures()))
+        withheld = withhold_rows(batch, symbol=None if self.symbol_field is None else _SYMBOL)
+        received = pc.filter(pa.array(arrived, pa.int64()), pc.is_null(batch.column(FAULT)))
+        filled = self.times.fill(
+            withheld.rows,
+            received=received,
             session_dates=None if sessions is None else sessions.correct,
         )
-        if dropped is not None:
-            batch = batch.filter(pc.call_function("invert", [dropped]))
         if self.symbol_field is None:  # rows that name no symbol go whole to every stream
-            drift = functools.reduce(DriftReport.merge, found, DriftReport())
-            return Converted(batch, drift, unreadable)
-        distinct = pc.call_function("unique", [batch.column(_SYMBOL)]).to_pylist()
-        return Converted(
-            batch,
-            functools.reduce(DriftReport.merge, found, DriftReport()),
-            unreadable,
-            symbols=frozenset(s for s in distinct if s is not None),
-            null_symbols=None in distinct,
-            dropped_symbols=_counted_symbols(arrays[_SYMBOL], late),
-        )
+            return Converted(filled, withheld)
+        distinct = pc.call_function("unique", [filled.column(_SYMBOL)]).to_pylist()
+        return Converted(filled, withheld, frozenset(s for s in distinct if s is not None))
 
-    def _read_symbols(
-        self, column: pa.ChunkedArray, symbols: dict[str, str | None]
-    ) -> tuple[pa.Array, pa.Array, pa.Array | None, str]:
-        """Read the rows' wire symbols; under `RAISE`, mark the rows of unreadable ones.
+    def _symbols(
+        self, sent: pa.Array, known: dict[str, str | None], failures: list[Failure]
+    ) -> pa.Array:
+        """Read the rows' wire symbols into canonical ones, noting the spellings it cannot read.
 
         Args:
-            column: The rows' symbols as sent.
-            symbols: The flush thread's raw-to-canonical map (`convert`).
+            sent: The rows' symbols as the wire spells them.
+            known: The flush thread's map of wire spellings read so far.
+            failures: Receives the rows whose spelling the library cannot read, to mark
+                `unreadable_symbols`.
 
         Returns:
-            The canonical symbols, the `RawSymbol` values, the mask of the rows to drop (None
-            when no row is dropped), and the failure of those rows, which fails every stream
-            of the dataset on the channel (`""` when none is dropped). Rows are dropped only
-            when the session's `unreadable_symbols` is `RAISE`.
+            The canonical symbols, null for a spelling the library cannot read.
         """
-        read = self.symbols.read(column.combine_chunks(), symbols)
-        if not read.unreadable or self.symbols.keeps:
-            return read.symbols, read.raw, None, ""
-        bad = pc.call_function("is_valid", [read.raw])
-        message = unreadable_symbol_message(self.dataset, read.unreadable)
-        return read.symbols, read.raw, bad, message
+        read = self.symbols.read(sent, known)
+
+        def reason(row: int) -> str:
+            return unreadable_symbol_reason(sent[row].as_py())
+
+        failures.append((RowFault.UNREADABLE_SYMBOLS, read.unreadable_rows, _SYMBOL, reason))
+        return read.symbols
 
     def _instants(
-        self, name: str, unit: TimeUnit, column: pa.ChunkedArray, *, found: list[DriftReport]
-    ) -> tuple[pa.Array, pa.Array | None]:
-        """Convert an epoch column, marking the rows whose time column fails the routine.
+        self,
+        name: str,
+        unit: TimeUnit,
+        column: pa.ChunkedArray,
+        *,
+        failures: list[Failure],
+    ) -> pa.Array:
+        """Convert an epoch column, noting the rows whose value fails the routine.
 
         Args:
             name: The column.
             unit: The epoch's unit.
             column: The rows' raw values.
-            found: Extended with the drift of a value that fails the routine: in the time
-                column, the rows dropped and the first failure's message
-                (`timestamps.mismatch_message`); in any other, the column's wire key and its
-                first failing value, which reads as null.
+            failures: Receives the rows whose value fails: for the time column, to mark
+                `unreadable_keys`; for any other, `unconvertible_values`.
 
         Returns:
-            The values as nanoseconds, null where a value fails; and for the time column the
-            mask of the rows to drop, or None when no row is dropped.
+            The values as nanoseconds, null where a value fails.
         """
         sent = column.combine_chunks()
+        label = f"{self.dataset}.{name}"
         values, failed = masked_instants(
-            unit, sent, time_column=name == self.time_name, label=f"{self.dataset}.{name}"
+            unit, sent, time_column=name == self.time_name, label=label
         )
-        first = first_failure(sent, failed)
-        if first is None:
-            return values, None
+        if first_failure(sent, failed) is None:
+            return values
+
+        def reason(row: int) -> str:
+            return mismatch_message(label, unit, sent[row].as_py())
+
         if name == self.time_name:
-            reason = mismatch_message(f"{self.dataset}.{name}", unit, first)
-            count = pc.call_function("sum", [failed]).as_py()
-            found.append(DriftReport(dropped_rows=count, dropped_reason=reason))
-            return values, failed
-        key = self.wire_keys[name]
-        found.append(
-            DriftReport(
-                unconvertible=frozenset({key}), samples={key: DriftSample(None, str(first))}
-            )
-        )
-        return values, None
+            failures.append((RowFault.UNREADABLE_KEYS, failed, name, reason))
+            return values
+        failures.append((RowFault.UNCONVERTIBLE_VALUES, failed, name, reason))
+        return values
 
 
 class StreamSink:
@@ -741,8 +668,12 @@ class StreamSink:
 
     Attributes:
         stream_id: The stream's id.
-        plan: How the stream's dataset reads its channel.
+        plan: How the stream's dataset reads its channel. Streams of one dataset and channel
+            share it, whatever their policies.
         publisher: The stream's publisher.
+        policy: The stream's resolved policy (`Request.on_error`): its `unreadable_symbols`
+            decides whether a spelling the library cannot read fails it, and its
+            `noncanonical_symbols` what a watchlist row that is not a ticker does.
         rows_published: The rows published to it so far, held ones included.
         rows_generation: The generation of the socket its newest rows arrived on
             (`Flusher.rows`), 0 before its first row. Only the flush thread writes it; the
@@ -762,6 +693,7 @@ class StreamSink:
         "_version",
         "failed",
         "plan",
+        "policy",
         "publisher",
         "rows_generation",
         "rows_published",
@@ -774,8 +706,9 @@ class StreamSink:
         *,
         core: SessionCore,
         plan: ChannelPlan,
-        publisher: BlinkPublisher,
+        publisher: Publisher,
         symbols: frozenset[str] | None,
+        policy: ResolvedPolicy,
     ) -> None:
         """Create the sink.
 
@@ -784,6 +717,7 @@ class StreamSink:
             core: The stream's session, which records its rows and its failure.
             plan: How the stream's dataset reads its channel.
             publisher: The stream's publisher.
+            policy: The stream's resolved policy (`Request.on_error`).
             symbols: The canonical symbols the stream receives; None for `dm.ALL`, which
                 receives every row of the channel.
         """
@@ -791,6 +725,7 @@ class StreamSink:
         self._core: Final = weakref.ref(core)
         self.plan: Final = plan
         self.publisher: Final = publisher
+        self.policy: Final = policy
         self._lock = threading.Lock()
         self._symbols = symbols
         self._version = 0
@@ -911,13 +846,13 @@ class StreamSink:
 
         Returns:
             True for a symbol stream that holds exactly one of the batch's symbols, unless that
-            symbol is the batch's only one and every row has it, which takes the whole batch.
+            symbol is the batch's only one, which takes the whole batch.
         """
         with self._lock:
             symbols = self._symbols
         if symbols is None or len(symbols & converted.symbols) != 1:
             return False
-        return len(converted.symbols) > 1 or converted.null_symbols
+        return len(converted.symbols) > 1
 
     def _select(self, batch: SharedBatch) -> Table | None:
         """Choose the rows of a batch the stream receives; the publish lock is held.
@@ -936,7 +871,7 @@ class StreamSink:
         held = symbols & converted.symbols
         if not held:
             return None
-        if len(held) == len(converted.symbols) and not converted.null_symbols:
+        if len(held) == len(converted.symbols):  # every row has a symbol: none is withheld
             return batch.table
         if len(held) == 1 and batch.splits:
             (symbol,) = held
@@ -944,7 +879,7 @@ class StreamSink:
         if version != self._filter_version:
             self._filter = new_table([string_col(_SYMBOL, sorted(symbols))])
             self._filter_version = version
-        return batch.table.where_in(cast("Table", self._filter), _SYMBOL)
+        return batch.table.where_in(required(self._filter, "the stream's symbol filter"), _SYMBOL)
 
     def fail(self, error: MassiveError) -> bool:
         """Fail the stream's table and record the failure, once.
@@ -954,7 +889,7 @@ class StreamSink:
         recorded too, and names it. When the session's close came first, the table fails with
         the close's error instead, so the table and its `CLOSED` row name the same cause, and
         nothing is logged (the close logs its count). Any other failure is logged once per
-        failure, however many streams it fails, at the level its cause gives (`log_failure`):
+        failure, however many streams it fails, at the level its `is_bug` gives (`log_failure`):
         ERROR for a defect, naming whose it is, and WARNING otherwise.
         The stream counts as failed even when `publish_failure` raises (the exception then
         propagates): its row already reads `FAILED`, so it publishes no more rows, and the
@@ -971,14 +906,19 @@ class StreamSink:
             if self.failed:
                 return False
             core = self._core()
-            closed = None if core is None else core.fail_stream(self.stream_id, str(error))
+            closed = None if core is None else core.fail_stream(self.stream_id, error)
             if closed is None:
                 log_failure(
-                    logger, error, "%s stream %d failed: %s", self.plan.dataset, self.stream_id
+                    logger,
+                    error,
+                    "%s stream %d failed: %s",
+                    self.plan.dataset,
+                    self.stream_id,
+                    named=self.plan.dataset,
                 )
             try:
                 self.publisher.publish_failure(
-                    error if closed in (None, str(error)) else MassiveError(closed)
+                    error if closed in (None, str(error)) else SessionClosedError(closed)
                 )
             finally:  # the row reads FAILED: the stream publishes nothing more either way
                 self.failed = True
@@ -996,7 +936,7 @@ class StreamSink:
         Args:
             message: Why the stream cannot follow its watchlist, naming the fix.
         """
-        failure = MassiveError(message, cause=ErrorCause.USER_DEFECT)  # the symbol table's
+        failure = MassiveError(message, source=ErrorSource.USER, is_bug=True)  # the symbol table's
 
         def fail() -> None:
             self.fail(failure)
@@ -1006,9 +946,10 @@ class StreamSink:
             core.defer(fail)
 
 
-_Frame = tuple[int, int, list[tuple[object, ...]]]
-"""One frame's rows of one channel, with the instant it arrived (epoch nanoseconds) and the
-generation of the socket it arrived on."""
+_Frame: TypeAlias = "tuple[int, int, list[tuple[object, ...]], RowMarks, int]"
+"""One frame's rows of one channel, with the instant it arrived (epoch nanoseconds), the
+generation of the socket it arrived on, the client's marks of the rows it could not read
+whole, and the rows' memory as `row_memory.frame_bytes` estimates it."""
 
 
 class _Routes:
@@ -1123,23 +1064,20 @@ class _Fail:
 
 @dataclass(frozen=True, slots=True)
 class _Batch:
-    """One channel's rows of one flush, and the rows the client dropped from its frames.
+    """One channel's rows of one flush, from one socket.
 
     Attributes:
         rows: The decoded rows, in arrival order, each a tuple of the source's fields.
         arrived: When each row's frame arrived, epoch nanoseconds, one per row.
-        lost: The rows the client dropped from the channel's frames since the last flush,
-            because a key could not be read, as the frames' drift merged (`dropped_rows`).
-        lost_symbols: How many of those rows each canonical symbol had.
+        marks: The client's marks of the rows: each frame's first row in `rows` with its
+            marks.
         generation: The generation of the socket every row arrived on (`Flusher.rows`); a
-            flush whose frames span two sockets publishes one batch per socket. 0 for a batch
-            of no rows.
+            flush whose frames span two sockets publishes one batch per socket.
     """
 
     rows: list[tuple[object, ...]]
     arrived: list[int]
-    lost: DriftReport
-    lost_symbols: Mapping[str, int]
+    marks: tuple[tuple[int, RowMarks], ...]
     generation: int
 
 
@@ -1151,14 +1089,28 @@ class _Drift:
         channel: The channel.
         drift: The frame's drift for the channel.
         where: The connection's URL and the channel, for the drift WARNING.
-        dropped: How many of the frame's dropped rows each canonical symbol had, for the
-            symbol's run of dropped rows (`DROPPED_RUN_LIMIT`).
     """
 
     channel: str
     drift: DriftReport
     where: str
-    dropped: Mapping[str, int]
+
+
+@dataclass(slots=True)
+class _Overflow:
+    """The rows a connection dropped past `HELD_BYTES_LIMIT`, until a flush fails its streams.
+
+    Attributes:
+        since: When the first dropped frame arrived, epoch nanoseconds.
+        rows: The rows buffered then.
+        held: Their memory, as `row_memory.frame_bytes` estimates it.
+        dropped: The rows dropped since, the first frame's included.
+    """
+
+    since: int
+    rows: int
+    held: int
+    dropped: int
 
 
 def _do_nothing() -> None:
@@ -1180,9 +1132,17 @@ class Flusher:
     anything the thread cannot carry on after (a `KeyboardInterrupt` or `SystemExit`) first
     fails every routed stream, so no table is left frozen without an error.
 
-    It counts the rows buffered and not taken by a flush yet (`backlog`), under a leaf lock of its
-    own, and logs a WARNING when the count passes `BACKLOG_WARNING_ROWS`. The buffers are
-    unbounded on purpose: a slow flush delays rows but never drops them.
+    It counts the rows buffered and not taken by a flush yet (`backlog`), and an estimate of
+    their memory (`row_memory.frame_bytes`), under a leaf lock of its own, and logs a WARNING
+    when the count passes `BACKLOG_WARNING_ROWS`. A slow flush delays rows but never drops them
+    until their memory would pass `row_memory.HELD_BYTES_LIMIT`: a flush that falls that far
+    behind (the update graph stalled, as by a long console command) has stopped keeping up, and
+    the server's memory must not go with it. The limit counts the rows as the Python objects the
+    buffers hold, as `row_memory.frame_bytes` estimates them; it bounds the buffers, and a flush
+    that drains them still converts what it took. The frame that would pass it, and every frame
+    after it, is dropped, and the next flush discards the buffered rows and fails every stream
+    the connection routes then, with an error that names the limit and when the rows began to be
+    missing (`_overflowed`); the streams routed after that flush get their rows as usual.
 
     It remembers the canonical symbol of each wire spelling it has read, per dataset and channel,
     so steady traffic costs no symbol reading. That memory is bounded: a flush forgets the
@@ -1196,17 +1156,20 @@ class Flusher:
 
     __slots__ = (
         "_backlog",
+        "_backlog_bytes",
         "_backlog_lock",
         "_backlog_warned",
         "_control",
         "_drift",
+        "_events",
         "_exec_ctx",
         "_final",
         "_flush_lock",
+        "_held",
         "_interval",
         "_new_generation",
-        "_noted",
         "_on_new_generation",
+        "_overflow",
         "_runs",
         "_sessions",
         "_stale",
@@ -1214,6 +1177,10 @@ class Flusher:
         "_symbol_runs",
         "_symbols",
         "_thread",
+        "_undated",
+        "_unrouted",
+        "_url",
+        "_waits",
         "routes",
     )
 
@@ -1222,8 +1189,10 @@ class Flusher:
         exec_ctx: ExecutionContext,
         name: str,
         *,
+        url: str,
         interval: float,
         sessions: FuturesSessionDates | None = None,
+        held: HeldRows[ChannelPlan] | None = None,
         on_new_generation: Callable[[], object] = _do_nothing,
     ) -> None:
         """Create the flusher; nothing runs until `start()`.
@@ -1232,9 +1201,13 @@ class Flusher:
             exec_ctx: The execution context every flush enters: that of the session which
                 created the connection.
             name: The thread's name, for thread dumps.
+            url: The connection's URL, such as `"wss://socket.massive.com/stocks"`, which
+                starts its messages and names where its problems came from.
             interval: Seconds between flushes (`MassiveConfig.flush_interval`).
             sessions: For a futures connection, the schedule calendar that corrects its rows'
                 session dates; None otherwise.
+            held: For a futures connection, where its rows wait for their session dates
+                (`HeldRows`, over `sessions`); None otherwise.
             on_new_generation: Called after a flush in which a stream got its first rows of a
                 newer socket generation (`StreamSink.rows_generation`), on the flush thread
                 with no lock held; it must not block. The connection posts its recovery check
@@ -1242,9 +1215,11 @@ class Flusher:
                 of the new socket reach it. Does nothing by default.
         """
         self._exec_ctx = exec_ctx
+        self._url = url
         self._on_new_generation = on_new_generation
         self._interval = interval
         self._sessions = sessions
+        self._held = held
         self.routes: Final = _Routes()
         self._control: queue.SimpleQueue[_Fail | _Drift] = queue.SimpleQueue()
         self._flush_lock = threading.Lock()
@@ -1253,24 +1228,38 @@ class Flusher:
         # Flush-lock state: the raw-to-canonical symbol map of each routed plan, at most
         # `SYMBOL_CACHE_LIMIT` spellings each after a flush.
         self._symbols: dict[ChannelPlan, dict[str, str | None]] = {}
-        # Flush-lock state: per `dm.ALL` stream, the symbols whose rows are being dropped, with
-        # the first reason, which its `Error` names; and the stale-symbol part last written.
-        self._stale: dict[int, dict[str, str]] = {}
-        self._noted: dict[int, str] = {}
+        # Flush-lock state: per stream, the symbols whose recent rows were all withheld, with
+        # the first reason, and their `stale_symbol_data` spans (`DROPPED_RUN_LIMIT`).
+        self._stale: dict[int, tuple[dict[str, str], SpanTracker]] = {}
         # Flush-lock state: per routed plan, the rows dropped in a row with none published,
         # and the first one's reason (`DROPPED_RUN_LIMIT`).
         self._runs: dict[ChannelPlan, tuple[int, str]] = {}
+        # Flush-lock state: per routed plan, the same run of rows with no readable symbol.
+        self._unrouted: dict[ChannelPlan, tuple[int, str]] = {}
         # Flush-lock state: per routed plan and symbol, the same run (`_counted_symbols`).
         self._symbol_runs: dict[ChannelPlan, dict[str, tuple[int, str]]] = {}
         # Flush-lock state: the drift a flush found, merged per (streams, where), which the
         # flush reports once it has released the flush lock (`_report_found`).
         self._drift: dict[tuple[tuple[StreamSink, ...], str], DriftReport] = {}
+        # Flush-lock state: the problems a flush found, per stream, which it hands to their
+        # sessions once it has released the flush lock (`_report_events`).
+        self._events: list[tuple[StreamSink, Sequence[Problem]]] = []
         # Flush-lock state: whether this flush gave a stream rows of a newer socket generation.
         self._new_generation = False
+        # Flush-lock state: per futures dataset, each ticker whose reported wait still holds,
+        # with its rows and reason; `Settled.delayed` reports a wait once, so a stream that
+        # receives the ticker later learns of it here.
+        self._waits: dict[ChannelPlan, dict[str, tuple[int, str]]] = {}
+        # Per futures stream, its tickers whose rows wait for their date, with its spans.
+        self._undated: dict[int, tuple[dict[str, tuple[int, str]], SpanTracker]] = {}
         # Guarded by the backlog lock, a leaf lock.
         self._backlog_lock = threading.Lock()
         self._backlog = 0
+        self._backlog_bytes = 0
         self._backlog_warned = False
+        # Once a frame would take the backlog past `HELD_BYTES_LIMIT`: frames are dropped, and
+        # counted here, until a flush takes it.
+        self._overflow: _Overflow | None = None
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
 
     @property
@@ -1309,39 +1298,75 @@ class Flusher:
             self._thread.join(timeout)
         return not self._thread.is_alive()
 
-    def rows(self, channel: str, rows: list[tuple[object, ...]], *, generation: int) -> None:
+    def rows(
+        self, channel: str, rows: list[tuple[object, ...]], marks: RowMarks, *, generation: int
+    ) -> None:
         """Buffer one frame's rows of a channel, with the instant they arrived. Never blocks.
 
         The instant, `time.time_ns()` now, on the connection's loop thread as the frame is
         handed over, becomes every row's `TimestampInsert`. Rows of a channel no stream was
         ever routed to are dropped. The rows count in the backlog until a flush takes them; a
         backlog that passes `BACKLOG_WARNING_ROWS` is logged at WARNING (see that constant for
-        when it is logged again).
+        when it is logged again). A frame whose memory would take the backlog's past
+        `HELD_BYTES_LIMIT` is dropped and logged at WARNING, and every frame after it is
+        dropped and counted until the next flush, which fails the connection's streams (the
+        class docstring says why).
 
         Args:
             channel: The channel.
-            rows: The decoded rows, each a tuple of the source's fields; the flusher keeps the
-                list.
+            rows: The decoded rows, each a tuple of the source's fields; at least one. The
+                flusher keeps the list.
+            marks: The client's marks of the rows it could not read whole.
             generation: The generation of the socket the frame arrived on, which each stream
                 the rows reach records (`StreamSink.rows_generation`).
         """
         buffer = self.routes.buffer(channel)
         if buffer is None:
             return
+        nbytes = frame_bytes(rows)
+        arrived = time.time_ns()
         with self._backlog_lock:  # counted before the put, so a flush never counts below zero
-            self._backlog += len(rows)
+            overflow = self._overflow
+            dropping = overflow is not None
+            overflowing = not dropping and self._backlog_bytes + nbytes > HELD_BYTES_LIMIT
+            if overflow is not None:
+                overflow.dropped += len(rows)
+            if overflowing:
+                self._overflow = _Overflow(arrived, self._backlog, self._backlog_bytes, len(rows))
+            if not dropping and not overflowing:
+                self._backlog += len(rows)
+                self._backlog_bytes += nbytes
             backlog = self._backlog
+            held = self._backlog_bytes
             warn = backlog > BACKLOG_WARNING_ROWS and not self._backlog_warned
             self._backlog_warned |= warn
-        buffer.put((time.time_ns(), generation, rows))
+        if dropping:  # counted in the overflow, which the next flush logs once
+            return
+        if overflowing:
+            logger.warning(
+                "%s: %s rows, about %d MB, wait to be published, and %s more on channel %s would "
+                "pass the %d MB the library keeps for one connection. Deephaven's update graph "
+                "fell behind the stream, or stopped, as it does while a console command runs. "
+                "The library drops the rows from now on and stops every live table of this "
+                "connection.",
+                self._url,
+                f"{backlog:,}",
+                held // 2**20,
+                f"{len(rows):,}",
+                channel,
+                HELD_BYTES_LIMIT // 2**20,
+            )
+            return
+        buffer.put((arrived, generation, rows, marks, nbytes))
         if warn:
             logger.warning(
-                "%s: %d rows are waiting to be published, more than %d; the flushes are "
-                "falling behind (a stalled or slow update graph), so memory grows until they "
-                "catch up",
-                self._thread.name,
-                backlog,
-                BACKLOG_WARNING_ROWS,
+                "%s: %s rows wait to be published, more than %s. Deephaven's update graph is "
+                "falling behind the stream, as it does while a console command runs, so memory "
+                "grows until it catches up. Past %d MB, the live tables of this connection stop.",
+                self._url,
+                f"{backlog:,}",
+                f"{BACKLOG_WARNING_ROWS:,}",
+                HELD_BYTES_LIMIT // 2**20,
             )
 
     def fail(self, stream_ids: Iterable[int], error: MassiveError) -> None:
@@ -1360,7 +1385,6 @@ class Flusher:
         drift: DriftReport,
         *,
         where: str,
-        dropped: Mapping[str, int] | None = None,
     ) -> None:
         """Ask the flush thread to report a channel's drift for the streams on it. Never blocks.
 
@@ -1369,17 +1393,15 @@ class Flusher:
             drift: The frame's drift for the channel.
             where: Where the frame came from, such as `"wss://delayed.massive.com/stocks
                 channel T"`, named in the drift WARNING.
-            dropped: How many of the frame's dropped rows (`DriftReport.dropped_rows`) each
-                canonical symbol had; None when no dropped row had a valid symbol.
         """
-        self._control.put(_Drift(channel, drift, where, dict(dropped or {})))
+        self._control.put(_Drift(channel, drift, where))
 
     def _run(self) -> None:
         """Flush every interval until `stop()`; a failing flush is logged and the next one runs.
 
         Anything else that escapes a flush ends the thread: it is logged at ERROR as a defect
         of the library, every routed stream is failed with a `MassiveError` naming the thread
-        (`ErrorCause.LIBRARY_DEFECT`, logged once), and it is re-raised.
+        (`ErrorSource.LIBRARY`, logged once), and it is re-raised.
         However the thread ends, it clears the routes last: nothing reads them any more, and a
         stream left there would be held by a connection that is gone.
         """
@@ -1391,10 +1413,10 @@ class Flusher:
         except BaseException as death:
             error = MassiveError(
                 library_bug(
-                    f"the flush thread {self._thread.name} died ({death!r}); this table no "
-                    "longer updates"
+                    f"{self._url}: the library thread that publishes this connection's rows "
+                    f"died: {death!r}. This table no longer updates"
                 ),
-                cause=ErrorCause.LIBRARY_DEFECT,
+                source=ErrorSource.LIBRARY,
             )
             log_failure(logger, error, "%s", exc_info=death)
             with entered(self._exec_ctx):
@@ -1408,7 +1430,11 @@ class Flusher:
         try:
             self.flush()
         except Exception:
-            logger.exception("%s: a flush failed; continuing. %s", self._thread.name, LIBRARY_BUG)
+            logger.exception(
+                "%s: publishing one batch of rows failed, and the next batch goes on. %s",
+                self._url,
+                LIBRARY_BUG,
+            )
 
     def flush(self) -> None:
         """Apply the queued failures, publish every buffered row, then report the queued drift.
@@ -1420,42 +1446,46 @@ class Flusher:
         lock, inside the flusher's execution context, with no other library lock held: it
         calls Deephaven (`to_table`, `partition_by`, `where_in`, `add`, `publish_failure`) and
         then each session with a stream that published once (`update_streams`). The drift the
-        flush found, its frames' and its rows' timestamps', is merged per channel and dataset
-        (`_found`) and reported once the flush lock is released (`_report_found`), so the
-        session's `DriftRegistry` logs once per flush, not once per frame. A channel's frames
-        from two sockets publish as one batch per socket (`_batches`), and a flush that gave a
-        stream its first rows of a newer socket calls `on_new_generation` last.
+        flush's frames found is merged per channel (`_found`) and reported once the flush lock
+        is released (`_report_found`), so each stream gets one `schema_drift` problem per field
+        per flush, not one per frame. A channel's frames from two sockets publish as one batch
+        per socket (`_batches`), and a flush that gave a stream its first rows of a newer
+        socket calls `on_new_generation` last.
         """
         with self._flush_lock, entered(self._exec_ctx):
+            self._overflowed()
             controls = _drain(self._control)
             drained = {channel: _drain(buffer) for channel, buffer in self.routes.buffers()}
-            # Each frame is `(arrived, generation, rows)`: the backlog counts the rows.
-            self._drained(sum(len(rows) for frames in drained.values() for *_, rows in frames))
+            frames = [frame for frames in drained.values() for frame in frames]
+            # Each frame is `(arrived, generation, rows, marks, nbytes)`: the backlog counts
+            # its rows and bytes.
+            self._drained(sum(len(f[2]) for f in frames), sum(f[4] for f in frames))
             # Routes after the rows: a stream routed meanwhile gets the rows that reached it.
             routes = self.routes.current()
-            lost: dict[str, DriftReport] = {}  # the rows the client dropped, by channel
-            lost_symbols: dict[str, Counter[str]] = {}  # and by symbol
             for item in controls:
                 if isinstance(item, _Fail):
                     failing = [s for s in self.routes.sinks() if s.stream_id in item.stream_ids]
                     self._fail_each(failing, item.error)
-                elif item.drift.dropped_rows:
-                    lost[item.channel] = lost.get(item.channel, DriftReport()).merge(item.drift)
-                    lost_symbols.setdefault(item.channel, Counter()).update(item.dropped)
             updates: dict[StreamSink, StreamUpdate] = {}
+            settled: set[ChannelPlan] = set()
             for channel, frames in drained.items():
                 sinks = routes.get(channel, ())
-                if sinks and (frames or channel in lost):
-                    for batch in _batches(frames, lost, lost_symbols, channel=channel):
-                        self._publish(batch, sinks, updates=updates)
+                if sinks and frames:
+                    for batch in _batches(frames):
+                        settled |= self._publish(batch, sinks, updates=updates)
+            self._release_held(routes, settled, updates=updates)
             for item in controls:
                 if isinstance(item, _Drift):
                     self._found(routes.get(item.channel, ()), item.drift, where=item.where)
             _report_updates(updates)
-            self._forget([sink for sinks in routes.values() for sink in sinks])
+            routed = [sink for sinks in routes.values() for sink in sinks]
+            self._forget(routed)
+            self._end_unheld_stale(routed)
             found, self._drift = self._drift, {}
+            events, self._events = self._events, []
             new_generation, self._new_generation = self._new_generation, False
         self._report_found(found)
+        self._report_events(events)
         if new_generation:
             self._on_new_generation()
 
@@ -1466,9 +1496,9 @@ class Flusher:
         reports, and logs, once rather than a thousand times.
 
         Args:
-            sinks: The streams of the channel or dataset the drift is about.
+            sinks: The streams of the channel the drift is about.
             drift: The drift.
-            where: The connection's URL and the channel, or the flush thread and the channel.
+            where: The connection's URL and the channel.
         """
         key = (sinks, where)
         self._drift[key] = self._drift.get(key, DriftReport()).merge(drift)
@@ -1488,8 +1518,8 @@ class Flusher:
                 self._report_drift(sinks, drift, where=where)
             except Exception:
                 logger.exception(
-                    "%s: could not report the drift of %s. %s",
-                    self._thread.name,
+                    "%s: the library could not report the fields Massive sent beyond its "
+                    "documentation. %s",
                     where,
                     LIBRARY_BUG,
                 )
@@ -1501,17 +1531,23 @@ class Flusher:
             routed: The streams the flush routed.
         """
         live = {sink.stream_id for sink in routed}
-        if self._stale:  # the stale symbols and warnings of streams no longer routed
+        if self._stale:  # the stale symbols of streams no longer routed
             self._stale = {i: m for i, m in self._stale.items() if i in live}
-        if self._noted:
-            self._noted = {i: m for i, m in self._noted.items() if i in live}
         plans = {sink.plan for sink in routed}
         if self._symbols:  # the spellings of datasets no longer routed
             self._symbols = {p: m for p, m in self._symbols.items() if p in plans}
         if self._runs:  # and their runs of dropped rows
             self._runs = {p: run for p, run in self._runs.items() if p in plans}
+        if self._unrouted:
+            self._unrouted = {p: run for p, run in self._unrouted.items() if p in plans}
         if self._symbol_runs:
             self._symbol_runs = {p: r for p, r in self._symbol_runs.items() if p in plans}
+        if self._held is not None:
+            self._held.keep(plans)
+        if self._undated:
+            self._undated = {i: u for i, u in self._undated.items() if i in live}
+        if self._waits:
+            self._waits = {p: w for p, w in self._waits.items() if p in plans}
 
     def _fail_each(self, sinks: Iterable[StreamSink], error: MassiveError) -> None:
         """Fail streams one by one; a stream whose failure raises costs the others nothing.
@@ -1528,23 +1564,71 @@ class Flusher:
                 sink.fail(error)
             except Exception:
                 logger.exception(
-                    "%s: could not fail stream %d (%s). %s",
-                    self._thread.name,
+                    "%s: the library could not stop stream %d with this error: %s %s",
+                    self._url,
                     sink.stream_id,
                     error,
                     LIBRARY_BUG,
                 )
 
-    def _drained(self, count: int) -> None:
+    def _drained(self, count: int, nbytes: int) -> None:
         """Take rows a flush drained off the backlog; re-arm the WARNING below half the level.
 
         Args:
             count: How many rows the flush took from the buffers.
+            nbytes: Their memory, as `rows` counted it.
         """
         with self._backlog_lock:
             self._backlog -= count
+            self._backlog_bytes -= nbytes
             if self._backlog < BACKLOG_WARNING_ROWS // 2:
                 self._backlog_warned = False
+
+    def _overflowed(self) -> None:
+        """Fail every routed stream once rows were dropped for passing `HELD_BYTES_LIMIT`.
+
+        Runs first in a flush, under the flush lock. It discards every buffered frame first,
+        since each belongs to a stream it fails, so the backlog falls before frames are let in
+        again; then it takes the overflow under the backlog lock, which lets frames be buffered
+        again, and only then reads the routes. So every stream routed while frames were
+        dropped fails, and a stream routed after the routes are read missed nothing. The error
+        dates the missing rows from the oldest frame discarded or dropped.
+        """
+        with self._backlog_lock:
+            overflow = self._overflow  # only this thread clears it
+        if overflow is None:
+            return
+        frames = [frame for _, buffer in self.routes.buffers() for frame in _drain(buffer)]
+        self._drained(sum(len(f[2]) for f in frames), sum(f[4] for f in frames))
+        with self._backlog_lock:
+            self._overflow = None
+        # The rows are missing from the oldest discarded frame on, not only the dropped ones.
+        missing = utc_text(min([overflow.since, *(f[0] for f in frames)]) / 1e9)
+        sinks = self.routes.sinks()
+        logger.debug(
+            "%s: %d rows dropped from %s, past the memory limit; %d buffered rows discarded, "
+            "failing %d streams",
+            self._thread.name,
+            overflow.dropped,
+            utc_text(overflow.since / 1e9),
+            sum(len(f[2]) for f in frames),
+            len(sinks),
+        )
+        by_dataset: dict[str, list[StreamSink]] = {}
+        for sink in sinks:
+            by_dataset.setdefault(sink.plan.dataset, []).append(sink)
+        for dataset, failing in by_dataset.items():
+            error = MassiveError(
+                f"{dataset}: {overflow.rows:,} rows, about {overflow.held // 2**20} MB, waited "
+                f"to be published, and {overflow.dropped:,} more would pass the "
+                f"{HELD_BYTES_LIMIT // 2**20} MB the library keeps for one connection. "
+                "Deephaven's update graph fell behind the stream, or stopped, as it does while "
+                f"a console command runs. The rows from {missing} on are missing, so this table "
+                f"stopped. {new_live_table(dataset)}",
+                source=ErrorSource.USER,
+                is_retryable=True,
+            )
+            self._fail_each(failing, error)
 
     def _publish(
         self,
@@ -1552,13 +1636,16 @@ class Flusher:
         sinks: tuple[StreamSink, ...],
         *,
         updates: dict[StreamSink, StreamUpdate],
-    ) -> None:
+    ) -> set[ChannelPlan]:
         """Convert a channel's rows once per dataset and add them to each of its streams.
 
         Args:
             batch: The channel's rows of this flush, and the rows the client dropped.
             sinks: The channel's streams.
-            updates: Receives each stream's new published-row total and `Error` notes.
+            updates: Receives each stream's new published-row total.
+
+        Returns:
+            The datasets whose rows the flush published or tried to.
         """
         by_plan: dict[ChannelPlan, list[StreamSink]] = {}
         for sink in sinks:
@@ -1570,14 +1657,16 @@ class Flusher:
             except Exception as error:  # one dataset's failure never costs the others their rows
                 failure = MassiveError(
                     library_bug(
-                        f"{plan.dataset}: could not publish a {plan.channel} batch: {error}"
+                        f"{plan.dataset}: the library could not publish the rows Massive sent "
+                        f"on channel {plan.channel}: {error!r}"
                     ),
-                    cause=ErrorCause.LIBRARY_DEFECT,
+                    source=ErrorSource.LIBRARY,
                 )
                 # Logged here, with the trace; each stream's failure then logs at DEBUG only.
                 mark_failure_logged(failure)
                 logger.exception("%s", failure)
                 self._fail_each(readers, failure)
+        return set(by_plan)
 
     def _publish_plan(
         self,
@@ -1589,34 +1678,379 @@ class Flusher:
     ) -> None:
         """Convert a channel's rows for one dataset once and add them to its streams.
 
-        A futures row the schedules cannot place has a null `Date` and leaves every stream's
-        `Error` alone (the calendar logs it). The drift of the rows' timestamps is
-        reported like a frame's (`_found`), and the rows dropped, here or by the client,
-        count toward the plan's run (`_counted`).
+        A futures dataset's rows go through its held rows (`HeldRows.settle`): the rows that
+        cannot be dated yet wait there, and the ones held before that can be now publish first
+        (`_apply_settled`). The rows the library cannot read whole are
+        withheld (`ChannelPlan.convert`), and each stream applies its own policy to them
+        (`_withheld`); they count toward the plan's and their symbols' runs (`_counted`,
+        `_counted_symbols`).
 
         Args:
             plan: The dataset's plan for the channel.
-            batch: The channel's rows of this flush, and the rows the client dropped.
+            batch: The channel's rows of this flush, from one socket.
             readers: The dataset's streams on the channel.
-            updates: Receives each stream's new published-row total and `Error` notes.
+            updates: Receives each stream's new published-row total.
         """
-        converted = self._convert(plan, batch.rows, arrived=batch.arrived)
-        if converted.unreadable:  # a spelling the library cannot read is its own defect
-            failure = MassiveError(converted.unreadable, cause=ErrorCause.LIBRARY_DEFECT)
-            self._fail_each(readers, failure)
-        drift = converted.drift
-        if drift.fields_drifted or drift.dropped_rows:
-            where = f"{self._thread.name} channel {plan.channel}"
-            self._found(tuple(readers), drift, where=where)
+        converted = self._convert(plan, batch, arrived=batch.arrived)
+        withheld = converted.withheld
+        if withheld.groups:
+            readers = self._withheld(plan, withheld, readers)
+            if not readers:
+                return
+        # The runs count the rows read whole; held ones are no more dropped than published ones.
         # The dataset's run first: when it fails every stream, no symbol is named stale.
-        if self._counted(plan, converted, lost=batch.lost, readers=readers):
+        if self._counted(plan, converted, readers=readers):
             return
-        self._counted_symbols(plan, converted, batch=batch, readers=readers)
+        self._counted_symbols(plan, converted, readers=readers)
+        if self._held is not None and plan.symbol_field is not None:
+            self._held.prune(plan, functools.partial(_received, readers))
+            settled = self._held.settle(
+                plan, converted.batch, generation=batch.generation, times=plan.times
+            )
+            readers = self._apply_settled(plan, settled, readers, held=self._held)
+            if not readers:
+                return
+            self._publish_released(plan, settled, readers=readers, updates=updates)
+            converted = _with_rows(converted, settled.rows)
+        self._publish_converted(
+            plan, converted, readers=readers, updates=updates, generation=batch.generation
+        )
+
+    def _publish_released(
+        self,
+        plan: ChannelPlan,
+        settled: Settled,
+        *,
+        readers: list[StreamSink],
+        updates: dict[StreamSink, StreamUpdate],
+    ) -> None:
+        """Publish a dataset's released held rows, one table per socket generation, oldest first.
+
+        Each table carries its own generation, so a stream that receives only rows of the
+        dropped socket never counts as recovered. Held rows were counted toward the runs when
+        they arrived, so they are not counted again.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            readers: The dataset's streams on the channel.
+            updates: Receives each stream's new published-row total.
+        """
+        for rows, generation in settled.released:
+            converted = Converted(rows, Withheld(rows))
+            self._publish_converted(
+                plan,
+                _with_rows(converted, rows),
+                readers=readers,
+                updates=updates,
+                generation=generation,
+            )
+
+    def _publish_converted(
+        self,
+        plan: ChannelPlan,
+        converted: Converted,
+        *,
+        readers: list[StreamSink],
+        updates: dict[StreamSink, StreamUpdate],
+        generation: int,
+    ) -> None:
+        """Add a dataset's converted rows to its streams, and write their notes.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            converted: The rows to publish.
+            readers: The dataset's streams on the channel.
+            updates: Receives each stream's new published-row total.
+            generation: The newest socket generation of the rows.
+        """
         if converted.batch.num_rows:
             self._publish_batch(
-                plan, converted, readers=readers, updates=updates, generation=batch.generation
+                plan, converted, readers=readers, updates=updates, generation=generation
             )
-        self._write_notes(readers, updates)
+
+    def _release_held(
+        self,
+        routes: Mapping[str, tuple[StreamSink, ...]],
+        settled: set[ChannelPlan],
+        *,
+        updates: dict[StreamSink, StreamUpdate],
+    ) -> None:
+        """Settle the held rows of the datasets this flush brought no rows.
+
+        A dataset no stream reads any more drops its held rows. A calendar whose worker died
+        fails every stream that holds rows, as a defect: nothing would ever date them. A
+        dataset whose settling raises fails its streams as a defect too, and the others go on.
+
+        Args:
+            routes: The streams by channel.
+            settled: The datasets the flush already settled with its rows.
+            updates: Receives each stream's new published-row total.
+        """
+        held = self._held
+        if held is None:
+            return
+        for plan in held.holding():
+            readers = [s for s in routes.get(plan.channel, ()) if s.plan is plan and not s.failed]
+            if not readers:
+                held.drop(plan, why=f"no stream of {plan.dataset} reads them any more")
+                continue
+            if self._sessions is not None and not self._sessions.alive():
+                held.drop(plan, why="the futures schedule worker stopped")
+                stopped = (
+                    "the library thread that reads Massive's futures schedules stopped, so the "
+                    "rows that wait for their trading session can never be dated"
+                )
+                self._fail_each(readers, _defect(plan, stopped))
+                continue
+            if plan in settled:
+                continue
+            try:
+                held.prune(plan, functools.partial(_received, readers))
+                result = held.settle(plan, None, generation=0, times=plan.times)
+                readers = self._apply_settled(plan, result, readers, held=held)
+                if readers:
+                    self._publish_released(plan, result, readers=readers, updates=updates)
+            except Exception as error:  # one dataset's failure never costs the others their rows
+                failure = _defect(
+                    plan,
+                    "the library could not publish the rows that waited for their trading "
+                    f"session: {error!r}",
+                )
+                mark_failure_logged(failure)
+                logger.exception("%s", failure)
+                held.drop(plan, why=str(failure))
+                self._fail_each(readers, failure)
+
+    def _apply_settled(
+        self,
+        plan: ChannelPlan,
+        settled: Settled,
+        readers: list[StreamSink],
+        *,
+        held: HeldRows[ChannelPlan],
+    ) -> list[StreamSink]:
+        """Apply what settling a dataset's held rows decided to each of its streams.
+
+        A stream that receives a ticker whose lookup Massive refused, or that failed past
+        `max_outage`, fails; so do all of them when the dataset holds the most rows past the
+        connection's limit. Every other stream gets the problems of its tickers
+        (`_report_futures`), and fails when its setting of a discard's cause is `RAISE`.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            readers: The dataset's streams on the channel.
+            held: The hold that settled them.
+
+        Returns:
+            The streams that go on.
+        """
+        if settled.overflow:
+            failure = MassiveError(
+                f"{plan.dataset}: {settled.overflow} {new_live_table(plan.dataset)}"
+            )
+            held.drop(plan, why=str(failure))
+            self._waits.pop(plan, None)
+            self._fail_each(readers, failure)
+            return []
+        waits = self._open_waits(plan, settled, held.waiting(plan))
+        kept: list[StreamSink] = []
+        # One copy per ticker, shared by its streams, so its failure is logged once.
+        again = new_live_table(plan.dataset)
+        failed = {
+            ticker: copy_error(error, f"{str(error).removesuffix('.')}. {again}")
+            for ticker, error in settled.failed.items()
+        }
+        for sink in readers:
+            refused = next(
+                (e for t, e in failed.items() if sink.receives_all or sink.holds(t)),
+                None,
+            )
+            if refused is not None:
+                self._fail_each([sink], refused)
+                continue
+            if self._report_futures(plan, settled, sink, waits=waits):
+                kept.append(sink)
+        return kept
+
+    def _open_waits(
+        self, plan: ChannelPlan, settled: Settled, held: dict[str, int]
+    ) -> dict[str, tuple[int, str]]:
+        """Update a dataset's reported waits that still hold; return them.
+
+        A wait joins when settling reports it (`Settled.delayed`), and leaves once the hold
+        no longer has a reported wait of the ticker: its rows published or were discarded, a
+        watchlist dropped it, or its lookup failed. A wait whose older rows were discarded
+        while newer ones still wait holds on. Each wait counts the rows the hold has of its
+        ticker now.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            held: The tickers whose reported wait the hold still has, with their rows
+                (`HeldRows.waiting`).
+
+        Returns:
+            Each ticker whose reported wait holds, with its rows and reason.
+        """
+        found = self._waits.get(plan, {})
+        waits = {t: (held[t], why) for t, (_, why) in found.items() if t in held}
+        waits.update({t: (delay.rows, delay.reason) for t, delay in settled.delayed.items()})
+        if waits:
+            self._waits[plan] = waits
+        else:
+            self._waits.pop(plan, None)
+        return waits
+
+    def _report_futures(
+        self,
+        plan: ChannelPlan,
+        settled: Settled,
+        sink: StreamSink,
+        *,
+        waits: dict[str, tuple[int, str]],
+    ) -> bool:
+        """Hand one stream its discarded tickers' events and its waiting tickers' spans.
+
+        Rows discarded (`futures_problems.DISCARDS`) are events of their cause; under `RAISE`
+        of that cause the stream then fails. A ticker whose rows waited
+        `held_rows.DELAYED_AFTER` is an `undated_rows` span of each stream that receives it,
+        however late the stream began to, until its rows publish, are discarded, or fail
+        (`_undated_spans`). The session's reporter logs the first problem of each cause.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            settled: What settling decided.
+            sink: The stream.
+            waits: The dataset's reported waits that still hold (`_open_waits`).
+
+        Returns:
+            False when the stream failed: its setting of a discard's cause is `RAISE`.
+        """
+
+        def receives(ticker: str) -> bool:
+            return sink.receives_all or sink.holds(ticker)
+
+        where = f"{self._url} channel {plan.channel}"
+        discarded = {
+            readiness: mine
+            for readiness, tickers in settled.discarded.items()
+            if (mine := {t: found for t, found in tickers.items() if receives(t)})
+        }
+        problems: list[Problem] = list(
+            futures_events(
+                plan.dataset, sink.stream_id, where, discarded=discarded, policy=sink.policy
+            )
+        )
+        spans = self._undated_spans(plan, waits, sink, where=where, receives=receives)
+        if spans is not None:
+            problems.append(spans)
+        if problems:
+            self._events.append((sink, tuple(problems)))
+        for readiness, tickers in discarded.items():
+            rule = DISCARDS[readiness]
+            if effect_of(rule.setting(sink.policy)).fails:
+                self._fail_each([sink], MassiveError(rule.message(plan.dataset, tickers)))
+                return False
+        return True
+
+    def _undated_spans(
+        self,
+        plan: ChannelPlan,
+        waits: dict[str, tuple[int, str]],
+        sink: StreamSink,
+        *,
+        where: str,
+        receives: Callable[[str], bool],
+    ) -> ProblemSpans | None:
+        """Update one stream's tickers whose rows wait for their date; return its new spans.
+
+        The stream's waits are the dataset's reported waits that still hold (`_open_waits`)
+        of the tickers it receives, so a stream that receives a ticker after its wait was
+        reported shows it too. A ticker leaves when its wait ends, or when the stream stops
+        receiving it. A ticker whose lookup fails fails every stream that receives it, so its
+        span ends with the stream.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            waits: The dataset's reported waits that still hold, by ticker.
+            sink: The stream.
+            where: The flush thread and channel.
+            receives: Whether the stream receives a ticker.
+
+        Returns:
+            The stream's `undated_rows` spans, or None when they did not change.
+        """
+        mine = {t: wait for t, wait in waits.items() if receives(t)}
+        found = self._undated.get(sink.stream_id)
+        if found is None:
+            if not mine:
+                return None
+            tracker = SpanTracker(
+                ProblemCause.UNDATED_ROWS,
+                dataset=plan.dataset,
+                stream_id=sink.stream_id,
+                where=where,
+            )
+            found = self._undated[sink.stream_id] = ({}, tracker)
+        waiting, tracker = found
+        waiting.clear()
+        waiting.update(mine)
+        return tracker.update({t: (t, None, why, rows) for t, (rows, why) in waiting.items()})
+
+    def _withheld(
+        self, plan: ChannelPlan, withheld: Withheld, readers: list[StreamSink]
+    ) -> list[StreamSink]:
+        """Apply each stream's policy to a batch's withheld rows: fail it, or report and go on.
+
+        A stream counts the withheld rows of the symbols it holds, read once per batch, and
+        every row whose symbol could not be read, since that could have been any stream's
+        (`Withheld.counts`). A stream whose policy is `RAISE` for a cause it counts fails.
+        Every stream that counts rows gets their events (`Withheld.events`), handed to its
+        session after the flush (`_report_events`), which logs each stream's first of a cause.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            withheld: The batch's withheld rows.
+            readers: The dataset's streams on the channel.
+
+        Returns:
+            The streams that go on.
+        """
+        kept: list[StreamSink] = []
+        named = plan.symbol_field is not None
+        symbols = {group.symbol for group in withheld.groups if group.symbol is not None}
+        for sink in readers:
+            # One reading of the stream's symbols, so its counts, events, and failure agree
+            # even when its symbols change meanwhile.
+            holds = (
+                frozenset(filter(sink.holds, symbols)).__contains__
+                if named and not sink.receives_all
+                else None
+            )
+            counts = withheld.counts(holds)
+            if not counts:
+                kept.append(sink)
+                continue
+            where = f"{self._url} channel {plan.channel}"
+            found = withheld.events(
+                dataset=plan.dataset,
+                transport=Transport.WS,
+                where=where,
+                stream_id=sink.stream_id,
+                policy=sink.policy,
+                holds=holds,
+            )
+            self._events.append((sink, found))
+            failure = failure_of(
+                counts, sink.policy, dataset=plan.dataset, first_reason=withheld.first_reason
+            )
+            if failure is not None:
+                self._fail_each([sink], RowDataError(failure))
+                continue
+            kept.append(sink)
+        return kept
 
     def _publish_batch(
         self,
@@ -1649,202 +2083,219 @@ class Flusher:
         )
         for sink in readers:
             if sink.publish(shared):
+                self._end_published_stale(sink, converted.symbols)
                 found = updates.get(sink, StreamUpdate())
                 updates[sink] = replace(found, rows_published=sink.rows_published)
                 if generation > sink.rows_generation:
                     sink.rows_generation = generation
                     self._new_generation = True
 
-    def _write_notes(
-        self, readers: list[StreamSink], updates: dict[StreamSink, StreamUpdate]
-    ) -> None:
-        """Write each `dm.ALL` stream's stale-symbol part of its `Error` when it changed.
-
-        The part (`NotePart.STALE_SYMBOLS`) names the symbols whose rows are being dropped
-        (`_stale_text`); it does not fail the stream, and the other sources' parts (the
-        connection's outage or options-cap notes) stay as they are.
-
-        Args:
-            readers: The dataset's streams on the channel.
-            updates: Receives each stream's changed parts.
-        """
-        for sink in readers:
-            key = sink.stream_id
-            text = _stale_text(self._stale.get(key, {})) or None
-            if text == self._noted.get(key):
-                continue
-            if text is None:
-                del self._noted[key]
-            else:
-                self._noted[key] = text
-            found = updates.get(sink, StreamUpdate())
-            updates[sink] = replace(found, notes={NotePart.STALE_SYMBOLS: text})
-
     def _counted(
-        self,
-        plan: ChannelPlan,
-        converted: Converted,
-        *,
-        lost: DriftReport,
-        readers: list[StreamSink],
+        self, plan: ChannelPlan, converted: Converted, *, readers: list[StreamSink]
     ) -> bool:
-        """Count a flush's dropped rows toward the plan's run; fail its streams at the limit.
+        """Count a flush's withheld rows toward the plan's run; fail its streams at the limit.
 
-        A flush that publishes a row of the plan ends its run. Otherwise its dropped rows, the
-        client's and the conversion's, extend the run, and once it reaches `DROPPED_RUN_LIMIT`
-        every stream of the dataset on the channel fails with a `MassiveError` naming the run's
-        length and its first row's reason, a defect of the library to fix
-        (`ErrorCause.LIBRARY_DEFECT`), and the run starts over.
+        A flush that publishes a row of the plan ends its run. Otherwise its withheld rows
+        extend the run, and once it reaches `DROPPED_RUN_LIMIT` every stream that receives the
+        whole channel (a `dm.ALL` stream, or one of a dataset whose rows name no symbol) fails
+        with a `RowDataError` naming the run's length and its first row's reason, Massive's data
+        the library cannot read (`ErrorSource.MASSIVE`), and the run starts over: nothing the
+        dataset's channel sends can be read. A stream of named symbols never fails for rows it
+        would not have received; its own symbols' runs mark them stale (`_counted_symbols`).
 
         Args:
             plan: The dataset's plan for the channel.
             converted: The flush's conversion of the channel's rows for the plan.
-            lost: The channel's rows the client dropped in this flush, as drift.
             readers: The dataset's streams on the channel.
 
         Returns:
-            True when the streams were failed, so nothing is published.
+            True when every stream was failed, so nothing is left to count or publish.
         """
         if converted.batch.num_rows:
             self._runs.pop(plan, None)
+            self._unrouted.pop(plan, None)
             return False
-        dropped = converted.drift.dropped_rows + lost.dropped_rows
-        if not dropped:
+        # A batch holds a row, so a flush that publishes none withheld at least one.
+        withheld = converted.withheld
+        unrouted = withheld.total - sum(withheld.by_symbol().values())
+        named = self._counted_unrouted(
+            plan, unrouted, reason=withheld.first_reason, readers=readers
+        )
+        ended = _extend_run(self._runs, plan, dropped=withheld.total, reason=withheld.first_reason)
+        if ended is None:
+            return named
+        count, reason = ended
+        failure = RowDataError(
+            f"{plan.dataset}: the library could not read {count:,} consecutive rows Massive "
+            f"sent on channel {plan.channel} whole, so it withheld them. "
+            f"{reason_sentence(reason)} {WITHHELD_LISTED}"
+        )
+        whole = plan.symbol_field is None
+        failing = [sink for sink in readers if whole or sink.receives_all]
+        self._fail_each(failing, failure)
+        return named or len(failing) == len(readers)
+
+    def _counted_unrouted(
+        self, plan: ChannelPlan, rows: int, *, reason: str, readers: list[StreamSink]
+    ) -> bool:
+        """Count withheld rows whose symbol could not be read; fail the named streams at the limit.
+
+        Such a row could have been any named stream's, so once `DROPPED_RUN_LIMIT` of them
+        arrive in a row with no row of the plan published, every stream of named symbols
+        fails, as the dataset's run fails a `dm.ALL` stream (`_counted`): no stream would
+        otherwise ever learn that it receives nothing.
+
+        Args:
+            plan: The dataset's plan for the channel.
+            rows: The flush's withheld rows with no readable symbol.
+            reason: Why the flush's first withheld row was withheld.
+            readers: The dataset's streams on the channel.
+
+        Returns:
+            True when every stream was failed.
+        """
+        if not rows or plan.symbol_field is None:
             return False
-        reason = lost.dropped_reason or converted.drift.dropped_reason
-        ended = _extend_run(self._runs, plan, dropped=dropped, reason=reason)
+        ended = _extend_run(self._unrouted, plan, dropped=rows, reason=reason)
         if ended is None:
             return False
-        count, reason = ended
-        failure = MassiveError(
-            library_bug(
-                f"{plan.dataset}: the last {count} rows of channel {plan.channel} were dropped "
-                "because a key could not be read, and none was published, so Massive's format "
-                f"has most likely changed; the first: {reason}"
-            ),
-            cause=ErrorCause.LIBRARY_DEFECT,
+        count, first = ended
+        failure = RowDataError(
+            f"{plan.dataset}: the library could not read the symbol of {count:,} consecutive "
+            f"rows Massive sent on channel {plan.channel}, so it withheld them. "
+            f"{reason_sentence(first)} {WITHHELD_LISTED}"
         )
-        self._fail_each(readers, failure)
-        return True
+        failing = [sink for sink in readers if not sink.receives_all]
+        self._fail_each(failing, failure)
+        return len(failing) == len(readers)
 
     def _counted_symbols(
         self,
         plan: ChannelPlan,
         converted: Converted,
         *,
-        batch: _Batch,
         readers: list[StreamSink],
     ) -> None:
-        """Count a flush's dropped rows toward each symbol's run; fail its streams at the limit.
+        """Count a flush's withheld rows toward each symbol's run; mark a symbol stale at the limit.
 
         The dataset's run (`_counted`) never ends while other symbols publish, so one symbol
-        whose every row is dropped would leave its streams frozen without an error. Each
-        symbol therefore has a run of its own: a published row of the symbol ends it, and once
-        `DROPPED_RUN_LIMIT` of its rows in a row have been dropped, every stream that holds the
-        symbol by name fails with a `MassiveError` naming it, the run's length, and its first
-        row's reason (`ErrorCause.LIBRARY_DEFECT`), and the run starts over. A `dm.ALL` stream
-        is never failed for one symbol, since it serves every other symbol; instead its
-        `Error` names the symbol as possibly stale (`_write_notes`) until a row of the symbol
-        is published again. A symbol becoming stale logs a WARNING (`_mark_stale`), and one
-        published again an INFO (`_clear_stale`).
+        whose every row is withheld would leave its streams frozen without a word. Each symbol
+        therefore has a run of its own: a published row of the symbol ends it, and once
+        `DROPPED_RUN_LIMIT` of its rows in a row have been withheld, every stream that holds the
+        symbol (by name, or `dm.ALL`) marks it stale: a `stale_symbol_data` span of `m.problems()`,
+        which ends when a row of the symbol is published to the stream again
+        (`_end_published_stale`), not when one is converted: a futures row may still wait for
+        its date. No stream fails for one symbol; the run starts over.
 
         Args:
             plan: The dataset's plan for the channel.
             converted: The flush's conversion of the channel's rows for the plan.
-            batch: The channel's rows of this flush, with the rows the client dropped.
             readers: The dataset's streams on the channel.
         """
         runs = self._symbol_runs.setdefault(plan, {})
         for symbol in converted.symbols:
             runs.pop(symbol, None)
-        # A stream failed this flush (a spelling the library cannot read) publishes nothing.
-        everyone = [s for s in readers if s.receives_all and not s.failed]
-        self._clear_stale(plan, everyone, published=converted.symbols)
+        # A stream failed this flush (a cause under RAISE) publishes nothing.
+        going = [s for s in readers if not s.failed]
         became: dict[str, str] = {}  # the symbols that become stale, with their first reason
-        dropped = Counter(converted.dropped_symbols)
-        dropped.update(batch.lost_symbols)
-        reason = batch.lost.dropped_reason or converted.drift.dropped_reason
-        for symbol, rows in dropped.items():
+        reason = converted.withheld.first_reason
+        for symbol, rows in converted.withheld.by_symbol().items():
             if symbol in converted.symbols:
                 continue
             ended = _extend_run(runs, symbol, dropped=rows, reason=reason)
-            if ended is None:
+            if ended is not None:
+                count, first = ended
+                became[symbol] = (
+                    f"The library withheld the last {count:,} rows of this symbol. "
+                    f"{reason_sentence(first)}"
+                )
+        for sink in going:
+            self._mark_stale(plan, sink, became)
+
+    def _mark_stale(self, plan: ChannelPlan, sink: StreamSink, became: Mapping[str, str]) -> None:
+        """Add one stream's symbols that became stale; queue its spans if they changed.
+
+        The symbols it holds that became stale join. A published one leaves when its row is
+        published (`_end_published_stale`), and one it no longer holds at every flush
+        (`_end_unheld_stale`).
+
+        Args:
+            plan: The dataset's plan for the channel.
+            sink: The stream.
+            became: Each symbol whose run reached the limit, with why.
+        """
+        held = {
+            symbol: why for symbol, why in became.items() if sink.receives_all or sink.holds(symbol)
+        }
+        found = self._stale.get(sink.stream_id)
+        if found is None:
+            if not held:
+                return
+            tracker = SpanTracker(
+                ProblemCause.STALE_SYMBOL_DATA,
+                dataset=plan.dataset,
+                stream_id=sink.stream_id,
+                where=f"{self._url} channel {plan.channel}",
+            )
+            found = self._stale[sink.stream_id] = ({}, tracker)
+        stale, tracker = found
+        stale.update(held)
+        spans = tracker.update({symbol: (symbol, None, why, 0) for symbol, why in stale.items()})
+        if spans is not None:
+            self._events.append((sink, (spans,)))
+
+    def _end_published_stale(self, sink: StreamSink, symbols: AbstractSet[str]) -> None:
+        """End the `stale_symbol_data` spans of the symbols a stream was just published rows of.
+
+        Args:
+            sink: The stream, which was just published rows of the batch.
+            symbols: The batch's distinct symbols.
+        """
+        found = self._stale.get(sink.stream_id)
+        if found is None:
+            return
+        stale, tracker = found
+        published = [
+            symbol for symbol in symbols & stale.keys() if sink.receives_all or sink.holds(symbol)
+        ]
+        if not published:
+            return
+        for symbol in published:
+            del stale[symbol]
+        spans = tracker.update({symbol: (symbol, None, why, 0) for symbol, why in stale.items()})
+        assert spans is not None  # the tracker held each symbol that just left
+        self._events.append((sink, (spans,)))
+
+    def _end_unheld_stale(self, routed: list[StreamSink]) -> None:
+        """End the `stale_symbol_data` spans of symbols their streams no longer hold.
+
+        A symbol whose watchlist row was deleted can never publish to the stream again, so its
+        span would hold until the stream closed. Runs at every flush, rows or not, so emptying a
+        watchlist ends its spans too. Runs after `_forget`, so every stream with stale symbols
+        is routed.
+
+        Args:
+            routed: The streams the flush routed.
+        """
+        if not self._stale:
+            return
+        sinks = {sink.stream_id: sink for sink in routed}
+        for stream_id, (stale, tracker) in self._stale.items():
+            sink = sinks[stream_id]
+            if sink.receives_all:
                 continue
-            count, first = ended
-            failure = MassiveError(
-                library_bug(
-                    f"{plan.dataset}: the last {count} rows of {symbol} on channel "
-                    f"{plan.channel} were dropped because a key could not be read, and none "
-                    f"was published; the first: {first}"
-                ),
-                cause=ErrorCause.LIBRARY_DEFECT,
+            gone = [symbol for symbol in stale if not sink.holds(symbol)]
+            if not gone:
+                continue
+            for symbol in gone:
+                del stale[symbol]
+            spans = tracker.update(
+                {symbol: (symbol, None, why, 0) for symbol, why in stale.items()}
             )
-            self._fail_each([s for s in readers if s.holds(symbol)], failure)
-            became[symbol] = first
-        self._mark_stale(plan, everyone, became)
+            assert spans is not None  # the tracker held each symbol that just left
+            self._events.append((sink, (spans,)))
 
-    def _mark_stale(
-        self, plan: ChannelPlan, everyone: list[StreamSink], became: Mapping[str, str]
-    ) -> None:
-        """Name symbols as possibly stale in each `dm.ALL` stream; warn of the new ones once.
-
-        One WARNING per flush and dataset lists the symbols not stale before in some stream,
-        with the first one's reason and the streams, through `bounded_list`; a symbol stale
-        already is not warned about again.
-
-        Args:
-            plan: The dataset's plan for the channel.
-            everyone: The dataset's `dm.ALL` streams on the channel.
-            became: Each symbol whose run reached the limit, with its first row's reason.
-        """
-        new: set[str] = set()
-        for sink in everyone:
-            stale = self._stale.setdefault(sink.stream_id, {})
-            new.update(symbol for symbol in became if symbol not in stale)
-            stale.update(became)
-        if new:
-            first = min(new)
-            logger.warning(
-                "%s: every recent row of %s on channel %s was dropped because a key could not "
-                "be read (the first: %s), so the dm.ALL streams %s may be stale for them; they "
-                "keep running and name the symbols in their Error until a row is published",
-                plan.dataset,
-                bounded_list(sorted(new)),
-                plan.channel,
-                became[first],
-                bounded_list(sink.stream_id for sink in everyone),
-            )
-
-    def _clear_stale(
-        self, plan: ChannelPlan, everyone: list[StreamSink], *, published: AbstractSet[str]
-    ) -> None:
-        """Clear the stale mark of symbols published again; log the recovery at INFO.
-
-        Args:
-            plan: The dataset's plan for the channel.
-            everyone: The dataset's `dm.ALL` streams on the channel.
-            published: The symbols this flush published.
-        """
-        recovered: set[str] = set()
-        for sink in everyone:
-            stale = self._stale.get(sink.stream_id)
-            if stale is not None:
-                back = published & stale.keys()
-                for symbol in back:
-                    del stale[symbol]
-                recovered |= back
-        if recovered:
-            logger.info(
-                "%s: rows of %s on channel %s are published again; the dm.ALL streams no "
-                "longer name them as stale",
-                plan.dataset,
-                bounded_list(sorted(recovered)),
-                plan.channel,
-            )
-
-    def _convert(
-        self, plan: ChannelPlan, rows: list[tuple[object, ...]], *, arrived: list[int]
-    ) -> Converted:
+    def _convert(self, plan: ChannelPlan, batch: _Batch, *, arrived: list[int]) -> Converted:
         """Convert a channel's rows for one dataset, with the plan's remembered symbols.
 
         The plan's memory of wire spellings is emptied after the conversion once it holds more
@@ -1852,14 +2303,16 @@ class Flusher:
 
         Args:
             plan: The dataset's plan for the channel.
-            rows: The channel's rows of this flush.
+            batch: The channel's rows of this flush, with the client's marks.
             arrived: When each row's frame arrived, epoch nanoseconds, one per row.
 
         Returns:
             The plan's conversion of the rows (`ChannelPlan.convert`).
         """
         known = self._symbols.setdefault(plan, {})
-        converted = plan.convert(rows, known, arrived=arrived, sessions=self._sessions)
+        converted = plan.convert(
+            batch.rows, batch.marks, known, arrived=arrived, sessions=self._sessions
+        )
         if len(known) > SYMBOL_CACHE_LIMIT:
             logger.debug(
                 "%s: the %s symbol cache holds %d spellings, past its limit of %d; starts over",
@@ -1871,20 +2324,86 @@ class Flusher:
             known.clear()
         return converted
 
+    def _report_events(self, events: list[tuple[StreamSink, Sequence[Problem]]]) -> None:
+        """Hand a flush's problems to each stream's session, with no lock held.
+
+        A session that raises is logged at ERROR, and the others still get theirs.
+
+        Args:
+            events: Each stream's problems of the flush.
+        """
+        for sink, problems in events:
+            core = sink.core()
+            if core is None:
+                continue
+            try:
+                core.problems(problems)
+            except Exception:
+                logger.exception(
+                    "%s: the library could not report the problems of stream %d. %s",
+                    self._url,
+                    sink.stream_id,
+                    LIBRARY_BUG,
+                )
+
     @staticmethod
     def _report_drift(sinks: tuple[StreamSink, ...], drift: DriftReport, *, where: str) -> None:
-        """Log a channel's drift once per session, dataset, and field; add it to each stream's row.
+        """Hand each stream's session a `schema_drift` problem per field the drift adds.
 
         Args:
             sinks: The channel's streams.
             drift: The drift.
             where: The connection's URL and the channel.
         """
-        live = [(core, sink) for sink in sinks if (core := sink.core()) is not None]
-        for core, dataset in dict.fromkeys((core, sink.plan.dataset) for core, sink in live):
-            core.drift.report(dataset, Transport.WS, drift, where=where)
-        for core, sink in live:
-            core.record_stream_drift(sink.stream_id, Transport.WS, drift)
+        for sink in sinks:
+            core = sink.core()
+            if core is not None:
+                core.problems(
+                    drift_events(
+                        drift, dataset=sink.plan.dataset, stream_id=sink.stream_id, where=where
+                    )
+                )
+
+
+def _received(readers: list[StreamSink], ticker: str) -> bool:
+    """Tell whether some stream of a dataset still receives a ticker.
+
+    Args:
+        readers: The dataset's streams on the channel.
+        ticker: The ticker.
+
+    Returns:
+        True when a `dm.ALL` stream reads the dataset, or a symbol stream holds the ticker.
+    """
+    return any(sink.receives_all or sink.holds(ticker) for sink in readers)
+
+
+def _defect(plan: ChannelPlan, what: str) -> MassiveError:
+    """Return the failure of a dataset's streams whose held rows the library cannot settle.
+
+    Args:
+        plan: The dataset's plan for the channel.
+        what: What went wrong.
+
+    Returns:
+        A `MassiveError` of the library.
+    """
+    return MassiveError(f"{plan.dataset}: {what}.", source=ErrorSource.LIBRARY)
+
+
+def _with_rows(converted: Converted, rows: pa.Table | None) -> Converted:
+    """Return a conversion that publishes other rows: those its held rows settled to.
+
+    Args:
+        converted: The flush's conversion.
+        rows: The rows to publish instead, or None for none.
+
+    Returns:
+        The conversion with those rows and their distinct symbols.
+    """
+    batch = converted.batch.schema.empty_table() if rows is None else rows
+    distinct = pc.call_function("unique", [batch.column(_SYMBOL)]).to_pylist()
+    return replace(converted, batch=batch, symbols=frozenset(s for s in distinct if s is not None))
 
 
 def _report_updates(updates: Mapping[StreamSink, StreamUpdate]) -> None:
@@ -1904,7 +2423,7 @@ def _report_updates(updates: Mapping[StreamSink, StreamUpdate]) -> None:
         core.update_streams(changes)
 
 
-def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
+def _fail_later(sink_ref: Callable[[], StreamSink | None], message: str) -> None:
     """A watch's `on_invalid`: queue its stream's failure, if the stream still exists.
 
     The listener's callbacks are held from Java until the JVM collects the listener, so they
@@ -1912,7 +2431,7 @@ def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
     keep a finished session alive until the next JVM collection.
 
     Args:
-        sink_ref: The stream's sink, weakly.
+        sink_ref: Returns the stream's sink, or None once it is freed: a weak reference.
         message: Why the stream cannot follow its watchlist.
     """
     sink = sink_ref()
@@ -1920,51 +2439,34 @@ def _fail_later(sink_ref: weakref.ref[StreamSink], message: str) -> None:
         sink.fail_later(message)
 
 
-def _show_skipped(sink_ref: weakref.ref[StreamSink], values: tuple[str, ...]) -> None:
-    """A watch's `on_skipped`: show the symbol-table values its stream skips in `m.streams()`.
+def _report_problems(
+    sink_ref: Callable[[], StreamSink | None], problems: Sequence[Problem]
+) -> None:
+    """Hand problems of a stream's symbol table to its session, if the stream still exists.
 
-    The text is kept apart from the transport's own warning (`StreamRow.skipped`), so neither
-    replaces or clears the other in the row's `Error`.
-
-    Runs in the watch's listener, under the update-graph lock: `SessionCore.update_streams`
-    takes only the leaf `registry_lock` and makes no Deephaven call, so it never blocks there.
-    The sink and its session are held weakly, as in `_fail_later`.
+    Its `SkippedValues` calls it from the watch's listener, under the update-graph lock, and
+    from a converted watchlist's listener: the session's problem sink logs and queues, and
+    never blocks. The sink and its session are held weakly, as in `_fail_later`.
 
     Args:
-        sink_ref: The stream's sink, weakly.
-        values: The values skipped now, sorted; empty once every bad row is fixed or deleted,
-            which clears the row's `Error`.
+        sink_ref: Returns the stream's sink, or None once it is freed: a weak reference.
+        problems: The problems.
     """
     sink = sink_ref()
     core = None if sink is None else sink.core()
-    if sink is None or core is None:
-        return
-    if values:
-        update = StreamUpdate(skipped=skipped_rows_text(values))
-    else:
-        update = StreamUpdate(clear_skipped=True)
-    core.update_streams({sink.stream_id: update})
+    if core is not None:
+        core.problems(problems)
 
 
-def _batches(
-    frames: list[_Frame],
-    lost: Mapping[str, DriftReport],
-    lost_symbols: Mapping[str, Counter[str]],
-    *,
-    channel: str,
-) -> list[_Batch]:
+def _batches(frames: list[_Frame]) -> list[_Batch]:
     """Return a channel's batches of one flush: one per socket generation of its frames.
 
     Frames arrive in order, so each generation's frames are consecutive. Almost every flush
     holds one generation; one that spans a reconnect gets a batch per socket, so each stream
-    records the generation of the rows it actually received. The rows the client dropped go
-    with the last batch, and a flush of dropped rows only gets one batch of no rows.
+    records the generation of the rows it actually received.
 
     Args:
         frames: The channel's frames this flush drained, in arrival order.
-        lost: The rows the client dropped, by channel.
-        lost_symbols: How many of them each canonical symbol had, by channel.
-        channel: The channel.
 
     Returns:
         The batches, in arrival order.
@@ -1975,21 +2477,17 @@ def _batches(
             runs[-1].append(frame)
         else:
             runs.append([frame])
-    batches = [
-        _Batch(
-            [row for *_, rows in run for row in rows],
-            [at for at, _, rows in run for _ in rows],
-            DriftReport(),
-            Counter(),
-            run[0][1],
-        )
-        for run in runs
-    ] or [_Batch([], [], DriftReport(), Counter(), 0)]
-    batches[-1] = replace(
-        batches[-1],
-        lost=lost.get(channel, DriftReport()),
-        lost_symbols=lost_symbols.get(channel, Counter()),
-    )
+    batches = []
+    for run in runs:
+        rows: list[tuple[object, ...]] = []
+        arrived: list[int] = []
+        marks: list[tuple[int, RowMarks]] = []
+        for at, _, frame_rows, frame_marks, _ in run:
+            if frame_marks:
+                marks.append((len(rows), frame_marks))
+            rows.extend(frame_rows)
+            arrived.extend([at] * len(frame_rows))
+        batches.append(_Batch(rows, arrived, tuple(marks), run[0][1]))
     return batches
 
 
@@ -2033,6 +2531,7 @@ def open_stream_tables(
     symbols: NormalizedSymbols,
     *,
     core: SessionCore,
+    policy: ResolvedPolicy,
     stream_id: int,
     host: str,
     path: str,
@@ -2060,6 +2559,7 @@ def open_stream_tables(
         symbols: The stream's symbols: a sorted tuple of canonical symbols, `dm.ALL`, or a
             reactive table's `SymbolTable` box.
         core: The stream's session, which its sink reports to.
+        policy: The stream's resolved policy (`Request.on_error`).
         stream_id: The id the session minted for the stream.
         host: The WebSocket host serving the stream.
         path: The cluster path, such as `/stocks`.
@@ -2082,20 +2582,29 @@ def open_stream_tables(
             )
             watch = None
             received: frozenset[str] | None
-            if isinstance(symbols, _All):
+            if isinstance(symbols, AllSymbols):
                 received = None
             else:
-                reactive = isinstance(symbols, SymbolTable)
-                received = frozenset() if reactive else frozenset(cast("tuple[str, ...]", symbols))
+                received = frozenset() if isinstance(symbols, SymbolTable) else frozenset(symbols)
             sink = StreamSink(
-                stream_id, core=core, plan=plan, publisher=publisher, symbols=received
+                stream_id,
+                core=core,
+                plan=plan,
+                publisher=publisher,
+                symbols=received,
+                policy=policy,
             )
             if isinstance(symbols, SymbolTable):
                 rule = SymbolRowRule(
                     plan.dataset,
                     plan.asset_class,
                     plan.symbols.as_written,
-                    core.config.noncanonical_symbols,
+                    policy.noncanonical_symbols,
+                )
+                skipped = SkippedValues(
+                    rule,
+                    stream_id=stream_id,
+                    report=functools.partial(_report_problems, weakref.ref(sink)),
                 )
                 watch = SymbolWatch(
                     rule,
@@ -2103,8 +2612,11 @@ def open_stream_tables(
                     on_symbols,
                     stream_id=stream_id,
                     on_invalid=functools.partial(_fail_later, weakref.ref(sink)),
-                    on_skipped=functools.partial(_show_skipped, weakref.ref(sink)),
+                    on_skipped=skipped.update,
                 )
+                refused = refused_values_of(symbols.table, rule.column)
+                if refused is not None:  # a table `canonicalize_symbols` returned
+                    refused.follow(skipped)
                 watch.keep_alive_with(blink)
         handle = StreamHandle(
             stream_id,

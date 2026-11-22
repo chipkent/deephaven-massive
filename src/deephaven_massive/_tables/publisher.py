@@ -54,7 +54,7 @@ from __future__ import annotations
 import functools
 import logging
 import threading
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 from deephaven.execution_context import get_exec_ctx
 from deephaven.stream.table_publisher import table_publisher
@@ -64,14 +64,35 @@ from deephaven_massive._tables.liveness import new_scope
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from deephaven import dtypes
     from deephaven.liveness_scope import LivenessScope
     from deephaven.stream.table_publisher import TablePublisher
-    from deephaven.table import Table
+    from deephaven.table import Table, TableDefinitionLike
 
-__all__ = ["BlinkPublisher", "blink_publisher"]
+__all__ = ["BlinkPublisher", "Publisher", "blink_publisher"]
 
 logger = logging.getLogger(__name__)
+
+
+class Publisher(Protocol):
+    """What a blink table's owner calls on its publisher: add rows, or fail the table.
+
+    A `BlinkPublisher` is one. Its owners (a stream's sink, a poller, a diagnostics table)
+    take this instead, since they call nothing else.
+    """
+
+    def add(self, table: Table) -> None:
+        """Add a snapshot of a table's rows to the blink table (`BlinkPublisher.add`).
+
+        Args:
+            table: The rows.
+        """
+
+    def publish_failure(self, error: Exception) -> None:
+        """Fail the blink table with an error, once (`BlinkPublisher.publish_failure`).
+
+        Args:
+            error: The failure.
+        """
 
 
 class _FailurePin:
@@ -246,7 +267,7 @@ class BlinkPublisher:
 
 def blink_publisher(
     name: str,
-    columns: dict[str, dtypes.DType],
+    columns: TableDefinitionLike,
     *,
     on_shutdown: Callable[[], None],
     release_later: Callable[[LivenessScope], None],
@@ -265,7 +286,7 @@ def blink_publisher(
 
     Args:
         name: The publisher's name, for Deephaven's logs, such as `massive.trades#7`.
-        columns: The blink table's columns (`col_defs`).
+        columns: The blink table's columns (`col_defs`, or a `TableDefinition`).
         on_shutdown: The table's shutdown callback. It must follow the rules of a Deephaven
             shutdown callback: no Deephaven call, no blocking, no exception.
         release_later: Releases a scope later on a library thread, under the update graph's

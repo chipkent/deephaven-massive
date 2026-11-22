@@ -318,12 +318,15 @@ _LEXICONS = (
     Lexicon(
         name="options_admin",
         reason="An options administrative message from the WebSocket, such as a FLEX trade notice.",
-        entries=_from(
-            "/v3/trades/{optionsTicker}",
-            q="sequence_number",
-            t="sip_timestamp",
-            x="exchange",
-        ),
+        entries={
+            **_from(
+                "/v3/trades/{optionsTicker}",
+                q="sequence_number",
+                t="sip_timestamp",
+                x="exchange",
+            ),
+            **_from("/options/v1/admin-messages", rt="retransmission"),
+        },
     ),
     Lexicon(
         name="snapshot",

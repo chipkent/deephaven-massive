@@ -2,9 +2,10 @@
 
 A bar is kept only when its whole window lies inside the range (`bar_starts`): an intraday or
 1-day bar's window is its own interval. Massive starts a week on its Sunday, at 00:00 in the
-class day zone, and stamps the week's bar there. For stocks and options, which do not trade at
-weekends, a week's window is its Monday to Friday and months, quarters, and years are calendar
-periods less their leading and trailing weekend days. Indices (which can update around the
+class's bar zone (Chicago for indices, else the class day zone), and stamps the week's bar
+there. For stocks and options, which do not trade at weekends, a week's window is its Monday to
+Friday and months, quarters, and years are calendar periods less their leading and trailing
+weekend days. Indices (which can update around the
 clock), forex (which trades from Sunday evening UTC), and crypto keep their weekends: their
 weeks run Sunday to Saturday and their months, quarters, and years are whole calendar periods.
 A bar of several units spans that many. A bar of several days spans that many calendar days,
@@ -24,10 +25,12 @@ and years are calendar periods (`futures_bucket_end`). A bar has certainly ended
 label's session has closed and, when the label may not yet be the bucket's last session, one
 weekday after the latest session the bucket can hold (`futures_bar_ended`). Named by session
 dates, such bars are requested from the first bucket that can start inside the range
-(`futures_bar_request`, `futures_first_bucket_day`). Intraday futures bars sit on whole units of
-UTC time like every other class's; named by date, their request starts
-`FUTURES_HOLIDAY_MARGIN` before the first session's regular open, and their rows are kept by
-their session, `Date`.
+(`futures_bar_request`, `futures_first_bucket_day`). Massive serves `day` bars of futures as it
+serves `session` bars, buckets of whole UTC days labelled by their last session, so a futures
+bar of `Timespan.DAY` follows every rule of `Timespan.SESSION` here (`futures_session_unit`).
+Intraday futures bars sit on whole units of UTC time like every other class's; named by date,
+their request starts `FUTURES_HOLIDAY_MARGIN` before the first session's regular open, and
+their rows are kept by their session, `Date`.
 
 `history_source` keeps the bars `bar_starts` admits, and `row_times` fills a bar's window from
 `bar_days` and judges whether a futures bar has ended with `futures_bar_ended`. Every function
@@ -44,8 +47,7 @@ from typing import TYPE_CHECKING, Final
 from deephaven_massive._datasets.dates import (
     DaySpan,
     TimeRange,
-    day_start,
-    day_zone,
+    bar_zone,
     midnight,
     trades_at_weekends,
 )
@@ -72,6 +74,7 @@ __all__ = [
     "futures_bar_request",
     "futures_bucket_end",
     "futures_first_bucket_day",
+    "futures_session_unit",
     "intraday",
     "unit_ns",
 ]
@@ -89,6 +92,9 @@ _ONE_DAY: Final = timedelta(days=1)
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
 _DAYS_A_WEEK: Final = 7
+
+_FUTURES_SESSION_UNITS: Final = frozenset({Timespan.SESSION, Timespan.DAY})
+"""The futures bar units of one session each (`futures_session_unit`)."""
 
 _INTRADAY_SECONDS: Final[Mapping[Timespan, int]] = {
     Timespan.SECOND: 1,
@@ -128,10 +134,11 @@ def futures_bar_request(span: DaySpan, *, timespan: Timespan, multiplier: int) -
         The instants to request, in UTC.
     """
     upper = datetime.combine(span.last, FUTURES_BAR_CLOSE, tzinfo=CHICAGO).astimezone(UTC)
-    if intraday(timespan) or (timespan is Timespan.SESSION and multiplier == 1):
+    sessions = futures_session_unit(timespan)
+    if intraday(timespan) or (sessions and multiplier == 1):
         lower = futures_session_open(span.first) - FUTURES_HOLIDAY_MARGIN
         return TimeRange(lower.astimezone(UTC), upper)
-    if timespan is Timespan.SESSION:
+    if sessions:
         # A futures bucket starts at 00:00 UTC of its first day.
         return TimeRange(midnight(futures_first_bucket_day(span.first), UTC), upper)
     period = _Periods(AssetClass.FUTURES, timespan).anchor(span.first)
@@ -216,13 +223,29 @@ def futures_bar_ended(
         The aware instant, in Chicago time.
     """
     closes = futures_session_end(label)
-    if timespan is Timespan.SESSION and multiplier == 1:
+    if futures_session_unit(timespan) and multiplier == 1:
         return closes
     after = futures_bucket_end(first_day, timespan=timespan, multiplier=multiplier)
     latest = _latest_possible_session(after)
     if label >= latest:
         return closes
     return futures_session_end(add_weekdays(latest, 1))
+
+
+def futures_session_unit(timespan: Timespan) -> bool:
+    """Tell whether a futures bar unit is one session, as `SESSION` and `DAY` both are.
+
+    Massive answers `resolution=1day` with bars in the shape of its `1session` bars: each
+    starts at 00:00 UTC on its bucket's first day and is labelled with the session it holds,
+    so the library dates and keeps both alike, and sends each as its own unit.
+
+    Args:
+        timespan: The bar unit.
+
+    Returns:
+        True for `SESSION` and `DAY`.
+    """
+    return timespan in _FUTURES_SESSION_UNITS
 
 
 def intraday(timespan: Timespan) -> bool:
@@ -261,7 +284,7 @@ class _Periods:
     timespan: Timespan
 
     def day_of(self, moment: datetime) -> date:
-        """Return the day an instant belongs to: its date in the class day zone.
+        """Return the day an instant belongs to: its date in the class's bar zone.
 
         Args:
             moment: An aware instant.
@@ -269,10 +292,10 @@ class _Periods:
         Returns:
             The day.
         """
-        return moment.astimezone(day_zone(self.asset_class)).date()
+        return moment.astimezone(bar_zone(self.asset_class)).date()
 
     def day_start(self, day: date) -> datetime:
-        """Return the instant a day starts: midnight in the class day zone.
+        """Return the instant a day starts: midnight in the class's bar zone.
 
         Args:
             day: The day.
@@ -280,7 +303,7 @@ class _Periods:
         Returns:
             The instant, in UTC.
         """
-        return day_start(self.asset_class, day)
+        return midnight(day, bar_zone(self.asset_class))
 
     def anchor(self, day: date) -> date:
         """Return the anchor of the period a day belongs to.
@@ -414,13 +437,15 @@ def bar_starts(
     its start belongs to (`_Periods`): days, weeks, or calendar months, quarters, and years. A
     week starts on its Sunday. A stock or option week covers Monday to Friday and its longer
     periods lose their leading and trailing weekend days, while indices, forex, and crypto keep
-    whole calendar weeks (Sunday to Saturday) and periods. Days are those of the class's day
-    zone. Futures bars of a session or longer are UTC-day buckets that this function does not
-    select: `history_source` keeps them by their filled window (`futures_bar_ended`).
+    whole calendar weeks (Sunday to Saturday) and periods. Days are those of the class's bar
+    zone (`dates.bar_zone`): Chicago for indices, whose bars Massive starts at midnight there,
+    else the class day zone. Futures bars of a session or longer are UTC-day buckets that this
+    function does not select: `history_source` keeps them by their filled window
+    (`futures_bar_ended`).
 
     Args:
-        asset_class: The class whose days apply (`day_class`), or `ClassFromPrefix.ANY` for New
-            York days; futures only for intraday bars.
+        asset_class: The class whose bar days apply (`day_class`), or `ClassFromPrefix.ANY`
+            for New York days; futures only for intraday bars.
         span: The range the bars must lie in. Pass an end no later than now, so a bar that
             has not finished yet is left out.
         timespan: The bar unit.
@@ -467,7 +492,7 @@ def bar_days(
     since an index can update at weekends, as forex and crypto do (a week runs Sunday to
     Saturday). A bar of several days spans that many calendar days, weekends included, as
     Massive counts them. It gives a bar's `TimestampStart` and `TimestampEnd`, the midnights of
-    the two days in the class day zone.
+    the two days in the class's bar zone (Chicago for indices, else the class day zone).
 
     Args:
         asset_class: The class (`day_class`); not futures, whose bars are sessions.

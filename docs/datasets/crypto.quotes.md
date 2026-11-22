@@ -7,7 +7,7 @@ Quotes of crypto pairs: each exchange's best bid and ask, as they change.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.crypto.quotes(symbols)
+m.crypto.quotes(symbols, *, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`
@@ -22,6 +22,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -40,7 +41,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Symbol` | String | The row's instrument, as Massive's ticker. From WebSocket `pair`: "The crypto pair." |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. |
 | `Timestamp` | Instant | The row's event time. From WebSocket `t`: "The Timestamp in Unix MS." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `BidPrice` | double | The bid price. |
 | `BidSize` | double | The bid size. |
 | `AskPrice` | double | The ask price. |
@@ -51,7 +51,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
@@ -60,7 +60,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Symbol` | `pair` |
 | `Date` |  |
 | `Timestamp` | `t` |
-| `RawSymbol` | `pair` |
 | `BidPrice` | `bp` |
 | `BidSize` | `bs` |
 | `AskPrice` | `ap` |
@@ -77,4 +76,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

@@ -117,7 +117,6 @@ def test_the_machine_check_names_secrets_only_as_set(tmp_path: Path) -> None:
     ]
     assert environment["set"] == {
         "MASSIVE_API_KEY": True,
-        "MASSIVE_DELAYED_API_KEY": False,
         "MASSIVE_S3_ACCESS_KEY_ID": False,
         "MASSIVE_S3_SECRET_ACCESS_KEY": False,
         "HTTPS_PROXY": True,
@@ -140,3 +139,11 @@ def test_a_machine_without_the_tools_is_not_ready(
     assert environment["java"] == ""
     assert not machine_checks.ready(items)
     assert machine_checks.ready([machine_checks.Item("x", WARN, "")])
+
+
+def test_the_java_checked_is_the_one_the_server_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert machine_checks.java_command({"JAVA_HOME": "/opt/jdk21"}) == "/opt/jdk21/bin/java"
+    assert machine_checks.java_command({"JAVA_HOME": " "}) == "/usr/bin/java"
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    assert machine_checks.java_command({}) == "java"

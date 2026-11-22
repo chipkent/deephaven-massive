@@ -20,20 +20,24 @@ For each example it writes, under the output folder:
   the progress lines also name;
 - `summary.txt`: one line per example, with its outcome and how long it took.
 
-Every text it writes passes through the secret filter (`SecretFilter.clean`). An example
-ends `passed`; `refused by your plan` when it raised `EntitlementError`, a refusal by
-Massive because of the key's plans, which is expected on a free key; or `failed` with any
-other error, which is a finding to report. A stream that Massive refuses fails after its
-example returns, so after the last example the run waits `REFUSAL_WAIT` seconds and gives a
-passed example the verdict of its sessions' failed streams (`stream_verdict`). Every table the
-examples make belongs to one liveness scope; at the end the runner closes every session the
-examples opened, forgets their variables, and releases that scope, so nothing they started
-outlives the run.
+Every text it writes passes through the secret filter (`SecretFilter.clean`). An example ends
+`passed`; `refused by Massive` when it raised Massive's `EntitlementError`, one whose `source` is
+`ErrorSource.MASSIVE` and that carries Massive's `status`, which Massive sends for data the key may
+not read; `not listed as delayed` when it raised the `EntitlementError` of the library's settings
+(its `source` is `ErrorSource.USER`: Massive labels the data delayed and the settings file does not
+list its subscription in `delayed_subscriptions`); or `failed` with any other error, which is a
+finding to report. A stream that Massive refuses fails after its example returns, and so does a
+`fetch()` or `history()` that reads in the background, so after the last example the run waits
+`REFUSAL_WAIT` seconds and gives a passed example the verdict of its sessions' failed streams and
+reads (`stream_verdict`). Every table the examples make belongs to one liveness scope; at the end
+the runner closes every session the examples opened, forgets their variables, and releases that
+scope, so nothing they started outlives the run.
 
-Most examples open their session with `dm.MassiveSession()`, as the README's do. The paid
+Most examples open their session with `dm.MassiveSession()`, as the README's do. The live
 Stocks examples load the settings file the README's settings example saves, `SETTINGS_PATH`;
-`run_examples` writes a settings file for the key's plans (`settings_text`) and runs a copy of
-each such example that reads it instead (`fitted`), so the run needs no file of the tester's.
+`run_examples` writes a settings file listing the subscriptions the tester's own settings list
+as delayed (`listed_delayed`, `settings_text`) and runs a copy of each such example that reads
+it instead (`fitted`), so the run writes nothing into the tester's own file.
 
 This module imports Deephaven, so it is imported only once a Deephaven server runs.
 """
@@ -47,7 +51,7 @@ import runpy
 import time
 import traceback
 from dataclasses import dataclass
-from types import MappingProxyType
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from deephaven.execution_context import get_exec_ctx
@@ -55,12 +59,13 @@ from deephaven.pandas import to_pandas
 from deephaven.table import Table
 
 import deephaven_massive as dm
+from deephaven_massive._config import CONFIG_FILE_VARIABLE
 from deephaven_massive._tables.liveness import new_scope, release_scope
+from tests._live.refusals import is_massive_refusal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Collection, Iterator, Mapping
     from contextlib import AbstractContextManager
-    from pathlib import Path
 
     from tests._live.live_run.secret_scrub import SecretFilter
 
@@ -76,15 +81,16 @@ SESSION_LINE: Final = re.compile(r"^m = dm\.MassiveSession\(.*\)\n", re.MULTILIN
 """A line of an example that opens its session in `m`."""
 
 PASSED: Final = "passed"
-REFUSED: Final = "refused by your plan"
+REFUSED: Final = "refused by Massive"
+NOT_LISTED: Final = "not listed as delayed"
 FAILED: Final = "failed"
 
 TABLE_ROWS: Final = 1000
 """How many rows of each table an example made are saved."""
 
 DOWNLOAD_TIMEOUT: Final = 900.0
-"""Seconds to wait for background downloads before the next example runs anyway: their 10
-minutes of rate-limit pauses, and some time to read."""
+"""Seconds to wait for background downloads before the next example runs anyway: their
+rate-limit pauses, at most `MassiveConfig.max_outage`, and time to read."""
 
 POLL_INTERVAL: Final = 1.0
 """Seconds between looks at the sessions' downloads."""
@@ -93,38 +99,63 @@ REFUSAL_WAIT: Final = 15.0
 """Seconds the run waits after the last example for Massive's answers to the examples'
 streams: a refused subscription fails its stream seconds after the example returned."""
 
-STREAM_REFUSAL: Final = "refused the subscription"
-"""The words of a stream's `Error` when Massive's WebSocket server refused its subscription,
-a refusal by the key's plans; the connection writes them (`ws_connection`, `_refused`)."""
+STREAM_REFUSAL: Final = "Massive answered the subscription to"
+"""The words of a stream's `Error` when Massive's WebSocket server refused its subscription;
+the connection writes them (`ws_connection`, `_refused`)."""
+
+READ_REFUSAL: Final = re.compile(
+    r"\w: Massive refused (?:this read for|its flat files\.|the flat files of) "
+)
+"""The words of a background read's `Error` when Massive refused it with `EntitlementError`:
+the dataset, then the REST refusal "Massive refused this read for" a subscription
+(`RestReader._dataset_error`) or the flat-file refusal "Massive refused its flat files" or
+"the flat files of" a venue (`_ingest/flatfiles.py`, `_ingest/refused_venues.py`)."""
+
+DELAYED_REFUSAL: Final = "is not in delayed_subscriptions"
+"""The words of a stream's or read's `Error` when the settings refused delayed data: the
+library's refusal names the setting that accepts it (`recency_labels.delayed_refusal`)."""
 
 SETTINGS_PATH: Final = "~/massive/settings.yaml"
-"""The settings file the paid examples read, where the README's settings example saves it."""
+"""The settings file the live examples read, where the README's settings example saves it."""
 
 TEST_FOLDER: Final = "~/massive-test"
 """The tester's folder, where the examples write their debug log and the diagnostics."""
 
-DELAYED_TIERS: Final = ("starter", "developer")
-"""The plans that stream delayed data, except for currencies, which are real-time on every
-plan."""
 
+def listed_delayed(environ: Mapping[str, str]) -> tuple[str, ...] | None:
+    """Read the subscriptions the tester's own settings file lists as delayed.
 
-def settings_text(tiers: Mapping[str, str]) -> str:
-    """Write the settings file the paid examples read, for the key's plans.
-
-    A Starter or Developer subscription other than currencies goes in
-    `delayed_subscriptions`, so its live examples read the delayed feed its plan streams.
+    The file is the one `DEEPHAVEN_MASSIVE_CONFIG_FILE` names, else `SETTINGS_PATH`, where
+    the README's settings example saves it. Which subscriptions Massive serves delayed is the
+    tester's to say, as their dashboard shows it; nothing asks Massive.
 
     Args:
-        tiers: Each subscription's plan, as the probe names them (`"stocks": "starter"`);
-            empty when the plans are unknown, which writes the free plan's file.
+        environ: The environment.
+
+    Returns:
+        The subscriptions, sorted; None when there is no such file.
+
+    Raises:
+        ValueError: When the library refuses the file.
+    """
+    path = Path(environ.get(CONFIG_FILE_VARIABLE, "").strip() or SETTINGS_PATH).expanduser()
+    if not path.exists():
+        return None
+    config = dm.MassiveConfig.from_file(path)
+    return tuple(sorted(s.value for s in config.delayed_subscriptions))
+
+
+def settings_text(delayed: Collection[str]) -> str:
+    """Write the settings file the live examples read.
+
+    Args:
+        delayed: The subscriptions to list in `delayed_subscriptions`, so their live examples
+            read the delayed feed (`listed_delayed`); empty lists none.
 
     Returns:
         The file's YAML, such as `delayed_subscriptions: [futures, stocks]` and a newline.
     """
-    delayed = sorted(
-        name for name, tier in tiers.items() if tier in DELAYED_TIERS and name != "currencies"
-    )
-    return f"delayed_subscriptions: [{', '.join(delayed)}]\n"
+    return f"delayed_subscriptions: [{', '.join(sorted(delayed))}]\n"
 
 
 def fitted(path: Path, *, settings: Path, test_folder: Path, folder: Path) -> Path:
@@ -156,7 +187,7 @@ class Outcome:
 
     Attributes:
         name: The example's file name.
-        status: `PASSED`, `REFUSED`, or `FAILED`.
+        status: `PASSED`, `REFUSED`, `NOT_LISTED`, or `FAILED`.
         seconds: How long it ran.
         error: The error's type and message for a refusal; for a failure, its type and the
             first line of its message, then its traceback; or `""`.
@@ -277,20 +308,32 @@ def failed_streams(session: dm.MassiveSession) -> list[str]:
 
 
 def stream_verdict(outcome: Outcome, errors: list[str]) -> Outcome:
-    """Give a passed example the verdict of the streams its sessions failed after it returned.
+    """Give a passed example the verdict of the streams and reads that failed after it returned.
 
     Args:
         outcome: The example's outcome when it returned.
-        errors: The `Error` of each failed stream of the sessions it opened (`failed_streams`).
+        errors: The `Error` of each failed row of `m.streams()` of the sessions it opened
+            (`failed_streams`): streams, and reads in the background.
 
     Returns:
-        The outcome as it was when it isn't `PASSED` or no stream failed; `REFUSED` when Massive
-        refused every failed stream's subscription (`STREAM_REFUSAL`); otherwise `FAILED`. The
-        new outcome's error names the first failed stream's `Error`.
+        The outcome as it was when it isn't `PASSED` or nothing failed. Otherwise, when every
+        failed row was refused, by Massive (`STREAM_REFUSAL`, `READ_REFUSAL`) or by the
+        settings (`DELAYED_REFUSAL`): `NOT_LISTED` when the settings refused any, the one the
+        tester can fix, and `REFUSED` when Massive refused them all; and `FAILED` when any row
+        failed for another reason. The new outcome's error names the first failed row's
+        `Error`.
     """
     if outcome.status != PASSED or not errors:
         return outcome
-    status = REFUSED if all(STREAM_REFUSAL in error for error in errors) else FAILED
+    refusals = (STREAM_REFUSAL, DELAYED_REFUSAL)
+    if not all(
+        any(words in error for words in refusals) or READ_REFUSAL.search(error) for error in errors
+    ):
+        status = FAILED
+    elif any(DELAYED_REFUSAL in error for error in errors):
+        status = NOT_LISTED
+    else:
+        status = REFUSED
     return Outcome(outcome.name, status, outcome.seconds, f"a stream failed: {errors[0]}")
 
 
@@ -345,12 +388,29 @@ def run_example(
     try:
         with lock(), contextlib.redirect_stdout(printed):
             namespace.update(runpy.run_path(str(path), init_globals=namespace))
-    except dm.EntitlementError as refusal:
-        status, error = REFUSED, f"{type(refusal).__name__}: {refusal}"
     except Exception as failure:  # noqa: BLE001 - any other error of an example is a finding
-        headline = f"{type(failure).__name__}: {str(failure).strip().partition(chr(10))[0]}"
-        status, error = FAILED, f"{headline}\n{traceback.format_exc()}"
+        status, error = _failure_outcome(failure)
     return Outcome(path.name, status, round(clock() - start, 1), error), printed.getvalue()
+
+
+def _failure_outcome(failure: Exception) -> tuple[str, str]:
+    """Judge what an example raised.
+
+    Args:
+        failure: The error, being handled.
+
+    Returns:
+        The status and the error's text: `NOT_LISTED` for the settings' `EntitlementError`
+        (its `source` is `ErrorSource.USER`), `REFUSED` for Massive's
+        (`refusals.is_massive_refusal`), each with its type and message; otherwise `FAILED`,
+        with its first line and its traceback, the library's own refusals included.
+    """
+    if isinstance(failure, dm.EntitlementError) and failure.source is dm.ErrorSource.USER:
+        return NOT_LISTED, f"{type(failure).__name__}: {failure}"
+    if is_massive_refusal(failure):
+        return REFUSED, f"{type(failure).__name__}: {failure}"
+    headline = f"{type(failure).__name__}: {str(failure).strip().partition(chr(10))[0]}"
+    return FAILED, f"{headline}\n{traceback.format_exc()}"
 
 
 def tables_of(namespace: dict[str, Any]) -> dict[str, Table]:
@@ -429,7 +489,7 @@ def run_examples(
     echo: Callable[[str], None],
     lock: Callable[[], AbstractContextManager[None]] = console_lock,
     wait: Callable[[dict[str, Any]], bool] = wait_for_downloads,
-    tiers: Mapping[str, str] = MappingProxyType({}),
+    delayed: Collection[str] = (),
     settle: Callable[[list[dm.MassiveSession]], None] = lambda _sessions: time.sleep(REFUSAL_WAIT),
 ) -> list[Outcome]:
     """Run the examples in order, as one console session, and save what each did.
@@ -444,8 +504,8 @@ def run_examples(
         lock: Makes the lock every console command holds.
         wait: Waits for the background downloads before each example; returns False when it
             gave up.
-        tiers: Each subscription's plan, for the settings file `out/settings.yaml`
-            (`settings_text`); empty, the default, writes the free plan's file. An example
+        delayed: The subscriptions the settings file `out/settings.yaml` lists as delayed
+            (`settings_text`); the default lists none. An example
             that names `SETTINGS_PATH` or `TEST_FOLDER` runs from a copy under `out/fitted/`
             (`fitted`).
         settle: Waits, after the last example, for Massive's answers to the streams of the
@@ -458,7 +518,7 @@ def run_examples(
     """
     out.mkdir(parents=True, exist_ok=True)
     settings = out / "settings.yaml"
-    settings.write_text(settings_text(tiers), encoding="utf-8")
+    settings.write_text(settings_text(delayed), encoding="utf-8")
     namespace: dict[str, Any] = {}
     outcomes: list[Outcome] = []
     opened: dict[int, tuple[dm.MassiveSession, str]] = {}

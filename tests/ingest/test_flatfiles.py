@@ -15,18 +15,23 @@ import tracemalloc
 import weakref
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, Protocol, cast
+from types import MethodType
+from typing import Any, ClassVar, NamedTuple, Protocol
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from deephaven import new_table
+from deephaven.column import string_col
 from deephaven.execution_context import get_exec_ctx
 from deephaven.table import Table
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
@@ -38,26 +43,55 @@ from deephaven_massive._datasets.history_source import HistoryWindow, history_wi
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._datasets.row_times import BarBounds, RowTimes, StartRule
 from deephaven_massive._datasets.schema import Schema
-from deephaven_massive._enums import AssetClass, FuturesVenue, HistorySource, NotBars, Timespan
+from deephaven_massive._datasets.symbols import NormalizedSymbols, SymbolTable
+from deephaven_massive._enums import (
+    AssetClass,
+    FuturesVenue,
+    HistorySource,
+    NotBars,
+    OnError,
+    Timespan,
+)
+from deephaven_massive._error_policy import resolve_policy
+from deephaven_massive._errors import LIBRARY_BUG, BrokenGuaranteeError, RowDataError
 from deephaven_massive._ingest import flatfiles
-from deephaven_massive._log_limits import BoundedLog
-from deephaven_massive._massive import DriftReport, Field, Source, Transport, WireType, WireUnit
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import HistoryQuery
+from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._ingest.refused_venues import RefusedVenues
+from deephaven_massive._log_limits import BoundedLog, LoggedKeys
+from deephaven_massive._massive import (
+    DriftReport,
+    Field,
+    RowFault,
+    RowMark,
+    Source,
+    Transport,
+    WireEntitlementError,
+    WireType,
+    WireUnit,
+)
 from deephaven_massive._session import CATALOG
-from deephaven_massive._tables import columns
+from deephaven_massive._tables import columns, problem_reporter
+from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.columns import col_defs
-from deephaven_massive._types import override
+from deephaven_massive._tables.problem_events import ProblemCause, ProblemEvent
+from deephaven_massive._tables.read_tally import ReadTally
+from deephaven_massive._tables.transports import (
+    SymbolFailure,
+    SymbolOutcome,
+    SymbolRows,
+)
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import HistoryQuery
 from tests._fakes.clock import FakeClock
-
-if TYPE_CHECKING:
-    from deephaven_massive._ingest.clients import SessionClients
+from tests._fakes.rest import FakeRestServer, Reply, envelope
+from tests._fakes.s3 import REQUEST_ID
 
 TIMEOUT = 30.0
 RowsWhen = Callable[[Table, Callable[[list[dict[str, Any]]], bool]], list[dict[str, Any]]]
 NEW_YORK = ZoneInfo("America/New_York")
 R, FF = Transport.REST, Transport.FLAT_FILES
 NOW = datetime(2025, 3, 10, 16, tzinfo=UTC)
+INDEX_BARS = CATALOG.by_name["indices.bars"]
 """A Monday afternoon, when every file of the first week of March 2025 is published."""
 LOGGER = "deephaven_massive"
 # The once-per-session warnings a transform built outside a session logs to.
@@ -191,11 +225,15 @@ TRADES_0303 = TRADES_KEY.format(3)
 TRADES_0304 = TRADES_KEY.format(4)
 TRADES_0305 = TRADES_KEY.format(5)
 LOCATION = "s3://flatfiles/{} at https://files.massive.com"
+A = "Massive answered the read of s3://flatfiles/"
+"""How Massive's answer to the read of a file starts, before the file's key."""
 FUTURES_KEY = "us_futures_{}/trades_v1/{:%Y/%m/%Y-%m-%d}.csv.gz"
 FUTURES_0304 = "us_futures_{}/trades_v1/2025/03/2025-03-04.csv.gz"
 STOCK_KEY = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
 """The file a transform's block comes from, in the tests that apply one directly."""
 VENUES = ("cme", "cbot", "nymex", "comex")
+EVERY_VENUE = frozenset(FuturesVenue)
+"""Every venue, named: refusals then follow `refused_venues`."""
 
 TRADE_HEADER = (
     "conditions,correction,exchange,id,participant_timestamp,price,sequence_number,"
@@ -217,21 +255,24 @@ def epoch_ns(moment: datetime) -> int:
     return int(moment.timestamp()) * 10**9
 
 
-def config(**overrides: object) -> dm.MassiveConfig:
-    fields: dict[str, object] = {
-        "api_key": "test-key",
-        "s3_access_key_id": "AKIDFLATFILES",
-        "s3_secret_access_key": "flat-file-secret",
-    }
-    fields.update(overrides)
-    return dm.MassiveConfig(**cast("dict[str, Any]", fields))
+CONFIG = dm.MassiveConfig(
+    api_key="test-key",
+    s3_access_key_id="AKIDFLATFILES",
+    s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
+)
+
+NO_S3 = dataclasses.replace(CONFIG, s3_access_key_id=None, s3_secret_access_key=None)
 
 
-NO_S3 = config(s3_access_key_id=None, s3_secret_access_key=None)
-
-
-def request(symbols: object = ("AAPL",), **fields: object) -> Request:
-    return Request(symbols=cast("Any", symbols), **cast("dict[str, Any]", fields))
+def request(
+    symbols: NormalizedSymbols = ("AAPL",),
+    *,
+    timespan: Timespan | None = None,
+    adjusted: bool | None = None,
+    on_error: dm.ErrorPolicy | None = None,
+) -> Request:
+    policy = resolve_policy(on_error, dm.ErrorPolicy())
+    return Request(symbols=symbols, timespan=timespan, adjusted=adjusted, on_error=policy)
 
 
 def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
@@ -251,6 +292,52 @@ def rows(table: Table, *, arrival: bool = False) -> list[dict[str, Any]]:
 
 def pick(table: Table, *columns: str) -> list[tuple[Any, ...]]:
     return [tuple(row[c] for c in columns) for row in rows(table)]
+
+
+def capture_problems(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> list[ProblemEvent]:
+    # The problem events the session receives, in order.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    return events
+
+
+def record_problems(m: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> list[ProblemEvent]:
+    # The problem events the session receives, in order; they still reach its reporter, which
+    # logs the alarm, and m.problems().
+    events: list[ProblemEvent] = []
+    report = m._core.problems
+
+    def recorded(found: Sequence[ProblemEvent]) -> None:
+        events.extend(found)
+        report(found)
+
+    monkeypatch.setattr(m._core, "problems", recorded)
+    return events
+
+
+def alarms(caplog: pytest.LogCaptureFixture) -> list[str]:
+    # The problem reporter's WARNINGs: the first problem of each cause on each read.
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == problem_reporter.__name__ and r.levelno == logging.WARNING
+    ]
+
+
+def alarm(cause: str, head: str, detail: str, *, where: str, read: int = 1) -> str:
+    # The WARNING of a read's first problem of a cause.
+    return (
+        f"stocks.trades table {read}: {cause}: {head}{detail.removesuffix('.')} (at {where}). "
+        f"m.problems() lists it and every later {cause} problem of this table, which the log "
+        "shows at DEBUG only."
+    )
+
+
+def problems(events: list[ProblemEvent]) -> list[tuple[object, ...]]:
+    # What each event says of its rows: cause, symbol as sent, field, and count.
+    return [(e.cause, e.symbol, e.field, e.rows) for e in events]
 
 
 @pytest.fixture
@@ -286,7 +373,7 @@ def retry_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
 
 @pytest.fixture
 def session(fake_s3: FakeS3, clock: Callable[[datetime], None]) -> Iterator[dm.MassiveSession]:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     yield m
     m.close()
 
@@ -345,15 +432,54 @@ def applied(monkeypatch: pytest.MonkeyPatch) -> Applied:
 
 def flat_file_client(m: dm.MassiveSession) -> _massive.FlatFileClient:
     # The session's flat-file client, which its first flat-file read created.
-    client = cast("SessionClients", m._core._ports)._flat_files
+    client = clients(m)._flat_files
     assert client is not None
     return client
 
 
-def query(m: dm.MassiveSession, spec: DatasetSpec, **kwargs: object) -> HistoryQuery:
-    q = build_query(m._core, spec, **cast("dict[str, Any]", kwargs))
-    assert isinstance(q, HistoryQuery)
-    return q
+def clients(m: dm.MassiveSession) -> SessionClients:
+    ports = m._core._ports
+    assert isinstance(ports, SessionClients)
+    return ports
+
+
+def files_transport(m: dm.MassiveSession) -> flatfiles.FlatFileHistory:
+    transport = m._core.flat_file_transport()
+    assert isinstance(transport, flatfiles.FlatFileHistory)
+    return transport
+
+
+def query(
+    m: dm.MassiveSession,
+    spec: DatasetSpec,
+    *,
+    symbols: dm.SymbolsLike | None = None,
+    venues: AbstractSet[FuturesVenue] | None = None,
+    timespan: Timespan | None = None,
+    adjusted: bool | None = None,
+    filters: Mapping[str, dm.FilterValue] | None = None,
+    on_error: dm.ErrorPolicy | None = None,
+) -> HistoryQuery:
+    return build_query(
+        m._core,
+        spec,
+        query_type=HistoryQuery,
+        symbols=symbols,
+        venues=venues,
+        timespan=timespan,
+        adjusted=adjusted,
+        filters=filters,
+        on_error=on_error,
+    )
+
+
+def join_reads(m: dm.MassiveSession) -> None:
+    # Waits for every background read of the session to end.
+    for state in list(m._core.workers._workers.values()):
+        assert isinstance(state.fail, MethodType)  # a read's own `fail`
+        read = state.fail.__self__
+        assert isinstance(read, BackgroundRead)
+        read.join(TIMEOUT)
 
 
 class ShutdownSignal(ThreadPoolExecutor):
@@ -393,7 +519,7 @@ def test_history_after_close_is_a_closed_session_error(
     q = query(m, INDEX_VALUES_SPEC, symbols=["I:SPX"])
     m.close()
     with pytest.raises(dm.MassiveError, match="is closed"):
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
 
 
 def test_auto_without_any_source_raises_before_any_request(
@@ -402,11 +528,14 @@ def test_auto_without_any_source_raises_before_any_request(
     m = dm.MassiveSession(NO_S3)
     try:
         q = query(m, INDEX_VALUES_SPEC, symbols=["I:SPX"])
-        with pytest.raises(
-            ValueError,
-            match=r"indices\.values history has no possible source\. Flat files: no S3 credentials",
-        ):
-            q.history("2025-03-03", "2025-03-03")
+        refused = (
+            "indices.values history has no source. Flat files cannot serve it, since no S3 "
+            "credentials are set. REST cannot serve it, since indices.values has no REST "
+            "history. Set s3_access_key_id and s3_secret_access_key in dm.MassiveConfig, or the "
+            "environment variables MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY."
+        )
+        with pytest.raises(ValueError, match=rf"^{re.escape(refused)}$"):
+            q.history("2025-03-03", "2025-03-03", wait=True)
     finally:
         m.close()
     assert fake_s3.clients == []
@@ -420,13 +549,12 @@ def test_trades_are_renamed_typed_and_converted(
     *, session: dm.MassiveSession, put: Callable[[str, str], None], fake_s3: FakeS3
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     first, msft, second, spy = rows(t)
     assert first == {
         "Symbol": "AAPL",
         "Timestamp": 1741012200000000123,
-        "RawSymbol": None,  # the default session keeps the column; null on a readable row
         "Conditions": [12, 37],
         "Correction": None,
         "Exchange": 4,
@@ -509,8 +637,9 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
         prefix="us_stocks_sip/day_aggs_v1",
         request=request(timespan=Timespan.DAY, adjusted=False),
         window=window,
-        unreadable_symbols=dm.OnError.RAISE,
         warnings=WARNINGS,
+        call=1,
+        tally=ReadTally(),
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -524,31 +653,94 @@ def test_a_bar_is_kept_only_when_it_ends_by_the_window_s_latest_end(hours: int, 
             "Transactions": [1],
         }
     )
-    assert transform.apply(batch, received=7, key=STOCK_KEY)[0].num_rows == kept
+    assert transform.apply(batch, {}, received=7, key=STOCK_KEY)[0].num_rows == kept
 
 
-def test_an_unreadable_spelling_under_raise_is_a_library_defect() -> None:
+@pytest.mark.parametrize(("hours", "withheld_rows"), [(23, 0), (24, 1)], ids=["open", "ended"])
+def test_a_bar_outside_the_whole_bar_window_is_neither_withheld_nor_counted(
+    hours: int, withheld_rows: int
+) -> None:
+    # A day bar whose close can't be read is withheld only when the window holds it whole:
+    # a bar that has not ended by the window's latest end is not the read's, so it is neither
+    # reported, nor counted, nor judged by the read's policy.
+    midnight = datetime(2025, 3, 3, 5, tzinfo=UTC)  # 00:00 in New York
+    times = TimeRange(midnight, midnight + timedelta(days=1))
+    day = DaySpan(date(2025, 3, 3), date(2025, 3, 3))
+    bars = BarBounds(midnight, midnight + timedelta(hours=hours), StartRule.RANGE)
+    window = HistoryWindow(day, times, None, times, bars, now=midnight + timedelta(days=2))
+    transform = flatfiles._Transform.build(
+        CATALOG,
+        STOCK_BARS,
+        prefix="us_stocks_sip/day_aggs_v1",
+        request=request(timespan=Timespan.DAY, adjusted=False),
+        window=window,
+        warnings=WARNINGS,
+        call=1,
+        tally=ReadTally(),
+    )
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": ["AAPL"],
+            "Volume": [1.0],
+            "Open": [1.0],
+            "Close": [None],
+            "High": [1.0],
+            "Low": [1.0],
+            "TimestampStart": [epoch_ns(midnight)],
+            "Transactions": [1],
+        },
+        schema=pa.schema(
+            [
+                ("Symbol", pa.string()),
+                ("Volume", pa.float64()),
+                ("Open", pa.float64()),
+                ("Close", pa.float64()),
+                ("High", pa.float64()),
+                ("Low", pa.float64()),
+                ("TimestampStart", pa.int64()),
+                ("Transactions", pa.int64()),
+            ]
+        ),
+    )
+    unfit = RowMark(
+        rows=(0,), fields=("close",), reasons=('close expects double, got "x"',), symbols=("AAPL",)
+    )
+    marks = {RowFault.UNCONVERTIBLE_VALUES: unfit}
+    rows, _, withheld = transform.apply(batch, marks, received=7, key=STOCK_KEY)
+    assert rows.num_rows == 0
+    assert withheld.total == withheld_rows
+
+
+def test_an_unreadable_spelling_is_withheld_beside_a_readable_row() -> None:
+    # The transform withholds the row whatever the setting: the read applies the setting.
     transform = flatfiles._Transform.build(
         synthetic_catalog(),
         SYNTHETIC,
         prefix=SYNTHETIC_FILES,
-        request=request(dm.ALL),
+        request=request(dm.ALL, on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)),
         window=whole_days(SYNTHETIC, "2025-03-03"),
-        unreadable_symbols=dm.OnError.RAISE,
         warnings=WARNINGS,
+        call=1,
+        tally=ReadTally(),
     )
     batch = pa.RecordBatch.from_pydict(
         {
-            "Symbol": ["!!"],
-            "Timestamp": [1741012200000000123],
-            "ParticipantTimestamp": [1741012199999],
-            "Size": [100],
-            "Conditions": [12],
+            "Symbol": ["!!", "AAPL"],
+            "Timestamp": [1741012200000000123, 1741012200000000124],
+            "ParticipantTimestamp": [1741012199999, 1741012199999],
+            "Size": [100, 200],
+            "Conditions": [12, 12],
         }
     )
-    with pytest.raises(dm.MassiveError, match="'!!'") as info:
-        transform.apply(batch, received=7, key=STOCK_KEY)
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    rows, _, withheld = transform.apply(batch, {}, received=7, key=STOCK_KEY)
+    assert rows.column("Symbol").to_pylist() == ["AAPL"]
+    [group] = withheld.groups
+    assert (group.fault, group.symbol, group.sent, group.rows) == (
+        RowFault.UNREADABLE_SYMBOLS,
+        None,
+        "!!",
+        1,
+    )
 
 
 def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
@@ -559,8 +751,9 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL),
         window=window,
-        unreadable_symbols=dm.OnError.RAISE,
         warnings=WARNINGS,
+        call=1,
+        tally=ReadTally(),
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -571,8 +764,9 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
             "Conditions": [12, None],
         }
     )
-    converted, drift = transform.apply(batch, received=7, key=STOCK_KEY)
+    converted, drift, withheld = transform.apply(batch, {}, received=7, key=STOCK_KEY)
     assert drift == DriftReport()
+    assert withheld.total == 0
     out = converted.to_pydict()
     # Every row of the block arrived together.
     assert [int(v.value) for v in out["TimestampInsert"]] == [7, 7]
@@ -587,15 +781,16 @@ def test_columns_convert_by_their_unit_and_widen_to_the_merged_type() -> None:
     assert transform.plan.required == frozenset({"ticker", "sip_timestamp"})
 
 
-def test_a_size_beyond_2_53_widened_to_a_double_is_served_rounded_and_reported() -> None:
+def test_a_size_beyond_2_53_widened_to_a_double_is_withheld_and_reported() -> None:
     transform = flatfiles._Transform.build(
         synthetic_catalog(),
         SYNTHETIC,
         prefix=SYNTHETIC_FILES,
         request=request(dm.ALL),
         window=whole_days(SYNTHETIC, "2025-03-03"),
-        unreadable_symbols=dm.OnError.RAISE,
         warnings=WARNINGS,
+        call=1,
+        tally=ReadTally(),
     )
     batch = pa.RecordBatch.from_pydict(
         {
@@ -606,107 +801,438 @@ def test_a_size_beyond_2_53_widened_to_a_double_is_served_rounded_and_reported()
             "Conditions": [12, 12],
         }
     )
-    converted, drift = transform.apply(batch, received=7, key=STOCK_KEY)
-    assert converted.column("Size").to_pylist() == [float(2**53), 100.0]
+    converted, drift, withheld = transform.apply(batch, {}, received=7, key=STOCK_KEY)
+    assert converted.column("Symbol").to_pylist() == ["MSFT"]
+    assert converted.column("Size").to_pylist() == [100.0]
+    assert withheld.counts() == {RowFault.UNCONVERTIBLE_VALUES: 1}
+    assert [(g.symbol, g.field) for g in withheld.groups] == [("AAPL", "Size")]
     assert drift == DriftReport(rounded=frozenset({"size"}))
     assert drift.samples["size"].value == str(2**53 + 1)
 
 
-def test_milliseconds_in_a_nanosecond_column_read_as_null_with_a_warning(
+def test_milliseconds_in_a_nanosecond_column_withhold_their_row_with_a_warning(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     make_csv_gz: Callable[[str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Milliseconds in a column documented in nanoseconds land in January 1970: never served.
     row = trade(1, 1741012200000000000, participant=1741012200000)
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row + trade(2, 1741012200000000001)))
+    events = record_problems(session, monkeypatch)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        t = q.history("2025-03-03", "2025-03-03")
-    assert pick(t, "Id", "ParticipantTimestamp") == [("1", None), ("2", 1741012200000000001)]
-    [warning] = [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER]
-    assert warning == (
-        "stocks.trades: FLAT_FILES field 'participant_timestamp' held a value that does not fit "
-        f"its type; it reads as null (schema drift) at {LOCATION.format(TRADES_0303)}; first "
-        "value 1741012200000"
+    with caplog.at_level(logging.WARNING):
+        t = q.history("2025-03-03", "2025-03-03", wait=True)
+    assert pick(t, "Id", "ParticipantTimestamp") == [("2", 1741012200000000001)]
+    assert problems(events) == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "ParticipantTimestamp", 1)
+    ]
+    why = (
+        "timestamp unit mismatch for stocks.trades.ParticipantTimestamp: 1741012200000 ns is "
+        "outside 1990 to 2100"
     )
+    assert events[0].detail == why
+    where = f"FLAT_FILES {LOCATION.format(TRADES_0303)}"
+    assert alarms(caplog) == [alarm("unconvertible_values", "1 row of AAPL, ", why, where=where)]
 
 
-def test_a_wrong_unit_in_the_time_column_drops_its_row_with_a_count(
+def test_a_wrong_unit_in_the_time_column_withholds_its_row_with_a_count(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     make_csv_gz: Callable[[str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rows = trade(1, 1741012200000) + trade(2, 1741012200000000001) + trade(3, 5)
+    # The participant times are good: only the time column fails, which is no field's drift.
+    good = 1741012200000000000
+    rows = (
+        trade(1, 1741012200000, participant=good)
+        + trade(2, 1741012200000000001)
+        + trade(3, 5, participant=good)
+    )
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        t = query(session, STOCK_TRADES, symbols=dm.ALL).history(
+            "2025-03-03", "2025-03-03", wait=True
+        )
     assert pick(t, "Id") == [("2",)]
-    [warning] = [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER]
-    assert warning == (
-        f"stocks.trades: dropped 2 FLAT_FILES row(s) whose key cannot be read, the first at "
-        f"{LOCATION.format(TRADES_0303)}: timestamp unit mismatch for "
-        "stocks.trades.Timestamp: 1741012200000 ns is outside 1990 to 2100; such rows are "
-        "dropped and counted: the running count is logged at DEBUG and shown in the "
-        "SchemaDrift of each live table that lost them"
+    assert problems(events) == [(ProblemCause.UNREADABLE_KEYS, "AAPL", "Timestamp", 2)]
+    why = (
+        "timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000 ns is outside 1990 "
+        "to 2100"
     )
+    assert events[0].detail == why
+    where = f"FLAT_FILES {LOCATION.format(TRADES_0303)}"
+    assert alarms(caplog) == [alarm("unreadable_keys", "2 rows of AAPL, ", why, where=where)]
 
 
-def test_malformed_lines_are_skipped_with_one_warning_per_file(
-    *,
-    session: dm.MassiveSession,
-    fake_s3: FakeS3,
-    make_csv_gz: Callable[[str], bytes],
-    caplog: pytest.LogCaptureFixture,
+def test_a_wrong_unit_in_the_time_column_fails_the_read_under_raise(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
 ) -> None:
-    # A line with too few fields and one with too many lose only themselves; the warning
-    # names the first one's row and field count, never its text.
-    rows = trade(1, 1741012200000000001) + "SECRET,7\n" + trade(2, 1741012200000000002)
-    rows += "12,,4,3,1,1.5,3,1741012200000000003,10,1,AAPL,,,SECRET\n"
+    rows = trade(1, 1741012200000) + trade(2, 1741012200000000001)
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    with caplog.at_level(logging.WARNING, logger=flatfiles.__name__):
-        t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    assert pick(t, "Id") == [("1",), ("2",)]
-    [warning] = [r.getMessage() for r in caplog.records if r.name == flatfiles.__name__]
-    assert warning == (
-        f"stocks.trades: skipped 2 malformed line(s) of {LOCATION.format(TRADES_0303)} that do "
-        "not split into the header's fields, the first: row 2 after the header has 2 fields "
-        "where the header has 13; the file's other rows are kept"
+    strict = dm.ErrorPolicy(unreadable_keys=dm.OnError.RAISE)
+    with dm.MassiveSession(CONFIG) as m, pytest.raises(RowDataError) as info:
+        query(m, STOCK_TRADES, symbols=dm.ALL, on_error=strict).history(
+            "2025-03-03", "2025-03-03", wait=True
+        )
+    assert str(info.value) == (
+        "stocks.trades: Massive sent 1 row the library cannot read whole, so it withheld it: "
+        f"1 under unreadable_keys, from {LOCATION.format(TRADES_0303)}. Timestamp unit "
+        "mismatch for stocks.trades.Timestamp: 1741012200000 ns is outside 1990 to 2100. To go on "
+        "without such rows, pass on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.LOG) to the "
+        "call or to dm.MassiveConfig."
     )
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
+
+
+MALFORMED_FIX = (
+    "To skip such lines and keep the rest of the file, pass "
+    "on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+)
+"""The fix that ends the message of a malformed line under `malformed_rows=RAISE`."""
+
+
+MALFORMED_ROWS = (
+    trade(1, 1741012200000000001)
+    + "SECRET,7\n"
+    + trade(2, 1741012200000000002)
+    + "12,,4,3,1,1.5,3,1741012200000000003,10,1,AAPL,,,SECRET\n"
+).encode() + trade(4, 1741012200000000004, "SECR\xe9T").encode("latin-1")
+"""Two rows between a line with too few fields, one with too many, and one not UTF-8 text."""
+
+MALFORMED = (
+    f"Massive's flat file {LOCATION.format(TRADES_0303)} has 3 lines the library cannot read, "
+    "so the library skipped them and kept the file's other rows. Of these, row 2 after the "
+    "header has 2 fields where the header has 13."
+)
+"""The detail of the one `malformed_rows` problem of the file that holds `MALFORMED_ROWS`."""
+
+
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.IGNORE])
+def test_malformed_lines_are_skipped_as_one_problem_per_file_warned_by_the_setting(
+    *,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
+) -> None:
+    # Each malformed line loses only itself; the file's one problem names the first one's row
+    # and fault, never its text, and warns under LOG only.
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
+    with (
+        dm.MassiveSession(
+            dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=setting))
+        ) as m,
+        caplog.at_level(logging.DEBUG),
+    ):
+        events = record_problems(m, monkeypatch)
+        t = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+        assert pick(t, "Id") == [("1",), ("2",)]
+    assert [(e.cause, e.rows, e.detail, e.policy) for e in events] == [
+        (ProblemCause.MALFORMED_ROWS, 3, MALFORMED, setting)
+    ]
     assert "SECRET" not in caplog.text
+    warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    where = LOCATION.format(TRADES_0303)
+    expected = alarm("malformed_rows", "3 rows, ", MALFORMED, where=where)
+    assert warned == ([expected] if setting is dm.OnError.LOG else [])
+
+
+def test_a_malformed_line_fails_the_read_under_raise(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The problem is listed before the read fails, as under every setting.
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
+    with dm.MassiveSession(
+        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE))
+    ) as m:
+        events = record_problems(m, monkeypatch)
+        q = query(m, STOCK_TRADES, symbols=dm.ALL)
+        with pytest.raises(dm.MassiveError) as info:
+            q.history("2025-03-03", "2025-03-03", wait=True)
+    [listed] = events
+    assert (listed.cause, listed.policy) == (ProblemCause.MALFORMED_ROWS, dm.OnError.RAISE)
+    assert listed.detail == (
+        f"Massive's flat file {LOCATION.format(TRADES_0303)} has 3 lines the library cannot "
+        "read, so the read fails. Of these, row 2 after the header has 2 fields where the header "
+        "has 13."
+    )
+    assert str(info.value) == (
+        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+        "library cannot read. Row 2 after the header has 2 fields where the header has 13. "
+        f"{MALFORMED_FIX}"
+    )
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
+    assert "SECRET" not in str(info.value)
+
+
+def test_a_call_s_malformed_rows_overrides_the_session_s(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+) -> None:
+    # The session skips such lines; the call that asks for every row fails instead, and a
+    # call that sets nothing keeps the session's setting.
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
+    strict = dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)
+    with dm.MassiveSession(CONFIG) as m:
+        q = query(m, STOCK_TRADES, symbols=dm.ALL, on_error=strict)
+        with pytest.raises(dm.MassiveError) as info:
+            q.history("2025-03-03", "2025-03-03", wait=True)
+        assert str(info.value) == (
+            f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+            "library cannot read. Row 2 after the header has 2 fields where the header has 13. "
+            f"{MALFORMED_FIX}"
+        )
+        kept = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+        assert kept.size > 0
+
+
+def test_malformed_lines_at_the_end_of_a_file_fail_the_read_under_raise(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The last chunks hold only lines that are not UTF-8 text and no row: each still hands on
+    # an empty block, so the read fails at the first of them.
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)
+    monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 1)
+    good = "".join(trade(n, 1741012200000000000 + n) for n in range(1, 21)).encode()
+    bad = b"".join(trade(n, 1741012200000000000 + n, "\xff").encode("latin-1") for n in range(20))
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + good + bad))
+    with (
+        dm.MassiveSession(
+            dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE))
+        ) as m,
+        pytest.raises(dm.MassiveError) as info,
+    ):
+        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert str(info.value) == (
+        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+        "library cannot read. Row 21 after the header is not UTF-8 text. "
+        f"{MALFORMED_FIX}"
+    )
+
+
+def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+) -> None:
+    # A file is read once for every symbol, so its failure is each symbol's, and a retry would
+    # meet the same line.
+    fake_s3.put(TRADES_0303, gzip.compress(TRADE_HEADER.encode() + MALFORMED_ROWS))
+    # The call's policy decides, whatever the session's.
+    strict = resolve_policy(dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE), dm.ErrorPolicy())
+    asked = Request(start=date(2025, 3, 3), end=date(2025, 3, 3), on_error=strict)
+    window = whole_days(STOCK_TRADES, "2025-03-03")
+    with dm.MassiveSession(CONFIG) as m:
+        transport = files_transport(m)
+        out = transport.history_by_symbol(
+            STOCK_TRADES,
+            asked,
+            window,
+            symbols=["AAPL", "MSFT"],
+            dates=(date(2025, 3, 3),),
+            call=1,
+            forced=True,
+            logged=LoggedKeys(),
+        )
+    for symbol in ("AAPL", "MSFT"):
+        failed = out[symbol]
+        assert isinstance(failed, SymbolFailure)
+        assert str(failed.error) == (
+            f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+            "library cannot read. Row 2 after the header has 2 fields where the header has 13. "
+            f"{MALFORMED_FIX}"
+        )
+        assert not failed.error.is_retryable
 
 
 def test_a_file_whose_every_line_is_malformed_fails_the_call(
-    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # The reader fails the file after its last block; its lines are still listed, and the
+    # failure is Massive's data, never logged as a bug.
+    events = capture_problems(session, monkeypatch)
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + "AAPL,1\nAAPL,2\n"))
-    with pytest.raises(
-        dm.MassiveError,
-        match=rf"^cannot read {re.escape(LOCATION.format(TRADES_0303))}: every one of its 2 "
-        r"lines is malformed, so the file's format may have changed; the first: row 1 after the "
-        r"header has 2 fields where the header has 13$",
-    ):
-        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    with caplog.at_level(logging.DEBUG), pytest.raises(RowDataError) as info:
+        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert str(info.value) == (
+        f"stocks.trades: every one of the 2 lines of Massive's flat file "
+        f"{LOCATION.format(TRADES_0303)} is malformed, so the library withheld them all. Row 1 "
+        "after the header has 2 fields where the header has 13. m.problems() counts the withheld "
+        "rows by cause and symbol."
+    )
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert problems(events) == [
+        (ProblemCause.MALFORMED_ROWS, None, LOCATION.format(TRADES_0303), 2)
+    ]
+
+
+def test_rows_withheld_before_a_malformed_line_under_raise_are_listed_too(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An earlier block withheld a row under LOG; the malformed line fails the read, and both
+    # problems are listed first.
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)
+    monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 1)
+    good = "".join(trade(n, 1741012200000000000 + n) for n in range(2, 21))
+    odd = unfit_price(1, 1741012200000000001)
+    bad = trade(30, 1741012200000000030).replace(",AAPL,", ",AAPL,x,")
+    fake_s3.put(TRADES_0303, gzip.compress((TRADE_HEADER + odd + good + bad).encode()))
+    strict = dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE)
+    with dm.MassiveSession(dataclasses.replace(CONFIG, on_error=strict)) as m:
+        events = capture_problems(m, monkeypatch)
+        q = query(m, STOCK_TRADES, symbols=dm.ALL)
+        with pytest.raises(dm.MassiveError) as info:
+            q.history("2025-03-03", "2025-03-03", wait=True)
+    assert str(info.value) == (
+        f"stocks.trades: Massive's flat file {LOCATION.format(TRADES_0303)} has a line the "
+        "library cannot read. Row 21 after the header has 14 fields where the header has 13. "
+        f"{MALFORMED_FIX}"
+    )
+    assert [e.cause for e in events] == [
+        ProblemCause.UNCONVERTIBLE_VALUES,
+        ProblemCause.MALFORMED_ROWS,
+    ]
+    assert events[1].detail == (
+        f"Massive's flat file {LOCATION.format(TRADES_0303)} has a line the library cannot read, "
+        "so the read fails. Row 21 after the header has 14 fields where the header has 13."
+    )
+
+
+@pytest.mark.parametrize(
+    ("setting", "late", "cause"),
+    [
+        pytest.param(
+            dm.ErrorPolicy(malformed_rows=dm.OnError.RAISE),
+            trade(30, 1741012200000000030).replace(",AAPL,", ",AAPL,x,"),
+            ProblemCause.MALFORMED_ROWS,
+            id="malformed",
+        ),
+        pytest.param(
+            dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE),
+            trade(30, 1741012200000000030).replace(",1.5,", ",x,"),
+            ProblemCause.UNCONVERTIBLE_VALUES,
+            id="withheld",
+        ),
+    ],
+)
+def test_an_extra_header_is_listed_when_a_later_block_fails_the_read(
+    *,
+    fake_s3: FakeS3,
+    clock: Callable[[datetime], None],
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.ErrorPolicy,
+    late: str,
+    cause: ProblemCause,
+) -> None:
+    # The first blocks find a header Massive's docs lack; a later block fails the read under
+    # RAISE, and the drift is listed with the failure's own problem.
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)
+    monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 1)
+    lines = [trade(n, 1741012200000000000 + n) for n in range(2, 21)] + [late]
+    wider = TRADE_HEADER.replace("\n", ",halted\n") + "".join(
+        line.replace("\n", ",true\n") for line in lines
+    )
+    fake_s3.put(TRADES_0303, gzip.compress(wider.encode()))
+    with dm.MassiveSession(dataclasses.replace(CONFIG, on_error=setting)) as m:
+        events = capture_problems(m, monkeypatch)
+        q = query(m, STOCK_TRADES, symbols=dm.ALL)
+        with pytest.raises(dm.MassiveError):
+            q.history("2025-03-03", "2025-03-03", wait=True)
+    assert sorted(e.cause for e in events) == sorted([cause, ProblemCause.SCHEMA_DRIFT])
+    assert drift_of(events) == [(events[0].stream_id, "halted", extra_header("halted"))]
 
 
 def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
     *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
 ) -> None:
-    # Every row dropped is a change in the file's format, not one odd row.
+    # Every row withheld fails the read, not one odd row; the rows are Massive's data.
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000)))
     with pytest.raises(
-        dm.MassiveError,
-        match=rf"^cannot read {re.escape(LOCATION.format(TRADES_0303))}: every one of the 1 "
-        r"rows of the requested symbols was dropped, so the file's format may have changed; the "
-        r"first: timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
-        r"outside 1990 to 2100$",
+        RowDataError,
+        match=r"^stocks\.trades: the library could read none of the 1 rows of the read's "
+        r"symbols and window from the flat files of us_stocks_sip/trades_v1 whole, so it withheld "
+        r"them all\. Timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
+        r"outside 1990 to 2100\. m\.problems\(\) counts the withheld rows by cause and symbol\."
+        "$",
     ) as info:
-        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert (info.value.source, info.value.is_bug) == (dm.ErrorSource.MASSIVE, False)
+
+
+INSIDE = 1741012200000000000  # 2025-03-03T14:30Z, in the read's window
+OUTSIDE = 1741098600000000000  # 2025-03-04T14:30Z, outside it
+
+
+def unfit_price(n: int, nanos: int) -> str:
+    # A trades row whose price is no number: its row cannot be read whole.
+    return trade(n, nanos).replace(",1.5,", ",x,")
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param(unfit_price(1, INSIDE) + unfit_price(2, INSIDE), id="every-row-inside"),
+        # The good rows outside the window count neither way: nothing the read asked for
+        # could be read.
+        pytest.param(
+            unfit_price(1, INSIDE) + trade(2, OUTSIDE) + trade(3, OUTSIDE), id="good-outside"
+        ),
+    ],
+)
+def test_a_file_whose_rows_in_the_window_are_all_unreadable_fails_the_read(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], rows: str
+) -> None:
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    with pytest.raises(
+        RowDataError,
+        match=r"the library could read none of the \d rows of the read's symbols and window",
+    ):
+        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+
+
+def test_a_file_whose_rows_are_all_unreadable_beside_a_file_read_whole_fails_nothing(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The read is judged across its files: one file of unreadable rows withholds them and
+    # reports them, and the other file's rows are published.
+    next_day = INSIDE + 86_400 * 10**9
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + unfit_price(1, INSIDE)))
+    fake_s3.put(TRADES_0304, make_csv_gz(TRADE_HEADER + trade(2, next_day)))
+    events = capture_problems(session, monkeypatch)
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04", wait=True)
+    assert pick(t, "Id") == [("2",)]
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)
+    ]
+
+
+def test_unreadable_rows_outside_the_window_are_neither_published_nor_reported(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = unfit_price(1, OUTSIDE) + trade(2, INSIDE) + unfit_price(3, OUTSIDE) + trade(4, INSIDE)
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
+    events = capture_problems(session, monkeypatch)
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert pick(t, "Id") == [("2",), ("4",)]
+    assert events == []
 
 
 def test_epoch_zero_is_null_except_in_timestamp(
@@ -715,7 +1241,7 @@ def test_epoch_zero_is_null_except_in_timestamp(
     # Stocks: a 0 participant or TRF timestamp is absent; a 0 price and size are data.
     row = "12,,4,1,0,0,1,1741012200000000000,0,1,AAPL,,0\n"
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row))
-    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     assert pick(t, "Timestamp", "ParticipantTimestamp", "TrfTimestamp", "Price", "Size") == [
         (1741012200000000000, None, None, 0.0, 0.0)
     ]
@@ -730,7 +1256,7 @@ def test_epoch_zero_is_null_except_in_timestamp(
         ),
     )
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    t = q.history("2025-03-04", "2025-03-04")
+    t = q.history("2025-03-04", "2025-03-04", wait=True)
     assert pick(t, "ReportSequence") == [(2,)]
 
 
@@ -741,7 +1267,7 @@ def test_quote_lists_are_parsed(
         "us_stocks_sip/quotes_v1/2025/03/2025-03-03.csv.gz",
         "us_stocks_sip_quotes_v1_2025-03-03.csv",
     )
-    t = query(session, STOCK_QUOTES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    t = query(session, STOCK_QUOTES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     assert pick(t, "Symbol", "Conditions", "Indicators", "BidSize", "AskExchange") == [
         ("AAPL", [1], [604, 607], 300.0, 12),
         ("MSFT", None, None, 100.0, 19),
@@ -753,7 +1279,7 @@ def test_symbol_pushdown_keeps_only_the_requested_symbols(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=["AAPL"])
-    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert pick(t, "Symbol", "Id") == [("AAPL", "1"), ("AAPL", "3")]
 
 
@@ -762,24 +1288,39 @@ def test_a_ticker_the_library_cannot_read_fails_the_read_under_raise(
 ) -> None:
     rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    with dm.MassiveSession(config(unreadable_symbols=dm.OnError.RAISE)) as m:
+    with dm.MassiveSession(
+        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE))
+    ) as m:
         every = query(m, STOCK_TRADES, symbols=dm.ALL)
-        with pytest.raises(
-            dm.MassiveError, match=r"^stocks\.trades: Massive sent the symbol 'BRK/B', a spelling"
-        ):
-            every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        with pytest.raises(RowDataError) as info:
+            every.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
+        assert str(info.value) == (
+            "stocks.trades: Massive sent 1 row the library cannot read whole, so it withheld it: "
+            f"1 under unreadable_symbols, from {LOCATION.format(TRADES_0303)}. Massive "
+            "sent the symbol 'BRK/B', a spelling the library cannot read as Massive's ticker. "
+            "To go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
+        )
 
 
-def test_a_ticker_the_library_cannot_read_is_kept_by_default(
-    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes], clock: Callable[[datetime], None]
+def test_a_ticker_the_library_cannot_read_is_withheld_by_default(
+    *,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    clock: Callable[[datetime], None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rows = trade(1, 1741012200000000000, "BRK/B") + trade(2, 1741012200000000000, "AAPL")
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
-    with dm.MassiveSession(config()) as m:
+    with dm.MassiveSession(CONFIG) as m:
+        events = capture_problems(m, monkeypatch)
         t = query(m, STOCK_TRADES, symbols=dm.ALL).history(
-            "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES
+            "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True
         )
-        assert pick(t, "Symbol", "RawSymbol", "Id") == [(None, "BRK/B", "1"), ("AAPL", None, "2")]
+        assert pick(t, "Symbol", "Id") == [("AAPL", "2")]
+        assert "RawSymbol" not in t.column_names
+    assert problems(events) == [(ProblemCause.UNREADABLE_SYMBOLS, "BRK/B", "Symbol", 1)]
 
 
 @pytest.mark.parametrize("ticker", ["NA", "NULL"])
@@ -792,9 +1333,11 @@ def test_tickers_that_look_like_null_markers_are_symbols(
     other = trade(2, 1741012200000000000, "SPY")
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row + other))
     q = query(session, STOCK_TRADES, symbols=[ticker])
-    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert pick(t, "Symbol", "Correction", "TrfId") == [(ticker, None, None)]
-    every = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    every = query(session, STOCK_TRADES, symbols=dm.ALL).history(
+        "2025-03-03", "2025-03-03", wait=True
+    )
     assert pick(every, "Symbol") == [(ticker,), ("SPY",)]
 
 
@@ -811,7 +1354,7 @@ def test_no_matching_rows_gives_an_empty_table_with_every_column(
 
     monkeypatch.setattr(flatfiles, "dataset_table", counted)
     q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
-    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert t.size == 0
     assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     assert converted == [0]  # only the empty schema table: no table of an empty block
@@ -826,12 +1369,13 @@ def test_each_file_logs_its_rows_after_each_step(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=["ZZZZ"])
     with caplog.at_level(logging.DEBUG, logger=flatfiles.__name__):
-        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     # The empty table is explained: the file held rows, none of the requested symbol.
     (line,) = [r.getMessage() for r in caplog.records if "rows read" in r.getMessage()]
     assert line.startswith(f"stocks.trades: s3://flatfiles/{TRADES_0303} at ")
     assert line.endswith(
-        ": 4 rows read, 0 of the requested symbols, 0 in the window, 0 kept as whole bars"
+        ": 4 rows read, 0 of the requested symbols, 0 in the window, 0 withheld, 0 kept as "
+        "whole bars"
     )
 
 
@@ -840,10 +1384,14 @@ def test_instant_bounds_are_half_open(
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    t = q.history(datetime(2025, 3, 3, 14, 30, tzinfo=UTC), datetime(2025, 3, 3, 15, tzinfo=UTC))
+    t = q.history(
+        datetime(2025, 3, 3, 14, 30, tzinfo=UTC), datetime(2025, 3, 3, 15, tzinfo=UTC), wait=True
+    )
     # The trade at exactly 15:00 UTC is the excluded end.
     assert pick(t, "Id") == [("1",), ("2",)]
-    t = q.history(datetime(2025, 3, 3, 15, tzinfo=UTC), datetime(2025, 3, 3, 21, tzinfo=UTC))
+    t = q.history(
+        datetime(2025, 3, 3, 15, tzinfo=UTC), datetime(2025, 3, 3, 21, tzinfo=UTC), wait=True
+    )
     # ... and the included start; the trade at exactly 21:00 UTC is excluded.
     assert pick(t, "Id") == [("3",)]
 
@@ -865,9 +1413,10 @@ def test_dst_fall_back_hour_and_the_25_hour_day(
     second = q.history(
         datetime(2025, 11, 2, 1, 30, fold=1, tzinfo=NEW_YORK),
         datetime(2025, 11, 2, 2, tzinfo=NEW_YORK),
+        wait=True,
     )
     assert pick(second, "Id") == [("2",)]
-    assert pick(q.history("2025-11-02", "2025-11-02"), "Id") == [("1",), ("2",), ("3",)]
+    assert pick(q.history("2025-11-02", "2025-11-02", wait=True), "Id") == [("1",), ("2",), ("3",)]
     assert fake_s3.keys() == [key, key]  # never the November 3 file
 
 
@@ -886,7 +1435,7 @@ def test_spring_forward_23_hour_day(
     data = TRADE_HEADER + trade(1, before) + trade(2, after) + trade(3, late)
     fake_s3.put(key, make_csv_gz(data))
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    assert pick(q.history("2025-03-09", "2025-03-09"), "Id") == [("1",), ("2",), ("3",)]
+    assert pick(q.history("2025-03-09", "2025-03-09", wait=True), "Id") == [("1",), ("2",), ("3",)]
     assert fake_s3.keys() == [key]
 
 
@@ -908,7 +1457,7 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
         adjusted=False,
     )
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-03", "2025-03-03")
+        t = q.history("2025-03-03", "2025-03-03", wait=True)
     # The day file stamps a bar at the 16:00 close; it runs from midnight to midnight.
     day = 1740978000000000000
     assert pick(
@@ -922,15 +1471,15 @@ def test_unadjusted_day_bars_of_every_symbol_read_flat_files(
         "stocks.bars history: AUTO chose FLAT_FILES (every symbol)",
         # REST's grouped-daily bars could have served it, with the columns the file lacks.
         (
-            "stocks.bars history: AUTO read flat files (every symbol); the read leaves Otc, "
-            "Vwap null, which the other source, REST, fills: pass "
-            "source=dm.HistorySource.REST to get them (logged once per session)"
+            "stocks.bars history: source=dm.HistorySource.AUTO read flat files for every "
+            "symbol, and that read leaves Otc and Vwap null, which REST fills. Pass "
+            "source=dm.HistorySource.REST to fill them."
         ),
         "stocks.bars history: source=S3 files=1 skipped=none unread=none",
     ]
     caplog.clear()
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
     # Once per session: the second read logs its choice and its files, and no WARNING.
     assert [r.levelno for r in caplog.records] == [logging.INFO, logging.INFO]
 
@@ -952,7 +1501,7 @@ def test_each_file_becomes_one_table(
 
     monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "BLOCK_SIZE", 256)  # several blocks per file
-    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-05")
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-05", wait=True)
     assert t.size == 6
     # The empty schema table, then one table per file, although each file has many blocks.
     assert sorted(converted) == [0, 2, 4]
@@ -968,7 +1517,7 @@ def test_every_block_carries_the_instant_it_was_decoded(
     blocks = many_blocks(TRADES_0303)
     ticks = itertools.count(1_000)
     monkeypatch.setattr(time, "time_ns", lambda: next(ticks))
-    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     arrived = [row["TimestampInsert"] for row in rows(t, arrival=True)]
     assert len(arrived) == 4000
     assert arrived == sorted(arrived)  # one reader reads the file's blocks in order
@@ -994,7 +1543,7 @@ def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
 
     monkeypatch.setattr(flatfiles, "dataset_table", counted)
     monkeypatch.setattr(flatfiles, "_TABLE_BLOCKS", 2)
-    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     assert pick(t, "Id")[:3] == [("0",), ("1",), ("2",)]  # still in file order
     assert t.size == 4000
     assert len(converted) > 4  # the file was split, so no table holds the whole file
@@ -1003,8 +1552,8 @@ def test_a_file_with_many_surviving_blocks_is_split_into_bounded_tables(
 
 def holiday_warning(spec: str, key: str, day: str) -> str:
     return (
-        f"{spec}: {key} does not exist, though a later day's file does; skipping {day}, a day "
-        "without trading (a holiday?)"
+        f"{spec}: Massive has no flat file {key}, though it has a later day's, so the read skips "
+        f"{day}. The usual cause is a market holiday."
     )
 
 
@@ -1014,15 +1563,18 @@ def s3_line(spec: str, files: int, skipped: str) -> str:
 
 def not_published(spec: str, day: str, remedy: str) -> str:
     return (
-        f"{spec}: the flat file for {day} is not published yet. Massive usually publishes a "
-        f"day's flat files by about 11:00 ET the next day, but the time varies. {remedy}"
+        f"{spec}: Massive has not published the flat file for {day} yet. Massive usually "
+        f"publishes a day's flat files by about 11:00 ET the next day, but the time varies. "
+        f"{remedy}"
     )
 
 
-READ_REST = "Retry later, or read REST with source=dm.HistorySource.REST"
+READ_REST = (
+    "Call history() again later, or pass source=dm.HistorySource.REST to read the day from REST."
+)
 NO_REST = (
-    "Retry later; REST cannot serve this read: futures.trades history over REST needs explicit "
-    "symbols"
+    "REST cannot serve this read, since futures.trades history over REST needs explicit "
+    "symbols. Call history() again later."
 )
 MANY = [f"S{n:02d}" for n in range(49)] + ["AAPL"]
 """Fifty symbols: enough for `AUTO` to read flat files, and explicit, so REST can serve them."""
@@ -1039,7 +1591,7 @@ def test_a_range_with_a_missing_weekday_warns_and_skips_it(
     put(TRADES_0305, "us_stocks_sip_trades_v1_2025-03-05.csv")
     q = query(session, STOCK_TRADES, symbols=["AAPL", "MSFT"])
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)
+        t = q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
     # Rows come in date order, although the three files are read concurrently.
     assert pick(t, "Id") == [("1",), ("2",), ("3",), ("9",), ("10",)]
     assert sorted(fake_s3.keys()) == [TRADES_0303, TRADES_0304, TRADES_0305]
@@ -1065,7 +1617,7 @@ def test_a_missing_last_weekday_with_a_later_file_is_a_day_without_trading(
     fake_s3.put(TRADES_KEY.format(10), make_csv_gz(TRADE_HEADER + trade(2, thursday)))
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-06", "2025-03-08", source=HistorySource.FLAT_FILES)
+        t = q.history("2025-03-06", "2025-03-08", source=HistorySource.FLAT_FILES, wait=True)
     assert pick(t, "Id") == [("1",)]
     assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in (6, 7, 8, 10)]
     assert TRADES_KEY.format(10) in fake_s3.closed_bodies
@@ -1091,7 +1643,7 @@ def test_missing_weekend_files_are_skipped_silently(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-01", "2025-03-03")
+        t = q.history("2025-03-01", "2025-03-03", wait=True)
     assert t.size == 4
     assert caplog.messages == [
         (
@@ -1114,7 +1666,7 @@ def test_a_missing_last_weekend_date_is_skipped_too(
         fake_s3.put(TRADES_KEY.format(day), make_csv_gz(TRADE_HEADER + trade(day, moment)))
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-05", "2025-03-08", source=HistorySource.FLAT_FILES)
+        t = q.history("2025-03-05", "2025-03-08", source=HistorySource.FLAT_FILES, wait=True)
     assert pick(t, "Id") == [("5",), ("6",), ("7",)]
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.INFO, s3_line("stocks.trades", 3, "2025-03-08"))
@@ -1126,7 +1678,7 @@ def test_a_weekend_only_range_is_an_empty_table(
 ) -> None:
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
+        t = q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES, wait=True)
     assert t.size == 0
     assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     assert caplog.messages == [s3_line("stocks.trades", 0, "2025-03-01,2025-03-02")]
@@ -1137,6 +1689,7 @@ def test_a_missing_last_day_with_no_later_file_raises_under_flat_files(
     session: dm.MassiveSession,
     put: Callable[[str, str], None],
     fake_s3: FakeS3,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # On Monday 03-10 no file after 03-04 exists, so 03-04 may simply not be out yet. The
     # look stops before today, whose file cannot exist.
@@ -1145,9 +1698,16 @@ def test_a_missing_last_day_with_no_later_file_raises_under_flat_files(
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(not_published("stocks.trades", "2025-03-04", READ_REST)) + "$",
-    ):
-        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+    ) as unpublished:
+        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
+    assert unpublished.value.is_retryable  # the file appears once Massive publishes it
     assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in (3, 4, 5, 6, 7)]
+    # The advice works: with source=dm.HistorySource.REST, REST reads the range.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    q.history("2025-03-03", "2025-03-04", source=HistorySource.REST, wait=True)
+    ((_, request, _),) = rest.calls
+    assert (request.start, request.end) == (date(2025, 3, 3), date(2025, 3, 4))
 
 
 def test_a_long_run_of_missing_files_well_before_today_has_no_file_at_all(
@@ -1164,18 +1724,19 @@ def test_a_long_run_of_missing_files_well_before_today_has_no_file_at_all(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=["AAPL"])
     missing = [d for d in range(4, 15) if date(2025, 3, d).weekday() < 5]
-    days = ", ".join(f"2025-03-{d:02d}" for d in missing)
+    days = "9 days, the first 3: 2025-03-04, 2025-03-05, and 2025-03-06"
+    assert len(missing) == 9
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(
-            f"stocks.trades: no flat file exists for {days}, nor for any later day up to a "
-            "week after the range; Massive publishes a day's file the next day, so these files "
-            "will not appear. To read them, read REST with source=dm.HistorySource.REST, or end "
-            "the range before them"
+            f"stocks.trades: Massive has no flat file for {days}, nor for any later day up to "
+            "a week after the range. Massive publishes a day's file the next day, so these "
+            "files will not appear. Pass source=dm.HistorySource.REST to read them from REST, "
+            "or end the range before them."
         )
         + "$",
     ):
-        q.history("2025-03-03", "2025-03-14", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-03", "2025-03-14", source=HistorySource.FLAT_FILES, wait=True)
     looked = [17, 18, 19, 20, 21]  # the weekdays of the week after the range
     assert sorted(fake_s3.keys()) == [TRADES_KEY.format(d) for d in [*range(3, 15), *looked]]
 
@@ -1188,7 +1749,7 @@ def test_a_refused_look_for_a_later_file_raises(
     fake_s3.refuse(TRADES_0305, status=403, code="AccessDenied", message="Access Denied")
     q = query(session, STOCK_TRADES, symbols=["AAPL"])
     with pytest.raises(dm.EntitlementError, match=re.escape(TRADES_0305)):
-        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
 
 
 def test_a_missing_day_rest_cannot_serve_raises_under_auto(
@@ -1197,14 +1758,14 @@ def test_a_missing_day_rest_cannot_serve_raises_under_auto(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     remedy = (
-        "Retry later; REST cannot serve this read: stocks.trades history over REST needs "
-        "explicit symbols"
+        "REST cannot serve this read, since stocks.trades history over REST needs explicit "
+        "symbols. Call history() again later."
     )
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(not_published("stocks.trades", "2025-03-04", remedy)) + "$",
     ):
-        q.history("2025-03-03", "2025-03-04")
+        q.history("2025-03-03", "2025-03-04", wait=True)
 
 
 def test_auto_reads_the_days_not_published_yet_from_rest(
@@ -1221,7 +1782,7 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=MANY)
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-03", "2025-03-04")
+        t = q.history("2025-03-03", "2025-03-04", wait=True)
     assert pick(t, "Symbol") == [("AAPL",), ("AAPL",), ("from REST",)]
     ((spec, req, window),) = rest.calls
     assert spec is STOCK_TRADES
@@ -1229,12 +1790,50 @@ def test_auto_reads_the_days_not_published_yet_from_rest(
     assert req.symbols == tuple(sorted(MANY))
     assert window.span == DaySpan(date(2025, 3, 4), date(2025, 3, 4))
     assert caplog.messages[-1].startswith(
-        "stocks.trades history: AUTO read REST because the flat files are missing for these "
-        "days: 1 [2025-03-04]"
+        "stocks.trades history: Massive has no flat files for 2025-03-04. The read took those "
+        "rows from REST instead."
     )
     assert t.attributes()["TableDescription"].endswith(
         "Read from flat files, and from REST for 2025-03-04, whose files are missing."
     )
+
+
+REST_0304 = int(datetime(2025, 3, 4, 15, tzinfo=UTC).timestamp()) * 1_000_000_000
+"""An instant of 2025-03-04, the day the files lack, which REST reads."""
+
+
+@pytest.mark.parametrize("files_whole", [True, False], ids=["files-whole", "files-unreadable"])
+def test_auto_judges_its_files_and_rest_fills_as_one_read(
+    *,
+    fake_s3: FakeS3,
+    fake_rest: FakeRestServer,
+    clock: Callable[[datetime], None],
+    make_csv_gz: Callable[[str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    files_whole: bool,
+) -> None:
+    # The file of 03-03 holds AAPL's trade, and REST fills 03-04, whose only row has a price
+    # that is no number. The call is one read: it fails only when no row of its files and
+    # REST pages could be read whole.
+    del clock
+    row = trade(1, INSIDE) if files_whole else unfit_price(1, INSIDE)
+    fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + row))
+    fake_rest.reply(
+        "/v3/trades/AAPL",
+        Reply(envelope([{"sip_timestamp": REST_0304, "price": "x", "size": 10}])),
+    )
+    with dm.MassiveSession(dataclasses.replace(CONFIG, rest_base_url=fake_rest.url)) as m:
+        events = capture_problems(m, monkeypatch)
+        q = query(m, STOCK_TRADES, symbols=MANY)
+        if not files_whole:
+            with pytest.raises(RowDataError, match="could read none of the 2 rows"):
+                q.history("2025-03-03", "2025-03-04", wait=True)
+            return
+        t = q.history("2025-03-03", "2025-03-04", wait=True)
+        assert pick(t, "Symbol", "Id") == [("AAPL", "1")]
+    # The other symbols' 404s are unavailable_symbols problems of their own.
+    withheld = [p for p in problems(events) if p[0] is not ProblemCause.UNAVAILABLE_SYMBOLS]
+    assert withheld == [(ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", "Price", 1)]
 
 
 def test_auto_reads_a_missing_weekday_mid_range_from_rest_in_date_order(
@@ -1251,7 +1850,7 @@ def test_auto_reads_a_missing_weekday_mid_range_from_rest_in_date_order(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     put(TRADES_0305, "us_stocks_sip_trades_v1_2025-03-05.csv")
     q = query(session, STOCK_TRADES, symbols=MANY)
-    t = q.history("2025-03-03", "2025-03-05")
+    t = q.history("2025-03-03", "2025-03-05", wait=True)
     assert pick(t, "Symbol", "Id") == [
         ("AAPL", "1"),
         ("AAPL", "3"),
@@ -1276,7 +1875,7 @@ def test_auto_reads_rest_from_the_unpublished_days_start_within_instants(
     q = query(session, STOCK_TRADES, symbols=MANY)
     start = datetime(2025, 3, 3, 9, tzinfo=NEW_YORK)
     end = datetime(2025, 3, 4, 12, tzinfo=NEW_YORK)
-    q.history(start, end)
+    q.history(start, end, wait=True)
     ((_, req, window),) = rest.calls
     # The day's first instant, not the call's start: the earlier hours came from the file.
     assert (req.start, req.end) == (datetime(2025, 3, 4, tzinfo=NEW_YORK), end)
@@ -1297,7 +1896,7 @@ def test_a_missing_weekend_file_of_a_class_that_trades_at_weekends_warns(
     put(key.format(3), "global_crypto_trades_v1_2025-03-01.csv")
     q = query(session, forex, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        q.history("2025-03-01", "2025-03-03", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-01", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert caplog.messages == [holiday_warning("forex.trades", key.format(2), "2025-03-02")]
 
 
@@ -1318,7 +1917,7 @@ def test_a_missing_forex_saturday_file_is_skipped_silently_even_as_the_last_day(
     clock(datetime(2025, 3, 2, 12, tzinfo=NEW_YORK))
     q = query(session, forex, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        q.history("2025-02-28", "2025-03-01", source=HistorySource.FLAT_FILES)
+        q.history("2025-02-28", "2025-03-01", source=HistorySource.FLAT_FILES, wait=True)
     assert caplog.messages == []
 
 
@@ -1332,15 +1931,18 @@ def test_crypto_trades_every_day(
     saturday = "global_crypto/trades_v1/2025/03/2025-03-01.csv.gz"
     put(saturday, "global_crypto_trades_v1_2025-03-01.csv")
     q = query(session, CRYPTO_TRADES, symbols=["X:BTCUSD"])
-    t = q.history("2025-03-01", "2025-03-01", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-03-01", "2025-03-01", source=HistorySource.FLAT_FILES, wait=True)
     assert pick(t, "Symbol", "Timestamp", "Size", "Id") == [
         ("X:BTCUSD", 1740830400000000000, 0.015, "a1")
     ]
     # A missing Sunday file is no weekend for crypto: with no later file yet, it may not be
     # out yet ...
     clock(datetime(2025, 3, 3, 12, tzinfo=NEW_YORK))
-    with pytest.raises(dm.MassiveError, match=r"the flat file for 2025-03-02 is not published"):
-        q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
+    with pytest.raises(
+        dm.MassiveError,
+        match=re.escape(not_published("crypto.trades", "2025-03-02", READ_REST)) + "$",
+    ):
+        q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES, wait=True)
     clock(NOW)
     caplog.clear()
     # ... and a missing day before an existing one was a day without trading, which warns.
@@ -1349,7 +1951,7 @@ def test_crypto_trades_every_day(
         "global_crypto_trades_v1_2025-03-01.csv",
     )
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        q.history("2025-02-28", "2025-03-02", source=HistorySource.FLAT_FILES)
+        q.history("2025-02-28", "2025-03-02", source=HistorySource.FLAT_FILES, wait=True)
     assert caplog.messages == [
         holiday_warning(
             "crypto.trades", "global_crypto/trades_v1/2025/02/2025-02-28.csv.gz", "2025-02-28"
@@ -1368,8 +1970,10 @@ class RestRecorder:
         window: HistoryWindow,
         *,
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
     ) -> Table:
+        del tally
         assert call > 0
         assert stop is None  # a blocking read has no stop token
         self.calls.append((spec, request, window))
@@ -1392,7 +1996,7 @@ def test_auto_delegates_few_symbols_to_rest(
     monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
     q = query(session, STOCK_TRADES, symbols=["MSFT", "AAPL"])
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-03", "2025-03-04")
+        t = q.history("2025-03-03", "2025-03-04", wait=True)
     assert pick(t, "Symbol") == [("from REST",)]
     ((spec, req, window),) = rest.calls
     assert spec is STOCK_TRADES
@@ -1400,7 +2004,10 @@ def test_auto_delegates_few_symbols_to_rest(
     assert (req.start, req.end) == (date(2025, 3, 3), date(2025, 3, 4))
     assert window.span == DaySpan(date(2025, 3, 3), date(2025, 3, 4))
     assert caplog.messages == [
-        "stocks.trades history: AUTO chose REST (2 symbols < flat_file_symbol_threshold 50)"
+        (
+            "stocks.trades history: AUTO chose REST (2 symbols, fewer than "
+            "flat_file_symbol_threshold=50)"
+        )
     ]
     assert fake_s3.requests == []
 
@@ -1415,7 +2022,7 @@ def test_futures_read_every_venue_by_default_in_venue_order(
         row = f",1.0,1,1,1,{sequence},2025-03-04,ESH5,1741042800000000000\n"
         fake_s3.put(FUTURES_0304.format(venue), make_csv_gz(FUTURES_HEADER + row))
     q = session.futures.trades(["ESH5"])  # every venue by default
-    t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert sorted(fake_s3.keys()) == sorted(FUTURES_0304.format(v) for v in VENUES)
     # Venue order within a date: CME, CBOT, NYMEX, COMEX.
     assert pick(t, "ReportSequence", "Date") == [
@@ -1433,7 +2040,7 @@ def test_futures_read_the_venues_asked_for_in_venue_order(
         row = f",1.0,1,1,1,{sequence},2025-03-04,ESH5,1741042800000000000\n"
         fake_s3.put(FUTURES_0304.format(venue), make_csv_gz(FUTURES_HEADER + row))
     q = session.futures.trades(["ESH5"], venues={FuturesVenue.COMEX, FuturesVenue.CME})
-    t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert sorted(fake_s3.keys()) == sorted(FUTURES_0304.format(v) for v in ("cme", "comex"))
     assert pick(t, "ReportSequence", "Date") == [(0, "2025-03-04"), (3, "2025-03-04")]
 
@@ -1443,7 +2050,7 @@ def test_futures_read_one_venue_when_asked(
 ) -> None:
     put(FUTURES_0304.format("cme"), "us_futures_trades_v1_2025-03-04.csv")
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    t = q.history("2025-03-04", "2025-03-04")
+    t = q.history("2025-03-04", "2025-03-04", wait=True)
     assert fake_s3.keys() == [FUTURES_0304.format("cme")]
     assert pick(t, "Symbol", "Timestamp", "Date", "ReportSequence") == [
         ("ESH5", 1741042800000000000, "2025-03-04", 31),
@@ -1462,6 +2069,7 @@ def test_futures_evening_instants_read_only_the_next_session(
         datetime(2025, 3, 3, 17, tzinfo=CHICAGO),
         datetime(2025, 3, 3, 18, tzinfo=CHICAGO),
         source=HistorySource.FLAT_FILES,
+        wait=True,
     )
     assert fake_s3.keys() == [FUTURES_0304.format("cme")]
     assert pick(t, "Symbol", "Timestamp", "Date") == [("ESH5", 1741042800000000000, "2025-03-04")]
@@ -1483,6 +2091,7 @@ def test_futures_instants_inside_one_session_need_only_its_file(
         datetime(2025, 3, 3, 10, tzinfo=CHICAGO),
         datetime(2025, 3, 3, 11, tzinfo=CHICAGO),
         source=HistorySource.FLAT_FILES,
+        wait=True,
     )
     assert pick(t, "Timestamp") == [(moment,)]
     assert fake_s3.keys() == [key]
@@ -1502,7 +2111,9 @@ def test_futures_instants_before_a_holiday_do_not_raise(
     fake_s3.put(key, make_csv_gz(FUTURES_HEADER + f",1.0,1,1,1,1,2024-12-24,ESH5,{moment}\n"))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     t = q.history(
-        datetime(2024, 12, 24, 10, tzinfo=CHICAGO), datetime(2024, 12, 24, 11, tzinfo=CHICAGO)
+        datetime(2024, 12, 24, 10, tzinfo=CHICAGO),
+        datetime(2024, 12, 24, 11, tzinfo=CHICAGO),
+        wait=True,
     )
     assert t.size == 1
     assert fake_s3.keys() == [key]
@@ -1530,6 +2141,7 @@ def test_futures_instants_on_a_holiday_read_the_next_session(
             datetime(2025, 1, 19, 17, tzinfo=CHICAGO),
             datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
             source=HistorySource.FLAT_FILES,
+            wait=True,
         )
     assert pick(t, "Timestamp") == [(sunday,)]  # the range keeps only its own instants
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20)), key]
@@ -1566,10 +2178,22 @@ def test_a_stopped_read_stops_its_roll_forward(
     end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
     window = history_window(FUTURES_TRADES, q._request, start=start, end=end)
     dates = history_source.partition_dates(FUTURES_TRADES, window)
-    with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"futures\.trades history: The read stopped",
+    ) as cancelled:
         session._core.flat_file_transport().history(
-            FUTURES_TRADES, q._request, window, dates=dates, call=1, infer_holidays=True, stop=stop
+            FUTURES_TRADES,
+            q._request,
+            window,
+            dates=dates,
+            tally=ReadTally(),
+            call=1,
+            infer_holidays=True,
+            logged=LoggedKeys(),
+            stop=stop,
         )
+    assert cancelled.value.source is dm.ErrorSource.USER  # the caller stopped the read
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20))]
 
 
@@ -1587,7 +2211,7 @@ def test_a_venue_not_out_yet_sends_the_day_of_every_venue_to_rest(
     venues = {FuturesVenue.CME, FuturesVenue.CBOT}
     contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
     q = query(session, FUTURES_TRADES, symbols=contracts, venues=venues)
-    t = q.history("2025-03-04", "2025-03-04")
+    t = q.history("2025-03-04", "2025-03-04", wait=True)
     assert pick(t, "Symbol") == [("from REST",)]
     ((_, req, _),) = rest.calls
     assert req.start == date(2025, 3, 4)
@@ -1613,7 +2237,7 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
     fake_s3.put_dropped(rolled, data[: len(data) // 2])
     stop = _massive.Cancel()
     # The session's client class itself: the session fixture wraps `_massive.FlatFileClient`.
-    transport = cast("flatfiles.FlatFileHistory", session._core.flat_file_transport())
+    transport = files_transport(session)
     client_class = type(transport._client)
     wait_to_reread = client_class.wait_to_reread
     waits: list[int] = []
@@ -1621,7 +2245,9 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
     def released_while_rereading(
         self: _massive.FlatFileClient, error: _massive.WireError, *args: object
     ) -> bool:
-        retry, cancel = cast("tuple[int, threading.Event]", args)
+        retry, cancel = args  # `wait_to_reread` takes them positionally
+        assert isinstance(retry, int)
+        assert isinstance(cancel, threading.Event)
         waits.append(retry)
         if retry == stopped_at:
             stop.set()
@@ -1633,9 +2259,20 @@ def test_a_read_stopped_while_a_roll_forward_rereads_reports_the_cancellation(
     end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
     window = history_window(FUTURES_TRADES, q._request, start=start, end=end)
     dates = history_source.partition_dates(FUTURES_TRADES, window)
-    with pytest.raises(dm.MassiveError, match=r"futures\.trades history: the read was cancelled"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"futures\.trades history: The read stopped",
+    ):
         session._core.flat_file_transport().history(
-            FUTURES_TRADES, q._request, window, dates=dates, call=1, infer_holidays=True, stop=stop
+            FUTURES_TRADES,
+            q._request,
+            window,
+            dates=dates,
+            tally=ReadTally(),
+            call=1,
+            infer_holidays=True,
+            logged=LoggedKeys(),
+            stop=stop,
         )
     assert waits == list(range(stopped_at + 1))
 
@@ -1670,7 +2307,9 @@ def test_an_early_opened_session_and_rest_s_holiday_never_repeat_a_row(
     contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
     q = query(session, FUTURES_TRADES, symbols=contracts, venues={FuturesVenue.CME})
     t = q.history(
-        datetime(2025, 1, 17, 8, tzinfo=CHICAGO), datetime(2025, 1, 22, 12, tzinfo=CHICAGO)
+        datetime(2025, 1, 17, 8, tzinfo=CHICAGO),
+        datetime(2025, 1, 22, 12, tzinfo=CHICAGO),
+        wait=True,
     )
     opens = datetime(2025, 1, 19, 17, tzinfo=CHICAGO)
     assert pick(t, "Symbol", "Timestamp") == [
@@ -1697,10 +2336,11 @@ class DayBars:
         window: HistoryWindow,
         *,
         call: int,
+        tally: ReadTally,
         stop: threading.Event | None = None,
         days: Sequence[date] | None = None,
     ) -> Table:
-        del call, stop
+        del call, stop, tally
         self.calls.append((request, window))
         self.days.append(days)
         rows = [
@@ -1734,7 +2374,7 @@ def test_rest_serves_day_bars_by_their_date_within_a_range_of_instants(
     # The day bars of 03-03 and 03-04 fit the range; 03-04 has no file.
     start = datetime(2025, 3, 3, tzinfo=NEW_YORK)
     end = datetime(2025, 3, 5, 12, tzinfo=NEW_YORK)
-    t = q.history(start, end)
+    t = q.history(start, end, wait=True)
     assert pick(t, "Symbol", "Date") == [("AAPL", "2025-03-03"), ("from REST", "2025-03-04")]
     ((request, window),) = day_bars.calls
     assert (request.start, request.end) == (start, end)
@@ -1755,16 +2395,18 @@ def test_a_futures_range_with_no_later_session_within_a_week_raises(
         # The run's only missing trading day, Monday 01-20, lies three weeks before today and
         # no session file followed it within a week: it has no file at all.
         match=re.escape(
-            "futures.trades: no flat file exists for 2025-01-20, nor for any later day up to a "
-            "week after the range; Massive publishes a day's file the next day, so these files "
-            "will not appear. To read them, end the range before them; REST cannot serve this "
-            "read: futures.trades history over REST needs explicit symbols"
-        ),
+            "futures.trades: Massive has no flat file for 2025-01-20, nor for any later day up "
+            "to a week after the range. Massive publishes a day's file the next day, so these "
+            "files will not appear. REST cannot serve this read, since futures.trades history "
+            "over REST needs explicit symbols. End the range before them."
+        )
+        + "$",
     ):
         q.history(
             datetime(2025, 1, 17, 18, tzinfo=CHICAGO),  # the weekend sessions are missing too
             datetime(2025, 1, 20, 12, tzinfo=CHICAGO),
             source=HistorySource.FLAT_FILES,
+            wait=True,
         )
     # The look tries the weekdays after the range up to a week past Monday, and no further.
     looked = [date(2025, 1, d) for d in (18, 19, 20, 21, 22, 23, 24, 27)]
@@ -1789,6 +2431,7 @@ def test_a_futures_range_ending_on_a_holiday_before_the_next_session_is_out_rais
             datetime(2024, 3, 29, 8, tzinfo=CHICAGO),
             datetime(2024, 3, 30, tzinfo=CHICAGO),
             source=HistorySource.FLAT_FILES,
+            wait=True,
         )
     assert sorted(fake_s3.keys()) == [FUTURES_KEY.format("cme", date(2024, 3, d)) for d in (29, 30)]
 
@@ -1809,7 +2452,7 @@ def test_a_futures_holiday_whose_next_session_is_not_out_reads_rest_under_auto(
     q = query(session, FUTURES_TRADES, symbols=contracts, venues={FuturesVenue.CME})
     start = datetime(2025, 1, 20, 8, tzinfo=CHICAGO)
     end = datetime(2025, 1, 20, 12, tzinfo=CHICAGO)
-    t = q.history(start, end)
+    t = q.history(start, end, wait=True)
     assert pick(t, "Symbol") == [("from REST",)]
     ((_, req, _),) = rest.calls
     assert (req.start, req.end) == (start, end)
@@ -1846,7 +2489,9 @@ def test_auto_keeps_a_sessions_row_from_the_next_days_file_when_no_day_is_missin
     contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
     q = query(session, FUTURES_TRADES, symbols=contracts, venues={FuturesVenue.CME})
     t = q.history(
-        datetime(2025, 1, 14, 8, tzinfo=CHICAGO), datetime(2025, 1, 15, 12, tzinfo=CHICAGO)
+        datetime(2025, 1, 14, 8, tzinfo=CHICAGO),
+        datetime(2025, 1, 15, 12, tzinfo=CHICAGO),
+        wait=True,
     )
     assert pick(t, "Timestamp", "Date") == [
         (tuesday, "2025-01-14"),
@@ -1881,7 +2526,9 @@ def test_auto_drops_a_files_rows_inside_a_day_rest_reads(
     contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
     q = query(session, FUTURES_TRADES, symbols=contracts, venues={FuturesVenue.CME})
     t = q.history(
-        datetime(2025, 1, 14, 8, tzinfo=CHICAGO), datetime(2025, 1, 15, 12, tzinfo=CHICAGO)
+        datetime(2025, 1, 14, 8, tzinfo=CHICAGO),
+        datetime(2025, 1, 15, 12, tzinfo=CHICAGO),
+        wait=True,
     )
     assert ("ESH5", late) not in pick(t, "Symbol", "Timestamp")
     assert ("ESH5", wednesday) in pick(t, "Symbol", "Timestamp")
@@ -1910,6 +2557,7 @@ def test_a_holiday_before_a_weekend_end_rolls_forward(
         datetime(2024, 3, 29, 8, tzinfo=CHICAGO),
         datetime(2024, 3, 30, tzinfo=CHICAGO),
         source=HistorySource.FLAT_FILES,
+        wait=True,
     )
     assert pick(t, "Timestamp") == [(friday,)]
     # The look after the range passes over Sunday 03-31, a day without a session.
@@ -1934,6 +2582,7 @@ def test_an_ordinary_weekend_end_does_not_roll_forward(
         datetime(2025, 1, 24, 8, tzinfo=CHICAGO),
         datetime(2025, 1, 25, tzinfo=CHICAGO),
         source=HistorySource.FLAT_FILES,
+        wait=True,
     )
     assert pick(t, "Timestamp") == [(friday,)]
     assert sorted(fake_s3.keys()) == [key, FUTURES_KEY.format("cme", date(2025, 1, 25))]
@@ -1953,7 +2602,7 @@ def test_futures_dates_do_not_roll_forward(
     later = FUTURES_KEY.format("cme", date(2025, 1, 21))
     fake_s3.put(later, make_csv_gz(FUTURES_HEADER + f",1.0,1,1,1,1,2025-01-21,ESH5,{tuesday}\n"))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    t = q.history("2025-01-20", "2025-01-20", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-01-20", "2025-01-20", source=HistorySource.FLAT_FILES, wait=True)
     assert t.size == 0
     assert fake_s3.keys() == [FUTURES_KEY.format("cme", date(2025, 1, 20)), later]
     assert later in fake_s3.closed_bodies
@@ -1963,20 +2612,26 @@ def test_mixed_futures_bounds_are_refused_before_any_read(
     *, session: dm.MassiveSession, fake_s3: FakeS3
 ) -> None:
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    with pytest.raises(ValueError, match="start and end must both be dates or both be datetimes"):
+    refused = (
+        "start=2024-12-17 is a date and end=2024-12-17T16:00:00-06:00 is a datetime. Pass two "
+        "dates for whole days, or two datetimes for exact instants."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refused)}$"):
         q.history(
             "2024-12-17",
             datetime(2024, 12, 17, 16, tzinfo=CHICAGO),
             source=HistorySource.FLAT_FILES,
+            wait=True,
         )
     assert fake_s3.requests == []
 
 
 OTHER_SESSIONS = (
-    "futures.trades: the flat file us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz holds rows "
-    "of session 2025-03-03, not only of its own 2025-03-04; each row keeps its own session in "
-    "Date and is kept when that session was requested, but rows of a requested session may "
-    "sit in a neighbouring day's file, which a call by dates does not read, and be missing"
+    "futures.trades: Massive's flat file us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz "
+    "holds rows of session 2025-03-03 as well as of its own 2025-03-04. Each row keeps its own "
+    "session in Date. Rows of a requested session may sit in a neighbouring day's file, which a "
+    "call by dates does not read, and be missing. To include them, read a wider range of "
+    "dates, or by datetimes."
 )
 
 
@@ -1997,8 +2652,8 @@ def test_a_futures_row_keeps_its_own_session_and_the_call_keeps_the_requested(
     fake_s3.put(FUTURES_0304.format("cme"), make_csv_gz(body))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        t = q.history("2025-03-04", "2025-03-04")
-        q.history("2025-03-04", "2025-03-04")
+        t = q.history("2025-03-04", "2025-03-04", wait=True)
+        q.history("2025-03-04", "2025-03-04", wait=True)
     assert pick(t, "ReportSequence", "Date") == [(1, "2025-03-04")]
     assert [
         r.getMessage() for r in caplog.records if "holds rows of session" in r.getMessage()
@@ -2014,9 +2669,9 @@ def test_a_futures_row_keeps_its_own_session_and_the_call_keeps_the_requested(
         doubts
         == [
             (
-                "futures.trades history: the flat files hold rows of sessions other than their "
-                "own day's, so rows of session(s) 2025-03-04 may sit in a file outside the range "
-                "and be missing; read a wider range of dates, or by datetimes, to include them"
+                "futures.trades history: Massive's flat files hold rows of sessions other than "
+                "their own day's, so rows of 2025-03-04 may sit in a file outside the range and "
+                "be missing. To include them, read a wider range of dates, or by datetimes."
             )
         ]
         * 2
@@ -2034,7 +2689,7 @@ def test_a_futures_read_names_both_edge_sessions_when_files_hold_both_neighbours
         make_csv_gz(FUTURES_HEADER + later),
     )
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    t = q.history("2025-03-03", "2025-03-04")
+    t = q.history("2025-03-03", "2025-03-04", wait=True)
     assert (
         "Session(s) 2025-03-03, 2025-03-04 may be incomplete"
         in (t.attributes()["TableDescription"])
@@ -2045,9 +2700,14 @@ def test_a_read_whose_files_hold_only_their_own_sessions_names_no_doubt() -> Non
     seen = flatfiles._OtherSessions()
     span = DaySpan(date(2025, 3, 3), date(2025, 3, 5))
     assert seen.uncertain(span) == ()
-    seen.saw(pa.array([date(2025, 3, 2)], pa.date32()), date(2025, 3, 3))
+    key = flatfiles._Key(
+        FUTURES_KEY.format("cme", date(2025, 3, 3)), date(2025, 3, 3), FuturesVenue.CME
+    )
+    seen.saw(pa.array([date(2025, 3, 2)], pa.date32()), key)
     assert seen.uncertain(span) == (date(2025, 3, 5),)
     assert seen.uncertain(None) == ()  # a read by instants covers its whole range
+    # The files of a venue the read dropped count for nothing.
+    assert seen.uncertain(span, dropped=(FuturesVenue.CME,)) == ()
 
 
 def test_a_futures_row_of_another_requested_session_is_kept_with_its_own_date(
@@ -2060,7 +2720,7 @@ def test_a_futures_row_of_another_requested_session_is_kept_with_its_own_date(
         make_csv_gz(FUTURES_HEADER + ",1.0,1,1,1,1,2025-03-03,ESH5,1740956400000000000\n"),
     )
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    t = q.history("2025-03-03", "2025-03-04")
+    t = q.history("2025-03-03", "2025-03-04", wait=True)
     assert sorted(pick(t, "ReportSequence", "Date")) == [(1, "2025-03-03"), (2, "2025-03-03")]
 
 
@@ -2070,7 +2730,7 @@ def test_a_futures_call_named_by_instants_keeps_rows_by_time_with_their_own_sess
     put(FUTURES_0304.format("cme"), "us_futures_trades_v1_wrong_session.csv")  # an ESH5 row
     q = query(session, FUTURES_TRADES, symbols=["ESH5"], venues={FuturesVenue.CME})
     start = datetime(2025, 3, 3, 17, tzinfo=CHICAGO)
-    t = q.history(start, start + timedelta(hours=20), source=HistorySource.FLAT_FILES)
+    t = q.history(start, start + timedelta(hours=20), source=HistorySource.FLAT_FILES, wait=True)
     assert pick(t, "ReportSequence", "Date") == [(31, "2025-03-03")]
 
 
@@ -2082,33 +2742,464 @@ def test_a_futures_row_without_a_session_is_dropped(
     )
     fake_s3.put(FUTURES_0304.format("cme"), make_csv_gz(FUTURES_HEADER + rows))
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    assert pick(q.history("2025-03-04", "2025-03-04"), "ReportSequence") == [(2,)]
+    assert pick(q.history("2025-03-04", "2025-03-04", wait=True), "ReportSequence") == [(2,)]
 
 
 def test_a_refused_futures_venue_names_the_venue(
     *, fake_s3: FakeS3, clock: Callable[[datetime], None], put: Callable[[str, str], None]
 ) -> None:
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
     try:
         put(FUTURES_0304.format("cme"), "us_futures_trades_v1_2025-03-04.csv")
         put(FUTURES_0304.format("cbot"), "us_futures_trades_v1_2025-03-04.csv")
         fake_s3.refuse(
             "us_futures_nymex/", status=403, code="AccessDenied", message="Access Denied"
         )
-        q = m.futures.trades(dm.ALL)
+        q = m.futures.trades(dm.ALL, venues=EVERY_VENUE)
         with pytest.raises(
             dm.EntitlementError,
             match=(
-                r"the plan does not include NYMEX futures flat files: HTTP 403 for "
-                r"s3://flatfiles/us_futures_nymex/trades_v1/2025/03/2025-03-04\.csv\.gz at "
-                r"https://files\.massive\.com \(AccessDenied: Access Denied\); pass "
-                r"venues={dm\.FuturesVenue\.<VENUE>, \.\.\.} with only the venues the plan "
-                "includes"
+                r"^futures\.trades: Massive refused the flat files of NYMEX\. Massive answered "
+                r"the read of s3://flatfiles/us_futures_nymex/trades_v1/2025/03/2025-03-04\.csv"
+                r"\.gz at https://files\.massive\.com with HTTP 403 \(request_id "
+                rf'{REQUEST_ID}\): "AccessDenied: Access Denied"\. Leave '
+                r"dm\.FuturesVenue\.NYMEX out of venues, or, to skip every venue Massive "
+                r"refuses, pass on_error=dm\.ErrorPolicy\(refused_venues=dm\.OnError\.LOG\) to "
+                r"the call or to dm\.MassiveConfig\.$"
             ),
         ):
-            q.history("2025-03-04", "2025-03-04")
+            q.history("2025-03-04", "2025-03-04", wait=True)
     finally:
         m.close()
+
+
+REFUSED_0305 = FUTURES_KEY.format("nymex", date(2025, 3, 5))
+"""NYMEX's file of the second day, which a test refuses alone."""
+
+
+@pytest.fixture
+def two_days_of_venues(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> Callable[[], None]:
+    # One ESH5 trade per venue and session of 2025-03-04 and 03-05; `ReportSequence` is
+    # 10 * day + venue index, so each row names its file.
+    def store() -> None:
+        for day, stamp in ((4, 1741042800000000000), (5, 1741129200000000000)):
+            for index, venue in enumerate(VENUES):
+                key = FUTURES_KEY.format(venue, date(2025, 3, day))
+                row = f",1.0,1,1,1,{10 * day + index},2025-03-0{day},ESH5,{stamp}\n"
+                fake_s3.put(key, make_csv_gz(FUTURES_HEADER + row))
+
+    return store
+
+
+SKIPPED_NYMEX = (
+    r"futures\.trades history \(MassiveSession #\d+ call-\d+\): Massive refused the flat "
+    "files of NYMEX for the whole range: Massive answered the read of "
+    rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com with HTTP 403 "
+    rf'\(request_id {REQUEST_ID}\): "AccessDenied: Access Denied"'
+)
+"""The DEBUG record of a read that skipped NYMEX after S3 refused `REFUSED_0305`."""
+
+NYMEX_ALARM = (
+    r"futures\.trades table \d+: refused_venues: Massive refused the flat files of NYMEX for "
+    "the whole range: Massive answered the read of "
+    rf"s3://flatfiles/{re.escape(REFUSED_0305)} at https://files\.massive\.com with HTTP 403 "
+    rf'\(request_id {REQUEST_ID}\): "AccessDenied: Access Denied" \(at [^)]*call-\d+\)\. '
+    r"m\.problems\(\) lists it and every later refused_venues problem of this table, which the "
+    r"log shows at DEBUG only\."
+)
+"""The WARNING of the read's `refused_venues` problem after S3 refused `REFUSED_0305`."""
+
+VENUES_LOGGER = "deephaven_massive._ingest.refused_venues"
+
+
+def test_a_read_that_leaves_venues_out_skips_a_refused_venue_whatever_the_setting(
+    *,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Left out, venues reads every exchange the plan allows: a refused one is skipped as one
+    # problem, with one WARNING, even where the call and the session say RAISE.
+    m = dm.MassiveSession(
+        dataclasses.replace(
+            CONFIG, max_concurrency=1, on_error=dm.ErrorPolicy(refused_venues=OnError.RAISE)
+        )
+    )
+    try:
+        two_days_of_venues()
+        fake_s3.refuse(REFUSED_0305, status=403, code="AccessDenied", message="Access Denied")
+        q = m.futures.trades(dm.ALL, on_error=dm.ErrorPolicy(refused_venues=OnError.RAISE))
+        with caplog.at_level(logging.WARNING):
+            t = q.history("2025-03-04", "2025-03-05", wait=True)
+        assert pick(t, "ReportSequence") == [(40,), (41,), (43,), (50,), (51,), (53,)]
+        assert "Massive refused the flat files of NYMEX" in t.attributes()["TableDescription"]
+        (report,) = caplog.records
+        assert report.levelno == logging.WARNING
+        assert re.fullmatch(NYMEX_ALARM, report.getMessage())
+    finally:
+        m.close()
+
+
+def test_a_read_that_leaves_venues_out_fails_when_every_venue_is_refused(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    two_days_of_venues()
+    fake_s3.refuse("us_futures_", status=403, code="AccessDenied", message="No")
+    q = session.futures.trades(dm.ALL)
+    with pytest.raises(
+        dm.EntitlementError,
+        match=r"^futures\.trades: Massive refused the flat files of every venue the read asked "
+        r"for, CME, CBOT, NYMEX, and COMEX\. ",
+    ):
+        q.history("2025-03-04", "2025-03-04", wait=True)
+    # The advice works: contract tickers with source=dm.HistorySource.REST read from REST.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    contracts = session.futures.trades(["ESH5"])
+    t = contracts.history("2025-03-04", "2025-03-04", source=HistorySource.REST, wait=True)
+    assert pick(t, "Symbol") == [("from REST",)]
+
+
+@pytest.mark.parametrize("policy", [OnError.LOG, OnError.IGNORE])
+def test_a_venue_refused_on_one_day_is_skipped_for_the_whole_range(
+    policy: OnError,
+    *,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # S3 refuses NYMEX's second day only: its first day's file is dropped too, so the table
+    # has no NYMEX row on any day, and the refusal is logged once with S3's answer, and warned
+    # of under LOG only.
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
+    try:
+        two_days_of_venues()
+        fake_s3.refuse(REFUSED_0305, status=403, code="AccessDenied", message="Access Denied")
+        q = m.futures.trades(
+            dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=policy)
+        )
+        with caplog.at_level(logging.DEBUG, logger=VENUES_LOGGER):
+            t = q.history("2025-03-04", "2025-03-05", wait=True)
+        assert pick(t, "ReportSequence") == [(40,), (41,), (43,), (50,), (51,), (53,)]
+        assert t.attributes()["TableDescription"].endswith(
+            "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange."
+        )
+        (report,) = [
+            r
+            for r in caplog.records
+            if r.name == VENUES_LOGGER and "for the whole range" in r.getMessage()
+        ]
+        assert report.levelno == logging.DEBUG
+        assert re.fullmatch(SKIPPED_NYMEX, report.getMessage())
+        warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warned) == (1 if policy is OnError.LOG else 0)
+        assert all(re.fullmatch(NYMEX_ALARM, message) for message in warned)
+    finally:
+        m.close()
+
+
+def test_a_read_under_log_that_s3_refuses_nothing_keeps_every_venue_quietly(
+    *,
+    session: dm.MassiveSession,
+    two_days_of_venues: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    two_days_of_venues()
+    q = session.futures.trades(
+        dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+    )
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.refused_venues"):
+        t = q.history("2025-03-04", "2025-03-04", wait=True)
+    assert pick(t, "ReportSequence") == [(40,), (41,), (42,), (43,)]
+    assert caplog.records == []
+    assert "refused" not in t.attributes().get("TableDescription", "")
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        pytest.param("2025-03-04", "2025-03-05", id="dates, which open the later file"),
+        pytest.param(
+            datetime(2025, 3, 3, 17, tzinfo=CHICAGO),
+            datetime(2025, 3, 5, 12, tzinfo=CHICAGO),
+            id="instants, which read it",
+        ),
+    ],
+)
+def test_a_venue_refused_past_the_range_end_is_skipped_for_the_whole_range(
+    start: str | datetime,
+    end: str | datetime,
+    *,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # NYMEX's 03-05 file is missing, and the look for a later file meets a refusal: NYMEX is
+    # dropped on every day rather than its missing day taken for a holiday or failing the call.
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
+    try:
+        for day, stamp in ((4, 1741042800000000000), (5, 1741129200000000000)):
+            for index, venue in enumerate(VENUES):
+                if (venue, day) != ("nymex", 5):
+                    row = f",1.0,1,1,1,{10 * day + index},2025-03-0{day},ESH5,{stamp}\n"
+                    key = FUTURES_KEY.format(venue, date(2025, 3, day))
+                    fake_s3.put(key, make_csv_gz(FUTURES_HEADER + row))
+        later = FUTURES_KEY.format("nymex", date(2025, 3, 6))
+        fake_s3.refuse(later, status=403, code="AccessDenied", message="Access Denied")
+        q = m.futures.trades(
+            dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+        )
+        with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
+            t = q.history(start, end, wait=True)
+        assert pick(t, "ReportSequence") == [(40,), (41,), (43,), (50,), (51,), (53,)]
+        assert t.attributes()["TableDescription"].endswith(
+            "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange."
+        )
+        assert [r.getMessage() for r in caplog.records if "holiday" in r.getMessage()] == []
+        assert f"of NYMEX for the whole range: {A}{later} at " in caplog.text
+    finally:
+        m.close()
+
+
+def test_a_call_whose_only_venue_is_refused_past_the_range_end_raises(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # NYMEX's 03-04 file reads, its 03-05 file is missing, and the look for a later file is
+    # refused: the call's only venue is refused, so it raises whatever the setting.
+    row = ",1.0,1,1,1,42,2025-03-04,ESH5,1741042800000000000\n"
+    fake_s3.put(FUTURES_KEY.format("nymex", date(2025, 3, 4)), make_csv_gz(FUTURES_HEADER + row))
+    later = FUTURES_KEY.format("nymex", date(2025, 3, 6))
+    fake_s3.refuse(later, status=403, code="AccessDenied", message="No")
+    q = session.futures.trades(
+        dm.ALL, venues={FuturesVenue.NYMEX}, on_error=dm.ErrorPolicy(refused_venues=OnError.IGNORE)
+    )
+    with pytest.raises(
+        dm.EntitlementError,
+        match=r"^futures\.trades: Massive refused the flat files of every venue the read asked "
+        r"for, NYMEX\. ",
+    ):
+        q.history("2025-03-04", "2025-03-05", wait=True)
+
+
+def test_a_list_of_contracts_read_with_flat_files_forced_skips_a_refused_venue(
+    *, session: dm.MassiveSession, fake_s3: FakeS3, two_days_of_venues: Callable[[], None]
+) -> None:
+    two_days_of_venues()
+    fake_s3.refuse("us_futures_nymex/", status=403, code="AccessDenied", message="No")
+    q = session.futures.trades(
+        ["ESH5"], venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+    )
+    t = q.history("2025-03-04", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
+    assert pick(t, "ReportSequence") == [(40,), (41,), (43,)]
+    assert "Massive refused the flat files of NYMEX" in t.attributes()["TableDescription"]
+
+
+def test_a_refused_venues_rows_of_other_sessions_leave_no_session_uncertain(
+    *, fake_s3: FakeS3, make_csv_gz: Callable[[str], bytes]
+) -> None:
+    # NYMEX's 03-04 file, read before its 03-05 file is refused, holds a row of session 03-03.
+    # NYMEX is dropped, so no kept file held another session's rows, and no requested session
+    # is called incomplete.
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
+    try:
+        for day, stamp in ((4, 1741042800000000000), (5, 1741129200000000000)):
+            for index, venue in enumerate(("cme", "nymex")):
+                row = f",1.0,1,1,1,{10 * day + index},2025-03-0{day},ESH5,{stamp}\n"
+                if (venue, day) == ("nymex", 4):
+                    row += ",1.0,1,1,1,99,2025-03-03,ESH5,1740956400000000000\n"
+                key = FUTURES_KEY.format(venue, date(2025, 3, day))
+                fake_s3.put(key, make_csv_gz(FUTURES_HEADER + row))
+        refused = FUTURES_KEY.format("nymex", date(2025, 3, 5))
+        fake_s3.refuse(refused, status=403, code="AccessDenied", message="No")
+        q = m.futures.trades(
+            dm.ALL,
+            venues={FuturesVenue.CME, FuturesVenue.NYMEX},
+            on_error=dm.ErrorPolicy(refused_venues=OnError.LOG),
+        )
+        t = q.history("2025-03-04", "2025-03-05", wait=True)
+        assert pick(t, "ReportSequence") == [(40,), (50,)]
+        assert "may be incomplete" not in t.attributes()["TableDescription"]
+    finally:
+        m.close()
+
+
+@pytest.mark.parametrize("policy", [OnError.LOG, OnError.IGNORE])
+def test_a_read_by_symbol_names_the_skipped_venue_and_logs_it_once_per_call(
+    *,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    caplog: pytest.LogCaptureFixture,
+    policy: OnError,
+) -> None:
+    # A table that follows a live symbol table has its description before any read, so each
+    # symbol's source names the skipped venue; reading again in the same call logs nothing new.
+    # What a call logged lives in its own `LoggedKeys`, never in the process: a call that
+    # starts afresh, even with an id already used, logs the venue again.
+    two_days_of_venues()
+    fake_s3.refuse("us_futures_nymex/", status=403, code="AccessDenied", message="No")
+    asked = Request(
+        venues=tuple(FuturesVenue),
+        refused_venues=policy,
+        start=date(2025, 3, 4),
+        end=date(2025, 3, 4),
+    )
+    window = whole_days(FUTURES_TRADES, "2025-03-04")
+    with dm.MassiveSession(CONFIG) as m:
+        transport = files_transport(m)
+
+        def read(call: int, logged: LoggedKeys) -> dict[str, SymbolOutcome]:
+            return transport.history_by_symbol(
+                FUTURES_TRADES,
+                asked,
+                window,
+                symbols=["ESH5"],
+                dates=(date(2025, 3, 4),),
+                call=call,
+                forced=True,
+                logged=logged,
+            )
+
+        seven, eight = LoggedKeys(), LoggedKeys()
+        with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.refused_venues"):
+            outcomes = [read(7, seven), read(7, seven), read(8, eight), read(7, LoggedKeys())]
+    for outcome in outcomes:
+        rows = outcome["ESH5"]
+        assert isinstance(rows, SymbolRows)
+        assert rows.source == "flat files without NYMEX (refused)"
+        assert pick(rows.table, "ReportSequence") == [(40,), (41,), (43,)]
+    skipped = [r for r in caplog.records if r.name == VENUES_LOGGER]
+    calls = [re.search(r"call-\d+", r.getMessage()) for r in skipped]
+    assert [match.group() for match in calls if match] == ["call-7", "call-8", "call-7"]
+    assert {r.levelno for r in skipped} == {logging.DEBUG}
+    # Under LOG the first problem of each call's id warns, once in the session.
+    warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [w.split(":")[0] for w in warned] == (
+        ["futures.trades table 7", "futures.trades table 8"] if policy is OnError.LOG else []
+    )
+
+
+def test_a_refused_venue_is_not_requested_again_in_the_call(
+    *, fake_s3: FakeS3, two_days_of_venues: Callable[[], None]
+) -> None:
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
+    try:
+        two_days_of_venues()
+        fake_s3.refuse("us_futures_cbot/", status=403, code="AccessDenied", message="Denied")
+        q = m.futures.trades(
+            dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+        )
+        t = q.history("2025-03-04", "2025-03-05", wait=True)
+        assert pick(t, "ReportSequence") == [(40,), (42,), (43,), (50,), (52,), (53,)]
+        # One reader at a time, in date and venue order: CBOT's second file is never asked for.
+        requested = fake_s3.keys()
+        cbot = [key for key in requested if key.startswith("us_futures_cbot/")]
+        assert cbot == [FUTURES_KEY.format("cbot", date(2025, 3, 4))]
+    finally:
+        m.close()
+
+
+def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
+    *,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The refusals are listed in m.problems() before the call raises.
+    m = dm.MassiveSession(
+        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(refused_venues=OnError.IGNORE))
+    )
+    try:
+        events = capture_problems(m, monkeypatch)
+        two_days_of_venues()
+        for venue in ("cme", "nymex"):
+            fake_s3.refuse(f"us_futures_{venue}/", status=403, code="AccessDenied", message="No")
+        q = m.futures.trades(dm.ALL, venues={FuturesVenue.NYMEX, FuturesVenue.CME})
+        with pytest.raises(
+            dm.EntitlementError,
+            match=(
+                r"^futures\.trades: Massive refused the flat files of every venue the read "
+                r"asked for, CME and NYMEX\. Massive answered the read of "
+                r"s3://flatfiles/us_futures_cme/trades_v1/2025/03/2025-03-04\.csv\.gz at "
+                rf"https://files\.massive\.com with HTTP 403 \(request_id {REQUEST_ID}\): "
+                r'"AccessDenied: No"\. To read from REST instead, pass '
+                r"source=dm\.HistorySource\.REST and contract tickers such as 'ESH5' in place of "
+                r"dm\.ALL\.$"
+            ),
+        ) as info:
+            q.history("2025-03-04", "2025-03-04", wait=True)
+        assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
+        # One row per refused exchange, so a later refusal never merges into an earlier one.
+        assert [(e.cause, e.policy, e.field) for e in events] == [
+            (ProblemCause.REFUSED_VENUES, OnError.IGNORE, "CME"),
+            (ProblemCause.REFUSED_VENUES, OnError.IGNORE, "NYMEX"),
+        ]
+        assert ["of CME for" in events[0].detail, "of NYMEX for" in events[1].detail] == [
+            True,
+            True,
+        ]
+    finally:
+        m.close()
+
+
+@pytest.mark.parametrize(
+    ("configured", "passed", "kept"),
+    [
+        pytest.param(OnError.LOG, None, [(40,), (41,), (42,)], id="the session's setting"),
+        pytest.param(OnError.LOG, OnError.RAISE, None, id="the call's RAISE"),
+        pytest.param(OnError.RAISE, OnError.LOG, [(40,), (41,), (42,)], id="the call's LOG"),
+    ],
+)
+def test_the_call_overrides_the_sessions_refused_venues(
+    configured: OnError,
+    passed: OnError | None,
+    kept: list[tuple[int]] | None,
+    *,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+) -> None:
+    m = dm.MassiveSession(
+        dataclasses.replace(CONFIG, on_error=dm.ErrorPolicy(refused_venues=configured))
+    )
+    try:
+        two_days_of_venues()
+        fake_s3.refuse("us_futures_comex/", status=403, code="AccessDenied", message="No")
+        q = m.futures.trades(
+            dm.ALL, venues=EVERY_VENUE, on_error=dm.ErrorPolicy(refused_venues=passed)
+        )
+        if kept is not None:
+            t = q.history("2025-03-04", "2025-03-04", wait=True)
+            assert pick(t, "ReportSequence") == kept
+        else:
+            with pytest.raises(dm.EntitlementError, match=r"the flat files of COMEX\. "):
+                q.history("2025-03-04", "2025-03-04", wait=True)
+    finally:
+        m.close()
+
+
+def test_auto_reads_rest_for_a_refused_list_of_contracts_whatever_the_setting(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A list that REST can serve: NYMEX's refusal sends the whole call to REST, as before,
+    # rather than skipping NYMEX and keeping the other venues' rows.
+    rest = RestRecorder()
+    monkeypatch.setattr(session._core, "rest_transport", lambda: rest)
+    two_days_of_venues()
+    fake_s3.refuse("us_futures_nymex/", status=403, code="AccessDenied", message="No")
+    contracts = [f"E{n:02d}H5" for n in range(49)] + ["ESH5"]
+    q = session.futures.trades(contracts, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG))
+    t = q.history("2025-03-04", "2025-03-04", wait=True)
+    assert pick(t, "Symbol") == [("from REST",)]
+    assert len(rest.calls) == 1
 
 
 # --- Errors ----------------------------------------------------------------------------------
@@ -2121,9 +3212,11 @@ def test_a_refused_file_is_an_entitlement_error(
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
         dm.EntitlementError,
-        match=r"the plan does not include these flat files: .*\(AccessDenied: Access Denied\)",
+        match=r"^stocks\.trades: Massive refused its flat files\. Massive answered the read of "
+        rf"s3://flatfiles/{re.escape(TRADES_0303)} at https://files\.massive\.com with HTTP "
+        rf'403 \(request_id {REQUEST_ID}\): "AccessDenied: Access Denied"\.$',
     ) as info:
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
     assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
 
 
@@ -2149,12 +3242,15 @@ def test_rejected_credentials_are_an_authentication_error(
     with pytest.raises(
         dm.AuthenticationError,
         match=re.escape(
-            f"S3 rejected the flat-file credentials: HTTP 403 for s3://flatfiles/{key} at "
-            f"https://files.massive.com ({code}: Rejected); check MassiveConfig "
-            "s3_access_key_id and s3_secret_access_key"
-        ),
+            f"{spec.name}: Massive rejected the flat-file credentials. {A}{key} at "
+            f"https://files.massive.com with HTTP 403 (request_id {REQUEST_ID}): "
+            f'"{code}: Rejected". Pass the S3 '
+            "access key Massive's dashboard shows as s3_access_key_id and s3_secret_access_key "
+            "to dm.MassiveConfig."
+        )
+        + "$",
     ) as info:
-        q.history("2025-03-04", "2025-03-04")
+        q.history("2025-03-04", "2025-03-04", wait=True)
     assert not isinstance(info.value, dm.EntitlementError)
     assert (info.value.status, info.value.request_id) == (403, fake_s3.request_id)
 
@@ -2164,8 +3260,15 @@ def test_a_server_error_is_a_massive_error(
 ) -> None:
     fake_s3.refuse("us_stocks_sip/", status=500, code="InternalError", message="Try again")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with pytest.raises(dm.MassiveError, match=r"HTTP 500 \(InternalError: Try again\)") as info:
-        q.history("2025-03-03", "2025-03-03")
+    with pytest.raises(
+        dm.MassiveError,
+        match=re.escape(
+            f"{A}{TRADES_0303} at https://files.massive.com with HTTP 500 (request_id "
+            f'{REQUEST_ID}): "InternalError: Try again".'
+        )
+        + "$",
+    ) as info:
+        q.history("2025-03-03", "2025-03-03", wait=True)
     assert (info.value.status, info.value.request_id) == (500, fake_s3.request_id)
     assert len(retry_clock.waits) == 3  # retried on the fake clock, never on real time
 
@@ -2176,9 +3279,14 @@ def test_an_unreachable_endpoint_is_a_massive_error(
     fake_s3.fail(TRADES_0303, "unreachable")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
-        dm.MassiveError, match=re.escape("cannot read s3://flatfiles/us_stocks_sip")
+        dm.MassiveError,
+        match=re.escape(
+            f"No answer to the read of s3://flatfiles/{TRADES_0303} at https://files.massive.com "
+            'after 4 tries: Could not connect to the endpoint URL: "https://files.massive.com".'
+        )
+        + "$",
     ):
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
     assert len(retry_clock.waits) == 3  # retried on the fake clock, never on real time
 
 
@@ -2191,7 +3299,6 @@ def test_an_unreachable_endpoint_is_a_massive_error(
             gzip.compress(b"ticker,price\n")[:10] + b"\xff" * 40, id="corrupt-deflate-data"
         ),
         pytest.param("ticker,price\nAAPL,1.0\n", id="missing-documented-headers"),
-        pytest.param("ticker,sip_timestamp\nAAPL,12:30\n", id="no-row-readable"),
     ],
 )
 def test_a_malformed_file_is_a_massive_error(
@@ -2204,9 +3311,10 @@ def test_a_malformed_file_is_a_massive_error(
     fake_s3.put(TRADES_0303, body if isinstance(body, bytes) else make_csv_gz(body))
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
-        dm.MassiveError, match=re.escape(f"cannot read s3://flatfiles/{TRADES_0303}")
+        dm.MassiveError,
+        match=re.escape(f"The library could not read Massive's file s3://flatfiles/{TRADES_0303}"),
     ):
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
 
 
 def test_a_dropped_connection_is_a_massive_error(
@@ -2222,9 +3330,13 @@ def test_a_dropped_connection_is_a_massive_error(
     fake_s3.put_dropped(TRADES_0303, data[: len(data) // 2])
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
-        dm.MassiveError, match=re.escape(f"cannot read s3://flatfiles/{TRADES_0303}")
+        dm.MassiveError,
+        match=re.escape(
+            "The connection broke off while the library read Massive's file "
+            f"s3://flatfiles/{TRADES_0303}"
+        ),
     ):
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
 
 
 _HOLD = 10.0
@@ -2270,7 +3382,7 @@ def test_a_dropped_connection_is_read_again_from_the_start(
     fake_s3.drop(TRADES_0303, times=2, at=size // 2)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     # Every row once, in file order: the tables of the two cut-short reads were discarded.
     assert pick(t, "Id") == [(str(n),) for n in range(4000)]
     assert sum(converted) > 4000  # ... although they had gathered some of them
@@ -2282,7 +3394,10 @@ def test_a_dropped_connection_is_read_again_from_the_start(
     assert 1.0 <= waits[1] <= 1.2
     rereads = [r.getMessage() for r in caplog.records if "again from its start" in r.getMessage()]
     assert len(rereads) == 2
-    assert rereads[0].startswith(f"cannot read {LOCATION.format(TRADES_0303)}: ")
+    assert rereads[0].startswith(
+        f"The connection broke off while the library read Massive's file "
+        f"{LOCATION.format(TRADES_0303)}: "
+    )
 
 
 def test_a_connection_that_keeps_dropping_fails_after_three_rereads(
@@ -2300,14 +3415,18 @@ def test_a_connection_that_keeps_dropping_fails_after_three_rereads(
     with (
         caplog.at_level(logging.DEBUG, logger=LOGGER),
         pytest.raises(
-            dm.MassiveError, match=re.escape(f"cannot read {LOCATION.format(TRADES_0304)}: ")
+            dm.MassiveError,
+            match=re.escape(
+                "The connection broke off while the library read Massive's file "
+                f"{LOCATION.format(TRADES_0304)}: "
+            ),
         ),
     ):
-        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert sorted(fake_s3.keys()) == [TRADES_0303] + [TRADES_0304] * 4
     assert len(retry_clock.waits) == 3
     # The call raises the failure, so the client's give-up is DEBUG detail.
-    assert [r.levelno for r in caplog.records if "giving up after 4 reads" in r.getMessage()] == [
+    assert [r.levelno for r in caplog.records if "Giving up after 4 reads." in r.getMessage()] == [
         logging.DEBUG
     ]
 
@@ -2318,10 +3437,10 @@ def test_a_reread_is_not_made_for_a_broken_file(
     fake_s3.put(TRADES_0303, b"not gzip")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(dm.MassiveError, match="Not a gzipped file") as info:
-        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert (fake_s3.keys(), retry_clock.waits) == ([TRADES_0303], [])
     # A file that cannot be read is a defect of the library, never an expected failure.
-    assert info.value.cause is dm.ErrorCause.LIBRARY_DEFECT
+    assert info.value.source is dm.ErrorSource.LIBRARY
 
 
 @pytest.mark.parametrize(
@@ -2345,14 +3464,16 @@ def test_a_404_that_is_not_a_missing_file_names_the_settings(
     fake_s3.refuse("", status=404, code=code, message=message)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with (
-        caplog.at_level(logging.DEBUG, logger="deephaven_massive._query"),
+        caplog.at_level(logging.DEBUG, logger="deephaven_massive.queries"),
         pytest.raises(dm.MassiveError) as info,
     ):
-        q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
     assert type(info.value) is dm.MassiveError
     assert str(info.value) == (
-        f"cannot read {LOCATION.format(TRADES_0303)}: HTTP 404 ({code}: {message}); check "
-        "MassiveConfig s3_bucket and s3_endpoint_url"
+        f"stocks.trades: {A}{TRADES_0303} at https://files.massive.com with HTTP 404 "
+        f'(request_id {REQUEST_ID}): "{code}: {message}". The usual cause is an s3_bucket or '
+        "s3_endpoint_url in dm.MassiveConfig that is not Massive's. Leave both out to read "
+        "Massive's."
     )
     assert (info.value.status, info.value.request_id) == (404, fake_s3.request_id)
     # Not skipped as holidays: the call fails, and its failure is logged with its id, at DEBUG
@@ -2372,13 +3493,14 @@ def test_a_range_without_any_file_raises(
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with (
         caplog.at_level(logging.WARNING, logger=LOGGER),
-        pytest.raises(dm.MassiveError, match=r"the flat file for 2025-03-03 is not published"),
+        pytest.raises(dm.MassiveError, match=r"the flat file for 2025-03-03 yet\. "),
     ):
-        q.history("2025-03-01", "2025-03-04", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-01", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert caplog.messages == [
         (
-            "stocks.trades: 0 of 2 trading days' files exist (2025-03-03..2025-03-04, first "
-            f"looked for at {TRADES_0303}); the bucket, prefix, or venue may be wrong"
+            "stocks.trades: Massive has none of the flat files of the 2 trading days from "
+            f"2025-03-03 to 2025-03-04, the first looked for at {TRADES_0303}. The usual cause is "
+            "an s3_bucket or s3_endpoint_url in dm.MassiveConfig that is not Massive's."
         )
     ]
 
@@ -2393,7 +3515,7 @@ def test_one_missing_trading_day_is_only_a_holiday(
     put(TRADES_0304, "us_stocks_sip_trades_v1_2025-03-05.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        table = q.history("2025-03-01", "2025-03-03", source=HistorySource.FLAT_FILES)
+        table = q.history("2025-03-01", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert caplog.messages == [holiday_warning("stocks.trades", TRADES_0303, "2025-03-03")]
     # The table says so too: the file may simply be missing, and its rows with it.
     assert table.attributes()["TableDescription"].endswith(
@@ -2410,11 +3532,12 @@ def test_a_crypto_weekend_without_files_warns_about_the_address(
     saturday = "global_crypto/trades_v1/2025/03/2025-03-01.csv.gz"
     q = query(session, CRYPTO_TRADES, symbols=dm.ALL)
     with caplog.at_level(logging.WARNING, logger=LOGGER), pytest.raises(dm.MassiveError):
-        q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-01", "2025-03-02", source=HistorySource.FLAT_FILES, wait=True)
     assert caplog.messages == [
         (
-            "crypto.trades: 0 of 2 trading days' files exist (2025-03-01..2025-03-02, first "
-            f"looked for at {saturday}); the bucket, prefix, or venue may be wrong"
+            "crypto.trades: Massive has none of the flat files of the 2 trading days from "
+            f"2025-03-01 to 2025-03-02, the first looked for at {saturday}. The usual cause is an "
+            "s3_bucket or s3_endpoint_url in dm.MassiveConfig that is not Massive's."
         )
     ]
 
@@ -2466,7 +3589,7 @@ def test_a_dropped_reads_tables_are_freed_before_the_wait(
         functools.partial(vars(_massive)["FlatFileClient"].func, clock=_Watching(count)),
     )
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert t.size == 4000
     assert partial  # the dropped read had built tables ...
     assert alive == [0]  # ... and none of them outlived it into the wait
@@ -2519,7 +3642,7 @@ def test_a_failing_sibling_ends_a_reread_wait(
     fake_s3.before_answer = hold
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(dm.EntitlementError):
-        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-03", "2025-03-04", source=HistorySource.FLAT_FILES, wait=True)
     assert manual_retry_clock.monotonic() == 0.0  # the wait ended without time passing
     assert fake_s3.keys().count(TRADES_0303) == 1  # and the file was not read again
 
@@ -2543,7 +3666,7 @@ def test_an_interrupt_ends_a_reread_wait(
     monkeypatch.setattr(flatfiles, "wait", interrupted)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(KeyboardInterrupt):
-        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert manual_retry_clock.monotonic() == 0.0
     assert fake_s3.keys() == [TRADES_0303]
 
@@ -2565,8 +3688,8 @@ def test_closing_the_session_ends_a_reread_wait(
     closer = threading.Thread(target=close_while_waiting)
     closer.start()
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
-        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    with pytest.raises(dm.MassiveError, match=r"^This session is closed"):
+        q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     closer.join(TIMEOUT)
     assert manual_retry_clock.monotonic() == 0.0
     assert fake_s3.keys() == [TRADES_0303]
@@ -2576,10 +3699,10 @@ def test_every_response_body_is_closed(
     *, session: dm.MassiveSession, fake_s3: FakeS3, put: Callable[[str, str], None]
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     fake_s3.put(TRADES_0304, b"not gzip")
     with pytest.raises(dm.MassiveError):
-        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04")
+        query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04", wait=True)
     assert fake_s3.closed_bodies == [TRADES_0303, TRADES_0304]
 
 
@@ -2597,10 +3720,10 @@ def test_reads_run_in_parallel_up_to_max_concurrency(
     fake_s3.before_answer = lambda _key: pair.wait()
     for day in (3, 4, 5, 6):
         put(TRADES_KEY.format(day), "us_stocks_sip_trades_v1_2025-03-05.csv")
-    m = dm.MassiveSession(config(max_concurrency=2))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=2))
     try:
-        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-06")
-        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04")
+        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-06", wait=True)
+        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04", wait=True)
     finally:
         m.close()
     assert pool.sizes == [2, 2]
@@ -2621,7 +3744,7 @@ def test_reader_threads_enter_the_session_context(
         return convert(data, dates)
 
     monkeypatch.setattr(flatfiles, "dataset_table", recorded)
-    query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     # The readers are named after the session and the call: the call's id is its first.
     reader = f"{session._core.thread_prefix} call-1 files_"
     assert all(context for _, context in seen)
@@ -2636,7 +3759,7 @@ def test_history_runs_from_a_thread_without_an_execution_context(
     out: list[object] = []
 
     def run() -> None:  # a failure leaves `out` empty, which the assertion reports
-        t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
         out.append(pick(t, "Id"))
 
     worker = threading.Thread(target=run)
@@ -2652,10 +3775,10 @@ def test_a_failed_read_cancels_the_reads_not_started(
     # still queued when the first failure is raised.
     fake_s3.before_answer = lambda key: pool.shut.wait(TIMEOUT) if key == TRADES_0304 else None
     fake_s3.refuse(TRADES_0303, status=500, code="InternalError", message="first")
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
     try:
         with pytest.raises(dm.MassiveError, match="HTTP 500"):
-            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-07")
+            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-07", wait=True)
     finally:
         m.close()
     assert fake_s3.keys()[0] == TRADES_0303
@@ -2678,10 +3801,10 @@ def test_the_earliest_failure_is_raised(
     fake_s3.before_answer = order
     fake_s3.refuse(TRADES_0303, status=501, code="NotImplemented", message="first")
     fake_s3.refuse(TRADES_0304, status=403, code="AccessDenied", message="second")
-    m = dm.MassiveSession(config(max_concurrency=2))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=2))
     try:
         with pytest.raises(dm.MassiveError, match="HTTP 501") as info:
-            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04")
+            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04", wait=True)
         assert not isinstance(info.value, dm.EntitlementError)
     finally:
         m.close()
@@ -2701,8 +3824,9 @@ def test_a_cancelled_or_closed_read_makes_no_request(
         prefix="us_stocks_sip/trades_v1",
         request=request(dm.ALL),
         window=window,
-        unreadable_symbols=dm.OnError.RAISE,
         warnings=WARNINGS,
+        call=1,
+        tally=ReadTally(),
     )
     key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
     cancel = _massive.Cancel()
@@ -2722,17 +3846,18 @@ def test_a_read_stopped_while_it_waits_for_a_connection_is_cancelled_not_missing
     # the connection, and stopping its call ends the wait as a cancellation: it never reads
     # as a missing file, which would send a look for later days on.
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
     try:
-        transport = cast("flatfiles.FlatFileHistory", m._core.flat_file_transport())
+        transport = files_transport(m)
         transform = flatfiles._Transform.build(
             CATALOG,
             STOCK_TRADES,
             prefix="us_stocks_sip/trades_v1",
             request=request(dm.ALL),
             window=whole_days(STOCK_TRADES, "2025-03-03"),
-            unreadable_symbols=dm.OnError.RAISE,
             warnings=WARNINGS,
+            call=1,
+            tally=ReadTally(),
         )
         key = flatfiles._Key(TRADES_0303, date(2025, 3, 3), None)
         client = flat_file_client(m)
@@ -2748,7 +3873,7 @@ def test_a_read_stopped_while_it_waits_for_a_connection_is_cancelled_not_missing
         client._slots._ready.wait = noted  # type: ignore[method-assign]  # see the wait
         for read in (
             lambda cancel: transport._read_key(transform, key, cancel=cancel),
-            lambda cancel: transport._opened(key, cancel=cancel),
+            lambda cancel: transport._opened(key, "stocks.trades", cancel=cancel),
         ):
             waiting.clear()
             cancel = _massive.Cancel()
@@ -2791,11 +3916,11 @@ def test_a_failure_stops_the_reads_in_progress(
 
     fake_s3.before_answer = hold
     applied.hook = pause
-    m = dm.MassiveSession(config(max_concurrency=2))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=2))
     try:
         # The March 3 read stopped rather than failed, so the March 4 failure is raised.
         with pytest.raises(dm.MassiveError, match="HTTP 500"):
-            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04")
+            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-04", wait=True)
     finally:
         m.close()
     assert gate == [True]  # the March 4 failure waited for the March 3 read's first block
@@ -2819,10 +3944,10 @@ def test_an_interrupt_stops_every_read(
 
     monkeypatch.setattr(flatfiles, "wait", interrupted)  # Ctrl-C while the caller waits
     applied.hook = lambda _key: pool.shut.wait(TIMEOUT)
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
     try:
         with pytest.raises(KeyboardInterrupt):
-            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     finally:
         m.close()
     assert applied.counts.get(TRADES_0303, 0) <= 1
@@ -2836,7 +3961,7 @@ def test_closing_the_session_stops_a_read_in_progress(
     applied: Applied,
 ) -> None:
     blocks = many_blocks(TRADES_0303)
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     first_block = threading.Event()
     closed = threading.Event()
 
@@ -2855,8 +3980,8 @@ def test_closing_the_session_stops_a_read_in_progress(
     closer = threading.Thread(target=close_when_reading)
     closer.start()
     try:
-        with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
-            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+        with pytest.raises(dm.MassiveError, match=r"^This session is closed"):
+            query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     finally:
         closer.join(TIMEOUT)
         m.close()
@@ -2887,12 +4012,12 @@ def test_a_close_during_a_request_reports_the_close(
     # and the call reports the close.
     if stored:
         put(TRADES_KEY.format(day), "us_stocks_sip_trades_v1_2025-03-03.csv")
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     fake_s3.before_answer = lambda _key: flat_file_client(m).close()
     when = f"2025-03-{day:02d}"
     try:
-        with pytest.raises(dm.MassiveError, match=r"MassiveSession #\d+ is closed"):
-            query(m, STOCK_TRADES, symbols=dm.ALL).history(when, when)
+        with pytest.raises(dm.MassiveError, match=r"^This session is closed"):
+            query(m, STOCK_TRADES, symbols=dm.ALL).history(when, when, wait=True)
     finally:
         m.close()
         fake_s3.before_answer = None  # the fake lives in a cycle: it must not keep the session
@@ -2909,15 +4034,17 @@ def test_the_client_comes_from_the_config_and_is_shared(
     *, fake_s3: FakeS3, clock: Callable[[datetime], None], put: Callable[[str, str], None]
 ) -> None:
     m = dm.MassiveSession(
-        config(s3_endpoint_url="https://s3.example.com", s3_bucket="other", max_concurrency=3)
+        dataclasses.replace(
+            CONFIG, s3_endpoint_url="https://s3.example.com", s3_bucket="other", max_concurrency=3
+        )
     )
     try:
         fake_s3.put(TRADES_0303, b"")
         q = query(m, STOCK_TRADES, symbols=dm.ALL)
         with pytest.raises(dm.MassiveError):  # an empty object is not a CSV file
-            q.history("2025-03-03", "2025-03-03")
+            q.history("2025-03-03", "2025-03-03", wait=True)
         put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-        assert q.history("2025-03-03", "2025-03-03").size == 4
+        assert q.history("2025-03-03", "2025-03-03", wait=True).size == 4
         # One client per session, created on first use from the configuration.
         assert fake_s3.clients == [
             {
@@ -2948,9 +4075,10 @@ def test_a_client_that_cannot_be_created_is_a_massive_error(
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(
         dm.MassiveError,
-        match=r"cannot create the S3 client for https://files\.massive\.com: .*no-such-profile",
+        match=r"^The library could not create its S3 client for https://files\.massive\.com: "
+        r".*no-such-profile",
     ):
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
     assert fake_s3.clients == []
 
 
@@ -2958,14 +4086,18 @@ def test_closing_the_session_closes_the_boto_client(
     *, session: dm.MassiveSession, fake_s3: FakeS3, put: Callable[[str, str], None]
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     client = flat_file_client(session)
     session.close()
     assert fake_s3.closes == 1
     assert client.closed
     client.close()  # idempotent
     assert fake_s3.closes == 1
-    with pytest.raises(_massive.WireError, match="is closed"):
+    with pytest.raises(
+        _massive.WireError,
+        match=r"^The library closed its connections to https://files\.massive\.com before this "
+        r"request was sent\.$",
+    ):
         client.open(TRADES_0303)  # a read that raced close() cannot reopen it
     assert fake_s3.keys() == [TRADES_0303]
 
@@ -2978,9 +4110,9 @@ def test_a_session_collected_unclosed_closes_its_bucket(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
-    m = dm.MassiveSession(config(api_key="collected-with-flat-files"))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, api_key="collected-with-flat-files"))
     name = repr(m).removeprefix("<").removesuffix(" open>")
-    table = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03")
+    table = query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
     client = flat_file_client(m)
     reaper = m._core._reaper.thread
     assert fake_s3.closes == 0
@@ -3078,82 +4210,118 @@ class MemorySampler:
         )
 
 
-def test_memory_per_reader_does_not_grow_with_the_file(
+MEMORY_BLOCK = 16 * 1024
+"""The block size of the bounded-memory tests' reads."""
+
+MEMORY_ROWS = 64_000
+"""The rows of the bounded-memory tests' long file: about 310 blocks of `MEMORY_BLOCK`."""
+
+PYTHON_SLACK = 64 * MEMORY_BLOCK
+"""How far a read's Python peak may rise, or differ between two files, without a regression.
+
+Python's peak includes the read-ahead's decompressed text, taken while the parse threads work,
+so it varies from run to run by up to about 40 blocks. A reader that kept a Python copy of each
+compressed chunk it read rises by about 175 over the last two thirds of the long file.
+"""
+
+ARROW_SLACK = 14 * MEMORY_BLOCK
+"""How far a read's Arrow pool may rise, or differ between two files, without a regression.
+
+Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result and
+legitimately grow it by about 6 blocks over the last two thirds of the long file (about 7
+between the two files), but each small batch also costs allocation overhead that its byte count
+does not show: kept as one batch per block instead of merged, they grow it by about 21 (24
+between the files).
+"""
+
+
+def stored_plain(csv_text: str) -> bytes:
+    # Stored without compression, so the compressed body is as large as its text: a reader
+    # that kept the body, or a copy of each compressed chunk, would hold a block of memory per
+    # block of the file, as plainly as one that kept the text.
+    return gzip.compress(csv_text.encode(), compresslevel=0)
+
+
+@pytest.fixture
+def measured_read(
     *,
     fake_s3: FakeS3,
     clock: Callable[[datetime], None],
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+) -> Iterator[Callable[[dm.SymbolsLike], ReadMemory]]:
+    # Stores the long file of `MEMORY_ROWS` trades as 2025-03-03 and yields a function that
+    # reads that day's file for some symbols and measures the read's memory.
+    #
     # A reader holds a window of its file, not the file: the chunks it reads ahead to parse
     # (`PARSE_THREADS + 1` chunks of `CHUNK_BLOCKS` blocks), plus at most `_TABLE_BLOCKS` blocks
     # of gathered rows. Small blocks, in chunks of four, give a file of about 310 blocks, cheap
     # to build and read, in which that window fills within the first third. Each block costs
-    # the same to read whatever its size, so the block count sets the test's time; at this
-    # count every regression named below still lands well past its slack. One parse thread:
-    # with several, how many parsed chunks coexist depends on how the threads happen to run
-    # (they truly run together without the GIL), which moves Arrow's peak by a few chunks from
-    # one read to the next, more than the slack below.
-    block = 16 * 1024
-    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", block)
+    # the same to read whatever its size, so the block count sets the tests' time; at this
+    # count every regression named in `PYTHON_SLACK`, `ARROW_SLACK`, and the tests still lands
+    # well past its slack. Each read under `tracemalloc` costs about as much as the rest of a
+    # test together, so the reads are split between two tests, each well within the time
+    # limit. One parse thread: with several, how many parsed chunks coexist depends on how the
+    # threads happen to run (they truly run together without the GIL), which moves Arrow's
+    # peak by a few chunks from one read to the next, more than the slack.
+    monkeypatch.setattr(flatfiles, "BLOCK_SIZE", MEMORY_BLOCK)
     monkeypatch.setattr(flatfiles, "CHUNK_BLOCKS", 4)
     monkeypatch.setattr(flatfiles, "PARSE_THREADS", 1)
     window = (flatfiles.PARSE_THREADS + 1) * 4 + flatfiles._TABLE_BLOCKS
-    rows = 64_000
-    text = synthetic_trades(rows)
-    blocks = len(text) // block
+    text = synthetic_trades(MEMORY_ROWS)
+    blocks = len(text) // MEMORY_BLOCK
     assert blocks > 6 * window  # the last two thirds of the file dwarf the window
-
-    def stored(csv_text: str) -> bytes:
-        # Stored without compression, so the compressed body is as large as its text: a
-        # reader that kept the body, or a copy of each compressed chunk, would hold a block
-        # of memory per block of the file, as plainly as one that kept the text.
-        return gzip.compress(csv_text.encode(), compresslevel=0)
-
-    fake_s3.put(TRADES_0303, stored(text))
-    fake_s3.put(TRADES_0304, stored(TRADE_HEADER + trade(1, 1741012200000000000)))
+    fake_s3.put(TRADES_0303, stored_plain(text))
+    fake_s3.put(TRADES_0304, stored_plain(TRADE_HEADER + trade(1, 1741012200000000000)))
     sampler = MemorySampler(2 * blocks + 100)
     sampler.install(monkeypatch)
-    m = dm.MassiveSession(config(max_concurrency=1))
+    m = dm.MassiveSession(dataclasses.replace(CONFIG, max_concurrency=1))
 
-    def read(symbols: object) -> Callable[[], Table]:
+    def measure(symbols: dm.SymbolsLike) -> ReadMemory:
         q = query(m, STOCK_TRADES, symbols=symbols)
-        return lambda: q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+        return sampler.measure(
+            lambda: q.history(
+                "2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True
+            )
+        )
 
     try:
         # A first read creates the client: botocore parses its service model once per client.
-        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04")
-        every = sampler.measure(read(dm.ALL))
-        rare = sampler.measure(read(["RARE"]))
-        fake_s3.put(TRADES_0303, stored(synthetic_trades(rows // 4)))
-        short = sampler.measure(read(["RARE"]))
+        query(m, STOCK_TRADES, symbols=dm.ALL).history("2025-03-04", "2025-03-04", wait=True)
+        yield measure
     finally:
         m.close()
-    assert (every.rows, rare.rows, short.rows) == (rows, rows // 100, rows // 400)
-    # Python's peak includes the read-ahead's decompressed text, taken while the parse threads
-    # work, so it varies from run to run by up to about 40 blocks. A reader that kept a Python
-    # copy of each compressed chunk it read rises by about 175 over the last two thirds of the
-    # file.
-    python_slack = 64 * block
-    # Arrow's pool varies by a few blocks. The RARE rows a selective read gathers are its result
-    # and legitimately grow it by about 6 blocks over the last two thirds of the file (about
-    # 7 between the two files), but each small batch also costs allocation overhead that its
-    # byte count does not show: kept as one batch per block instead of merged, they grow it by
-    # about 21 (24 between the files).
-    arrow_slack = 14 * block
+
+
+def test_memory_per_reader_does_not_grow_with_the_file_when_every_row_survives(
+    measured_read: Callable[[dm.SymbolsLike], ReadMemory],
+) -> None:
+    every = measured_read(dm.ALL)
+    assert every.rows == MEMORY_ROWS
     # From a third of the way through the file to its end, a reader that kept each block it
     # read would rise by about 280 blocks. When every row survives, the result itself (a
     # Deephaven table, and its Python wrapper, per `_TABLE_BLOCKS` blocks) legitimately grows
     # with the file, but by far less than a block per table.
-    assert every.python_rise < python_slack
-    assert every.arrow_rise < arrow_slack
-    assert rare.python_rise < python_slack
-    assert rare.arrow_rise < arrow_slack
+    assert every.python_rise < PYTHON_SLACK
+    assert every.arrow_rise < ARROW_SLACK
+
+
+def test_memory_per_reader_does_not_grow_with_the_file_of_a_selective_read(
+    measured_read: Callable[[dm.SymbolsLike], ReadMemory], fake_s3: FakeS3
+) -> None:
+    rare = measured_read(["RARE"])
+    fake_s3.put(TRADES_0303, stored_plain(synthetic_trades(MEMORY_ROWS // 4)))
+    short = measured_read(["RARE"])
+    assert (rare.rows, short.rows) == (MEMORY_ROWS // 100, MEMORY_ROWS // 400)
+    # A reader that kept each block it read would rise by about 280 blocks from a third of the
+    # way through the file to its end.
+    assert rare.python_rise < PYTHON_SLACK
+    assert rare.arrow_rise < ARROW_SLACK
     # The rises leave out whatever a read sets up before its first block, such as the whole
     # body read or decompressed up front: reading a file four times as long must peak about as
     # high as reading the short one. A reader that read the whole body first would peak about
     # 235 blocks higher.
-    assert rare.python_peak - short.python_peak < python_slack
-    assert rare.arrow_peak - short.arrow_peak < arrow_slack
+    assert rare.python_peak - short.python_peak < PYTHON_SLACK
+    assert rare.arrow_peak - short.arrow_peak < ARROW_SLACK
 
 
 def test_the_production_block_size() -> None:
@@ -3173,13 +4341,13 @@ def test_outcome_of_a_cancelled_read_is_skipped() -> None:
 def test_a_session_without_a_flat_file_read_creates_no_client(
     *, fake_s3: FakeS3, clock: Callable[[datetime], None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    m = dm.MassiveSession(config())
+    m = dm.MassiveSession(CONFIG)
     rest = RestRecorder()
     monkeypatch.setattr(m._core, "rest_transport", lambda: rest)
-    query(m, STOCK_TRADES, symbols=["AAPL"]).history("2025-03-03", "2025-03-03")
+    query(m, STOCK_TRADES, symbols=["AAPL"]).history("2025-03-03", "2025-03-03", wait=True)
     assert len(rest.calls) == 1  # AUTO chose REST for one symbol
     m.close()
-    assert cast("SessionClients", m._core._ports)._flat_files is None
+    assert clients(m)._flat_files is None
     assert (fake_s3.clients, fake_s3.closes) == ([], 0)
 
 
@@ -3189,8 +4357,13 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
     # Converting a file's rows can fail in Arrow (out of memory, say): it is a failed read of
     # that file, named like any other.
     def exhausted(
-        transform: flatfiles._Transform, batch: pa.RecordBatch, *, received: int, key: object
-    ) -> tuple[pa.RecordBatch, DriftReport]:
+        transform: flatfiles._Transform,
+        batch: pa.RecordBatch,
+        marks: object,
+        *,
+        received: int,
+        key: object,
+    ) -> tuple[pa.RecordBatch, DriftReport, object]:
         raise pa.ArrowMemoryError("malloc of size 1048576 failed")
 
     monkeypatch.setattr(flatfiles._Transform, "apply", exhausted)
@@ -3199,17 +4372,17 @@ def test_an_arrow_error_while_gathering_rows_is_a_massive_error(
     with pytest.raises(
         dm.MassiveError,
         match=re.escape(
-            f"cannot read s3://flatfiles/{TRADES_0303} at https://files.massive.com: malloc of "
-            "size 1048576 failed"
+            "stocks.trades: the library could not convert Massive's flat file "
+            f"s3://flatfiles/{TRADES_0303} at https://files.massive.com: "
+            "ArrowMemoryError('malloc of size 1048576 failed'). This is a bug in "
+            "deephaven-massive. "
         ),
     ) as info:
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
     assert isinstance(info.value.__cause__, pa.ArrowMemoryError)
 
 
 # Schema drift: headers are matched by name; extra and missing headers warn once.
-
-DRIFT_LOGGER = "deephaven_massive._tables.diagnostics"
 
 
 def csv_rows(
@@ -3223,21 +4396,17 @@ def csv_rows(
 
 
 def extra_header(name: str) -> str:
-    dropped = "it is dropped (schema drift)"
-    return f"stocks.trades: FLAT_FILES field {name!r} is not in the schema; {dropped}"
+    # The detail of the `schema_drift` problem of a header Massive's docs lack.
+    return (
+        f"Massive sent the field {name!r}, which its documentation lacks, so the rows are "
+        "published without it."
+    )
 
 
-def missing_header(name: str) -> str:
-    return f"stocks.trades: FLAT_FILES field {name!r} is missing; it reads as null (schema drift)"
-
-
-def drift_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    # Each WARNING ends with the file that showed the drift first, which for a call of several
-    # files depends on which reader finished first; the file is checked where only one is read.
+def drift_of(events: list[ProblemEvent]) -> list[tuple[object, ...]]:
+    # Each `schema_drift` event as (read, field, detail).
     return [
-        r.getMessage().split(" at s3://", 1)[0]
-        for r in caplog.records
-        if r.name == DRIFT_LOGGER and r.levelno == logging.WARNING
+        (e.stream_id, e.field, e.detail) for e in events if e.cause is ProblemCause.SCHEMA_DRIFT
     ]
 
 
@@ -3246,26 +4415,26 @@ def test_reordered_headers_give_identical_results(
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     fake_s3.put_csv(TRADES_0303, names, data)
-    expected = rows(q.history("2025-03-03", "2025-03-03"))
+    expected = rows(q.history("2025-03-03", "2025-03-03", wait=True))
     assert len(expected) == 4
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        for order in (list(reversed(names)), sorted(names, key=lambda n: n[::-1])):
-            fake_s3.put_csv(TRADES_0303, order, data)
-            assert rows(q.history("2025-03-03", "2025-03-03")) == expected
-    assert drift_warnings(caplog) == []
+    events = capture_problems(session, monkeypatch)
+    for order in (list(reversed(names)), sorted(names, key=lambda n: n[::-1])):
+        fake_s3.put_csv(TRADES_0303, order, data)
+        assert rows(q.history("2025-03-03", "2025-03-03", wait=True)) == expected
+    assert events == []
 
 
-def test_an_extra_header_is_dropped_and_warned_once_per_session(
+def test_an_extra_header_is_dropped_and_a_problem_of_each_read(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, first = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     _, second = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-05.csv")
@@ -3273,29 +4442,32 @@ def test_an_extra_header_is_dropped_and_warned_once_per_session(
     fake_s3.put_csv(TRADES_0303, wider, [{**row, "halted": "true"} for row in first])
     fake_s3.put_csv(TRADES_0305, wider, [{**row, "halted": "false"} for row in second])
     q = query(session, STOCK_TRADES, symbols=["AAPL"])
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        t = q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)
-        assert pick(t, "Id") == [("1",), ("3",), ("9",)]
-        assert "Halted" not in {c.name for c in t.columns}
-        # Two files, then a second call: still one warning for the session.
-        q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES)
-    assert drift_warnings(caplog) == [extra_header("halted")]
+    events = capture_problems(session, monkeypatch)
+    t = q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
+    assert pick(t, "Id") == [("1",), ("3",), ("9",)]
+    assert "Halted" not in {c.name for c in t.columns}
+    # Two files, then a second call: each file of each call is a problem of its call.
+    q.history("2025-03-03", "2025-03-05", source=HistorySource.FLAT_FILES, wait=True)
+    assert sorted(drift_of(events)) == [
+        (read, "halted", extra_header("halted")) for read in (1, 1, 2, 2)
+    ]
 
 
-def test_a_missing_header_is_null_and_warned_once(
+def test_a_missing_header_is_null_and_no_problem(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A documented field a file lacks is Massive's null, which is valid data.
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     narrower = [name for name in names if name not in {"trf_id", "participant_timestamp"}]
     fake_s3.put_csv(TRADES_0303, narrower, data)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        t = q.history("2025-03-03", "2025-03-03")
-        q.history("2025-03-03", "2025-03-03")
+    events = capture_problems(session, monkeypatch)
+    t = q.history("2025-03-03", "2025-03-03", wait=True)
+    q.history("2025-03-03", "2025-03-03", wait=True)
     assert {c.name: c.data_type for c in t.columns} == col_defs(schema_of(STOCK_TRADES))
     assert pick(t, "Id", "TrfId", "ParticipantTimestamp", "TrfTimestamp") == [
         ("1", None, None, None),
@@ -3303,10 +4475,7 @@ def test_a_missing_header_is_null_and_warned_once(
         ("3", None, None, 1741013999999999000),
         ("4", None, None, None),
     ]
-    assert drift_warnings(caplog) == [
-        missing_header("participant_timestamp"),
-        missing_header("trf_id"),
-    ]
+    assert events == []
 
 
 @pytest.mark.parametrize("key_header", ["ticker", "sip_timestamp"])
@@ -3321,11 +4490,11 @@ def test_a_missing_key_header_is_a_massive_error(
     fake_s3.put_csv(TRADES_0303, [name for name in names if name != key_header], data)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(dm.MassiveError) as info:
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
     assert type(info.value) is dm.MassiveError
     assert str(info.value) == (
-        f"cannot read s3://flatfiles/{TRADES_0303} at https://files.massive.com: the header "
-        f"lacks the key column {key_header}"
+        f"The library could not read Massive's file s3://flatfiles/{TRADES_0303} at "
+        f"https://files.massive.com: its header lacks the key column {key_header}. {LIBRARY_BUG}"
     )
 
 
@@ -3339,51 +4508,64 @@ def test_a_futures_file_without_its_session_header_is_a_massive_error(
     lacking = [name for name in names if name != "session_end_date"]
     fake_s3.put_csv(FUTURES_0304.format("cme"), lacking, data)
     q = query(session, FUTURES_TRADES, symbols=dm.ALL, venues={FuturesVenue.CME})
-    with pytest.raises(dm.MassiveError, match=r"the header lacks the key column session_end_date$"):
-        q.history("2025-03-04", "2025-03-04")
+    with pytest.raises(
+        dm.MassiveError, match=r"its header lacks the key column session_end_date\. "
+    ):
+        q.history("2025-03-04", "2025-03-04", wait=True)
 
 
-def unconvertible_header(name: str, value: str) -> str:
-    return (
-        f"stocks.trades: FLAT_FILES field {name!r} held a value that does not fit its type; it "
-        f"reads as null (schema drift) at {LOCATION.format(TRADES_0303)}; first value {value}"
-    )
+WHERE = f"FLAT_FILES {LOCATION.format(TRADES_0303)}"
+"""Where a read of `TRADES_0303` found a withheld row, as its problem's WARNING names it."""
 
 
-def test_an_unconvertible_value_is_null_and_warned_once(
+def test_an_unconvertible_value_withholds_its_row_and_warns_once(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     fake_s3.put_csv(TRADES_0303, names, [*data[:2], {**data[2], "size": "lots"}, data[3]])
+    events = record_problems(session, monkeypatch)
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        t = q.history("2025-03-03", "2025-03-03")
-        q.history("2025-03-03", "2025-03-03")
-    assert pick(t, "Id", "Size") == [("1", 100.0), ("2", 50.0), ("3", None), ("4", 10.0)]
-    assert [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER] == [
-        unconvertible_header("size", "lots")
+    with caplog.at_level(logging.WARNING):
+        t = q.history("2025-03-03", "2025-03-03", wait=True)
+        q.history("2025-03-03", "2025-03-03", wait=True)
+    assert pick(t, "Id", "Size") == [("1", 100.0), ("2", 50.0), ("4", 10.0)]
+    why = "size holds 'lots', which is not double"
+    assert [(e.cause, e.field, e.rows, e.detail) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Size", 1, why)
+    ] * 2
+    # Each read is its own table: each warns of its first.
+    assert alarms(caplog) == [
+        alarm("unconvertible_values", f"1 row of {events[0].symbol}, ", why, where=WHERE, read=read)
+        for read in (1, 2)
     ]
 
 
-def test_an_unconvertible_list_is_null_and_warned(
+def test_an_unconvertible_list_withholds_its_row_and_warns(
     *,
     session: dm.MassiveSession,
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     fake_s3.put_csv(TRADES_0303, names, [{**data[0], "conditions": "12,abc"}, *data[1:]])
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        t = q.history("2025-03-03", "2025-03-03")
-    assert pick(t, "Id", "Conditions")[0] == ("1", None)
-    assert [r.getMessage() for r in caplog.records if r.name == DRIFT_LOGGER] == [
-        unconvertible_header("conditions", "12,abc")
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        t = q.history("2025-03-03", "2025-03-03", wait=True)
+    assert [row[0] for row in pick(t, "Id")] == ["2", "3", "4"]
+    why = "conditions holds '12,abc', which is not string"
+    assert [(e.cause, e.field, e.rows, e.detail) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Conditions", 1, why)
+    ]
+    assert alarms(caplog) == [
+        alarm("unconvertible_values", f"1 row of {events[0].symbol}, ", why, where=WHERE)
     ]
 
 
@@ -3393,25 +4575,29 @@ def test_a_file_with_a_header_and_no_rows_still_reports_its_drift(
     fake_s3: FakeS3,
     load_fixture: Callable[[str, str], bytes],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     names, _ = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
     fake_s3.put_csv(TRADES_0303, [*names, "halted"], [])
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
-    with caplog.at_level(logging.WARNING, logger=DRIFT_LOGGER):
-        t = q.history("2025-03-03", "2025-03-03")
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        t = q.history("2025-03-03", "2025-03-03", wait=True)
     assert rows(t) == []
-    assert drift_warnings(caplog) == [extra_header("halted")]
+    assert drift_of(events) == [(1, "halted", extra_header("halted"))]
     # The WARNING names the file, so the log says where to look.
-    assert caplog.messages == [f"{extra_header('halted')} at {LOCATION.format(TRADES_0303)}"]
+    where = LOCATION.format(TRADES_0303)
+    assert caplog.messages == [alarm("schema_drift", "", extra_header("halted"), where=where)]
 
 
 def test_an_empty_file_is_a_massive_error(*, session: dm.MassiveSession, fake_s3: FakeS3) -> None:
     fake_s3.put(TRADES_0303, b"")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     with pytest.raises(dm.MassiveError) as info:
-        q.history("2025-03-03", "2025-03-03")
+        q.history("2025-03-03", "2025-03-03", wait=True)
     assert str(info.value) == (
-        f"cannot read {LOCATION.format(TRADES_0303)}: the file is empty: no header line"
+        f"The library could not read Massive's file {LOCATION.format(TRADES_0303)}: the file is "
+        f"empty and has no header line. {LIBRARY_BUG}"
     )
 
 
@@ -3433,6 +4619,7 @@ def test_minute_bar_files_keep_only_whole_bars_of_an_instant_range(
         datetime(2025, 3, 3, 14, 30, 30, tzinfo=UTC),
         datetime(2025, 3, 3, 14, 32, 30, tzinfo=UTC),
         source=HistorySource.FLAT_FILES,
+        wait=True,
     )
     assert pick(t, "Date", "TimestampStart", "TimestampEnd") == [
         ("2025-03-03", minutes[1], minutes[2])
@@ -3449,8 +4636,13 @@ def test_a_session_end_date_filter_with_dates_is_refused_before_any_read(
         venues={FuturesVenue.CME},
         filters={"session_end_date": "2025-01-21"},
     )
-    with pytest.raises(ValueError, match=r"history\(\) dates set session_end_date themselves"):
-        q.history("2025-01-21", "2025-01-21", source=HistorySource.FLAT_FILES)
+    refused = (
+        "futures.trades: history() with dates sets session_end_date itself, so it takes no "
+        "session_end_date filter. Leave the filter out, or pass datetimes as start and end to "
+        "combine it with a time range."
+    )
+    with pytest.raises(ValueError, match=rf"^{re.escape(refused)}$"):
+        q.history("2025-01-21", "2025-01-21", source=HistorySource.FLAT_FILES, wait=True)
     assert fake_s3.requests == []
 
 
@@ -3467,7 +4659,7 @@ def test_every_row_of_a_day_shares_one_stored_date(
     key = "us_stocks_sip/minute_aggs_v1/2025/03/2025-03-03.csv.gz"
     fake_s3.put(key, make_csv_gz(header + body))
     q = query(session, STOCK_BARS, symbols=dm.ALL, timespan=Timespan.MINUTE, adjusted=False)
-    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES)
+    t = q.history("2025-03-03", "2025-03-03", source=HistorySource.FLAT_FILES, wait=True)
     assert t.size == 20
     assert string_objects(t, "Date") == 1
 
@@ -3481,8 +4673,7 @@ def test_a_background_history_lands_the_files_rows(
     put(TRADES_0303, "us_stocks_sip_trades_v1_2025-03-03.csv")
     q = query(session, STOCK_TRADES, symbols=dm.ALL)
     table = q.history("2025-03-03", "2025-03-03", wait=False)
-    for state in list(session._core._workers.values()):
-        cast("Any", state.fail).__self__.thread.join(TIMEOUT)
+    join_reads(session)
     # The read's row shows DONE only after the update cycle that added the rows, so the
     # table holds them from then on.
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["State"] != "LOADING")
@@ -3503,8 +4694,7 @@ def test_a_background_read_rest_could_complete_says_so_in_its_description(
         "A day the flat files cannot serve is read from REST; the log names it."
         in (table.attributes()["TableDescription"])
     )
-    for state in list(session._core._workers.values()):
-        cast("Any", state.fail).__self__.thread.join(TIMEOUT)
+    join_reads(session)
     (row,) = rows_when(session.streams(), lambda rows: bool(rows) and rows[0]["State"] != "LOADING")
     assert row["State"] == "DONE"
     session.release(table)
@@ -3520,7 +4710,145 @@ def test_a_set_stop_token_cancels_a_flat_file_read(
     window = history_window(STOCK_TRADES, request, start=day, end=day, classes=())
     stop = _massive.Cancel()
     stop.set()
-    with pytest.raises(dm.MassiveError, match=r"stocks\.trades history: the read was cancelled"):
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"stocks\.trades history: The read stopped",
+    ):
         session._core.flat_file_transport().history(
-            STOCK_TRADES, request, window, dates=[day], call=1, infer_holidays=True, stop=stop
+            STOCK_TRADES,
+            request,
+            window,
+            dates=[day],
+            tally=ReadTally(),
+            call=1,
+            infer_holidays=True,
+            logged=LoggedKeys(),
+            stop=stop,
         )
+
+
+def test_symbol_filter_raises_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="filter has no rule for a value of type object"):
+        flatfiles._symbol_filter(AssetClass.STOCKS, object())  # type: ignore[arg-type]  # the point: refused at run time
+
+
+def test_symbol_filter_raises_a_library_defect_for_a_symbol_table() -> None:
+    # history() reads a symbol table into a list before it reads flat files.
+    with pytest.raises(BrokenGuaranteeError, match="got a symbol table"):
+        flatfiles._symbol_filter(
+            AssetClass.STOCKS, SymbolTable(new_table([string_col("Symbol", [])]))
+        )
+
+
+def test_a_price_a_double_would_round_withholds_its_row(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    odd = {**data[1], "price": "9007199254740993"}
+    fake_s3.put_csv(TRADES_0303, names, [data[0], odd, data[2], data[3]])
+    events = capture_problems(session, monkeypatch)
+    t = query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
+    assert [row[0] for row in pick(t, "Id", "Size")] == ["1", "3", "4"]
+    assert [(e.cause, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Price", 1)
+    ]
+
+
+def test_an_ignored_unconvertible_value_withholds_its_row_with_no_warning(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    load_fixture: Callable[[str, str], bytes],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    names, data = csv_rows(load_fixture, "us_stocks_sip_trades_v1_2025-03-03.csv")
+    fake_s3.put_csv(TRADES_0303, names, [*data[:2], {**data[2], "size": "lots"}, data[3]])
+    events = record_problems(session, monkeypatch)
+    quiet = dm.ErrorPolicy(unconvertible_values=dm.OnError.IGNORE)
+    q = query(session, STOCK_TRADES, symbols=dm.ALL, on_error=quiet)
+    with caplog.at_level(logging.WARNING):
+        t = q.history("2025-03-03", "2025-03-03", wait=True)
+    assert [row[0] for row in pick(t, "Id", "Size")] == ["1", "2", "4"]
+    # The row's problem still reaches the session, with its setting; nothing warns.
+    assert [(e.cause, e.field, e.rows, e.policy) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "Size", 1, dm.OnError.IGNORE)
+    ]
+    assert caplog.records == []
+
+
+def test_a_refused_venue_is_listed_when_another_file_fails_the_call(
+    *,
+    fake_s3: FakeS3,
+    two_days_of_venues: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One venue is refused and the other's file fails: the call raises the failure, and the
+    # refused venue it met on the way is listed all the same. The NYMEX failure is answered
+    # only once the CME refusal is recorded, so it never cancels the CME read first.
+    recorded = threading.Event()
+    add = RefusedVenues.add
+
+    def record(refusals: RefusedVenues, venue: FuturesVenue, error: WireEntitlementError) -> None:
+        add(refusals, venue, error)
+        recorded.set()
+
+    gate: list[bool] = []  # written once, by the thread answering NYMEX, before it fails
+
+    def hold(key: str) -> None:
+        if key.startswith("us_futures_nymex/"):
+            gate.append(recorded.wait(TIMEOUT))
+
+    monkeypatch.setattr(RefusedVenues, "add", record)
+    fake_s3.before_answer = hold
+    m = dm.MassiveSession(
+        dataclasses.replace(
+            CONFIG, max_concurrency=2, on_error=dm.ErrorPolicy(refused_venues=OnError.LOG)
+        )
+    )
+    try:
+        events = capture_problems(m, monkeypatch)
+        two_days_of_venues()
+        fake_s3.refuse("us_futures_cme/", status=403, code="AccessDenied", message="No")
+        fake_s3.refuse("us_futures_nymex/", status=400, code="InvalidRequest", message="Bad")
+        q = m.futures.trades(dm.ALL, venues={FuturesVenue.NYMEX, FuturesVenue.CME})
+        with pytest.raises(dm.MassiveError, match="InvalidRequest"):
+            q.history("2025-03-04", "2025-03-04", wait=True)
+        assert gate == [True]  # the NYMEX failure waited for the CME refusal
+        assert [e.cause for e in events] == [ProblemCause.REFUSED_VENUES]
+        assert "CME" in events[0].detail
+    finally:
+        m.close()
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (date(2025, 3, 4), date(2025, 3, 4)),
+        (datetime(2025, 3, 4, 5, tzinfo=UTC), datetime(2025, 3, 4, 6, 1, tzinfo=UTC)),
+    ],
+)
+def test_an_index_minute_read_takes_the_new_york_day_s_first_hour_from_the_file_before(
+    *,
+    session: dm.MassiveSession,
+    fake_s3: FakeS3,
+    make_csv_gz: Callable[[str], bytes],
+    start: date | datetime,
+    end: date | datetime,
+) -> None:
+    # Massive's index minute file of a date holds its Chicago day, 01:00 to 01:00 New York, so
+    # Tuesday's New York hour from 00:00 to 01:00 is in Monday's file.
+    header = "ticker,open,close,high,low,window_start\n"
+    utc = [datetime(2025, 3, 4, 5, tzinfo=UTC), datetime(2025, 3, 4, 5, 30, tzinfo=UTC)]
+    monday = "".join(f"I:X,1.0,1.0,1.0,1.0,{epoch_ns(m)}\n" for m in utc)
+    after = [datetime(2025, 3, 4, 6, tzinfo=UTC), datetime(2025, 3, 5, 5, tzinfo=UTC)]
+    tuesday = "".join(f"I:X,1.0,1.0,1.0,1.0,{epoch_ns(m)}\n" for m in after)
+    for day, body in (("2025-03-03", monday), ("2025-03-04", tuesday)):
+        fake_s3.put(f"us_indices/minute_aggs_v1/2025/03/{day}.csv.gz", make_csv_gz(header + body))
+    q = query(session, INDEX_BARS, symbols=dm.ALL, timespan=Timespan.MINUTE)
+    t = q.history(start, end, source=HistorySource.FLAT_FILES, wait=True)
+    assert pick(t, "TimestampStart") == [(epoch_ns(m),) for m in (*utc, after[0])]

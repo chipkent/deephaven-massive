@@ -1,8 +1,8 @@
 """Tests of the tester examples' runner (`tests/_live/tester/examples.py`), and the examples.
 
 Every example of `docs/tester-examples/` runs here, in order, against a fake Massive REST
-server that answers like a free key (`MarketServer`), and the examples that need a paid plan's
-streams run on a session whose WebSocket connections reach the fake WebSocket server. The
+server (`MarketServer`) that refuses the snapshot and the last trade, and the examples that
+stream run on a session whose WebSocket connections reach the fake WebSocket server. The
 guide's code blocks are checked against the files, so the tester pastes exactly the code
 these tests run.
 """
@@ -17,18 +17,19 @@ import weakref
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as day_time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
 from deephaven import empty_table
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _debug_log, _massive
 from deephaven_massive._config import MassiveConfig
 from deephaven_massive._datasets import history_source
 from deephaven_massive._ingest import ws_connection
-from deephaven_massive._types import override
+from deephaven_massive._ingest.recency_labels import delayed_refusal
 from tests._fakes.rest import FakeRestServer, Received, Reply, envelope
 from tests._fakes.ws import status_frame
 from tests._live.live_run.secret_scrub import SecretFilter
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
+    from deephaven_massive._massive import DriftReport, RowMarks, Source, Status, WireError, WsState
     from deephaven_massive._tables.session_core import SessionCore
     from tests._fakes.ws import FakeMassiveServer
     from tests._fakes.ws_session import WsSession
@@ -56,7 +57,7 @@ LIVE = (
     "21_crypto_watchlist.py",
     "22_gainers_trades.py",
 )
-"""The examples that need a paid plan's streams."""
+"""The examples that stream, which run on the fake WebSocket server."""
 
 AGGS = re.compile(r"^/v2/aggs/ticker/([^/]+)/range/(\d+)/(\w+)/([\d-]+)/([\d-]+)$")
 DETAILS = re.compile(r"^/v3/reference/tickers/([A-Z.]+)$")
@@ -197,7 +198,7 @@ def _clients_reach(server: FakeMassiveServer, monkeypatch: pytest.MonkeyPatch) -
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], RowMarks, DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_deadline: Callable[[], float | None],
     ) -> _massive.WsClient:
@@ -228,7 +229,7 @@ def test_every_example_runs_against_the_fake_market(
     monkeypatch: pytest.MonkeyPatch,
     fake_ws_server: FakeMassiveServer,
 ) -> None:
-    # The free plan's snapshot is refused, so the live minute bars open on the real-time host
+    # The fake refuses the snapshot, so the live minute bars open on the real-time host
     # and Massive's live connection refuses their topic. The fake answers only once every
     # example has returned: a refusal that came while example 10 still built its table would
     # fail the open instead, so an immediate answer would race the example.
@@ -245,6 +246,15 @@ def test_every_example_runs_against_the_fake_market(
                 return
             pace.wait(0.02)
 
+    paced = threading.Event()  # never set; only paces the looks at the downloads
+
+    def look_again(_seconds: float) -> None:
+        # The fake market serves a download in milliseconds: look every 20 ms, not every second.
+        paced.wait(0.02)
+
+    def downloaded(namespace: dict[str, Any]) -> bool:
+        return examples.wait_for_downloads(namespace, sleep=look_again)
+
     files = [p for p in examples.example_files(EXAMPLES) if p.name not in LIVE]
     lines: list[str] = []
     outcomes = examples.run_examples(
@@ -253,6 +263,7 @@ def test_every_example_runs_against_the_fake_market(
         tmp_path,
         secrets=SecretFilter((KEY,)),
         echo=lines.append,
+        wait=downloaded,
         settle=refuse,
     )
     # Example 10's live minute bars return before Massive refuses them, and the run reads the
@@ -272,13 +283,14 @@ def test_every_example_runs_against_the_fake_market(
     assert printed["11_symbols"].splitlines()[:4] == ["C:EURUSD", "X:BTCUSD", "I:SPX", "BRK.B"]
     assert "0 copies of the key" in printed["12_check_the_log"]
     assert re.search(r"<MassiveSession #\d+ closed>", printed["25_finish"])
-    assert re.search(r"MassiveError: MassiveSession #\d+ is closed", printed["25_finish"])
+    assert re.search(r"MassiveError: This session is closed\.", printed["25_finish"])
     assert (out / "tables" / "03_daily_bars" / "daily.csv").exists()
     assert (out / "tables" / "20_watchlist_poll" / "watched_bars.csv").exists()
     assert (out / "tables" / "20_watchlist_poll" / "watched_contracts.csv").exists()
     assert (out / "tables" / "23_followed_history" / "followed.csv").exists()
     assert sorted(p.name for p in (tmp_path / "diagnostics").iterdir()) == [
         "connections.csv",
+        "problems.csv",
         "rate_limits.csv",
         "streams.csv",
         "symbol_reads.csv",
@@ -295,7 +307,7 @@ def _on_the_given_session(path: Path, folder: Path) -> Path:
 
 
 @pytest.mark.jvm_held
-def test_the_paid_examples_run_on_streams_from_the_fake_server(
+def test_the_live_examples_run_on_streams_from_the_fake_server(
     market: MarketServer,
     make_ws_session: Callable[..., WsSession],
     tmp_path: Path,
@@ -362,7 +374,9 @@ def test_history_plus_live_keeps_one_row_per_minute(
             for i, c in [(1, 3.0), (2, 4.0)]
         ]
         session.publish(*live)
-        table = namespace["aapl_today"]
+        # History reads in the background, so it may land before or after the stream's
+        # minutes: the rows are compared oldest first.
+        table = namespace["aapl_today"].sort("TimestampStart")
         pace = threading.Event()  # never set; only paces the loop
         made = dh_to_pylist(table)
         for _ in range(500):
@@ -433,30 +447,38 @@ def test_every_example_but_the_diagnostics_opens_its_own_session() -> None:
     assert "m = dm.MassiveSession()\n" in (EXAMPLES / "01_start_a_session.py").read_text()
 
 
-def test_settings_text_fits_the_keys_plans() -> None:
-    # Starter and Developer stream delayed data, except currencies, which have no delayed feed.
-    paid = {
-        "stocks": "developer",
-        "options": "advanced",
-        "indices": "basic",
-        "currencies": "starter",
-        "futures": "starter",
-    }
-    assert examples.settings_text(paid) == "delayed_subscriptions: [futures, stocks]\n"
-    assert examples.settings_text({}) == "delayed_subscriptions: []\n"
+def test_settings_text_lists_the_delayed_subscriptions_sorted() -> None:
+    assert examples.settings_text(("stocks", "futures")) == (
+        "delayed_subscriptions: [futures, stocks]\n"
+    )
+    assert examples.settings_text(()) == "delayed_subscriptions: []\n"
+
+
+def test_the_testers_own_settings_file_names_the_delayed_subscriptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Which subscriptions Massive serves delayed is the tester's to say, in their own file."""
+    monkeypatch.setenv("MASSIVE_API_KEY", "PLANTED-examples-key")
+    settings = tmp_path / "settings.yaml"
+    variable = {"DEEPHAVEN_MASSIVE_CONFIG_FILE": str(settings)}
+    assert examples.listed_delayed(variable) is None
+    settings.write_text("delayed_subscriptions: [stocks, futures]\n", encoding="utf-8")
+    assert examples.listed_delayed(variable) == ("futures", "stocks")
+    monkeypatch.setenv("HOME", str(tmp_path))  # SETTINGS_PATH is under the home folder
+    assert examples.listed_delayed({}) is None
 
 
 def test_fitted_runs_a_copy_only_when_the_example_names_a_path_of_the_run(tmp_path: Path) -> None:
-    free = _write(tmp_path, "01_a.py", "m = dm.MassiveSession()\n")
+    plain = _write(tmp_path, "01_a.py", "m = dm.MassiveSession()\n")
     reads = f'm = dm.MassiveSession(dm.MassiveConfig.from_file("{examples.SETTINGS_PATH}"))\n'
-    paid = _write(tmp_path, "02_b.py", f"# paid\n{reads}")
+    settled = _write(tmp_path, "02_b.py", f"# live\n{reads}")
     logs = _write(tmp_path, "03_c.py", f'log = "{examples.TEST_FOLDER}/massive-debug.log"\n')
     settings, folder, copies = tmp_path / "settings.yaml", tmp_path / "t", tmp_path / "fitted"
-    assert examples.fitted(free, settings=settings, test_folder=folder, folder=copies) == free
-    copy = examples.fitted(paid, settings=settings, test_folder=folder, folder=copies)
+    assert examples.fitted(plain, settings=settings, test_folder=folder, folder=copies) == plain
+    copy = examples.fitted(settled, settings=settings, test_folder=folder, folder=copies)
     assert copy == copies / "02_b.py"
     assert copy.read_text(encoding="utf-8") == (
-        f'# paid\nm = dm.MassiveSession(dm.MassiveConfig.from_file("{settings}"))\n'
+        f'# live\nm = dm.MassiveSession(dm.MassiveConfig.from_file("{settings}"))\n'
     )
     copy = examples.fitted(logs, settings=settings, test_folder=folder, folder=copies)
     assert copy.read_text(encoding="utf-8") == f'log = "{folder}/massive-debug.log"\n'
@@ -464,7 +486,11 @@ def test_fitted_runs_a_copy_only_when_the_example_names_a_path_of_the_run(tmp_pa
 
 def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() -> None:
     passed = examples.Outcome("17_a.py", examples.PASSED, 1.0, "")
-    refusal = f"the WebSocket server x {examples.STREAM_REFUSAL} to AM.AAPL; Massive said: no"
+    refusal = (
+        'Massive answered the subscription to AM.AAPL on wss://socket.massive.com/stocks: "not '
+        'authorized".'
+    )
+    assert examples.STREAM_REFUSAL in refusal
     assert examples.stream_verdict(passed, []) is passed
     refused = examples.stream_verdict(passed, [refusal])
     assert (refused.status, refused.error) == (examples.REFUSED, f"a stream failed: {refusal}")
@@ -472,6 +498,42 @@ def test_stream_verdict_turns_a_pass_with_failed_streams_into_their_verdict() ->
     assert failed.status == examples.FAILED
     already = examples.Outcome("10_b.py", examples.FAILED, 1.0, "RuntimeError: x")
     assert examples.stream_verdict(already, [refusal]) is already
+
+
+def test_stream_verdict_tells_a_refused_read_from_an_unlisted_delay() -> None:
+    passed = examples.Outcome("18_a.py", examples.PASSED, 1.0, "")
+    answer = 'Massive answered GET /v2/aggs with HTTP 403: "You are not entitled to this data".'
+    plan = f"stocks.bars: Massive refused this read for the Stocks subscription. {answer}"
+    s3 = 'Massive answered the read of s3://flatfiles/x with HTTP 403: "AccessDenied".'
+    files = [
+        f"stocks.trades: Massive refused its flat files. {s3}",
+        (
+            f"futures.trades: Massive refused the flat files of NYMEX. {s3} Leave "
+            "dm.FuturesVenue.NYMEX out of venues."
+        ),
+        (
+            "futures.trades: Massive refused the flat files of every venue the read asked for, "
+            f"CME and NYMEX. {s3}"
+        ),
+    ]
+    delayed = str(
+        delayed_refusal(
+            dm.Subscription.STOCKS,
+            "stocks.bars data",
+            "timeframe=DELAYED",
+            streams=False,
+        )
+    )
+    for refusal in [plan, *files]:
+        assert examples.stream_verdict(passed, [refusal]).status == examples.REFUSED, refusal
+    for other in [
+        f"stocks.trades history: Massive refused the flat files. {answer}",
+        "Massive refused the flat files of NYMEX, so this table holds no rows of that exchange.",
+    ]:
+        assert examples.stream_verdict(passed, [other]).status == examples.FAILED, other
+    assert examples.stream_verdict(passed, [delayed]).status == examples.NOT_LISTED
+    assert examples.stream_verdict(passed, [plan, delayed]).status == examples.NOT_LISTED
+    assert examples.stream_verdict(passed, [plan, "HTTP 500"]).status == examples.FAILED
 
 
 def test_failed_streams_lists_none_once_the_session_is_closed(market: MarketServer) -> None:
@@ -497,15 +559,28 @@ def test_run_example_shares_variables_and_captures_prints(tmp_path: Path) -> Non
     assert namespace["y"] == 6
 
 
-def test_run_example_tells_a_plan_refusal_from_a_failure_under_the_console_lock(
+def test_run_example_tells_a_refusal_from_a_failure_under_the_console_lock(
     tmp_path: Path,
 ) -> None:
-    code = "import deephaven_massive as dm\nraise dm.EntitlementError('no plan')\n"
+    code = "import deephaven_massive as dm\nraise dm.EntitlementError('no plan', status=403)\n"
+    unlisted = (
+        "import deephaven_massive as dm\n"
+        "raise dm.EntitlementError('delayed', source=dm.ErrorSource.USER)\n"
+    )
+    built = "import deephaven_massive as dm\nraise dm.EntitlementError('not entitled')\n"
     refused = _write(tmp_path, "01_a.py", code)
     failed = _write(tmp_path, "02_b.py", "print('before')\n1 / 0\n")
+    delayed = _write(tmp_path, "03_c.py", unlisted)
+    library = _write(tmp_path, "04_d.py", built)
     namespace: dict[str, Any] = {"kept": 1}
     outcome, _ = examples.run_example(refused, namespace)
     assert (outcome.status, outcome.error) == (examples.REFUSED, "EntitlementError: no plan")
+    outcome, _ = examples.run_example(delayed, namespace)
+    assert (outcome.status, outcome.error) == (examples.NOT_LISTED, "EntitlementError: delayed")
+    # The library's own refusal, with no status of Massive's, is a finding, not Massive's.
+    outcome, _ = examples.run_example(library, namespace)
+    assert outcome.status == examples.FAILED
+    assert outcome.error.startswith("EntitlementError: not entitled\nTraceback")
     outcome, printed = examples.run_example(failed, namespace)
     assert outcome.status == examples.FAILED
     assert outcome.error.startswith("ZeroDivisionError: division by zero\nTraceback")
@@ -668,7 +743,8 @@ class BrokenTable:
 
 
 def test_save_tables_records_a_table_it_cannot_read_and_goes_on(tmp_path: Path) -> None:
-    tables = {"broken": cast("Table", BrokenTable()), "fine": empty_table(1)}
+    broken: Table = BrokenTable()  # type: ignore[assignment]  # a table that fails to read
+    tables = {"broken": broken, "fine": empty_table(1)}
     unsaved = examples.save_tables(tables, tmp_path, SecretFilter(("K-2",)))
     assert unsaved == ["broken: RuntimeError: the stream failed: K-2"]
     assert (tmp_path / "broken.error.txt").read_text() == (

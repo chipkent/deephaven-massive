@@ -7,7 +7,7 @@ One day's opening, closing, high, and low levels of each index.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.indices.daily_open_close(symbols, date)
+m.indices.daily_open_close(symbols, date, *, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -24,6 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | Indices with the `I:` prefix. `dm.ALL` is refused; for every index's bar of one day, use `m.indices.bars(dm.ALL, dm.Timespan.DAY).history(day, day)`. |
 | [`date`](README.md#date) | The day, as a date. A `datetime` raises. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -41,10 +42,9 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `symbol`: "The exchange symbol that this item is traded under." |
-| `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a New York calendar day. From REST `from`: "The requested date." |
-| `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 New York time of `Date`. |
-| `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of the next day. For indices that end is an hour later, 01:00 New York time, since whether an index day bar covers the New York or the Chicago day is not verified. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
+| `Date` | String | The day the summary covers, as ISO yyyy-MM-dd text: a Chicago calendar day. From REST `from`: "The requested date." |
+| `TimestampStart` | Instant | The start of the day the summary covers, as an Instant: 00:00 Chicago time (01:00 New York time) of `Date`, where the index day bar of that date starts. Massive's index days are Chicago days: it stamps an index day at midnight in Chicago on every source, and its values are those of that Chicago day, though Massive's documentation says index days are Eastern. |
+| `TimestampEnd` | Instant | The exclusive end of the day the summary covers, as an Instant: 00:00 Chicago time (01:00 New York time) of the next day, where the index day bar of that date ends. Massive's index days are Chicago days: it stamps an index day at midnight in Chicago on every source, and its values are those of that Chicago day, though Massive's documentation says index days are Eastern. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades. |
 | `Open` | double | The open value for the symbol in the given time period. |
 | `High` | double | The highest value for the symbol in the given time period. |
 | `Low` | double | The lowest value for the symbol in the given time period. |
@@ -55,7 +55,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
@@ -65,7 +65,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Date` | `from` |
 | `TimestampStart` |  |
 | `TimestampEnd` |  |
-| `RawSymbol` | `symbol` |
 | `Open` | `open` |
 | `High` | `high` |
 | `Low` | `low` |
@@ -82,4 +81,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

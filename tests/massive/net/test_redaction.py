@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import traceback
 from typing import TYPE_CHECKING
@@ -39,12 +40,14 @@ from deephaven_massive._massive.spec.types import (
     Param,
     ParamKind,
     RestPath,
+    RowFault,
+    RowMarks,
     Source,
     Transport,
     WireType,
 )
 from deephaven_massive._massive.ws.client import WsClient, WsState
-from deephaven_massive._massive.ws.protocol import Reject, Status, StatusKind
+from deephaven_massive._massive.ws.protocol import Status, StatusKind
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import Reply, envelope
 
@@ -332,10 +335,14 @@ def test_the_websocket_client_never_shows_the_api_key(
         clock=FakeClock(),
     )
     client.start()
+    client.connect()
     assert client.join(10.0)  # a rejected key is fatal, so the client ends by itself
     [(state, failure)] = [(s, d) for s, d in states if s is WsState.FAILED]
     assert isinstance(failure, WireAuthError)
-    assert failure.message.endswith(f"no such key: {REDACTED}")
+    assert failure.message == (
+        "Massive answered the authentication at 127.0.0.1/stocks with status auth_failed: "
+        f'"no such key: {REDACTED}".'
+    )
     _assert_no_secret(every_logger_at_debug, failure)
     # The frame log that would show the authentication frame stays off.
     assert not [r for r in every_logger_at_debug.records if r.name.endswith(".ws.client.wire")]
@@ -351,8 +358,9 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
 ) -> None:
     received: list[Status] = []
     rows: list[dict[str, object]] = []
-    rejects: list[Reject] = []
+    marked: list[RowMarks] = []
     drifts: list[DriftReport] = []
+    arrived = threading.Event()  # the refusal and the rows both reached the library
     trades = Source(
         key="stocks/T",
         transport=Transport.WS,
@@ -366,21 +374,28 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         _generation: int,
         _channel: str,
         data: list[tuple[object, ...]],
-        rejected: list[Reject],
+        marks: RowMarks,
         drift: DriftReport,
     ) -> None:
         columns = [field.column for field in trades.fields]
         rows.extend(dict(zip(columns, row, strict=True)) for row in data)
-        rejects.extend(rejected)
+        marked.append(marks)
         drifts.append(drift)
+        if received:
+            arrived.set()
+
+    def on_status(_generation: int, status: Status) -> None:
+        received.append(status)
+        if rows:
+            arrived.set()
 
     client = WsClient(
         fake_ws_server.url(),
         api_key=PLANTED_KEY,
         sources=(trades,),
-        # On the loop thread, before any frame: a row without its ticker is dropped.
+        # On the loop thread, before any frame: a row without its ticker is marked.
         on_open=lambda _generation: client.set_required("T", frozenset({"Ticker"})),
-        on_status=lambda _generation, status: received.append(status),
+        on_status=on_status,
         on_data=on_data,
         on_state=lambda *_: None,
         reconnect_backoff=1.0,
@@ -388,31 +403,40 @@ def test_a_frame_echoing_the_api_key_reaches_the_library_cleaned(
         clock=FakeClock(),
     )
     client.start()
+    client.connect()
     try:
         fake_ws_server.wait_for(lambda server: len(server.connections) == 1)
         frame = (
             f'[{{"ev":"status","status":"error","message":"refused for {spelled}"}},'
             f'{{"ev":"T","sym":"{spelled}"}},'
             # A row with a value that does not fit, whose whole text is logged, and an extra
-            # field; then a row dropped for its required key, whose whole text is kept.
+            # field; then a row marked for its required key, whose whole text is logged too.
             f'{{"ev":"T","sym":"AAPL","p":"bad","echo":"{spelled}"}},'
             f'{{"ev":"T","p":1,"echo":"{spelled}"}}]'
         )
         fake_ws_server.wait_for(lambda server: server.connections[0].auth is not None)
         fake_ws_server.send(frame)
-        fake_ws_server.wait_for(lambda _server: bool(received) and bool(rows))
+        assert arrived.wait(10)
     finally:
         client.close()
         assert client.join(10.0)
     assert received == [Status(kind=StatusKind.REFUSED, message=f"refused for {REDACTED}")]
-    assert rows == [{"Ticker": REDACTED, "Price": None}, {"Ticker": "AAPL", "Price": None}]
+    assert rows == [
+        {"Ticker": REDACTED, "Price": None},
+        {"Ticker": "AAPL", "Price": None},
+        {"Ticker": None, "Price": 1.0},
+    ]
     assert drifts[0].samples["echo"].value == '"***"'
-    [reject] = rejects
-    assert reject.raw == '{"ev":"T","p":1,"echo":"***"}'
-    assert any(
-        record.getMessage().endswith('the row: {"ev":"T","sym":"AAPL","p":"bad","echo":"***"}')
-        for record in every_logger_at_debug.records
-    )
+    [marks] = marked
+    assert marks[RowFault.UNREADABLE_KEYS].rows == (2,)
+    for logged in (
+        '{"ev":"T","sym":"AAPL","p":"bad","echo":"***"}',
+        '{"ev":"T","p":1,"echo":"***"}',
+    ):
+        assert any(
+            record.getMessage().endswith(f"the row: {logged}")
+            for record in every_logger_at_debug.records
+        )
     _assert_no_secret(every_logger_at_debug)
 
 
@@ -426,7 +450,7 @@ def test_an_odd_rest_row_echoing_the_api_key_is_logged_cleaned(
         fields=(Field(wire_key="v", column="V", wire_type=WireType.LONG),),
         params=_TRADES.params,
     )
-    _, drift = to_batch(page.rows, path, required=())
+    _, drift, _ = to_batch(page.rows, path, required=())
     assert drift.samples["note"].value == '"***"'
     assert any('"note":"***"' in record.getMessage() for record in every_logger_at_debug.records)
     _assert_no_secret(every_logger_at_debug)
@@ -484,7 +508,11 @@ def test_an_s3_message_echoing_the_secret_is_cleaned(
             client.open(_FILE)
     finally:
         client.close()
-    assert info.value.message.endswith(f"({code}: denied {REDACTED})")
+    assert info.value.message == (
+        "Massive answered the read of s3://flatfiles/us_stocks_sip/trades_v1/2025/03/"
+        f"2025-03-03.csv.gz at https://files.massive.com with HTTP {status} (request_id "
+        f'4442587FB7D0A2F9): "{code}: denied {REDACTED}".'
+    )
     assert info.value.__cause__ is None  # botocore's error quotes the secret: not chained
     _assert_no_secret(every_logger_at_debug, info.value)
 

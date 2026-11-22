@@ -102,8 +102,9 @@ class Timespan(StrEnum):
 
     For `bars()`, the timespan also decides whether the bars stream: one-second and one-minute bars
     (`SECOND` and `MINUTE` with `multiplier=1`) stream, and every other bar is history only.
-    `SESSION` is for futures alone, whose bars have a trading-session unit and no `DAY`. The
-    previous day's bar is a dataset of its own, `previous_day_bar()`.
+    `SESSION` is a futures trading session, and Massive serves it only for futures bars. A
+    futures `DAY` bar also spans one session. The previous day's bar is a dataset of its own,
+    `previous_day_bar()`.
 
     Example:
         ::
@@ -174,6 +175,8 @@ class HistorySource(StrEnum):
       them, it reads from REST any day whose file is missing or isn't in your plan.
     - `REST`: Massive's REST API.
     - `FLAT_FILES`: Massive's flat files, the daily CSV files it publishes on S3. They need S3 keys.
+      Each file holds a whole day of data, and a read downloads all of it, however few
+      symbols or short a range you ask for.
 
     Example:
         ::
@@ -218,8 +221,10 @@ class Reread(StrEnum):
 class FuturesVenue(StrEnum):
     """A futures exchange, which picks the flat files a futures `history()` reads.
 
-    A futures dataset's `venues` argument takes a set of members and reads every exchange by
-    default. It applies only to flat files: streams cover every exchange.
+    A futures dataset's `venues` argument takes a set of members. Left out, a read takes every
+    exchange the plan allows and skips each one Massive refuses with a warning; the
+    `refused_venues` cause of `dm.ErrorPolicy` says what happens when Massive refuses an
+    exchange the call names. Both apply only to flat files: streams cover every exchange.
 
     Example:
         ::
@@ -253,9 +258,10 @@ class Direction(StrEnum):
 
 
 class ContractType(StrEnum):
-    """The type of an options contract, as `options.chain` and `options.contracts` filter it.
+    """The type of an options contract, for the `contract_type` argument of the options datasets.
 
-    Its values are the `contract_type` values both endpoints accept: calls and puts.
+    The chain, the contracts, and the open interest filter by it. Its values are the
+    `contract_type` values those endpoints accept: calls and puts.
 
     Example:
         ::
@@ -337,7 +343,7 @@ class Market(StrEnum):
     STOCKS = "stocks"
     OTC = "otc"
     INDICES = "indices"
-    FX = "fx"
+    FOREX = "fx"
     CRYPTO = "crypto"
 
 
@@ -450,7 +456,9 @@ class SymbolConvention(StrEnum):
     - `CMS`: the root, a space, and a suffix, as many broker and FIX systems write it; a class
       is ` B` (`BRK B`), a preferred ` PR` and its optional series (`BAC PRL`).
 
-    `YAHOO`, `NASDAQ`, and `CMS` apply to stocks only.
+    `YAHOO`, `NASDAQ`, and `CMS` apply to stocks only. Each names a source of symbols, not an
+    exchange: pick the one the tickers came from, not where the stock trades. `NASDAQ` reads
+    `BRK-B` as a preferred, `BRKpB`, whatever exchange lists Berkshire.
 
     Example:
         ::
@@ -469,33 +477,26 @@ class SymbolConvention(StrEnum):
 
 
 class OnError(StrEnum):
-    """What a bad symbol does: fail, or keep going with or without a log record.
+    """What a problem does: fail, or keep going with or without a log record.
 
-    One enum for every symbol problem, used in five places:
+    One bad symbol or row never stops a table by default. The members:
 
-    - `canonicalize_symbols(on_error=)`, for a value of the table that does not convert. The default
-      there is `RAISE`.
-    - `MassiveConfig.noncanonical_symbols`, for a row of a table of symbols passed as `symbols` that
-      is not Massive's exact ticker. A `str` or a list you pass always raises, whatever the setting.
-      The default is `LOG`.
-    - `MassiveConfig.unlisted_symbols`, for a crypto pair of a table of symbols that Massive's
-      crypto ticker list does not hold, in a live stream, `fetch()`, or `poll()`. The default is
-      `LOG`.
-    - `MassiveConfig.unreadable_symbols`, for a symbol Massive sends in a spelling the library
-      cannot read. The default is `LOG`.
-    - `MassiveConfig.unavailable_symbols`, for a symbol Massive has no data for in `fetch()`,
-      `history()`, or `poll()`, or one a `poll()` table cannot read. The default is `LOG`.
-
-    The members:
-
-    - `RAISE`: fail. A static input raises `ValueError` (or the read raises `MassiveError`), and a
-      live table fails when the bad value arrives.
-    - `LOG`: keep going, and log each distinct value once, a bounded number of times: at WARNING for
-      a value the user supplied, and at ERROR, as a library defect to report, for a spelling from
-      Massive the library cannot read. `canonicalize_symbols` writes a null symbol for the row; a
-      bad row of a table of symbols is skipped and listed in its result's `m.streams()` row; an
-      unreadable spelling keeps its row with a null `Symbol` and the text in the `RawSymbol` column.
+    - `RAISE`: fail whatever met the problem. A check at the call raises, and so does a call
+      with `wait=True`. A live table fails. A watchlist read by `fetch()` or `history()` fails
+      only the symbols it met, and `m.symbol_reads()` shows them `FAILED`. A bad watchlist row
+      under `noncanonical_symbols` is the exception: it fails the whole result.
+    - `LOG`: skip the value and keep going. `m.problems()` lists each problem, and the first
+      of each cause on each table logs one WARNING that points there; the rest log at DEBUG.
+      A row of Massive's data the library can't read whole is never published, under any
+      setting.
     - `IGNORE`: keep going as `LOG` does, with nothing logged above DEBUG.
+
+    Each cause has its own setting in `dm.ErrorPolicy`, set for the session
+    (`MassiveConfig.on_error`) or for one call (a dataset method's `on_error=`); its docstring
+    lists the causes. The symbol converters take a member directly: the `on_error` argument of
+    `canonicalize_symbols` (default `LOG`), and of `canonical_symbol` and the per-class
+    converters (default `RAISE`, where `LOG` and `IGNORE` return None), for a value that
+    doesn't convert.
 
     Example:
         ::
@@ -503,7 +504,9 @@ class OnError(StrEnum):
             import deephaven_massive as dm
 
             assert dm.OnError("log") is dm.OnError.LOG
-            strict = dm.MassiveConfig(noncanonical_symbols=dm.OnError.RAISE)
+            strict = dm.MassiveConfig(
+                on_error=dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)
+            )
     """
 
     RAISE = "raise"
@@ -544,27 +547,26 @@ class ConnectionTaken(StrEnum):
 
 
 class Subscription(StrEnum):
-    """One of Massive's five subscriptions, each with its own plan and REST request limit.
+    """One of Massive's five subscriptions, each with its own plan.
 
-    Massive sells its data as five subscriptions, one per asset class, with forex and crypto sharing
-    `CURRENCIES`. Each has its own plan, such as Stocks Basic or Options Starter, and the plan sets
-    its REST request limit: five a minute on a free Basic plan, and no limit on a paid one. All the
-    API keys of your account share the limits.
+    Massive sells its data as five subscriptions, one per asset class, with forex and crypto
+    sharing `CURRENCIES`. A subscription's plan may limit how many REST requests a minute it
+    makes. All the API keys of your account share the limits.
 
-    List your Basic subscriptions in `MassiveConfig.rest_basic_subscriptions`, so their requests
-    keep to the limit from the first one; otherwise the library slows down after Massive's first
-    refusal. `m.rate_limits()` shows each subscription's state. Datasets Massive assigns to no
-    subscription, such as reference, economy, and partner data, share a limit of their own, `other`,
-    which the library learns from Massive's refusals.
+    Give each limited subscription's limit in `MassiveConfig.rest_requests_per_minute`, so its
+    requests keep to it from the first one. Without it, the library slows down after Massive's
+    first rate-limit error. `m.rate_limits()` shows each subscription's state. Datasets Massive
+    assigns to no subscription share a limit of their own, `other`. Reference, economy, and
+    partner data are among them. The library learns that limit from Massive's rate-limit errors.
 
     Example:
         ::
 
             import deephaven_massive as dm
 
-            # Paid stocks; free options and currencies (forex and crypto).
+            # Options and currencies (forex and crypto) limited to 5 requests a minute.
             config = dm.MassiveConfig(
-                rest_basic_subscriptions={dm.Subscription.OPTIONS, dm.Subscription.CURRENCIES}
+                rest_requests_per_minute={dm.Subscription.OPTIONS: 5, dm.Subscription.CURRENCIES: 5}
             )
     """
 
@@ -607,9 +609,10 @@ def subscription_of(asset_class: AssetClass | ClassFromPrefix) -> Subscription |
 class Recency(StrEnum):
     """How fresh the data of a WebSocket host or a live table is (internal).
 
-    `REALTIME` for Massive's real-time and Business hosts, `DELAYED` for its delayed feed, and
-    `UNKNOWN` for a pinned host the library does not know, or a REST table of a subscription
-    listed in `MassiveConfig.delayed_subscriptions` (REST serves what the plan serves).
+    `REALTIME` for Massive's real-time and FMV hosts, `DELAYED` for its delayed feed, a pinned
+    host's as Massive's snapshot labels it, and `UNKNOWN` for a pinned host without such a
+    label, or a REST table of a subscription
+    listed in `MassiveConfig.delayed_subscriptions` (REST serves what Massive serves the key).
     `UNKNOWN` is never shown as real-time.
     """
 
@@ -621,8 +624,10 @@ class Recency(StrEnum):
 class ChannelFamily(StrEnum):
     """Which group of channels a WebSocket connection carries (internal).
 
-    `FMV` (fair market value) is Business-only and always served from `business.massive.com`;
-    every other channel is in the `TICK` family, whose host depends on the key's plan.
+    `FMV` (fair market value) streams only from the one host its page documents
+    (`business.massive.com` today); every other channel is in the `TICK` family, whose host follows
+    `MassiveConfig.delayed_subscriptions`, `MassiveConfig.websocket_hosts`, and Massive's recency
+    label.
     """
 
     TICK = "TICK"
@@ -648,7 +653,7 @@ def _require_enum(value: object, enum_type: type[_E], name: str) -> _E:
 
     Raises:
         TypeError: If `value` is not a member of `enum_type`, for example
-            `TypeError("timespan must be dm.Timespan, e.g. dm.Timespan.MINUTE")`.
+            `TypeError("timespan must be dm.Timespan, such as dm.Timespan.MINUTE, not 'minute'")`.
     """
     if isinstance(value, enum_type):
         return value
@@ -661,4 +666,12 @@ def _require_enum(value: object, enum_type: type[_E], name: str) -> _E:
                 example = member
                 break
     qualified = f"dm.{enum_type.__name__}"
-    raise TypeError(f"{name} must be {qualified}, e.g. {qualified}.{example.name}")
+    # Another enum's member reads as the user wrote it, text as quoted, and anything else by
+    # its type, the form Python's own type errors take.
+    if isinstance(value, Enum):
+        actual = f"dm.{type(value).__name__}.{value.name}"
+    elif isinstance(value, str):
+        actual = repr(value)
+    else:
+        actual = type(value).__name__
+    raise TypeError(f"{name} must be {qualified}, such as {qualified}.{example.name}, not {actual}")

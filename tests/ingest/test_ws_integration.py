@@ -15,8 +15,8 @@ import dataclasses
 import logging
 import threading
 import time
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import pytest
 from deephaven import dtypes, input_table, new_table
@@ -25,7 +25,9 @@ from deephaven.column import string_col
 
 import deephaven_massive as dm
 from deephaven_massive._massive import WsClient
-from tests._live import streams
+from deephaven_massive.queries import StreamHistoryQuery
+from tests._live import refusals, streams, summary
+from tests._live.feeds import with_delayed
 
 if TYPE_CHECKING:
     import asyncio
@@ -35,6 +37,8 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
+    from tests._live.recency import RecencyAnswer
+
 pytestmark = pytest.mark.integration
 
 # Fixture types, repeated in each live module: test modules may not import from conftest.
@@ -43,6 +47,7 @@ WaitRows: TypeAlias = "Callable[[dm.MassiveSession, Table, float], list[dict[str
 Report: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
 Evidence: TypeAlias = "Callable[[str], None]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
+RecencyLabel: TypeAlias = "Callable[[dm.Subscription], RecencyAnswer]"
 MarketStatus: TypeAlias = "Callable[[str], str]"
 
 _WAIT = 45.0
@@ -51,16 +56,16 @@ _WAIT = 45.0
 _FIRST_WAIT = 20.0
 """Seconds the taken-connection test waits for a session's trades; crypto trades all the time."""
 
-_DELAYED_FEED_LAG = timedelta(minutes=15)
-"""How far Massive's delayed stocks feed lags the market: its first trade of a session comes
-this long after the session opens."""
-
 _RECOVERY_WAIT = 120.0
 """Seconds the reconnect check waits for the stream to deliver rows again after the drop."""
 
 _FOLLOW_WAIT = 60.0
 """Seconds the watchlist check waits for each step: a pair's first trade, or a row's leaving.
 Bitcoin and Ether trade every few seconds at any hour."""
+
+
+_SocketT = TypeVar("_SocketT", bound="_Socket")
+_EndT = TypeVar("_EndT")
 
 
 class _Socket(Protocol):
@@ -99,15 +104,18 @@ def _subscribe_minute_bars(
     table_rows: TableRows,
     stream_report: Report,
     evidence: Evidence,
-) -> list[str]:
-    """Stream `AM.AAPL` in a session of its own, record what happened, and return the errors.
+) -> tuple[int, list[str]]:
+    """Stream `AM.AAPL` in a session of its own, record what happened, and return the outcome.
 
     Returns:
-        The stream's `Error` and the connection's `LastError`, where set.
+        How many rows arrived, and the stream's `Error` and the connection's `LastError`, where
+        set.
     """
     session = dm.MassiveSession(config)
     try:
-        table = session.stocks.bars("AAPL", dm.Timespan.MINUTE).append_only()
+        bars = session.stocks.bars("AAPL", dm.Timespan.MINUTE)
+        assert isinstance(bars, StreamHistoryQuery)  # 1-minute bars stream
+        table = bars.append_only()
         rows = wait_rows(session, table, time.monotonic() + _WAIT)
         for line in stream_report(session):
             evidence(line)
@@ -117,49 +125,67 @@ def _subscribe_minute_bars(
         evidence(f"AM.AAPL rows received: {len(rows)}; errors: {errors or 'none'}")
     finally:
         session.close()
-    return errors
+    return len(rows), errors
 
 
-@pytest.mark.needs("stocks:starter")
 @pytest.mark.settles("8")
 @pytest.mark.timeout(110)
 def test_what_massive_says_to_a_delayed_key_on_the_real_time_feed(
-    delayed_key: str,
+    live_config: dm.MassiveConfig,
     *,
+    recency_label: RecencyLabel,
     wait_rows: WaitRows,
     table_rows: TableRows,
     stream_report: Report,
     evidence: Evidence,
 ) -> None:
-    """What Massive answers when a delayed plan subscribes on the real-time feed.
+    """What Massive answers when a key whose stocks data it labels delayed subscribes in real time.
 
     A subscription not listed in `MassiveConfig.delayed_subscriptions` always streams from
-    `socket.massive.com`, and a delayed plan is refused there. Pins stocks to that host with a
-    delayed key (`MASSIVE_DELAYED_API_KEY`, or the main key when Stocks is on Starter or
-    Developer), so the snapshot check does not refuse the verb first, subscribes `AM.AAPL`,
-    minute bars, which every plan from Starter includes, and records the stream's error and the
-    connection's last error. The refusal does not depend on the market being open. Passes when
-    Massive refused the stream; the evidence quotes its text, which the error message shows.
+    `socket.massive.com`, the real-time feed. First asks Massive how it labels the key's stocks
+    snapshot (`recency_label`), and skips, quoting the answer, when Massive refused the snapshot
+    or does not label it delayed: the question is about a key whose data it does. Then leaves
+    stocks out of `delayed_subscriptions` and pins them to that host, so the library's own check
+    of the snapshot does not refuse the stream first, subscribes `AM.AAPL`, minute bars, and
+    records the stream's error and the connection's last error. The refusal does not depend on
+    the market being open. Passes when every error is a refusal (`refusals.is_entitlement_text`,
+    such as the library's `Massive answered the subscription to`): the refusal is the
+    evidence the question asks for. Fails on any other error, such as an outage or a taken
+    connection, which says nothing of what Massive allows. Skips, quoting the rows, when Massive
+    served the stream with no error.
     """
-    config = dm.MassiveConfig(
-        api_key=delayed_key, websocket_hosts={dm.AssetClass.STOCKS: "socket.massive.com"}
-    )
-    errors = _subscribe_minute_bars(
-        config,
+    answer = recency_label(dm.Subscription.STOCKS)
+    if answer.refusal is not None:
+        pytest.skip(f"{summary.REFUSED}{answer.refusal}")
+    if not answer.delayed:
+        pytest.skip(
+            f"Massive does not label this key's stocks data delayed ({answer.text()}); the "
+            f"question is about a key whose stocks data it labels delayed"
+        )
+    config = with_delayed(live_config, live_config.delayed_subscriptions - {dm.Subscription.STOCKS})
+    hosts = {**config.websocket_hosts, dm.AssetClass.STOCKS: "socket.massive.com"}
+    rows, errors = _subscribe_minute_bars(
+        dataclasses.replace(config, websocket_hosts=hosts),
         wait_rows=wait_rows,
         table_rows=table_rows,
         stream_report=stream_report,
         evidence=evidence,
     )
-    assert errors, "Massive served a delayed key on the real-time feed"
+    others = [error for error in errors if not refusals.is_entitlement_text(error)]
+    assert not others, f"the stream failed for a reason other than a refusal: {others}"
+    if not errors:
+        pytest.skip(
+            f"Massive served this key real-time rows on socket.massive.com: {rows} AM.AAPL "
+            f"row(s) in {_WAIT:.0f} s, no error"
+        )
 
 
-@pytest.mark.needs("stocks:advanced")
 @pytest.mark.verifies("70")
-@pytest.mark.timeout(1200)
+@pytest.mark.timeout(200)
 def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
     live_config: dm.MassiveConfig,
     *,
+    recency_label: RecencyLabel,
     wait_acked: WaitAcked,
     wait_rows: WaitRows,
     market_status: MarketStatus,
@@ -167,21 +193,28 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
     stream_report: Report,
     evidence: Evidence,
 ) -> None:
-    """Whether Massive serves a real-time key on its delayed feed, `delayed.massive.com`.
+    """Whether Massive serves a key it labels real-time on its delayed feed, `delayed.massive.com`.
 
     A subscription listed in `MassiveConfig.delayed_subscriptions` always streams from the
-    delayed feed, even on a real-time plan. With a real-time Stocks plan, lists stocks as
-    delayed, subscribes `T.AAPL` (trades, which flow in the extended hours too), and records
-    the stream's host, acknowledgement, rows, and any error. While the stock market is closed
-    the test skips after the acknowledgement. While it is open, it waits until the session
-    has been open longer than the delayed feed's 15 minutes, then up to 45 s for a trade, and
-    requires one, so the test runs up to about 17 minutes in the first quarter hour of a
-    session. Passes when Massive acknowledged the subscription without refusing it and, in an
-    open market, sent a trade: a real-time key may choose delayed data. A refusal would mean
-    the setting needs a delayed plan, and the library's message would have to say so.
+    delayed feed, even for a key Massive serves real-time. First asks Massive how it labels
+    the key's stocks snapshot (`recency_label`), and skips, quoting the answer, when it labels
+    it delayed: the question is about a key whose data is not, or when Massive refused the
+    snapshot. Then lists stocks as delayed (dropping any host pin of stocks to another feed),
+    subscribes `T.AAPL` (trades, which flow in the extended hours too), and records the
+    stream's host, acknowledgement, rows, and any error. While the stock market is closed the
+    test skips after the acknowledgement. While it is open, it waits up to 45 s for a trade;
+    the delayed feed lags the market by an amount the tests do not know, so no trade skips,
+    naming how long the session has been open. Passes when Massive acknowledged the
+    subscription without refusing it and, when a trade came, sent it: a key Massive serves
+    real-time may choose delayed data. A refusal would mean the setting needs a key whose data
+    Massive labels delayed, and the library's message would have to say so.
     """
-    config = dataclasses.replace(live_config, delayed_subscriptions={dm.Subscription.STOCKS})
-    session = dm.MassiveSession(config)
+    answer = recency_label(dm.Subscription.STOCKS)
+    if answer.refusal is not None:
+        pytest.skip(f"{summary.REFUSED}{answer.refusal}")
+    if answer.delayed:
+        pytest.skip(f"Massive labels the key's stocks data delayed ({answer.text()})")
+    session = dm.MassiveSession(with_delayed(live_config, {dm.Subscription.STOCKS}))
     try:
         table = session.stocks.trades("AAPL").append_only()
         acked = wait_acked(session, 1, time.monotonic() + _WAIT)
@@ -190,9 +223,7 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
         opened = streams.opened_at("stocks", status, family="trades", now=now)
         rows: list[dict[str, Any]] = []
         if opened is not None:
-            lag = max((opened + _DELAYED_FEED_LAG - now).total_seconds(), 0.0)
-            evidence(f"the session opened {opened}; waiting {lag:.0f} s for the feed's lag")
-            rows = wait_rows(session, table, time.monotonic() + lag + _WAIT)
+            rows = wait_rows(session, table, time.monotonic() + _WAIT)
         for line in stream_report(session):
             evidence(line)
         errors = [str(r["Error"]) for r in table_rows(session.streams()) if r["Error"]]
@@ -206,10 +237,14 @@ def test_whether_massive_serves_a_real_time_key_on_the_delayed_feed(
     assert acked, "Massive did not acknowledge T.AAPL on the delayed feed"
     if opened is None:
         pytest.skip(f"not exercised: the stock market is {status} (acknowledged)")
-    assert rows, f"no AAPL trade arrived on the delayed feed of an open market ({status})"
+    if not rows:
+        minutes = (datetime.now(UTC) - opened).total_seconds() / 60
+        pytest.skip(
+            f"no row on the delayed feed in {_WAIT:.0f} s; the market has been open "
+            f"{minutes:.0f} min (acknowledged)"
+        )
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.timeout(200)
 def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     live_session: dm.MassiveSession,
@@ -218,6 +253,7 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     table_rows: TableRows,
     stream_report: Report,
     monkeypatch: pytest.MonkeyPatch,
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     evidence: Evidence,
 ) -> None:
     """What the session does when its streaming socket drops: reconnect and deliver rows again.
@@ -229,20 +265,24 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     a reconnect, is `CONNECTED` again, its stream is `RUNNING`, and a trade the library
     received after the drop reached the table, within 120 s. Every connection state seen is
     recorded in order, `WAITING_SLOT` included: a reconnect that finds the old connection's
-    slot still held waits for it.
+    slot still held waits for it. A stream Massive refuses skips, quoting Massive.
     """
     sockets: list[tuple[WsClient, _Socket]] = []
-    run_generation = cast(
-        "Callable[[WsClient, _Socket], Awaitable[object]]", WsClient._run_generation
-    )
 
-    async def recording(self: WsClient, websocket: _Socket) -> object:
-        sockets.append((self, websocket))
-        return await run_generation(self, websocket)
+    def recorded(
+        run: Callable[[WsClient, _SocketT], Awaitable[_EndT]],
+    ) -> Callable[[WsClient, _SocketT], Awaitable[_EndT]]:
+        async def recording(self: WsClient, websocket: _SocketT) -> _EndT:
+            sockets.append((self, websocket))
+            return await run(self, websocket)
 
-    monkeypatch.setattr(WsClient, "_run_generation", recording)
+        return recording
+
+    monkeypatch.setattr(WsClient, "_run_generation", recorded(WsClient._run_generation))
     table = live_session.crypto.trades("X:BTCUSD").append_only()
     first = wait_rows(live_session, table, time.monotonic() + _FIRST_WAIT)
+    if not first:
+        skip_if_not_entitled(live_session)
     assert first, "no X:BTCUSD trade arrived before the drop"
     client, websocket = sockets[-1]
     dropped = time.time_ns()
@@ -278,7 +318,6 @@ def test_a_stream_comes_back_with_rows_after_its_socket_drops(
     assert after, f"no trade reached the table in {_RECOVERY_WAIT:.0f} s after the drop"
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.verifies("12")
 @pytest.mark.integration_limits
 @pytest.mark.timeout(200)
@@ -347,7 +386,7 @@ def test_a_newer_connection_with_one_key_takes_the_older_ones_place(
         errors = [str(r["Error"]) for r in newly_failed(streams)]
         assert errors, "Massive did not close the older connection"
         assert errors[0].startswith(
-            "another connection with this API key took the WebSocket connection to "
+            "Another connection with this API key took the WebSocket connection to "
             "socket.massive.com/crypto at "
         ), errors[0]
         # The table's failure and the connection's CLOSED row land on other threads, so each
@@ -381,7 +420,6 @@ def test_a_newer_connection_with_one_key_takes_the_older_ones_place(
     live_session.release(first)
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.timeout(330)
 def test_a_crypto_stream_follows_its_watchlist(
     live_session: dm.MassiveSession,
@@ -389,6 +427,7 @@ def test_a_crypto_stream_follows_its_watchlist(
     dh_exec_ctx: ExecutionContext,
     table_rows: TableRows,
     stream_report: Report,
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     evidence: Evidence,
 ) -> None:
     """Whether a stream subscribes and unsubscribes as rows of its watchlist come and go.
@@ -400,7 +439,8 @@ def test_a_crypto_stream_follows_its_watchlist(
     table and `Symbols` drops it once it is deleted, with `X:BTCUSD` still streaming; and after
     it is added again, the table shows no row of it from before (each `X:ETHUSD` row was
     received after the re-add) until a new trade arrives. A failure here means a watchlist edit
-    did not reach Massive, or a deleted pair's row outlived its subscription.
+    did not reach Massive, or a deleted pair's row outlived its subscription. A stream Massive
+    refuses skips, quoting Massive.
     """
     btc, eth = "X:BTCUSD", "X:ETHUSD"
     with dh_update_graph.shared_lock(dh_exec_ctx.update_graph):
@@ -422,6 +462,8 @@ def test_a_crypto_stream_follows_its_watchlist(
 
     first = _wait_until(board_rows, lambda rows: btc in pairs(rows))
     evidence(f"{btc} first row: {btc in pairs(first)}; Symbols {symbols()!r}")
+    if btc not in pairs(first):
+        skip_if_not_entitled(live_session)
     assert btc in pairs(first), f"no {btc} trade arrived in {_FOLLOW_WAIT:.0f} s"
 
     watchlist.add(new_table([string_col("Symbol", [eth])]))
@@ -451,3 +493,194 @@ def test_a_crypto_stream_follows_its_watchlist(
     live_session.release(board)
     assert not stale, f"the table showed an {eth} row from before the re-add: {stale}"
     assert rows, f"no new {eth} trade arrived in {_FOLLOW_WAIT:.0f} s after re-adding it"
+
+
+@pytest.mark.timeout(180)
+def test_an_empty_watchlist_waits_and_its_first_pair_connects(
+    live_session: dm.MassiveSession,
+    *,
+    dh_exec_ctx: ExecutionContext,
+    table_rows: TableRows,
+    stream_report: Report,
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
+    evidence: Evidence,
+) -> None:
+    """Whether a stream with nothing to subscribe opens no socket until its first pair arrives.
+
+    Streams `m.crypto.trades(watchlist).last_by()` from an empty keyed input table, in a fresh
+    session, so no other stream holds a crypto connection. Passes when the session's crypto
+    WebSocket row in `m.connections()` reads `WAITING` with no message received and no
+    reconnect, and, once `X:BTCUSD` is added, reads `CONNECTED` and a `X:BTCUSD` trade arrives;
+    Bitcoin trades every few seconds at any hour. A failure means a connection opened a socket
+    with nothing to stream, or a watchlist's first row did not connect it. A stream Massive
+    refuses once connected skips, quoting Massive.
+    """
+    btc = "X:BTCUSD"
+    with dh_update_graph.shared_lock(dh_exec_ctx.update_graph):
+        watchlist = input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    board = live_session.crypto.trades(watchlist).last_by()
+
+    def crypto_rows() -> list[dict[str, Any]]:
+        return [
+            r
+            for r in table_rows(live_session.connections())
+            if r["Transport"] == "WebSocket" and r["AssetClass"] == "crypto"
+        ]
+
+    waiting = _wait_until(crypto_rows, lambda rows: [r["State"] for r in rows] == ["WAITING"])
+    evidence(f"before the first pair: {[(r['State'], r['LastMessageAt']) for r in waiting]}")
+    assert [r["State"] for r in waiting] == ["WAITING"], waiting
+    (row,) = waiting
+    assert row["LastMessageAt"] is None, "a waiting connection received a message"
+    assert row["Reconnects"] == 0
+
+    def board_rows() -> list[dict[str, Any]]:
+        return table_rows(board)
+
+    watchlist.add(new_table([string_col("Symbol", [btc])]))
+    traded = _wait_until(board_rows, bool)
+    for line in stream_report(live_session):
+        evidence(line)
+    states = [r["State"] for r in crypto_rows()]
+    evidence(f"after adding {btc}: connection {states}; {len(traded)} rows")
+    if not traded:
+        skip_if_not_entitled(live_session)
+    live_session.release(board)
+    assert states == ["CONNECTED"], states
+    assert traded, f"no {btc} trade arrived in {_FOLLOW_WAIT:.0f} s after adding it"
+
+
+_HOLD = 90.0
+"""Seconds the real-time-only checks keep their streams open: long enough for Massive to answer
+every subscription, and to take an older connection of the key if a newer one counts against it."""
+
+_TAKEN = "another connection with this API key took"
+"""The start of the library's words, in a stream's error or a connection's last error, for a
+connection Massive closed because a newer one on the key took its place."""
+
+
+def _states(session: dm.MassiveSession, table_rows: TableRows) -> dict[str, tuple[str, str | None]]:
+    """Return each stream's state and error in `m.streams()`, by its dataset."""
+    return {
+        str(r["Dataset"]): (str(r["State"]), r["Error"] and str(r["Error"]))
+        for r in table_rows(session.streams())
+    }
+
+
+def _hold(
+    session: dm.MassiveSession, table_rows: TableRows, datasets: int
+) -> dict[str, tuple[str, str | None]]:
+    """Wait `_HOLD` seconds, or until every one of `datasets` streams has failed.
+
+    Returns:
+        The streams' states and errors at the end (`_states`).
+    """
+    deadline = time.monotonic() + _HOLD
+    pause = threading.Event()  # never set; only paces the wait
+    states = _states(session, table_rows)
+    while time.monotonic() < deadline:
+        failed = [state for state, _ in states.values() if state == "FAILED"]
+        if len(failed) == datasets:
+            break
+        pause.wait(1.0)
+        states = _states(session, table_rows)
+    return states
+
+
+@pytest.mark.timeout(180)
+def test_fmv_streams_from_its_host_beside_a_delayed_stocks_stream(
+    live_config: dm.MassiveConfig,
+    *,
+    wait_acked: WaitAcked,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> None:
+    """Whether stocks FMV streams beside delayed stock trades, and whether either takes the other.
+
+    Lists stocks in `MassiveConfig.delayed_subscriptions`, which moves `T.SPY` to
+    `delayed.massive.com` and never applies to fair market value, then streams
+    `m.stocks.fmv("SPY")`, which uses `business.massive.com`, the one host Massive documents for
+    it. Waits for Massive to acknowledge both topics, holds both streams for `_HOLD` seconds,
+    and records the two connections and the streams. Passes when no stream or connection
+    reports that the other connection took its place (a second connection on one key that
+    Massive counts as the same cluster), Massive acknowledged both topics, and both streams
+    still run. Skips, quoting Massive, when Massive refused either subscription and nothing was
+    taken: the library sent the request and Massive answered.
+    """
+    config = dataclasses.replace(
+        live_config,
+        delayed_subscriptions=live_config.delayed_subscriptions | {dm.Subscription.STOCKS},
+    )
+    session = dm.MassiveSession(config)
+    try:
+        trades = session.stocks.trades("SPY").blink()
+        fmv = session.stocks.fmv("SPY").blink()
+        acked = wait_acked(session, 2, time.monotonic() + _WAIT)
+        states = _hold(session, table_rows, 2)
+        last_errors = [
+            str(r["LastError"]) for r in table_rows(session.connections()) if r["LastError"]
+        ]
+        for line in stream_report(session):
+            evidence(line)
+        session.release(trades)
+        session.release(fmv)
+    finally:
+        session.close()
+    evidence(f"acknowledged topics {acked}; streams after {_HOLD:.0f} s: {states}")
+    taken = [error for _, error in states.values() if error and _TAKEN in error]
+    taken += [error for error in last_errors if _TAKEN in error]
+    assert not taken, f"one connection took the other's place: {taken}"
+    refused = {
+        name: error
+        for name, (state, error) in states.items()
+        if state == "FAILED" and error and "Massive answered the subscription to" in error
+    }
+    if refused:
+        pytest.skip(f"Massive refused: {refused}")
+    assert acked == 2, f"Massive acknowledged {acked} of the 2 topics"
+    assert {name: state for name, (state, _) in states.items()} == {
+        "stocks.trades": "RUNNING",
+        "stocks.fmv": "RUNNING",
+    }
+
+
+@pytest.mark.timeout(180)
+def test_admin_messages_on_the_delayed_options_feed(
+    live_config: dm.MassiveConfig,
+    *,
+    wait_acked: WaitAcked,
+    table_rows: TableRows,
+    stream_report: Report,
+    evidence: Evidence,
+) -> None:
+    """What Massive answers to the options admin messages on its delayed feed.
+
+    Massive documents `AD.*` only on the real-time feed, and the library sends it wherever the
+    session's options streams go, so Massive's answer decides. Lists options in
+    `MassiveConfig.delayed_subscriptions`, streams `m.options.admin_messages()` on
+    `delayed.massive.com`, and records Massive's acknowledgement or refusal. Passes when Massive
+    acknowledged `AD.*` there and the stream runs; messages come only with FLEX activity or an
+    exchange's notice, so no row is required. Skips, quoting Massive, when Massive refused it:
+    the refusal is then the table's error, which the evidence records.
+    """
+    config = dataclasses.replace(
+        live_config,
+        delayed_subscriptions=live_config.delayed_subscriptions | {dm.Subscription.OPTIONS},
+    )
+    session = dm.MassiveSession(config)
+    try:
+        table = session.options.admin_messages().append_only()
+        acked = wait_acked(session, 1, time.monotonic() + _WAIT)
+        states = _states(session, table_rows)
+        for line in stream_report(session):
+            evidence(line)
+        session.release(table)
+    finally:
+        session.close()
+    evidence(f"AD.* acknowledged topics {acked}; streams {states}")
+    state, error = states["options.admin_messages"]
+    if state == "FAILED" and error and "Massive answered the subscription to" in error:
+        pytest.skip(f"Massive refused: {error}")
+    assert acked, "Massive neither acknowledged nor refused AD.* on the delayed options feed"
+    assert state == "RUNNING", f"the admin messages stream is {state}: {error}"

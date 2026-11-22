@@ -9,8 +9,9 @@ the check goes on. How to run these tests is in `docs/live-tests.md`.
 
 from __future__ import annotations
 
+import time
 from collections import Counter
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -19,7 +20,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets.timestamps import MAGNITUDE_NS_THRESHOLD
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire
 from deephaven_massive._massive import Transport, WireEntitlementError, WireError, sources
-from tests._live import calendar
+from tests._live import calendar, refusals
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -39,10 +40,8 @@ Text: TypeAlias = "Callable[[int], str]"
 Evidence: TypeAlias = "Callable[[str], None]"
 
 _VENUES = ("cme", "cbot", "nymex", "comex")
-_COMPARED_LAG = timedelta(minutes=16)
-"""How far before the current minute the AUTO and REST comparison stops: one minute, so no
-bar is still forming, and the 15 minutes a delayed plan's REST bars lag."""
 _DAY_NS = 86_400 * 1_000_000_000
+_MINUTE_NS = 60 * 1_000_000_000
 _PREFIX_CLASSES = {
     "global_crypto": dm.AssetClass.CRYPTO,
     "global_forex": dm.AssetClass.FOREX,
@@ -54,7 +53,6 @@ _PREFIX_CLASSES = {
 """The asset class of each flat-file prefix's first path part, whose tickers it holds."""
 
 
-@pytest.mark.needs("futures:starter", "s3")
 @pytest.mark.verifies("4")
 @pytest.mark.timeout(100)
 def test_futures_files_hold_only_the_session_of_their_key(
@@ -76,9 +74,8 @@ def test_futures_files_hold_only_the_session_of_their_key(
     check would fail real reads.
 
     Raises:
-        WireEntitlementError: When a file is refused although Futures Starter and S3 are
-            declared; the test fails.
-        EntitlementError: When the library's read is refused, likewise.
+        WireEntitlementError: When Massive refuses a file; the test skips, quoting it.
+        EntitlementError: When Massive refuses the library's read, likewise.
     """
     read = 0
     other_sessions: dict[str, list[str | None]] = {}
@@ -103,7 +100,7 @@ def test_futures_files_hold_only_the_session_of_their_key(
     try:
         bars = live_session.futures.bars(
             dm.ALL, dm.Timespan.SESSION, venues={dm.FuturesVenue.CME}
-        ).history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES)
+        ).history(recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES, wait=True)
         evidence(f"library CME session bars of {recent_monday}: {len(table_rows(bars))} rows")
     except dm.EntitlementError:
         raise
@@ -113,7 +110,6 @@ def test_futures_files_hold_only_the_session_of_their_key(
     assert not other_sessions, f"rows of sessions other than {recent_monday}: {other_sessions}"
 
 
-@pytest.mark.needs("indices:starter", "s3")
 @pytest.mark.verifies("22")
 def test_index_value_timestamps_are_nanoseconds(
     flat_file_head: FlatFileHead,
@@ -154,40 +150,40 @@ def _day_ns(day: date) -> int:
     return (day - date(1970, 1, 1)).days * _DAY_NS
 
 
-@pytest.mark.needs("s3")
 @pytest.mark.verifies("28")
 @pytest.mark.timeout(100)
 def test_ticker_spellings_of_every_flat_file(
     flat_file_head: FlatFileHead,
     *,
     recent_monday: date,
-    flat_files_reached: Callable[[str], bool],
     evidence: Evidence,
 ) -> None:
     """How each flat file spells its tickers, beside REST's canonical forms.
 
     Reads the first block of every flat-file prefix for the most recent published Monday (futures
     from `cme`) and records the first tickers of each, any header the generated schema lacks, and
-    each prefix the credentials are refused. The crypto and forex files spell pairs with a dash
+    Massive's refusal of each prefix it refuses. The crypto and forex files spell pairs with a dash
     (`X:BTC-USD`, `C:EUR-USD`) and the library reads each row's ticker into its canonical form.
     Passes when at least one file was read and the library reads every recorded ticker of each
     file (futures as written); a spelling it cannot read must join the symbol's wire spellings
-    before symbol filters match those rows.
+    before symbol filters match those rows. Skips, quoting Massive's first refusal, when Massive
+    refused a prefix, no file was read, and no read failed otherwise.
     """
     read = 0
     unreadable: dict[str, list[str]] = {}
+    refused: list[str] = []
+    failed: list[str] = []
     for prefix in sources(Transport.FLAT_FILES):
         venue = "cme" if "{venue}" in prefix else None
-        if not flat_files_reached(prefix):
-            evidence(f"{prefix}: the S3 credentials do not reach it")
-            continue
         try:
             result = flat_file_head(prefix, recent_monday, venue)
         except WireEntitlementError as error:
-            evidence(f"{prefix}: not entitled: needs that class's flat files ({error})")
+            refused.append(refusals.refusal_line(error))
+            evidence(f"{prefix}: refused: {refused[-1]}")
             continue
         except WireError as error:
-            evidence(f"{prefix}: {type(error).__name__}: {error}")
+            failed.append(f"{prefix}: {type(error).__name__}: {error}")
+            evidence(failed[-1])
             continue
         if result is None:
             evidence(f"{prefix}: no file for {recent_monday}")
@@ -197,15 +193,29 @@ def test_ticker_spellings_of_every_flat_file(
         tickers = list(dict.fromkeys(str(row["ticker"]) for row in rows))
         evidence(f"{prefix}: tickers {tickers[:8]}; undocumented headers {sorted(extra)}")
         asset_class = _PREFIX_CLASSES[prefix.partition("/")[0]]
-        refused = [t for t in tickers if canonical_from_wire(asset_class, t) is None]
-        if refused:
-            evidence(f"{prefix}: tickers the library cannot read {refused[:8]}")
-            unreadable[prefix] = refused
-    assert read
+        odd = [t for t in tickers if canonical_from_wire(asset_class, t) is None]
+        if odd:
+            evidence(f"{prefix}: tickers the library cannot read {odd[:8]}")
+            unreadable[prefix] = odd
+    if not read and refused and not failed:
+        pytest.skip(f"refused: every prefix; the first: {refused[0]}")
+    assert read, f"no file was read; failed reads: {failed}"
     assert not unreadable, f"tickers the library cannot read: {unreadable}"
 
 
-@pytest.mark.needs("stocks:starter", "s3")
+def _days_ended_by(bars: list[tuple[str, int]], instant: int) -> list[str]:
+    """Return the days of the minute bars that ended by an instant, so both reads hold them.
+
+    Args:
+        bars: Each bar's `Date` and `TimestampStart` in nanoseconds.
+        instant: The instant, in nanoseconds since the epoch.
+
+    Returns:
+        The days, sorted.
+    """
+    return sorted({day for day, start in bars if start + _MINUTE_NS <= instant})
+
+
 @pytest.mark.timeout(200)
 def test_auto_minute_bars_through_today_match_rest(
     live_session: dm.MassiveSession,
@@ -221,36 +231,51 @@ def test_auto_minute_bars_through_today_match_rest(
     from the files and fills the rest, today at least, from REST, and warns that it did. Reads
     AAPL's minute bars as traded (`adjusted=False`, the files' basis) from the previous trading
     day through today on `AUTO` and on `REST`, and records each source's bars per day and the
-    fill warning. Today's bars keep arriving between the two reads, so only the minutes that
-    start before a cutoff taken before the first read are compared: the minute before the
-    current one, less the delayed feed's 15 minutes, which a delayed plan's REST lags by.
-    Passes when both hold the same minutes (`TimestampStart`) per day, and no minute twice:
-    no day missing or doubled where the sources meet. Skips on a day that is not a trading
-    day, when there is nothing to fill, and when the previous day's file is not published
-    yet, when `AUTO` reads REST for both days and the test would compare REST with REST.
+    fill warning. Today's bars keep arriving between the two reads, and Massive may serve the
+    key's recent bars late, so only the minutes that start before the latest minute both reads
+    hold are compared. A late bar may also be published between the reads, so when REST holds a
+    day that `AUTO` lacks among the minutes that ended before the first read began, `AUTO` reads
+    again, after REST, and that read's days count: a day `AUTO` truly misses stays missing.
+    Passes when REST holds bars to compare, both reads hold the same days among the minutes that
+    ended before the first read began, the same minutes (`TimestampStart`) per day before the
+    latest minute both hold, and no minute twice: no day missing or doubled where the sources
+    meet.
+    Skips on a day that is not a trading day, when there is nothing to fill, and when the
+    previous day's file is not published yet, when `AUTO` reads REST for both days and the test
+    would compare REST with REST.
     """
     today = calendar.today()
     if not calendar.is_trading_day(today):
         pytest.skip(f"not exercised: {today} is not a trading day, so no day is filled from REST")
-    now = datetime.now(UTC).replace(second=0, microsecond=0)
-    cutoff = int((now - _COMPARED_LAG).timestamp()) * 1_000_000_000
     query = live_session.stocks.bars("AAPL", dm.Timespan.MINUTE, adjusted=False)
-    read: dict[str, list[tuple[str, int]]] = {}
-    for chosen in (dm.HistorySource.AUTO, dm.HistorySource.REST):
-        table = query.history(previous_trading_day, today, source=chosen)
+
+    def minute_bars(chosen: dm.HistorySource) -> list[tuple[str, int]]:
+        table = query.history(previous_trading_day, today, source=chosen, wait=True)
         rows = table_rows(table.view(["Date", "TimestampStart"]))
-        read[chosen.value] = sorted(
-            (str(r["Date"]), int(r["TimestampStart"]))
-            for r in rows
-            if int(r["TimestampStart"]) < cutoff
+        return sorted((str(r["Date"]), int(r["TimestampStart"])) for r in rows)
+
+    started = time.time_ns()
+    whole = {s.value: minute_bars(s) for s in (dm.HistorySource.AUTO, dm.HistorySource.REST)}
+    cutoff = min((max(stamp for _, stamp in bars) for bars in whole.values() if bars), default=0)
+    read = {name: [bar for bar in bars if bar[1] < cutoff] for name, bars in whole.items()}
+    for name, bars in read.items():
+        days = Counter(day for day, _ in bars)
+        evidence(
+            f"{name}: {len(whole[name])} minute bars; compared per day {dict(sorted(days.items()))}"
         )
-        days = Counter(day for day, _ in read[chosen.value])
-        evidence(f"{chosen.value}: {len(rows)} minute bars; per day {dict(sorted(days.items()))}")
     fills = [r.getMessage() for r in caplog.records if "AUTO read REST" in r.getMessage()]
-    evidence(f"fill warning: {fills or 'none'}; compared minutes before {now - _COMPARED_LAG}")
+    compared = datetime.fromtimestamp(cutoff / 1e9, UTC)
+    evidence(f"fill warning: {fills or 'none'}; compared minutes before {compared}")
     if any(previous_trading_day.isoformat() in fill for fill in fills):
         pytest.skip(f"not exercised: the {previous_trading_day} file is not published yet")
     auto, rest = read["auto"], read["rest"]
+    assert rest, f"REST holds no AAPL minute bar to compare from {previous_trading_day} to {today}"
+    finished = {name: _days_ended_by(held, started) for name, held in whole.items()}
+    if finished["auto"] != finished["rest"]:
+        # A bar Massive published between the two reads: AUTO reads again, after REST.
+        finished["auto"] = _days_ended_by(minute_bars(dm.HistorySource.AUTO), started)
+        evidence(f"days differ; AUTO read again, after REST, holds {finished['auto']}")
+    assert finished["auto"] == finished["rest"], f"AUTO read days {finished}"
     assert len(set(auto)) == len(auto), "AUTO holds a minute twice"
     assert auto == rest, (
         f"AUTO and REST differ: {len(set(auto) - set(rest))} minutes only in AUTO, "

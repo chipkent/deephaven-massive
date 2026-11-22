@@ -12,11 +12,12 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import re
 import string
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pyarrow as pa
@@ -36,18 +37,18 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.symbols import SymbolTable
 from deephaven_massive._enums import AssetClass, ChannelFamily
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import forex
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import (
-    HistoryQuery,
-    Query,
-    QueryBase,
-    StreamHistoryQuery,
-    SymbolStreamQuery,
-    query_class,
-)
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import poll
+from deephaven_massive.namespaces import _forex as forex
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import (
+    FetchQuery,
+    HistoryQuery,
+    Query,
+    StreamHistoryQuery,
+    StreamQuery,
+)
+from deephaven_massive.queries._choice import query_class
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply
 
@@ -55,7 +56,16 @@ if TYPE_CHECKING:
     from tests._fakes.s3 import FakeS3
     from tests._fakes.ws_session import WsSession
 
+"""The refusal of a stream of bars Massive doesn't stream."""
+
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
+
 NS = 10**9
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 MS = 10**6
@@ -84,7 +94,7 @@ FOREX_SOURCES = {
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.forex
-    assert type(namespace) is forex._Forex
+    assert type(namespace) is forex.ForexNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -117,13 +127,13 @@ def test_the_namespace_passes_every_catalog_gate() -> None:
     ("spec", "expected"),
     [
         (forex.QUOTES, StreamHistoryQuery),
-        (forex.LAST_QUOTE, Query),
+        (forex.LAST_QUOTE, FetchQuery),
         (forex.BARS, HistoryQuery),
-        (forex.PREVIOUS_DAY_BAR, Query),
-        (forex.FMV, SymbolStreamQuery),
-        (forex.SNAPSHOTS, Query),
-        (forex.MOVERS, Query),
-        (forex.CONVERSION, Query),
+        (forex.PREVIOUS_DAY_BAR, FetchQuery),
+        (forex.FMV, StreamQuery),
+        (forex.SNAPSHOTS, FetchQuery),
+        (forex.MOVERS, FetchQuery),
+        (forex.CONVERSION, FetchQuery),
     ],
 )
 def test_each_dataset_has_its_query_class(spec: DatasetSpec, expected: type) -> None:
@@ -136,10 +146,7 @@ def _schema(spec: DatasetSpec) -> dict[str, ColumnType]:
     The process catalog also merges the members other namespaces declare into each kind, so
     exact column lists are checked against the namespace's own catalog.
     """
-    return {
-        c.name: c.type
-        for c in Catalog(forex.DATASETS).dataset_schema(spec, raw_symbol=False).columns
-    }
+    return {c.name: c.type for c in Catalog(forex.DATASETS).dataset_schema(spec).columns}
 
 
 def test_quotes_join_the_last_quote_through_its_projection() -> None:
@@ -202,8 +209,14 @@ def test_snapshot_rows_lead_with_their_symbol(spec: DatasetSpec) -> None:
 def test_conversion_keeps_the_vendor_symbol() -> None:
     columns = _schema(forex.CONVERSION)
     assert next(iter(columns)) == "Symbol"
-    assert {"Converted", "InitialAmount", "LastAsk", "LastBid", "LastTimestamp"} <= set(columns)
-    assert columns["LastTimestamp"] is ColumnType.INSTANT
+    assert {
+        "Converted",
+        "InitialAmount",
+        "LastQuoteAskPrice",
+        "LastQuoteBidPrice",
+        "LastQuoteParticipantTimestamp",
+    } <= set(columns)
+    assert columns["LastQuoteParticipantTimestamp"] is ColumnType.INSTANT
 
 
 # --- factories ------------------------------------------------------------------------------
@@ -216,7 +229,7 @@ def test_only_the_canonical_ticker_is_taken(
     massive_session: dm.MassiveSession, symbols: str | list[str]
 ) -> None:
     forex_ns = massive_session.forex
-    factories: tuple[Callable[[str | list[str]], QueryBase], ...] = (
+    factories: tuple[Callable[[str | list[str]], Query], ...] = (
         forex_ns.quotes,
         forex_ns.fmv,
         lambda symbols: forex_ns.bars(symbols, dm.Timespan.MINUTE),
@@ -224,7 +237,9 @@ def test_only_the_canonical_ticker_is_taken(
     )
     for factory in factories:
         assert factory("C:EURUSD")._request.symbols == ("C:EURUSD",)
-        with pytest.raises(ValueError, match=r"use 'C:EURUSD' .*dm\.canonical_symbol_forex"):
+        with pytest.raises(
+            ValueError, match=r"Pass 'C:EURUSD', which dm\.canonical_symbol_forex\("
+        ):
             factory(symbols)
 
 
@@ -237,10 +252,10 @@ def test_quotes(massive_session: dm.MassiveSession) -> None:
 
 def test_the_one_row_datasets(massive_session: dm.MassiveSession) -> None:
     last = massive_session.forex.last_quote(["C:GBPUSD", "C:EURUSD"])
-    assert type(last) is Query
+    assert type(last) is FetchQuery
     assert last._request == Request(symbols=("C:EURUSD", "C:GBPUSD"))
     prev = massive_session.forex.previous_day_bar("C:EURUSD")
-    assert type(prev) is Query
+    assert type(prev) is FetchQuery
     # The bar's request carries its timespan, so its rows get the 1-day day rules.
     assert prev._request == Request(symbols=("C:EURUSD",), timespan=dm.Timespan.DAY)
 
@@ -253,22 +268,22 @@ def test_a_symbol_table_is_a_watchlist(massive_session: dm.MassiveSession) -> No
 
 
 @pytest.mark.parametrize(
-    ("case", "expected"),
+    ("case", "streams"),
     [
-        ((dm.Timespan.SECOND, 1), StreamHistoryQuery),
-        ((dm.Timespan.MINUTE, 1), StreamHistoryQuery),
-        ((dm.Timespan.DAY, 1), HistoryQuery),
-        ((dm.Timespan.MINUTE, 5), HistoryQuery),
-        ((dm.Timespan.HOUR, 1), HistoryQuery),
-        ((dm.Timespan.DAY, 2), HistoryQuery),
+        ((dm.Timespan.SECOND, 1), True),
+        ((dm.Timespan.MINUTE, 1), True),
+        ((dm.Timespan.DAY, 1), False),
+        ((dm.Timespan.MINUTE, 5), False),
+        ((dm.Timespan.HOUR, 1), False),
+        ((dm.Timespan.DAY, 2), False),
     ],
 )
-def test_bars_pick_their_class_from_the_timespan(
-    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int], expected: type
+def test_only_bars_that_stream_get_the_stream_methods(
+    massive_session: dm.MassiveSession, case: tuple[dm.Timespan, int], streams: bool
 ) -> None:
     timespan, multiplier = case
     query = massive_session.forex.bars("C:EURUSD", timespan, multiplier=multiplier)
-    assert type(query) is expected
+    assert type(query) is (StreamHistoryQuery if streams else HistoryQuery)
     assert query._request == Request(
         symbols=("C:EURUSD",), timespan=timespan, multiplier=multiplier
     )
@@ -282,34 +297,35 @@ def test_bars_default_to_one_minute_and_take_no_adjusted(
     # Currency pairs have no corporate actions: no `adjusted` is stored, so none is ever sent.
     assert query._request == Request(symbols=dm.ALL, timespan=dm.Timespan.MINUTE)
     with pytest.raises(TypeError, match="adjusted"):
-        massive_session.forex.bars(dm.ALL, adjusted=False)  # type: ignore[call-overload]  # no such argument
+        massive_session.forex.bars(dm.ALL, adjusted=False)  # type: ignore[call-arg]  # no such argument
 
 
 def test_bars_reject_bad_arguments(massive_session: dm.MassiveSession) -> None:
     bars = massive_session.forex.bars
-    with pytest.raises(ValueError, match="SESSION exists only for futures"):
-        bars("C:EURUSD", dm.Timespan.SESSION)
+    # Massive judges these values itself, so the query is built and they are sent.
+    assert bars("C:EURUSD", dm.Timespan.SESSION)._request.timespan is dm.Timespan.SESSION
+    assert bars("C:EURUSD", dm.Timespan.HOUR, multiplier=0)._request.multiplier == 0
     with pytest.raises(TypeError, match=r"timespan must be dm\.Timespan"):
-        bars("C:EURUSD", "minute")  # type: ignore[call-overload]  # a plain string is refused
-    with pytest.raises(ValueError, match="multiplier"):
-        bars("C:EURUSD", dm.Timespan.HOUR, multiplier=0)
+        bars("C:EURUSD", "minute")  # type: ignore[arg-type]  # a plain string is refused
+    with pytest.raises(TypeError, match="multiplier must be an int"):
+        bars("C:EURUSD", dm.Timespan.HOUR, multiplier=True)
 
 
 def test_fmv(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.fmv(dm.ALL)
-    assert type(query) is SymbolStreamQuery
+    assert type(query) is StreamQuery
     assert query._request == Request(symbols=dm.ALL)
 
 
 def test_snapshots(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.snapshots(dm.ALL)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._request == Request(symbols=dm.ALL)
 
 
 def test_movers(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.movers(dm.Direction.LOSERS)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._request == Request(params=(("direction", dm.Direction.LOSERS),))
     with pytest.raises(TypeError, match=r"direction must be dm\.Direction"):
         massive_session.forex.movers("gainers")  # type: ignore[arg-type]  # a str is refused
@@ -317,7 +333,7 @@ def test_movers(massive_session: dm.MassiveSession) -> None:
 
 def test_conversion(massive_session: dm.MassiveSession) -> None:
     query = massive_session.forex.conversion("AUD", "USD", amount=100, precision=4)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._request == Request(
         params=(("amount", 100), ("from", "AUD"), ("precision", "4"), ("to", "USD"))
     )
@@ -329,34 +345,39 @@ def test_a_large_integer_amount_keeps_every_digit(massive_session: dm.MassiveSes
     amount = 10**17 + 1
     query = massive_session.forex.conversion("EUR", "USD", amount=amount)
     assert dict(query._request.params)["amount"] == amount
+    # An int too large for a float is still a number a request can carry.
+    huge = massive_session.forex.conversion("EUR", "USD", amount=10**400)
+    assert dict(huge._request.params)["amount"] == 10**400
 
 
 @pytest.mark.parametrize(
     ("kwargs", "failure"),
     [
-        ({"from_currency": "EURO"}, (ValueError, "from_currency='EURO' is not a three-letter")),
-        ({"from_currency": "EU1"}, (ValueError, "from_currency='EU1' is not a three-letter")),
-        ({"to_currency": "U$D"}, (ValueError, r"to_currency='U\$D' is not a three-letter")),
-        # A code is taken exactly as written: the message names the code to write instead.
+        ({"from_currency": 840}, (TypeError, "from_currency must be a str, not int")),
+        ({"to_currency": None}, (TypeError, "to_currency must be a str, not NoneType")),
+        # The code is a path segment, which can't be empty.
         (
-            {"from_currency": " aud"},
+            {"from_currency": ""},
             (
                 ValueError,
-                "from_currency=' aud' is not a three-letter upper-case currency code; write 'AUD'",
+                whole("from_currency='' is not a currency code. Pass one, such as 'USD'."),
             ),
         ),
-        ({"to_currency": "Usd"}, (ValueError, "to_currency='Usd' is not .*; write 'USD'")),
-        ({"to_currency": "USD "}, (ValueError, "to_currency='USD ' is not .*; write 'USD'")),
-        ({"from_currency": "EURO"}, (ValueError, "upper-case currency code, such as 'USD'")),
-        ({"from_currency": 840}, (TypeError, "from_currency must be a str, not int")),
-        ({"amount": 0}, (ValueError, "amount must be positive and finite, got 0")),
-        ({"amount": -1.5}, (ValueError, "amount must be positive and finite, got -1.5")),
-        ({"amount": float("inf")}, (ValueError, "amount must be positive and finite, got inf")),
-        ({"amount": float("nan")}, (ValueError, "amount must be positive and finite, got nan")),
+        (
+            {"to_currency": ""},
+            (ValueError, whole("to_currency='' is not a currency code. Pass one, such as 'USD'.")),
+        ),
+        # A request cannot carry NaN or an infinity as a number.
+        (
+            {"amount": float("inf")},
+            (ValueError, whole("amount=inf is not a finite number. Pass one, such as 100.")),
+        ),
+        (
+            {"amount": float("nan")},
+            (ValueError, whole("amount=nan is not a finite number. Pass one, such as 100.")),
+        ),
         ({"amount": "1"}, (TypeError, "amount must be an int or float, not str")),
         ({"amount": True}, (TypeError, "amount must be an int or float, not bool")),
-        ({"precision": 5}, (ValueError, r"precision must be one of \[0, 1, 2, 3, 4\], got 5")),
-        ({"precision": -1}, (ValueError, "precision must be one of")),
         ({"precision": 2.0}, (TypeError, "precision must be an int, not float")),
         ({"precision": True}, (TypeError, "precision must be an int, not bool")),
     ],
@@ -375,18 +396,18 @@ def test_conversion_rejects_bad_arguments(
 @pytest.mark.parametrize(
     ("symbols", "message"),
     [
-        ("EUR/US", "cannot read 'EUR/US' as a forex pair"),
-        ("EUR/USD/JPY", "cannot read 'EUR/USD/JPY' as a forex pair"),
-        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker; this dataset takes forex tickers"),
-        ("EU1/USD", "cannot read 'EU1/USD' as a forex pair"),
-        ([], "no symbols"),
+        ("EUR/US", "'EUR/US' is not a forex pair of two three-letter currency codes"),
+        ("EUR/USD/JPY", "'EUR/USD/JPY' is not a forex pair of two three-letter currency codes"),
+        ("X:BTCUSD", r"'X:BTCUSD' is a crypto ticker, and this dataset takes forex tickers"),
+        ("EU1/USD", "'EU1/USD' is not a forex pair of two three-letter currency codes"),
+        ([], "symbols holds no tickers"),
     ],
 )
 def test_invalid_pairs_fail_at_construction(
     massive_session: dm.MassiveSession, symbols: str | list[str], message: str
 ) -> None:
     forex_ns = massive_session.forex
-    factories: list[Callable[[str | list[str]], QueryBase]] = [
+    factories: list[Callable[[str | list[str]], Query]] = [
         forex_ns.quotes,
         lambda symbols: forex_ns.bars(symbols, dm.Timespan.MINUTE),
         forex_ns.fmv,
@@ -400,53 +421,68 @@ def test_invalid_pairs_fail_at_construction(
 def test_an_exhausted_generator_has_no_symbols(massive_session: dm.MassiveSession) -> None:
     pairs = (pair for pair in ["C:EURUSD"])
     list(pairs)
-    with pytest.raises(ValueError, match="no symbols"):
-        massive_session.forex.quotes(cast("list[str]", pairs))  # any iterable is read
+    with pytest.raises(ValueError, match="symbols holds no tickers"):
+        massive_session.forex.quotes(pairs)  # type: ignore[arg-type]  # the point: any iterable is read
 
 
 def test_a_symbol_table_needs_a_symbol_column(massive_session: dm.MassiveSession) -> None:
     table = new_table([string_col("Pair", ["C:EURUSD"])])
-    with pytest.raises(ValueError, match="must have a Symbol column"):
+    refusal = (
+        "The symbol table has no Symbol column. It has Pair. Name the column of tickers Symbol, "
+        'as in t.rename_columns("Symbol = Pair").'
+    )
+    with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.forex.snapshots(table)
+    # The advice: the renamed column is taken.
+    renamed = table.rename_columns("Symbol = Pair")
+    assert massive_session.forex.snapshots(renamed)._request.symbols is not None
 
 
 def test_the_one_row_datasets_refuse_every_pair(massive_session: dm.MassiveSession) -> None:
-    with pytest.raises(ValueError, match=r"use m\.forex\.snapshots\(dm\.ALL\)\.fetch\(\)"):
+    every_pair = (
+        "forex.last_quote does not take dm.ALL. For every pair, call "
+        "m.forex.snapshots(dm.ALL).fetch()."
+    )
+    with pytest.raises(ValueError, match=whole(every_pair)):
         massive_session.forex.last_quote(dm.ALL)
-    every_bar = r"use m\.forex\.bars\(dm\.ALL, dm\.Timespan\.DAY\)\.history\(day, day\)"
-    with pytest.raises(ValueError, match=every_bar):
+    every_bar = (
+        "forex.previous_day_bar does not take dm.ALL. For every ticker's bar of one day, call "
+        "m.forex.bars(dm.ALL, dm.Timespan.DAY).history('2025-01-02', '2025-01-02')."
+    )
+    with pytest.raises(ValueError, match=whole(every_bar)):
         massive_session.forex.previous_day_bar(dm.ALL)
+    # The calls the refusals name take dm.ALL.
+    assert massive_session.forex.snapshots(dm.ALL)._request.symbols is dm.ALL
+    assert massive_session.forex.bars(dm.ALL, dm.Timespan.DAY)._request.symbols is dm.ALL
 
 
-def test_a_missing_verb_names_the_dataset_that_has_it(massive_session: dm.MassiveSession) -> None:
-    quotes = massive_session.forex.quotes("C:EURUSD")
-    with pytest.raises(AttributeError, match=r"use m\.forex\.last_quote\(\.\.\.\)\.fetch\(\)"):
-        _ = quotes.fetch
-    day = massive_session.forex.bars("C:EURUSD", dm.Timespan.DAY)
-    with pytest.raises(AttributeError, match=r"m\.forex\.previous_day_bar\(\.\.\.\)\.fetch"):
-        _ = day.fetch
+def test_the_streams_and_daily_bars_have_no_fetch(massive_session: dm.MassiveSession) -> None:
+    assert not hasattr(massive_session.forex.quotes("C:EURUSD"), "fetch")
+    assert not hasattr(massive_session.forex.bars("C:EURUSD", dm.Timespan.DAY), "fetch")
 
 
 def test_rest_history_of_every_pair_needs_daily_bars(massive_session: dm.MassiveSession) -> None:
     rest = dm.HistorySource.REST
     with pytest.raises(ValueError, match=r"forex\.quotes history over REST needs explicit symbols"):
-        massive_session.forex.quotes(dm.ALL).history("2026-10-20", "2026-10-20", source=rest)
+        massive_session.forex.quotes(dm.ALL).history(
+            "2026-10-20", "2026-10-20", source=rest, wait=True
+        )
     with pytest.raises(ValueError, match=r"forex\.bars history over REST needs explicit symbols"):
         massive_session.forex.bars(dm.ALL, dm.Timespan.HOUR).history(
-            date(2026, 10, 20), date(2026, 10, 20), source=rest
+            date(2026, 10, 20), date(2026, 10, 20), source=rest, wait=True
         )
 
 
 def test_every_docstring_names_its_dataset_page() -> None:
     methods = {
-        "quotes": forex._Forex.quotes,
-        "last_quote": forex._Forex.last_quote,
-        "bars": forex._Forex.bars,
-        "previous_day_bar": forex._Forex.previous_day_bar,
-        "fmv": forex._Forex.fmv,
-        "snapshots": forex._Forex.snapshots,
-        "movers": forex._Forex.movers,
-        "conversion": forex._Forex.conversion,
+        "quotes": forex.ForexNamespace.quotes,
+        "last_quote": forex.ForexNamespace.last_quote,
+        "bars": forex.ForexNamespace.bars,
+        "previous_day_bar": forex.ForexNamespace.previous_day_bar,
+        "fmv": forex.ForexNamespace.fmv,
+        "snapshots": forex.ForexNamespace.snapshots,
+        "movers": forex.ForexNamespace.movers,
+        "conversion": forex.ForexNamespace.conversion,
     }
     assert {f"forex.{name}" for name in methods} == {spec.name for spec in forex.DATASETS}
     for name, method in methods.items():
@@ -485,7 +521,8 @@ def test_each_fixture_has_the_generated_shape(
         rows = found if isinstance(found, list) else [found]
     declared = spec.keys_for(R, path).declared()
     required = {key.column for _, key in declared if not key.from_request}
-    batch, drift = to_batch(rows, rest_path, required=required)
+    batch, drift, marks = to_batch(rows, rest_path, required=required)
+    assert marks == {}  # every row read whole
     assert batch.num_rows == len(rows) > 0
     assert (drift.extra, drift.missing) == (frozenset(), frozenset())
 
@@ -522,7 +559,7 @@ def test_last_quote_reads_the_last_quote_of_each_pair(
 ) -> None:
     body = fixture_body(load_fixture, "last_quote.json")
     fake_rest.reply("/v1/last_quote/currencies/AUD/USD", Reply(body))
-    table = rest_session.forex.last_quote("C:AUDUSD").fetch()
+    table = rest_session.forex.last_quote("C:AUDUSD").fetch(wait=True)
     # The pair goes out as two path segments, and the whole pair comes back as `Symbol`.
     assert fake_rest.get_queries() == [("/v1/last_quote/currencies/AUD/USD", {})]
     columns = ("Symbol", "Date", "Timestamp", "AskPrice", "BidPrice", "Exchange")
@@ -541,7 +578,9 @@ def test_quotes_history_reads_the_quote_history(
     del body["next_url"]  # the sample's next page is on Massive's host
     fake_rest.reply("/v3/quotes/C%3AEURUSD", Reply(body))
     query = rest_session.forex.quotes("C:EURUSD")
-    table = query.history(date(2021, 7, 1), date(2021, 7, 1), source=dm.HistorySource.REST)
+    table = query.history(
+        date(2021, 7, 1), date(2021, 7, 1), source=dm.HistorySource.REST, wait=True
+    )
     # A forex day is a UTC day, sent as nanosecond bounds of the half-open window.
     day = epoch_ns(datetime(2021, 7, 1, tzinfo=UTC))
     assert fake_rest.get_queries() == [
@@ -578,7 +617,9 @@ def test_quotes_history_takes_deephaven_instants_rounded_outward(
     end = to_j_instant("2021-07-01T01:00:00.000000500Z")
     assert start is not None  # Deephaven's converters are typed Optional
     assert end is not None
-    rest_session.forex.quotes("C:EURUSD").history(start, end, source=dm.HistorySource.REST)
+    rest_session.forex.quotes("C:EURUSD").history(
+        start, end, source=dm.HistorySource.REST, wait=True
+    )
     hour = epoch_ns(datetime(2021, 7, 1, tzinfo=UTC))
     ((_, params),) = fake_rest.get_queries()
     assert params["timestamp.gte"] == [str(hour)]
@@ -598,7 +639,7 @@ def test_quotes_history_takes_numpy_times_and_deephaven_text(
     fake_rest.reply("/v3/quotes/C%3AEURUSD", Reply(body))
     end = np.datetime64("2021-07-01T01:00:00.000000500", "ns")
     query = rest_session.forex.quotes("C:EURUSD")
-    query.history("2021-06-30T20:00 America/New_York", end, source=dm.HistorySource.REST)
+    query.history("2021-06-30T20:00 America/New_York", end, source=dm.HistorySource.REST, wait=True)
     hour = epoch_ns(datetime(2021, 7, 1, tzinfo=UTC))
     ((_, params),) = fake_rest.get_queries()
     assert params["timestamp.gte"] == [str(hour)]
@@ -629,7 +670,7 @@ def test_previous_day_bar_reads_the_previous_session(
     fake_rest.reply(
         "/v2/aggs/ticker/C%3AEURUSD/prev", Reply(fixture_body(load_fixture, "prev.json"))
     )
-    table = rest_session.forex.previous_day_bar("C:EURUSD").fetch()
+    table = rest_session.forex.previous_day_bar("C:EURUSD").fetch(wait=True)
     assert fake_rest.get_queries() == [("/v2/aggs/ticker/C:EURUSD/prev", {})]
     # Stamped 23:59:59.999 UTC by `/prev`, its window here is its whole UTC day.
     start = 1_651_622_400_000 * MS
@@ -660,7 +701,7 @@ def test_bars_history_reads_the_aggregate_range(
         Reply(fixture_body(load_fixture, "range.json")),
     )
     query = rest_session.forex.bars("C:EURUSD", dm.Timespan.HOUR)
-    table = query.history("2021-07-22", "2021-07-22", source=dm.HistorySource.REST)
+    table = query.history("2021-07-22", "2021-07-22", source=dm.HistorySource.REST, wait=True)
     # The UTC day goes out as millisecond path segments, the page size as the query.
     assert fake_rest.get_queries() == [
         (
@@ -696,7 +737,7 @@ def test_daily_bars_of_every_pair_read_the_grouped_day(
         Reply(fixture_body(load_fixture, "grouped_daily.json")),
     )
     query = rest_session.forex.bars(dm.ALL, dm.Timespan.DAY)
-    table = query.history("2020-10-14", "2020-10-14", source=dm.HistorySource.REST)
+    table = query.history("2020-10-14", "2020-10-14", source=dm.HistorySource.REST, wait=True)
     assert fake_rest.get_queries() == [("/v2/aggs/grouped/locale/global/market/fx/2020-10-14", {})]
     assert [row[0] for row in pick(table, "Symbol")] == ["C:ILSCHF", "C:GBPCAD", "C:DKKAUD"]
 
@@ -711,7 +752,7 @@ def test_snapshots_send_the_pairs_as_tickers(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(SNAPSHOTS_PATH, Reply(fixture_body(load_fixture, "snapshots.json")))
-    table = rest_session.forex.snapshots(["C:HKDCHF", "C:EURUSD"]).fetch()
+    table = rest_session.forex.snapshots(["C:HKDCHF", "C:EURUSD"]).fetch(wait=True)
     assert fake_rest.get_queries() == [(SNAPSHOTS_PATH, {"tickers": ["C:EURUSD,C:HKDCHF"]})]
     columns = ("Symbol", "DayClose", "LastQuoteAskPrice", "PrevDayClose", "Updated")
     assert pick(table, *columns) == [
@@ -731,7 +772,7 @@ def test_snapshots_read_the_update_time_in_nanoseconds_and_the_vwaps(
     body = fixture_body(load_fixture, "snapshots_nanosecond_update.json")
     fake_rest.reply(SNAPSHOTS_PATH, Reply(body))
     with caplog.at_level(logging.WARNING):
-        table = rest_session.forex.snapshots(["C:EURUSD"]).fetch()
+        table = rest_session.forex.snapshots(["C:EURUSD"]).fetch(wait=True)
     columns = ("Symbol", "Updated", "DayVwap", "LastMinuteVwap")
     assert pick(table, *columns) == [("C:EURUSD", 1_793_633_526_000_000_000, 1.1199, 1.1203)]
     assert "schema drift" not in caplog.text
@@ -744,7 +785,7 @@ def test_snapshots_of_every_pair_send_no_tickers(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply(SNAPSHOTS_PATH, Reply(fixture_body(load_fixture, "snapshots.json")))
-    assert rest_session.forex.snapshots(dm.ALL).fetch().size == 1
+    assert rest_session.forex.snapshots(dm.ALL).fetch(wait=True).size == 1
     assert fake_rest.get_queries() == [(SNAPSHOTS_PATH, {})]
 
 
@@ -756,7 +797,7 @@ def test_movers_put_the_direction_in_the_path(
 ) -> None:
     path = "/v2/snapshot/locale/global/markets/forex/losers"
     fake_rest.reply(path, Reply(fixture_body(load_fixture, "movers.json")))
-    table = rest_session.forex.movers(dm.Direction.LOSERS).fetch()
+    table = rest_session.forex.movers(dm.Direction.LOSERS).fetch(wait=True)
     assert fake_rest.get_queries() == [(path, {})]
     assert pick(table, "Symbol", "TodaysChangePerc") == [("C:PLNILS", 5.13770674)]
 
@@ -769,15 +810,60 @@ def test_conversion_sends_the_pair_amount_and_precision(
 ) -> None:
     body = fixture_body(load_fixture, "conversion.json")
     fake_rest.reply("/v1/conversion/AUD/USD", Reply(body))
-    table = rest_session.forex.conversion("AUD", "USD", amount=100, precision=4).fetch()
+    table = rest_session.forex.conversion("AUD", "USD", amount=100, precision=4).fetch(wait=True)
     assert fake_rest.get_queries() == [
         ("/v1/conversion/AUD/USD", {"amount": ["100"], "precision": ["4"]})
     ]
-    columns = ("Symbol", "Converted", "InitialAmount", "LastAsk", "LastBid", "LastTimestamp")
+    columns = (
+        "Symbol",
+        "Converted",
+        "InitialAmount",
+        "LastQuoteAskPrice",
+        "LastQuoteBidPrice",
+        "LastQuoteParticipantTimestamp",
+    )
     # The vendor's `AUD/USD` becomes the canonical pair.
     assert pick(table, *columns) == [
         ("C:AUDUSD", 73.14, 100.0, 1.3673344, 1.3672596, 1_605_555_313_000 * MS)
     ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "sent"),
+    [
+        # Massive honors a precision of 5, converts 0 and negative amounts, and answers HTTP 404
+        # to a code it does not know, such as `aud`: each is sent as given.
+        ({"precision": 5}, ("/v1/conversion/AUD/USD", {"amount": ["1"], "precision": ["5"]})),
+        ({"precision": -1}, ("/v1/conversion/AUD/USD", {"amount": ["1"], "precision": ["-1"]})),
+        ({"amount": 0}, ("/v1/conversion/AUD/USD", {"amount": ["0"], "precision": ["2"]})),
+        ({"amount": -100}, ("/v1/conversion/AUD/USD", {"amount": ["-100"], "precision": ["2"]})),
+        (
+            {"from_currency": "aud", "to_currency": "usd"},
+            ("/v1/conversion/aud/usd", {"amount": ["1"], "precision": ["2"]}),
+        ),
+    ],
+)
+def test_conversion_sends_the_values_massive_judges(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    kwargs: dict[str, object],
+    sent: tuple[str, dict[str, list[str]]],
+) -> None:
+    fake_rest.reply_default(Reply(fixture_body(load_fixture, "conversion.json")))
+    arguments: dict[str, object] = {"from_currency": "AUD", "to_currency": "USD", **kwargs}
+    rest_session.forex.conversion(**arguments).fetch(wait=True)  # type: ignore[arg-type]
+    assert fake_rest.get_queries() == [sent]
+
+
+def test_a_currency_massive_does_not_know_fails_with_its_answer(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    refusal = {"status": "NOT_FOUND", "request_id": "r", "message": "Couldn't find requested pair"}
+    fake_rest.reply_default(Reply(refusal, status=404))
+    with pytest.raises(dm.MassiveError, match=r"HTTP 404 .*Couldn't find requested pair"):
+        rest_session.forex.conversion("aud", "usd").fetch(wait=True)
 
 
 # --- WebSocket, end to end --------------------------------------------------------------------
@@ -837,8 +923,7 @@ def test_a_bar_frame_lands_in_blink(
     ws_session.publish(frame)
     columns = ("Symbol", "Date", "TimestampStart", "Open", "Close", "Volume", "TimestampEnd")
     (row,) = rows_when(table, bool)
-    # The end is the start plus the bar's length, whatever `e` says (60 s here for both).
-    length = 60_000 if timespan is dm.Timespan.MINUTE else 1_000
+    # The end is Massive's `e` as sent, 60 s after the start here for both channels.
     assert tuple(row[c] for c in columns) == (
         "C:EURUSD",
         "2023-11-14",  # the UTC day of the start
@@ -846,7 +931,7 @@ def test_a_bar_frame_lands_in_blink(
         1.08,
         1.09,
         20.0,
-        at_ms(1_700_000_040_000 + length),
+        at_ms(1_700_000_100_000),
     )
     assert row["TimestampInsert"] is not None
 
@@ -874,8 +959,12 @@ FILES_PUBLISHED = datetime(2025, 3, 10, 16, tzinfo=UTC)
 @pytest.fixture
 def files_session(fake_s3: FakeS3, monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession]:
     monkeypatch.setattr(history_source, "_now", lambda: FILES_PUBLISHED)
-    credentials = {"s3_access_key_id": "AKIDFLATFILES", "s3_secret_access_key": "flat-file-secret"}
-    m = dm.MassiveSession(dm.MassiveConfig(api_key="test-key", **cast("Any", credentials)))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        s3_access_key_id="AKIDFLATFILES",
+        s3_secret_access_key="flat-file-secret",  # noqa: S106  # fake credential
+    )
+    m = dm.MassiveSession(config)
     yield m
     m.close()
 
@@ -903,7 +992,7 @@ def test_quote_files_round_trip(*, files_session: dm.MassiveSession, fake_s3: Fa
         ],
     )
     query = files_session.forex.quotes("C:EURUSD")
-    table = query.history(FILE_DAY, FILE_DAY, source=dm.HistorySource.FLAT_FILES)
+    table = query.history(FILE_DAY, FILE_DAY, source=dm.HistorySource.FLAT_FILES, wait=True)
     assert fake_s3.requests == [("flatfiles", file_key("global_forex/quotes_v1"))]
     columns = ("Symbol", "Timestamp", "AskPrice", "BidPrice", "AskExchange", "Exchange")
     assert pick(table, *columns) == [("C:EURUSD", moment, 1.08066, 1.08063, 48, None)]
@@ -932,9 +1021,9 @@ def test_quote_files_in_the_sample_spelling_are_read(
         ],
     )
     flat = dm.HistorySource.FLAT_FILES
-    one = files_session.forex.quotes("C:EURUSD").history(FILE_DAY, FILE_DAY, source=flat)
+    one = files_session.forex.quotes("C:EURUSD").history(FILE_DAY, FILE_DAY, source=flat, wait=True)
     assert pick(one, "Symbol", "AskPrice") == [("C:EURUSD", 1.08066)]
-    every = files_session.forex.quotes(dm.ALL).history(FILE_DAY, FILE_DAY, source=flat)
+    every = files_session.forex.quotes(dm.ALL).history(FILE_DAY, FILE_DAY, source=flat, wait=True)
     assert pick(every, "Symbol") == [("C:EURUSD",), ("C:GBPUSD",)]
 
 
@@ -956,7 +1045,7 @@ def test_a_quote_file_in_any_massive_spelling_is_read(
     row = dict(zip(header, (spelling, 48, 1.08066, 48, 1.08063, moment), strict=True))
     fake_s3.put_csv(file_key("global_forex/quotes_v1"), header, [row])
     table = files_session.forex.quotes("C:EURUSD").history(
-        FILE_DAY, FILE_DAY, source=dm.HistorySource.FLAT_FILES
+        FILE_DAY, FILE_DAY, source=dm.HistorySource.FLAT_FILES, wait=True
     )
     assert pick(table, "Symbol", "AskPrice") == [("C:EURUSD", 1.08066)]
 
@@ -985,7 +1074,7 @@ def test_bar_files_round_trip(
     fake_s3.put_csv(file_key(prefix), BAR_HEADER, [dict(zip(BAR_HEADER, values, strict=True))])
     # With no `adjusted` to rule them out, AUTO reads every pair's bars from the files.
     query = files_session.forex.bars(dm.ALL, timespan)
-    table = query.history(FILE_DAY, FILE_DAY)
+    table = query.history(FILE_DAY, FILE_DAY, wait=True)
     assert fake_s3.requests == [("flatfiles", file_key(prefix))]
     length = 60 * NS if timespan is dm.Timespan.MINUTE else DAY_NS
     assert pick(table, *BAR_COLUMNS) == [
@@ -1016,7 +1105,7 @@ def test_a_long_snapshot_list_is_split_into_requests_of_250(
     fake_rest.reply(SNAPSHOTS_PATH, Reply(fixture_body(load_fixture, "snapshots.json")))
     codes = ["".join(letters) for letters in itertools.product(string.ascii_uppercase, repeat=3)]
     pairs = [f"C:{code}USD" for code in codes[:251]]
-    rest_session.forex.snapshots(pairs).fetch()
+    rest_session.forex.snapshots(pairs).fetch(wait=True)
     sizes = sorted(len(query["tickers"][0].split(",")) for _, query in fake_rest.get_queries())
     assert sizes == [1, 250]
 
@@ -1078,7 +1167,7 @@ def test_snapshot_polls_keep_one_row_per_symbol(
     fake_rest: FakeRestServer,
     poll_clock: FakeClock,
     rows_when: RowsWhen,
-    make: Callable[[dm.MassiveSession], Query],
+    make: Callable[[dm.MassiveSession], FetchQuery],
     path: str,
 ) -> None:
     first = {
@@ -1135,7 +1224,7 @@ def test_the_current_state_datasets_revise_on_their_update_times() -> None:
     assert revised == {
         "forex.snapshots": ("Updated",),
         "forex.movers": ("Updated",),
-        "forex.conversion": ("LastTimestamp",),
+        "forex.conversion": ("LastQuoteParticipantTimestamp",),
         "forex.last_quote": ("Timestamp",),
         "forex.previous_day_bar": ("TimestampStart",),
     }

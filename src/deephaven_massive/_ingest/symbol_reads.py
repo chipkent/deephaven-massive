@@ -10,9 +10,12 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   for the symbols, each with its path. A dataset whose rows carry no `Symbol` column reads
   each symbol in a request of its own, so every row belongs to the one request that returned
   it; a dataset whose rows list their tickers gets its `Symbol` from them, so its requests are
-  grouped as `fetch()` groups them. A
-  crypto pair Massive's ticker list does not hold, and a parameter a path does not take, fail
-  their own symbols here, before any request.
+  grouped as `fetch()` groups them. A crypto ticker list that can't be read, and, for
+  `history()`, a parameter its path does not take, fail their own symbols here, before any
+  request; a `fetch()` refused every such parameter at the call. A crypto pair the list
+  gives no split for is planned as a call never sent. A pair the list doesn't hold has no
+  data, as an HTTP 404 means. A pair whose currencies can't make up its ticker is skipped, and
+  its `m.symbol_reads()` row says why (`_with_skipped`).
 - **Attribution** (`read_rest_by_symbol`): a request of one symbol gives all its rows to that
   symbol; a request of several (`ticker.any_of`) gives each its rows by their `Symbol`, and its
   failure is the failure of each of them. A row of such a request with a null `Symbol` (a row
@@ -26,9 +29,9 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   option chain's underlying, a futures product code) is read value by value, each with the
   requests `fetch()` makes for that value alone, so every row belongs to the value whose
   request returned it, and one value's failure fails only that value.
-- **Classes of failure** (`failure_kind`): `TRANSIENT` when the cause may pass (a rate limit
-  beyond the read's patience, a server error after the client's retries, a network failure, a
-  symbol's later page that answered HTTP 404), `PERMANENT` otherwise: the same read would fail
+- **Classes of failure** (the error's `is_retryable`): retryable when the cause may pass (a
+  rate limit beyond the read's patience, a server error after the client's retries, a network
+  failure, a symbol's later page that answered HTTP 404); otherwise the same read would fail
   again for this session's entitlements (a refusal of the plan, which an upgrade of the plan
   lifts; rows that break the schema; a crypto pair Massive does not list; a parameter the path
   does not take; any other HTTP 404, such as a path Massive retired; a defect of the library).
@@ -39,10 +42,10 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
 - **Columns**: each symbol's table must have exactly the dataset's columns
   (`SessionCore.dataset_schema`), so tables of different symbols, and of reads made at
   different times, can be merged. A table that does not is a defect of the library: the symbol
-  fails `PERMANENT`, logged at ERROR.
+  fails with an error that is not retryable, logged at ERROR.
 
 Each symbol's outcome logs one DEBUG line (its rows and source); each failure is logged once
-at the level its cause gives (`_log_limits.log_failure`): DEBUG for an expected one, ERROR for
+at the level its `is_bug` gives (`_log_limits.log_failure`): DEBUG for an expected one, ERROR for
 a defect. Every function runs on the calling thread (a read's own thread), which may be any
 thread but an update-graph thread holding no library lock; the REST requests fan out on the
 reader's pool (`RestReader.read_each`).
@@ -53,22 +56,22 @@ from __future__ import annotations
 import functools
 import logging
 from dataclasses import replace
-from http import HTTPStatus
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._enums import OnError
 from deephaven_massive._errors import (
     AuthenticationError,
-    CutShortError,
-    EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     PermanentError,
+    SessionClosedError,
     library_bug,
+    required,
+    required_instance,
+    session_closed,
 )
 from deephaven_massive._ingest.crypto_tickers import recording_split
 from deephaven_massive._ingest.rest_requests import (
@@ -77,11 +80,12 @@ from deephaven_massive._ingest.rest_requests import (
     own_symbols,
     plan_calls,
 )
-from deephaven_massive._log_limits import bounded_list, log_failure
+from deephaven_massive._log_limits import bounded_list, log_failure, prose_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
-from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
+from deephaven_massive._tables.read_tally import ReadTally
+from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -101,7 +105,6 @@ if TYPE_CHECKING:
 __all__ = [
     "RestUnit",
     "UnsupportedParameterError",
-    "failure_kind",
     "fetch_units",
     "history_units",
     "read_rest_by_symbol",
@@ -119,50 +122,18 @@ RestUnit: TypeAlias = "tuple[RestPath, Call]"
 class UnsupportedParameterError(PermanentError):
     """A parameter the call set that a symbol's path does not take, in a read by symbol.
 
-    A dataset with a path per symbol class can route one symbol to a path that lacks a
-    parameter the call set (`adjusted=False` on the crypto indicators). That symbol's read
-    fails with this error before any request, and the other symbols are read. The parameter is
-    the caller's, so its cause is `ErrorCause.USER_DEFECT`.
+    A `history()` or value-table read by symbol can meet a path that lacks a parameter the
+    call set when the call did not check it. That symbol's read fails with this error before
+    any request, and the other symbols are read. The parameter is
+    the caller's, so its source is `ErrorSource.USER`, and it is a bug.
     """
 
-    default_cause = ErrorCause.USER_DEFECT
+    default_source = ErrorSource.USER
+    default_is_bug = True
 
 
 _SYMBOL = "Symbol"
 """The column that names each row's symbol, by which a request of several symbols is split."""
-
-
-def failure_kind(error: MassiveError) -> FailureKind:
-    """Class a symbol's failure: may the same read succeed if it is made again later?
-
-    Args:
-        error: The failure, as the transport raised or returned it.
-
-    Returns:
-        `TRANSIENT` for a symbol's data cut short (`CutShortError`: a later page's 404), and
-        for an expected failure with no status (a network failure, a read stopped), a server
-        error (5xx), or a rate limit (429). `PERMANENT`, meaning the same read would fail
-        again for this session's entitlements, for everything else: a refusal of the plan
-        (`EntitlementError`, which an upgrade of the plan lifts), a failure a retry cannot fix
-        (`PermanentError`: rows that break the schema, a parameter the path does not take, a
-        crypto pair Massive does not list), any defect (`ErrorCause.LIBRARY_DEFECT` or
-        `USER_DEFECT`), and any other HTTP status, such as 400 or the 404 of a path Massive
-        retired.
-    """
-    if isinstance(error, CutShortError):
-        return FailureKind.TRANSIENT
-    if isinstance(error, (EntitlementError, PermanentError)):
-        return FailureKind.PERMANENT
-    if error.cause is not ErrorCause.EXPECTED:
-        return FailureKind.PERMANENT
-    status = error.status
-    if (
-        status is None
-        or status == HTTPStatus.TOO_MANY_REQUESTS
-        or status >= HTTPStatus.INTERNAL_SERVER_ERROR
-    ):
-        return FailureKind.TRANSIENT
-    return FailureKind.PERMANENT
 
 
 def _ordered(symbols: Sequence[str]) -> tuple[str, ...]:
@@ -180,10 +151,11 @@ def _ordered(symbols: Sequence[str]) -> tuple[str, ...]:
 def _failure_recorder(
     reader: RestReader, failed: dict[str, MassiveError], cancel: Cancel | None
 ) -> CryptoSplit:
-    """Return a crypto split that records any pair it cannot split instead of raising.
+    """Return a crypto split that records a failed lookup instead of raising.
 
-    Each such pair fails alone, a failed read of the crypto ticker list included, while the
-    read goes on with the other symbols (`recording_split`).
+    A failed read of the crypto ticker list fails that pair alone, while the read goes on with
+    the other symbols (`recording_split`). A pair the list gives no split for is no failure:
+    it is planned as a call with no data, reported as HTTP 404 is (`RestReader.read_each`).
 
     Args:
         reader: The reader whose session's crypto ticker list splits each pair.
@@ -194,7 +166,7 @@ def _failure_recorder(
         The split.
     """
     pair = functools.partial(reader.crypto_pair, cancel=cancel)
-    return recording_split(pair, failed, catching=MassiveError)
+    return recording_split(pair, failed)
 
 
 def _refused(symbols: Sequence[str], error: ValueError) -> dict[str, MassiveError]:
@@ -205,9 +177,12 @@ def _refused(symbols: Sequence[str], error: ValueError) -> dict[str, MassiveErro
         error: The planning error, which names the path and the parameter.
 
     Returns:
-        Each symbol with one shared `UnsupportedParameterError`.
+        Each symbol with one shared `UnsupportedParameterError`, whose message ends with the
+        fix: leave the parameter out, or read these symbols in a call without it.
     """
-    refusal = UnsupportedParameterError(str(error))
+    refusal = UnsupportedParameterError(
+        f"{error} Leave that argument out, or read these symbols in a call without it."
+    )
     return dict.fromkeys(symbols, refusal)
 
 
@@ -237,14 +212,16 @@ def fetch_units(
 
     Returns:
         The planned requests in plan order, and the symbols that failed before any request
-        with their errors: a crypto pair Massive's list does not hold (or the list's failed
-        read), and every symbol of a path that does not take a parameter the call set
-        (`UnsupportedParameterError`).
+        with their errors: a crypto pair whose lookup failed. A path that does not take a
+        parameter the call set raises the `ValueError` of `plan_calls`, which the call has
+        already checked for (`RestEndpoints.check_fetch`).
     """
     asked = tuple(sorted(_ordered(symbols)))
     alone = _SYMBOL not in columns
-    # Explicit symbols give each path a tuple of them.
-    groups = [(path, cast("tuple[str, ...]", own)) for path, own in fetch_paths(spec, asked)]
+    groups = [
+        (path, required_instance(own, tuple, f"the symbols of {path}"))
+        for path, own in fetch_paths(spec, asked)
+    ]
     if alone:
         groups = [(template, (symbol,)) for template, own in groups for symbol in own]
     failed: dict[str, MassiveError] = {}
@@ -252,18 +229,14 @@ def fetch_units(
     units: list[RestUnit] = []
     for template, own in groups:
         rest_path = reader.rest_path(template)
-        try:
-            calls = plan_calls(
-                spec,
-                rest_path,
-                request,
-                symbols=own,
-                dates=(request.start, request.end),
-                split=split,
-            )
-        except ValueError as error:
-            failed.update(_refused(own, error))
-            continue
+        calls = plan_calls(
+            spec,
+            rest_path,
+            request,
+            symbols=own,
+            dates=(request.start, request.end),
+            split=split,
+        )
         units.extend((rest_path, call) for call in calls if call.symbol not in failed)
     logger.debug(
         "%s fetch by symbol: %d symbols in %d requests (%s); failed before any request: %s",
@@ -308,7 +281,7 @@ def history_units(
     failed: dict[str, MassiveError] = {}
     units: list[RestUnit] = []
     if not window.empty:
-        rest_path = reader.rest_path(cast("str", spec.history_path))
+        rest_path = reader.rest_path(required(spec.history_path, f"{spec.name}'s history path"))
         try:
             calls = history_calls(
                 spec,
@@ -346,12 +319,15 @@ def read_rest_by_symbol(
     current: bool,
     call: int,
     cancel: Cancel | None,
+    tally: ReadTally,
     to_table: Callable[[pa.Table], Table],
 ) -> dict[str, SymbolOutcome]:
     """Make a read by symbol's planned REST requests and return each symbol's outcome.
 
     Each request's rows go to the symbols it names (see the module docstring), and each
-    symbol's rows become one static table, in plan order.
+    symbol's rows become one static table, in plan order. A symbol whose every request Massive
+    had no data for is marked so (`SymbolRows.no_data`). The rows count in `tally`, which the
+    read's entry point judges (`ReadTally.judge`); this read never does.
 
     Args:
         reader: The reader of the session's paths.
@@ -367,6 +343,7 @@ def read_rest_by_symbol(
             (`rest._fetch_is_current`).
         call: The verb call's id, for the log lines.
         cancel: The read's stop token, or None.
+        tally: The whole read's count of its rows and of those withheld.
         to_table: Converts a symbol's Arrow rows to a static Deephaven table.
 
     Returns:
@@ -386,6 +363,7 @@ def read_rest_by_symbol(
         current=current,
         cancel=cancel,
         patience=patience,
+        tally=tally,
     )
     logger.debug(
         "call %d %s by symbol: %d of %d requests answered, waiting out at most %.0f s of pauses",
@@ -397,20 +375,25 @@ def read_rest_by_symbol(
     )
     pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in ordered}
     failures = dict(failed)
+    absent: set[str] = set()
+    answered: set[str] = set()
     for (rest_path, planned), result in zip(units, results, strict=True):
         own = own_symbols(spec, planned.symbol, planned.query)
         if isinstance(result, MassiveError):
             for symbol in own:
                 failures.setdefault(symbol, result)
-            continue
-        _attribute(reader, spec, result, template=rest_path.template, own=own, pieces=pieces)
+        elif result is None:
+            absent.update(own)
+        else:
+            answered.update(own)
+            _attribute(reader, spec, result, template=rest_path.template, own=own, pieces=pieces)
     empty = core.dataset_schema(spec).arrow_schema().empty_table()
     tables = {
         symbol: to_table(pa.concat_tables(rows) if rows else empty)
         for symbol, rows in pieces.items()
         if symbol not in failures
     }
-    return symbol_outcomes(
+    outcomes = symbol_outcomes(
         core,
         spec,
         symbols=ordered,
@@ -419,6 +402,45 @@ def read_rest_by_symbol(
         call=call,
         source=TRANSPORT_LABELS[Transport.REST],
     )
+    # A symbol with no data from every request that named it; one that failed keeps its failure.
+    no_data = absent - answered
+    outcomes = {
+        symbol: replace(outcome, no_data=True)
+        if symbol in no_data and isinstance(outcome, SymbolRows)
+        else outcome
+        for symbol, outcome in outcomes.items()
+    }
+    return _with_skipped(outcomes, units)
+
+
+def _with_skipped(
+    outcomes: dict[str, SymbolOutcome], units: Sequence[RestUnit]
+) -> dict[str, SymbolOutcome]:
+    """Name, in each outcome it applies to, why a call left its crypto pair unread.
+
+    A pair whose currencies Massive's crypto ticker list gives but can't be read as its ticker
+    is planned as a call the reader never sends (`Call.unsplit`), so its read ends with no
+    rows; `unreadable_symbols` already logged it, and the read lists it in `m.problems()`. A
+    read by symbol also names it in its `m.symbol_reads()` row. A pair Massive
+    has no data for is not named: it is reported as HTTP 404 is.
+
+    Args:
+        outcomes: Each symbol's outcome (`symbol_outcomes`).
+        units: The planned requests.
+
+    Returns:
+        The outcomes, each skipped pair's rows carrying why (`SymbolRows.skipped`).
+    """
+    for _, planned in units:
+        unsplit, symbol = planned.unsplit, planned.symbol
+        if unsplit is None or unsplit.no_data:
+            continue
+        assert symbol is not None  # a split is planned only for a call of one pair
+        outcome = outcomes[symbol]
+        assert isinstance(outcome, SymbolRows)  # an unsent call fails no symbol
+        why = f"skipped: {unsplit.why}, so the pair gets no rows"
+        outcomes[symbol] = replace(outcome, skipped=why)
+    return outcomes
 
 
 def read_rest_by_value(
@@ -439,7 +461,10 @@ def read_rest_by_value(
     value and `Request.limit` caps each value's requests as it would that call's. A value whose
     read fails gets its own failure; a parameter its path does not take fails it with
     `UnsupportedParameterError`. A rejected API key stops the read, since every value would
-    be refused.
+    be refused. The values are one read: their rows count in one tally, judged after the last
+    value (`ReadTally.judge`), so a value whose rows are all withheld, beside others read
+    whole, gets no rows, and when the library could read none of the rows of every value
+    whole, each value that read fails.
 
     Args:
         reader: The reader of the session's paths.
@@ -460,15 +485,16 @@ def read_rest_by_value(
     pauses = holds_update_graph_lock(core.exec_ctx)
     tables: dict[str, Table] = {}
     failures: dict[str, MassiveError] = {}
+    tally = ReadTally()
     for value in ordered:
         try:
             rows, requests = reader.read_fetch(
                 spec,
                 request.for_value(value),
-                symbols=request.symbols,
+                symbols=request.static_symbols,
                 cancel=cancel,
                 pauses_live_tables=pauses,
-                unlisted=OnError.RAISE,
+                tally=tally,
             )
         except MassiveError as error:
             failures[value] = error
@@ -482,7 +508,7 @@ def read_rest_by_value(
             "call %d %s by value: %s read in %d requests", call, spec.name, value, requests
         )
         tables[value] = to_table(rows)
-    return symbol_outcomes(
+    outcomes = symbol_outcomes(
         core,
         spec,
         symbols=ordered,
@@ -491,6 +517,7 @@ def read_rest_by_value(
         call=call,
         source=TRANSPORT_LABELS[Transport.REST],
     )
+    return tally.judge(spec.name, outcomes)
 
 
 def _attribute(
@@ -505,12 +532,10 @@ def _attribute(
     """Give one request's rows to the symbols it names.
 
     A request of one symbol gives that symbol all its rows. A request of several gives each its
-    rows by their `Symbol`. A row whose `Symbol` is null, such as a row that lists none of the
-    request's tickers (`RestReader._listed` logs its WARNING), keeps that null and goes with
-    the first symbol the request names, as a static read keeps it: it leaves a followed result
-    when that symbol does. A row whose `Symbol` names another symbol (or any row of a request
-    that names no symbol) belongs to no symbol and is left out, with one WARNING per dataset
-    and path a session.
+    rows by their `Symbol` (a row that lists none of the request's tickers never reaches here:
+    `RestReader._listed` leaves it out). A row whose `Symbol` names another symbol (or any row
+    of a request that names no symbol) belongs to no symbol and is left out, with one WARNING
+    per dataset and path a session.
 
     Args:
         reader: The reader, whose session remembers the warnings already given.
@@ -528,33 +553,18 @@ def _attribute(
         mine = rows.filter(pc.equal(rows[_SYMBOL], symbol))
         pieces[symbol].append(mine)
         kept += mine.num_rows
-    if own:
-        unnamed = rows.filter(pc.is_null(rows[_SYMBOL]))
-        if unnamed.num_rows:
-            pieces[own[0]].append(unnamed)
-            kept += unnamed.num_rows
-            logger.debug(
-                "%s: %d rows Massive returned from %s for %s have a null Symbol; they are "
-                "kept with %s",
-                spec.name,
-                unnamed.num_rows,
-                template,
-                bounded_list(own),
-                own[0],
-            )
     left = rows.num_rows - kept
     if not left:
         return
     level = logging.WARNING if reader.state.first("unowned", spec.name, template) else logging.DEBUG
     logger.log(
         level,
-        "%s: %d of the %d rows Massive returned from %s for %s name none of those symbols, so "
-        "no symbol's read owns them and they are left out",
+        "%s: %d of the %d rows Massive returned for %s name none of those symbols, so no "
+        "symbol's read owns them and they are left out.",
         spec.name,
         left,
         rows.num_rows,
-        template,
-        bounded_list(own) if own else "no symbol",
+        prose_list(own, "symbols") if own else "no symbol",
     )
 
 
@@ -587,13 +597,13 @@ def split_by_symbol(
         kept = sum(part.size for part in tables.values())
     if kept != total:
         logger.warning(
-            "%s: %d of the %d rows read from %s for %s name none of those symbols (or no "
-            "symbol), so no symbol's read owns them and they are left out",
+            "%s: %d of the %d rows read from %s for %s name none of those symbols, or no "
+            "symbol, so no symbol's read owns them and they are left out.",
             spec.name,
             total - kept,
             total,
             source,
-            bounded_list(symbols),
+            prose_list(symbols, "symbols"),
         )
     return tables
 
@@ -623,13 +633,13 @@ def symbol_outcomes(
             `"flat files and REST"` when REST served the days the files lack.
 
     Returns:
-        Each symbol with its `SymbolRows` (which carry `source`), or its `SymbolFailure`
-        classed by `failure_kind`;
+        Each symbol with its `SymbolRows` (which carry `source`), or its `SymbolFailure`;
         a table without exactly the dataset's columns fails its symbol as a library defect.
 
     Raises:
         AuthenticationError: When any symbol failed with it: every symbol would.
-        MassiveError: `"<session> is closed"` when the session closed during the read.
+        SessionClosedError: `"This session is closed. ..."` when the session closed during the
+            read.
     """
     refused = next((e for e in failures.values() if isinstance(e, AuthenticationError)), None)
     if refused is not None:
@@ -638,7 +648,7 @@ def symbol_outcomes(
         )
         raise refused
     if core.closed:
-        raise MassiveError(f"{core.label} is closed")
+        raise SessionClosedError(session_closed())
     expected = col_defs(core.dataset_schema(spec))
     outcomes: dict[str, SymbolOutcome] = {}
     for symbol in symbols:
@@ -659,20 +669,19 @@ def symbol_outcomes(
                 continue
             error = MassiveError(
                 library_bug(f"{spec.name}: {symbol}'s rows from {source} {problem}"),
-                cause=ErrorCause.LIBRARY_DEFECT,
+                source=ErrorSource.LIBRARY,
             )
-        kind = failure_kind(error)
-        outcomes[symbol] = SymbolFailure(error, kind)
+        outcomes[symbol] = SymbolFailure(error)
         log_failure(
             logger,
             error,
-            "call %d %s %s: the read from %s failed (%s), which fails this symbol alone: %s",
+            "call %d %s %s failed alone, in its read from %s: %s",
             call,
             spec.name,
             symbol,
             source,
-            kind.value,
             expected=logging.DEBUG,
+            named=spec.name,
         )
     return outcomes
 

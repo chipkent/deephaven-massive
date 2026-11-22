@@ -1,14 +1,15 @@
 """What every Massive wire client shares: errors, TLS and proxy settings, JSON decoding.
 
-`net` is the bottom layer of `deephaven_massive._massive`. It imports only the standard library
-and `certifi` (plus `orjson` when installed), never another part of `_massive`, and the REST,
-WebSocket, and flat-file clients all build on it:
+`net` is the bottom layer of `deephaven_massive._massive`. It imports only the standard library,
+`certifi`, urllib3's `CertificateError`, and `orjson` when installed, never another part of
+`_massive`, and the REST, WebSocket, and flat-file clients all build on it:
 
-- `net.errors`: `WireError`, `WireAuthError`, `WireEntitlementError`, re-exported here.
+- `net.errors`: `WireError`, `WireAuthError`, `WireEntitlementError` (re-exported here), and
+  `is_certificate_failure`, the test of which TLS failures every client fails at once.
 - `net.http`: the CA bundle and the proxy each client uses.
 - `net.codec`: the JSON decoder (orjson when installed, else a strict standard-library path).
-- `net.retry`: the retry schedule, the `Retry-After` parser, TLS-failure detection, and the
-  injectable `Clock` every wait goes through.
+- `net.retry`: the retry schedule, the `Retry-After` parser, and the injectable `Clock` every
+  wait goes through.
 - `net.cancel`: `Cancel`, the token that ends a request's waits, which follows other tokens.
 - `net.slots`: `ConnectionSlots`, the bound on a client's requests in flight: its pool's size.
 - `net.origins`: `origin_of`, the scheme, host, and port a URL reaches.

@@ -5,7 +5,9 @@ a WebSocket channel of one cluster (`stocks/T`), or a flat-file prefix
 (`us_stocks_sip/trades_v1`). Each is described by
 its ordered **fields**: the key on the wire, the long-form column the library names it, the
 field's `WireType`, its timestamp `WireUnit` when it is an epoch, and whether the vendor marks
-it required. A REST source is a `RestPath`, which adds its result key and its parameters.
+it required. A REST source is a `RestPath`, which adds its result key and its parameters; a
+WebSocket channel is a `WsChannel`, which adds the hosts its documentation page lists for it
+(`FeedHost`: one per `Feed`, such as `Real-Time` on `socket.massive.com`).
 
 A source may belong to dataset **kinds** (trades, quotes, bars, ...): the sources whose rows
 merge into one table schema. Each `Membership` names the kind, the asset-class group within
@@ -14,7 +16,10 @@ contributes to that membership, each under its column there, which may keep only
 keep them all and rename some.
 
 Decoders compare each payload with its source and return a `DriftReport` of the keys that
-were extra or missing.
+were extra or missing, and the `RowMarks` of the rows they could not read whole: each such row
+stays in the payload's batch, with a null where a value could not be read, and its index, the
+field, and the reason are marked by its `RowFault`, so the library alone decides what happens
+to it.
 
 `Provenance` records where the generated values came from: the day the vendor sources were
 fetched, the vendor URL of each source, and what each vendor page says about Massive's plans:
@@ -34,29 +39,20 @@ This module imports only the standard library.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import string
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeAlias
 
-_F = TypeVar("_F")
+from typing_extensions import override
 
 if TYPE_CHECKING:
     import datetime as dt
-    from collections.abc import Iterable, Mapping, Sequence
-
-    from typing_extensions import override
-else:
-
-    def override(method: _F) -> _F:
-        """Return `method` unchanged: `typing.override` exists only from Python 3.12.
-
-        Type checkers read `typing_extensions.override` instead, from its bundled stub, so
-        overrides stay checked without a run-time dependency.
-        """
-        return method
+    from collections.abc import Iterable, Sequence
 
 
 __all__ = [
@@ -66,6 +62,8 @@ __all__ = [
     "Conversion",
     "DriftReport",
     "DriftSample",
+    "Feed",
+    "FeedHost",
     "Field",
     "Membership",
     "Param",
@@ -74,10 +72,15 @@ __all__ = [
     "PlanTerms",
     "Provenance",
     "RestPath",
+    "RowFault",
+    "RowMark",
+    "RowMarker",
+    "RowMarks",
     "Source",
     "Transport",
     "WireType",
     "WireUnit",
+    "WsChannel",
 ]
 
 
@@ -105,6 +108,34 @@ class Transport(StrEnum):
     WS = "WS"
     REST = "REST"
     FLAT_FILES = "FLAT_FILES"
+
+
+class Feed(StrEnum):
+    """A feed Massive's WebSocket documentation lists for a channel, by the page's own label.
+
+    Each channel's page has a "Connection" table with one row per feed that serves it: the
+    label (these values, exactly as Massive writes them) and the feed's URL. A label the refresh
+    does not know stops it, so a new feed is a change a person looks at. A label names where a
+    channel is served, not how recent its data is: a plan may get delayed data on any feed
+    (Massive's index value page lists only `Business`, and a plan that gets it 15 minutes late).
+    """
+
+    REAL_TIME = "Real-Time"
+    DELAYED = "Delayed"
+    BUSINESS = "Business"
+
+
+@dataclass(frozen=True, kw_only=True)
+class FeedHost:
+    """One row of a channel's "Connection" table: a feed and the host that serves it.
+
+    Attributes:
+        feed: The feed's label.
+        host: The hostname of the feed's URL, such as `"socket.massive.com"`.
+    """
+
+    feed: Feed
+    host: str
 
 
 class WireType(StrEnum):
@@ -461,8 +492,8 @@ class Param:
         in_path: True for a placeholder of the path template, False for a query parameter.
         values: The accepted values of an `ENUM` parameter, in spec order; empty otherwise.
         unit: The unit an instant is sent in, set exactly when `kind` is `TIMESTAMP`: `NS` for
-            the trade and quote filters, `MS` for the indicator filters. An instant is sent as
-            an exact integer count of it.
+            the trade and quote filters, `MS` for the indicator filters; never `MS_OR_NS`. An
+            instant is sent as an exact integer count of it.
         default: The value Massive's specification documents as the parameter's default, as
             the JSON scalar it gives (`50` for an indicator's `window`, `"day"` for its
             `timespan`, `True` for `adjusted`); `None` when it documents none, or documents
@@ -485,8 +516,10 @@ class Param:
         """Check that values are given exactly for an enum, and a unit exactly for a timestamp.
 
         Raises:
-            ValueError: If `kind` is `ENUM` and `values` is empty, or the reverse; or if `kind`
-                is `TIMESTAMP` and `unit` is `None`, or the reverse.
+            ValueError: If `kind` is `ENUM` and `values` is empty, or the reverse; if `kind` is
+                `TIMESTAMP` and `unit` is `None`, or the reverse; or if `unit` is `MS_OR_NS`,
+                which tells units apart by a value's size and so cannot say how to send one.
+                The message names the parameter.
         """
         if (self.kind is ParamKind.ENUM) != bool(self.values):
             raise ValueError(
@@ -495,6 +528,11 @@ class Param:
         if (self.kind is ParamKind.TIMESTAMP) != (self.unit is not None):
             raise ValueError(
                 f"parameter {self.name!r}: a timestamp needs a unit and any other kind has none"
+            )
+        if self.unit is WireUnit.MS_OR_NS:
+            raise ValueError(
+                f"parameter {self.name!r}: the unit {self.unit} is for fields only; a parameter "
+                "sends an instant as a count of one exact unit"
             )
 
 
@@ -670,6 +708,52 @@ class RestPath(Source):
     def template(self) -> str:
         """The path template, with `{name}` placeholders; the same text as `key`."""
         return self.key
+
+
+@dataclass(frozen=True, kw_only=True)
+class WsChannel(Source):
+    """A WebSocket source: a channel of one cluster, with the hosts its page documents.
+
+    `transport` is always `Transport.WS` and cannot be passed.
+
+    Attributes:
+        hosts: The feeds that serve the channel and their hosts, from the "Connection" table
+            of the channel's documentation page, sorted by feed. No feed appears twice.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.spec.types import Feed, FeedHost, WsChannel
+
+            fmv = WsChannel(
+                key="stocks/FMV",
+                fields=(),
+                hosts=(FeedHost(feed=Feed.BUSINESS, host="business.massive.com"),),
+            )
+            assert fmv.only_host == "business.massive.com"
+    """
+
+    transport: Transport = dataclasses.field(default=Transport.WS, init=False)
+    hosts: tuple[FeedHost, ...] = ()
+
+    @override
+    def __post_init__(self) -> None:
+        """Check the source's invariants, then that no feed is listed twice.
+
+        Raises:
+            ValueError: If the source's invariants fail (see `Source`), or two hosts share a
+                feed; the message names the channel and the feeds.
+        """
+        super().__post_init__()
+        repeated = _duplicates(h.feed.value for h in self.hosts)
+        if repeated:
+            raise ValueError(f"source {self.key!r}: repeated feeds {repeated}")
+
+    @property
+    def only_host(self) -> str | None:
+        """The one host the channel's page lists, or None when it lists several or none."""
+        found = {h.host for h in self.hosts}
+        return found.pop() if len(found) == 1 else None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -898,3 +982,126 @@ class DriftReport:
             dropped_reason=self.dropped_reason or other.dropped_reason,
             samples={**other.samples, **self.samples},
         )
+
+
+class RowFault(StrEnum):
+    """Why the library could not read a row whole, named as the `dm.ErrorPolicy` field it follows.
+
+    A row has at most one fault, the first found: a decoder marks a row first, and each of
+    the library's later steps marks only a row not marked yet.
+    """
+
+    UNREADABLE_KEYS = "unreadable_keys"
+    """A key the library needs to place the row (its symbol, its time, or another key the
+    dataset declares) is absent, null, or does not fit."""
+    UNREADABLE_SYMBOLS = "unreadable_symbols"
+    """The row's symbol is text the library cannot read as Massive's ticker. The library
+    marks it, after decoding; a decoder never does."""
+    UNCONVERTIBLE_VALUES = "unconvertible_values"
+    """A value outside the keys does not fit its field's type or named conversion, so the
+    row's batch holds a null there."""
+
+
+@dataclass(frozen=True, slots=True)
+class RowMark:
+    """The rows of one payload that one fault marks, each with where and why.
+
+    The four tuples have one entry per marked row, in ascending row order.
+
+    Attributes:
+        rows: Each marked row's index in the payload, counting every row the decoder read.
+        fields: The long-form column of the row's first value that could not be read.
+        reasons: Why, as the decoder words it: the clause `spec.convert` shares with every
+            decoder (the field, the expected type, and the value's first 200 characters), with
+            the payload's own context; never the row's whole text.
+        symbols: The row's symbol exactly as the wire spells it, or None when the decoder was
+            not told which column holds it, or the row's value there is missing or not text.
+
+    Raises:
+        ValueError: If the tuples differ in length, or `rows` is not strictly ascending.
+    """
+
+    rows: tuple[int, ...]
+    fields: tuple[str, ...]
+    reasons: tuple[str, ...]
+    symbols: tuple[str | None, ...]
+
+    def __post_init__(self) -> None:
+        """Check that the tuples align and the rows ascend.
+
+        Raises:
+            ValueError: If they do not.
+        """
+        if not len(self.rows) == len(self.fields) == len(self.reasons) == len(self.symbols):
+            raise ValueError("a row mark needs one field, reason, and symbol per row")
+        if any(a >= b for a, b in itertools.pairwise(self.rows)):
+            raise ValueError(f"a row mark's rows must ascend: {self.rows}")
+
+
+RowMarks: TypeAlias = Mapping[RowFault, RowMark]
+"""A payload's marked rows by fault. A fault no row has is absent, and a row is under one fault
+at most; the common payload, every row read whole, is empty."""
+
+
+class RowMarker:
+    """Collects the marks of one payload as a decoder reads it, one fault per row.
+
+    A decoder creates one per payload on its own thread and calls `mark` for each row it cannot
+    read whole; `marks` returns them as plain immutable data that may cross threads.
+
+    Example:
+        ::
+
+            from deephaven_massive._massive.spec.types import RowFault, RowMarker
+
+            marker = RowMarker()
+            marker.mark(RowFault.UNREADABLE_KEYS, 3, field="Timestamp", reason="no t", symbol="A")
+            marker.mark(RowFault.UNCONVERTIBLE_VALUES, 3, field="Price", reason="x", symbol="A")
+            [mark] = marker.marks().values()
+            assert mark.rows == (3,) and mark.fields == ("Timestamp",)
+    """
+
+    __slots__ = ("_found", "_marked")
+
+    def __init__(self) -> None:
+        """Start with no row marked."""
+        self._found: dict[RowFault, list[tuple[int, str, str, str | None]]] = {}
+        self._marked: set[int] = set()
+
+    def mark(
+        self, fault: RowFault, row: int, *, field: str, reason: str, symbol: str | None
+    ) -> bool:
+        """Mark a row with a fault, unless it already has one.
+
+        Args:
+            fault: The fault.
+            row: The row's index in the payload.
+            field: The long-form column of the value that could not be read.
+            reason: Why (`RowMark.reasons`).
+            symbol: The row's symbol as the wire spells it, or None.
+
+        Returns:
+            True when the row is marked now; False when it already had a fault, which stays.
+        """
+        if row in self._marked:
+            return False
+        self._marked.add(row)
+        self._found.setdefault(fault, []).append((row, field, reason, symbol))
+        return True
+
+    def marks(self) -> RowMarks:
+        """Return the marks so far, by fault, each fault's rows in ascending order.
+
+        Returns:
+            A read-only mapping; empty when no row is marked.
+        """
+        built = {}
+        for fault, found in self._found.items():
+            ordered = sorted(found)
+            built[fault] = RowMark(
+                rows=tuple(r for r, _, _, _ in ordered),
+                fields=tuple(f for _, f, _, _ in ordered),
+                reasons=tuple(why for _, _, why, _ in ordered),
+                symbols=tuple(sym for _, _, _, sym in ordered),
+            )
+        return MappingProxyType(built)

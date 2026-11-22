@@ -10,27 +10,28 @@ tested without a socket; `ws.client` owns the socket and calls in here:
 - **The handshake.** `handshake_status` reads the `connected` greeting and the reply to the
   authentication frame.
 - **Received frames.** `FrameDecoder` decodes each frame once, with the `net.codec` JSON codec,
-  into `Status` events and per-channel `Data`: the rows (tuples of values in the order of the
-  source's fields), `Reject`s for the rows dropped because a required key cannot be read, and
-  the `DriftReport` of the channel's objects in the frame. Each value goes through its field's
+  into `Status` events and per-channel `Data`: every row (a tuple of values in the order of the
+  source's fields), the `RowMarks` of the rows it could not read whole, and the `DriftReport`
+  of the channel's objects in the frame. Each value goes through its field's
   converter, the converter the REST client uses too (a field with a named `conversion` through
   that conversion), so a value means the same on both transports. A channel's objects are read
   a column at a time, as a REST page is (`spec.convert.column_converter`), and read again one by
   one only when a column holds a value that reading cannot vouch for; either way the rows,
-  rejects, and drift are the same. Drift is reported as REST reports it: `extra` holds the
+  marks, and drift are the same. Drift is reported as REST reports it: `extra` holds the
   keys a channel does not declare, which are dropped (a key the source lists as ignored,
   `Source.ignored_keys`, is dropped without being reported), `missing` only the fields the vendor
   marks required (`Field.required`) that some object lacked or held as null, and
-  `unconvertible` the fields that held a value that does not fit, which reads as null. A row
-  whose required key (`FrameDecoder.set_required`) is absent, null, or does not fit cannot be
-  routed, so it is dropped and becomes a `Reject`. Each drifted key carries a sample
-  (`DriftReport.samples`): the symbol of the first object that showed it and, for an extra key
-  or a value that does not fit, its value. A dropped row carries its whole raw text
-  (`Reject.raw`); it, and a row holding a value that does not fit, is logged whole at DEBUG on
-  this module's logger, once, where it is decoded.
+  `unconvertible` the fields that held a value that does not fit, which reads as null, and the
+  row is marked `RowFault.UNCONVERTIBLE_VALUES`. A row whose required key
+  (`FrameDecoder.set_required`) is absent, null, or does not fit cannot be routed: it is marked
+  `RowFault.UNREADABLE_KEYS`, its key reads as null, and its other values add no
+  `unconvertible` drift. Each drifted key carries a sample (`DriftReport.samples`): the symbol
+  of the first object that showed it and, for an extra key or a value that does not fit, its
+  value. A marked row is logged whole at DEBUG on this module's logger, once, where it is
+  decoded; what happens to it is the library's decision.
 - **Failures.** `classify_failure` decides whether an exception from opening the socket is
   fatal or retryable, from websockets' own rule and two overrides, and how long a retryable
-  one must wait at least. The overrides use the shared `net` helpers: `is_tls_failure`
+  one must wait at least. The overrides use the shared `net` helpers: `is_certificate_failure`
   and the `Retry-After` reader.
 
 Topics are exact strings throughout: nothing here matches one topic as a prefix of another.
@@ -51,10 +52,21 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Final, Literal, NamedTuple
 
 from websockets.client import process_exception
-from websockets.exceptions import InvalidStatus
+from websockets.exceptions import (
+    InvalidHandshake,
+    InvalidProxy,
+    InvalidProxyMessage,
+    InvalidProxyStatus,
+    InvalidStatus,
+    ProxyError,
+)
 
 from deephaven_massive._massive.net import codec
-from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError, is_tls_failure
+from deephaven_massive._massive.net.errors import (
+    WireError,
+    WireFailure,
+    is_certificate_failure,
+)
 from deephaven_massive._massive.net.retry import retry_after_seconds
 from deephaven_massive._massive.spec.convert import (
     UnconvertibleError,
@@ -65,18 +77,24 @@ from deephaven_massive._massive.spec.convert import (
     row_excerpt,
     unconvertible_message,
 )
-from deephaven_massive._massive.spec.types import DriftReport, DriftSample, Source, Transport
+from deephaven_massive._massive.spec.types import (
+    DriftReport,
+    DriftSample,
+    RowFault,
+    RowMarker,
+    Source,
+    Transport,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
-    from deephaven_massive._massive.spec.types import Field
+    from deephaven_massive._massive.spec.types import Field, RowMarks
 
 __all__ = [
     "MAX_TOPICS_PER_FRAME",
     "Data",
     "FrameDecoder",
-    "Reject",
     "Status",
     "StatusKind",
     "auth_frame",
@@ -87,8 +105,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-DROPPED_ERROR_LIMIT: Final = 20
-"""How many dropped frames or elements one connection logs at ERROR; later ones log at DEBUG."""
+DROPPED_WARNING_LIMIT: Final = 20
+"""How many dropped frames or elements one connection logs at WARNING; later ones log at DEBUG."""
 
 MAX_TOPICS_PER_FRAME = 1000
 """The most topics one subscribe or unsubscribe frame names.
@@ -104,7 +122,7 @@ Reading by column costs a few calls per column whatever the number of objects, s
 cheaper than reading the objects one by one only from about four objects of a trade or quote
 on (measured with the generated `stocks/T` source: a lone object takes about 1.7 times as long
 by column, and a frame of 100 objects half as long). Fewer are read one by one, which gives the
-same rows, rejects, and drift."""
+same rows, marks, and drift."""
 
 # How much of an undecodable frame or element a log message or handshake error quotes.
 _LOG_LIMIT = 200
@@ -154,41 +172,21 @@ class Status:
 
 
 @dataclass(frozen=True, kw_only=True)
-class Reject:
-    """One received row dropped because a required key is absent, null, or does not fit.
-
-    The row cannot be routed, so it is not delivered; the library counts it as drift and fails
-    no stream for it. The frame's other rows are delivered. Immutable, so it may be passed
-    between threads.
-
-    Attributes:
-        channel: The channel the row arrived on, such as `"T"`.
-        symbol: The row's symbol exactly as the wire spells it (`"EUR/USD"`, not `"C:EURUSD"`),
-            read from the column `set_required` declared as the channel's symbol; `None` when
-            no symbol column is declared or the row's value is missing or not text.
-        error: Why the row was dropped: a missing required key or a value that does not fit,
-            naming the connection, the field, the expected type, and the value.
-        raw: The whole row as it arrived, its compact JSON text cut to 2,000 characters
-            (`spec.convert.row_excerpt`), so a log line can show every field it held.
-    """
-
-    channel: str
-    symbol: str | None
-    error: WireError
-    raw: str
-
-
-@dataclass(frozen=True, kw_only=True)
 class Data:
     """One channel's data objects from one frame, decoded.
 
     Attributes:
         channel: The channel, such as `"T"`.
-        rows: The rows in arrival order, without the rows dropped for a required key: each a
-            tuple of the values of the channel's source's fields, in the order of
-            `Source.fields`, each in the form the field's converter gives it (`spec.convert`),
-            or `None` when the wire omitted it, sent null, or sent a value that does not fit.
-        rejects: The rows dropped for a required key, in arrival order.
+        rows: Every row in arrival order: each a tuple of the values of the channel's source's
+            fields, in the order of `Source.fields`, each in the form the field's converter
+            gives it (`spec.convert`), or `None` when the wire omitted it, sent null, or sent a
+            value that does not fit.
+        marks: The rows it could not read whole, by index into `rows`: a required key absent,
+            null, or unfit (`RowFault.UNREADABLE_KEYS`), or another value unfit
+            (`RowFault.UNCONVERTIBLE_VALUES`). Each reason reads `"a <channel> row[ for
+            <symbol>] from <host><path>: <problem>"`, and each symbol is the row's as the wire
+            spells it (`"EUR/USD"`, not `"C:EURUSD"`), read from the column `set_required`
+            declared as the channel's symbol. Immutable, so it may be passed between threads.
         drift: The wire keys of these objects that the source does not declare (`extra`),
             the vendor-required fields some object lacked or held as null (`missing`), and the
             fields that held a value that does not fit (`unconvertible`).
@@ -196,7 +194,7 @@ class Data:
 
     channel: str
     rows: list[tuple[object, ...]]
-    rejects: list[Reject]
+    marks: RowMarks
     drift: DriftReport
 
 
@@ -253,7 +251,7 @@ def handshake_status(data: str | bytes) -> tuple[str, str]:
             status, message = item.get("status"), item.get("message", "")
             if isinstance(status, str):
                 return status, message if isinstance(message, str) else ""
-    raise ValueError(f"expected a status object, got {_quote(data)}")
+    raise ValueError(f"The frame holds no status object with a text status: {_quote(data)}.")
 
 
 def classify_failure(error: Exception, *, host: str, path: str, now: float) -> WireError | float:
@@ -262,8 +260,10 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
     websockets' public rule, `websockets.client.process_exception`, decides: it retries an
     `OSError`, a timeout, an EOF during the upgrade, and HTTP 500, 502, 503, and 504, and
     treats everything else (HTTP 400 or 404, an invalid URI, ...) as fatal. Two cases override
-    it: an HTTP 429 is always retried, after its `Retry-After`, and a TLS certificate failure
-    is always fatal, although it is an `OSError`.
+    it: an HTTP 429 is always retried, after its `Retry-After`; a proxy that could not reach
+    the server (any status but 407, or a reply that is not HTTP) is retried, as the REST and
+    flat-file clients retry it; and a TLS certificate failure is always fatal, although it is
+    an `OSError`.
 
     Args:
         error: What opening the socket (TCP, TLS, proxy, HTTP upgrade) raised.
@@ -279,26 +279,76 @@ def classify_failure(error: Exception, *, host: str, path: str, now: float) -> W
         the `Retry-After` of an HTTP 429 (0.0 when absent or unreadable), and 0.0 otherwise,
         so the backoff alone decides.
     """
-    if is_tls_failure(error):
+    if is_certificate_failure(error):
         return WireError(
-            f"TLS certificate verification failed for {host}: {error}; "
-            "set SSL_CERT_FILE to a bundle that trusts the server's certificate",
+            f"The TLS certificate of {host} did not verify for the WebSocket connection to "
+            f"{host}{path}: {error}. If a proxy or a private certificate authority signs it, set "
+            "SSL_CERT_FILE to a bundle that trusts it.",
             host=host,
             path=path,
+            kind=WireFailure.LOCAL,
         )
     status = error.response.status_code if isinstance(error, InvalidStatus) else None
     if isinstance(error, InvalidStatus) and status == HTTPStatus.TOO_MANY_REQUESTS:
         wait = retry_after_seconds(error.response.headers.get("Retry-After"), now)
         return 0.0 if wait is None else wait
-    if process_exception(error) is None:
+    if _proxy_failed_to_connect(error) or process_exception(error) is None:
         return 0.0
+    if isinstance(error, InvalidProxyStatus):
+        status = error.response.status_code
     reason = f"HTTP {status}" if status is not None else f"{type(error).__name__}: {error}"
+    kind = _fatal_kind(error)
+    fix = (
+        " Correct the proxy, and its user and password, in HTTPS_PROXY."
+        if kind is WireFailure.LOCAL
+        else ""
+    )
+    said = (
+        f"Massive answered the WebSocket connection to {host}{path} with {reason}."
+        if isinstance(error, InvalidStatus)
+        else f"The WebSocket connection to {host}{path} failed with {reason}."
+    )
     return WireError(
-        f"WebSocket connection to {host}{path} failed: {reason}",
+        f"{said}{fix}",
         status=status,
         host=host,
         path=path,
+        kind=kind,
     )
+
+
+def _proxy_failed_to_connect(error: Exception) -> bool:
+    """Tell whether a proxy answered for a server it could not reach, rather than refusing.
+
+    Args:
+        error: What the attempt raised.
+
+    Returns:
+        True for a proxy's status other than 407 (such as its own 502) and for a proxy reply
+        that is not HTTP: no answer from the server, which the clients retry alike.
+    """
+    if isinstance(error, InvalidProxyStatus):
+        return error.response.status_code != HTTPStatus.PROXY_AUTHENTICATION_REQUIRED
+    return isinstance(error, InvalidProxyMessage)
+
+
+def _fatal_kind(error: Exception) -> WireFailure:
+    """Return what kind of failure a connection attempt websockets does not retry is.
+
+    Args:
+        error: What the attempt raised.
+
+    Returns:
+        `LOCAL` for a proxy that refused the credentials (HTTP 407) or is configured wrong
+        (the proxy settings are this machine's); `REFUSED` for a server that answered but
+        refused or broke the handshake (an HTTP status such as 401 or 404 included); and
+        `CLIENT_DEFECT` for anything else, such as a URI the client built wrong.
+    """
+    if isinstance(error, ProxyError | InvalidProxy):
+        return WireFailure.LOCAL
+    if isinstance(error, InvalidHandshake):
+        return WireFailure.REFUSED
+    return WireFailure.CLIENT_DEFECT
 
 
 def _quote(value: object) -> str:
@@ -376,7 +426,8 @@ class _Channel:
 
         Args:
             source: The channel's generated source.
-            required: The wire keys whose absence, null, or value that does not fit drops a row.
+            required: The wire keys whose absence, null, or value that does not fit marks a
+                row `RowFault.UNREADABLE_KEYS`.
             symbol: The wire key holding the symbol, or `None`.
 
         Returns:
@@ -406,9 +457,9 @@ class _Channel:
 class _Accumulator:
     """One channel's decoded objects of the frame being decoded."""
 
-    # Each kept row's values, in the order of the channel's source's fields.
+    # Each row's values, in the order of the channel's source's fields.
     rows: list[tuple[object, ...]] = field(default_factory=list)
-    rejects: list[Reject] = field(default_factory=list)
+    marker: RowMarker = field(default_factory=RowMarker)
     extra: set[str] = field(default_factory=set)
     missing: set[str] = field(default_factory=set)
     unconvertible: set[str] = field(default_factory=set)
@@ -426,12 +477,11 @@ class FrameDecoder:
     Example:
         ::
 
-            from deephaven_massive._massive.spec.types import Field, Source, Transport, WireType
+            from deephaven_massive._massive.spec.types import Field, WireType, WsChannel
             from deephaven_massive._massive.ws.protocol import FrameDecoder
 
-            trades = Source(
+            trades = WsChannel(
                 key="stocks/T",
-                transport=Transport.WS,
                 fields=(
                     Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
                     Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE),
@@ -449,8 +499,9 @@ class FrameDecoder:
         Args:
             sources: The WebSocket sources of the connection's cluster. Each key is
                 `"<cluster>/<channel>"`, and the channel is the `ev` value its objects carry.
-            host: The host of the connection, named in reject errors.
-            path: The URL path of the connection, such as `"/stocks"`, named in reject errors.
+            host: The host of the connection, named in the marks' reasons.
+            path: The URL path of the connection, such as `"/stocks"`, named in the marks'
+                reasons.
 
         Raises:
             ValueError: If a source is not a WebSocket source, its key names no channel, a
@@ -465,15 +516,18 @@ class FrameDecoder:
         for source in sources:
             channel = source.key.partition("/")[2]
             if source.transport is not Transport.WS or not channel:
-                raise ValueError(f"{source.key!r} is not a WebSocket source '<cluster>/<channel>'")
+                raise ValueError(
+                    f"Source {source.key!r} is not a WebSocket source of the form "
+                    "'<cluster>/<channel>'."
+                )
             dotted = sorted(f.wire_key for f in source.fields if "." in f.wire_key)
             if dotted:
                 raise ValueError(
-                    f"source {source.key!r} has dotted wire keys {dotted}; "
-                    "a WebSocket object is flat"
+                    f"Source {source.key!r} has dotted wire keys {', '.join(dotted)}, and a "
+                    "WebSocket object is flat."
                 )
             if channel in self._channels:
-                raise ValueError(f"two sources for channel {channel!r}")
+                raise ValueError(f"Two sources name the channel {channel!r}.")
             self._channels[channel] = _Channel.plan(source)
 
     def set_required(
@@ -484,10 +538,10 @@ class FrameDecoder:
         Args:
             channel: The channel, such as `"T"`.
             keys: Long-form columns of the channel's source; a row missing one, holding it as
-                null, or holding a value that does not fit is dropped. Empty means no column is
-                required.
-            symbol: The long-form column holding the row's symbol, read raw into each
-                `Reject.symbol` and drift sample; `None` when the channel's rows carry no
+                null, or holding a value that does not fit is marked
+                `RowFault.UNREADABLE_KEYS`. Empty means no column is required.
+            symbol: The long-form column holding the row's symbol, read raw into each mark
+                (`RowMark.symbols`) and drift sample; `None` when the channel's rows carry no
                 symbol.
 
         Raises:
@@ -496,11 +550,11 @@ class FrameDecoder:
         """
         current = self._channels.get(channel)
         if current is None:
-            raise ValueError(f"no source for channel {channel!r}")
+            raise ValueError(f"No source names the channel {channel!r}.")
         by_column = {f.column: f.wire_key for f in current.source.fields}
         unknown = sorted((keys | {symbol} if symbol is not None else keys) - by_column.keys())
         if unknown:
-            raise ValueError(f"source {current.source.key!r} has no columns {unknown}")
+            raise ValueError(f"Source {current.source.key!r} has no columns {unknown}.")
         self._channels[channel] = _Channel.plan(
             current.source,
             frozenset(by_column[k] for k in keys),
@@ -513,9 +567,9 @@ class FrameDecoder:
         Each status object becomes a `Status` where it appears. A channel's data objects become
         one `Data`, placed where the channel's first object appears. A frame that is not JSON,
         an element that is not an object with a text `ev`, and the objects of a channel with no
-        source are dropped and logged (the first two at ERROR, as data the library cannot read,
-        up to `DROPPED_ERROR_LIMIT` times per connection and at DEBUG after that; the third at
-        WARNING once per channel); none of them stops the other events.
+        source are dropped and logged (the first two at WARNING, as Massive's data the library
+        cannot read, up to `DROPPED_WARNING_LIMIT` times per connection and at DEBUG after
+        that; the third at WARNING once per channel); none of them stops the other events.
 
         Args:
             data: The frame's payload.
@@ -528,11 +582,10 @@ class FrameDecoder:
         except ValueError:
             logger.log(
                 self._drop_level(),
-                "dropped a frame from %s%s that is not JSON: %s. %s",
+                "Massive sent a frame from %s%s that is not JSON, so the library dropped it: %s.",
                 self._host,
                 self._path,
                 _quote(data),
-                LIBRARY_BUG_REPORT,
                 exc_info=True,
             )
             return []
@@ -542,11 +595,11 @@ class FrameDecoder:
             if not isinstance(item, dict) or not isinstance(ev := item.get("ev"), str):
                 logger.log(
                     self._drop_level(),
-                    "dropped an element of a frame from %s%s with no text 'ev': %s. %s",
+                    "Massive sent an element of a frame from %s%s with no text 'ev', so the "
+                    "library dropped it: %s.",
                     self._host,
                     self._path,
                     _quote(item),
-                    LIBRARY_BUG_REPORT,
                 )
             elif ev == "status":
                 order.append(self._status(item))
@@ -554,7 +607,8 @@ class FrameDecoder:
                 if ev not in self._unknown:
                     self._unknown.add(ev)
                     logger.warning(
-                        "dropping objects of channel %r from %s%s, which has no source",
+                        "Massive sent objects of the channel %r from %s%s, which the library does "
+                        "not read, so it drops them.",
                         ev,
                         self._host,
                         self._path,
@@ -573,18 +627,19 @@ class FrameDecoder:
         """Count one dropped frame or element, and return the level to log it at.
 
         Returns:
-            ERROR for the first `DROPPED_ERROR_LIMIT` of the connection, so a vendor change
-            that breaks every frame logs a bounded number of ERRORs, and DEBUG after that.
+            WARNING for the first `DROPPED_WARNING_LIMIT` of the connection, so a vendor change
+            that breaks every frame logs a bounded number of WARNINGs, and DEBUG after that.
         """
         self._dropped += 1
-        if self._dropped <= DROPPED_ERROR_LIMIT:
-            return logging.ERROR
-        if self._dropped == DROPPED_ERROR_LIMIT + 1:
-            logger.error(
-                "%s%s: %d dropped frames or elements were logged; further ones are logged at DEBUG",
+        if self._dropped <= DROPPED_WARNING_LIMIT:
+            return logging.WARNING
+        if self._dropped == DROPPED_WARNING_LIMIT + 1:
+            logger.warning(
+                "%s%s: the library has warned of %d dropped frames or elements, and it logs "
+                "further ones at DEBUG.",
                 self._host,
                 self._path,
-                DROPPED_ERROR_LIMIT,
+                DROPPED_WARNING_LIMIT,
             )
         return logging.DEBUG
 
@@ -631,7 +686,7 @@ class FrameDecoder:
         return tuple(topics)
 
     def _row(self, channel: str, item: dict[str, object], into: _Accumulator) -> None:
-        """Decode one data object into a row, or drop it, and record its drift.
+        """Decode one data object into a row, mark it if it is not read whole, and record drift.
 
         Args:
             channel: The object's channel, which has a source.
@@ -641,8 +696,9 @@ class FrameDecoder:
         spec = self._channels[channel]
         self._scan(channel, item, into=into)
         row: list[object] = []
-        unfit: list[tuple[str, object, str]] = []
-        for key, _, required, convert, f, _ in spec.steps:
+        unfit: list[tuple[str, object, str, str]] = []
+        unread_key: tuple[str, str] | None = None
+        for key, column, required, convert, f, _ in spec.steps:
             value = item.get(key)
             problem = None
             if value is not None:
@@ -652,20 +708,22 @@ class FrameDecoder:
                 except UnconvertibleError:
                     problem = unconvertible_message(f, value)
             if required:
-                self._drop(channel, item, problem or missing_key_message(f), into=into)
-                return
-            if problem is not None:
-                unfit.append((key, value, problem))
+                unread_key = unread_key or (column, problem or missing_key_message(f))
+            elif problem is not None:
+                unfit.append((key, value, problem, column))
             row.append(None)
-        if unfit:
-            self._record_unfit(channel, item, unfit, into=into)
+        index = len(into.rows)
         into.rows.append(tuple(row))
+        if unread_key is not None:
+            self._mark_key(channel, item, unread_key, index=index, into=into)
+        elif unfit:
+            self._record_unfit(channel, item, unfit, index=index, into=into)
 
     def _scan(self, channel: str, item: dict[str, object], *, into: _Accumulator) -> None:
         """Record an object's extra keys (`_extra`) and its missing vendor-required fields.
 
         The vendor-required scan runs only on a channel that has such fields, and covers every
-        object, a dropped one included. Samples are taken only for a key not seen before in
+        object, a key-marked one included. Samples are taken only for a key not seen before in
         this frame, so a drifting frame costs one lookup per key.
 
         Args:
@@ -700,54 +758,67 @@ class FrameDecoder:
                     into.extra.add(key)
                     into.samples[key] = DriftSample(self._symbol(channel, item), excerpt(item[key]))
 
-    def _drop(
-        self, channel: str, item: dict[str, object], problem: str, *, into: _Accumulator
+    def _mark_key(
+        self,
+        channel: str,
+        item: dict[str, object],
+        unread: tuple[str, str],
+        *,
+        index: int,
+        into: _Accumulator,
     ) -> None:
-        """Drop a row for a required key: record its `Reject` and log it whole at DEBUG.
+        """Mark a row whose required key cannot be read, and log it whole at DEBUG.
 
         Args:
             channel: The row's channel.
             item: The row's object, from which the raw symbol is read.
-            problem: Why: the clause `spec.convert` shares with every decoder, for a missing key
-                or a value that does not fit.
+            index: The row's index in the channel's rows of the frame.
+            unread: The first such key's long-form column, and why: the clause `spec.convert`
+                shares with every decoder, for a missing key or a value that does not fit.
             into: The channel's accumulator for this frame.
         """
-        error = WireError(
-            f"dropped {self._about(channel, item, problem)}", host=self._host, path=self._path
-        )
-        raw = row_excerpt(item)
-        logger.debug("%s; the row: %s", error, raw)
+        column, problem = unread
+        reason = self._about(channel, item, problem)
+        if logger.isEnabledFor(logging.DEBUG):  # the row's JSON is built only for the line
+            logger.debug("cannot place %s; the row: %s", reason, row_excerpt(item))
         symbol = self._symbol(channel, item)
-        into.rejects.append(Reject(channel=channel, symbol=symbol, error=error, raw=raw))
+        into.marker.mark(
+            RowFault.UNREADABLE_KEYS, index, field=column, reason=reason, symbol=symbol
+        )
 
     def _record_unfit(
         self,
         channel: str,
         item: dict[str, object],
-        unfit: list[tuple[str, object, str]],
+        unfit: list[tuple[str, object, str, str]],
         *,
+        index: int,
         into: _Accumulator,
     ) -> None:
-        """Record the values of a kept row that do not fit, and log the row whole at DEBUG.
+        """Mark a row whose values do not fit, record them as drift, and log the row at DEBUG.
 
         Args:
             channel: The row's channel.
             item: The row's object.
-            unfit: Each value that does not fit: its wire key, the value, and the clause naming
-                the field, the expected type, and the value.
+            index: The row's index in the channel's rows of the frame.
+            unfit: Each value that does not fit: its wire key, the value, the clause naming
+                the field, the expected type, and the value, and its long-form column.
             into: The channel's accumulator for this frame.
         """
-        for key, value, _ in unfit:
+        symbol = self._symbol(channel, item)
+        for key, value, _, _ in unfit:
             if key not in into.unconvertible:
                 into.unconvertible.add(key)
-                into.samples[key] = DriftSample(self._symbol(channel, item), excerpt(value))
-        if logger.isEnabledFor(logging.DEBUG):
-            problems = "; ".join(problem for _, _, problem in unfit)
-            reason = self._about(channel, item, problems)
+                into.samples[key] = DriftSample(symbol, excerpt(value))
+        reason = self._about(channel, item, "; ".join(problem for _, _, problem, _ in unfit))
+        into.marker.mark(
+            RowFault.UNCONVERTIBLE_VALUES, index, field=unfit[0][3], reason=reason, symbol=symbol
+        )
+        if logger.isEnabledFor(logging.DEBUG):  # the row's JSON is built only for the line
             logger.debug("read as null in %s; the row: %s", reason, row_excerpt(item))
 
     def _about(self, channel: str, item: dict[str, object], problem: str) -> str:
-        """Name a row and what is wrong with it, for a dropped row's reason and the DEBUG log.
+        """Name a row and what is wrong with it, for a marked row's reason and the DEBUG log.
 
         Args:
             channel: The row's channel.
@@ -782,7 +853,7 @@ class FrameDecoder:
         From `COLUMN_MIN_OBJECTS` objects on, the objects are read a column at a time
         (`_by_column`); when that reading cannot vouch for a column, they are read again one by
         one (`_row`), which judges each value on its own, and why is logged at DEBUG. Fewer
-        objects are read one by one at once. Either way the rows, the rejects, and the drift
+        objects are read one by one at once. Either way the rows, the marks, and the drift
         are the same, as for a REST page (`rest.batch`).
 
         Args:
@@ -790,7 +861,7 @@ class FrameDecoder:
             items: Its objects in the frame, in arrival order.
 
         Returns:
-            The channel's rows, rejects, and drift.
+            The channel's rows, marks, and drift.
         """
         acc = _Accumulator()
         if len(items) < COLUMN_MIN_OBJECTS or not self._by_column(channel, items, into=acc):
@@ -802,7 +873,7 @@ class FrameDecoder:
             unconvertible=frozenset(acc.unconvertible),
             samples=acc.samples,
         )
-        return Data(channel=channel, rows=acc.rows, rejects=acc.rejects, drift=drift)
+        return Data(channel=channel, rows=acc.rows, marks=acc.marker.marks(), drift=drift)
 
     def _by_column(
         self, channel: str, items: list[dict[str, object]], *, into: _Accumulator
@@ -823,7 +894,7 @@ class FrameDecoder:
             into: The channel's accumulator for this frame; changed only when it returns True.
 
         Returns:
-            True when the objects were read, none dropped and no value found unconvertible;
+            True when the objects were read, none marked;
             False when they must be read one by one (`_row`).
         """
         spec = self._channels[channel]

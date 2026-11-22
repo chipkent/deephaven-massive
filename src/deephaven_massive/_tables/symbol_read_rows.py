@@ -41,8 +41,9 @@ class SymbolReadState(StrEnum):
 
     A symbol starts `QUEUED` when its row enters the symbol table, becomes `LOADING` when a
     read of it begins, and `DONE` once its rows are in the result. A read that fails in a way
-    that may pass makes it `RETRYING` until its next attempt; one that fails for good, or the
-    last retry, makes it `FAILED`. `REMOVED`, `STOPPED`, and `CLOSED` end its following: its
+    that may pass makes it `RETRYING` until its next attempt; one that fails for good, or one
+    that comes once its failures have lasted `MassiveConfig.max_outage`, makes it `FAILED`.
+    `REMOVED`, `STOPPED`, and `CLOSED` end its following: its
     row left the symbol table, the result was released and nothing uses it any more, or the
     session closed.
     """
@@ -105,7 +106,8 @@ class SymbolReadRow:
         rows: Its rows in the result.
         attempts: Reads started since it was last added.
         next_attempt_at: When its next read begins; set only while `RETRYING`.
-        error: The text of its latest failure; None once a read succeeds.
+        error: The text of its latest failure; once a read succeeds, why the library skipped
+            it (`SymbolRows.skipped`), or None.
         updated_at: When the row was made.
     """
 

@@ -10,7 +10,7 @@ stream's `on_shutdown_callback`, alive exactly as long as it lives.
 import logging
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -26,8 +26,7 @@ from deephaven_massive._datasets.catalog import DatasetSpec
 from deephaven_massive._datasets.schema import Column, ColumnType, Schema
 from deephaven_massive._enums import AssetClass, NotBars, Recency, Subscription
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces import indices
-from deephaven_massive._namespaces.snapshots import SNAPSHOTS
+from deephaven_massive._snapshots import SNAPSHOTS
 from deephaven_massive._tables import columns
 from deephaven_massive._tables.columns import (
     COLUMN_TABLE_DESCRIPTIONS,
@@ -41,6 +40,7 @@ from deephaven_massive._tables.columns import (
 )
 from deephaven_massive._tables.liveness import new_scope
 from deephaven_massive._tables.publisher import blink_publisher
+from deephaven_massive.namespaces import _indices as indices
 
 if TYPE_CHECKING:
     from deephaven.liveness_scope import LivenessScope
@@ -271,7 +271,7 @@ def test_a_description_of_a_missing_column_fails(dh_exec_ctx: ExecutionContext) 
     lacking = new_table([string_col("Symbol", ["AAPL"])])  # no Price column
     with pytest.raises(
         RuntimeError,
-        match=r"^describing a stocks\.trades result failed: .*Column\(s\) not found: Price, Note",
+        match=r"^Describing a stocks\.trades result failed: .*Column\(s\) not found: Price, Note",
     ) as raised:
         describe(lacking, SPEC, SCHEMA)
     assert type(raised.value.__cause__) is RuntimeError  # jpy's form of the Java exception
@@ -319,7 +319,7 @@ def test_the_column_table_lists_every_column(
     assert column_descriptions(table) == dict(COLUMN_TABLE_DESCRIPTIONS)
     assert list(COLUMN_TABLE_DESCRIPTIONS) == ["Name", "Type", "Description", "SuppliedBy"]
     with pytest.raises(TypeError):  # read-only: no caller can change the header text
-        cast("dict[str, str]", COLUMN_TABLE_DESCRIPTIONS)["Name"] = "changed"
+        COLUMN_TABLE_DESCRIPTIONS["Name"] = "changed"  # type: ignore[index]  # the point: read-only
 
 
 def _string_objects(table: Table, column: str) -> int:
@@ -525,12 +525,27 @@ def test_a_joined_dataset_table_is_flat(dh_exec_ctx: object) -> None:
     assert dataset_table(rows, ("Date",)).j_table.isFlat()
 
 
-def test_the_recency_note_of_an_unknown_host_never_claims_real_time() -> None:
-    note = recency_note(Recency.UNKNOWN, host="x.example.com")
-    assert (
-        note
-        == "Live data from x.example.com, a pinned host whose recency the library does not know."
-    )
+@pytest.mark.parametrize(
+    ("recency", "note"),
+    [
+        (Recency.REALTIME, "Live real-time data from socket.massive.com."),
+        (
+            Recency.DELAYED,
+            "Live delayed data from socket.massive.com, 15 minutes behind (10 for futures).",
+        ),
+        (
+            Recency.UNKNOWN,
+            (
+                "Live data from socket.massive.com. Massive hasn't said whether the data is "
+                "real-time or delayed."
+            ),
+        ),
+    ],
+)
+def test_the_recency_note_names_the_host_never_a_feed(recency: Recency, note: str) -> None:
+    # A pinned host's recency comes from Massive's label, so the note never calls a host a
+    # feed: business.massive.com may serve delayed data. Every member has a note.
+    assert recency_note(recency, host="socket.massive.com") == note
 
 
 @pytest.mark.parametrize(

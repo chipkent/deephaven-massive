@@ -7,15 +7,19 @@ request is built from (`ParamValue`), the identity of a live stream (`StreamKey`
 passed where a dataset takes one value, such as an option chain's underlying (`ValueTable`).
 
 Everything here is a plain value: no I/O, no threads, and no Deephaven call. The namespaces'
-shared dataset factory builds requests (`build_query` in `_namespaces/query_building.py`), the
-query classes of `_query.py` hand them to the transports, and the transport interfaces that
-receive them live in `_tables/transports.py`.
+shared dataset factory builds requests (`build_query` in `namespaces/_query_building.py`), the
+query classes of `deephaven_massive.queries` hand them to the transports, and the transport
+interfaces that receive them live in `_tables/transports.py`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias
+
+from deephaven_massive._datasets.symbols import AllSymbols
+from deephaven_massive._error_policy import DEFAULT_POLICY, ResolvedPolicy
+from deephaven_massive._errors import required, required_instance
 
 if TYPE_CHECKING:
     from datetime import date, datetime
@@ -24,7 +28,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._datasets.symbols import NormalizedSymbols
-    from deephaven_massive._enums import FuturesVenue, Timespan
+    from deephaven_massive._enums import FuturesVenue, OnError, Timespan
 
 __all__ = ["ParamValue", "Request", "StreamKey", "ValueTable"]
 
@@ -35,11 +39,13 @@ ParamValue: TypeAlias = (
 for a list of dates (`date.any_of`) and numbers for a list of numbers (`strike_price.any_of`);
 the filter check writes each item as its text, so a `Request` stores lists of text."""
 
-StreamKey: TypeAlias = "tuple[str, str, NormalizedSymbols]"
-"""The identity of a stream: `(dataset name, channel, symbols)`. The symbols are the sorted
-tuple of canonical symbols, `ALL`, or the `SymbolTable` box of a refreshing table, which compares
-by the identity of the table's wrapper and holds it strongly while the key exists. A static
-table never reaches a key: it is read first, and its symbols become the tuple."""
+StreamKey: TypeAlias = "tuple[str, str, NormalizedSymbols, ResolvedPolicy]"
+"""The identity of a stream: `(dataset name, channel, symbols, policy)`. The symbols are the
+sorted tuple of canonical symbols, `ALL`, or the `SymbolTable` box of a refreshing table, which
+compares by the identity of the table's wrapper and holds it strongly while the key exists. A
+static table never reaches a key: it is read first, and its symbols become the tuple. The policy
+is the call's resolved `on_error` (`Request.on_error`), so a call that sets another policy gets
+its own stream, which follows that policy."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +56,7 @@ class ValueTable:
     instead of one value. Each of its values is read as if it had been passed alone, one
     request series per value (`Request.for_value`); a refreshing table is followed, so a value
     added to it is read and a value deleted from it leaves the result. Built by the dataset
-    method (`value_table` in `_namespaces/query_building.py`); immutable. Like `SymbolTable`,
+    method (`value_table` in `namespaces/_query_building.py`); immutable. Like `SymbolTable`,
     it compares and hashes by the identity of the table's Python wrapper, which it holds
     strongly.
 
@@ -83,7 +89,7 @@ class ValueTable:
 class Request:
     """The normalized arguments of a dataset call, shared by every verb of its query.
 
-    Built by `_namespaces/query_building.py` when the query is created; immutable and hashable, so
+    Built by `namespaces/_query_building.py` when the query is created; immutable and hashable, so
     equal calls give equal queries and share streams.
 
     Attributes:
@@ -93,6 +99,10 @@ class Request:
         venues: The futures venues whose flat-file prefixes `history()` reads, in
             `FuturesVenue` order; None for a dataset without venues. They select flat-file
             prefixes only, never a stream.
+        refused_venues: What `history()` does with a venue whose flat files S3 refuses when REST
+            cannot serve the call (`FlatFileHistory.history`). For venues the call named, the
+            policy's `refused_venues` (`on_error`); `LOG` when the call left `venues` out, so
+            the read skips each refused venue with a warning. None for a dataset without venues.
         adjusted: Whether bars are adjusted for splits, for datasets with an `adjusted`
             parameter; None for datasets without one. Flat files hold only unadjusted bars.
             The REST transport sends it, when not None, as the `adjusted` query parameter;
@@ -110,12 +120,16 @@ class Request:
         value_table: The table passed where the dataset takes one value (`ValueTable`), or
             None. Its parameter is then absent from `params`: each verb reads the table's
             values and sends each one through `for_value`.
+        on_error: The call's setting of every cause: its `on_error` argument, else the
+            session's `MassiveConfig.on_error`, else `ErrorPolicy.DEFAULTS`
+            (`resolve_policy`). Every transport the call reaches reads it.
     """
 
     symbols: NormalizedSymbols | None = None
     timespan: Timespan | None = None
     multiplier: int = 1
     venues: tuple[FuturesVenue, ...] | None = None
+    refused_venues: OnError | None = None
     adjusted: bool | None = None
     start: date | datetime | None = None
     end: date | datetime | None = None
@@ -123,6 +137,7 @@ class Request:
     filters: tuple[tuple[str, ParamValue], ...] = ()
     limit: int | None = None
     value_table: ValueTable | None = None
+    on_error: ResolvedPolicy = DEFAULT_POLICY
 
     def for_value(self, value: str) -> Request:
         """Return the request that reads one value of the value table, as if passed alone.
@@ -136,9 +151,24 @@ class Request:
             The request with no value table and `value` sent as its parameter, exactly the
             request the dataset method builds for that one value.
         """
-        parameter = cast("ValueTable", self.value_table).parameter
+        parameter = required(self.value_table, "the request's value table").parameter
         params = {**dict(self.params), parameter: value}
         return replace(self, value_table=None, params=tuple(sorted(params.items())))
+
+    @property
+    def static_symbols(self) -> tuple[str, ...] | AllSymbols | None:
+        """The symbols of a read that names them in code: a tuple, `ALL`, or None.
+
+        A read of a symbol table's symbols reads each symbol on its own, with requests built
+        from its symbols in code, so only a stream's request holds a table.
+
+        Symbols that are a symbol table raise the `BrokenGuaranteeError` of
+        `required_instance`.
+        """
+        symbols = self.symbols
+        if symbols is None or isinstance(symbols, AllSymbols):
+            return symbols
+        return required_instance(symbols, tuple, "the symbols a read names in code")
 
     def symbol_key(self) -> NormalizedSymbols:
         """Return the symbol part of a stream key.

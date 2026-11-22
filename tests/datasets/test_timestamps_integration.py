@@ -46,7 +46,6 @@ def _check(
     assert abs(age) * 1e9 < _RECENT_NS
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.verifies("2")
 def test_forex_last_quote_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
@@ -64,13 +63,12 @@ def test_forex_last_quote_timestamp_is_milliseconds(
     """
     raw = rest_rows("/v1/last_quote/currencies/{from}/{to}", {"from": "EUR", "to": "USD"}, {})
     evidence(f"raw /v1/last_quote/currencies/EUR/USD: {raw}")
-    rows = table_rows(live_session.forex.last_quote("C:EURUSD").fetch())
+    rows = table_rows(live_session.forex.last_quote("C:EURUSD").fetch(wait=True))
     _check(
         "forex.last_quote fetch()", rows, column="Timestamp", text=instant_text, evidence=evidence
     )
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.verifies("2")
 def test_crypto_last_trade_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
@@ -89,13 +87,12 @@ def test_crypto_last_trade_timestamp_is_milliseconds(
     """
     raw = rest_rows("/v1/last/crypto/{from}/{to}", {"from": "BTC", "to": "USD"}, {})
     evidence(f"raw /v1/last/crypto/BTC/USD: {raw}")
-    rows = table_rows(live_session.crypto.last_trade("X:BTCUSD").fetch())
+    rows = table_rows(live_session.crypto.last_trade("X:BTCUSD").fetch(wait=True))
     _check(
         "crypto.last_trade fetch()", rows, column="Timestamp", text=instant_text, evidence=evidence
     )
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.verifies("2")
 def test_forex_conversion_last_timestamp_is_milliseconds(
     live_session: dm.MassiveSession,
@@ -114,6 +111,6 @@ def test_forex_conversion_last_timestamp_is_milliseconds(
     """
     raw = rest_rows("/v1/conversion/{from}/{to}", {"from": "EUR", "to": "USD"}, {})
     evidence(f"raw /v1/conversion/EUR/USD: {raw}")
-    rows = table_rows(live_session.forex.conversion("EUR", "USD").fetch())
-    column = "Timestamp" if rows and "Timestamp" in rows[0] else "LastTimestamp"
+    rows = table_rows(live_session.forex.conversion("EUR", "USD").fetch(wait=True))
+    column = "Timestamp" if rows and "Timestamp" in rows[0] else "LastQuoteParticipantTimestamp"
     _check("forex.conversion fetch()", rows, column=column, text=instant_text, evidence=evidence)

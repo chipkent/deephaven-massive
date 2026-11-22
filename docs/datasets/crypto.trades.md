@@ -7,7 +7,7 @@ Trades of crypto pairs, tick by tick, from the exchanges Massive aggregates.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.crypto.trades(symbols)
+m.crypto.trades(symbols, *, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`, `history(start, end=None)`
@@ -22,6 +22,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Crypto pairs, such as `X:BTCUSD`, or `dm.ALL` for every pair. `history()` reads `dm.ALL` only from the flat files. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -40,7 +41,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST: the request's `cryptoTicker` parameter; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `pair`: "The crypto pair." | REST, flat files, WebSocket |
 | `Date` | String | The trading day of the row, as ISO yyyy-MM-dd text: the UTC date of `Timestamp`. | REST, flat files, WebSocket |
 | `Timestamp` | Instant | The row's event time. From REST `participant_timestamp`: "The nanosecond Exchange Unix Timestamp. This is the timestamp of when the trade was generated at the exchange."; flat files `participant_timestamp`: "The nanosecond accuracy Participant/Exchange Unix Timestamp. This is the timestamp of when the trade was actually generated at the exchange."; WebSocket `t`: "The Timestamp in Unix MS." | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. | REST, flat files, WebSocket |
 | `Price` | double | The price of the trade: the amount of the pair's second currency paid for one unit of its first (US dollars per bitcoin for X:BTCUSD). | REST, flat files, WebSocket |
 | `Size` | double | The size of a trade (also known as volume). | REST, flat files, WebSocket |
 | `Conditions` | long[] | A list of condition codes. See Crypto Condition Codes (https://massive.com/docs/rest/crypto/market-operations/condition-codes) for what each code means. | REST, flat files, WebSocket |
@@ -51,7 +51,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it. `request` marks a value the library fills from the request.
 
@@ -60,7 +60,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Symbol` | request | `ticker` | `pair` |
 | `Date` |  |  |  |
 | `Timestamp` | `participant_timestamp` | `participant_timestamp` | `t` |
-| `RawSymbol` | request | `ticker` | `pair` |
 | `Price` | `price` | `price` | `p` |
 | `Size` | `size` | `size` | `s` |
 | `Conditions` | `conditions` | `conditions` | `c` |
@@ -79,4 +78,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

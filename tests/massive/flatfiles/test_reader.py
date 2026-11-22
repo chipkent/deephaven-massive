@@ -7,7 +7,8 @@ import sys
 import threading
 import time
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any
 
@@ -15,14 +16,19 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.csv as pacsv
 import pytest
+from typing_extensions import override
 
+from deephaven_massive._massive import WireFailure
 from deephaven_massive._massive.flatfiles import reader
 from deephaven_massive._massive.flatfiles.reader import FlatFile, ReadColumn, ReadPlan
 from deephaven_massive._massive.net.errors import WireError
-from deephaven_massive._massive.spec.types import DriftReport, DriftSample
-from deephaven_massive._types import override
+from deephaven_massive._massive.spec.types import DriftReport, DriftSample, RowFault, RowMark
 
 KEY = "us_stocks_sip/trades_v1/2025/03/2025-03-03.csv.gz"
+UNREADABLE = (
+    "The library could not read Massive's file s3://flatfiles/us_stocks_sip/trades_v1/2025/03/"
+    "2025-03-03.csv.gz at https://files.massive.com: "
+)
 FUTURES_KEY = "us_futures_cme/trades_v1/2025/03/2025-03-04.csv.gz"
 OWNER = "massive/flatfiles"
 HOST = "files.massive.com"
@@ -47,8 +53,12 @@ FUTURES_COLUMNS = (
 )
 
 
-def identity(values: pa.Array) -> tuple[pa.Array, str]:
-    return values, ""
+def identity(values: pa.Array) -> pa.Array:
+    return values
+
+
+def unplaced(value: int) -> str:
+    return f"{value} is no time"
 
 
 def plan(
@@ -57,7 +67,7 @@ def plan(
     symbols: pa.Array | None = None,
     time_header: str = "sip_timestamp",
     window_ns: tuple[int, int] | None = None,
-    to_ns: Callable[[pa.Array], tuple[pa.Array, str]] = identity,
+    to_ns: Callable[[pa.Array], pa.Array] = identity,
     block_size: int = 1 << 20,
     chunk_blocks: int = 16,
     parse_threads: int = 3,
@@ -70,6 +80,7 @@ def plan(
         time_header=time_header,
         window_ns=window_ns,
         to_ns=to_ns,
+        unplaced=unplaced,
         block_size=block_size,
         chunk_size=chunk_blocks * block_size,
         parse_threads=parse_threads,
@@ -102,13 +113,13 @@ def trades(
 
 def table(file: FlatFile, read: ReadPlan) -> pa.Table:
     with file:
-        return pa.Table.from_batches([batch for batch, _ in file.batches(read)])
+        return pa.Table.from_batches([batch for batch, _, _ in file.batches(read)])
 
 
 def drift(file: FlatFile, read: ReadPlan) -> DriftReport:
     # The drift of every block of a file is the same report.
     with file:
-        reports = {report for _, report in file.batches(read)}
+        reports = {report for _, report, _ in file.batches(read)}
     (report,) = reports
     return report
 
@@ -158,9 +169,9 @@ def test_the_symbol_filter_keeps_only_the_requested_symbols(trades: FlatFile) ->
 def test_the_window_is_half_open_on_the_converted_time(trades: FlatFile) -> None:
     converted: list[int] = []
 
-    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
+    def to_ns(values: pa.Array) -> pa.Array:
         converted.append(len(values))
-        return pc.multiply(values, 1), ""
+        return pc.multiply(values, 1)
 
     window = (1741012200000002000, 1741035600000000000)
     result = table(trades, plan(window_ns=window, to_ns=to_ns))
@@ -182,9 +193,9 @@ def test_the_file_counts_its_rows_after_each_filter(trades: FlatFile) -> None:
 def test_the_window_follows_the_symbol_filter(trades: FlatFile) -> None:
     converted: list[int] = []
 
-    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
+    def to_ns(values: pa.Array) -> pa.Array:
         converted.append(len(values))
-        return values, ""
+        return values
 
     symbols = pa.array(["SPY"], pa.string())
     result = table(trades, plan(symbols=symbols, window_ns=(0, 2**62), to_ns=to_ns))
@@ -198,33 +209,49 @@ def test_the_window_converts_the_time_of_a_plan_whose_time_is_no_key(trades: Fla
     assert result["Id"].to_pylist() == ["2", "3"]
 
 
-def test_a_row_whose_time_cannot_be_placed_is_dropped_and_counted(trades: FlatFile) -> None:
-    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
+def test_a_row_whose_time_cannot_be_placed_is_kept_and_marked(
+    *, opened: Callable[[str, str | bytes], FlatFile], load_fixture: Callable[[str, str], bytes]
+) -> None:
+    text = load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode()
+
+    def to_ns(values: pa.Array) -> pa.Array:
         # The converter places every time but the second row's.
-        placed = pc.if_else(pc.equal(values, 1741012200000002000), None, values)
-        return placed, "timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000002000"
+        return pc.if_else(pc.equal(values, 1741012200000002000), None, values)
+
+    def ids(window: tuple[int, int] | None) -> list[str]:
+        with opened(KEY, text) as file:
+            [(batch, report, marks)] = list(file.batches(plan(to_ns=to_ns, window_ns=window)))
+        found: list[str] = batch["Id"].to_pylist()
+        assert marks == {
+            RowFault.UNREADABLE_KEYS: RowMark(
+                rows=(found.index("2"),),
+                fields=("Timestamp",),
+                reasons=("1741012200000002000 is no time",),
+                symbols=("MSFT",),
+            )
+        }
+        assert report.dropped_rows == 0
+        return found
+
+    assert ids(None) == ["1", "2", "3", "4"]
+    # A window holds the row too, since its time cannot be placed in or out of any window.
+    assert ids((1741012200000000123, 1741012200000000124)) == ["1", "2"]
+
+
+def test_a_file_whose_every_time_cannot_be_placed_hands_every_row_on_marked(
+    trades: FlatFile,
+) -> None:
+    # Whether a file of no readable row fails is its reader's call, after the window
+    # (`_ingest/flatfiles.py`): the reader hands every row on, each marked.
+    def to_ns(values: pa.Array) -> pa.Array:
+        return pa.nulls(len(values), pa.int64())
 
     with trades:
-        [(batch, report)] = list(trades.batches(plan(to_ns=to_ns)))
-    assert batch["Id"].to_pylist() == ["1", "3", "4"]
-    assert report.dropped_rows == 1
-    assert report.dropped_reason == (
-        "timestamp unit mismatch for stocks.trades.Timestamp: 1741012200000002000"
-    )
-
-
-def test_a_file_whose_every_time_cannot_be_placed_fails(trades: FlatFile) -> None:
-    def to_ns(values: pa.Array) -> tuple[pa.Array, str]:
-        return pa.nulls(len(values), pa.int64()), "timestamp unit mismatch for x: 5 ns"
-
-    with pytest.raises(WireError) as info:
-        table(trades, plan(to_ns=to_ns))
-    assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of the 4 rows "
-        "of the requested symbols was dropped, so the file's format may have changed; the "
-        "first: timestamp unit mismatch for x: 5 ns"
-    )
-    assert info.value.unreadable
+        [(rows, _, marks)] = list(trades.batches(plan(to_ns=to_ns)))
+    assert rows.num_rows == 4
+    unread = marks[RowFault.UNREADABLE_KEYS]
+    assert unread.rows == (0, 1, 2, 3)
+    assert unread.reasons[0] == "1741012200000000123 is no time"
 
 
 def test_one_odd_row_alone_in_its_block_never_fails_the_file(
@@ -239,9 +266,10 @@ def test_one_odd_row_alone_in_its_block_never_fails_the_file(
         read = plan(symbols=pa.array(["ILLQ", "AAPL"], pa.string()), block_size=1024)
         found = list(file.batches(read))
     assert len(found) > 2
-    first, report = found[0]
-    assert (first.num_rows, report.dropped_rows) == (0, 1)  # the block's only requested row
-    assert sum(batch.num_rows for batch, _ in found) == 3
+    first, _, marks = found[0]
+    assert first.num_rows == 1  # the block's only requested row, kept for its mark
+    assert marks[RowFault.UNREADABLE_KEYS].rows == (0,)
+    assert sum(batch.num_rows for batch, _, _ in found) == 4
 
 
 def test_typed_values_with_surrounding_spaces_are_read(
@@ -250,7 +278,7 @@ def test_typed_values_with_surrounding_spaces_are_read(
     # Arrow's typed parsing trimmed spaces around numbers; reading as text keeps that.
     row = '"12,37",  1 ,4,1,1, 227.48 ,100, 1741012200000000123 ,100,3,AAPL,, 0\n'
     with opened(KEY, TRADE_HEADER + row) as file:
-        [(batch, report)] = list(file.batches(plan()))
+        [(batch, report, _)] = list(file.batches(plan()))
     assert batch.to_pylist()[0] | {"Conditions": None} == {
         "Symbol": "AAPL",
         "Timestamp": 1741012200000000123,
@@ -342,14 +370,19 @@ def test_odd_values_are_null_and_found_without_python_per_value(
         (",,4,1,1,1.5,1,1741012200000000000,10,1,,,\n", "a row has no ticker"),
     ],
 )
-def test_a_row_whose_key_cannot_be_read_is_dropped(
+def test_a_row_whose_key_cannot_be_read_is_kept_and_marked(
     row: str, reason: str, opened: Callable[[str, str | bytes], FlatFile]
 ) -> None:
+    # The row's price does not parse either, but its key is its fault, and adds no drift.
     good = ",,4,2,1,1.5,1,1741012200000000000,10,1,MSFT,,\n"
-    with opened(KEY, TRADE_HEADER + row + good) as file:
-        [(batch, report)] = list(file.batches(plan()))
-    assert batch["Id"].to_pylist() == ["2"]
-    assert (report.dropped_rows, report.dropped_reason) == (1, reason)
+    with opened(KEY, TRADE_HEADER + row.replace(",1.5,", ",x,") + good) as file:
+        [(batch, report, marks)] = list(file.batches(plan()))
+    assert batch["Id"].to_pylist() == ["1", "2"]
+    [(fault, mark)] = marks.items()
+    assert fault is RowFault.UNREADABLE_KEYS
+    assert (mark.rows, mark.reasons) == ((0,), (reason,))
+    assert mark.symbols == ((None,) if "ticker" in reason else ("AAPL",))
+    assert (report.dropped_rows, report.unconvertible) == (0, frozenset())
 
 
 def test_rows_the_symbol_filter_removes_never_fail_a_block(
@@ -358,7 +391,7 @@ def test_rows_the_symbol_filter_removes_never_fail_a_block(
     odd = ",,4,1,1,1.5,1,4.0,10,1,AAPL,,\n"
     with opened(KEY, TRADE_HEADER + odd) as file:
         read = plan(symbols=pa.array(["MSFT"], pa.string()))
-        [(batch, report)] = list(file.batches(read))
+        [(batch, report, _)] = list(file.batches(read))
     assert (batch.num_rows, report.dropped_rows) == (0, 0)
 
 
@@ -369,7 +402,7 @@ def test_every_block_yields_a_batch_even_when_empty(
     file = opened(KEY, TRADE_HEADER + rows)
     with file:
         read = plan(symbols=pa.array(["ZZZZ"]), block_size=1024)
-        batches = [batch for batch, _ in file.batches(read)]
+        batches = [batch for batch, _, _ in file.batches(read)]
     assert len(batches) > 10
     assert all(batch.num_rows == 0 for batch in batches)
     assert batches[0].schema.names == [column.column for column in TRADE_COLUMNS]
@@ -386,7 +419,7 @@ def test_a_futures_file_keeps_each_rows_own_session(
     assert set(result["SessionEndDate"].to_pylist()) == {date(2025, 3, 4)}
 
 
-def test_a_futures_row_without_a_session_is_dropped(
+def test_a_futures_row_without_a_session_is_marked(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
     text = (
@@ -396,34 +429,45 @@ def test_a_futures_row_without_a_session_is_dropped(
     required = frozenset({"ticker", "timestamp", "session_end_date"})
     futures = plan(columns=FUTURES_COLUMNS, time_header="timestamp", required=required)
     with opened(FUTURES_KEY, text) as file:
-        [(batch, report)] = list(file.batches(futures))
-    assert batch["ReportSequence"].to_pylist() == [2]
-    assert (report.dropped_rows, report.dropped_reason) == (
-        2,
+        [(batch, report, marks)] = list(file.batches(futures))
+    # The marked rows stay, their values unread.
+    assert batch["ReportSequence"].to_pylist() == [None, 2, None]
+    mark = marks[RowFault.UNREADABLE_KEYS]
+    assert (mark.rows, mark.fields) == ((0, 2), ("SessionEndDate", "SessionEndDate"))
+    assert mark.reasons == (
         "a row has no session_end_date",
+        "session_end_date holds '2025-13-45', which is not date32[day]",
     )
+    assert report.dropped_rows == 0
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "problem"),
     [
-        pytest.param(b"not gzip", id="not-gzip"),
-        pytest.param(gzip.compress(b"ticker,price\n" * 1000)[:-200], id="truncated-gzip"),
+        pytest.param(b"not gzip", "Not a gzipped file (b'no')", id="not-gzip"),
         pytest.param(
-            gzip.compress(b"ticker,price\n")[:10] + b"\xff" * 40, id="corrupt-deflate-data"
+            gzip.compress(b"ticker,price\n" * 1000)[:-200],
+            "the file is empty and has no header line",
+            id="truncated-gzip",
         ),
-        pytest.param("ticker,price\nAAPL,1.0\n", id="missing-documented-headers"),
-        pytest.param(TRADE_HEADER + "12,,4,1,1,1.5,1,12:30,10,1,AAPL,,\n", id="no-row-readable"),
+        pytest.param(
+            gzip.compress(b"ticker,price\n")[:10] + b"\xff" * 40,
+            "Error -3 while decompressing data: invalid block type",
+            id="corrupt-deflate-data",
+        ),
+        pytest.param(
+            "ticker,price\nAAPL,1.0\n",
+            "its header lacks the key column sip_timestamp",
+            id="missing-documented-headers",
+        ),
     ],
 )
 def test_a_malformed_file_is_a_wire_error(
-    *, opened: Callable[[str, str | bytes], FlatFile], body: str | bytes
+    *, opened: Callable[[str, str | bytes], FlatFile], body: str | bytes, problem: str
 ) -> None:
     with pytest.raises(WireError) as info:
         table(opened(KEY, body), plan())
-    assert info.value.message.startswith(
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: "
-    )
+    assert info.value.message == f"{UNREADABLE}{problem}."
     assert (info.value.status, info.value.path) == (None, KEY)
 
 
@@ -443,8 +487,12 @@ def test_a_failed_read_of_the_stream_is_a_wire_error(
     data = make_csv_gz(load_fixture(OWNER, "us_stocks_sip_trades_v1_2025-03-03.csv").decode())
     location = f"s3://flatfiles/{KEY} at https://{HOST}"
     file = FlatFile(_BrokenStream(data[: len(data) // 2]), KEY, location=location, host=HOST)
-    with pytest.raises(WireError, match=f"cannot read s3://flatfiles/{KEY}") as info:
+    with pytest.raises(WireError) as info:
         table(file, plan())
+    assert info.value.message == (
+        f"The connection broke off while the library read Massive's file s3://flatfiles/{KEY} "
+        "at https://files.massive.com: Connection broken: IncompleteRead."
+    )
     assert isinstance(info.value.__cause__, OSError)
 
 
@@ -487,7 +535,7 @@ def test_a_filtered_out_row_is_never_parsed(opened: Callable[[str, str | bytes],
 # Reading in parallel chunks reads exactly as the streaming reader did.
 
 
-def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str:
+def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport, int]:
     # The reading the chunked one replaced, as reference: Arrow's streaming reader over the
     # whole decompressed file, one block at a time, each block through the same `_apply`.
     file, _ = flat_file(KEY, data)
@@ -499,7 +547,7 @@ def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str
         missing=frozenset(read_types).difference(names),
     )
     if not text.peek(1):
-        return pa.Table.from_batches([reader._empty(read)]), headers
+        return pa.Table.from_batches([reader._empty(read)]), headers, 0
     blocks = pacsv.open_csv(
         pa.PythonFile(text, mode="r"),
         read_options=pacsv.ReadOptions(
@@ -513,28 +561,25 @@ def _streamed(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str
             strings_can_be_null=True,
         ),
     )
-    batches, drift, held = [], headers, 0
+    batches, drift, marked = [], headers, 0
     for block in blocks:
-        rows, found, considered = file._apply(block, read)
-        batches.append(rows)
-        drift = drift.merge(found)
-        held += considered
-    if held and drift.dropped_rows == held:
-        return f"every one of the {held} rows of the requested symbols was dropped"
-    return pa.Table.from_batches(batches, schema=batches[0].schema), drift
+        applied = file._apply(block, read)
+        batches.append(applied.rows)
+        drift = drift.merge(applied.drift)
+        marked += sum(len(found.rows) for found in applied.marks.values())
+    return pa.Table.from_batches(batches, schema=batches[0].schema), drift, marked
 
 
-def _chunked(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport] | str:
+def _chunked(data: bytes, read: ReadPlan) -> tuple[pa.Table, DriftReport, int]:
+    # The chunked reader's rows, drift, and count of marked rows.
     file, _ = flat_file(KEY, data)
-    batches, drift = [], DriftReport()
-    try:
-        with file:
-            for rows, found in file.batches(read):
-                batches.append(rows)
-                drift = drift.merge(found)
-    except WireError as error:
-        return error.message
-    return pa.Table.from_batches(batches, schema=batches[0].schema), drift
+    batches, drift, marked = [], DriftReport(), 0
+    with file:
+        for rows, found, marks in file.batches(read):
+            batches.append(rows)
+            drift = drift.merge(found)
+            marked += sum(len(mark.rows) for mark in marks.values())
+    return pa.Table.from_batches(batches, schema=batches[0].schema), drift, marked
 
 
 def _odd_trades(rows: int, *, line_end: str = "\n") -> str:
@@ -574,7 +619,6 @@ def test_chunks_read_exactly_as_one_stream(
     # gives the rows, in order, and the drift and dropped rows of the streaming reader.
     data = make_csv_gz(_odd_trades(3_000, line_end=line_end))
     expected = _streamed(data, plan(symbols=symbols, window_ns=window_ns, block_size=4096))
-    assert not isinstance(expected, str)
     assert expected[0].num_rows > 0
     for chunk_blocks in (1, 2, 5):
         for threads in (1, 3):
@@ -586,23 +630,24 @@ def test_chunks_read_exactly_as_one_stream(
                 parse_threads=threads,
             )
             got = _chunked(data, read)
-            assert not isinstance(got, str)
             assert got[0].equals(expected[0]), (chunk_blocks, threads)
             assert got[1] == expected[1]
+            assert got[2] == expected[2]
             assert dict(got[1].samples) == dict(expected[1].samples)
 
 
-def test_a_file_whose_every_row_is_dropped_fails_alike_in_chunks(
+def test_a_file_whose_every_row_is_unreadable_is_handed_on_alike_in_chunks(
     make_csv_gz: Callable[[str], bytes],
 ) -> None:
+    # The reader marks every row; its caller decides that such a file fails.
     rows = "".join(f"12,,4,{n},1,1.5,{n},x,100,3,AAPL,,\n" for n in range(2_000))
     data = make_csv_gz(TRADE_HEADER + rows)
     read = plan(block_size=4096, chunk_blocks=2)
     expected = _streamed(data, read)
-    assert expected == "every one of the 2000 rows of the requested symbols was dropped"
-    failure = _chunked(data, read)
-    assert isinstance(failure, str)
-    assert failure.startswith(f"cannot read s3://flatfiles/{KEY} at https://{HOST}: {expected}")
+    assert expected[2] == 2_000
+    got = _chunked(data, read)
+    assert got[0].equals(expected[0])
+    assert got[2] == 2_000
 
 
 def test_a_read_ended_early_drops_the_chunks_not_yet_parsed(
@@ -613,7 +658,7 @@ def test_a_read_ended_early_drops_the_chunks_not_yet_parsed(
     file, _ = flat_file(KEY, data)
     with file:
         blocks = file.batches(plan(block_size=4096, chunk_blocks=1, parse_threads=2))
-        first, _ = next(blocks)
+        first, _, _ = next(blocks)
         blocks.close()
     assert first.num_rows > 0
     assert not [t for t in threading.enumerate() if t.name.endswith(" parse_0")]
@@ -690,19 +735,19 @@ def test_a_missing_key_header_fails_before_the_first_block(
         batches = file.batches(plan())
         with pytest.raises(WireError) as info:
             next(batches)
-    assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: the header lacks the "
-        f"key column {key_header}"
-    )
+    assert info.value.message == f"{UNREADABLE}its header lacks the key column {key_header}."
     assert (info.value.path, info.value.host) == (KEY, HOST)
 
 
 def test_every_missing_key_header_is_named(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    with pytest.raises(WireError, match=r"lacks the key column sip_timestamp, ticker$") as info:
+    with pytest.raises(WireError) as info:
         table(opened(KEY, "price\n1.5\n"), plan())
-    assert info.value.unreadable
+    assert (
+        info.value.message == f"{UNREADABLE}its header lacks the key column sip_timestamp, ticker."
+    )
+    assert info.value.kind is WireFailure.UNREADABLE
 
 
 @pytest.mark.parametrize(
@@ -712,10 +757,7 @@ def test_an_empty_file_is_a_wire_error(body: bytes) -> None:
     file, _ = flat_file(KEY, body)
     with pytest.raises(WireError) as info:
         table(file, plan())
-    assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: the file is empty: "
-        "no header line"
-    )
+    assert info.value.message == f"{UNREADABLE}the file is empty and has no header line."
 
 
 def test_a_header_without_rows_yields_one_empty_batch_with_its_drift(
@@ -724,7 +766,7 @@ def test_a_header_without_rows_yields_one_empty_batch_with_its_drift(
     for text in (TRADE_HEADER, TRADE_HEADER.rstrip("\n"), "ticker,sip_timestamp,halted\n"):
         file = opened(KEY, text)
         with file:
-            ((batch, _),) = list(file.batches(plan()))
+            ((batch, _, _),) = list(file.batches(plan()))
         assert batch.num_rows == 0
         assert batch.schema == table(opened(KEY, TRADE_HEADER + TRADE_ROWS), plan()).schema
     # The drift of a file without rows still reaches the caller.
@@ -739,7 +781,7 @@ def test_a_header_that_names_a_column_twice_is_a_wire_error(
     text = "ticker,price,sip_timestamp,price,id,id\nAAPL,1,1741012200000000000,2,a,b\n"
     with pytest.raises(WireError) as info:
         table(opened(KEY, text), plan())
-    assert info.value.message.endswith(": the header names id, price more than once")
+    assert info.value.message == f"{UNREADABLE}its header names id, price more than once."
 
 
 def test_a_quoted_header_with_crlf_line_ends_is_parsed(
@@ -771,7 +813,7 @@ def test_a_list_that_does_not_convert_is_null_and_reported(
         good = '"12,37",,4,2,1,227.48,100,1741012200000000123,100,3,AAPL,,\n'
         row = f'"{conditions}",,4,1,1,227.48,100,1741012200000000123,100,3,AAPL,,\n'
         with opened(KEY, TRADE_HEADER + good + row) as file:
-            [(batch, report)] = list(file.batches(plan()))
+            [(batch, report, _)] = list(file.batches(plan()))
         assert batch["Conditions"].to_pylist() == [[12, 37], None]
         assert report.unconvertible == {"conditions"}
         assert report.samples["conditions"] == DriftSample(None, conditions)
@@ -782,8 +824,9 @@ def test_a_header_longer_than_a_block_is_a_wire_error(
 ) -> None:
     columns = TRADE_COLUMNS[:2]
     long = "ticker,sip_timestamp," + ",".join(f"h{n}" for n in range(200)) + "\n"
-    with pytest.raises(WireError, match=r"the header line is longer than 256 bytes$"):
+    with pytest.raises(WireError) as info:
         table(opened(KEY, long + "AAPL,5\n"), plan(columns=columns, block_size=256))
+    assert info.value.message == f"{UNREADABLE}its header line is longer than 256 bytes."
     # A header of exactly one block, line end included, still reads.
     exact = "ticker,sip_timestamp,x" + "x" * (256 - 23) + "\n"
     assert len(exact) == 256
@@ -793,8 +836,11 @@ def test_a_header_longer_than_a_block_is_a_wire_error(
 
 def test_a_header_that_is_not_utf8_is_a_wire_error() -> None:
     file, _ = flat_file(KEY, gzip.compress(b"ticker,\xffprice\nAAPL,1\n"))
-    with pytest.raises(WireError, match=r"^cannot read .*'utf-8' codec can't decode") as info:
+    with pytest.raises(WireError) as info:
         table(file, plan())
+    assert info.value.message == (
+        f"{UNREADABLE}'utf-8' codec can't decode byte 0xff in position 7: invalid start byte."
+    )
     assert isinstance(info.value.__cause__, UnicodeDecodeError)
 
 
@@ -805,12 +851,24 @@ def test_a_value_that_does_not_convert_is_null_and_reported_by_its_header(
     rows = "12,,4,1,1,1.5,1,1,10,1,AAPL,,x\n12,,4,2,1,x" + "y" * 300 + ",1,1,10,1,AAPL,,5\n"
     text = reorder(TRADE_HEADER + rows, list(reversed(TRADE_NAMES)))
     with opened(KEY, text) as file:
-        [(batch, report)] = list(file.batches(plan()))
+        [(batch, report, marks)] = list(file.batches(plan()))
     assert batch["TrfTimestamp"].to_pylist() == [None, 5]
     assert batch["Price"].to_pylist() == [1.5, None]
     assert report.unconvertible == {"trf_timestamp", "price"}
     assert report.samples["trf_timestamp"] == DriftSample(None, "x")
     assert report.samples["price"] == DriftSample(None, "x" + "y" * 199)  # cut to 200
+    # Each row is marked once, for its first header that does not parse, in the plan's order.
+    assert marks == {
+        RowFault.UNCONVERTIBLE_VALUES: RowMark(
+            rows=(0, 1),
+            fields=("TrfTimestamp", "Price"),
+            reasons=(
+                "trf_timestamp holds 'x', which is not int64",
+                f"price holds {'x' + 'y' * 199!r}, which is not double",
+            ),
+            symbols=("AAPL", "AAPL"),
+        )
+    }
 
 
 def test_a_malformed_line_is_skipped_and_counted(
@@ -844,11 +902,11 @@ def test_a_file_whose_every_line_is_malformed_fails_without_quoting_a_line(
     with pytest.raises(WireError) as info:
         table(opened(KEY, text), plan())
     assert info.value.message == (
-        f"cannot read s3://flatfiles/{KEY} at https://files.massive.com: every one of its 2 "
-        "lines is malformed, so the file's format may have changed; the first: row 1 after "
-        "the header has 2 fields where the header has 13"
+        f"None of the 2 lines after the header of Massive's file s3://flatfiles/{KEY} at "
+        "https://files.massive.com can be read. In the first, row 1 after the header has 2 "
+        "fields where the header has 13."
     )
-    assert info.value.unreadable
+    assert info.value.kind is WireFailure.UNREADABLE_ROWS  # Massive's data, not the library's
 
 
 def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(
@@ -866,13 +924,12 @@ def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(
     first = 1 + sum(1 for line in spoiled[: spoiled.index("S9,499")] if line)
     data = make_csv_gz("\n".join([header, *spoiled]))
     expected = _streamed(make_csv_gz(clean), plan(block_size=4096))
-    assert not isinstance(expected, str)
     for chunk_blocks in (1, 5):
         for threads in (1, 3):
             read = plan(block_size=4096, chunk_blocks=chunk_blocks, parse_threads=threads)
             file, _ = flat_file(KEY, data)
             with file:
-                rows = [batch for batch, _ in file.batches(read)]
+                rows = [batch for batch, _, _ in file.batches(read)]
             assert pa.Table.from_batches(rows).equals(expected[0]), (chunk_blocks, threads)
             assert file.malformed_lines == 6
             assert file.malformed_reason == (
@@ -880,11 +937,126 @@ def test_malformed_lines_in_chunks_are_skipped_and_numbered_in_the_file(
             )
 
 
+def _trade_line(n: int, *, ticker: bytes = b"AAPL", tape: bytes = b"1") -> bytes:
+    return b",,4,%d,1,1.5,%d,17410122000000000%02d,10,%s,%s,,\n" % (n, n, n, tape, ticker)
+
+
+def test_a_line_that_is_not_utf8_is_skipped_and_counted(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Arrow refuses a whole chunk for one such line, or hands its handler text it cannot
+    # decode when the line also has the wrong field count: each line costs only itself, a
+    # byte in a header the plan does not read included.
+    rows = (
+        _trade_line(1)
+        + _trade_line(2, ticker=b"AA\xffPL")
+        + b"\n"
+        + _trade_line(3)
+        + _trade_line(4, tape=b"\xe9")
+        + b"SECRET,1\n"
+        + _trade_line(5).replace(b"\n", b",\xffSECRET\n")
+        + _trade_line(6)
+    )
+    file = opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows))
+    result = table(file, plan())
+    assert result["Id"].to_pylist() == ["1", "3", "6"]
+    assert file.rows_read == 3
+    assert file.malformed_lines == 4
+    assert file.malformed_reason == "row 2 after the header is not UTF-8 text"
+
+
+def test_the_first_malformed_line_is_reported_whichever_its_kind(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # A line with the wrong field count before a line that is not UTF-8 text: Arrow numbers
+    # the rows of the chunk without the removed line, which comes after, so the number holds.
+    rows = _trade_line(1) + b"SECRET,1\n" + _trade_line(2, ticker=b"\xff") + _trade_line(3)
+    file = opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows))
+    assert table(file, plan())["Id"].to_pylist() == ["1", "3"]
+    assert (file.malformed_lines, file.malformed_reason) == (
+        2,
+        "row 2 after the header has 2 fields where the header has 13",
+    )
+
+
+def test_a_chunk_of_lines_that_are_not_utf8_is_skipped_and_numbered_in_the_file() -> None:
+    # A whole chunk of such lines leaves Arrow nothing to read; the chunks around it are read,
+    # and the first such line is numbered by the rows of every chunk before its own.
+    good = b"".join(_trade_line(n) for n in range(1, 41))
+    bad = b"".join(_trade_line(n, ticker=b"\xff") for n in range(41, 81))
+    after = b"".join(_trade_line(n) for n in range(81, 91))
+    read = plan(block_size=512, chunk_blocks=1, parse_threads=2)
+    file, _ = flat_file(KEY, gzip.compress(TRADE_HEADER.encode() + good + bad + after))
+    result = table(file, read)
+    assert result["Id"].to_pylist() == [str(n) for n in [*range(1, 41), *range(81, 91)]]
+    assert file.malformed_lines == 40
+    assert file.malformed_reason == "row 41 after the header is not UTF-8 text"
+
+
+@pytest.mark.parametrize(
+    ("bad", "first"),
+    [
+        pytest.param(
+            lambda n: _trade_line(n, ticker=b"\xff"),
+            "row 1 after the header is not UTF-8 text",
+            id="not-utf8",
+        ),
+        pytest.param(
+            lambda n: b"SECRET,%d,%s\n" % (n, b"x" * 40),
+            "row 1 after the header has 3 fields where the header has 13",
+            id="wrong-field-count",
+        ),
+    ],
+)
+def test_a_chunk_without_a_row_still_hands_on_an_empty_batch(
+    bad: Callable[[int], bytes], first: str
+) -> None:
+    # The consumer checks for cancellation, and for a skipped line, after every batch: a run of
+    # chunks with no row left must not leave it waiting for the file's end.
+    lines = b"".join(bad(n) for n in range(40))
+    read = plan(block_size=512, chunk_blocks=1, parse_threads=2)
+    file, _ = flat_file(KEY, gzip.compress(TRADE_HEADER.encode() + lines))
+    seen = []
+
+    def consume() -> None:
+        with file:
+            for batch, _, _ in file.batches(read):
+                seen.append((batch.num_rows, file.malformed_lines))
+
+    with pytest.raises(WireError) as info:
+        consume()
+    assert info.value.message == (
+        f"None of the 40 lines after the header of Massive's file s3://flatfiles/{KEY} at "
+        f"https://files.massive.com can be read. In the first, {first}."
+    )
+    assert len(seen) > 1
+    assert all(rows == 0 and skipped for rows, skipped in seen)
+
+
+def test_a_file_whose_every_line_is_not_utf8_fails(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    rows = _trade_line(1, ticker=b"\xff") + _trade_line(2, ticker=b"\xfe")
+    with pytest.raises(WireError) as info:
+        table(opened(KEY, gzip.compress(TRADE_HEADER.encode() + rows)), plan())
+    assert info.value.message == (
+        f"None of the 2 lines after the header of Massive's file s3://flatfiles/{KEY} at "
+        "https://files.massive.com can be read. In the first, row 1 after the header is not "
+        "UTF-8 text."
+    )
+    assert info.value.kind is WireFailure.UNREADABLE_ROWS
+
+
 def test_a_header_that_is_not_valid_csv_is_a_wire_error(
     opened: Callable[[str, str | bytes], FlatFile],
 ) -> None:
-    with pytest.raises(WireError, match=r"^cannot read .*: new-line character seen") as info:
+    with pytest.raises(WireError) as info:
         table(opened(KEY, "ticker,a\rb,sip_timestamp\nAAPL,1,2\n"), plan())
+    # The csv module's own words, quoted as it wrote them.
+    assert info.value.message == (
+        f"{UNREADABLE}new-line character seen in unquoted field - do you need to open the file "
+        "with newline=''?"
+    )
     assert isinstance(info.value.__cause__, csv.Error)
 
 
@@ -910,7 +1082,7 @@ def test_benchmark_one_large_file(
         file, _ = flat_file(KEY, data)
         started = time.perf_counter()
         with file:
-            kept = sum(batch.num_rows for batch, _ in file.batches(read))
+            kept = sum(batch.num_rows for batch, _, _ in file.batches(read))
         times.append(time.perf_counter() - started)
     seconds = statistics.median(times)
     with capsys.disabled():
@@ -919,3 +1091,164 @@ def test_benchmark_one_large_file(
             f"{seconds:.2f} s, "
             f"{rows / seconds:,.0f} rows/s\n"
         )
+
+
+def _counted(items: list[int], taken: list[int], failure: Exception | None = None) -> Iterator[int]:
+    for item in items:
+        taken.append(item)
+        yield item
+    if failure is not None:
+        raise failure
+
+
+def test_in_order_yields_results_in_item_order_with_bounded_read_ahead() -> None:
+    taken: list[int] = []
+    with ThreadPoolExecutor(3) as pool:
+        results = reader._in_order(
+            pool, _counted([1, 2, 3, 4, 5], taken), lambda n: n * 10, ahead=2, deferred=()
+        )
+        assert next(results) == 10
+        assert taken == [1, 2, 3]  # the awaited item and two ahead of it
+        assert list(results) == [20, 30, 40, 50]
+
+
+def test_in_order_raises_a_deferred_read_failure_after_the_results_before_it() -> None:
+    results: list[int] = []
+    with ThreadPoolExecutor(2) as pool, pytest.raises(OSError, match="truncated"):
+        results.extend(
+            reader._in_order(
+                pool,
+                _counted([1, 2], [], OSError("truncated")),
+                lambda n: n,
+                ahead=5,
+                deferred=(OSError,),
+            )
+        )
+    assert results == [1, 2]
+
+
+def test_in_order_raises_any_other_read_failure_at_once() -> None:
+    results: list[int] = []
+    with ThreadPoolExecutor(2) as pool, pytest.raises(ValueError, match="bad"):
+        results.extend(
+            reader._in_order(
+                pool,
+                _counted([1, 2], [], ValueError("bad")),
+                lambda n: n,
+                ahead=5,
+                deferred=(OSError,),
+            )
+        )
+    assert results == []
+
+
+def test_in_order_cancels_the_work_not_started_when_closed_early() -> None:
+    worked: list[int] = []
+    release = threading.Event()
+
+    def work(n: int) -> int:
+        worked.append(n)
+        if n > 1:
+            release.wait(30)
+        return n
+
+    with ThreadPoolExecutor(1) as pool:
+        results = reader._in_order(pool, iter([1, 2, 3, 4]), work, ahead=3, deferred=())
+        assert next(results) == 1
+        results.close()
+        release.set()
+    assert 3 not in worked
+    assert 4 not in worked
+
+
+def test_a_watched_body_refuses_to_seek() -> None:
+    watched = reader._Watched(io.BytesIO(b"body"), threading.Event())
+    with pytest.raises(
+        io.UnsupportedOperation,
+        match=r"^A response body cannot seek, and the reader asked for position 0\.$",
+    ):
+        watched.seek(0)
+
+
+def test_a_row_with_two_unreadable_keys_is_marked_once_for_the_first_header(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    good = ",,4,2,1,1.5,1,1741012200000000000,10,1,MSFT,,\n"
+    with opened(KEY, TRADE_HEADER + ",,4,1,1,1.5,1,,10,1,,,\n" + good) as file:
+        [(batch, _, marks)] = list(file.batches(plan()))
+    assert batch["Id"].to_pylist() == ["1", "2"]
+    assert marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(0,),
+            fields=("Timestamp",),
+            reasons=("a row has no sip_timestamp",),
+            symbols=(None,),
+        )
+    }
+
+
+def test_a_row_whose_key_cannot_be_read_never_changes_how_other_rows_convert(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Arrow reads "0x10" as 16, in a list too; the marked row's odd text must not send a
+    # column to the slower reading, which would not.
+    columns = (*TRADE_COLUMNS, ReadColumn("sequence_number", "SequenceNumber", pa.int64()))
+    good = "0x10,,4,1,1,1.5,0x10,1741012200000000000,10,1,AAPL,,\n"
+    keyless = "x,,4,2,1,x,y,,10,1,AAPL,,\n"
+    with opened(KEY, TRADE_HEADER + good + keyless) as file:
+        [(batch, report, marks)] = list(file.batches(plan(columns=columns)))
+    assert batch["SequenceNumber"].to_pylist() == [16, None]
+    assert batch["Conditions"].to_pylist() == [[16], None]
+    assert batch["Price"].to_pylist() == [1.5, None]
+    assert report.unconvertible == frozenset()
+    assert marks[RowFault.UNREADABLE_KEYS].rows == (1,)
+
+
+def test_an_integer_a_double_would_round_is_marked_and_one_it_holds_reads(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Arrow would read 9007199254740993 as ...992.0, a price Massive never sent; 2**60 and a
+    # decimal text are what Massive sent, so they read.
+    rows = "".join(
+        f",,4,{n},1,{price},1,1741012200000000000,10,1,AAPL,,\n"
+        for n, price in enumerate(
+            ("9007199254740993", str(2**60), "9007199254740993.5", "1" + "0" * 400), 1
+        )
+    )
+    with opened(KEY, TRADE_HEADER + rows) as file:
+        [(batch, report, marks)] = list(file.batches(plan()))
+    assert batch["Price"].to_pylist() == [None, 2.0**60, 9007199254740994.0, None]
+    assert report.unconvertible == frozenset({"price"})
+    mark = marks[RowFault.UNCONVERTIBLE_VALUES]
+    assert (mark.rows, mark.fields) == ((0, 3), ("Price", "Price"))
+    assert mark.reasons[0] == "price holds '9007199254740993', which is not double"
+
+
+def test_an_integer_too_long_for_python_to_read_is_marked_not_raised(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # Python refuses to read an integer of more than 4,300 digits; a double holds none of them,
+    # nor 309 nines, past the largest double.
+    rows = "".join(
+        f",,4,{n},1,{'9' * digits},1,1741012200000000000,10,1,AAPL,,\n"
+        for n, digits in enumerate((5000, 309), 1)
+    )
+    with opened(KEY, TRADE_HEADER + rows) as file:
+        [(batch, _, marks)] = list(file.batches(plan()))
+    assert batch["Price"].to_pylist() == [None, None]
+    assert marks[RowFault.UNCONVERTIBLE_VALUES].rows == (0, 1)
+
+
+def test_a_key_marked_row_keeps_its_readable_keys(
+    opened: Callable[[str, str | bytes], FlatFile],
+) -> None:
+    # A futures row whose time is unreadable keeps its session date, so a session window can
+    # still judge it.
+    text = "ticker,timestamp,report_sequence,session_end_date\nESH5,x,1,2025-03-04\n"
+    required = frozenset({"ticker", "timestamp", "session_end_date"})
+    futures = plan(columns=FUTURES_COLUMNS, time_header="timestamp", required=required)
+    with opened(FUTURES_KEY, text) as file:
+        [(batch, _, marks)] = list(file.batches(futures))
+    assert batch["SessionEndDate"].to_pylist() == [date(2025, 3, 4)]
+    assert batch["Timestamp"].to_pylist() == [None]
+    assert marks[RowFault.UNREADABLE_KEYS].fields == ("Timestamp",)

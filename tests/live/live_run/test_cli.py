@@ -1,32 +1,31 @@
 """Tests of the live-run program's command line (`tests/_live/live_run/cli.py`).
 
 The commands run on a context of fakes or on the real context with its probe and machine
-checks replaced, so nothing reaches Massive; the built-in groups' child runs with a fake server
-start and a stand-in for the group.
+checks replaced, so nothing reaches Massive. The parent's own imports are checked in a fresh
+interpreter, since this test process already runs a JVM.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
+import subprocess
 import sys
-import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
-from tests._live.live_run import children, cli, commands, group_child, machine_checks
+from tests._live.live_run import children, cli, commands, machine_checks
+from tests._live.live_run import state as run_state
 from tests._live.live_run.context import RunContext, RunRefusedError
-from tests._live.live_run.run_probe import Credentials, ProbeResult
+from tests._live.live_run.probe_result import ProbeResult
 from tests._live.live_run.secret_scrub import SecretFilter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from deephaven_massive import MassiveSession
     from tests._live.live_run.machine_checks import Item
 
 KEY = "PLANTED-cli-key-6b0e"
@@ -35,15 +34,11 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def _probe() -> ProbeResult:
-    return ProbeResult(when="2026-11-04T17:00:00Z", tiers=None, error="not used")
+    return ProbeResult(when="2026-11-04T17:00:00Z", error="not used")
 
 
 def _machine(_folder: Path, _offset: float | None) -> tuple[list[Item], dict[str, object]]:
     return [], {}
-
-
-def _no_server(_heap: int, _folder: Path) -> None:
-    pytest.fail("only _group starts a server")
 
 
 class Recorder:
@@ -73,7 +68,6 @@ def _main(argv: list[str], recorder: Recorder) -> int:
         argv,
         root=ROOT,
         script=ROOT / "scripts" / "live_run.py",
-        start_server=_no_server,
         make_context=recorder,
     )
 
@@ -154,13 +148,6 @@ def test_an_unknown_redo_group_is_refused(tmp_path: Path) -> None:
     )
 
 
-def test_credentials_come_from_the_environment_and_need_both_s3_values() -> None:
-    environ = {"MASSIVE_API_KEY": f" {KEY} ", "MASSIVE_S3_ACCESS_KEY_ID": S3_PAIR[0]}
-    assert cli.credentials(environ) == Credentials(api_key=KEY, s3_pair=None)
-    environ["MASSIVE_S3_SECRET_ACCESS_KEY"] = S3_PAIR[1]
-    assert cli.credentials(environ).s3_pair == S3_PAIR
-
-
 def test_the_free_disk_is_read_from_the_nearest_existing_folder(tmp_path: Path) -> None:
     assert cli.nearest_folder(tmp_path / "a" / "b") == tmp_path
 
@@ -168,10 +155,10 @@ def test_the_free_disk_is_read_from_the_nearest_existing_folder(tmp_path: Path) 
 def test_the_real_context_wires_the_machine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    probes: list[Credentials] = []
+    probes: list[dict[str, object]] = []
 
-    def probe_key(credentials: Credentials, *, now: datetime) -> ProbeResult:
-        probes.append(credentials)
+    def probe_in_child(**options: object) -> ProbeResult:
+        probes.append(options)
         return _probe()
 
     machines: list[Path] = []
@@ -182,7 +169,7 @@ def test_the_real_context_wires_the_machine(
         machines.append(disk_path)
         return [], {"offset": clock_offset}
 
-    monkeypatch.setattr(cli, "probe_key", probe_key)
+    monkeypatch.setattr(cli, "probe_in_child", probe_in_child)
     monkeypatch.setattr(machine_checks, "check_machine", check_machine)
     stdout = io.StringIO()
     environ = {"MASSIVE_API_KEY": KEY}
@@ -192,7 +179,14 @@ def test_the_real_context_wires_the_machine(
     assert len(ctx.commit) == 40
     assert ctx.secrets.values == (KEY,)
     ctx.probe()
-    assert probes == [Credentials(api_key=KEY, s3_pair=None)]
+    [options] = probes
+    assert (options["python"], options["script"], options["root"]) == (
+        sys.executable,
+        Path("s.py"),
+        ROOT,
+    )
+    assert options["environ"] == environ
+    assert options["secrets"] is ctx.secrets
     assert ctx.machine(tmp_path / "out", 1.5) == ([], {"offset": 1.5})
     assert machines == [tmp_path]
     ctx.echo("hello")
@@ -217,103 +211,91 @@ def test_the_real_keep_awake_starts_and_stops_its_tool(
     assert stdout.getvalue() == "warning: nothing keeps the machine awake; keep it awake yourself\n"
 
 
-@pytest.mark.parametrize(
-    ("group", "memory", "heap"),
-    [
-        ("responses", 64 << 30, cli.SMALL_HEAP),
-        ("stream-day", 64 << 30, cli.STREAM_HEAP_LIMIT),
-        ("throughput", 12 << 30, 6 << 30),
-        ("stream-day", None, cli.SMALL_HEAP),
-    ],
-)
-def test_the_group_child_starts_a_server_sized_to_its_group(
-    *, group: str, memory: int | None, heap: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (tmp_path / "a").mkdir()
-    (tmp_path / "a" / "request.json").write_text(
-        json.dumps({"group": group, "tiers": {"stocks": "basic"}})
+# --- the parent starts no JVM -----------------------------------------------------------------
+
+WATCHED = ("deephaven", "deephaven_server", "deephaven_massive", "jpy")
+"""The packages the parent must never import: Deephaven's, its JVM bridge, and the library."""
+
+
+def _watched_imports(done: subprocess.CompletedProcess[str]) -> list[str]:
+    """Read the modules of `WATCHED` a script run with `-X importtime` imported.
+
+    `-X importtime` prints every module the process imports to its standard error, so the
+    script's own `os._exit` hides nothing.
+
+    Returns:
+        Those modules, sorted.
+    """
+    names = [
+        line.rsplit("|", 1)[-1].strip()
+        for line in done.stderr.splitlines()
+        if line.startswith("import time:")
+    ]
+    # `importlib` imports `cli` unlogged, but `cli` imports `commands` with a statement.
+    assert "tests._live.live_run.commands" in names  # the script did reach the parent
+    return sorted(n for n in names if n.split(".")[0] in WATCHED)
+
+
+def test_the_scripts_help_imports_no_deephaven() -> None:
+    done = subprocess.run(
+        [sys.executable, "-X", "importtime", "scripts/live_run.py", "--help"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    monkeypatch.setattr(machine_checks, "memory_total", lambda: memory)
-    ran: list[str] = []
-    monkeypatch.setattr(
-        group_child, "run_group", lambda _out, attempt, **_options: ran.append(attempt)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "usage: live_run.py" in done.stdout
+    assert _watched_imports(done) == []
+
+
+def test_the_scripts_commands_import_no_deephaven() -> None:
+    # Without the key, `check` is refused once the parent has imported every command's module.
+    environ = {k: v for k, v in os.environ.items() if k != "MASSIVE_API_KEY"}
+    done = subprocess.run(
+        [sys.executable, "-X", "importtime", "scripts/live_run.py", "check"],
+        cwd=ROOT,
+        env=environ,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    servers: list[tuple[int, Path]] = []
-    watched: list[str] = []
-    code = cli.main(
-        ["_group", "--out", str(tmp_path), "--attempt", "a", "--token", "t"],
-        root=ROOT,
-        script=Path("s.py"),
-        start_server=lambda heap, folder: servers.append((heap, folder)),
-        watch=lambda: watched.append("watching"),
+    assert done.returncode == cli.REFUSED, done.stdout + done.stderr
+    assert "MASSIVE_API_KEY is not set" in done.stdout
+    assert _watched_imports(done) == []
+
+
+def test_a_run_imports_no_deephaven_while_it_probes_and_runs_groups(tmp_path: Path) -> None:
+    wrapper = tmp_path / "python"
+    child = ROOT / "tests" / "_fakes" / "live_child.py"
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{child}" "$@"\n')
+    wrapper.chmod(0o755)
+    probe = ProbeResult(when="2026-11-04T17:00:00Z", clock_offset=0.5)
+    script = {
+        "probe": dataclasses.asdict(probe),
+        "results": [{"name": "market-status", "status": "passed", "reason": ""}],
+    }
+    out = tmp_path / "out"
+    environ = {k: v for k, v in os.environ.items() if k != "CI"} | {
+        "MASSIVE_API_KEY": KEY,
+        "FAKE_LIVE_CHILD": json.dumps(script),
+        "LIVE_PARENT_OUT": str(out),
+        "LIVE_PARENT_PYTHON": str(wrapper),
+    }
+    done = subprocess.run(
+        [sys.executable, "-m", "tests._fakes.live_parent"],
+        cwd=ROOT,
+        env=environ,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert code == 0
-    assert (servers, ran, watched) == ([(heap, tmp_path / "a")], ["a"], ["watching"])
-
-
-def test_the_group_childs_sessions_declare_the_basic_and_delayed_subscriptions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (tmp_path / "a").mkdir()
-    request = {"group": "upgrade-check", "tiers": {"stocks": "basic", "options": "starter"}}
-    (tmp_path / "a" / "request.json").write_text(json.dumps(request))
-    monkeypatch.setenv("MASSIVE_API_KEY", KEY)
-    seen: dict[str, Callable[..., Any]] = {}
-
-    def run_group(
-        _out: Path,
-        _attempt: str,
-        *,
-        open_session: Callable[[], MassiveSession],
-        tier_of: Callable[[str], str | None],
-    ) -> None:
-        seen["open_session"], seen["tier_of"] = open_session, tier_of
-
-    tiers: list[dict[str, str] | None] = [{"stocks": "starter"}, None]
-
-    def probe_key(_credentials: Credentials, *, now: datetime) -> ProbeResult:
-        return ProbeResult(when="", tiers=tiers.pop(0))
-
-    monkeypatch.setattr(group_child, "run_group", run_group)
-    monkeypatch.setattr(cli, "probe_key", probe_key)
-    cli.run_group_child(
-        tmp_path,
-        "a",
-        environ={"MASSIVE_API_KEY": KEY},
-        start_server=lambda _heap, _folder: None,
-        watch=lambda: None,
-    )
-    open_session = seen["open_session"]
-    with open_session() as session:
-        assert {str(s) for s in session._core.config.rest_basic_subscriptions} == {"stocks"}
-        assert {str(s) for s in session._core.config.delayed_subscriptions} == {"options"}
-    assert seen["tier_of"]("stocks") == "starter"
-    assert seen["tier_of"]("stocks") is None
-
-
-def test_a_group_child_ends_once_its_parent_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
-    parents = [100, 100, 1]
-    monkeypatch.setattr(os, "getppid", lambda: parents.pop(0))
-    waits: list[float] = []
-    ended: list[str] = []
-
-    def wait(seconds: float) -> bool:
-        waits.append(seconds)
-        return False
-
-    cli.watch_parent(100, orphaned=lambda: ended.append("ended"), wait=wait)
-    assert (waits, ended) == ([cli.PARENT_CHECK, cli.PARENT_CHECK], ["ended"])
-
-
-def test_the_parent_watch_runs_on_a_thread_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[int] = []
-    done = threading.Event()
-
-    def watch_parent(parent: int, **_options: object) -> None:
-        seen.append(parent)
-        done.set()
-
-    monkeypatch.setattr(cli, "watch_parent", watch_parent)
-    cli.start_parent_watch()
-    assert done.wait(10.0)
-    assert seen == [os.getppid()]
+    assert done.returncode == 0, done.stdout + done.stderr
+    report = json.loads(done.stdout.splitlines()[-1])
+    assert report == {"status": commands.INTERRUPTED, "imported": []}
+    # The run probed through its child and ran groups in theirs, so the check means something.
+    [probed] = (out / "probes").glob("2026*.json")
+    assert json.loads(probed.read_text())["clock_offset"] == 0.5
+    state = run_state.load(out)
+    assert state is not None
+    assert state.attempts

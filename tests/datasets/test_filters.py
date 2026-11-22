@@ -4,15 +4,18 @@ They run on synthetic specs over the real generated sources.
 """
 
 import dataclasses
-from collections.abc import Mapping
+import re
+import typing
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
-from typing import Any, cast
 
+import numpy as np
 import pytest
 
 from deephaven_massive._datasets import filters
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
-from deephaven_massive._datasets.filters import check_filters, param_base
+from deephaven_massive._datasets.filters import FilterValue, check_filters, param_base
+from deephaven_massive._datasets.request import ParamValue
 from deephaven_massive._enums import AssetClass, ContractType
 from deephaven_massive._massive import (
     Field,
@@ -77,13 +80,8 @@ DIVIDENDS = DatasetSpec(
 )
 
 
-def change(spec: DatasetSpec, **changes: object) -> DatasetSpec:
-    return dataclasses.replace(spec, **cast("dict[str, Any]", changes))
-
-
-def check(spec: DatasetSpec, filters: Mapping[str, object]) -> dict[str, object]:
-    # The values pass through as given: the check itself must refuse what does not fit.
-    return dict(check_filters(Catalog((spec,)), spec, cast("Mapping[str, Any]", filters)))
+def check(spec: DatasetSpec, filters: Mapping[str, ParamValue]) -> dict[str, object]:
+    return dict(check_filters(Catalog((spec,)), spec, filters))
 
 
 def test_filters_are_the_query_parameters_of_the_dataset_paths() -> None:
@@ -96,8 +94,27 @@ def test_filters_are_the_query_parameters_of_the_dataset_paths() -> None:
         },
     )
     assert check(EXCHANGES, {}) == {}  # nothing to check, so no path is read
-    with pytest.raises(ValueError, match=r"has no filter 'pay_date_lte'; valid filters: \["):
+    with pytest.raises(
+        ValueError, match=r"^stocks\.dividends has no filter 'pay_date_lte'\. Pass one of "
+    ):
         check(DIVIDENDS, {"pay_date_lte": "2025-01-01"})
+
+
+def test_a_dataset_without_filters_says_it_takes_none() -> None:
+    named = "reference.exchanges has no filter 'nope'. Pass one of asset_class and locale."
+    with pytest.raises(ValueError, match=f"^{re.escape(named)}$"):
+        check(EXCHANGES, {"nope": "x"})
+    fixed = dataclasses.replace(EXCHANGES, fixed_params={"asset_class": "stocks", "locale": "us"})
+    message = "reference.exchanges has no filter 'nope', and takes none. Leave filters out."
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        check(fixed, {"nope": "x"})
+    assert check(fixed, {}) == {}
+
+
+def test_an_unknown_filter_names_every_filter_and_one_of_them_works() -> None:
+    with pytest.raises(ValueError, match=r"Pass one of .*\bfrequency_gte\b"):
+        check(DIVIDENDS, {"pay_date_lte": "2025-01-01"})
+    assert check(DIVIDENDS, {"frequency_gte": 4}) == {"frequency_gte": 4}
 
 
 def test_a_path_parameter_is_no_filter() -> None:
@@ -153,15 +170,30 @@ def test_the_symbol_parameter_reserves_only_its_equality_forms() -> None:
     assert "date.all_of" in filters.param_family("date.gte")
 
 
+def test_a_symbol_parameter_another_method_takes_reserves_only_its_equality_forms() -> None:
+    listed = dataclasses.replace(
+        CONTRACTS, symbol_param=None, symbol_params_elsewhere={"ticker": "use another method"}
+    )
+    for key in ("ticker", "ticker_any_of", "ticker_all_of"):
+        with pytest.raises(ValueError, match=rf"has no filter '{key}'"):
+            check(listed, {key: "O:AAPL250117C00150000"})
+    assert "ticker" in filters.filter_keys(Catalog((OPTION_CONTRACTS,)), OPTION_CONTRACTS)
+    assert "ticker" not in filters.filter_keys(Catalog((listed,)), listed)
+
+
 def test_filter_values_must_fit_their_kind() -> None:
     with pytest.raises(
         ValueError, match=r"^stocks\.dividends filter 'frequency' takes integer values, not '4'$"
     ):
         check(DIVIDENDS, {"frequency": "4"})
-    with pytest.raises(ValueError, match=r"takes one of \['recurring', 'special', .*\], not 'x'"):
+    with pytest.raises(
+        ValueError,
+        match=r"filter 'distribution_type'='x' is not one of its values\. Pass one of "
+        r"'recurring', 'special', ",
+    ):
         check(DIVIDENDS, {"distribution_type": "x"})
     # Without a time axis, the date parameter is an ordinary filter.
-    unaxed = change(DIVIDENDS, time_axis=None)
+    unaxed = dataclasses.replace(DIVIDENDS, time_axis=None)
     check(unaxed, {"ex_dividend_date": date(2025, 1, 2)})
     naive = datetime(2025, 1, 2, 9, 30, tzinfo=UTC).replace(tzinfo=None)  # naive on purpose
     with pytest.raises(ValueError, match=r"^ex_dividend_date=datetime\.datetime\(2025, 1, 2"):
@@ -169,7 +201,7 @@ def test_filter_values_must_fit_their_kind() -> None:
     # Text for a date parameter is ISO-8601, and a time in it carries an offset.
     with pytest.raises(ValueError, match=r"^ex_dividend_date='soon' is not an ISO-8601 date"):
         check(unaxed, {"ex_dividend_date": "soon"})
-    with pytest.raises(ValueError, match=r"^ex_dividend_date='2025-01-02T09:30' needs a timezone"):
+    with pytest.raises(ValueError, match=r"^ex_dividend_date='2025-01-02T09:30' has no timezone"):
         check(unaxed, {"ex_dividend_date": "2025-01-02T09:30"})
     check(unaxed, {"ex_dividend_date": "2025-01-02T09:30:00Z"})
 
@@ -180,7 +212,7 @@ INDICATOR = DatasetSpec(
     fetch_path="/v1/indicators/sma/{stockTicker}",
 )
 
-OPTION_CONTRACTS = change(CONTRACTS, symbol_param=None)
+OPTION_CONTRACTS = dataclasses.replace(CONTRACTS, symbol_param=None)
 
 NEWS = DatasetSpec(
     name="reference.news",
@@ -254,7 +286,7 @@ NEWS = DatasetSpec(
     ],
 )
 def test_each_parameter_kind_keeps_the_value_it_sends(
-    *, spec: DatasetSpec, key: str, given: object, kept: object
+    *, spec: DatasetSpec, key: str, given: ParamValue, kept: object
 ) -> None:
     (value,) = check(spec, {key: given}).values()
     assert value == kept
@@ -270,7 +302,12 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
         (OPTION_CONTRACTS, "strike_price_gte", False, "takes number values, not False"),
         (OPTION_CONTRACTS, "strike_price_gte", float("nan"), "takes a finite number, not nan"),
         (OPTION_CONTRACTS, "expired", 1, "takes a bool, not 1"),
-        (OPTION_CONTRACTS, "contract_type", "up", r"takes one of \['call', 'put'\], not 'up'"),
+        (
+            OPTION_CONTRACTS,
+            "contract_type",
+            "up",
+            r"='up' is not one of its values\. Pass one of 'call' and 'put'\.$",
+        ),
         (OPTION_CONTRACTS, "as_of", 1, "takes a date or an aware datetime, not 1"),
         (INDICATOR, "timestamp_gte", 1.5, "takes a date or an aware datetime, not 1.5"),
         # Milliseconds cannot carry a microsecond instant; rounding would move the bound.
@@ -281,33 +318,36 @@ def test_each_parameter_kind_keeps_the_value_it_sends(
             "takes whole ms since the epoch",
         ),
         (DIVIDENDS, "distribution_type_any_of", (), "takes at least one value"),
-        (DIVIDENDS, "distribution_type_any_of", "a,,b", "has an empty value in"),
-        (DIVIDENDS, "distribution_type_any_of", " ", "has an empty value in"),
-        # An item is taken exactly as written: a space after a comma is refused, not trimmed.
-        (
-            DIVIDENDS,
-            "distribution_type_any_of",
-            "a, b",
-            "has the item ' b' with surrounding whitespace in",
-        ),
-        (DIVIDENDS, "distribution_type_any_of", ("a", " b"), "has the item ' b'"),
+        # An all-empty list sends no value, so it would ask for no filter at all.
+        (DIVIDENDS, "distribution_type_any_of", "", "has no value in"),
+        (DIVIDENDS, "distribution_type_any_of", ",", "has no value in"),
         # ISO-8601 text of no documented precision cannot end a day exactly.
         (
             NEWS,
             "published_utc_lte",
             date(2025, 6, 2),
             (
-                r"published_utc\.lte has no exact unit to end a day with; pass an aware "
-                "datetime, or a date to published_utc_gte or published_utc_lt"
+                r" takes no date, since Massive's "
+                r"published_utc\.lte has no exact unit to end a day with\. Pass an aware "
+                r"datetime to published_utc_lte, or a date to published_utc_gte or "
+                r"published_utc_lt\.$"
             ),
         ),
         (NEWS, "published_utc_gt", "2025-06-02", "no exact unit to end a day with"),
-        (DIVIDENDS, "distribution_type_any_of", ("a", 1), "takes no numbers, not 1"),
+        (
+            DIVIDENDS,
+            "distribution_type_any_of",
+            ("a", 1),
+            (
+                r" takes no numbers, not 1\. "
+                r"Pass its values as text\.$"
+            ),
+        ),
         (DIVIDENDS, "distribution_type_any_of", 5, "takes a sequence of text"),
     ],
 )
 def test_a_value_the_wire_cannot_send_is_refused_at_once(
-    *, spec: DatasetSpec, key: str, value: object, message: str
+    *, spec: DatasetSpec, key: str, value: ParamValue, message: str
 ) -> None:
     with pytest.raises(ValueError, match=rf"^{spec.name} filter '{key}'.*{message}"):
         check(spec, {key: value})
@@ -376,13 +416,19 @@ def _two_paths(as_text: tuple[str, ...]) -> tuple[Catalog, DatasetSpec]:
 def test_every_path_that_declares_a_filter_checks_it() -> None:
     catalog, spec = _two_paths(("frequency", "ex_dividend_date"))
     # The copy takes text where the real path takes an integer: no value suits both.
-    with pytest.raises(ValueError, match=r"takes integer values, not '4' \(on /stocks/v1/div"):
+    with pytest.raises(ValueError, match=r"takes integer values, not '4'"):
         check_filters(catalog, spec, {"frequency": "4"})
-    with pytest.raises(ValueError, match=r"takes text, not 4 \(on /stocks/v1/dividends-copy\)"):
+    with pytest.raises(ValueError, match=r"takes text, not 4"):
         check_filters(catalog, spec, {"frequency": 4})
     # A date parameter on one path and a text one on the other read the text differently.
-    with pytest.raises(ValueError, match=r"the dataset's paths read '2025-01-02' as different"):
+    message = (
+        "stocks.two_paths filter 'ex_dividend_date' reads '2025-01-02' as "
+        "datetime.date(2025, 1, 2) and '2025-01-02' on the dataset's requests, which the library "
+        "cannot send alike. Leave the filter out."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         check_filters(catalog, spec, {"ex_dividend_date": "2025-01-02"})
+    assert check_filters(catalog, spec, {}) == ()
     # Paths that agree pass.
     assert check_filters(catalog, spec, {"distribution_type": "special"}) == (
         ("distribution_type", "special"),
@@ -412,13 +458,14 @@ def test_the_valid_filters_named_are_only_those_the_caller_can_pass() -> None:
     catalog = Catalog((DIVIDENDS,))
     with pytest.raises(ValueError, match=r"has no filter 'pay_date'") as caught:
         check_filters(catalog, DIVIDENDS, {"pay_date": "2025-01-01"}, typed=("frequency",))
-    named = str(caught.value).partition("valid filters: ")[2]
+    named = str(caught.value).partition("Pass one of ")[2]
     # The typed parameter's family, the time axis, the symbol's equality forms, and the
     # parameters the library sets are reserved; the symbol's range forms stay filters.
-    for reserved in ("'frequency", "'ex_dividend_date", "'ticker'", "'ticker_any_of'", "'limit'"):
-        assert reserved not in named
-    assert "'ticker_gte'" in named
-    assert "'distribution_type'" in named
+    words = set(named.removesuffix(".").replace(",", " ").split())
+    for reserved in ("frequency", "ex_dividend_date", "ticker", "ticker_any_of", "limit"):
+        assert reserved not in words
+    assert "ticker_gte" in words
+    assert "distribution_type" in words
     with pytest.raises(ValueError, match=r"has no filter 'frequency_gte'"):
         check_filters(catalog, DIVIDENDS, {"frequency_gte": 4}, typed=("frequency",))
 
@@ -427,3 +474,56 @@ def test_a_parameter_s_base_is_its_text_before_the_first_dot() -> None:
     assert param_base("timestamp.gte") == "timestamp"
     assert param_base("ticker.any_of") == "ticker"
     assert param_base("date") == "date"
+
+
+@pytest.mark.parametrize(
+    ("value", "sent"),
+    [
+        ("a, b", ("a", " b")),
+        (("a", " b"), ("a", " b")),
+        (" ", (" ",)),
+        # An empty item is sent too, for Massive to read.
+        ("a,,b", ("a", "", "b")),
+    ],
+)
+def test_a_list_item_with_whitespace_or_none_is_sent_as_written(
+    value: ParamValue, sent: tuple[str, ...]
+) -> None:
+    # Massive reads the item it names: `ticker.any_of` of AAPL and " MSFT" returned MSFT's rows.
+    assert check(DIVIDENDS, {"distribution_type_any_of": value}) == {
+        "distribution_type_any_of": sent
+    }
+
+
+def test_an_enum_filter_value_the_parameter_does_not_list_is_refused() -> None:
+    # Massive answers it with no rows and no error (`market=equities` on the tickers list).
+    message = (
+        "options.contracts filter 'contract_type'='up' is not one of its values. Pass one of "
+        "'call' and 'put'."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        check(OPTION_CONTRACTS, {"contract_type": "up"})
+    assert check(OPTION_CONTRACTS, {"contract_type": "call"}) == {"contract_type": "call"}
+
+
+def test_date_text_writes_a_day_only_for_a_list_of_dates() -> None:
+    assert filters._date_text(date(2026, 10, 30), ParamKind.DATE, label="x") == "2026-10-30"
+    with pytest.raises(
+        ValueError,
+        match=r"^d filter 'k' takes no dates, not datetime\.date\(2026, 10, 30\)\. Pass its "
+        r"values as text\.$",
+    ):
+        filters._date_text(date(2026, 10, 30), None, label="d filter 'k'")
+
+
+def test_filter_value_alias() -> None:
+    assert set(typing.get_args(FilterValue)) == {
+        str,
+        int,
+        float,
+        bool,
+        date,
+        datetime,
+        np.datetime64,
+        Sequence[str | int | float | date | np.datetime64],
+    }

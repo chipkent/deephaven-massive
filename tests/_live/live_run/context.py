@@ -5,7 +5,7 @@ folder, the repository, the environment and its secret filter, the probe, the ma
 the clock, and the terminal. `scripts/live_run.py` builds it from the real machine; the unit
 tests build it with fakes, so the whole program runs against the fake servers and a fake
 clock. `RunMemory` holds what one `run` remembers between steps without writing it down: the
-latest probe and its retries, and the pause before the next group.
+latest probe and its retries.
 
 Only the program's main thread uses either.
 """
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from tests._live.live_run.machine_checks import Item
-    from tests._live.live_run.run_probe import ProbeResult
+    from tests._live.live_run.probe_result import ProbeResult
     from tests._live.live_run.secret_scrub import SecretFilter
 
 
@@ -61,7 +61,7 @@ class RunContext:
         environ: The environment, secrets included; never written.
         secrets: The filter applied to everything printed and written.
         commit: The checkout's commit, which a resumed run must match.
-        probe: Probes the key now (`run_probe.probe_key`).
+        probe: Probes the key now (`probe_result.probe_in_child`).
         machine: Runs the machine checks for a folder, given the probe's clock offset
             (`machine_checks.check_machine`).
         keep_awake: Starts keeping the machine awake, and returns the function that stops it.
@@ -113,17 +113,13 @@ class RunMemory:
     """What one `run` keeps in memory beside the state file.
 
     Attributes:
-        latest_probe: The latest probe that could tell the tiers, as a record.
+        latest_probe: The latest probe that read Massive's market status, as a record.
         probed_at: When the latest probe ran, whatever its answer.
-        retries: Probes in a row that could not tell the tiers.
-        not_before: No group starts before this (the pause after a probe).
-        reminded: The New York date the flat-files reminder was last printed, ISO.
+        retries: Probes in a row that could not read the market status.
         finished_since_pack: Whether an attempt finished since the last pack.
     """
 
     latest_probe: dict[str, Any] | None = None
     probed_at: datetime | None = None
     retries: int = 0
-    not_before: datetime | None = None
-    reminded: str = ""
     finished_since_pack: bool = False

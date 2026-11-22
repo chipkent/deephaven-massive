@@ -10,6 +10,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import pytest
+
 from deephaven_massive._config import NO_ACK_RESEND
 from deephaven_massive._enums import AssetClass
 from deephaven_massive._ingest import subscriptions
@@ -24,8 +26,6 @@ from deephaven_massive._massive import Status, StatusKind
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-
-    import pytest
 
 
 # --- Subscriptions: the reconcile loop alone ---------------------------------------------------
@@ -90,6 +90,10 @@ class Loop:
     changes: list[tuple[int, int, int, int]]
 
 
+URL = "wss://socket.test/stocks"
+"""The connection URL each WARNING of the tests' subscriptions starts with."""
+
+
 def make_loop(*, cap: int | None = None) -> Loop:
     sender, timers = FakeSender(), FakeTimers()
     refused: list[tuple[tuple[str, ...], str]] = []
@@ -101,6 +105,7 @@ def make_loop(*, cap: int | None = None) -> Loop:
         cap=cap,
         on_refused=lambda topics, message: refused.append((topics, message)),
         on_change=lambda: changes.append(subs.counts()),
+        url=URL,
     )
     return Loop(subs, sender, timers, refused, changes)
 
@@ -165,7 +170,13 @@ def test_an_unparsed_acknowledgement_acknowledges_the_step_and_warns_once(
         loop.subs.reconcile()
         loop.subs.status(ack())
     assert loop.subs.counts() == (3, 3, 0, 0)
-    assert len([r for r in caplog.records if "named no topic" in r.message]) == 1
+    unnamed = [r.getMessage() for r in caplog.records if "without naming it" in r.getMessage()]
+    assert unnamed == [
+        (
+            f"{URL}: Massive confirmed a subscription without naming it, so the library takes it "
+            "as confirming every subscription it sent last."
+        )
+    ]
 
 
 def test_removed_topics_are_unsubscribed_after_the_step() -> None:
@@ -233,6 +244,58 @@ def test_a_refused_wildcard_keeps_the_explicit_topics() -> None:
     assert loop.subs.counts() == (1, 1, 0, 0)
 
 
+@pytest.mark.parametrize("end", ["", ".", ", try later"])
+@pytest.mark.parametrize(
+    ("combo", "shorter"),
+    [("T.CL:BF Q6-U6-V6", "T.CL:BF Q6-U6"), ("T.1Y:SA 03M F6", "T.1Y:SA 03M")],
+    ids=["hyphen", "space"],
+)
+def test_a_refusal_names_a_futures_combo_topic_with_spaces(
+    combo: str, shorter: str, end: str
+) -> None:
+    # The protocol reads words, so it names only the combo's first word; the topic held whole
+    # in the message is the one refused, and a shorter combo inside it is not.
+    loop = make_loop()
+    loop.subs.add([combo, shorter, "T.ESZ5"])
+    loop.subs.opened(1)
+    loop.sender.take()
+    message = f"not authorized: {combo}{end}"
+    loop.subs.status(refusal(combo.partition(" ")[0], message=message))
+    assert loop.refused == [((combo,), message)]
+
+
+def test_a_refusal_naming_a_combo_and_a_longer_one_refuses_both() -> None:
+    # The longer topic wins only where the two overlap: the shorter one, named on its own
+    # elsewhere in the message, is refused too.
+    combo, longer = "T.1Y:SA 03M", "T.1Y:SA 03M F6"
+    loop = make_loop()
+    loop.subs.add([combo, longer])
+    loop.subs.opened(1)
+    loop.sender.take()
+    message = f"not authorized: {longer}, {combo}"
+    loop.subs.status(refusal("T.1Y:SA", message=message))
+    assert loop.refused == [((combo, longer), message)]
+
+
+@pytest.mark.parametrize("acked", [True, False], ids=["unsubscribed", "in-flight"])
+def test_a_late_refusal_of_a_removed_combo_spares_the_shorter_one(acked: bool) -> None:
+    # The longer combo leaves before Massive's refusal of it arrives, either after its
+    # unsubscription went out or while the step that sent it still awaits the shorter one.
+    combo, longer = "T.1Y:SA 03M", "T.1Y:SA 03M F6"
+    loop = make_loop()
+    loop.subs.add([combo, longer])
+    loop.subs.opened(1)
+    if acked:
+        loop.subs.status(ack(combo))
+    loop.subs.remove([longer])
+    loop.subs.reconcile()
+    assert loop.sender.take()[-1] == (
+        ("unsubscribe", 1, (longer,)) if acked else ("subscribe", 1, (combo, longer))
+    )
+    loop.subs.status(refusal("T.1Y:SA", message=f"not authorized: {longer}"))
+    assert loop.refused == []
+
+
 def test_removing_a_wildcard_waits_for_the_explicit_topics() -> None:
     loop = make_loop()
     loop.subs.add(["T.*", "T.AAPL", "T.MSFT", "T.IBM"])
@@ -288,10 +351,9 @@ def test_a_missing_acknowledgement_is_resent_once_then_counted_without_a_reconne
     (record,) = caplog.records
     assert record.levelno == logging.WARNING
     assert record.getMessage() == (
-        "generation 1: no acknowledgement from Massive after 10.0 s and one re-send for the "
-        "topics 2 [T.AAPL, T.IBM]; they stay subscribed and are re-sent every 60 s, they count "
-        "in NoAckTopics of m.connections() and in their streams' Error, and the connection is "
-        "not reconnected for them"
+        f"{URL}: Massive has not confirmed the subscriptions T.AAPL and T.IBM after 10 s and "
+        "one re-send, so their live tables may miss rows. m.problems() lists them until "
+        "Massive confirms. Nothing to do: the library re-sends them every 60 s."
     )
 
 
@@ -851,3 +913,10 @@ def test_a_refused_contract_frees_its_place_under_the_cap() -> None:
     loop.subs.status(refusal("T.O:A"))
     assert loop.subs.admitted == {"T.O:B"}
     assert loop.sender.take() == [("subscribe", 1, ("T.O:B",))]
+
+
+def test_a_status_of_a_kind_with_no_rule_is_a_defect() -> None:
+    # Every kind has its rule; a new one fails until it has, never changes nothing unseen.
+    loop = make_loop()
+    with pytest.raises(AssertionError):
+        loop.subs.status(Status(kind="BOGUS", message="x"))  # type: ignore[arg-type]  # the point: refused at run time

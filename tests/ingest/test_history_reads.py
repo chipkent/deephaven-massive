@@ -3,36 +3,41 @@
 The flat-file read and the REST transport are fakes here: the files answer a scripted
 `FlatFileRead` (or refusal), and REST records each call and returns no rows. The reads through
 the real transports are tested in `tests/ingest/test_flatfiles.py`, and through `history()` in
-`tests/test_query.py`.
+`tests/queries/test_history.py`.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
+from typing_extensions import override
 
 import deephaven_massive as dm
-from deephaven_massive import _session
+from deephaven_massive import _massive, _session
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.history_source import history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import Timespan
+from deephaven_massive._errors import RowDataError
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
+from deephaven_massive._log_limits import LoggedKeys
+from deephaven_massive._massive import RowFault
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import (
-    FailureKind,
     FlatFileRead,
     SymbolFailure,
     SymbolOutcome,
     SymbolRows,
 )
+from deephaven_massive._tables.withheld import Withheld, WithheldGroup
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -47,6 +52,7 @@ TRADES = _session.CATALOG.by_name["stocks.trades"]
 BARS = _session.CATALOG.by_name["stocks.bars"]
 """Daily bars, which REST reads over the call's own window."""
 VALUES = _session.CATALOG.by_name["indices.values"]
+INDEX_BARS = _session.CATALOG.by_name["indices.bars"]
 """A dataset only the flat files serve."""
 MONDAY, TUESDAY = date(2025, 3, 3), date(2025, 3, 4)
 
@@ -96,6 +102,7 @@ class _Rest:
         window: HistoryWindow,
         *,
         call: int,
+        tally: object,
         stop: object = None,
         days: tuple[date, ...] | None = None,
     ) -> Table:
@@ -111,14 +118,18 @@ class _Rest:
         *,
         symbols: Sequence[str],
         call: int,
+        tally: object,
         stop: object = None,
     ) -> dict[str, SymbolOutcome]:
         # A row a symbol on the read's first and last day; a symbol in `failing` fails.
         self.by_symbol.append((request.start, request.end, tuple(symbols)))
         self.nows.append(window.now)
-        days = sorted({cast("date", request.start), cast("date", request.end)})
+        start, end = request.start, request.end
+        assert isinstance(start, date)
+        assert isinstance(end, date)
+        days = sorted({start, end})
         return {
-            symbol: SymbolFailure(self.failing[symbol], FailureKind.TRANSIENT)
+            symbol: SymbolFailure(self.failing[symbol])
             if symbol in self.failing
             else SymbolRows(_rows(self.session, [symbol], *days, spec=spec))
             for symbol in symbols
@@ -149,7 +160,7 @@ def _read(
         request,
         window,
         core=session._core,
-        files=cast("FlatFileHistory", files),
+        files=files,
         dates=(MONDAY, TUESDAY),
         call=1,
         stop=None,
@@ -191,8 +202,8 @@ def test_the_days_the_files_lack_are_read_from_rest_one_by_one(
     assert served == "Read from flat files, and from REST for 2025-03-04, whose files are missing."
     (message,) = caplog.messages
     assert message.startswith(
-        "stocks.trades history: AUTO read REST because the flat files are missing for these "
-        "days: 1 [2025-03-04]"
+        "stocks.trades history: Massive has no flat files for 2025-03-04. The read took those "
+        "rows from REST instead."
     )
 
 
@@ -222,7 +233,7 @@ def test_a_missing_day_read_later_keeps_the_call_s_instant(
         request,
         window,
         core=massive_session._core,
-        files=cast("FlatFileHistory", files),
+        files=files,
         dates=(MONDAY, TUESDAY),
         call=1,
         stop=None,
@@ -231,38 +242,89 @@ def test_a_missing_day_read_later_keeps_the_call_s_instant(
     assert rest.nows == [call]
 
 
-@pytest.mark.parametrize(("spec", "forced"), [(TRADES, True), (VALUES, False)])
+@pytest.mark.parametrize(
+    ("spec", "forced", "remedy"),
+    [
+        (
+            TRADES,
+            True,
+            (
+                "Call history() again later, or pass source=dm.HistorySource.REST to read the day "
+                "from REST."
+            ),
+        ),
+        (
+            VALUES,
+            False,
+            (
+                "REST cannot serve this read, since indices.values has no REST history. Call "
+                "history() again later."
+            ),
+        ),
+    ],
+)
 def test_a_file_not_published_yet_raises_where_rest_may_not_serve_it(
-    *, massive_session: dm.MassiveSession, rest: _Rest, spec: DatasetSpec, forced: bool
+    *,
+    massive_session: dm.MassiveSession,
+    rest: _Rest,
+    spec: DatasetSpec,
+    forced: bool,
+    remedy: str,
 ) -> None:
     files = _files(massive_session, spec, unread=(TUESDAY,))
-    with pytest.raises(
-        dm.MassiveError, match=r"the flat file for 2025-03-04 is not published"
-    ) as info:
+    with pytest.raises(dm.MassiveError) as info:
         _read(massive_session, files, spec, forced=forced)
     assert files.inferred == [True]
-    remedy = "or read REST with" if forced else "REST cannot serve this read"
-    assert remedy in str(info.value)
+    assert str(info.value) == (
+        f"{spec.name}: Massive has not published the flat file for 2025-03-04 yet. Massive "
+        "usually publishes a day's flat files by about 11:00 ET the next day, but the time "
+        f"varies. {remedy}"
+    )
     assert rest.calls == []
 
 
-@pytest.mark.parametrize(("spec", "remedy"), [(TRADES, "read REST"), (VALUES, "end the range")])
+@pytest.mark.parametrize(
+    ("spec", "remedy"),
+    [
+        (
+            TRADES,
+            (
+                "Pass source=dm.HistorySource.REST to read them from REST, or end the range before "
+                "them."
+            ),
+        ),
+        (
+            VALUES,
+            (
+                "REST cannot serve this read, since indices.values has no REST history. End the "
+                "range before them."
+            ),
+        ),
+    ],
+)
 def test_files_that_will_never_appear_raise(
     *, massive_session: dm.MassiveSession, rest: _Rest, spec: DatasetSpec, remedy: str
 ) -> None:
     files = _files(massive_session, spec, absent=(TUESDAY,))
-    with pytest.raises(dm.MassiveError, match=r"no flat file exists for 2025-03-04") as info:
+    with pytest.raises(dm.MassiveError) as info:
         _read(massive_session, files, spec, forced=True)
-    assert f"To read them, {remedy}" in str(info.value)
+    assert str(info.value) == (
+        f"{spec.name}: Massive has no flat file for 2025-03-04, nor for any later day up to a "
+        "week after the range. Massive publishes a day's file the next day, so these files will "
+        f"not appear. {remedy}"
+    )
 
 
 def test_a_refusal_names_rest_when_rest_could_serve_the_read(
     massive_session: dm.MassiveSession, rest: _Rest
 ) -> None:
-    refused = dm.EntitlementError("no files", status=403, request_id="r1")
+    refused = dm.EntitlementError("Massive refused the files.", status=403, request_id="r1")
     with pytest.raises(dm.EntitlementError) as info:
         _read(massive_session, _Files(refused), forced=True)
-    assert str(info.value).startswith("no files; REST serves this read too")
+    assert str(info.value) == (
+        "Massive refused the files. To read from REST instead, pass source=dm.HistorySource.REST "
+        "to history()."
+    )
     assert (info.value.status, info.value.request_id) == (403, "r1")
     with pytest.raises(dm.EntitlementError) as unchanged:
         _read(massive_session, _Files(refused), VALUES)
@@ -291,7 +353,13 @@ def test_sessions_a_futures_read_may_miss_are_named(
     assert served is None
     assert lacks is not None
     assert lacks.startswith("Session(s) 2025-03-03 may be incomplete")
-    assert "rows of session(s) 2025-03-03 may sit in a file outside the range" in caplog.text
+    assert caplog.messages == [
+        (
+            "stocks.trades history: Massive's flat files hold rows of sessions other than their "
+            "own day's, so rows of 2025-03-03 may sit in a file outside the range and be missing. "
+            "To include them, read a wider range of dates, or by datetimes."
+        )
+    ]
 
 
 def test_days_taken_for_holidays_are_named_on_the_table(
@@ -335,10 +403,11 @@ def _by_symbol(
         request,
         window,
         core=session._core,
-        files=cast("FlatFileHistory", _Files(answer)),
+        files=_Files(answer),
         symbols=["MSFT", "AAPL", "MSFT"],
         dates=(MONDAY, TUESDAY),
         call=1,
+        logged=LoggedKeys(),
         stop=None,
         forced=forced,
     )
@@ -414,7 +483,7 @@ def test_a_failed_scan_fails_every_symbol_with_one_error(
         massive_session, _monday_files(massive_session, unread=(TUESDAY,)), forced=True
     )
     assert {str(o.error)[:40] for o in late.values() if isinstance(o, SymbolFailure)} == {
-        "stocks.trades: the flat file for 2025-03"
+        "stocks.trades: Massive has not published"
     }
     assert rest.by_symbol == []
 
@@ -446,18 +515,39 @@ def test_the_flat_file_transport_reads_by_symbol_and_skips_an_empty_window(
         return _monday_files(massive_session)
 
     monkeypatch.setattr(FlatFileHistory, "history", scan)
-    files = FlatFileHistory(massive_session._core, cast("Any", None))
+    unread = _massive.FlatFileClient(  # never read: `history` is patched
+        access_key_id="k",
+        secret_access_key="s",  # noqa: S106  # fake credential
+        endpoint_url="http://127.0.0.1:9",
+        bucket="b",
+        max_pool=1,
+    )
+    files = FlatFileHistory(massive_session._core, unread)
     request = Request(start=MONDAY, end=MONDAY)
     window = history_window(TRADES, request, start=MONDAY, end=MONDAY)
     out = files.history_by_symbol(
-        TRADES, request, window, symbols=["MSFT", "AAPL"], dates=(MONDAY,), call=7, forced=False
+        TRADES,
+        request,
+        window,
+        symbols=["MSFT", "AAPL"],
+        dates=(MONDAY,),
+        call=7,
+        forced=False,
+        logged=LoggedKeys(),
     )
     assert scans == [("AAPL", "MSFT")]
     assert [_dates(o) for o in out.values()] == [["2025-03-03"], ["2025-03-03"]]
     instant = datetime(2025, 3, 3, 5, tzinfo=UTC)
     empty = history_window(TRADES, request, start=instant, end=instant, now=instant)
     nothing = files.history_by_symbol(
-        TRADES, request, empty, symbols=["AAPL"], dates=(), call=8, forced=False
+        TRADES,
+        request,
+        empty,
+        symbols=["AAPL"],
+        dates=(),
+        call=8,
+        forced=False,
+        logged=LoggedKeys(),
     )
     assert _dates(nothing["AAPL"]) == []
     assert len(scans) == 1
@@ -477,12 +567,173 @@ def test_a_missing_day_of_daily_bars_keeps_only_that_day_from_rest(
         request,
         window,
         core=massive_session._core,
-        files=cast("FlatFileHistory", files),
+        files=files,
         symbols=["AAPL"],
         dates=(MONDAY, TUESDAY),
         call=1,
+        logged=LoggedKeys(),
         stop=None,
         forced=False,
     )
     assert _dates(out["AAPL"]) == ["2025-03-03", "2025-03-04"]
     assert rest.by_symbol == [(MONDAY, TUESDAY, ("AAPL",))]
+
+
+def _lost(rows: int) -> Withheld:
+    # `rows` rows withheld for a price that is no number.
+    group = WithheldGroup(RowFault.UNCONVERTIBLE_VALUES, "AAPL", "AAPL", "Price", rows, "x")
+    return Withheld(pa.table({"x": pa.array([], pa.int64())}), (group,), "x")
+
+
+class _LostFiles(_Files):
+    # The flat files of `answer`, whose every row of the read was withheld.
+    @override
+    def history(self, *_: object, infer_holidays: bool, **kwargs: object) -> FlatFileRead:
+        tally = kwargs["tally"]
+        assert isinstance(tally, ReadTally)
+        tally.add(1, _lost(1), source="the flat files")
+        return super().history(infer_holidays=infer_holidays)
+
+
+def test_a_symbol_with_no_data_keeps_its_rows_when_the_read_fails(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The files hold no row of either symbol; REST withholds AAPL's only row of the missing
+    # day and answers HTTP 404 for MSFT. The read fails AAPL, and MSFT keeps its empty rows.
+    class Rest(_Rest):
+        @override
+        def history_by_symbol(
+            self, spec: DatasetSpec, *_: object, symbols: Sequence[str], tally: object, **__: object
+        ) -> dict[str, SymbolOutcome]:
+            assert isinstance(tally, ReadTally)
+            tally.add(1, _lost(1), source="GET /v3/trades/{stockTicker}")
+            empty = _rows(self.session, [], spec=spec)
+            return {s: SymbolRows(empty, no_data=s == "MSFT") for s in symbols}
+
+    monkeypatch.setattr(massive_session._core, "rest_transport", lambda: Rest(massive_session))
+    empty = _rows(massive_session, [], MONDAY)
+    out = _by_symbol(massive_session, FlatFileRead(((MONDAY, empty),), empty, (TUESDAY,)))
+    aapl, msft = out["AAPL"], out["MSFT"]
+    assert isinstance(aapl, SymbolFailure)
+    assert isinstance(aapl.error, RowDataError)
+    assert isinstance(msft, SymbolRows)
+    assert msft.no_data
+
+
+def test_a_rest_day_bar_of_a_files_day_counts_as_read(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every row of the files is withheld. REST reads day bars over the whole range: Monday's
+    # bar, which the call drops for the files' day, reads whole, and the missing Tuesday's is
+    # withheld. Massive sent a row of the call's window that read whole, so the call goes on.
+    class Rest(_Rest):
+        @override
+        def history(self, spec: DatasetSpec, *_: object, tally: object, **__: object) -> Table:
+            assert isinstance(tally, ReadTally)
+            tally.add(2, _lost(1), source="GET /v2/aggs/...")
+            return _rows(self.session, ["AAPL"], MONDAY, spec=spec)
+
+    monkeypatch.setattr(massive_session._core, "rest_transport", lambda: Rest(massive_session))
+    request = Request(
+        symbols=("AAPL",), start=MONDAY, end=TUESDAY, timespan=Timespan.DAY, multiplier=1
+    )
+    window = history_window(BARS, request, start=MONDAY, end=TUESDAY)
+    empty = _rows(massive_session, [], spec=BARS)
+    files = _LostFiles(FlatFileRead(((MONDAY, empty),), empty, (TUESDAY,)))
+    table, _, _ = read_history(
+        BARS,
+        request,
+        window,
+        core=massive_session._core,
+        files=files,
+        dates=(MONDAY, TUESDAY),
+        call=1,
+        stop=None,
+        forced=False,
+    )
+    assert table.size == 0
+
+
+def test_a_symbol_whose_file_rows_were_all_withheld_fails_with_the_read(
+    massive_session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The files' rows were all withheld, so an empty file table is no sign of no data: AAPL,
+    # whose REST days Massive answered HTTP 404 for, fails with the read.
+    class Rest(_Rest):
+        @override
+        def history_by_symbol(
+            self, spec: DatasetSpec, *_: object, symbols: Sequence[str], tally: object, **__: object
+        ) -> dict[str, SymbolOutcome]:
+            empty = _rows(self.session, [], spec=spec)
+            return {s: SymbolRows(empty, no_data=True) for s in symbols}
+
+    monkeypatch.setattr(massive_session._core, "rest_transport", lambda: Rest(massive_session))
+    empty = _rows(massive_session, [], MONDAY)
+    request = Request(start=MONDAY, end=TUESDAY)
+    window = history_window(TRADES, request, start=MONDAY, end=TUESDAY)
+    out = read_history_by_symbol(
+        TRADES,
+        request,
+        window,
+        core=massive_session._core,
+        files=_LostFiles(FlatFileRead(((MONDAY, empty),), empty, (TUESDAY,))),
+        symbols=["AAPL"],
+        dates=(MONDAY, TUESDAY),
+        call=1,
+        logged=LoggedKeys(),
+        stop=None,
+        forced=False,
+    )
+    failed = out["AAPL"]
+    assert isinstance(failed, SymbolFailure)
+    assert isinstance(failed.error, RowDataError)
+
+
+def test_a_missing_index_minute_file_is_read_from_rest_as_the_chicago_day_it_holds(
+    massive_session: dm.MassiveSession, rest: _Rest
+) -> None:
+    # An index minute file holds its date's Chicago day, 01:00 to 01:00 New York time, so
+    # Tuesday's missing file is read from REST as those instants, clipped to the New York days
+    # asked for: Monday's file, which was read, already holds Tuesday 00:00 to 01:00.
+    request = Request(start=MONDAY, end=TUESDAY, timespan=Timespan.MINUTE, multiplier=1)
+    window = history_window(INDEX_BARS, request, start=MONDAY, end=TUESDAY)
+    empty = _rows(massive_session, [], spec=INDEX_BARS)
+    files = _Files(FlatFileRead(((MONDAY, empty),), empty, (TUESDAY,)))
+    read_history(
+        INDEX_BARS,
+        request,
+        window,
+        core=massive_session._core,
+        files=files,
+        dates=(date(2025, 3, 2), MONDAY, TUESDAY),
+        call=1,
+        stop=None,
+        forced=False,
+    )
+    tuesday_chicago = datetime(2025, 3, 4, 6, tzinfo=UTC)  # 01:00 New York
+    wednesday_new_york = datetime(2025, 3, 5, 5, tzinfo=UTC)  # the range's end
+    assert rest.calls == [(tuesday_chicago, wednesday_new_york, None)]
+
+
+def test_a_missing_first_index_minute_file_is_read_from_rest_for_the_first_hour_only(
+    massive_session: dm.MassiveSession, rest: _Rest
+) -> None:
+    # The file before the range's first day holds only its hour from 00:00 to 01:00 New York.
+    request = Request(start=TUESDAY, end=TUESDAY, timespan=Timespan.MINUTE, multiplier=1)
+    window = history_window(INDEX_BARS, request, start=TUESDAY, end=TUESDAY)
+    empty = _rows(massive_session, [], spec=INDEX_BARS)
+    files = _Files(FlatFileRead(((TUESDAY, empty),), empty, (MONDAY,)))
+    read_history(
+        INDEX_BARS,
+        request,
+        window,
+        core=massive_session._core,
+        files=files,
+        dates=(MONDAY, TUESDAY),
+        call=1,
+        stop=None,
+        forced=False,
+    )
+    tuesday_new_york = datetime(2025, 3, 4, 5, tzinfo=UTC)
+    tuesday_chicago = datetime(2025, 3, 4, 6, tzinfo=UTC)
+    assert rest.calls == [(tuesday_new_york, tuesday_chicago, None)]

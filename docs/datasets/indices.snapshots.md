@@ -7,7 +7,7 @@ The current state of each index: its level, its session so far, and its status.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.indices.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None)
+m.indices.snapshots(symbols, *, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -28,6 +28,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"ticker_gte": "I:N"}`. Keys: `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -45,47 +46,45 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "Ticker of asset queried." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `Value` | double | Value of Index. |
 | `Error` | String | The error while looking for this ticker. |
 | `LastUpdated` | Instant | The nanosecond timestamp of when this information was updated. |
 | `MarketStatus` | String | The market status for the market that trades this ticker. |
 | `Message` | String | The error message while looking for this ticker. |
+| `Name` | String | Name of Index. |
+| `TodaysChange` | double | The value of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionOpen` | double | The open value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionHigh` | double | The highest value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionLow` | double | The lowest value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionClose` | double | The closing value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
-| `SessionChange` | double | The value of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
-| `SessionChangePercent` | double | The percent of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionPreviousClose` | double | The closing value for the index of previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
-| `Name` | String | Name of Index. |
+| `TodaysChangePerc` | double | The percent of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `Timeframe` | String | The time relevance of the data. |
 | `Type` | String | The indices market. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `Value` | `value` |
 | `Error` | `error` |
 | `LastUpdated` | `last_updated` |
 | `MarketStatus` | `market_status` |
 | `Message` | `message` |
+| `Name` | `name` |
+| `TodaysChange` | `session.change` |
 | `SessionOpen` | `session.open` |
 | `SessionHigh` | `session.high` |
 | `SessionLow` | `session.low` |
 | `SessionClose` | `session.close` |
-| `SessionChange` | `session.change` |
-| `SessionChangePercent` | `session.change_percent` |
 | `SessionPreviousClose` | `session.previous_close` |
-| `Name` | `name` |
+| `TodaysChangePerc` | `session.change_percent` |
 | `Timeframe` | `timeframe` |
 | `Type` | `type` |
 | `TimestampInsert` |  |
@@ -98,4 +97,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

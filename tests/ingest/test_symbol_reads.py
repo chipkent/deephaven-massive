@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 import pytest
@@ -28,23 +29,25 @@ from deephaven_massive._errors import (
     LIBRARY_BUG,
     CutShortError,
     EntitlementError,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
     RowDataError,
-    UnlistedPairError,
+    UnavailableSymbolError,
+    session_closed,
 )
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.symbol_reads import (
     UnsupportedParameterError,
-    failure_kind,
     split_by_symbol,
     symbol_outcomes,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._namespaces import futures
+from deephaven_massive._tables import problem_reporter
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
+from deephaven_massive._tables.read_tally import ReadTally
+from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
+from deephaven_massive.namespaces import _futures as futures
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
@@ -57,6 +60,17 @@ if TYPE_CHECKING:
 
 LOGGER = "deephaven_massive._ingest.symbol_reads"
 REST_LOGGER = "deephaven_massive._ingest.rest"
+
+
+def alarms(caplog: pytest.LogCaptureFixture) -> list[str]:
+    # The problem reporter's WARNINGs: the first problem of each cause on each read.
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == problem_reporter.__name__ and r.levelno == logging.WARNING
+    ]
+
+
 R = Transport.REST
 NS = 10**9
 
@@ -134,7 +148,9 @@ def session(
 
 def _rows(outcome: SymbolOutcome) -> list[dict[str, Any]]:
     assert isinstance(outcome, SymbolRows)
-    return cast("list[dict[str, Any]]", dh_arrow.to_arrow(outcome.table).to_pylist())
+    rows = dh_arrow.to_arrow(outcome.table).to_pylist()
+    assert isinstance(rows, list)
+    return rows
 
 
 def _failure(outcome: SymbolOutcome) -> SymbolFailure:
@@ -154,7 +170,8 @@ def _fetch(
     m: dm.MassiveSession, spec: DatasetSpec, symbols: list[str], *, adjusted: bool | None = None
 ) -> Mapping[str, SymbolOutcome]:
     rest = m._core.rest_transport()
-    return rest.fetch_by_symbol(spec, Request(adjusted=adjusted), symbols=symbols, call=7)
+    asked = Request(adjusted=adjusted, on_error=m._core.policy)
+    return rest.fetch_by_symbol(spec, asked, symbols=symbols, call=7)
 
 
 def _history(
@@ -165,8 +182,8 @@ def _history(
     adjusted: bool | None = None,
 ) -> Mapping[str, SymbolOutcome]:
     rest = m._core.rest_transport()
-    asked = Request(start=MONDAY, end=MONDAY, adjusted=adjusted)
-    return rest.history_by_symbol(TRADES, asked, window, symbols=symbols, call=7)
+    asked = Request(start=MONDAY, end=MONDAY, adjusted=adjusted, on_error=m._core.policy)
+    return rest.history_by_symbol(TRADES, asked, window, symbols=symbols, call=7, tally=ReadTally())
 
 
 def _monday() -> HistoryWindow:
@@ -178,27 +195,34 @@ def _monday() -> HistoryWindow:
 
 
 @pytest.mark.parametrize(
-    ("error", "kind"),
+    ("error", "retryable"),
     [
-        (MassiveError("rate limited: ...", status=429), FailureKind.TRANSIENT),
-        (MassiveError("HTTP 503", status=503), FailureKind.TRANSIENT),
-        (MassiveError("connection reset"), FailureKind.TRANSIENT),
-        (CutShortError("AAPL's data was cut short", status=404), FailureKind.TRANSIENT),
+        (MassiveError("rate limited: ...", status=429), True),
+        (MassiveError("HTTP 503", status=503), True),
+        (MassiveError("connection reset", source=ErrorSource.NETWORK), True),
+        # A certificate this machine does not trust fails alike until its settings change.
+        (MassiveError("TLS failed", source=ErrorSource.USER), False),
+        (CutShortError("AAPL's data was cut short", status=404), True),
+        # S3's RequestTimeout on a flat-file scan: an HTTP 400 that means try again.
+        (
+            MassiveError("HTTP 400 (RequestTimeout)", status=400, is_retryable=True),
+            True,
+        ),
         # Any other 404, such as one for a request of several symbols or of none (a path
         # Massive retired), would answer the same again.
-        (MassiveError("HTTP 404 from GET /v1/retired", status=404), FailureKind.PERMANENT),
-        (EntitlementError("not in the plan", status=403), FailureKind.PERMANENT),
-        (RowDataError("every row was dropped"), FailureKind.PERMANENT),
-        (UnsupportedParameterError("does not take ['adjusted']"), FailureKind.PERMANENT),
-        (UnlistedPairError("X:NOPEUSD is not listed"), FailureKind.PERMANENT),
-        (MassiveError("unreadable", cause=ErrorCause.LIBRARY_DEFECT), FailureKind.PERMANENT),
-        (MassiveError("HTTP 400", status=400), FailureKind.PERMANENT),
+        (MassiveError("HTTP 404 from GET /v1/retired", status=404), False),
+        (EntitlementError("not in the plan", status=403), False),
+        (RowDataError("every row was dropped"), False),
+        (UnsupportedParameterError("does not take ['adjusted']"), False),
+        (UnavailableSymbolError("Massive has no data for X:NOPEUSD"), False),
+        (MassiveError("unreadable", source=ErrorSource.LIBRARY), False),
+        (MassiveError("HTTP 400", status=400), False),
     ],
 )
-def test_a_failure_is_transient_only_when_its_cause_may_pass(
-    error: MassiveError, kind: FailureKind
+def test_a_failure_is_retryable_only_when_its_cause_may_pass(
+    error: MassiveError, *, retryable: bool
 ) -> None:
-    assert failure_kind(error) is kind
+    assert error.is_retryable is retryable
 
 
 # --- fetch by symbol ----------------------------------------------------------------------------
@@ -221,29 +245,25 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
     nvda, tsla = _failure(out["NVDA"]), _failure(out["TSLA"])
     assert nvda.error is tsla.error
     assert isinstance(nvda.error, EntitlementError)
-    assert nvda.kind is FailureKind.PERMANENT
+    assert not nvda.error.is_retryable
     # The row of a symbol no one asked for belongs to no symbol's read.
     unowned = [r for r in caplog.records if "name none of those symbols" in r.getMessage()]
     assert [(r.levelno, r.getMessage()) for r in unowned] == [
         (
             logging.WARNING,
             (
-                "stocks.dividends: 1 of the 3 rows Massive returned from /stocks/v1/dividends "
-                "for 2 [AAPL, MSFT] name none of those symbols, so no symbol's read owns them "
-                "and they are left out"
+                "stocks.dividends: 1 of the 3 rows Massive returned for AAPL and MSFT name none "
+                "of those symbols, so no symbol's read owns them and they are left out."
             ),
         )
     ]
     # The shared failure is logged once, at DEBUG: it is expected, and the caller reports it.
-    failed = [r for r in caplog.records if "fails this symbol alone" in r.getMessage()]
+    failed = [r for r in caplog.records if "failed alone" in r.getMessage()]
     assert [r.levelno for r in failed] == [logging.DEBUG, logging.DEBUG]
-    assert (
-        failed[0]
-        .getMessage()
-        .startswith(
-            "call 7 stocks.dividends TSLA: the read from REST failed (permanent), which fails this "
-            "symbol alone: stocks.dividends: the Stocks subscription of your plan does not include "
-        )
+    assert failed[0].getMessage() == (
+        "call 7 stocks.dividends TSLA failed alone, in its read from REST: Massive refused this "
+        "read for the Stocks subscription. Massive answered GET /stocks/v1/dividends?limit=5000&"
+        'ticker.any_of=NVDA%2CTSLA on 127.0.0.1 with HTTP 403: "upgrade".'
     )
 
 
@@ -289,11 +309,11 @@ def test_a_row_listing_two_named_tickers_goes_to_each(
     assert [r["BenzingaId"] for r in _rows(out["MSFT"])] == [1, 2]
 
 
-def test_a_row_listing_none_of_the_named_tickers_keeps_a_null_symbol(
+def test_a_row_listing_none_of_the_named_tickers_belongs_to_no_symbol(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A static read keeps such a row with a null Symbol; a read by symbol keeps it too, with
-    # the request's first symbol, and the listing step logs its WARNING.
+    # The row is about none of the request's symbols, so it is left out, as a row outside the
+    # window is, and the listing step logs its WARNING.
     fake_rest.reply(
         BENZINGA_NEWS_PATH,
         Reply(
@@ -307,12 +327,18 @@ def test_a_row_listing_none_of_the_named_tickers_keeps_a_null_symbol(
     )
     with caplog.at_level(logging.DEBUG):
         out = _fetch(session, LISTED, ["MSFT", "AAPL"])
-    assert [(r["BenzingaId"], r["Symbol"]) for r in _rows(out["AAPL"])] == [(2, None)]
+    assert _rows(out["AAPL"]) == []
     assert [(r["BenzingaId"], r["Symbol"]) for r in _rows(out["MSFT"])] == [(1, "MSFT")]
-    listing = [r for r in caplog.records if "list none of the request's tickers" in r.getMessage()]
-    assert [r.levelno for r in listing] == [logging.WARNING]
-    assert "name none of those symbols" not in caplog.text
-    assert "null Symbol; they are kept with AAPL" in caplog.text
+    listing = [r for r in caplog.records if "lists none of the requested" in r.getMessage()]
+    assert [(r.levelno, r.getMessage()) for r in listing] == [
+        (
+            logging.WARNING,
+            (
+                "partners.benzinga.news: Massive sent 1 rows from /benzinga/v2/news whose Tickers "
+                "lists none of the requested tickers AAPL and MSFT, so they are left out."
+            ),
+        )
+    ]
 
 
 def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
@@ -322,12 +348,30 @@ def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
     with caplog.at_level(logging.WARNING, LOGGER):
         out = _fetch(session, NEWS, ["AAPL"])
     assert _rows(out["AAPL"]) == []
-    assert "returned from /v2/reference/news for no symbol name none" in caplog.text
+    assert caplog.messages == [
+        (
+            "reference.news: 1 of the 1 rows Massive returned for no symbol name none of those "
+            "symbols, so no symbol's read owns them and they are left out."
+        )
+    ]
 
 
-def test_a_crypto_pair_massive_does_not_list_fails_alone(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_a_crypto_pair_massive_does_not_list_has_no_rows_or_fails_alone_under_raise(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # A pair Massive has no data for, as a 404 is: no rows under LOG and IGNORE, logged once at
+    # DEBUG and warned of under LOG only; its own failure under RAISE.
+    core = session._core
+    replaced = dataclasses.replace(
+        core.config, on_error=dm.ErrorPolicy(unavailable_symbols=setting)
+    )
+    monkeypatch.setattr(core, "config", replaced)
     listed = {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"}
     fake_rest.reply(TICKERS_PATH, Reply(envelope([listed])), Reply(envelope([])))
     last = {
@@ -336,26 +380,54 @@ def test_a_crypto_pair_massive_does_not_list_fails_alone(
         "last": {"price": 90000.5, "timestamp": 1741000000000},
     }
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(last))
-    out = _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
+    with caplog.at_level(logging.DEBUG, logger=REST_LOGGER):
+        out = _fetch(session, CRYPTO_LAST, ["X:NOPEUSD", "X:BTCUSD"])
     assert [r["Symbol"] for r in _rows(out["X:BTCUSD"])] == ["X:BTCUSD"]
-    nope = _failure(out["X:NOPEUSD"])
-    assert isinstance(nope.error, UnlistedPairError)
-    assert nope.kind is FailureKind.PERMANENT
+    skipped = [
+        (r.levelno, r.getMessage()) for r in caplog.records if "are left out" in r.getMessage()
+    ]
+    warned = alarms(caplog)
+    assert len(warned) == (1 if setting is dm.OnError.LOG else 0)
+    assert all(
+        "unavailable_symbols: X:NOPEUSD: Massive has no data for it (Massive's crypto ticker "
+        "list does not hold it)" in message
+        for message in warned
+    )
+    if setting is dm.OnError.RAISE:
+        assert skipped == []
+    else:
+        assert _rows(out["X:NOPEUSD"]) == []
+        assert skipped == [
+            (
+                logging.DEBUG,
+                (
+                    "crypto.last: Massive has no data for 1 [X:NOPEUSD (Massive's crypto "
+                    "ticker list does not hold it)], so they are left out"
+                ),
+            )
+        ]
+    if setting is dm.OnError.RAISE:
+        nope = _failure(out["X:NOPEUSD"])
+        assert isinstance(nope.error, UnavailableSymbolError)
+        assert str(nope.error) == (
+            "crypto.last: Massive has no data for X:NOPEUSD. Remove it, or, to read the others, "
+            "pass on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
+        )
+        assert not nope.error.is_retryable
     # No request was made for the pair the list does not hold.
     assert [p for p, _ in fake_rest.get_queries() if p != TICKERS_PATH] == [
         "/v1/last/crypto/BTC/USD"
     ]
 
 
-def test_a_parameter_the_path_does_not_take_fails_its_symbols_before_any_request(
+def test_a_parameter_the_path_does_not_take_raises_before_any_request(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"], adjusted=False)
-    aapl, msft = _failure(out["AAPL"]), _failure(out["MSFT"])
-    assert aapl.error is msft.error
-    assert isinstance(aapl.error, UnsupportedParameterError)
-    assert str(aapl.error) == "stocks.dividends: /stocks/v1/dividends does not take ['adjusted']"
-    assert aapl.kind is FailureKind.PERMANENT
+    # The call refuses such a parameter for every path its symbol table could reach, so a
+    # fetch read by symbol never fails one symbol for it.
+    with pytest.raises(ValueError, match=r"^stocks\.dividends does not take adjusted=False\.$"):
+        _fetch(session, DIVIDENDS, ["AAPL", "MSFT"], adjusted=False)
     assert fake_rest.get_queries() == []
 
 
@@ -378,7 +450,7 @@ def test_a_rejected_key_while_splitting_a_pair_fails_the_whole_read(
 def test_a_session_closed_during_the_read_fails_it(session: dm.MassiveSession) -> None:
     rest = session._core.rest_transport()
     session.close()
-    with pytest.raises(dm.MassiveError, match=r"^MassiveSession #\d+ is closed$"):
+    with pytest.raises(dm.MassiveError, match="^" + re.escape(session_closed()) + "$"):
         rest.fetch_by_symbol(DIVIDENDS, Request(), symbols=["AAPL"], call=7)
 
 
@@ -413,24 +485,30 @@ def test_each_symbol_s_history_ends_in_its_own_outcome(
         out = _history(session, symbols, _monday())
     assert [r["Symbol"] for r in _rows(out["AAPL"])] == ["AAPL"]
     assert _rows(out["MSFT"]) == []
-    kinds = {symbol: _failure(out[symbol]).kind for symbol in ["NVDA", "TSLA", "AMZN", "WMT"]}
-    assert kinds == {
-        "NVDA": FailureKind.PERMANENT,
-        "TSLA": FailureKind.TRANSIENT,
-        "AMZN": FailureKind.TRANSIENT,
-        "WMT": FailureKind.TRANSIENT,
+    retryable = {
+        symbol: _failure(out[symbol]).error.is_retryable
+        for symbol in ["NVDA", "TSLA", "AMZN", "WMT"]
+    }
+    assert retryable == {
+        "NVDA": False,
+        "TSLA": True,
+        "AMZN": True,
+        "WMT": True,
     }
     assert isinstance(_failure(out["AMZN"]).error, CutShortError)
-    assert "AMZN's data was cut short" in str(_failure(out["AMZN"]).error)
-    assert str(_failure(out["WMT"]).error).startswith("rate limited: ")
-    # MSFT's missing data warns as history() warns it; no failure warns.
+    assert str(_failure(out["AMZN"]).error).startswith(
+        "stocks.trades: the rows of AMZN were cut short after 1 page arrived. "
+    )
+    assert str(_failure(out["WMT"]).error).startswith("Massive answered GET ")
+    # MSFT's missing data warns as history() warns it, as a problem; no failure warns.
     warned = [r for r in caplog.records if r.name in {LOGGER, REST_LOGGER}]
-    assert [r.getMessage() for r in warned if r.levelno >= logging.WARNING] == [
-        (
-            "stocks.trades: no data for 1 [MSFT]: Massive answered HTTP 404 from "
-            "/v3/trades/{stockTicker}, so they are left out"
-        )
-    ]
+    assert [r.getMessage() for r in warned if r.levelno >= logging.WARNING] == []
+    (alarm,) = alarms(caplog)
+    assert alarm == (
+        "stocks.trades table 7: unavailable_symbols: MSFT: Massive has no data for it (HTTP 404 "
+        "from GET /v3/trades/MSFT) (at stocks.trades). m.problems() lists it and every later "
+        "unavailable_symbols problem of this table, which the log shows at DEBUG only."
+    )
 
 
 def test_a_history_read_made_after_the_clock_moved_keeps_the_call_s_rows(
@@ -450,7 +528,7 @@ def test_a_history_read_made_after_the_clock_moved_keeps_the_call_s_rows(
     before, after = int(call.timestamp()) * NS - 1, int(call.timestamp()) * NS + 1
     fake_rest.reply("/v3/trades/AAPL", Reply(envelope([_trade(before), _trade(after)])))
     rest = session._core.rest_transport()
-    out = rest.history_by_symbol(TRADES, asked, window, symbols=["AAPL"], call=7)
+    out = rest.history_by_symbol(TRADES, asked, window, symbols=["AAPL"], call=7, tally=ReadTally())
     assert len(_rows(out["AAPL"])) == 1
     [(_, query)] = fake_rest.get_queries(one_value=True)
     assert query["timestamp.lt"] == str(int(call.timestamp()) * NS)
@@ -463,7 +541,9 @@ def test_an_empty_window_reads_nothing(
     window = history_window(TRADES, asked, start=MIDNIGHT, end=MIDNIGHT, now=MIDNIGHT)
     assert window.empty
     rest = session._core.rest_transport()
-    out = rest.history_by_symbol(TRADES, asked, window, symbols=["AAPL", "MSFT"], call=7)
+    out = rest.history_by_symbol(
+        TRADES, asked, window, symbols=["AAPL", "MSFT"], call=7, tally=ReadTally()
+    )
     assert [_rows(outcome) for outcome in out.values()] == [[], []]
     assert fake_rest.get_queries() == []
 
@@ -472,7 +552,7 @@ def test_a_history_parameter_the_path_does_not_take_fails_every_symbol(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     out = _history(session, ["AAPL", "MSFT"], _monday(), adjusted=False)
-    assert {_failure(o).kind for o in out.values()} == {FailureKind.PERMANENT}
+    assert not any(_failure(o).error.is_retryable for o in out.values())
     assert isinstance(_failure(out["AAPL"]).error, UnsupportedParameterError)
     assert fake_rest.get_queries() == []
 
@@ -511,9 +591,9 @@ def test_a_split_by_symbol_warns_about_rows_no_symbol_owns(
     assert [part.size for part in out.values()] == [0, 2, 1]
     assert caplog.messages == [
         (
-            "stocks.trades: 2 of the 5 rows read from flat files for 3 [NVDA, AAPL, MSFT] name "
-            "none of those symbols (or no symbol), so no symbol's read owns them and they are "
-            "left out"
+            "stocks.trades: 2 of the 5 rows read from flat files for NVDA, AAPL, and MSFT name "
+            "none of those symbols, or no symbol, so no symbol's read owns them and they are "
+            "left out."
         )
     ]
 
@@ -551,8 +631,8 @@ def test_a_table_without_the_dataset_s_columns_is_a_library_defect(
             source="flat files",
         )
     failure = _failure(out["AAPL"])
-    assert failure.kind is FailureKind.PERMANENT
-    assert failure.error.cause is ErrorCause.LIBRARY_DEFECT
+    assert not failure.error.is_retryable
+    assert failure.error.source is ErrorSource.LIBRARY
     assert str(failure.error) == (
         "stocks.trades: AAPL's rows from flat files lack Price; have Extra, which the dataset "
         f"does not; have Exchange as java.lang.String, not long. {LIBRARY_BUG}"
@@ -594,6 +674,33 @@ def test_each_value_is_read_alone_and_fails_alone(
     assert isinstance(_failure(out["NQ"]).error, EntitlementError)
 
 
+UNREADABLE_NQ = Reply(envelope([{"product_code": "NQ", "last_updated": "no time"}]))
+"""NQ's product, whose only row has an update time the library cannot read."""
+
+
+def test_a_value_whose_rows_are_all_unreadable_beside_one_read_whole_gets_no_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The values are one read: NQ's row is withheld, and the read goes on with ES's.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    fake_rest.reply(PRODUCTS_PATH, es, UNREADABLE_NQ)
+    out = _by_value(rest_session, ["ES", "NQ"])
+    assert [r["ProductCode"] for r in _rows(out["ES"])] == ["ES"]
+    assert _rows(out["NQ"]) == []
+
+
+def test_a_read_by_value_whose_rows_are_all_unreadable_fails_each_value(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    es = Reply(envelope([{"product_code": "ES", "last_updated": "no time"}]))
+    fake_rest.reply(PRODUCTS_PATH, es, UNREADABLE_NQ)
+    out = _by_value(rest_session, ["ES", "NQ"])
+    for value in ("ES", "NQ"):
+        error = _failure(out[value]).error
+        assert isinstance(error, RowDataError)
+        assert "could read none of the 2 rows" in str(error)
+
+
 def test_a_rejected_key_stops_a_read_by_value(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
@@ -609,5 +716,8 @@ def test_a_parameter_the_path_does_not_take_fails_each_value_before_any_request(
     out = _by_value(rest_session, ["ES"], adjusted=False)
     error = _failure(out["ES"]).error
     assert isinstance(error, UnsupportedParameterError)
-    assert str(error) == "futures.products: /futures/v1/products does not take ['adjusted']"
+    assert str(error) == (
+        "futures.products does not take adjusted=False. Leave that argument out, or read these "
+        "symbols in a call without it."
+    )
     assert fake_rest.get_queries() == []

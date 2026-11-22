@@ -7,7 +7,7 @@ The consensus of analyst ratings and price targets for each US stock, from Benzi
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.partners.benzinga.consensus_ratings(symbols, *, filters=None)
+m.partners.benzinga.consensus_ratings(symbols, *, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -24,6 +24,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | --- | --- |
 | [`symbols`](README.md#symbols) | US stock tickers. `dm.ALL` is refused; pass a list of tickers. |
 | [`filters`](README.md#filters) | The range of the ratings to count, such as `{"date_gte": "2026-01-01"}`; leave it out to count every rating. Keys: `date`, `date_any_of`, `date_gt`, `date_gte`, `date_lt`, `date_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -39,7 +40,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The requested ticker." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `BuyRatings` | long | The count of 'Buy' ratings from contributing analysts. |
 | `ConsensusPriceTarget` | double | The average price target across all analysts, rounded to 2 decimal places. |
 | `ConsensusRating` | String | The overall rating category determined by the average consensus weight. Possible values: 'strong_buy', 'buy', 'hold', 'sell', 'strong_sell'. |
@@ -56,14 +56,13 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `BuyRatings` | `buy_ratings` |
 | `ConsensusPriceTarget` | `consensus_price_target` |
 | `ConsensusRating` | `consensus_rating` |
@@ -86,4 +85,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

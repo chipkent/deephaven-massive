@@ -7,14 +7,15 @@ could drift from what a reader pastes:
 
 - `blocks`, `section_blocks`, and `intro_blocks` read a page's Python blocks, each a `Block`; a
   block fenced as `python continues` is the second step of an example, run in the namespace of
-  the block before it, and one fenced as `python skip-test` never runs.
+  the block before it, and one fenced as `python skip-test` never runs. `examples` groups a
+  page's blocks into its examples, each a block with the blocks that continue it.
 - `settings_commands` reads the README's shell commands that save the settings file, one block
   for the delayed plans and one for the real-time plans, and `write_settings_file` runs them.
 - `run_blocks` runs blocks as scripts, each as one console command, and `merged` and `forget`
   read and then drop the names they defined; `Console` runs them in one reader's console,
   where a later example rebinds the names of an earlier one.
 - `recorded_sessions` closes every session the examples opened, once they are done.
-- `FREE_SECTIONS`, `PAID_SECTIONS`, and `UNRUN_SECTIONS` name the README's examples the live run
+- `HISTORY_SECTIONS`, `LIVE_SECTIONS`, and `UNRUN_SECTIONS` name the README's examples the live run
   runs, and those it leaves out.
 - `dashboard_panels` reads the titles and contents of a `deephaven.ui` dashboard's panels.
 - `snapshots_cleared` and `seam_gaps` are the pure rules the live checks apply to Example 8's
@@ -48,22 +49,26 @@ if TYPE_CHECKING:
 
 _FENCE: Final = re.compile(r"^```python([^\n]*)\n(.*?)^```", re.DOTALL | re.MULTILINE)
 _BASH: Final = re.compile(r"^```bash\n(.*?)^```", re.DOTALL | re.MULTILINE)
+_ANCHOR: Final = re.compile(r'<a id="([a-z0-9-]+)"></a>')
 
 SETTINGS_ANCHOR: Final = "what-your-plan-allows"
-"""The README section whose shell commands save the settings file the paid examples load."""
+"""The README section whose shell commands save the settings file the live examples load."""
 
-FREE_SECTIONS: Final = (
+HISTORY_SECTIONS: Final = (
     "read-daily-bars",
     "whole-market-day",
     "compare-stocks",
     "chart-closes",
     "follow-the-news",
+    "see-problems",
     "stop-live-tables",
     "drive-with-a-watchlist",
+    "convert-symbols",
 )
-"""The README's Stocks Basic examples, 1 to 7, which follow its hook, in the README's order."""
+"""The README's examples that need no setting, which follow its hook: Examples 1 to 7, 15, and
+16."""
 
-PAID_SECTIONS: Final = (
+LIVE_SECTIONS: Final = (
     "what-your-plan-allows",
     "stream-minute-bars",
     "change-since-close",
@@ -71,9 +76,13 @@ PAID_SECTIONS: Final = (
     "backfill-then-live",
     "dashboard",
 )
-"""The README's Stocks Starter examples, 8 to 13, in the README's order."""
+"""The README's examples that load the settings file and stream stocks, 8 to 13, in the
+README's order."""
 
 UNRUN_SECTIONS: Final = {
+    "options-chain": (
+        "the smoke tests read m.options.chain on the owner's key; tests/test_docs.py runs it"
+    ),
     "massive-config": "it opens a session and reads nothing; tests/test_docs.py runs it",
 }
 """The README sections with Python blocks that the live run of the examples leaves out, and why."""
@@ -158,11 +167,45 @@ def intro_blocks(page: Path) -> list[Block]:
     return blocks(text[: end if end >= 0 else len(text)])
 
 
+class Example(NamedTuple):
+    """One example of a user page: a block, and the blocks that continue it, in order."""
+
+    anchor: str
+    """The `<a id>` of the section the example starts in; `""` before the page's first anchor."""
+    blocks: list[Block]
+    """The example's blocks: the first starts afresh, and each later one continues it."""
+
+
+def examples(page: Path) -> list[Example]:
+    """Return the examples of a page, in order, each with the anchor of its section.
+
+    Every block that runs belongs to exactly one example: a block that continues the one before
+    it joins that block's example, even across a section's end, and every other block starts an
+    example.
+
+    Args:
+        page: The user page.
+
+    Returns:
+        The examples.
+    """
+    parts = _ANCHOR.split(page.read_text(encoding="utf-8"))
+    sections = zip(["", *parts[1::2]], parts[::2], strict=True)
+    found: list[Example] = []
+    for anchor, text in sections:
+        for block in blocks(text):
+            if block.continues and found:
+                found[-1].blocks.append(block)
+            else:
+                found.append(Example(anchor, [block]))
+    return found
+
+
 def settings_commands(page: Path, *, delayed: bool) -> str:
     """Return the README's shell commands that save the settings file for a kind of plan.
 
-    The section has one block of commands per kind of plan: first Starter and Developer's,
-    which accept the delayed feed, then Advanced and Business's, which are real-time.
+    The section has two blocks of commands: first the one for a key Massive serves stocks
+    delayed, which lists them in `delayed_subscriptions`, then the one for real-time data.
 
     Args:
         page: The README.
@@ -271,8 +314,8 @@ def recorded_sessions() -> Iterator[None]:
 
     The examples open their sessions as a reader does, through `dm.MassiveSession`; inside the
     block, that name makes a real session and remembers it weakly, so a session the examples
-    no longer reach can still be collected, as in a reader's console. The package resolves
-    the name lazily, so the stand-in is bound in the package only for the block, then removed.
+    no longer reach can still be collected, as in a reader's console. The stand-in is bound in
+    the package only for the block, and the real class is bound again at its end.
 
     Yields:
         Nothing; the examples run in between.
@@ -289,7 +332,7 @@ def recorded_sessions() -> Iterator[None]:
     try:
         yield
     finally:
-        vars(dm).pop("MassiveSession", None)
+        vars(dm)["MassiveSession"] = real
         for core in (ref() for ref in opened):
             if core is not None:
                 core.close()

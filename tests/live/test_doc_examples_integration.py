@@ -8,18 +8,21 @@ as `m` and `latest`. The test keeps only the tables it checks, so a live table m
 running after the session that made it is no longer reachable.
 
 These tests assert what only Massive can show: that the tables fill with real data, with
-plausible counts; that Basic's rate limit and a delayed plan behave as the README says; and
-what each stock session sends. What the library does with the data, such as Example 2's ranking
-or Example 6's closed-session error, `tests/test_docs.py` checks against the fake servers. The
-groups follow the README:
+plausible counts; that a reader with no setting gets them filled whatever limit Massive sets;
+and what each stock session sends. What the library does with the data, such as Example 2's
+ranking or Example 16's closed-session error, `tests/test_docs.py` checks against the fake
+servers. The groups follow the README:
 
-- the hook and Examples 1 to 7, on a main key on Stocks Basic, or paced at Basic's rate on a
-  paid one;
+- the hook and Examples 1 to 7, 15, and 16, with no setting, and again paced by a declared
+  limit;
 - Examples 8 to 13, which load the settings file Example 8 saves, checked against what the
   stock session of the moment sends: pre-market, regular, after hours, or overnight;
-- Example 8 without its setting, on a delayed Stocks plan;
-- the streaming example's crypto line, on Currencies Starter;
-- the tester guide's example 10, on a main key on Stocks Basic.
+- Example 8 without its setting, on a key whose stocks data Massive labels delayed;
+- the streaming example's crypto line;
+- the tester guide's example 10, which describes a key Massive refuses the live minute bars
+  and the bars of 2015 to.
+
+A test whose data Massive refuses the key skips, quoting Massive.
 
 A claim that needs another stock session than the current one goes unchecked, and the evidence
 names the session. Each test records what it saw (`evidence`). How to run these tests is in
@@ -38,14 +41,14 @@ import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, assert_never
 
 import pytest
 from deephaven import update_graph
 
 import deephaven_massive as dm
 from deephaven_massive._ingest import rate_limits
-from tests._live import doc_examples, plans, streams
+from tests._live import doc_examples, refusals, streams, summary
 from tests._live.calendar import NEW_YORK, is_trading_day
 from tests._live.tester.examples import guide_blocks
 
@@ -56,13 +59,18 @@ if TYPE_CHECKING:
     from deephaven.execution_context import ExecutionContext
     from deephaven.table import Table
 
+    from tests._live.recency import RecencyAnswer
+
 pytestmark = pytest.mark.integration
 
 # Fixture types, repeated in each live module: test modules may not import from conftest.
 TableRows: TypeAlias = "Callable[[Table], list[dict[str, Any]]]"
 Evidence: TypeAlias = "Callable[[str], None]"
 StreamReport: TypeAlias = "Callable[[dm.MassiveSession], list[str]]"
+SkipIfNotEntitled: TypeAlias = "Callable[[dm.MassiveSession], None]"
+RecencyLabel: TypeAlias = "Callable[[dm.Subscription], RecencyAnswer]"
 WaitAcked: TypeAlias = "Callable[[dm.MassiveSession, int, float], int]"
+MarketStatus: TypeAlias = "Callable[[str], str]"
 ConsoleCommand: TypeAlias = "Callable[..., None]"
 Names: TypeAlias = "dict[str, Any]"
 Rows: TypeAlias = "list[dict[str, Any]]"
@@ -72,8 +80,8 @@ README = _ROOT / "README.md"
 TESTER_GUIDE = _ROOT / "docs" / "tester-guide.md"
 
 _CONSOLE_WAIT: Final = 120.0
-"""Seconds one console command may take: a read paced at Basic's rate waits up to 90 s under
-the console's lock before it gives up."""
+"""Seconds one console command may take: a read of a subscription Massive limits waits up to
+90 s for its pace under the console's lock before it gives up."""
 
 _FILL_WAIT: Final = 90.0
 """Seconds a poll's first rows may take, a paced request's wait for its minute included."""
@@ -92,13 +100,11 @@ _BAR_COLUMNS: Final = ("Date", "Open", "High", "Low", "Close", "Volume")
 _CRYPTO_LINE: Final = re.compile(r"`(m\.crypto\.bars\([^`]*\)\.last_by\(\))`")
 """The streaming example's line for crypto, inline in its text."""
 
-_DELAYED_REFUSAL: Final = "is not in MassiveConfig.delayed_subscriptions"
+_DELAYED_REFUSAL: Final = "is not in delayed_subscriptions"
 """What the library's refusal of delayed data says about the setting that would accept it."""
 
 _STOCKS: Final = frozenset({"AAPL", "MSFT", "NVDA"})
 """The stocks Examples 3, 8, 9, 10, and 13 read."""
-
-_ON_BASIC: Final = "needs the main key on Stocks Basic, as a free tester's is"
 
 
 def _wait(check: Callable[[], bool], seconds: float) -> bool:
@@ -183,7 +189,7 @@ class _Run:
 
 
 def _console(tmp_path: Path, console_command: ConsoleCommand, evidence: Evidence) -> _Run:
-    """Open one console whose commands may wait out Basic's pace.
+    """Open one console whose commands may wait out a limited subscription's pace.
 
     Returns:
         The console.
@@ -192,147 +198,266 @@ def _console(tmp_path: Path, console_command: ConsoleCommand, evidence: Evidence
     return _Run(doc_examples.Console(tmp_path, command), evidence)
 
 
-# --- The hook and Examples 1 to 7 ---------------------------------------------------------------
+# --- The hook and Examples 1 to 7, 15, and 16 ---------------------------------------------------
 
 
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
 @pytest.mark.timeout(1200)
-def test_the_free_examples_fill_on_stocks_basic(
-    live_plans: plans.LivePlans,
+def test_the_history_examples_fill_with_no_setting(
+    live_config: dm.MassiveConfig,
     *,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     console_command: ConsoleCommand,
     table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 7 fill on Stocks Basic, by a free reader's path.
+    """Whether the hook and Examples 1 to 7, 15, and 16 fill with no setting, on a reader's path.
 
-    Runs them back to back in one console with the main key on Stocks Basic and no setting, as
-    a free reader does. Their sessions get a rate governor of their own, as in a new server,
-    not the run's, which paces Basic from the first request: so Massive refuses the first
-    request past 5 in a minute, and each session pauses and resumes inside the console's
-    patience. The examples send about 15 stock requests, past the 5 a live test may send a
-    class on Basic, so the test declares no Basic plan, and the run's pacing rule, which would
-    skip it, leaves it alone. Skips unless the main key is on Stocks Basic.
+    Runs them back to back in one console with the main key and no setting, as a new reader
+    does. Their sessions get a rate governor of their own, as in a new server, not the run's,
+    which paces from the first request what the owner's settings say Massive limits: so when
+    Massive limits stocks, it refuses the first request past its minute's count, and each
+    session learns the limit, pauses, and resumes inside the console's patience. The examples
+    send about 15 stock requests. Records from `m.rate_limits()` of a session on the same key
+    whether the stocks governor learned a limit.
 
-    Asserts what `_run_free_examples` checks.
+    Asserts what `_run_history_examples` checks.
     """
-    if live_plans.tiers["stocks"] != "basic":
-        pytest.skip(_ON_BASIC)
     monkeypatch.setattr(rate_limits, "GOVERNORS", rate_limits.GovernorRegistry())
-    evidence("Basic key with a governor of its own: Basic's limit is learned from Massive")
+    evidence("a governor of the test's own and no setting: a limit is learned from Massive")
     run = _console(tmp_path, console_command, evidence)
     try:
         with doc_examples.recorded_sessions():
-            _run_free_examples(run, table_rows=table_rows, evidence=evidence)
+            _run_history_examples(
+                run,
+                table_rows=table_rows,
+                skip_if_not_entitled=skip_if_not_entitled,
+                evidence=evidence,
+            )
+            _record_stocks_limit(live_config, table_rows=table_rows, evidence=evidence)
     finally:
         run.console.close()
 
 
-@pytest.mark.needs("stocks:starter")
+def _record_stocks_limit(
+    live_config: dm.MassiveConfig, *, table_rows: TableRows, evidence: Evidence
+) -> None:
+    """Record whether the key's stocks governor learned a limit, as `m.rate_limits()` shows it.
+
+    Opens a session with the key alone while the examples' sessions still hold the governor,
+    so its row is theirs.
+    """
+    session = dm.MassiveSession(dm.MassiveConfig(api_key=live_config.api_key))
+    try:
+        view = session.rate_limits()
+        rows = [row for row in table_rows(view) if row["Bucket"] == "stocks"]
+        session.release(view)
+    finally:
+        session.close()
+    evidence(f"stocks rate limit after the examples: {rows or 'no row'}")
+
+
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
 @pytest.mark.timeout(900)
-def test_the_free_examples_fill_back_to_back_at_basics_pace(
+def test_the_history_examples_fill_back_to_back_at_a_declared_pace(
     live_config: dm.MassiveConfig,
     *,
     tmp_path: Path,
     console_command: ConsoleCommand,
     table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Whether the hook and Examples 1 to 7 fill with real data, at Basic's pace.
+    """Whether the hook and Examples 1 to 7, 15, and 16 fill with real data, at a declared pace.
 
-    A check of their content on a paid Stocks key. Runs them back to back in one console while
-    a session that declares Stocks Basic (`rest_basic_subscriptions`) holds the key's rate
-    governor, so every session's stock requests keep to Basic's 5 a minute. The setting paces
-    from the first request, so this test never exercises a Basic reader's path, Massive's
-    refusal of a sixth request and the pause after it;
-    `test_the_free_examples_fill_on_stocks_basic` does, on a Basic key.
+    Runs them back to back in one console while a session that declares stocks limited
+    (`rest_requests_per_minute`, a user setting: the owner's stocks limit, else 5) holds the
+    key's rate governor, so every session's stock requests keep to it. The setting paces from
+    the first request, so this test never exercises Massive's refusal of a request past its
+    limit and the pause after it; `test_the_history_examples_fill_with_no_setting` does, when
+    Massive limits stocks.
 
-    Asserts what `_run_free_examples` checks.
+    Asserts what `_run_history_examples` checks.
     """
-    evidence("paced as Basic by the setting: Massive's refusal of a sixth request is not exercised")
-    stocks_basic = live_config.rest_basic_subscriptions | {dm.Subscription.STOCKS}
-    pacer = dm.MassiveSession(
-        dataclasses.replace(live_config, rest_basic_subscriptions=stocks_basic)
-    )
+    evidence("paced by the setting: Massive's refusal of a request past its limit is not exercised")
+    limited = {dm.Subscription.STOCKS: 5, **live_config.rest_requests_per_minute}
+    pacer = dm.MassiveSession(dataclasses.replace(live_config, rest_requests_per_minute=limited))
     run = _console(tmp_path, console_command, evidence)
     try:
         with doc_examples.recorded_sessions():
-            _run_free_examples(run, table_rows=table_rows, evidence=evidence)
+            _run_history_examples(
+                run,
+                table_rows=table_rows,
+                skip_if_not_entitled=skip_if_not_entitled,
+                evidence=evidence,
+            )
     finally:
         run.console.close()
         pacer.close()
 
 
-def _run_free_examples(run: _Run, *, table_rows: TableRows, evidence: Evidence) -> None:
-    """Run the hook and Examples 1 to 7 in one console, and check what Massive sent.
+def _run_history_examples(
+    run: _Run,
+    *,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
+) -> None:
+    """Run the hook and Examples 1 to 7, 15, and 16 in one console; check what Massive sent.
 
     Checks: the hook's year of Apple's bars; Example 1's five daily bars with their columns;
     Example 2's day of more than 1,000 stocks, none over the counter, and its top 20;
     Example 3's three returns; Example 4's year of Nvidia's bars; Example 5's headlines for
-    each of its stocks, at most ten each, the limit Massive applies per ticker; Example 7's
-    four previous closes. Example 6 and Example 7's edit run as written; what they do is the
-    library's, which `tests/test_docs.py` checks.
+    each of its stocks, at most ten each, the limit Massive applies per ticker; Example 6's
+    four previous closes; Example 7's previous closes of three Yahoo tickers, under
+    Massive's spellings; Example 15's Apple row, and its `ZZZZ` problem row quoting
+    Massive's HTTP 404. Example 16 and Example 6's edit run as written; what they do is the
+    library's, which `tests/test_docs.py` checks. Each example reads in the background,
+    so Massive's refusal fails its table instead of raising: after each wait, a refusal in its
+    session's `m.streams()` skips the test, quoting Massive, before its rows are checked.
     """
-    ran = {"hook": run.paste(doc_examples.intro_blocks(README), "hook", "apple")}
+    ran = {"hook": run.paste(doc_examples.intro_blocks(README), "hook", "m", "apple")}
     keep = {
-        "read-daily-bars": ("apple",),
-        "whole-market-day": ("day", "busiest"),
-        "compare-stocks": ("returns",),
-        "chart-closes": ("nvda",),
+        "read-daily-bars": ("m", "apple"),
+        "whole-market-day": ("m", "day", "busiest"),
+        "compare-stocks": ("m", "returns"),
+        "chart-closes": ("m", "nvda"),
     }
     for anchor, names in keep.items():
         ran[anchor] = run.section(anchor, *names)
-    _check_history_examples(ran, table_rows=table_rows, evidence=evidence)
-    news = run.section("follow-the-news", "headlines")
-    _check_news(news["headlines"], table_rows=table_rows, evidence=evidence)
-    run.section("stop-live-tables")
+    _check_history_examples(
+        ran, table_rows=table_rows, skip_if_not_entitled=skip_if_not_entitled, evidence=evidence
+    )
+    news = run.section("follow-the-news", "m", "headlines")
+    _check_news(
+        news, table_rows=table_rows, skip_if_not_entitled=skip_if_not_entitled, evidence=evidence
+    )
     opening, edit = doc_examples.section_blocks(README, "drive-with-a-watchlist")
-    closes = run.paste([opening], "drive-with-a-watchlist", "closes")["closes"]
+    watched = run.paste([opening], "drive-with-a-watchlist", "m", "closes")
+    closes = watched["closes"]
     first = {"AAPL", "MSFT", "AMZN", "GOOGL"}
     filled = _wait(lambda: _symbols(table_rows(closes)) == first, _FILL_WAIT)
-    evidence(f"example 7: {sorted(_symbols(table_rows(closes)))}, filled: {filled}")
-    assert filled, f"Example 7's closes did not fill within {_FILL_WAIT:.0f} s"
+    evidence(f"example 6: {sorted(_symbols(table_rows(closes)))}, filled: {filled}")
+    skip_if_not_entitled(watched["m"])
+    assert filled, f"Example 6's closes did not fill within {_FILL_WAIT:.0f} s"
     run.paste([edit], "drive-with-a-watchlist edit")
+    converting = run.section("convert-symbols", "m", "yahoo_closes")
+    yahoo = converting["yahoo_closes"]
+    converted = {"AAPL", "BRK.B", "BACpL"}
+    filled = _wait(lambda: _symbols(table_rows(yahoo)) == converted, _FILL_WAIT)
+    evidence(f"example 7, Yahoo tickers: {sorted(_symbols(table_rows(yahoo)))}, filled: {filled}")
+    skip_if_not_entitled(converting["m"])
+    assert filled, f"the Yahoo tickers' closes did not fill within {_FILL_WAIT:.0f} s"
+    problems = run.section("see-problems", "m", "problems", "details")
+    _check_problems(
+        problems,
+        table_rows=table_rows,
+        skip_if_not_entitled=skip_if_not_entitled,
+        evidence=evidence,
+    )
+    run.section("stop-live-tables")
+
+
+def _check_problems(
+    ran: Names,
+    *,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
+) -> None:
+    """Check Example 15: Apple's details, and `ZZZZ` as an `unavailable_symbols` row.
+
+    Massive answers a ticker it doesn't list with HTTP 404 on ticker details, which the README
+    states; the row's `Detail` names that answer. A refusal of the read skips, quoting Massive.
+    """
+
+    def missing() -> list[dict[str, Any]]:
+        return [
+            row
+            for row in table_rows(ran["problems"])
+            if row["Cause"] == "unavailable_symbols" and row["Symbol"] == "ZZZZ"
+        ]
+
+    def apple() -> set[str]:
+        return _symbols(table_rows(ran["details"]))
+
+    found = _wait(lambda: bool(missing()) and apple() == {"AAPL"}, _FILL_WAIT)
+    rows = missing()
+    evidence(f"example 13: details {sorted(apple())}, problems {rows}, found: {found}")
+    skip_if_not_entitled(ran["m"])
+    assert found, f"Example 15's rows did not appear within {_FILL_WAIT:.0f} s"
+    [row] = rows
+    assert row["Action"] == "SKIPPED"
+    assert "HTTP 404" in row["Detail"]
 
 
 def _check_history_examples(
-    ran: dict[str, Names], *, table_rows: TableRows, evidence: Evidence
+    ran: dict[str, Names],
+    *,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
 ) -> None:
-    """Check the hook and Examples 1 to 4: real bars, in plausible numbers."""
-    year = table_rows(ran["hook"]["apple"])
+    """Check the hook and Examples 1 to 4: real bars, in plausible numbers.
+
+    Each reads in the background, so each check first waits for its table to fill, then skips,
+    quoting Massive, when Massive refused a read of the example's session.
+    """
+
+    def when_filled(
+        names: Names, table: Table, enough: Callable[[int], bool]
+    ) -> list[dict[str, Any]]:
+        _wait(lambda: enough(len(table_rows(table))), _FILL_WAIT)
+        skip_if_not_entitled(names["m"])
+        return table_rows(table)
+
+    year = when_filled(ran["hook"], ran["hook"]["apple"], lambda rows: rows >= 240)
     evidence(f"hook: {len(year)} daily bars of AAPL")
     assert len(year) >= 240, "the hook's year of Apple's daily bars is short"
 
     first = ran["read-daily-bars"]["apple"]
-    week = table_rows(first)
+    week = when_filled(ran["read-daily-bars"], first, lambda rows: rows == 5)
     evidence(f"example 1: {len(week)} bars, dates {[row['Date'] for row in week]}")
     assert len(week) == 5, "Example 1 reads five trading days"
     assert set(_BAR_COLUMNS) <= set(first.column_names)
 
     market = ran["whole-market-day"]
-    day = table_rows(market["day"])
+    day = when_filled(market, market["day"], lambda rows: rows > 1000)
     otc = [row["Symbol"] for row in day if row.get("Otc")]
     evidence(f"example 2: {len(day)} stocks, {len(otc)} over the counter")
     assert len(day) > 1000, "Example 2's day holds every listed US stock"
     assert not otc, f"Example 2's day holds stocks over the counter: {otc[:5]}"
-    assert len(table_rows(market["busiest"])) == 20
+    assert len(when_filled(market, market["busiest"], lambda rows: rows == 20)) == 20
 
-    returns = table_rows(ran["compare-stocks"]["returns"])
-    evidence(f"example 3: {[(r['Symbol'], r['ReturnPct']) for r in returns]}")
-    assert _symbols(returns) == _STOCKS
+    compared = ran["compare-stocks"]["returns"]
+    filled = _wait(lambda: _symbols(table_rows(compared)) == _STOCKS, _FILL_WAIT)
+    skip_if_not_entitled(ran["compare-stocks"]["m"])
+    returns = table_rows(compared)
+    evidence(f"example 3: {[(r['Symbol'], r['ReturnPct']) for r in returns]}, filled: {filled}")
+    assert filled, f"Example 3's returns did not fill within {_FILL_WAIT:.0f} s"
 
-    nvda = table_rows(ran["chart-closes"]["nvda"])
+    nvda = when_filled(ran["chart-closes"], ran["chart-closes"]["nvda"], lambda rows: rows >= 240)
     evidence(f"example 4: {len(nvda)} daily bars of NVDA")
     assert len(nvda) >= 240, "Example 4's year of Nvidia's daily bars is short"
 
 
-def _check_news(headlines: Table, *, table_rows: TableRows, evidence: Evidence) -> None:
-    """Check Example 5: headlines for each stock, at most ten each."""
+def _check_news(
+    ran: Names,
+    *,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
+) -> None:
+    """Check Example 5: headlines for each stock, at most ten each.
+
+    Skips, quoting Massive, when Massive refused a read of its session.
+    """
     asked = {"AAPL", "NVDA", "TSLA"}
+    headlines = ran["headlines"]
     filled = _wait(lambda: _symbols(table_rows(headlines)) == asked, _FILL_WAIT)
+    skip_if_not_entitled(ran["m"])
     rows = table_rows(headlines)
     counts = {symbol: sum(row["Symbol"] == symbol for row in rows) for symbol in sorted(asked)}
     evidence(f"example 5: articles per stock {counts}, every stock in by the wait: {filled}")
@@ -340,14 +465,13 @@ def _check_news(headlines: Table, *, table_rows: TableRows, evidence: Evidence) 
     assert all(count <= 10 for count in counts.values()), f"more than ten for a stock: {counts}"
 
 
-# --- Examples 8 to 13, on a Stocks plan that streams --------------------------------------------
+# --- Examples 8 to 13, on a key Massive streams stocks to ----------------------------------------
 
 
-@pytest.mark.needs("stocks:starter")
 @pytest.mark.jvm_held  # the examples' formulas hand their globals, the sessions too, to the JVM
 @pytest.mark.timeout(600)
-def test_the_paid_examples_fill_in_the_current_stock_session(
-    live_plans: plans.LivePlans,
+def test_the_live_examples_fill_in_the_current_stock_session(
+    live_config: dm.MassiveConfig,
     live_session: dm.MassiveSession,
     *,
     tmp_path: Path,
@@ -357,19 +481,23 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
     wait_acked: WaitAcked,
     table_rows: TableRows,
     stream_report: StreamReport,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    market_status: MarketStatus,
     evidence: Evidence,
 ) -> None:
     """Whether Examples 8 to 13 fill with what the stock session of the moment sends.
 
-    Saves the settings file with the README's commands for the key's Stocks plan (delayed on
-    Starter and Developer), in a stand-in home folder, runs Examples 8 to 13 in one console,
+    Saves the settings file with the README's commands, listing stocks as delayed when the
+    owner's settings do, in a stand-in home folder, runs Examples 8 to 13 in one console,
     in order, and collects whatever the console no longer reaches, such as the sessions each
     later example's `m` replaced. Then watches the streams across three minute boundaries.
 
     Asserts at any hour: Example 8's snapshot of three stocks with its columns, except while
-    Massive's snapshots are empty (`doc_examples.snapshots_cleared`); Example 13's three topics
-    acknowledged and none of its streams failed. Then, by the session the plan's feed is in
-    (`streams.stock_session`):
+    Massive's snapshots are empty (`doc_examples.snapshots_cleared`, or on the delayed feed,
+    whose lag the tests do not know, any empty snapshot); Example 13's three topics
+    acknowledged and none of its streams failed. Then, by the session the feed is in
+    (`streams.stock_session`: the wall clock on the real-time feed; on the delayed feed, the
+    latest bar's end, so the test skips when no bar arrives there):
 
     - pre-market, regular, or after hours: Example 9's minute bars; Example 11's bars of SPY;
       bars reaching Example 13's chart. In the regular session, also: every stock has its
@@ -378,17 +506,24 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
       the stream (`doc_examples.seam_gaps`). Outside it, REST may hold minutes made only of
       trades reported late, which no live bar had, so those minutes are recorded but not
       required.
-    - overnight: Example 9's `latest` and the other live tables stay empty, and `spy` holds
-      the bars REST has of the day Example 12 read, or none on a day the market is closed.
+    - no session (`CLOSED`: a closed day, the hours from the after-hours close to 21:00, a
+      night before a closed day), or the overnight window while Massive's stock status says
+      `closed`: Example 9's `latest` and the other live tables stay empty, and `spy` holds the
+      bars REST has of the day Example 12 read, or none on a day the market is closed.
+    - the overnight session while Massive's status says the market trades: what each live
+      table holds is recorded, and the test skips, since bars come only for minutes with
+      trades, and no one has yet seen how often overnight minutes have them.
 
     A run whose feed crosses from one session to another while it watches is skipped after
-    the checks that hold at any hour.
+    the checks that hold at any hour. When Massive refuses Example 8's snapshot or Example
+    12's streams, whose tables fail in the background, the test skips, quoting Massive,
+    before checking that example; so too when the library refuses them as delayed data the
+    settings file does not list, quoting the library.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
-    delayed = not plans.unmet(("stocks:delayed",), live_plans)
+    delayed = dm.Subscription.STOCKS in live_config.delayed_subscriptions
     doc_examples.write_settings_file(README, tmp_path, delayed=delayed)
-    delay = streams.FEED_DELAYS.get(("stocks", live_plans.tiers["stocks"]), timedelta(0))
-    evidence(f"settings file for a {'delayed' if delayed else 'real-time'} plan; delay {delay}")
+    evidence(f"settings file for the {'delayed' if delayed else 'real-time'} feed")
     run = _console(tmp_path, console_command, evidence)
 
     def locked_rows(*tables: Table) -> list[Rows]:
@@ -397,9 +532,15 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
 
     try:
         with doc_examples.recorded_sessions():
-            snapshot = run.section("what-your-plan-allows", "snapshot")["snapshot"]
-            _check_snapshot(snapshot, delay, table_rows=table_rows, evidence=evidence)
-            first_session = streams.stock_session(datetime.now(UTC), delay)
+            snapshot = run.section("what-your-plan-allows", "m", "snapshot")
+            _check_snapshot(
+                snapshot,
+                delayed=delayed,
+                table_rows=table_rows,
+                skip_if_not_entitled=skip_if_not_entitled,
+                evidence=evidence,
+            )
+            snapshot.clear()  # Example 9's `m` replaces Example 8's, as in a reader's console
             ran = {"stream-minute-bars": run.section("stream-minute-bars", "latest")}
             ran["change-since-close"] = run.section("change-since-close", "changes")
             ran["table-shapes"] = run.section("table-shapes", "since_start")
@@ -411,6 +552,7 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
             acked = wait_acked(board, len(_STOCKS), time.monotonic() + _ACK_WAIT)
             for line in stream_report(board):
                 evidence(line)
+            skip_if_not_entitled(board)
             assert acked >= len(_STOCKS), "Example 13's topics were not all acknowledged"
             seen = [
                 _watch_minute(
@@ -420,40 +562,165 @@ def test_the_paid_examples_fill_in_the_current_stock_session(
             ]
             failed = [r["Error"] for r in table_rows(board.streams()) if r["State"] == "FAILED"]
             assert not failed, f"Example 13's stream failed: {failed}"
-            last_session = streams.stock_session(datetime.now(UTC), delay)
+            first_session = _feed_session(seen[0], delayed=delayed)
+            last_session = _feed_session(seen[-1], delayed=delayed)
             evidence(f"stock session of the feed: {first_session}, then {last_session}")
+            if first_session is None or last_session is None:
+                pytest.skip("no bar on the delayed feed, whose lag the tests do not know")
             if first_session != last_session:
                 pytest.skip(f"the feed moved from {first_session} to {last_session} meanwhile")
-            if first_session == streams.OVERNIGHT:
-                _check_overnight(
-                    seen[-1], backfill_day, live_session, table_rows=table_rows, evidence=evidence
-                )
-            else:
-                _check_streaming(seen, first_session, evidence=evidence)
-                _check_seam(
-                    ran["backfill-then-live"],
-                    backfill_day,
-                    live_session,
-                    strict=first_session == streams.REGULAR,
-                    locked_rows=locked_rows,
-                    table_rows=table_rows,
-                    evidence=evidence,
-                )
+            _check_session(
+                first_session,
+                seen,
+                ran,
+                backfill_day=backfill_day,
+                live_session=live_session,
+                market_status=market_status,
+                locked_rows=locked_rows,
+                table_rows=table_rows,
+                evidence=evidence,
+            )
     finally:
         run.console.close()
 
 
-def _check_snapshot(
-    snapshot: Table, delay: timedelta, *, table_rows: TableRows, evidence: Evidence
+def _check_session(
+    session: streams.StockSession,
+    seen: list[dict[str, Any]],
+    ran: dict[str, Names],
+    *,
+    backfill_day: date,
+    live_session: dm.MassiveSession,
+    market_status: MarketStatus,
+    locked_rows: Callable[..., list[Rows]],
+    table_rows: TableRows,
+    evidence: Evidence,
 ) -> None:
-    """Check Example 8: a snapshot of three stocks, with the columns its text names."""
+    """Check Examples 9 to 13 by the stock session the feed is in, as the test's docstring says.
+
+    In the overnight window Massive's stock status decides. Under `closed`, the tables must hold
+    what they hold when no session runs, and a filled live table fails, quoting the status.
+    Under any status saying the market trades, the tables are recorded.
+    """
+    match session:
+        case streams.StockSession.CLOSED:
+            _check_closed(
+                seen[-1],
+                backfill_day,
+                live_session,
+                table_rows=table_rows,
+                evidence=evidence,
+            )
+        case streams.StockSession.OVERNIGHT:
+            status = market_status("stocks")
+            if streams.market_state(status) is streams.MarketState.CLOSED:
+                last = seen[-1]
+                filled = [n for n in ("latest", "since_start") if last[n]]
+                assert not filled, (
+                    f"{filled} filled in the overnight window while /v1/marketstatus/now says "
+                    f"stocks are {status!r}: before the first overnight session that is rows "
+                    "from nowhere; after it, Massive streams a session its status does not name"
+                )
+                _check_closed(
+                    seen[-1],
+                    backfill_day,
+                    live_session,
+                    table_rows=table_rows,
+                    evidence=evidence,
+                )
+            else:
+                _record_overnight(seen[-1], status, evidence=evidence)
+        case (
+            streams.StockSession.PRE_MARKET
+            | streams.StockSession.REGULAR
+            | streams.StockSession.AFTER_HOURS
+        ):
+            _check_streaming(seen, session, evidence=evidence)
+            _check_seam(
+                ran["backfill-then-live"],
+                backfill_day,
+                live_session,
+                strict=session is streams.StockSession.REGULAR,
+                locked_rows=locked_rows,
+                table_rows=table_rows,
+                evidence=evidence,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _check_snapshot(
+    ran: Names,
+    *,
+    delayed: bool,
+    table_rows: TableRows,
+    skip_if_not_entitled: SkipIfNotEntitled,
+    evidence: Evidence,
+) -> None:
+    """Check Example 8: a snapshot of three stocks, with the columns its text names.
+
+    The snapshot reads in the background, so a refusal fails its table instead of raising:
+    the check waits for rows or a failed read in `m.streams()`, skips on Massive's refusal,
+    quoting Massive, or on delayed data the settings file does not list, quoting the library,
+    and fails on any other failed read. Massive empties its snapshots
+    from 03:30 to 04:00 New York time, and on the delayed feed refills them later by a lag the
+    tests do not know, so there an empty snapshot of a finished read is recorded, not failed.
+
+    Args:
+        ran: Example 8's `m` and `snapshot`.
+        delayed: Whether the settings file lists stocks as delayed.
+        table_rows: Snapshots a table into rows.
+        skip_if_not_entitled: Skips when Massive or the settings refused a read of the
+            session.
+        evidence: Records what the snapshot held.
+    """
+    session, snapshot = ran["m"], ran["snapshot"]
+    reads = session.streams()
+
+    def failed() -> list[str]:
+        return [str(row["Error"]) for row in table_rows(reads) if row["State"] == "FAILED"]
+
+    def done() -> bool:
+        states = [row["State"] for row in table_rows(reads)]
+        return bool(states) and all(state == "DONE" for state in states)
+
+    _wait(lambda: bool(failed()) or bool(table_rows(snapshot)) or done(), _FILL_WAIT)
+    errors = failed()
+    finished = done()
+    session.release(reads)
+    skip_if_not_entitled(session)
+    assert not errors, f"Example 8's snapshot read failed: {errors}"
     assert {"DayClose", "PrevDayClose", "TodaysChangePerc"} <= set(snapshot.column_names)
     rows = table_rows(snapshot)
-    evidence(f"example 8: {[(r['Symbol'], r['DayClose']) for r in rows]}")
-    if doc_examples.snapshots_cleared(datetime.now(UTC), delay):
-        evidence("example 8's rows unchecked: Massive's snapshots are empty from 03:30 to 04:00")
+    evidence(f"example 7: {[(r['Symbol'], r['DayClose']) for r in rows]}")
+    if doc_examples.snapshots_cleared(datetime.now(UTC), timedelta(0)):
+        evidence("example 7's rows unchecked: Massive's snapshots are empty from 03:30 to 04:00")
+        return
+    if delayed and not rows:
+        assert finished, f"example 7's snapshot read did not finish in {_FILL_WAIT:.0f} s"
+        evidence("example 7's rows unchecked: the delayed feed's snapshot is empty")
         return
     assert _symbols(rows) == _STOCKS
+
+
+def _feed_session(seen: dict[str, Any], *, delayed: bool) -> streams.StockSession | None:
+    """Name the stock session the feed is in, by its own time.
+
+    Args:
+        seen: One minute's rows of the streaming examples (`_watch_minute`).
+        delayed: Whether the examples stream from the delayed feed.
+
+    Returns:
+        On the real-time feed, the session of the wall clock when the minute was read
+        (`clock`); on the delayed feed, the session of the latest minute bar's end in Example
+        8's and 10's tables, or None when no bar has arrived.
+    """
+    if not delayed:
+        return streams.stock_session(seen["clock"])
+    ends = [int(r["TimestampEnd"]) for r in (*seen["latest"], *seen["since_start"])]
+    if not ends:
+        return None
+    return streams.stock_session(datetime.fromtimestamp(max(ends) / 1e9, UTC))
 
 
 def _watch_minute(
@@ -472,9 +739,11 @@ def _watch_minute(
         evidence: Records the counts.
 
     Returns:
-        Each table's rows, by name, and `published`, the rows the dashboard's stream published.
+        Each table's rows, by name; `published`, the rows the dashboard's stream published;
+        and `clock`, the wall clock as the tables were read.
     """
     _sleep_until(streams.minute_bar_deadline(datetime.now(UTC)))
+    clock = datetime.now(UTC)
     names = ("latest", "changes", "since_start", "spy")
     tables = (
         ran["stream-minute-bars"]["latest"],
@@ -483,6 +752,7 @@ def _watch_minute(
         ran["backfill-then-live"]["spy"],
     )
     seen: dict[str, Any] = dict(zip(names, locked_rows(*tables), strict=True))
+    seen["clock"] = clock
     seen["published"] = sum(
         int(row["RowsPublished"] or 0)
         for row in table_rows(ran["dashboard"]["m"].streams())
@@ -496,15 +766,17 @@ def _watch_minute(
     return seen
 
 
-def _check_streaming(seen: list[dict[str, Any]], session: str, *, evidence: Evidence) -> None:
+def _check_streaming(
+    seen: list[dict[str, Any]], session: streams.StockSession, *, evidence: Evidence
+) -> None:
     """Check Examples 9 to 13 while the stock market trades."""
     last = seen[-1]
-    evidence(f"checked in the {session} session")
-    assert last["latest"], f"no minute bar of Example 9 arrived in the {session} session"
+    evidence(f"checked in the {session.value} session")
+    assert last["latest"], f"no minute bar of Example 9 arrived in the {session.value} session"
     assert last["since_start"], "Example 11's since_start holds no bar"
     published = [minute["published"] for minute in seen]
     assert published[-1] > 0, "Example 13's chart got no bar"
-    if session != streams.REGULAR:
+    if session is not streams.StockSession.REGULAR:
         return
     assert _symbols(last["latest"]) == _STOCKS
     ends = {row["Symbol"]: row["TimestampEnd"] for row in seen[0]["latest"]}
@@ -521,7 +793,9 @@ def _rest_minutes(live_session: dm.MassiveSession, table_rows: TableRows, day: d
     Returns:
         The starts.
     """
-    history = live_session.stocks.bars("SPY", dm.Timespan.MINUTE).history(day.isoformat())
+    history = live_session.stocks.bars("SPY", dm.Timespan.MINUTE).history(
+        day.isoformat(), wait=True
+    )
     return {int(row["TimestampStart"]) for row in table_rows(history)}
 
 
@@ -555,14 +829,14 @@ def _check_seam(
     assert live, "no live bar reached Example 12"
     missing, extra = doc_examples.seam_gaps(spy, live, _rest_minutes(live_session, table_rows, day))
     evidence(
-        f"example 12: {len(spy)} minutes, {len(live)} live; missing {missing[:5]} "
+        f"example 11: {len(spy)} minutes, {len(live)} live; missing {missing[:5]} "
         f"({len(missing)}); only in spy {extra[:5]}; required: {strict}"
     )
     if strict:
         assert not missing, f"Example 12's spy lacks {len(missing)} minutes that REST has"
 
 
-def _check_overnight(
+def _check_closed(
     last: dict[str, Any],
     day: date,
     live_session: dm.MassiveSession,
@@ -570,66 +844,93 @@ def _check_overnight(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Check Examples 9 to 12 between sessions: the live tables empty, `spy` only history."""
-    evidence("checked overnight")
-    assert not last["latest"], "Example 9's latest filled overnight"
-    assert not last["since_start"], "Example 11's since_start filled overnight"
+    """Check Examples 9 to 12 while nothing trades: the live tables empty, `spy` only history."""
+    evidence("checked while nothing trades")
+    assert not last["latest"], "Example 9's latest filled while nothing trades"
+    assert not last["since_start"], "Example 11's since_start filled while nothing trades"
     assert all(row["Close"] is None for row in last["changes"]), last["changes"]
     spy = {int(row["TimestampStart"]) for row in last["spy"]}
     if not is_trading_day(day):
-        evidence(f"example 12 on {day}, a closed day: {len(spy)} rows")
+        evidence(f"example 11 on {day}, a closed day: {len(spy)} rows")
         assert not spy, "Example 12's spy holds bars on a day the market is closed"
         return
     rest = _rest_minutes(live_session, table_rows, day)
-    evidence(f"example 12 overnight, {day}: spy {len(spy)} minutes, REST {len(rest)}")
+    evidence(f"example 11 overnight, {day}: spy {len(spy)} minutes, REST {len(rest)}")
     assert spy == rest, "Example 12's spy does not hold the day's minutes from history"
 
 
-# --- Single examples on other plans ------------------------------------------------------------
+def _record_overnight(last: dict[str, Any], status: str, *, evidence: Evidence) -> None:
+    """Record what Examples 9 to 13 hold in the overnight session, then skip.
+
+    Bars come only for minutes with trades, and no one has yet seen how often overnight
+    minutes have them, so no table must fill; what filled is the evidence of what Massive
+    streams overnight.
+    """
+    ends = [int(r["TimestampEnd"]) for r in (*last["latest"], *last["since_start"])]
+    evidence(
+        f"overnight, Massive's stock status {status}: Example 9's latest "
+        f"{_symbols(last['latest'])}, Example 11's since_start {len(last['since_start'])} rows, "
+        f"Example 13's stream published {last['published']} rows, "
+        f"latest bar end {max(ends, default=None)}"
+    )
+    pytest.skip(f"overnight session ({status}): bars recorded, not required")
 
 
-@pytest.mark.needs("stocks:starter")
+# --- Single examples ----------------------------------------------------------------------------
+
+
 @pytest.mark.timeout(200)
-def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_plan(
-    delayed_key: str,
+def test_the_settings_example_without_its_setting_is_refused_on_a_delayed_key(
     *,
+    recency_label: RecencyLabel,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     console_command: ConsoleCommand,
+    table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether Example 8 raises `dm.EntitlementError` on a delayed plan without its setting.
+    """Whether Example 8's snapshot fails without its setting on a key whose stocks are delayed.
 
-    Saves the real-time plans' settings file, `delayed_subscriptions: []`, with the README's
-    own commands, then runs Example 8 with a delayed Stocks key (`MASSIVE_DELAYED_API_KEY`, or
-    the main key on Starter or Developer). Passes when the snapshot raises
-    `dm.EntitlementError` and its message says stocks are not in `delayed_subscriptions`, which
-    sets this refusal apart from one of a plan without snapshots, such as a Basic key's.
+    First asks Massive how it labels the key's stocks snapshot (`recency_label`), and skips,
+    quoting the answer, when Massive refused the snapshot or does not label it delayed: the
+    question is about a key whose stocks data it labels delayed. Then saves the settings file
+    with `delayed_subscriptions: []`, with the README's own commands, and runs Example 8. The
+    snapshot reads in the background, so the library's refusal fails its table. Passes when the
+    read's row in `m.streams()` is `FAILED` and its `Error` says stocks are not in
+    `delayed_subscriptions`, which sets this refusal apart from Massive's refusal of a snapshot.
     """
+    answer = recency_label(dm.Subscription.STOCKS)
+    if answer.refusal is not None:
+        pytest.skip(f"{summary.REFUSED}{answer.refusal}")
+    if not answer.delayed:
+        pytest.skip(
+            f"Massive does not label this key's stocks data delayed ({answer.text()}); the "
+            f"question is about a key whose stocks data it labels delayed"
+        )
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("MASSIVE_API_KEY", delayed_key)
     doc_examples.write_settings_file(README, tmp_path, delayed=False)
     [block] = doc_examples.section_blocks(README, "what-your-plan-allows")
     script = tmp_path / "settings_example.py"
     script.write_text(block.code, encoding="utf-8")
-    raised: list[tuple[bool, str]] = []
+    ran: list[dict[str, Any]] = []
 
     def example() -> None:
-        try:
-            runpy.run_path(str(script))
-        except dm.MassiveError as error:
-            raised.append((isinstance(error, dm.EntitlementError), str(error)))
+        ran.append(runpy.run_path(str(script)))
+
+    def errors() -> list[str]:
+        streams = ran[0]["m"].streams()
+        return [str(r["Error"]) for r in table_rows(streams) if r["State"] == "FAILED"]
 
     with doc_examples.recorded_sessions():
         console_command(example, timeout=_CONSOLE_WAIT)
-    evidence(f"example 8 without the setting: {raised or 'no error'}")
-    assert raised, "Example 8 read the snapshot without its setting"
-    entitlement, message = raised[0]
-    assert entitlement, message
-    assert _DELAYED_REFUSAL in message, "the refusal does not name delayed_subscriptions"
+        _wait(lambda: bool(errors()), _FILL_WAIT)
+        failed = errors()
+        ran[0]["m"].close()
+    evidence(f"example 7 without the setting: {failed or 'no failure'}")
+    assert failed, "Example 8 read the snapshot without its setting"
+    assert _DELAYED_REFUSAL in failed[0], "the refusal does not name delayed_subscriptions"
 
 
-@pytest.mark.needs("currencies:starter")
 @pytest.mark.timeout(150)
 def test_the_streaming_examples_crypto_line_streams_now(
     *,
@@ -638,13 +939,15 @@ def test_the_streaming_examples_crypto_line_streams_now(
     wait_acked: WaitAcked,
     table_rows: TableRows,
     stream_report: StreamReport,
+    skip_if_not_entitled: SkipIfNotEntitled,
     evidence: Evidence,
 ) -> None:
-    """Whether the streaming example's crypto line fills on Currencies Starter, at any hour.
+    """Whether the streaming example's crypto line fills, at any hour.
 
     Runs the line as the example's text gives it, in a session opened as the README's examples
     open theirs, and waits for the first minute bar past the next minute boundary. Passes when
-    Massive acknowledged the topic and a bar arrived.
+    Massive acknowledged the topic and a bar arrived; skips, quoting Massive, when Massive
+    refuses the stream.
     """
     found = _CRYPTO_LINE.search(doc_examples.section(README, "stream-minute-bars"))
     assert found, "the streaming example's text has no crypto line"
@@ -662,6 +965,7 @@ def test_the_streaming_examples_crypto_line_streams_now(
             for line in stream_report(names["m"]):
                 evidence(line)
             evidence(f"{found.group(1)}: acknowledged {acked}, rows {table_rows(names['latest'])}")
+            skip_if_not_entitled(names["m"])
             names.clear()
     finally:
         run.console.close()
@@ -674,7 +978,11 @@ _TESTER_LINES: Final = (
     "live minute bars: opened; ",
     "bars from 2015: EntitlementError: ",
 )
-"""The starts of the three lines the tester guide's example 10 prints on Basic, as it says."""
+"""The starts of the three lines the tester guide's example 10 prints, as it says, on a key
+Massive refuses the live minute bars and the bars of 2015 to."""
+
+_SERVED_2015: Final = "bars from 2015: no error"
+"""The start of the line example 10 prints when Massive served the bars of 2015."""
 
 _REFUSED_TOPIC: Final = "AM.AAPL"
 _REJECTED_KEY: Final = "not only a bad key"
@@ -682,11 +990,9 @@ _REJECTED_KEY: Final = "not only a bad key"
 rejected the key, the guide's two outcomes."""
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(240)
-def test_tester_example_10_fails_the_live_minute_bars_on_basic(
-    live_plans: plans.LivePlans,
+def test_tester_example_10_fails_the_live_minute_bars_where_massive_refuses_them(
     *,
     tmp_path: Path,
     console_command: ConsoleCommand,
@@ -696,16 +1002,22 @@ def test_tester_example_10_fails_the_live_minute_bars_on_basic(
 ) -> None:
     """Whether the tester guide's example 10 prints its three lines and fails its live bars.
 
-    Runs the example as the guide gives it with the main key on Stocks Basic, which no plan
-    setting of a paid key can stand in for; skips on any other Stocks plan. It sends the key's
-    stocks two requests, each of which may wait out Basic's pace inside the console's
-    patience. Passes when it prints the guide's three lines (the latest trade and the bars
-    from 2015 refused with `EntitlementError`, the live bars opened), and the `stocks.bars`
-    row of `streams` reads `FAILED` with one of the guide's two outcomes: Massive's refusal of
+    Runs the example as the guide gives it with the main key. It sends the key's stocks two
+    requests, each of which may wait out a limited subscription's pace inside the console's
+    patience. The guide describes a key Massive refuses the bars of 2015 and the live minute
+    bars to. Whatever Massive answered, the example must print its three lines (the latest
+    trade, the live minute bars, the bars from 2015), and its `stocks.bars` stream must settle:
+    `FAILED`, or running with its topic acknowledged or rows published; a missing line or an
+    unsettled stream fails the test. When a printed line is the library's refusal of data
+    Massive labels delayed and the example's default session does not list, the test skips,
+    quoting it: the guide's outcome needs a key Massive serves in real time or refuses. When
+    Massive served either the bars of 2015 (the
+    example's line for them says no error) or the live bars (the stream runs), the test skips,
+    saying what Massive served. Otherwise it passes when the latest trade and the bars from
+    2015 are refused with `EntitlementError`, the live bars opened, and the `stocks.bars` row
+    of `streams` reads `FAILED` with one of the guide's two outcomes: Massive's refusal of
     `AM.AAPL`, or Massive's rejection of the key.
     """
-    if live_plans.tiers["stocks"] != "basic":
-        pytest.skip(_ON_BASIC)
     code = guide_blocks(TESTER_GUIDE.read_text(encoding="utf-8"))[10]
     run = _console(tmp_path, console_command, evidence)
 
@@ -724,12 +1036,36 @@ def test_tester_example_10_fails_the_live_minute_bars_on_basic(
                 lambda: any(r["State"] == "FAILED" for r in bars(names["streams"])), _REFUSAL_WAIT
             )
             rows = bars(names["streams"])
-            for row in table_rows(names["connections"]):
-                evidence(f"connection {row['AssetClass']} {row['State']} {row['LastError']!r}")
+            connections = table_rows(names["connections"])
+            for row in connections:
+                evidence(
+                    f"connection {row['AssetClass']} {row['State']} acked {row['AckedTopics']} "
+                    f"{row['LastError']!r}"
+                )
             names.clear()
     finally:
         run.console.close()
     evidence(f"stocks.bars: {[(row['State'], row['Error']) for row in rows]}")
+    for start in _TESTER_LINES:
+        label = start.split(": ")[0]
+        assert any(line.startswith(f"{label}: ") for line in printed), f"no {label!r} line"
+    unlisted = [line for line in printed if refusals.is_not_listed_text(line)]
+    if unlisted:
+        pytest.skip(f"{summary.NOT_LISTED}{' '.join(unlisted[0].split())}")
+    acked = sum(int(r["AckedTopics"]) for r in connections if r["AssetClass"] == "stocks")
+    states = [row["State"] for row in rows]
+    live = states == ["RUNNING"] and bool(acked or rows[0]["RowsPublished"])
+    assert live or states == ["FAILED"], f"stocks.bars settled neither way: {states}"
+    served = []
+    if any(line.startswith(_SERVED_2015) for line in printed):
+        served.append("the bars from 2015")
+    if live:
+        served.append("the live minute bars")
+    if served:
+        pytest.skip(
+            f"Massive served {' and '.join(served)}; the guide's example 10 describes a key "
+            "Massive refuses them to"
+        )
     for start in _TESTER_LINES:
         assert any(line.startswith(start) for line in printed), f"no line starts {start!r}"
     assert [row["State"] for row in rows] == ["FAILED"]

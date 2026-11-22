@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import re
 import ssl
 import statistics
 import sys
@@ -13,16 +14,26 @@ from typing import TYPE_CHECKING
 
 import pytest
 from websockets.datastructures import Headers
-from websockets.exceptions import InvalidMessage, InvalidStatus, InvalidURI
+from websockets.exceptions import (
+    InvalidMessage,
+    InvalidProxy,
+    InvalidProxyMessage,
+    InvalidProxyStatus,
+    InvalidStatus,
+    InvalidURI,
+)
 from websockets.http11 import Response
 
-from deephaven_massive._massive.net.errors import LIBRARY_BUG_REPORT, WireError
+from deephaven_massive._massive import WireFailure
+from deephaven_massive._massive.net.errors import WireError
 from deephaven_massive._massive.spec import sources
 from deephaven_massive._massive.spec.types import (
     Conversion,
     DriftReport,
     DriftSample,
     Field,
+    RowFault,
+    RowMark,
     Source,
     Transport,
     WireType,
@@ -31,7 +42,7 @@ from deephaven_massive._massive.spec.types import (
 from deephaven_massive._massive.ws import protocol
 from deephaven_massive._massive.ws import protocol as protocol_module
 from deephaven_massive._massive.ws.protocol import (
-    DROPPED_ERROR_LIMIT,
+    DROPPED_WARNING_LIMIT,
     MAX_TOPICS_PER_FRAME,
     Data,
     FrameDecoder,
@@ -200,7 +211,8 @@ def test_handshake_status_tolerates_a_bare_object_and_odd_messages(
     "frame", ["[]", '[{"ev":"status"}]', '[{"ev":"status","status":1}]', "[1]"]
 )
 def test_handshake_status_refuses_a_frame_without_a_status(frame: str) -> None:
-    with pytest.raises(ValueError, match="expected a status object"):
+    expected = f"The frame holds no status object with a text status: {frame!r}."
+    with pytest.raises(ValueError, match=rf"^{re.escape(expected)}$"):
         handshake_status(frame)
 
 
@@ -337,22 +349,24 @@ def test_a_row_with_an_odd_value_is_logged_whole_at_debug(
     ]
 
 
-def test_a_dropped_row_is_logged_whole_at_debug(
+def test_a_key_marked_row_is_logged_whole_at_debug(
     decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
 ) -> None:
     decoder.set_required("T", frozenset({"SipTimestamp"}), symbol="Ticker")
     row = {"ev": "T", "sym": "AAPL", "t": 4.0}
     with caplog.at_level(logging.DEBUG, logger=protocol.__name__):
         data = _decode_one(decoder, row)
-    assert _dicts(data) == []
-    [reject] = data.rejects
-    assert (reject.channel, reject.symbol) == ("T", "AAPL")
-    assert reject.error.message == (
-        "dropped a T row for AAPL from socket.massive.com/stocks: SipTimestamp (wire key 't') "
+    assert [r["SipTimestamp"] for r in _dicts(data)] == [None]
+    reason = (
+        "a T row for AAPL from socket.massive.com/stocks: SipTimestamp (wire key 't') "
         "expects epoch, got 4.0"
     )
-    assert reject.raw == '{"ev":"T","sym":"AAPL","t":4.0}'
-    assert caplog.messages == [f"{reject.error.message}; the row: {reject.raw}"]
+    assert data.marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(0,), fields=("SipTimestamp",), reasons=(reason,), symbols=("AAPL",)
+        )
+    }
+    assert caplog.messages == [f'cannot place {reason}; the row: {{"ev":"T","sym":"AAPL","t":4.0}}']
 
 
 def test_an_odd_row_is_not_serialized_with_debug_off(
@@ -362,9 +376,12 @@ def test_an_odd_row_is_not_serialized_with_debug_off(
         raise AssertionError("the row was serialized with DEBUG off")
 
     monkeypatch.setattr(protocol, "row_excerpt", refuse)
-    # A dropped row's `Reject` always carries its text; a kept row's odd value needs none.
-    data = _decode_one(decoder, {"ev": "T", "p": "x", "t": 1})
+    # Neither a key-marked row nor a row with an odd value is serialized for its mark.
+    decoder.set_required("T", frozenset({"Ticker"}))
+    data = _decode_one(decoder, {"ev": "T", "sym": "A", "p": "x", "t": 1})
     assert (len(_dicts(data)), data.drift.unconvertible) == (1, frozenset({"p"}))
+    data = _decode_one(decoder, {"ev": "T", "t": 1})
+    assert list(data.marks) == [RowFault.UNREADABLE_KEYS]
 
 
 def test_a_vendor_required_field_held_as_null_is_missing(decoder: FrameDecoder) -> None:
@@ -374,7 +391,7 @@ def test_a_vendor_required_field_held_as_null_is_missing(decoder: FrameDecoder) 
     assert data.drift == DriftReport(missing=frozenset({"t"}))
 
 
-def test_a_dropped_row_still_counts_in_the_drift(decoder: FrameDecoder) -> None:
+def test_a_key_marked_row_counts_in_the_drift_only_for_its_shape(decoder: FrameDecoder) -> None:
     decoder.set_required("T", frozenset({"Ticker"}))
     [data] = decoder.decode(
         _frame(
@@ -384,9 +401,10 @@ def test_a_dropped_row_still_counts_in_the_drift(decoder: FrameDecoder) -> None:
         )
     )
     assert isinstance(data, Data)
-    assert [r["Ticker"] for r in _dicts(data)] == ["A", "B"]
-    assert len(data.rejects) == 1
-    # The dropped row's extra key counts; its odd value does not, since no row reads it.
+    assert [r["Ticker"] for r in _dicts(data)] == ["A", None, "B"]
+    assert data.marks[RowFault.UNREADABLE_KEYS].rows == (1,)
+    assert data.marks[RowFault.UNCONVERTIBLE_VALUES].rows == (2,)
+    # The key-marked row's extra key counts; its odd value does not: its fault is its key.
     assert data.drift == DriftReport(
         extra=frozenset({"new", "z"}), missing=frozenset({"t"}), unconvertible=frozenset({"p"})
     )
@@ -465,6 +483,13 @@ def test_an_unconvertible_value_reads_as_null_and_is_drift(
     assert row[column] is None
     assert (data.drift.unconvertible, data.drift.dropped_rows) == (frozenset({key}), 0)
     assert data.drift.samples[key] == DriftSample(None, quoted)  # no symbol column declared
+    [(fault, mark)] = data.marks.items()
+    assert (fault, mark.rows, mark.fields, mark.symbols) == (
+        RowFault.UNCONVERTIBLE_VALUES,
+        (0,),
+        (column,),
+        (None,),
+    )
 
 
 @pytest.mark.parametrize(
@@ -475,24 +500,29 @@ def test_an_unconvertible_value_reads_as_null_and_is_drift(
         ("sym", "Ticker", 5, "string", "5"),
     ],
 )
-def test_an_unconvertible_required_key_drops_its_row(
+def test_an_unconvertible_required_key_marks_its_row(
     decoder: FrameDecoder, case: tuple[str, str, object, str, str]
 ) -> None:
     key, column, value, expects, quoted = case
     decoder.set_required("T", frozenset({column}))
     data = _decode_one(decoder, {"ev": "T", "sym": "AAPL", key: value})
-    assert _dicts(data) == []
+    assert [r[column] for r in _dicts(data)] == [None]
     assert data.drift.unconvertible == frozenset()
-    [reject] = data.rejects
-    assert reject.channel == "T"
-    assert reject.symbol is None  # no symbol column was declared
-    assert (reject.error.host, reject.error.path, reject.error.status) == (HOST, PATH, None)
-    # The clause after the prefix is the one `spec.convert` shares with the REST decoder,
-    # quoting the value's JSON text.
-    assert reject.error.message == (
-        f"dropped a T row from socket.massive.com/stocks: "
-        f"{column} (wire key {key!r}) expects {expects}, got {quoted}"
-    )
+    # No symbol column was declared. The clause after the prefix is the one `spec.convert`
+    # shares with the REST decoder, quoting the value's JSON text.
+    assert data.marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(0,),
+            fields=(column,),
+            reasons=(
+                (
+                    f"a T row from socket.massive.com/stocks: "
+                    f"{column} (wire key {key!r}) expects {expects}, got {quoted}"
+                ),
+            ),
+            symbols=(None,),
+        )
+    }
 
 
 def test_a_named_conversion_applies_to_its_field() -> None:
@@ -548,7 +578,7 @@ def test_an_odd_value_sample_quotes_at_most_200_characters(decoder: FrameDecoder
 # --- required keys and symbols ------------------------------------------------------------------
 
 
-def test_a_missing_required_key_drops_while_a_missing_optional_field_is_null(
+def test_a_missing_required_key_marks_while_a_missing_optional_field_is_null(
     decoder: FrameDecoder,
 ) -> None:
     decoder.set_required("T", frozenset({"Ticker", "SipTimestamp"}), symbol="Ticker")
@@ -560,28 +590,39 @@ def test_a_missing_required_key_drops_while_a_missing_optional_field_is_null(
         )
     )
     assert isinstance(data, Data)
-    assert _dicts(data) == [
-        {"Ticker": "AAPL", "Price": None, "Size": None, "SipTimestamp": 1, "Conditions": None}
-    ]
-    assert [(r.channel, r.symbol) for r in data.rejects] == [("T", "MSFT"), ("T", None)]
-    assert data.rejects[0].error.message == (
-        "dropped a T row for MSFT from socket.massive.com/stocks: "
-        "no SipTimestamp (wire key 't'), which the dataset needs"
-    )
-    assert data.rejects[1].error.message == (
-        "dropped a T row from socket.massive.com/stocks: "
-        "no Ticker (wire key 'sym'), which the dataset needs"
-    )
+    assert _dicts(data)[0] == {
+        "Ticker": "AAPL",
+        "Price": None,
+        "Size": None,
+        "SipTimestamp": 1,
+        "Conditions": None,
+    }
+    assert data.marks == {
+        RowFault.UNREADABLE_KEYS: RowMark(
+            rows=(1, 2),
+            fields=("SipTimestamp", "Ticker"),
+            reasons=(
+                (
+                    "a T row for MSFT from socket.massive.com/stocks: "
+                    "no SipTimestamp (wire key 't'), which the dataset needs"
+                ),
+                (
+                    "a T row from socket.massive.com/stocks: "
+                    "no Ticker (wire key 'sym'), which the dataset needs"
+                ),
+            ),
+            symbols=("MSFT", None),
+        )
+    }
 
 
-def test_a_dropped_row_without_a_text_symbol_names_none(decoder: FrameDecoder) -> None:
+def test_a_key_marked_row_without_a_text_symbol_names_none(decoder: FrameDecoder) -> None:
     decoder.set_required("T", frozenset({"Ticker"}), symbol="Ticker")
     data = _decode_one(decoder, {"ev": "T", "t": 3, "sym": 7})
-    [reject] = data.rejects
-    assert reject.symbol is None
-    assert reject.error.message == (
-        "dropped a T row from socket.massive.com/stocks: Ticker (wire key 'sym') expects "
-        "string, got 7"
+    mark = data.marks[RowFault.UNREADABLE_KEYS]
+    assert mark.symbols == (None,)
+    assert mark.reasons == (
+        "a T row from socket.massive.com/stocks: Ticker (wire key 'sym') expects string, got 7",
     )
 
 
@@ -608,16 +649,16 @@ def test_set_required_replaces_the_earlier_choice(decoder: FrameDecoder) -> None
 @pytest.mark.parametrize(
     "case",
     [
-        ("Q", frozenset(), None, "no source for channel 'Q'"),
-        ("T", frozenset({"Bid", "Ticker"}), None, r"source 'stocks/T' has no columns \['Bid'\]"),
-        ("T", frozenset(), "Symbol", r"has no columns \['Symbol'\]"),
+        ("Q", frozenset(), None, "No source names the channel 'Q'."),
+        ("T", frozenset({"Bid", "Ticker"}), None, "Source 'stocks/T' has no columns ['Bid']."),
+        ("T", frozenset(), "Symbol", "Source 'stocks/T' has no columns ['Symbol']."),
     ],
 )
 def test_set_required_checks_its_names(
     decoder: FrameDecoder, case: tuple[str, frozenset[str], str | None, str]
 ) -> None:
     channel, keys, symbol, message = case
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         decoder.set_required(channel, keys, symbol=symbol)
 
 
@@ -627,26 +668,33 @@ def test_set_required_checks_its_names(
 def test_a_frame_that_is_not_json_is_dropped_and_logged(
     decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # Massive's frame, not a defect of the library: a WARNING with no bug report.
     assert decoder.decode("{oops") == []
-    assert "not JSON" in caplog.text
-    assert caplog.records[0].levelno == logging.ERROR
-    assert caplog.records[0].getMessage().endswith(LIBRARY_BUG_REPORT)
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "Massive sent a frame from socket.massive.com/stocks that is not JSON, so the "
+                "library dropped it: '{oops'."
+            ),
+        )
+    ]
 
 
-def test_dropped_frames_log_a_bounded_number_of_errors(
+def test_dropped_frames_log_a_bounded_number_of_warnings(
     decoder: FrameDecoder, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    for _ in range(DROPPED_ERROR_LIMIT + 5):
+    for _ in range(DROPPED_WARNING_LIMIT + 5):
         assert decoder.decode("{oops") == []
     ours = [r for r in caplog.records if r.name == protocol_module.__name__]
-    # The limit's ERRORs, one ERROR saying the rest are quieter, then DEBUG only.
+    # The limit's WARNINGs, one WARNING saying the rest are quieter, then DEBUG only.
     assert [r.levelno for r in ours] == (
-        [logging.ERROR] * (DROPPED_ERROR_LIMIT + 1) + [logging.DEBUG] * 5
+        [logging.WARNING] * (DROPPED_WARNING_LIMIT + 1) + [logging.DEBUG] * 5
     )
-    assert ours[DROPPED_ERROR_LIMIT].getMessage() == (
-        f"socket.massive.com/stocks: {DROPPED_ERROR_LIMIT} dropped frames or elements were "
-        "logged; further ones are logged at DEBUG"
+    assert ours[DROPPED_WARNING_LIMIT].getMessage() == (
+        f"socket.massive.com/stocks: the library has warned of {DROPPED_WARNING_LIMIT} dropped "
+        "frames or elements, and it logs further ones at DEBUG."
     )
 
 
@@ -655,7 +703,16 @@ def test_an_element_without_ev_is_dropped_and_its_siblings_kept(
 ) -> None:
     events = decoder.decode(_frame(5, {"sym": "A"}, {"ev": 3}, {"ev": "E", "b": True}))
     assert len(events) == 1
-    assert caplog.text.count("no text 'ev'") == 3
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "Massive sent an element of a frame from socket.massive.com/stocks with no text "
+                f"'ev', so the library dropped it: {item}."
+            ),
+        )
+        for item in ("5", "{'sym': 'A'}", "{'ev': 3}")
+    ]
 
 
 def test_an_unknown_channel_is_dropped_and_warned_once(
@@ -663,16 +720,29 @@ def test_an_unknown_channel_is_dropped_and_warned_once(
 ) -> None:
     for _ in range(2):
         assert decoder.decode(_frame({"ev": "XQ", "pair": "BTC-USD"})) == []
-    assert [r.levelno for r in caplog.records] == [logging.WARNING]
-    assert "'XQ'" in caplog.text
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.WARNING,
+            (
+                "Massive sent objects of the channel 'XQ' from socket.massive.com/stocks, which "
+                "the library does not read, so it drops them."
+            ),
+        )
+    ]
 
 
 @pytest.mark.parametrize(
     ("sources", "message"),
     [
-        ([TRADES, TRADES], "two sources for channel 'T'"),
-        ([Source(key="stocks", transport=Transport.WS, fields=())], "not a WebSocket source"),
-        ([Source(key="stocks/T", transport=Transport.REST, fields=())], "not a WebSocket source"),
+        ([TRADES, TRADES], "Two sources name the channel 'T'."),
+        (
+            [Source(key="stocks", transport=Transport.WS, fields=())],
+            "Source 'stocks' is not a WebSocket source of the form '<cluster>/<channel>'.",
+        ),
+        (
+            [Source(key="stocks/T", transport=Transport.REST, fields=())],
+            "Source 'stocks/T' is not a WebSocket source of the form '<cluster>/<channel>'.",
+        ),
         (
             [
                 Source(
@@ -681,12 +751,12 @@ def test_an_unknown_channel_is_dropped_and_warned_once(
                     fields=(Field(wire_key="day.c", column="DayC", wire_type=WireType.DOUBLE),),
                 )
             ],
-            r"source 'stocks/T' has dotted wire keys \['day\.c'\]; a WebSocket object is flat",
+            "Source 'stocks/T' has dotted wire keys day.c, and a WebSocket object is flat.",
         ),
     ],
 )
 def test_the_sources_are_checked(sources: list[Source], message: str) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=rf"^{re.escape(message)}$"):
         FrameDecoder(sources, host=HOST, path=PATH)
 
 
@@ -757,7 +827,61 @@ def test_other_http_statuses_are_fatal(status: int) -> None:
     error = _classify(_status_error(status))
     assert isinstance(error, WireError)
     assert (error.status, error.host, error.path) == (status, HOST, PATH)
-    assert error.message == f"WebSocket connection to {HOST}{PATH} failed: HTTP {status}"
+    assert error.message == (
+        "Massive answered the WebSocket connection to socket.massive.com/stocks with "
+        f"HTTP {status}."
+    )
+    assert error.kind is WireFailure.REFUSED  # the server answered the handshake
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        InvalidProxyStatus(Response(407, "x", Headers({}), b"")),
+        InvalidProxy("http://proxy", "bad"),
+    ],
+    ids=["refused-credentials", "bad-setting"],
+)
+def test_a_proxy_failure_is_this_machines_to_fix(error: Exception) -> None:
+    classified = _classify(error)
+    assert isinstance(classified, WireError)
+    assert classified.kind is WireFailure.LOCAL
+    assert classified.message.endswith(
+        ". Correct the proxy, and its user and password, in HTTPS_PROXY."
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        InvalidProxyStatus(Response(502, "x", Headers({}), b"")),
+        InvalidProxyMessage("the proxy's reply is not HTTP"),
+    ],
+    ids=["proxy-502", "garbled-reply"],
+)
+def test_a_proxy_that_could_not_reach_the_server_is_retried(error: Exception) -> None:
+    # No answer from the server, as the REST and flat-file clients count it.
+    assert _classify(error) == 0.0
+
+
+def test_a_proxy_that_refuses_the_credentials_names_its_status() -> None:
+    error = _classify(InvalidProxyStatus(Response(407, "x", Headers({}), b"")))
+    assert isinstance(error, WireError)
+    assert error.status == 407
+    assert error.message == (
+        "The WebSocket connection to socket.massive.com/stocks failed with HTTP 407. Correct the "
+        "proxy, and its user and password, in HTTPS_PROXY."
+    )
+
+
+def test_a_broken_handshake_is_the_servers_answer() -> None:
+    error = _classify(InvalidMessage("did not receive a valid HTTP response"))
+    assert isinstance(error, WireError)
+    assert (error.status, error.kind) == (None, WireFailure.REFUSED)
+    assert error.message == (
+        "The WebSocket connection to socket.massive.com/stocks failed with InvalidMessage: did "
+        "not receive a valid HTTP response."
+    )
 
 
 def test_an_invalid_uri_is_fatal_without_a_status() -> None:
@@ -765,8 +889,10 @@ def test_an_invalid_uri_is_fatal_without_a_status() -> None:
     assert isinstance(error, WireError)
     assert error.status is None
     assert error.message == (
-        f"WebSocket connection to {HOST}{PATH} failed: InvalidURI: x isn't a valid URI: bad"
+        "The WebSocket connection to socket.massive.com/stocks failed with InvalidURI: x isn't a "
+        "valid URI: bad."
     )
+    assert error.kind is WireFailure.CLIENT_DEFECT  # the client built the URI
 
 
 def test_a_certificate_failure_is_fatal_and_names_ssl_cert_file() -> None:
@@ -775,9 +901,11 @@ def test_a_certificate_failure_is_fatal_and_names_ssl_cert_file() -> None:
     assert isinstance(error, WireError)
     assert error.status is None
     assert (error.host, error.path) == (HOST, PATH)
-    assert error.message.startswith(f"TLS certificate verification failed for {HOST}: ")
-    assert error.message.endswith(
-        "; set SSL_CERT_FILE to a bundle that trusts the server's certificate"
+    assert error.kind is WireFailure.LOCAL  # SSL_CERT_FILE, on this machine, is the fix
+    assert error.message == (
+        "The TLS certificate of socket.massive.com did not verify for the WebSocket connection to "
+        "socket.massive.com/stocks: certificate verify failed. If a proxy or a private "
+        "certificate authority signs it, set SSL_CERT_FILE to a bundle that trusts it."
     )
 
 
@@ -833,16 +961,15 @@ _OBJECTS: tuple[dict[str, object], ...] = (
 
 
 def _events(decoder: FrameDecoder, frame: str) -> list[object]:
-    # Every event of a frame, compared whole: each value with its exact type, each reject by
-    # its fields, and each drift with its samples, which its equality leaves out.
+    # Every event of a frame, compared whole: each value with its exact type, the marks, and
+    # each drift with its samples, which its equality leaves out.
     events: list[object] = []
     for event in decoder.decode(frame):
         if isinstance(event, Status):
             events.append(event)
             continue
         rows = [[(type(v), v) for v in row] for row in event.rows]
-        rejects = [(r.channel, r.symbol, r.error.message, r.raw) for r in event.rejects]
-        events.append((event.channel, rows, rejects, event.drift, dict(event.drift.samples)))
+        events.append((event.channel, rows, event.marks, event.drift, dict(event.drift.samples)))
     return events
 
 
@@ -858,7 +985,7 @@ def test_frames_read_by_column_decode_exactly_as_one_by_one(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The same frames, read by column where the reading can vouch for them and one by one
-    # otherwise, and read one by one throughout: identical rows, rejects, drift, and samples.
+    # otherwise, and read one by one throughout: identical rows, marks, drift, and samples.
     # Every ordered pair of objects, repeated into frames of five; every run of one to twelve
     # objects of the list taken in turn; and each object six times alone.
     frames = [_frame(a, b, b, a, a) for a, b in itertools.product(_OBJECTS, repeat=2)]

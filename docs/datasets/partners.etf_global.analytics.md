@@ -7,7 +7,7 @@ ETF Global's quantitative risk, reward, and quality scores for US-listed ETFs.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.partners.etf_global.analytics(symbols=None, *, sort=None, order=None, limit=None, filters=None)
+m.partners.etf_global.analytics(symbols=None, *, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -27,6 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"effective_date_gte": "2026-01-01"}`. Keys: `composite_ticker_gt`, `composite_ticker_gte`, `composite_ticker_lt`, `composite_ticker_lte`, `effective_date`, `effective_date_gt`, `effective_date_gte`, `effective_date_lt`, `effective_date_lte`, `processed_date`, `processed_date_gt`, `processed_date_gte`, `processed_date_lt`, `processed_date_lte`, `quant_composite_behavioral`, `quant_composite_behavioral_gt`, `quant_composite_behavioral_gte`, `quant_composite_behavioral_lt`, `quant_composite_behavioral_lte`, `quant_composite_fundamental`, `quant_composite_fundamental_gt`, `quant_composite_fundamental_gte`, `quant_composite_fundamental_lt`, `quant_composite_fundamental_lte`, `quant_composite_global`, `quant_composite_global_gt`, `quant_composite_global_gte`, `quant_composite_global_lt`, `quant_composite_global_lte`, `quant_composite_quality`, `quant_composite_quality_gt`, `quant_composite_quality_gte`, `quant_composite_quality_lt`, `quant_composite_quality_lte`, `quant_composite_sentiment`, `quant_composite_sentiment_gt`, `quant_composite_sentiment_gte`, `quant_composite_sentiment_lt`, `quant_composite_sentiment_lte`, `quant_composite_technical`, `quant_composite_technical_gt`, `quant_composite_technical_gte`, `quant_composite_technical_lt`, `quant_composite_technical_lte`, `quant_grade`, `quant_grade_any_of`, `quant_grade_gt`, `quant_grade_gte`, `quant_grade_lt`, `quant_grade_lte`, `quant_total_score`, `quant_total_score_gt`, `quant_total_score_gte`, `quant_total_score_lt`, `quant_total_score_lte`, `reward_score`, `reward_score_gt`, `reward_score_gte`, `reward_score_lt`, `reward_score_lte`, `risk_total_score`, `risk_total_score_gt`, `risk_total_score_gte`, `risk_total_score_lt`, `risk_total_score_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -39,7 +40,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `composite_ticker`: "The stock ticker symbol used to identify this ETF product on exchanges." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `EffectiveDate` | String | The date showing when the information was accurate or valid; some issuers, such as Vanguard, release their data on a delay, so the effective_date can be several weeks earlier than the processed_date. |
 | `ProcessedDate` | String | The date showing when ETF Global received and processed the data. |
 | `QuantCompositeBehavioral` | double | Behavioral analysis score measuring investor psychology and market behavior patterns. |
@@ -77,14 +77,13 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `composite_ticker` |
-| `RawSymbol` | `composite_ticker` |
 | `EffectiveDate` | `effective_date` |
 | `ProcessedDate` | `processed_date` |
 | `QuantCompositeBehavioral` | `quant_composite_behavioral` |
@@ -128,4 +127,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

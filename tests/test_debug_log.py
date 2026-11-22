@@ -14,7 +14,7 @@ import re
 import sys
 import threading
 from datetime import datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -27,8 +27,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 LIBRARY = logging.getLogger("deephaven_massive")
-CHILD = logging.getLogger("deephaven_massive._query")
-# `2026-10-28 14:03:07,112Z DEBUG [MainThread] deephaven_massive._query: a message`
+CHILD = logging.getLogger("deephaven_massive.queries._query")
+# `2026-10-28 14:03:07,112Z DEBUG [MainThread] deephaven_massive.queries._query: a message`
 LINE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}Z (\w+) \[([^\]]+)\] ([\w.]+): (.*)$")
 
 
@@ -75,7 +75,8 @@ def test_enable_debug_logging_writes_every_level_to_stderr(
         "logging deephaven_massive at DEBUG to stderr (from enable_debug_logging())",
     )
     assert lines[1][3].startswith("deephaven-massive ")  # the process, described once
-    assert lines[2:] == [("DEBUG", "MainThread", "deephaven_massive._query", "call 7 start")]
+    queries = "deephaven_massive.queries._query"
+    assert lines[2:] == [("DEBUG", "MainThread", queries, "call 7 start")]
     # Records still reach the root's handlers, such as pytest's own.
     assert LIBRARY.propagate
 
@@ -87,7 +88,7 @@ def test_the_line_names_the_thread_that_logged_it(capsys: pytest.CaptureFixture[
     worker.start()
     worker.join()
     assert _lines(capsys.readouterr().err) == [
-        ("DEBUG", "massive #9 reaper", "deephaven_massive._query", "from a worker")
+        ("DEBUG", "massive #9 reaper", "deephaven_massive.queries._query", "from a worker")
     ]
 
 
@@ -110,7 +111,7 @@ def test_enable_debug_logging_appends_to_a_file(tmp_path: Path) -> None:
     assert _lines("\n".join(lines[1:]))[-1] == (
         "DEBUG",
         "MainThread",
-        "deephaven_massive._query",
+        "deephaven_massive.queries._query",
         "über AAPL",
     )
     assert f"to {path.resolve()} (from enable_debug_logging())" in lines[1]
@@ -206,7 +207,7 @@ def test_the_file_variable_alone_logs_at_debug(
     text = path.read_text(encoding="utf-8")
     assert (
         f"logging deephaven_massive at DEBUG to {path.resolve()} "
-        "(from the environment; DEEPHAVEN_MASSIVE_LOG unset, so DEBUG)"
+        "(from the environment, with DEEPHAVEN_MASSIVE_LOG unset)"
     ) in text
     assert _lines(text)[-1][3] == "a DEBUG line"
 
@@ -216,16 +217,22 @@ def test_a_variable_with_surrounding_whitespace_is_refused(
     monkeypatch: pytest.MonkeyPatch, variable: str
 ) -> None:
     monkeypatch.setenv(variable, " INFO ")
-    message = f"{variable}=' INFO ' has leading or trailing whitespace; set it without any"
+    message = f"{variable}=' INFO ' has leading or trailing whitespace. Set {variable} to 'INFO'."
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         _debug_log.configure_from_environment()
+
+
+def test_the_level_a_whitespace_refusal_names_is_taken(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "INFO")  # the fix the refusal above names
+    _debug_log.configure_from_environment()
+    assert LIBRARY.level == logging.INFO
 
 
 def test_an_unknown_level_names_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "verbose")
     message = (
-        "DEEPHAVEN_MASSIVE_LOG='verbose' is not a logging level; use one of DEBUG, INFO, "
-        "WARN, WARNING, ERROR, CRITICAL"
+        "DEEPHAVEN_MASSIVE_LOG='verbose' is not a logging level. Set it to DEBUG, INFO, WARN, "
+        "WARNING, ERROR, or CRITICAL."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         _debug_log.configure_from_environment()
@@ -272,8 +279,11 @@ def test_a_log_file_that_cannot_be_opened_names_the_variable(
     path = tmp_path / "missing" / "massive.log"
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG", "DEBUG")
     monkeypatch.setenv("DEEPHAVEN_MASSIVE_LOG_FILE", str(path))
-    message = f"DEEPHAVEN_MASSIVE_LOG_FILE={str(path)!r} cannot be opened for appending: "
-    with pytest.raises(OSError, match=f"^{re.escape(message)}") as info:
+    message = (
+        f"DEEPHAVEN_MASSIVE_LOG_FILE={str(path)!r} cannot be opened for appending: No such file "
+        "or directory. Set it to a file this process can write."
+    )
+    with pytest.raises(OSError, match=f"^{re.escape(message)}$") as info:
         _debug_log.configure_from_environment()
     assert isinstance(info.value.__cause__, FileNotFoundError)
     assert not [h for h in LIBRARY.handlers if isinstance(h, logging.FileHandler)]
@@ -283,7 +293,7 @@ def test_output_must_be_a_log_output_or_a_path() -> None:
     with pytest.raises(
         TypeError, match=r"^output must be a dm\.LogOutput or a file path, not int$"
     ):
-        dm.enable_debug_logging(cast("str", 3))
+        dm.enable_debug_logging(3)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 @pytest.mark.parametrize("proxy", [False, True])

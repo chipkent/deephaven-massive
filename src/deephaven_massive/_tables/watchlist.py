@@ -8,14 +8,15 @@ ticker, as `symbols=` must (`check_symbol` in `_datasets/symbols.py`): the libra
 a watchlist, so what the table says is what the stream subscribes and what `last_by()` matches. A
 null row is ignored.
 A row that is not canonical is never subscribed or requested; what else it does follows the
-session's `MassiveConfig.noncanonical_symbols`, which `SymbolRowRule` carries:
+call's `noncanonical_symbols` setting, which `SymbolRowRule` carries:
 
 - `OnError.RAISE`: a bad row present at the call raises `ValueError`, and one that arrives
-  later fails the result, with a message that names the row and `canonicalize_symbols`.
+  later fails the result, with a message that names the row and how to fix it.
 - `OnError.LOG` and `OnError.IGNORE`: the row is skipped and the result keeps following the
-  others. `LOG` logs each distinct value once at WARNING, `IGNORE` at DEBUG (a bounded number
-  per process), and the skipped values are listed in the result's `m.streams()` row until they
-  are fixed or deleted.
+  others. Each skipped value is a `noncanonical_symbols` span of the result's problems in
+  `m.problems()` until its rows are fixed or deleted (`SkippedValues`); the session's problem
+  reporter logs the first at WARNING under `LOG`. A static verb's read lists each skipped value
+  as a problem of its call (`SymbolRowRule.skipped_events`).
 
 Two pieces apply that rule:
 
@@ -48,23 +49,35 @@ thread, and makes no table operation.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 from deephaven.table_listener import TableListener, TableListenerHandle
+from typing_extensions import override
 
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import (
     UNDERLYING_CLASSES,
+    as_written_fault,
     canonical_symbol,
     check_symbol,
     is_canonical,
     symbol_class,
 )
-from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError
-from deephaven_massive._log_limits import BoundedLog
-from deephaven_massive._types import override
+from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
+from deephaven_massive._errors import user_defect
+from deephaven_massive._log_limits import BoundedLog, prose_list
+from deephaven_massive._on_error import effect_of
+from deephaven_massive._tables.problem_events import (
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+    SpanTracker,
+)
+from deephaven_massive._tables.refused_values import refused_detail
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -74,12 +87,18 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import ValueTable
+    from deephaven_massive._tables.problem_events import Problem
 
 __all__ = [
     "CURRENT_STEP",
+    "SKIPPED_ROWS_FIX",
+    "UNDERLYINGS_IN_ANOTHER_SPELLING",
     "CurrentSymbols",
+    "RowRule",
+    "SkippedValues",
     "SymbolRowRule",
     "SymbolWatch",
+    "failed_table_message",
     "invalid_row_message",
     "latest_rows_since_added",
     "read_symbols",
@@ -90,8 +109,6 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _SYMBOL: Final = "Symbol"
-_SHOWN: Final = 5
-"""The most bad values one message lists."""
 _WATCHED: Final = "__MassiveWatched"
 """The hidden column `watched_rows` joins on and drops. Dataset columns are PascalCase wire names,
 so none can take this name."""
@@ -119,7 +136,7 @@ _ignored_rows: Final = BoundedLog(logger, limit=_SKIPPED_LIMIT, level=logging.DE
 def invalid_row_message(
     asset_class: AssetClass | ClassFromPrefix, symbol: str, *, as_written: bool = False
 ) -> str:
-    """Say why a symbol table's row is refused, and how to convert such a table.
+    """Say why a symbol table's row is refused, and how to fix it.
 
     Args:
         asset_class: The dataset's class, or `ClassFromPrefix.ANY` for a dataset that spans
@@ -133,30 +150,52 @@ def invalid_row_message(
         row into a ticker, where to report it, since the value can also be a ticker Massive
         writes in a form the library does not know yet. For a
         dataset of one class the remedy is `dm.canonicalize_symbols`, which by default nulls
-        the rows it cannot convert; for a dataset that spans classes, whose rows may mix them, it
-        is `dm.canonical_symbol` per row with each row's class.
+        the rows it cannot convert and, with `on_error=dm.OnError.RAISE`, fails on them, so a
+        caller who chose to fail on a bad row keeps failing; for a dataset that spans classes,
+        whose rows may mix them, it is `dm.canonical_symbol` per row with each row's class. For
+        stocks, alone or among other classes, the remedy names `convention=`, since under the
+        default, Massive's own spelling, no ticker with another source's separators converts.
+        For values kept as Massive writes them (a third party's global tickers, futures product
+        codes) the message names the rule the row breaks, and the remedy is only to fix the row:
+        the converters follow a class's ticker grammar, so they refuse a product code such as
+        `ES`, and they refuse the faults such a row has, so they would null every one.
     """
-    reason = ""
+    if as_written:
+        return (
+            f"A symbol table holds {symbol!r}, which {as_written_fault(symbol)}, and Massive "
+            "never writes a ticker that way. Fix the row to the value Massive lists, or delete "
+            "it."
+        )
+    refusal = ""
     try:
-        check_symbol(asset_class, symbol, as_written=as_written)
+        check_symbol(asset_class, symbol)
     except ValueError as error:
-        reason = f" ({error})"
+        text = str(error)
+        refusal = f" {text}" if text.endswith(".") else f" {text}."
+    held = f"A symbol table holds {symbol!r}.{refusal}"
     if asset_class is ClassFromPrefix.ANY:
         remedy = (
-            "convert each row with dm.canonical_symbol(text, asset_class) and the row's own "
-            "class, since this dataset's rows may mix classes"
+            "Fix the row, or convert each row with dm.canonical_symbol and that row's class, "
+            "such as dm.canonical_symbol('EUR/USD', dm.AssetClass.FOREX), or "
+            "dm.canonical_symbol('BRK-B', dm.AssetClass.STOCKS, "
+            "convention=dm.SymbolConvention.YAHOO) for a stock in Yahoo's spelling."
         )
-    else:
+    elif asset_class is AssetClass.STOCKS:
         remedy = (
-            f"pass the table through dm.canonicalize_symbols(table, "
-            f"dm.AssetClass.{asset_class.name}), which converts what it can and nulls the rest"
+            "Fix the row, or convert the table with dm.canonicalize_symbols(table, "
+            "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), naming the convention "
+            "your tickers come from."
         )
-    message = f"a symbol table holds {symbol!r}{reason}. Fix the row, or {remedy}"
-    if as_written or _converts(asset_class, symbol):
-        return message
+    else:  # every other class converts by its class alone
+        remedy = (
+            f"Fix the row, or convert the table with dm.canonicalize_symbols(table, "
+            f"dm.AssetClass.{asset_class.name})."
+        )
+    if _converts(asset_class, symbol):
+        return f"{held} {remedy}"
     return (
-        f"{message}. If Massive itself writes {symbol!r}, the library does not know its form "
-        f"yet: report it at {ISSUES_URL}"
+        f"{held} {remedy} If Massive itself writes {symbol!r}, report it at {ISSUES_URL}, since "
+        "the library does not know that form yet."
     )
 
 
@@ -172,50 +211,128 @@ def _converts(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> bool:
         symbol: The refused row.
 
     Returns:
-        True when `dm.canonical_symbol` converts the row for its class.
+        True when `dm.canonical_symbol` converts the row for its class, under any convention
+        for a stock.
     """
     resolved = symbol_class(symbol) if asset_class is ClassFromPrefix.ANY else asset_class
-    try:
-        canonical_symbol(symbol, resolved)
-    except ValueError:
-        return False
-    return True
+    # A stock ticker converts only from a named convention, and the message names
+    # `convention=`; every other class converts by its class alone.
+    conventions = (
+        tuple(SymbolConvention) if resolved is AssetClass.STOCKS else (SymbolConvention.MASSIVE,)
+    )
+    for convention in conventions:
+        try:
+            canonical_symbol(symbol, resolved, convention=convention)
+        except ValueError:
+            continue
+        return True
+    return False
 
 
-_FAILED_TABLE: Final = (
-    "the symbol table passed to {dataset} failed upstream, so the result can no longer follow "
-    "it: {cause}. Fix that table and call {dataset} again; a table made by "
-    "dm.canonicalize_symbols fails on a row it cannot convert only under on_error=dm.OnError.RAISE"
+UNDERLYINGS_IN_ANOTHER_SPELLING: Final = (
+    "https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md"
+    "#underlyings-in-another-spelling"
 )
-"""The message of a result whose symbol table failed upstream, formatted with the dataset and
-the cause."""
+"""The troubleshooting section that converts a table of tickers in another source's spelling,
+a table of underlyings that mixes stocks and indices among them."""
+
+_UNDERLYING_CONVERSION: Final = (
+    "If your tickers use another source's spelling, such as Yahoo's 'BRK-B', convert the stock "
+    f"rows with dm.canonicalize_symbols and keep the index rows: {UNDERLYINGS_IN_ANOTHER_SPELLING}."
+)
+"""How a table of underlyings in another source's stock spelling converts: the stock rows only,
+since the stock converter nulls an index ticker. The linked section holds the code."""
 
 
-def skipped_rows_text(values: Iterable[str]) -> str:
-    """Say which values of a symbol table are skipped, for the `Error` of a `m.streams()` row.
+def failed_table_message(dataset: str, cause: object | None = None) -> str:
+    """Say that the table a result follows has failed, and how to go on.
+
+    A table made by `dm.canonicalize_symbols` under `on_error=dm.OnError.RAISE` fails on a row
+    it cannot convert; any other failed table fails the same way.
+
+    Args:
+        dataset: The dataset the table was passed to, such as `"stocks.quotes"`.
+        cause: What Deephaven reported when the table failed while followed, which may end in
+            a stack trace; None when the table had already failed at the read.
+
+    Returns:
+        Such as `"The table you passed to stocks.quotes has failed, so the library can no longer
+        read it. Deephaven reported: boom. Fix that table, then call stocks.quotes again."`.
+    """
+    problem = f"The table you passed to {dataset} has failed, so the library can no longer read it"
+    if cause is not None:
+        problem = f"{problem}. Deephaven reported: {str(cause).strip()}"
+    return user_defect(problem, f"Fix that table, then call {dataset} again")
+
+
+SKIPPED_ROWS_FIX: Final = (
+    f"Fix or delete those rows, or report them at {ISSUES_URL} if Massive itself writes them."
+)
+"""What ends the error of a table none of whose values a read takes: a skipped value may be a
+form Massive writes that the library does not know yet (`skipped_rows_text`)."""
+
+
+def skipped_rows_text(values: Sequence[str]) -> str:
+    """Say which values of a table a read skipped, for the error of a table that holds none.
 
     Args:
         values: The distinct skipped values; at least one.
 
     Returns:
-        Their count and the first five in sorted order, and what to do, such as
-        `skipping 1 symbol-table value this dataset does not take: 'aapl'; fix or delete that
-        row, or report it at <issues> if Massive itself writes it`. The value is not called
-        wrong: Massive may write a form the library does not know yet.
+        The values in sorted order as prose, the first three only when there are more, such
+        as `"'aapl' and 'msft'"` or `"7 values, the first 3: 'a', 'b', and 'c'"`. The values
+        are not called wrong: Massive may write a form the library does not know yet.
     """
-    texts = sorted(values)
-    shown = ", ".join(repr(text) for text in texts[:_SHOWN])
-    more = f", and {len(texts) - _SHOWN} more" if len(texts) > _SHOWN else ""
-    if texts[1:]:
-        return (
-            f"skipping {len(texts)} symbol-table values this dataset does not take: "
-            f"{shown}{more}; fix or delete those rows, or report them at {ISSUES_URL} if "
-            "Massive itself writes them"
-        )
-    return (
-        f"skipping 1 symbol-table value this dataset does not take: {shown}; fix or delete "
-        f"that row, or report it at {ISSUES_URL} if Massive itself writes it"
-    )
+    return prose_list([repr(text) for text in sorted(values)], "values")
+
+
+class RowRule(Protocol):
+    """What a `SymbolWatch` asks of the rule its table's rows follow.
+
+    `SymbolRowRule` is a dataset's rule; `refused_values.ConversionRule` is the rule of the
+    input of a table `canonicalize_symbols` returned, whose skipped values are those the
+    converter refuses.
+    """
+
+    @property
+    def dataset(self) -> str:
+        """The name the watch's log records use."""
+        ...
+
+    @property
+    def column(self) -> str:
+        """The table's column of values."""
+        ...
+
+    @property
+    def noncanonical(self) -> OnError:
+        """What a value the rule refuses does."""
+        ...
+
+    def accepts(self, symbol: str) -> bool:
+        """Tell whether a value is good.
+
+        Args:
+            symbol: The value, never null.
+        """
+        ...
+
+    def refusal(self, symbol: str) -> str:
+        """Say why a value is refused.
+
+        Args:
+            symbol: A value `accepts` refuses.
+        """
+        ...
+
+    def skip(self, symbol: str, *, stream_id: int | None) -> None:
+        """Log a refused value, as the rule does.
+
+        Args:
+            symbol: The value.
+            stream_id: The table that met it, or None.
+        """
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,7 +347,7 @@ class SymbolRowRule:
         asset_class: The class whose grammar the rows must follow, or `ClassFromPrefix.ANY`
             for a dataset that spans classes (each symbol's prefix selects its class).
         as_written: True for a dataset whose symbols are kept as Massive writes them.
-        noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+        noncanonical: The call's `noncanonical_symbols` setting (`Request.on_error`).
         column: The table's column that holds the values: `Symbol`, or `ProductCode` for a
             table of futures product codes.
         underlying: True when each value must be a stock or index ticker, the underlying of
@@ -250,7 +367,7 @@ class SymbolRowRule:
 
         Args:
             spec: The dataset.
-            noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+            noncanonical: The call's `noncanonical_symbols` setting (`Request.on_error`).
 
         Returns:
             The rule.
@@ -272,7 +389,7 @@ class SymbolRowRule:
         Args:
             spec: The dataset.
             values: The table and the argument it stands for.
-            noncanonical: The session's `MassiveConfig.noncanonical_symbols`.
+            noncanonical: The call's `noncanonical_symbols` setting (`Request.on_error`).
 
         Returns:
             The rule, reading the table's `values.column`.
@@ -319,6 +436,41 @@ class SymbolRowRule:
         """
         return f"{self.dataset}: {self._reason(symbol)}"
 
+    def skipped_events(
+        self, values: Iterable[str], *, stream_id: int, where: str, field: str | None
+    ) -> list[ProblemEvent]:
+        """Return the `noncanonical_symbols` problems of one read's skipped values.
+
+        A static verb reads its table once, so each skipped value is one problem of the call,
+        not a span: the table never changes after the read.
+
+        Args:
+            values: The distinct values the read skipped.
+            stream_id: The call's id, its `StreamId`.
+            where: The table the values came from, such as `the symbol table of <query>`.
+            field: None for the call's symbols; the column of a table of values.
+
+        Returns:
+            One `SKIPPED` event per value, with its reason and the call's setting.
+        """
+        at = time.time_ns()
+        return [
+            ProblemEvent(
+                cause=ProblemCause.NONCANONICAL_SYMBOLS,
+                action=ProblemAction.SKIPPED,
+                dataset=self.dataset,
+                stream_id=stream_id,
+                where=where,
+                symbol=value,
+                field=field,
+                rows=0,
+                detail=self.refusal(value),
+                at=at,
+                policy=self.noncanonical,
+            )
+            for value in values
+        ]
+
     def _reason(self, symbol: str) -> str:
         """Say why a row is refused, without the dataset's name.
 
@@ -326,41 +478,192 @@ class SymbolRowRule:
             symbol: The row's value, which `accepts` refuses.
 
         Returns:
-            For a rule of underlyings, that an underlying is a stock or index ticker; else
-            the reason of `invalid_row_message`.
+            For a rule of underlyings, that an underlying is a stock or index ticker, and the
+            one conversion that can turn a refused row into one: a stock ticker in another
+            source's spelling, converted with its `convention=` (an unprefixed row is read as
+            a stock, so an index spelling such as `spx` converts to nothing); else the reason
+            of `invalid_row_message`.
         """
         if self.underlying:
             return (
-                f"a table of underlyings holds {symbol!r}, which is not a stock or index ticker "
-                "such as 'AAPL' or 'I:SPX'. Fix the row, or convert it with "
-                "dm.canonical_symbol(text, asset_class)"
+                f"A table of underlyings holds {symbol!r}, which is not a stock or index ticker "
+                f"such as 'AAPL' or 'I:SPX'. Fix or delete the row. {_UNDERLYING_CONVERSION}"
             )
         return invalid_row_message(self.asset_class, symbol, as_written=self.as_written)
 
-    def skip(self, symbol: str, *, stream_id: int | None) -> None:
-        """Log a skipped row under `LOG` (WARNING) or `IGNORE` (DEBUG), once per value.
+    def skip(self, symbol: str, *, stream_id: int | None, reported: bool = False) -> None:
+        """Log a skipped row once per value: at DEBUG for a table, else as `LOG` or `IGNORE` say.
 
+        A table's skipped values are `noncanonical_symbols` problems of `m.problems()`, whose
+        first WARNING per table the session's problem reporter logs (`SkippedValues`), so a
+        table's reader logs each value at DEBUG only. So do the check a live verb makes before
+        its table exists and a static verb's read, which lists its values itself (`reported`).
+        A read no problem row covers logs under `LOG` at WARNING and under `IGNORE` at DEBUG.
         Each value is logged once per dataset, a bounded number of values per process, so a
-        table edited for weeks keeps the log and the memory small. The record names the
-        dataset and the stream that first met the value, such as
-        `stocks.quotes stream 7: ...; the row is skipped until it is fixed or deleted`. Never
-        called under `RAISE`.
+        table edited for weeks keeps the log and the memory small. The record names the dataset
+        and the stream that first met the value, such as `stocks.quotes stream 7: ...; the row
+        is skipped until it is fixed or deleted`. Never called under `RAISE`.
 
         Args:
             symbol: The row's symbol, which `accepts` refuses.
             stream_id: The stream or `poll()` table that read the row, or None for a verb's
-                read of the table before any stream exists (`fetch()`, or the check a live
-                verb makes first).
+                read of the table before any stream exists (a static verb's, or the check a
+                live verb makes first).
+            reported: True for a read whose value `m.problems()` lists, with its first WARNING:
+                the check a live verb makes first, and a static verb's read.
         """
-        rows = _logged_rows if self.noncanonical is OnError.LOG else _ignored_rows
-        reader = "a call's read" if stream_id is None else f"stream {stream_id}"
+        level = effect_of(self.noncanonical).level
+        alarm = level > logging.DEBUG and stream_id is None and not reported
+        rows = _logged_rows if alarm else _ignored_rows
+        reader = "" if stream_id is None else f" stream {stream_id}"
         rows.log(
             f"{self.dataset}\0{symbol}",
-            "%s %s: %s; the row is skipped until it is fixed or deleted",
+            "%s%s: Skipping the row %r until it is fixed or deleted. %s",
             self.dataset,
             reader,
+            symbol,
             self._reason(symbol),
         )
+
+
+class SkippedValues:
+    """A table's skipped symbol-table values, as its `noncanonical_symbols` spans.
+
+    Each value a table skips is one span of `m.problems()` while some row holds it, which ends
+    once every row of it is fixed or deleted. Its sources are the table's own reader (a
+    watch's listener, a poller), with the values its rule skips (`update`), and, for each table
+    it reads that `canonicalize_symbols` returned (its symbol table, a `poll()`'s value table),
+    the values the converter refuses there (`refused_changed`, from
+    `refused_values.RefusedValues`). A value table's spans name its column in `Field`, as its
+    own skipped values do. Each change of a source reports the joined spans through `report`.
+    One leaf lock orders the changes of every source, and the report is made under it, so the
+    snapshots reach the session in order.
+    """
+
+    __slots__ = (
+        "__weakref__",
+        "_lock",
+        "_own",
+        "_refused",
+        "_report",
+        "_rule",
+        "_tracker",
+        "_values",
+    )
+
+    def __init__(
+        self,
+        rule: SymbolRowRule,
+        *,
+        stream_id: int,
+        report: Callable[[Sequence[Problem]], None],
+        values: SymbolRowRule | None = None,
+    ) -> None:
+        """Start with no value skipped.
+
+        Args:
+            rule: The rule that refuses the symbol table's values, for each one's reason.
+            stream_id: The table's `StreamId`.
+            report: Hands the spans to the table's session (`SessionCore.problems`); it must
+                not block.
+            values: The rule of a value table the table also reads (`SymbolRowRule.for_values`),
+                or None.
+        """
+        self._rule = rule
+        self._values = values
+        self._report = report
+        self._lock = threading.Lock()
+        self._own: dict[str, tuple[str | None, str | None, str, int]] = {}
+        # Each converted table's refused values, by its `field` (`refused_changed`): their
+        # spans, and the converter's `on_error`.
+        self._refused: dict[
+            str | None, tuple[dict[str, tuple[str | None, str | None, str, int]], OnError]
+        ] = {}
+        self._tracker = SpanTracker(
+            ProblemCause.NONCANONICAL_SYMBOLS,
+            dataset=rule.dataset,
+            stream_id=stream_id,
+            where=f"the symbol table of stream {stream_id}",
+            policy=rule.noncanonical,
+        )
+
+    def update(self, symbols: Iterable[str], *, values: Iterable[str] = ()) -> None:
+        """Take the values the table's own rule skips now; report the spans if they changed.
+
+        Args:
+            symbols: The symbol table's distinct values skipped now; empty once none is.
+            values: The value table's, skipped by the `values` rule.
+        """
+        # Named by the source and the value, quoted, as `refused_changed` names its spans, so
+        # one text skipped in both tables is two spans.
+        own: dict[str, tuple[str | None, str | None, str, int]] = {
+            f"skipped {None!r} {value!r}": (value, None, self._rule.refusal(value), 0)
+            for value in symbols
+        }
+        if self._values is not None:
+            rule = self._values
+            own.update(
+                {
+                    f"skipped {rule.column!r} {value!r}": (
+                        value,
+                        rule.column,
+                        rule.refusal(value),
+                        0,
+                    )
+                    for value in values
+                }
+            )
+        with self._lock:
+            self._own = dict(own)
+            self._show()
+
+    def update_values(self, values: Iterable[str]) -> None:
+        """Take the values a table of values skips now, for a table that reads only that table.
+
+        Args:
+            values: Its distinct values skipped now, by the `values` rule; empty once none is.
+        """
+        self.update((), values=values)
+
+    def refused_changed(
+        self, refused: Mapping[str, str], policy: OnError, *, field: str | None = None
+    ) -> None:
+        """Take the values `canonicalize_symbols` refuses now in one table the table reads.
+
+        Reports the spans if they changed. Each converted table is a source of its own, so a
+        change of one leaves the other's spans as they were.
+
+        Args:
+            refused: Each value the converter refuses now, with its reason.
+            policy: The converter's `on_error`.
+            field: The column of a value table, which its spans name in `Field`; None for the
+                symbol table.
+        """
+        # Named by the source and the value, quoted, so no two sources' names can meet.
+        spans: dict[str, tuple[str | None, str | None, str, int]] = {
+            f"refused {field!r} {value!r}": (
+                value,
+                field,
+                refused_detail(why),
+                0,
+            )
+            for value, why in refused.items()
+        }
+        with self._lock:
+            self._refused[field] = (spans, policy)
+            self._show()
+
+    def _show(self) -> None:
+        """Report the joined spans when they changed; the lock is held."""
+        current: dict[str, tuple[str | None, str | None, str, int]] = {}
+        policies: dict[str, OnError] = {}
+        for refused, policy in self._refused.values():
+            current.update(refused)
+            policies.update(dict.fromkeys(refused, policy))
+        current.update(self._own)
+        spans = self._tracker.update(current, policies=policies)
+        if spans is not None:
+            self._report([spans])
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,7 +680,9 @@ class CurrentSymbols:
     skipped: tuple[str, ...] = ()
 
 
-def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) -> CurrentSymbols:
+def read_symbols(
+    rule: SymbolRowRule, table: Table, *, stream_id: int | None, reported: bool = False
+) -> CurrentSymbols:
     """Read a symbol table's current rows once, sorting them into good and skipped values.
 
     The table is read with `Table.iter_tuple`, which holds the update graph's shared lock while
@@ -386,10 +691,13 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
     Under `LOG` and `IGNORE` each skipped value is logged once (`SymbolRowRule.skip`).
 
     Args:
-        rule: The dataset's rule: its grammar and the session's `noncanonical_symbols`.
+        rule: The dataset's rule: its grammar and the call's `noncanonical_symbols`.
         table: The user's table with the rule's column (`Symbol`, or `ProductCode`).
         stream_id: The stream or `poll()` table the read is for, named in a skipped row's
             record; None for a verb's read before any stream exists.
+        reported: True for a read whose skipped values `m.problems()` lists: the check a live
+            verb makes before its table exists, whose table reports them, and a static verb's
+            read, which reports them as its call's (`SymbolRowRule.skip`).
 
     Returns:
         The table's canonical symbols and, under `LOG` and `IGNORE`, its skipped values; both
@@ -402,17 +710,17 @@ def read_symbols(rule: SymbolRowRule, table: Table, *, stream_id: int | None) ->
             in sorted order).
     """
     if table.j_table.isFailed():
-        raise ValueError(_FAILED_TABLE.format(dataset=rule.dataset, cause="it is failed"))
+        raise ValueError(failed_table_message(rule.dataset))
     found = sorted({row[0] for row in table.iter_tuple(cols=rule.column) if row[0] is not None})
     good: list[str] = []
     skipped: list[str] = []
     for symbol in found:
         if rule.accepts(symbol):
             good.append(symbol)
-        elif rule.noncanonical is OnError.RAISE:
+        elif effect_of(rule.noncanonical).fails:
             raise ValueError(rule.refusal(symbol))
         else:
-            rule.skip(symbol, stream_id=stream_id)
+            rule.skip(symbol, stream_id=stream_id, reported=reported)
             skipped.append(symbol)
     return CurrentSymbols(tuple(good), tuple(skipped))
 
@@ -430,17 +738,19 @@ class SymbolWatch:
     `on_change(added, removed)` receives two disjoint frozensets of symbols: those the table now
     holds and did not before, and those it no longer holds. It is never called with both empty. A
     row whose symbol is not Massive's exact ticker of the class is never counted (the transport
-    looks up a crypto pair's split before it subscribes). What else it does follows the rule's
-    `noncanonical` setting: under `OnError.RAISE`, `on_invalid(message)` receives the reason each
-    time such a row arrives, and its owner fails the stream; under `LOG` and `IGNORE` the value
-    is logged once (`SymbolRowRule.skip`), and `on_skipped(values)` receives the sorted distinct
-    values skipped now each time that set changes, empty once every bad row is fixed or deleted.
-    A fixed row is an added symbol like any other. When the watched table itself fails (a
-    `canonicalize_symbols` table under `OnError.RAISE` that met a bad row), `on_invalid` receives
-    that too, whatever the setting, so the stream never follows a frozen table. The callbacks run
-    on the replaying caller thread or an update-graph thread, with the update-graph lock held:
-    they must not block, wait on a library thread, or make a table operation, and an exception
-    one raises is logged at ERROR by the listener's error callback.
+    looks up a crypto pair's split before it subscribes). Under every setting,
+    `on_skipped(values)` receives the sorted distinct values skipped now each time that set
+    changes, empty once every bad row is fixed or deleted, so `m.problems()` lists each one.
+    What else it does follows the rule's `noncanonical` setting: under `OnError.RAISE`,
+    `on_invalid(message)` receives the reason each time such a row arrives, before
+    `on_skipped`, and its owner fails the stream; under `LOG` and `IGNORE` the value is logged
+    once (`SymbolRowRule.skip`). A fixed row is an added symbol like any other. When the
+    watched table itself fails (a `canonicalize_symbols` table under `OnError.RAISE` that met a
+    bad row), `on_invalid` receives that too, whatever the setting, so the stream never follows
+    a frozen table. The callbacks run on the replaying caller thread or an update-graph thread,
+    with the update-graph lock held: they must not block, wait on a library thread, or make a
+    table operation, and an exception one raises is logged at ERROR by the listener's error
+    callback.
 
     `keep_alive_with(table)` ties the view and the listener to another table's liveness, so
     they are not destroyed while that table lives: the transport passes the stream's blink
@@ -482,7 +792,7 @@ class SymbolWatch:
 
     def __init__(
         self,
-        rule: SymbolRowRule,
+        rule: RowRule,
         table: Table,
         on_change: Callable[[frozenset[str], frozenset[str]], None],
         *,
@@ -496,13 +806,13 @@ class SymbolWatch:
         that should own the view and the listener, and outside every library lock.
 
         Args:
-            rule: The dataset's grammar and the session's `noncanonical_symbols`.
+            rule: The dataset's grammar and the call's `noncanonical_symbols`.
             table: The user's refreshing table with the rule's column (`Symbol`, or
                 `ProductCode`).
             on_change: Receives each change of the set of symbols; see the class documentation.
             stream_id: The stream that follows the table, named in the watch's log records.
             on_invalid: Receives the message of a bad row under `RAISE`, or of a failed table.
-            on_skipped: Receives the values skipped now under `LOG` and `IGNORE`, each time
+            on_skipped: Receives the values skipped now, under every setting, each time
                 that set changes.
         """
         # Without its null rows: `TableUpdate` hands a String column over as NumPy text, in
@@ -565,7 +875,7 @@ class _SymbolCounter(TableListener):
 
     def __init__(
         self,
-        rule: SymbolRowRule,
+        rule: RowRule,
         on_change: Callable[[frozenset[str], frozenset[str]], None],
         *,
         stream_id: int,
@@ -575,11 +885,11 @@ class _SymbolCounter(TableListener):
         """Start with no value counted.
 
         Args:
-            rule: The dataset's grammar and the session's `noncanonical_symbols`.
+            rule: The dataset's grammar and the call's `noncanonical_symbols`.
             on_change: Receives each change of the set of symbols.
             stream_id: The stream that follows the table, named in the log records.
             on_invalid: Receives the message of a bad row under `RAISE`, or of a failed table.
-            on_skipped: Receives the values skipped now under `LOG` and `IGNORE`.
+            on_skipped: Receives the values skipped now, under every setting.
         """
         self._rule = rule
         self._stream_id = stream_id
@@ -595,8 +905,8 @@ class _SymbolCounter(TableListener):
 
         A replay of the initial rows is the same change as rows being added; it is only
         logged at DEBUG with the number of symbols found. Under `RAISE` a bad row is reported
-        to `on_invalid` before the change is; under `LOG` and `IGNORE` the skipped set is
-        reported after it.
+        to `on_invalid` before the change is; under every setting the skipped set is reported
+        after it.
 
         Args:
             update: The update; its added, removed, and modified rows' `Symbol` values.
@@ -636,7 +946,7 @@ class _SymbolCounter(TableListener):
         Args:
             e: What Deephaven reported.
         """
-        message = _FAILED_TABLE.format(dataset=self._rule.dataset, cause=e)
+        message = failed_table_message(self._rule.dataset, e)
         logger.debug("%s stream %d: %s", self._rule.dataset, self._stream_id, message)
         self._on_invalid(message)
 
@@ -644,8 +954,8 @@ class _SymbolCounter(TableListener):
         """Add `step` to the count of each value, forgetting counts that reach zero.
 
         A canonical symbol is counted among the symbols. Any other value is counted among the
-        skipped ones under `LOG` and `IGNORE`, and logged once when it arrives; under `RAISE` an
-        arriving one is reported to `on_invalid` and a leaving one is ignored.
+        skipped ones, so `m.problems()` lists it under every setting. When it arrives, `RAISE`
+        reports it to `on_invalid`, which fails the stream, and `LOG` and `IGNORE` log it once.
 
         Args:
             columns: The `Symbol` values of some rows, as `TableUpdate` returns them: NumPy
@@ -656,11 +966,9 @@ class _SymbolCounter(TableListener):
             symbol = str(value)  # a plain str, not NumPy's subclass, leaves the listener
             counts = self._counts
             if not self._rule.accepts(symbol):
-                if self._rule.noncanonical is OnError.RAISE:
-                    if step > 0:
-                        self._on_invalid(self._rule.refusal(symbol))
-                    continue
-                if step > 0:
+                if step > 0 and effect_of(self._rule.noncanonical).fails:
+                    self._on_invalid(self._rule.refusal(symbol))
+                elif step > 0:
                     self._rule.skip(symbol, stream_id=self._stream_id)
                 counts = self._skipped
             count = counts[symbol] + step
@@ -670,12 +978,29 @@ class _SymbolCounter(TableListener):
                 del counts[symbol]
 
 
-def watched_rows(table: Table, watchlist: Table) -> Table:
-    """Keep the rows of a table whose `Symbol` the watchlist holds, following its changes.
+def _watched_symbols(watchlist: Table) -> Table:
+    """Return the watchlist's distinct symbols, without a null.
 
-    The result is what `table.where_in(watchlist, "Symbol")` returns: a row is kept while its
-    symbol is in the watchlist, and leaves when the symbol does. A blink table stays a blink
-    table. Duplicate watchlist rows count once.
+    A join matches a null key to a null key, so a null watchlist row (a row
+    `canonicalize_symbols` could not convert, or an input-table row left empty) would match
+    every data row whose symbol the library could not read, which `unreadable_symbols` keeps
+    with a null `Symbol`. A null row watches nothing.
+
+    Args:
+        watchlist: The user's symbol table; only its `Symbol` column is read.
+
+    Returns:
+        A table with one `Symbol` column, one row per symbol the watchlist holds.
+    """
+    return watchlist.where(f"!isNull({_SYMBOL})").select_distinct(_SYMBOL)
+
+
+def watched_rows(table: Table, watchlist: Table, *, key: str = _SYMBOL) -> Table:
+    """Keep the rows of a table whose symbol the watchlist holds, following its changes.
+
+    A row is kept while its symbol is in the watchlist, and leaves when the symbol does, as
+    `where_in` would keep it. A blink table stays a blink table. Duplicate watchlist rows count
+    once. A null watchlist row watches nothing, so a row with a null symbol is never kept.
 
     It is built from a join instead of `where_in`, because Deephaven 42.7's `where_in` delivers
     a failure of each of its two tables to its result: when the watchlist fails and the table
@@ -684,19 +1009,21 @@ def watched_rows(table: Table, watchlist: Table) -> Table:
     end the process every time a watchlist failed. A join forwards the first failure of its
     two tables and ignores the second.
 
-    Call it where a result is built (the `build` of `SessionCore.stream_result`), inside the
+    Call it where a result is built (the `build` of `SharedStreams.result`), inside the
     result's liveness scope, which then manages the tables it creates.
 
     Args:
-        table: A live table with a `Symbol` column, such as a stream's blink table or its
+        table: A live table with a column of symbols, such as a stream's blink table or its
             `last_by`.
         watchlist: The user's symbol table; only its `Symbol` column is read.
+        key: The table's column of symbols, `Symbol` unless the table's own `Symbol` column
+            holds something else (a followed read's vectors of rows).
 
     Returns:
         The table's rows whose symbol the watchlist holds, with the table's columns.
     """
-    marks = watchlist.select_distinct(_SYMBOL).update_view(f"{_WATCHED} = true")
-    joined = table.natural_join(marks, on=_SYMBOL, joins=_WATCHED)
+    marks = _watched_symbols(watchlist).update_view(f"{_WATCHED} = true")
+    joined = table.natural_join(marks, on=f"{key}={_SYMBOL}", joins=_WATCHED)
     return joined.where(f"{_WATCHED} = true").drop_columns(_WATCHED)
 
 
@@ -710,7 +1037,8 @@ def latest_rows_since_added(blink: Table, watchlist: Table, keys: Sequence[str])
     including a row the blink table holds from the cycle that just ran. A symbol deleted and
     added again is a new row of the distinct watchlist, stamped with a new cycle, so a row that
     entered the table before the cycle in which its symbol last joined stays hidden until the
-    symbol's next row. The rule compares only the update graph's own cycle numbers, never a
+    symbol's next row. A null watchlist row watches nothing, so a row with a null symbol never
+    shows. The rule compares only the update graph's own cycle numbers, never a
     wall clock, so neither a row's `TimestampInsert` nor a clock running behind can hide it.
 
     Meant for `last_by()` keyed by `Symbol`: the aggregation remembers every key it has seen,
@@ -718,7 +1046,7 @@ def latest_rows_since_added(blink: Table, watchlist: Table, keys: Sequence[str])
     that span symbols filter first instead (`watched_rows`). It is built from a join, for the
     reason `watched_rows` gives.
 
-    Call it where a result is built (the `build` of `SessionCore.stream_result`), inside the
+    Call it where a result is built (the `build` of `SharedStreams.result`), inside the
     result's liveness scope, which then manages the tables it creates. It holds the update
     graph's shared lock while it creates the two stamped tables, so it blocks while an update
     cycle runs; a caller that already holds either lock (a console command) takes it again at
@@ -743,7 +1071,7 @@ def latest_rows_since_added(blink: Table, watchlist: Table, keys: Sequence[str])
         # keeps every cycle out until both sides exist, so the symbols and rows present now get
         # equal steps. `update`, never `update_view`, on both sides: a view would compute the
         # step when a row is read, not in the cycle the row changed.
-        added = watchlist.select_distinct(_SYMBOL).update(f"{_ADDED_STEP} = {CURRENT_STEP}")
+        added = _watched_symbols(watchlist).update(f"{_ADDED_STEP} = {CURRENT_STEP}")
         # Stamped before the aggregation: a formula that reads no column is not computed again
         # when a row is modified, so after `last_by` it would keep the step of each key's first
         # row.

@@ -9,27 +9,36 @@ and shares it between every caller; nothing falls back to a guessed split.
 The REST transport (`_ingest/rest.py`) holds the session's list in its `RestState` and reads it
 through a `RestReader`, whose patience and error conversion the list's requests use
 (`TickerListReader`). The WebSocket transport reaches it through the REST transport's
-`crypto_pair`. `recording_split` turns the list's lookup into a split that records a pair it
-cannot split instead of raising, for reads that leave such a pair out and go on with the rest.
-The single-flight sharing itself is `SharedLookup`'s (`_ingest/shared_lookup.py`).
+`crypto_pair`. A pair the list gives no split for is one Massive has no data for, and the
+lookup says why instead of raising, so each transport treats it as it treats any other symbol
+with no data. A failed read of the list is a transport failure, and raises. `recording_split`
+turns the lookup into a split that records such a failure instead of raising, for a read by
+symbol, where it fails that pair alone. The single-flight sharing itself is `SharedLookup`'s
+(`_ingest/shared_lookup.py`).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Final, Protocol, TypeAlias
 
+from deephaven_massive._enums import OnError
+from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    ErrorCause,
+    ErrorSource,
     MassiveError,
-    UnlistedPairError,
-    cause_of,
+    RowDataError,
+    copy_error,
+    source_of,
 )
 from deephaven_massive._ingest.rate_limits import OTHER
 from deephaven_massive._ingest.rest_requests import largest_page
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
+from deephaven_massive._log_limits import BoundedLog
 from deephaven_massive._massive import Cancel, WireError
+from deephaven_massive._on_error import effect_of
+from deephaven_massive._tables.transports import Unsplit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -39,6 +48,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "LIST_KEY",
+    "NOT_LISTED",
     "REREAD_AFTER",
     "CryptoTickerList",
     "CryptoTickers",
@@ -56,11 +66,21 @@ REREAD_AFTER: Final = 3600.0
 """The seconds after which a ticker the crypto list does not hold makes the session read the list
 again, so a pair Massive lists later is found without a restart, at most once an hour."""
 
+NOT_LISTED: Final = Unsplit("Massive's crypto ticker list does not hold it", no_data=True)
+"""A pair the list does not hold: one Massive has no data for."""
+
 CryptoTickers: TypeAlias = "Mapping[str, tuple[str, str] | str]"
 """Massive's crypto tickers: each one's `(base, quote)`, or why its currencies cannot be used."""
 
-_Error = TypeVar("_Error", bound=MassiveError)
-"""The failure a `recording_split` records."""
+_READ_FAILED: Final = "Reading Massive's crypto ticker list failed"
+"""What failed when the list's read fails, for its messages."""
+
+_UNREADABLE_LIMIT: Final = 100
+"""The most listed tickers whose currencies do not join logged per process, per level."""
+_logged_unjoined: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.WARNING)
+"""Listed tickers whose currencies do not join, under `unreadable_symbols=LOG`: Massive's data."""
+_ignored_unjoined: Final = BoundedLog(logger, limit=_UNREADABLE_LIMIT, level=logging.DEBUG)
+"""The same, under `unreadable_symbols=IGNORE`: logged at DEBUG only."""
 
 
 class TickerListReader(Protocol):
@@ -126,15 +146,20 @@ class CryptoTickerList:
         self._lookup: Final[SharedLookup[str, CryptoTickers]] = SharedLookup(label, client.governor)
 
     def pair(
-        self, symbol: str, *, reader: TickerListReader, cancel: Cancel | None = None
-    ) -> tuple[str, str]:
-        """Return a crypto ticker's base and quote currencies, with no guess.
+        self,
+        symbol: str,
+        *,
+        reader: TickerListReader,
+        unreadable: OnError,
+        cancel: Cancel | None = None,
+    ) -> tuple[str, str] | Unsplit:
+        """Return a crypto ticker's base and quote currencies, or why it has none.
 
         The session reads Massive's whole list of crypto tickers once, on first need
         (`/v3/reference/tickers?market=crypto`, every page, first with `active=true` and then
         with `active=false`, so a delisted pair splits too), keeping each ticker's
         `base_currency_symbol` and `currency_symbol`, whose join must be the ticker. Its
-        requests count against Massive's limit on reference data, so on a Basic subscription
+        requests count against Massive's limit on reference data, so once that limit is paced
         they wait their turn. Blocks the calling thread for that read, or while another thread
         makes it, sharing that read rather than starting a second one; a caller that shares it
         still waits out no more of its pauses than its own patience covers
@@ -144,24 +169,32 @@ class CryptoTickerList:
         the list is an hour old or more (`SharedLookup.retire`), so a pair Massive lists later
         is found without a restart, and the list is read at most once an hour.
 
+        A ticker the list does not hold is one Massive has no data for. A listed ticker whose
+        currencies do not join to it is Massive's data in a form the library cannot read, which
+        follows `unreadable_symbols`: logged once at WARNING under `LOG`, at
+        DEBUG under `IGNORE`, and in both the pair has no split, which is not Massive's
+        absence of data, so `unavailable_symbols` never applies to it.
+
         Args:
             symbol: A canonical crypto ticker, such as `X:DOTUSD`.
             reader: The read the lookup serves, whose patience and error conversion the list's
                 requests use.
+            unreadable: The call's `unreadable_symbols` setting (`Request.on_error`).
             cancel: A background read's stop token: once it is set, the list's pages and the
                 wait for another caller's read of it stop, and the call raises. None when only
                 the session's close should stop them.
 
         Returns:
-            `(base, quote)`, such as `("DOT", "USD")`.
+            `(base, quote)`, such as `("DOT", "USD")`; or, for a pair with no split, why
+            (`NOT_LISTED`, or the currencies that do not join).
 
         Raises:
-            UnlistedPairError: If the list does not hold the ticker, or its currencies do not
-                join to the ticker; a `poll()` table fails with it.
+            RowDataError: Under `unreadable_symbols=RAISE`, for a listed ticker whose
+                currencies do not join to it.
 
         A failed read raises its public error (`AuthenticationError`, `EntitlementError`, or
-        `MassiveError`), and so does a stopped one (`"... cancelled"`). Every message names the
-        ticker.
+        `MassiveError`), and so does a stopped one (`"... The read stopped ..."`). Every message
+        names the ticker.
         """
         where = f"{symbol!r} cannot be split into its two currencies"
         tickers = self._listed(where, reader, cancel)
@@ -176,9 +209,19 @@ class CryptoTickerList:
             tickers = self._listed(where, reader, cancel)
             entry = tickers.get(symbol)
         if entry is None:
-            raise UnlistedPairError(f"{where}: Massive's reference data does not list it")
+            return NOT_LISTED
         if isinstance(entry, str):
-            raise UnlistedPairError(f"{where}: {entry}")
+            effect = effect_of(unreadable)
+            if effect.fails:
+                hint = policy_hint(
+                    OnError.LOG,
+                    "unreadable_symbols",
+                    purpose="To give the pair no rows and go on",
+                )
+                raise RowDataError(f"{where}: {entry}. {hint}")
+            unjoined = _logged_unjoined if effect.level > logging.DEBUG else _ignored_unjoined
+            unjoined.log(symbol, "%s: %s. The pair gets no rows.", where, entry)
+            return Unsplit(entry, no_data=False)
         return entry
 
     def _listed(self, where: str, reader: TickerListReader, cancel: Cancel | None) -> CryptoTickers:
@@ -199,12 +242,10 @@ class CryptoTickerList:
         try:
             return self._tickers(reader, cancel)
         except MassiveError as public:
-            raise type(public)(
-                f"{where}: reading Massive's crypto tickers failed: {public}",
-                status=public.status,
-                request_id=public.request_id,
-                cause=public.cause,
-            ) from public
+            named = copy_error(
+                public, f"{where}, since reading Massive's crypto ticker list failed. {public}"
+            )
+            raise named from public
 
     def _tickers(self, reader: TickerListReader, cancel: Cancel | None) -> CryptoTickers:
         """Return the session's list, reading it on first need.
@@ -263,15 +304,13 @@ class CryptoTickerList:
                 "try again" if stopped else "get a copy of the error",
                 public,
             )
-            self._lookup.fail(claim, public, "the read failed", stopped=stopped)
+            self._lookup.fail(claim, public, _READ_FAILED, stopped=stopped)
             raise public from error
         except BaseException as error:
             # The reader's own unexpected error propagates; its waiters get a MassiveError.
-            self._lookup.fail(claim, error, "the read failed")
-            if cause_of(error) is ErrorCause.LIBRARY_DEFECT:
-                logger.exception(
-                    "%s: reading Massive's crypto tickers failed. %s", self._label, LIBRARY_BUG
-                )
+            self._lookup.fail(claim, error, _READ_FAILED)
+            if source_of(error) is ErrorSource.LIBRARY:
+                logger.exception("%s. %s", _READ_FAILED, LIBRARY_BUG)
             raise
         self._lookup.complete(claim, tickers)
         return tickers
@@ -314,28 +353,24 @@ class CryptoTickerList:
         return tickers
 
 
-def recording_split(
-    pair: CryptoSplit, recorded: dict[str, _Error], *, catching: type[_Error]
-) -> CryptoSplit:
-    """Return a crypto split that records a pair it cannot split instead of raising.
+def recording_split(pair: CryptoSplit, recorded: dict[str, MassiveError]) -> CryptoSplit:
+    """Return a crypto split that records a failed lookup instead of raising.
 
-    A read that leaves such a pair out and goes on with the others plans with it: the plan's
-    calls of a recorded pair are then dropped. A failure of any other type still raises.
+    A read by symbol plans with it, so a failed read of the list fails that pair alone and the
+    read goes on with the others: the plan's calls of a recorded pair are then dropped.
 
     Args:
         pair: The lookup, such as `RestReader.crypto_pair` with the read's stop token bound.
-        recorded: Receives each pair that cannot be split, with its first error.
-        catching: The failures to record: `UnlistedPairError` for a pair Massive does not
-            list, or `MassiveError` for any failure, a failed read of the list included.
+        recorded: Receives each pair whose lookup failed, with its first error.
 
     Returns:
         A split that returns `("", "")` for a pair it recorded.
     """
 
-    def split(symbol: str) -> tuple[str, str]:
+    def split(symbol: str) -> tuple[str, str] | Unsplit:
         try:
             return pair(symbol)
-        except catching as error:
+        except MassiveError as error:
             recorded.setdefault(symbol, error)
             return "", ""
 

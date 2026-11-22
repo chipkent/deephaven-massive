@@ -3,13 +3,17 @@
 import inspect
 import json
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
+from deephaven import dtypes, new_table
+from deephaven.column import string_col
 from deephaven.table import Table
+from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec
@@ -19,11 +23,22 @@ from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.rest_requests import page_size
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
-from deephaven_massive._namespaces import indicators
-from deephaven_massive._namespaces.query_building import Namespace
-from deephaven_massive._query import Query
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables.problem_events import ProblemCause
+from deephaven_massive.namespaces import _indicators as indicators
+from deephaven_massive.namespaces._namespace import Namespace
+from deephaven_massive.queries import FetchQuery
+from tests._fakes.queries import until
 from tests._fakes.rest import FakeRestServer, Reply, envelope
+
+if TYPE_CHECKING:
+    from deephaven_massive._tables.problem_events import ProblemEvent
+
+
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
 
 OWNER = "namespaces/indicators"
 R = Transport.REST
@@ -33,7 +48,7 @@ WINDOWED = [("sma", indicators.SMA), ("ema", indicators.EMA), ("rsi", indicators
 
 def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSession) -> None:
     namespace = massive_session.indicators
-    assert type(namespace) is indicators._Indicators
+    assert type(namespace) is indicators.IndicatorsNamespace
     assert isinstance(namespace, Namespace)
 
 
@@ -76,7 +91,7 @@ def test_a_windowed_indicator_builds_its_query(
 ) -> None:
     factory = getattr(massive_session.indicators, name)
     query = factory(["X:BTCUSD", "AAPL"], 20)
-    assert type(query) is Query
+    assert type(query) is FetchQuery
     assert query._spec is spec
     assert query._request == Request(
         symbols=("AAPL", "X:BTCUSD"),
@@ -118,7 +133,7 @@ def test_a_windowed_indicator_builds_its_query(
 
 @pytest.mark.parametrize("name", NAMES)
 def test_the_summary_opens_the_docstring(name: str) -> None:
-    doc = getattr(indicators._Indicators, name).__doc__
+    doc = getattr(indicators.IndicatorsNamespace, name).__doc__
     assert doc.splitlines()[0] == CATALOG.by_name[f"indicators.{name}"].summary
 
 
@@ -134,26 +149,42 @@ def test_macd_takes_three_windows(massive_session: dm.MassiveSession) -> None:
         "short_window": 12,
         "signal_window": 9,
     }
-    with pytest.raises(ValueError, match="signal_window must be positive"):
+    with pytest.raises(ValueError, match=whole("signal_window=0 is not positive.")):
         massive_session.indicators.macd("AAPL", short_window=12, long_window=26, signal_window=0)
 
 
 def test_arguments_are_validated_at_construction(massive_session: dm.MassiveSession) -> None:
     i = massive_session.indicators
-    with pytest.raises(ValueError, match=r"indicators\.sma does not accept dm\.ALL"):
+    with pytest.raises(
+        ValueError, match=whole("indicators.sma does not take dm.ALL. Pass a list of tickers.")
+    ):
         i.sma(dm.ALL, 20)
     for span in (dm.Timespan.SECOND, dm.Timespan.SESSION):
-        with pytest.raises(ValueError, match=f"Timespan.{span.name}"):
+        refusal = (
+            f"indicators.sma takes no timespan=dm.Timespan.{span.name}. Pass one of "
+            "dm.Timespan.MINUTE, dm.Timespan.HOUR, dm.Timespan.DAY, dm.Timespan.WEEK, "
+            "dm.Timespan.MONTH, dm.Timespan.QUARTER, and dm.Timespan.YEAR."
+        )
+        with pytest.raises(ValueError, match=whole(refusal)):
             i.sma("AAPL", 20, timespan=span)
-    with pytest.raises(ValueError, match="window must be positive"):
+    with pytest.raises(ValueError, match=whole("window=0 is not positive.")):
         i.rsi("AAPL", 0)
     with pytest.raises(TypeError, match="adjusted must be a bool"):
-        i.rsi("AAPL", 14, adjusted=cast("bool", 1))
-    with pytest.raises(ValueError, match="the library sets expand_underlying itself"):
+        i.rsi("AAPL", 14, adjusted=1)  # type: ignore[arg-type]  # the point: refused at run time
+    library = (
+        "The library sets 'expand_underlying' itself, so it cannot be a filter. Remove it from "
+        "filters."
+    )
+    with pytest.raises(ValueError, match=whole(library)):
         i.sma("AAPL", 20, filters={"expand_underlying": True})
-    with pytest.raises(ValueError, match=r"^adjusted is set through its own argument, adjusted="):
+    adjusted = "The filter 'adjusted' has its own argument. Pass adjusted= instead."
+    with pytest.raises(ValueError, match=whole(adjusted)):
         i.sma("AAPL", 20, filters={"adjusted": True})
-    with pytest.raises(ValueError, match="timestamp_gte is set through start= and end="):
+    axis = (
+        "The filter 'timestamp_gte' sets the time range of indicators.sma. Pass start= and end= "
+        "instead."
+    )
+    with pytest.raises(ValueError, match=whole(axis)):
         i.sma("AAPL", 20, filters={"timestamp_gte": 1})
     with pytest.raises(ValueError, match=r"^'Q:NOPE' is not a Massive stock ticker"):
         i.sma("Q:NOPE", 20)
@@ -164,22 +195,28 @@ def test_a_timespan_passed_as_the_window_names_the_keyword(
 ) -> None:
     # bars() takes its timespan second; an indicator takes its window there.
     i = massive_session.indicators
-    keyword = "timespan is keyword-only, so pass it by name"
-    with pytest.raises(
-        TypeError, match=rf"^window must be an int, not Timespan\.MINUTE: {keyword}"
-    ):
-        i.sma("AAPL", cast("int", dm.Timespan.MINUTE))
-    with pytest.raises(TypeError, match=rf"^window must be an int, not 'hour': {keyword}"):
-        i.rsi("AAPL", cast("int", "hour"))
-    with pytest.raises(TypeError, match=r"^short_window must be an int, not Timespan\.DAY: "):
-        i.macd("AAPL", short_window=cast("int", dm.Timespan.DAY))
+    refusal = (
+        "window must be an int, not dm.Timespan.MINUTE. If you meant timespan, pass it by name, "
+        "since it is keyword-only: m.indicators.sma('AAPL', timespan=dm.Timespan.MINUTE)."
+    )
+    assert i.sma("AAPL", timespan=dm.Timespan.MINUTE)._request is not None  # the advice
+    with pytest.raises(TypeError, match=whole(refusal)):
+        i.sma("AAPL", dm.Timespan.MINUTE)  # type: ignore[arg-type]  # the point: refused at run time
+    with pytest.raises(TypeError, match=whole("window must be an int, not str")):
+        i.rsi("AAPL", "hour")  # type: ignore[arg-type]  # the point: refused at run time
+    short = (
+        "short_window must be an int, not dm.Timespan.DAY. If you meant timespan, pass it by "
+        "name, since it is keyword-only: m.indicators.sma('AAPL', timespan=dm.Timespan.MINUTE)."
+    )
+    with pytest.raises(TypeError, match=whole(short)):
+        i.macd("AAPL", short_window=dm.Timespan.DAY)  # type: ignore[arg-type]  # the point: refused at run time
     with pytest.raises(TypeError, match=r"^window must be an int, not float$"):
-        i.ema("AAPL", cast("int", 2.5))
+        i.ema("AAPL", 2.5)  # type: ignore[arg-type]  # the point: refused at run time
 
 
 def test_enums_reject_text(massive_session: dm.MassiveSession) -> None:
     i = massive_session.indicators
-    factories: list[Callable[..., Query]] = [
+    factories: list[Callable[..., FetchQuery]] = [
         lambda **kw: i.sma("AAPL", 20, **kw),
         lambda **kw: i.ema("AAPL", 20, **kw),
         lambda **kw: i.rsi("AAPL", 14, **kw),
@@ -213,11 +250,12 @@ def test_the_vendor_samples_decode_without_drift(
     # The rows are `results.values`; `results.underlying` holds the bars and is not decoded.
     name, kind = fixture.split("_")
     payload = json.loads(load_fixture(OWNER, f"{fixture}.json"))
-    rest_path = cast("RestPath", source(R, f"/v1/indicators/{name}/{{{kind}Ticker}}"))
+    rest_path = CATALOG.rest_path(f"/v1/indicators/{name}/{{{kind}Ticker}}")
     spec = CATALOG.by_name[f"indicators.{name}"]
     required = [f.column for f in required_fields(spec, rest_path)]
     assert required == ["Timestamp"]
-    batch, drift = to_batch(payload["results"]["values"], rest_path, required=required)
+    batch, drift, marks = to_batch(payload["results"]["values"], rest_path, required=required)
+    assert marks == {}  # every row read whole
     assert drift.extra == drift.missing == frozenset()
     rows = batch.to_pylist()
     assert [{k: row[k] for k in value} for row, value in zip(rows, values, strict=True)] == values
@@ -257,7 +295,7 @@ def test_each_symbol_class_is_served_by_its_own_path(
         order=dm.Order.ASC,
         limit=10,
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     shared = {
         "timespan": ["hour"],
         "window": ["50"],
@@ -299,7 +337,7 @@ def test_a_daily_value_takes_the_day_of_its_symbols_class(
 
     fake_rest.reply("/v1/indicators/sma/AAPL", values(datetime(2025, 1, 1, 5, tzinfo=UTC)))
     fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", values(datetime(2025, 1, 2, tzinfo=UTC)))
-    out = dh_to_pylist(rest_session.indicators.sma(["AAPL", "X:BTCUSD"], 20).fetch())
+    out = dh_to_pylist(rest_session.indicators.sma(["AAPL", "X:BTCUSD"], 20).fetch(wait=True))
     windows = {r["Symbol"]: (r["Date"], r["TimestampStart"], r["TimestampEnd"]) for r in out}
     new_york = timedelta(hours=5)  # UTC-5 in January
     assert windows == {
@@ -338,7 +376,7 @@ def test_a_range_of_dates_follows_each_symbols_class_days(
     query = rest_session.indicators.sma(
         ["AAPL", "X:BTCUSD"], 20, start=date(2025, 1, 2), end=date(2025, 1, 3)
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     assert sorted((r["Symbol"], r["Date"]) for r in out) == [
         ("AAPL", "2025-01-02"),
         ("X:BTCUSD", "2025-01-02"),
@@ -355,54 +393,71 @@ def stamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [
         r.getMessage()
         for r in caplog.records
-        if r.levelno == logging.WARNING and "is not a stamp Massive is known to use" in r.message
+        if r.levelno == logging.WARNING and "cannot tell which day this one covers" in r.message
     ]
 
 
 @pytest.mark.parametrize(
-    ("timespan", "moment", "window"),
+    ("timespan", "moment", "known"),
     [
         # 03:00 UTC is 22:00 the day before in New York: not the start of a stock's day, so
-        # which day the value covers is not known. It keeps its stamp, ends a day later, and
-        # has no Date.
+        # which day the value covers is not known; beside it, a value at New York midnight.
         (
             dm.Timespan.DAY,
             datetime(2025, 1, 2, 3, tzinfo=UTC),
-            (None, datetime(2025, 1, 2, 3, tzinfo=UTC), datetime(2025, 1, 3, 3, tzinfo=UTC)),
+            datetime(2025, 1, 2, 5, tzinfo=UTC),
         ),
-        # Massive stamps a week value on its week's Sunday; one on a Wednesday keeps its stamp
-        # and ends a week later.
+        # Massive stamps a week value on its week's Sunday, not on a Wednesday.
         (
             dm.Timespan.WEEK,
             datetime(2025, 1, 8, 5, tzinfo=UTC),
-            (None, datetime(2025, 1, 8, 5, tzinfo=UTC), datetime(2025, 1, 15, 5, tzinfo=UTC)),
+            datetime(2025, 1, 5, 5, tzinfo=UTC),
         ),
     ],
     ids=["day", "week"],
 )
-def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_served_with_a_warning(
+def test_a_value_of_a_day_or_longer_at_an_unexpected_stamp_is_withheld_with_a_warning(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     timespan: dm.Timespan,
     moment: datetime,
-    window: tuple[str | None, datetime, datetime],
+    known: datetime,
 ) -> None:
     caplog.set_level(logging.WARNING)
-    stamp = int(moment.timestamp() * 1000)
-    reply = Reply(envelope({"values": [{"timestamp": stamp, "value": 1.0}]}))
-    fake_rest.reply("/v1/indicators/sma/AAPL", reply)
-    out = dh_to_pylist(rest_session.indicators.sma("AAPL", 20, timespan=timespan).fetch())
-    assert [(r["Date"], r["TimestampStart"], r["TimestampEnd"], r["Value"]) for r in out] == [
-        (*window, 1.0)
+    values = [
+        {"timestamp": int(moment.timestamp() * 1000), "value": 1.0},
+        {"timestamp": int(known.timestamp() * 1000), "value": 2.0},
     ]
-    [warning] = stamp_warnings(caplog)
+    page = Reply(envelope({"values": values}))
+    fake_rest.reply("/v1/indicators/sma/AAPL", page, page)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    sma = rest_session.indicators.sma
+    out = dh_to_pylist(sma("AAPL", 20, timespan=timespan).fetch(wait=True))
+    assert [r["Value"] for r in out] == [2.0]
+    assert [(e.cause, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "TimestampStart", 1)
+    ]
+    strict = dm.ErrorPolicy(unconvertible_values=dm.OnError.RAISE)
+    hint = re.escape(
+        "To go on without such rows, pass "
+        "on_error=dm.ErrorPolicy(unconvertible_values=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    whole = (
+        r"^indicators\.sma: Massive sent 1 row the library cannot read whole, so it withheld it: "
+        r"1 under unconvertible_values\. Stamped at \S+, which Massive is not known to use for a "
+        rf"1-\w+ bar\. {hint}$"
+    )
+    with pytest.raises(dm.MassiveError, match=whole):
+        sma("AAPL", 20, timespan=timespan, on_error=strict).fetch(wait=True)
+    [warning] = stamp_warnings(caplog)  # the known stamp gives none
     assert warning.startswith(
-        "indicators.sma: an indicator value of AAPL from /v1/indicators/sma/{stockTicker} is "
-        "stamped "
-        f"{moment.isoformat()}"
+        f"indicators.sma: Massive sent an indicator value of AAPL stamped {moment.isoformat()}"
     )
 
 
@@ -413,11 +468,37 @@ def test_adjusted_false_reaches_only_a_path_that_takes_it(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     fake_rest.reply("/v1/indicators/ema/AAPL", sample(load_fixture, "sma_stock"))
-    rest_session.indicators.ema("AAPL", 20, adjusted=False).fetch()
-    assert dict(fake_rest.get_queries())["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
-    # Unadjusted prices are never dropped silently on the crypto path, which has no basis.
-    with pytest.raises(ValueError, match=r"\{cryptoTicker\} does not take \['adjusted'\]"):
-        rest_session.indicators.ema("X:BTCUSD", 20, adjusted=False).fetch()
+    fake_rest.reply("/v1/indicators/ema/X%3ABTCUSD", sample(load_fixture, "sma_stock"))
+    rest_session.indicators.ema(["AAPL", "X:BTCUSD"], 20, adjusted=False).fetch(wait=True)
+    queries = dict(fake_rest.get_queries())
+    assert queries["/v1/indicators/ema/AAPL"]["adjusted"] == ["false"]
+    # The crypto path declares no `adjusted`, and a pair has no splits to adjust for.
+    assert "adjusted" not in queries["/v1/indicators/ema/X:BTCUSD"]
+
+
+def test_an_unadjusted_poll_of_a_watchlist_reads_its_crypto_pair_too(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    # The session's own SMA: the stock request carries `adjusted`, the pair's leaves it out.
+    fake_rest.reply("/v1/indicators/sma/AAPL", sample(load_fixture, "sma_stock"))
+    # 2024-01-03 00:00 UTC: a crypto pair's day value carries the start of its UTC day.
+    day = {"values": [{"timestamp": 1704240000000, "value": 97000.0}]}
+    fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(envelope(day)))
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", ["AAPL", "X:BTCUSD"])]))
+    table = rest_session.indicators.sma(watch, 20, adjusted=False).poll(60)
+    until(lambda: {r["Symbol"] for r in dh_to_pylist(table)} == {"AAPL", "X:BTCUSD"})
+    queries = dict(fake_rest.get_queries())
+    assert queries["/v1/indicators/sma/AAPL"]["adjusted"] == ["false"]
+    assert "adjusted" not in queries["/v1/indicators/sma/X:BTCUSD"]
+    until(lambda: len(dh_to_pylist(rest_session.streams())) == 1)  # the row is shown async
+    (row,) = dh_to_pylist(rest_session.streams())
+    assert row["Error"] is None
 
 
 _SIGNATURE_PARAMS: Final = ("window", "short_window", "long_window", "signal_window")
@@ -428,10 +509,11 @@ wire."""
 @pytest.mark.parametrize("name", NAMES)
 def test_every_signature_default_is_the_default_massive_documents(name: str) -> None:
     spec = CATALOG.by_name[f"indicators.{name}"]
-    path = source(R, cast("str", spec.fetch_path))
+    assert spec.fetch_path is not None
+    path = source(R, spec.fetch_path)
     assert isinstance(path, RestPath)
     documented = {p.name: p.default for p in path.params}
-    signature = inspect.signature(getattr(indicators._Indicators, name)).parameters
+    signature = inspect.signature(getattr(indicators.IndicatorsNamespace, name)).parameters
     compared = [
         n for n in (*_SIGNATURE_PARAMS, "timespan", "series_type", "adjusted") if n in signature
     ]
@@ -454,7 +536,7 @@ def test_macd_returns_its_three_lines(
     query = rest_session.indicators.macd(
         "X:BTCUSD", short_window=12, long_window=26, signal_window=9
     )
-    out = dh_to_pylist(query.fetch())
+    out = dh_to_pylist(query.fetch(wait=True))
     params = dict(fake_rest.get_queries())["/v1/indicators/macd/X:BTCUSD"]
     assert (params["short_window"], params["long_window"], params["signal_window"]) == (
         ["12"],
@@ -476,7 +558,7 @@ def test_a_date_bound_is_a_day_in_the_symbols_zone(
     fake_rest.reply("/v1/indicators/sma/C%3AEURUSD", empty)
     day = date(2025, 1, 2)
     symbols = ["AAPL", "X:BTCUSD", "C:EURUSD"]
-    rest_session.indicators.sma(symbols, 20, start=day, end=day).fetch()
+    rest_session.indicators.sma(symbols, 20, start=day, end=day).fetch(wait=True)
     requests = dict(fake_rest.get_queries())
     # A crypto or forex day is a UTC day; a stock day is a New York day (UTC-5 in January).
     # Forex takes the stock template, so its zone comes from the symbol, not the path.

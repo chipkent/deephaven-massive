@@ -79,18 +79,20 @@ are the same: a column it returns holds exactly what the converter gives for eac
 unless a caller that builds Arrow arrays leaves the numbers for Arrow to check and convert.
 
 The functions are pure and safe from any thread. This module imports only the standard
-library and `spec.types`.
+library and `spec.types`. A column reader given a value its caller never passes raises
+`TypeError`, a defect of the library, never a null or a skipped check.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import re
 from datetime import UTC, date, datetime, time, timedelta
 from itertools import chain
 from types import MappingProxyType, NoneType
-from typing import TYPE_CHECKING, Final, TypeVar, cast
+from typing import TYPE_CHECKING, Final, TypeGuard, TypeVar
 from zoneinfo import ZoneInfo
 
 from deephaven_massive._massive.spec.types import (
@@ -101,7 +103,7 @@ from deephaven_massive._massive.spec.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from deephaven_massive._massive.spec.types import Field
 
@@ -187,17 +189,21 @@ def _double(value: object) -> float:
         `value` as a `float`.
 
     Raises:
-        UnconvertibleError: If `value` is not a number, is a `bool`, or is an integer too large
-            for a double.
+        UnconvertibleError: If `value` is not a number, is a `bool`, or is an integer a double
+            cannot hold exactly (beyond 2**53, and not a multiple the double holds), which it
+            would round.
     """
     if type(value) is float:  # what a JSON decoder gives for nearly every such value
         return value
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise UnconvertibleError
     try:
-        return float(value)
+        converted = float(value)
     except OverflowError:
         raise UnconvertibleError from None
+    if isinstance(value, int) and int(converted) != value:
+        raise UnconvertibleError
+    return converted
 
 
 def _of_type(kind: type[_T]) -> Callable[[object], _T]:
@@ -601,53 +607,135 @@ _ITEMS_AS_SENT: Final[Mapping[WireType, frozenset[type]]] = MappingProxyType(
 """The JSON value types the items of a list column may hold to be kept as they are."""
 
 
-def _in_int64(values: list[object], *, has_null: bool) -> bool:
+def _only(values: Sequence[object], kind: type[_T]) -> TypeGuard[list[_T]]:
+    """Tell whether a column holds values of one exact type only.
+
+    One pass of the builtin `type` over the column, with no Python call per value, so a fast
+    path can then convert the whole list with one builtin call.
+
+    Args:
+        values: The column.
+        kind: The one type; a subclass (a `bool` for `int`) does not count.
+
+    Returns:
+        True when every value's type is `kind`, or the column is empty.
+    """
+    return set(map(type, values)) <= {kind}
+
+
+def _present(values: list[object], kind: type[_T], column: str) -> list[_T]:
+    """Return a column's non-null values, which its caller has checked are all of one type.
+
+    The per-value path of a column that holds nulls; a column with none takes `_only`'s path.
+
+    Args:
+        values: The column: values of `kind` exactly, and `None`s, which are left out.
+        kind: The one type.
+        column: The kind of column, for the message, such as `"an integer column"`.
+
+    Returns:
+        The values that are not `None`, in order.
+
+    Raises:
+        TypeError: A defect of the library, if a value is of another type (a `bool` in an
+            integer column, say): the caller admits only `kind` and nulls, and any other value
+            would otherwise be left out unseen.
+    """
+    present = [v for v in values if v is not None]
+    if not _only(present, kind):
+        raise TypeError(_unexpected(column, present, frozenset({kind})))
+    return present
+
+
+def _in_int64(values: list[object]) -> bool:
     """Return whether every integer of a list of integers and nulls is in the signed 64-bit range.
 
     Args:
-        values: Integers, and `None`s when `has_null`.
-        has_null: Whether `values` holds a `None`, which is then left out.
+        values: Integers and `None`s; the `None`s are left out.
 
     Returns:
         True when every integer is in range, or there is none.
     """
-    numbers = cast("list[int]", [v for v in values if v is not None] if has_null else values)
+    numbers = values if _only(values, int) else _present(values, int, "an integer column")
     return not numbers or (_INT64[0] <= min(numbers) and max(numbers) <= _INT64[1])
 
 
-_NUMBERS: Final = frozenset({int, float, NoneType})
+_NUMBERS: Final[frozenset[type]] = frozenset({int, float, NoneType})
 """The JSON value types of a `double` column that `float` converts as its converter does."""
 
+_WHOLE_NUMBERS: Final = frozenset({int, float})
+"""The value types of a `double` column with no null, which `float` converts in one call."""
 
-def _as_floats(values: list[object], *, has_null: bool) -> list[object] | None:
+
+def _numbers_only(values: Sequence[object]) -> TypeGuard[list[int | float]]:
+    """Tell whether a column holds integers and floats only, by one pass of the builtin `type`.
+
+    Args:
+        values: The column.
+
+    Returns:
+        True when every value's exact type is `int` or `float`, or the column is empty.
+    """
+    return set(map(type, values)) <= _WHOLE_NUMBERS
+
+
+def _numbers_or_nulls(values: Sequence[object]) -> TypeGuard[list[int | float | None]]:
+    """Tell whether a column holds integers, floats, and nulls only, by one pass of `type`.
+
+    Args:
+        values: The column.
+
+    Returns:
+        True when every value's exact type is `int`, `float`, or `NoneType`.
+    """
+    return set(map(type, values)) <= _NUMBERS
+
+
+_EXACT_INTEGER: Final = 2**53
+"""Every integer within this many of zero is a double exactly; past it, only some are."""
+
+
+def _as_floats(values: list[object]) -> list[object] | None:
     """Return a column of integers, floats, and nulls as floats, as the `double` converter gives.
 
     A `double` column often mixes integers in (a price of exactly 100 is sent as `100`), so this
     converts the whole list with the builtin `float`, not the converter's Python call per value.
-    `float` rounds a large integer exactly as the converter does.
+    An integer a double cannot hold exactly, which `float` would round, makes it give up, so the
+    converter judges that value on its own and refuses it.
 
     Args:
-        values: Integers and floats, and `None`s when `has_null`.
-        has_null: Whether `values` holds a `None`, which then stays `None`.
+        values: Integers, floats, and `None`s, which stay `None`.
 
     Returns:
-        A new list of floats (and `None`s); or None when an integer is too large for a double,
-        which the converter refuses.
+        A new list of floats (and `None`s); or None when an integer is one a double cannot
+        hold exactly, which the converter refuses.
+
+    Raises:
+        TypeError: A defect of the library, if a value is neither null, an `int`, nor a `float`:
+            the caller admits only those, and any other type would otherwise be lost.
     """
-    numbers = cast("list[int | float | None]", values)
     try:
-        if has_null:
-            return [None if v is None else float(v) for v in numbers]
-        return list(map(float, cast("list[int | float]", numbers)))
+        if _numbers_only(values):
+            floats: list[object] = list(map(float, values))
+        elif _numbers_or_nulls(values):
+            floats = [None if v is None else float(v) for v in values]
+        else:
+            raise TypeError(_unexpected("a double column", values, _NUMBERS))
     except OverflowError:
         return None
+    # Python compares an int with a float exactly, so a rounded one differs.
+    inexact = any(
+        type(v) is int and not -_EXACT_INTEGER <= v <= _EXACT_INTEGER and float(v) != v
+        for v in values
+    )
+    return None if inexact else floats
 
 
 _TEXTS: Final = frozenset({str, NoneType})
 """The JSON value types of a `decimal-text-number` column read as text in one pass."""
 
 
-def _decimal_texts(values: list[object], *, has_null: bool) -> list[object] | None:
+def _decimal_texts(values: list[object]) -> list[object] | None:
     """Return a column of decimal texts and nulls as floats, as `decimal-text-number` gives.
 
     The whole column is checked by one pattern test over its texts joined by newlines, after a
@@ -655,24 +743,23 @@ def _decimal_texts(values: list[object], *, has_null: bool) -> list[object] | No
     `float`, so a frame of text prices costs no Python call per value.
 
     Args:
-        values: Texts, and `None`s when `has_null`.
-        has_null: Whether `values` holds a `None`, which then stays `None`.
+        values: Texts and `None`s, which stay `None`.
 
     Returns:
         A new list of floats (and `None`s); or None when some text is not a plain decimal, or
         spells a number too large for a finite double, which the converter refuses.
     """
-    texts = cast("list[str]", [v for v in values if v is not None] if has_null else values)
+    texts = values if _only(values, str) else _present(values, str, "a decimal-text column")
     joined = "\n".join(texts)
     # A text holding a newline of its own (`"1\n2"`) would pass the pattern as two decimals:
     # the column passes only when the joining newlines are the only ones.
     if joined.count("\n") != len(texts) - 1 or not _DECIMAL_TEXTS.fullmatch(joined):
         return None
-    numbers = list(map(float, texts))
+    numbers: list[object] = list(map(float, texts))
     if math.inf in numbers or -math.inf in numbers:
         return None
-    if not has_null:
-        return cast("list[object]", numbers)
+    if len(numbers) == len(values):  # no null to keep
+        return numbers
     found = iter(numbers)
     return [None if v is None else next(found) for v in values]
 
@@ -695,13 +782,12 @@ def _decimal_column(
 
     def decimal(values: list[object]) -> list[object] | None:
         types = set(map(type, values))
-        has_null = NoneType in types
         if types <= _NUMBERS:
             if arrow_checks_numbers or types <= _AS_SENT[WireType.DOUBLE]:
                 return values
-            return _as_floats(values, has_null=has_null)
+            return _as_floats(values)
         if types <= _TEXTS:
-            return _decimal_texts(values, has_null=has_null)
+            return _decimal_texts(values)
         return converted(values)
 
     return decimal
@@ -755,10 +841,6 @@ def column_converter(
     """
     convert = field_converter(field)
     as_sent = None if field.conversion is not None else _AS_SENT.get(field.wire_type)
-    items_as_sent = _ITEMS_AS_SENT.get(field.wire_type)
-    long_values = not arrow_checks_numbers and field.wire_type in {WireType.LONG, WireType.EPOCH}
-    long_items = not arrow_checks_numbers and field.wire_type is WireType.LONG_ARRAY
-    double_values = field.wire_type is WireType.DOUBLE
 
     def converted(values: list[object]) -> list[object] | None:
         try:
@@ -771,28 +853,103 @@ def column_converter(
     if as_sent is None:
         return converted
 
-    def kept(values: list[object]) -> list[object] | None:
-        types = set(map(type, values))
-        if not types <= as_sent:
-            if double_values and types <= _NUMBERS:
-                if arrow_checks_numbers:
-                    return values
-                return _as_floats(values, has_null=NoneType in types)
-            return converted(values)
-        has_null = NoneType in types
-        if items_as_sent is not None:
-            lists = cast("list[list[object]]", filter(None, values))
-            items = list(chain.from_iterable(lists))
-            item_types = set(map(type, items))
-            if not item_types <= items_as_sent or (
-                long_items and not _in_int64(items, has_null=NoneType in item_types)
-            ):
-                return None
-        elif long_values and not _in_int64(values, has_null=has_null):
-            return None
-        return values
+    return functools.partial(
+        _as_sent_column,
+        as_sent=as_sent,
+        # A list field's items are always checked: a list type missing here is a KeyError.
+        items_as_sent=_ITEMS_AS_SENT[field.wire_type] if list in as_sent else None,
+        converted=converted,
+        double_values=field.wire_type is WireType.DOUBLE,
+        long_values=not arrow_checks_numbers and field.wire_type in {WireType.LONG, WireType.EPOCH},
+        long_items=not arrow_checks_numbers and field.wire_type is WireType.LONG_ARRAY,
+        arrow_checks_numbers=arrow_checks_numbers,
+    )
 
-    return kept
+
+def _as_sent_column(
+    values: list[object],
+    *,
+    as_sent: frozenset[type],
+    items_as_sent: frozenset[type] | None,
+    converted: Callable[[list[object]], list[object] | None],
+    double_values: bool,
+    long_values: bool,
+    long_items: bool,
+    arrow_checks_numbers: bool,
+) -> list[object] | None:
+    """Check and convert a column of a plain wire type, returning it as is where it can.
+
+    Args:
+        values: The field's value in each object, `None` where absent or null.
+        as_sent: The value types the field's converter returns unchanged (`_AS_SENT`).
+        items_as_sent: For a list field, the item types returned unchanged (`_ITEMS_AS_SENT`);
+            None for any other field.
+        converted: Converts the column value by value (`field_converter`), or returns `None`
+            when the converter refuses one.
+        double_values: Whether the field is a `double`.
+        long_values: Whether the column's integers are range-checked as signed 64-bit here.
+        long_items: Whether a list column's integers are range-checked as signed 64-bit here.
+        arrow_checks_numbers: Whether a `double` column that mixes integers in is kept as it
+            is, for Arrow to make floats of.
+
+    Returns:
+        `values` itself when every value is as sent, a new list where some value is converted,
+        or `None` when some value or item is refused.
+    """
+    types = set(map(type, values))
+    if not types <= as_sent:
+        if double_values and types <= _NUMBERS:
+            if arrow_checks_numbers:
+                return values
+            return _as_floats(values)
+        return converted(values)
+    if items_as_sent is not None:
+        return values if _items_fit(values, items_as_sent, long_items=long_items) else None
+    if long_values and not _in_int64(values):
+        return None
+    return values
+
+
+def _items_fit(values: list[object], items_as_sent: frozenset[type], *, long_items: bool) -> bool:
+    """Tell whether every item of a column of lists can be returned as sent.
+
+    Args:
+        values: Each object's list, `None` where absent or null.
+        items_as_sent: The item types the field's converter returns unchanged.
+        long_items: Whether the items are integers range-checked as signed 64-bit here.
+
+    Returns:
+        True when every item's type is in `items_as_sent` and, under `long_items`, every item
+        fits in a signed 64-bit integer.
+
+    Raises:
+        TypeError: A defect of the library, if a value is neither null nor a list: the caller
+            admits only those, and any other form would otherwise skip the check.
+    """
+    lists = [v for v in values if v is not None]
+    if not _only(lists, list):
+        raise TypeError(_unexpected("a list column", lists, frozenset({list})))
+    items: list[object] = list(chain.from_iterable(lists))
+    return set(map(type, items)) <= items_as_sent and (not long_items or _in_int64(items))
+
+
+def _unexpected(column: str, values: list[object], admitted: frozenset[type]) -> str:
+    """Return the message of a value a column reader's caller should never have passed it.
+
+    Args:
+        column: The kind of column, such as `"a double column"`.
+        values: The column's values, at least one of a type not in `admitted`.
+        admitted: The value types the reader handles.
+
+    Returns:
+        The message, which names the first such value's type and says the defect is the
+        library's.
+    """
+    kind = next(type(v) for v in values if type(v) not in admitted)
+    return (
+        f"{column} holds a {kind.__name__}, which its reader does not handle and would lose; "
+        "this is a bug in deephaven-massive"
+    )
 
 
 def unconvertible_message(field: Field, value: object) -> str:

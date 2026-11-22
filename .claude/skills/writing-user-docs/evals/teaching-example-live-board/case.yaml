@@ -1,4 +1,4 @@
 schema_version: "1.1"
 name: teaching-example-live-board
 expected_outcome: |
-  example-8.md follows the teaching-sequence shape: a goal-first title, the goal and plan before the code, a short runnable block that joins a live last_by() of minute bars to a static previous-day read, what to notice and the one new idea, a bridge to the next example, and the plan line (Stocks Starter or higher, with the delayed-data setting). It passes the calibrated editor.
+  example-8.md follows the teaching-sequence shape: a goal-first title, the goal and plan before the code, a short runnable block that joins a live last_by() of minute bars to a static previous-day read, what to notice and the one new idea, a bridge to the next example, a `**Plan:**` line under its heading saying Stocks Starter or higher, and the delayed-data setting, with no plan named in its prose. It passes the calibrated editor.

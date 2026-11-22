@@ -15,7 +15,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._massive.refresh import exclusions, generate, lexicon, overrides, render
+from deephaven_massive._massive import spec
+from deephaven_massive._massive.refresh import (
+    docs,
+    exclusions,
+    generate,
+    lexicon,
+    overrides,
+    render,
+)
 from deephaven_massive._massive.refresh import snapshot as snapshot_module
 from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.hand_input import HandInput
@@ -61,6 +69,22 @@ def test_the_generated_files_match_the_snapshot_byte_for_byte(tmp_path: Path) ->
     assert written == [tmp_path / path.name for path in _COMMITTED]
     for committed in _COMMITTED:
         assert (tmp_path / committed.name).read_bytes() == committed.read_bytes(), committed.name
+
+
+def test_each_channel_carries_the_hosts_its_vendored_page_lists(real: generate.Generated) -> None:
+    # The hosts the library streams from are Massive's: a page that moves a host and a
+    # generated file that was not refreshed differ here, as well as in the parity test above.
+    pages = Snapshot.load().websocket_pages
+    for channel in real.ws:
+        listed = {
+            (row.label, row.host)
+            for name in real.ws_coverage.pages[channel.key]
+            for row in docs.connections(pages[name])
+        }
+        assert listed == {(h.feed.value, h.host) for h in channel.hosts}, channel.key
+        assert channel.hosts, channel.key
+    committed = {c.key: c.hosts for c in spec.sources(Transport.WS).values()}
+    assert committed == {c.key: c.hosts for c in real.ws}
 
 
 def test_no_link_syntax_survives_in_the_descriptions() -> None:
@@ -133,7 +157,7 @@ def test_a_reworded_description_changes_only_the_descriptions_file(tmp_path: Pat
     # The only change is one field's description: the schema files must stay byte for byte as
     # they are, so a reviewer sees that no schema moved.
     original = (DIRECTORY / OPENAPI).read_bytes()
-    reworded = original.replace(b"The exchange symbol that this item is traded under.", b"Moved.")
+    reworded = original.replace(b"The percentage change since the previous day.", b"Moved.")
     assert reworded != original
     _copy_snapshot(tmp_path / "snapshot", reworded)
     (tmp_path / "spec").mkdir()
@@ -295,8 +319,10 @@ def _relexicon(name: str, **long_names: str) -> HandInput:
 def test_gate_type_agreement_stocks_dv_against_futures_dv() -> None:
     # Naming the futures dollar volume like the stocks fractional volume puts a double and a
     # string into one column of the bars kind: the naming error the gate exists to catch.
-    # The renamed column is also one the futures stream alone supplies.
+    # The renamed column is also one the futures stream alone supplies, and a second name
+    # for the field the futures flat file documents alike as `dollar_volume`.
     assert _problems(_relexicon("futures_bar", dv="decimal_volume")) == [
+        ("field-spelling", "", "decimal_volume | dollar_volume"),
         ("transport-agreement", "bars", "DecimalVolume"),
         ("type-agreement", "bars", "DecimalVolume"),
     ]
@@ -401,7 +427,11 @@ def test_gate_shape_two_transports_with_one_source_key() -> None:
         "## Columns\n\n| Column | Type | Description |\n|---|---|---|\n"
         "| `price` | number | The price. |\n\n## Example Data\n\n| price |\n| --- |\n"
     )
-    feed = "`wss://socket.massive.com/stocks`\nThe channel prefix for this feed is `1`.\n"
+    feed = (
+        "## Connection\n\n| Feed | URL |\n| --- | --- |\n"
+        "| Real-Time | `wss://socket.massive.com/stocks` |\n\n"
+        "The channel prefix for this feed is `1`.\n"
+    )
     snapshot = Snapshot(
         openapi={"paths": {}},
         llms="",
@@ -434,6 +464,8 @@ def test_gate_shape_two_transports_with_one_source_key() -> None:
         kinds={},
         sample_errors=(),
         projections={},
+        spellings={},
+        shared_descriptions={},
         transport_only={},
         venues={},
         undeclared_fields={},

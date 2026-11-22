@@ -4,19 +4,20 @@ The live-run program (`live_run`) loops: probe, run a group, or sleep. `next_ste
 from the state, the run's memory, and the time:
 
 1. Probe when the day's probe time (`timetable.probe_time`) has passed since the last probe, or
-   when a probe that could not tell the tiers is due to be tried again.
-2. Sleep through the pause after a probe, so the first group starts on an unspent minute.
-3. Run the planned stream night (`stream-night`) while it is open: from its start until its
+   when a probe that could not read Massive's market status is due to be tried again.
+2. Run the planned stream night (`stream-night`) while it is open: from its start until its
    latest restart the next morning, while its units are due and its child has started fewer
    than `MAX_STREAM_STARTS` times.
-4. Run the `--any-time` groups that still have due checks, at once, except on a stream day.
-5. Run the first of the day's slots (`timetable.slots`) that has due checks, has not run today,
-   and whose latest start has not passed; sleep until its earliest start if it is not open yet.
-6. Otherwise sleep until the next trading day's probe, or the planned night's start or latest
+3. Run the `--any-time` groups that still have due checks, at once, except on a stream day.
+4. Run the first of the day's slots (`timetable.slots`) that has due checks, has not run today
+   (or must run again: a refusal of one of its subscriptions, or its skip for the delayed
+   listing, cleared, `run_state.reruns`), and whose latest start has not passed; sleep until
+   its earliest start if it is not open yet.
+5. Otherwise sleep until the next trading day's probe, or the planned night's start or latest
    restart if sooner.
 
-On a stream night's evening nothing in 4 or 5 starts from `timetable.NIGHT_CLEARANCE`, and
-whatever starts before is stopped then. Nothing in 4 or 5 starts from the night's start to its
+On a stream night's evening nothing in 3 or 4 starts from `timetable.NIGHT_CLEARANCE`, and
+whatever starts before is stopped then. Nothing in 3 or 4 starts from the night's start to its
 latest restart the next morning either, even once the night's child may start no more: the run
 sleeps until that restart or the next probe, whichever comes first. The child stops itself
 before 09:30, so the morning's groups start as soon as it ends after the latest restart.
@@ -33,8 +34,8 @@ from typing import TYPE_CHECKING, Final
 
 from tests._live.calendar import NEW_YORK
 from tests._live.live_run import timetable
-from tests._live.live_run.replies import EXAMPLES
-from tests._live.live_run.state import check_of, is_due
+from tests._live.live_run.reply_examples import EXAMPLES
+from tests._live.live_run.state import check_of, is_due, reruns
 from tests._live.live_run.stream_units import night_units, stream_units, throughput_units
 
 if TYPE_CHECKING:
@@ -67,7 +68,7 @@ path's every test."""
 
 PROBE_RETRIES: Final = 3
 PROBE_RETRY_AFTER: Final = timedelta(minutes=5)
-"""How many times, and how soon, a probe that could not tell the tiers is tried again."""
+"""How many times, and how soon, a probe that could not read the market status is tried again."""
 
 MAX_STREAM_STARTS: Final = 5
 """How many times a stream day's child may start in one day, or a stream night's in one night,
@@ -113,7 +114,6 @@ def known_names(state: RunState, group: str, today: date) -> list[str] | None:
     Returns:
         The names, or None for a pytest group never collected.
     """
-    tiers = state.entitlements[state.current]["tiers"] if state.current else {}
     if group in PYTEST_GROUPS:
         if group not in state.known:
             return None
@@ -121,10 +121,10 @@ def known_names(state: RunState, group: str, today: date) -> list[str] | None:
         return [name + suffix for name in state.known[group]]
     names = {
         "responses": [e.name for e in EXAMPLES],
-        "stream-day": stream_units(tiers),
-        "throughput": throughput_units(tiers),
+        "stream-day": stream_units(),
+        "throughput": throughput_units(),
         "stream-day-reconcile": _reconcile_units(state, "stream-day", today),
-        "stream-night": night_units(tiers),
+        "stream-night": night_units(),
         "stream-night-reconcile": _reconcile_units(state, "stream-night", today),
     }
     return names.get(group, [])
@@ -169,7 +169,7 @@ def due_names(
     if group == "responses" and any_time:
         streams = {e.name for e in EXAMPLES if e.stream}
         names = [n for n in names if n not in streams]
-    return [n for n in names if is_due(state, check_of(state, group, n))]
+    return [n for n in names if is_due(check_of(state, group, n), today.isoformat())]
 
 
 def has_due(state: RunState, group: str, today: date, *, any_time: bool = False) -> bool:
@@ -242,8 +242,6 @@ def next_step(state: RunState, memory: RunMemory, now: datetime) -> Step:
     probe_at = timetable.probe_time(kind)
     if _probe_due(memory, now, timetable.at(today, probe_at) if probe_at else None):
         return Step("probe")
-    if memory.not_before is not None and now < memory.not_before:
-        return Step("sleep", "the pause after the probe", memory.not_before)
     night = _night_run(state, today, now)
     if night is not None:
         return night
@@ -268,7 +266,7 @@ def _group_step(state: RunState, now: datetime, *, kind: timetable.DayKind) -> S
         kind: The kind of its New York day.
 
     Returns:
-        The step (`next_step` 4 and 5), or None when no group runs today any more or the
+        The step (`next_step` 3 and 4), or None when no group runs today any more or the
         planned stream night holds the key (`_night_holds_key`).
     """
     if _night_holds_key(state, now):
@@ -280,7 +278,11 @@ def _group_step(state: RunState, now: datetime, *, kind: timetable.DayKind) -> S
             return Step("run", group, any_time_stop(state, today))
         state.any_time.remove(group)
     for slot in timetable.slots(today, kind):
-        if ran_today(state, slot.group, today) or not has_due(state, slot.group, today):
+        # A stream day's starts are its restarts, which a rerun must not add to.
+        again = slot.group != "stream-day" and reruns(state, slot.group)
+        if (ran_today(state, slot.group, today) and not again) or not has_due(
+            state, slot.group, today
+        ):
             continue
         if now < timetable.at(today, slot.earliest):
             return Step("sleep", slot.group, timetable.at(today, slot.earliest))

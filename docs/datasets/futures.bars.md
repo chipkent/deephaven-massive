@@ -7,10 +7,10 @@ Open, high, low, close, and volume bars of futures contracts.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.futures.bars(symbols, timespan, *, multiplier=1, venues=frozenset(dm.FuturesVenue))
+m.futures.bars(symbols, timespan, *, multiplier=1, venues=None, on_error=None)
 ```
 
-- [Methods](README.md#query-methods): `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`, `history(start, end=None)`
+- [Methods](README.md#query-methods): `history(start, end=None)`; for 1-second and 1-minute bars at multiplier=1 also `blink()`, `append_only()`, `ring(capacity)`, `last_by(by='Symbol')`
 - Read from: REST, flat files, WebSocket
 
 [Dataset index](README.md)
@@ -22,9 +22,10 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Contract tickers, a contracts table, or `dm.ALL` for every contract. |
-| [`timespan`](README.md#timespan) | The bar's unit, any but `dm.Timespan.DAY`. |
+| [`timespan`](README.md#timespan) | The bar's unit. `DAY` bars are read from REST only; for `dm.ALL`, use `SESSION`. |
 | [`multiplier`](README.md#multiplier) | Units per bar. |
-| [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. |
+| [`venues`](README.md#venues) | The exchanges whose flat files `history()` reads. Left out, it reads every exchange your plan allows. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -48,8 +49,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The ticker for the contract."; flat files `ticker`: "The exchange symbol that this item is traded under."; WebSocket `sym`: "The ticker symbol for the given future." | REST, flat files, WebSocket |
 | `Date` | String | The futures session of the bar (its trading date), as ISO yyyy-MM-dd text: Massive's `session_end_date` from REST and the flat files, and on the WebSocket the session as for futures trades; null for a bar of several sessions, a week or longer, or an intraday bar that crosses 17:00 Chicago time. Joining an intraday row to the same day's daily bar on `Date` attaches values not known until that day ended, and a null `Date` matches another null, so join longer bars on `TimestampEnd`. From REST `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format. Sessions are named by this end date, while window_start holds the session's start date, which for session candles is the day before."; flat files `session_end_date`: "Also known as the trading date, the date of the end of the trading session, in YYYY-MM-DD format." | REST, flat files, WebSocket |
 | `TimestampStart` | Instant | The start of the bar's window, as an Instant: Massive's own window start. From REST `window_start`: "The timestamp of the beginning of the candlestick’s aggregation window."; flat files `window_start`: "The Unix nanosecond timestamp for the start of the aggregate window."; WebSocket `s`: "The start timestamp of this aggregate window in Unix Milliseconds." | REST, flat files, WebSocket |
-| `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `t.aj(bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends its length after its start (a one-second WebSocket bar at Massive's `e` as sent, with a WARNING when that is not one second after its start); a bar of a session or longer at 17:00 Chicago time on its label, Massive's `session_end_date`, which is its last session. history() returns a bar of several sessions, or of a week or longer, only once no later session can still join it. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades; an end set later than the window's (an index day's extra hour, a stamp kept as sent) only keeps a finished row out longer. A bar of several sessions or longer read before its last session passes that test once its latest session so far has ended, though later sessions can still join it. | REST, flat files, WebSocket |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. | REST, flat files, WebSocket |
+| `TimestampEnd` | Instant | The exclusive end of the bar's window, as an Instant: the first instant at which the bar is complete, so an as-of join on it, `t.aj(bars, on=["Symbol", "Timestamp>=TimestampEnd"])`, never attaches a bar that is still open. It is when the window closes, not when Massive published the bar, and Massive may correct a bar later. An intraday bar ends at Massive's `e` where the WebSocket sends one, else its length after its start; a WARNING says when the two differ. A bar of a session or longer ends at 17:00 Chicago time on its label, Massive's `session_end_date`, which is its last session. history() returns a bar of several sessions, or of a week or longer, only once no later session can still join it. A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows read after their window ended. That test reads the local clock, which can be off, and a row read within moments of its end, or from a delayed feed, may still lack the window's last trades. A bar of several sessions or longer read before its last session passes that test once its latest session so far has ended, though later sessions can still join it. | REST, flat files, WebSocket |
 | `Open` | double | The opening price within the timeframe. | REST, flat files, WebSocket |
 | `High` | double | The highest price within the timeframe. | REST, flat files, WebSocket |
 | `Low` | double | The lowest price within the timeframe. | REST, flat files, WebSocket |
@@ -63,7 +63,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
@@ -73,7 +73,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Date` | `session_end_date` | `session_end_date` |  |
 | `TimestampStart` | `window_start` | `window_start` | `s` |
 | `TimestampEnd` |  |  | `e` |
-| `RawSymbol` | `ticker` | `ticker` | `sym` |
 | `Open` | `open` | `open` | `o` |
 | `High` | `high` | `high` | `h` |
 | `Low` | `low` | `low` | `l` |
@@ -103,4 +102,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

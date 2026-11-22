@@ -1,7 +1,7 @@
 """Regenerate the committed wire schemas from the vendored snapshot: the refresh's one entry.
 
-`refresh()` is what `python -m deephaven_massive._massive.refresh` runs. It composes the
-other modules and adds only the rule for writing:
+`refresh()` is what `scripts/refresh.py` runs. It composes the other modules and adds only
+the rule for writing:
 
 1. `snapshot.Snapshot.load` reads the vendored snapshot and verifies it against its manifest;
 2. `generate` runs the three generators, `rest_sources.generate_rest` (the OpenAPI specification),
@@ -41,7 +41,7 @@ from deephaven_massive._massive.refresh.plan_access import plan_access
 from deephaven_massive._massive.refresh.rest_sources import Coverage, generate_rest
 from deephaven_massive._massive.refresh.snapshot import Snapshot
 from deephaven_massive._massive.refresh.ws_sources import WsCoverage, generate_ws
-from deephaven_massive._massive.spec.types import PlanAccess, RestPath, Source, Transport
+from deephaven_massive._massive.spec.types import PlanAccess, RestPath, Source, Transport, WsChannel
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -76,7 +76,7 @@ class Generated:
     """
 
     rest: tuple[RestPath, ...]
-    ws: tuple[Source, ...]
+    ws: tuple[WsChannel, ...]
     flat_files: tuple[Source, ...]
     rest_coverage: Coverage
     ws_coverage: WsCoverage
@@ -172,7 +172,7 @@ def _generate_each(
     snapshot: Snapshot, hand: HandInput
 ) -> tuple[
     tuple[tuple[RestPath, ...], Coverage],
-    tuple[tuple[Source, ...], WsCoverage],
+    tuple[tuple[WsChannel, ...], WsCoverage],
     tuple[tuple[Source, ...], FlatFileCoverage],
 ]:
     """Run the three generators, collecting the problems of all of them before stopping.
@@ -236,9 +236,10 @@ def _check_kinds(
 
     Raises:
         RefreshError: With every problem found: two transports' sources sharing a key, a
-            stale hand entry, a conversion no sample needs, two concepts in one column, a
-            stale `KINDS` or `PROJECTIONS` entry, a type or transport disagreement, or a
-            column order that cannot be taken from a kind.
+            stale hand entry, a conversion no sample needs, two concepts in one column, two
+            names for a field Massive documents alike, a stale `KINDS` or `PROJECTIONS`
+            entry, a type or transport disagreement, or a column order that cannot be taken
+            from a kind.
     """
     problems: list[Problem] = []
     by_key: dict[str, Source] = {}
@@ -257,6 +258,7 @@ def _check_kinds(
     problems += gates.unneeded_type_fixes(hand, uses)
     problems += gates.unused_description_fixes(hand, uses)
     problems += gates.concept_collisions(hand, uses)
+    problems += gates.field_spellings(hand, uses)
     found, member_problems = kinds.members(hand, by_key)
     problems += member_problems
     problems += kinds.type_agreement(found)
@@ -294,7 +296,7 @@ def refresh(
     generated = generate(snapshot, hand)
     texts = {
         render.REST_FILE.name: render.render_rest(generated.rest),
-        render.WS_FILE.name: render.render_sources(generated.ws),
+        render.WS_FILE.name: render.render_channels(generated.ws),
         render.FLAT_FILES_FILE.name: render.render_sources(generated.flat_files),
         render.DESCRIPTIONS_FILE.name: render.render_descriptions(
             {

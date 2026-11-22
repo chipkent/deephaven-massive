@@ -49,7 +49,6 @@ def _attempts(rows: list[dict[str, Any]]) -> dict[str, int]:
     return {str(row["Bucket"]): int(row["Attempts"]) for row in rows}
 
 
-@pytest.mark.needs("stocks:basic")
 @pytest.mark.verifies("66")
 @pytest.mark.requests(2)
 @pytest.mark.timeout(100)
@@ -67,8 +66,7 @@ def test_a_reference_lookup_and_the_market_status_count_in_the_other_row(
     stock ticker (`reference.tickers(market=STOCKS, limit=1)`, one request) and the market
     status (one request), and records the `Attempts` of every row of `m.rate_limits()` before
     and after. The session shares the run's rate governor, so the counts include earlier
-    tests' requests; only their changes count. It needs Stocks on Basic only in that it may
-    read a stock lookup there: the two requests stay within a minute's 5.
+    tests' requests; only their changes count.
 
     Passes when the `other` row gained at least the two requests (a retry would add more) and
     no subscription's row changed; a failure names the rows that moved, a bug in the library's
@@ -79,9 +77,9 @@ def test_a_reference_lookup_and_the_market_status_count_in_the_other_row(
     try:
         before = _attempts(rows_when(view, lambda rows: _OTHER in _attempts(rows)))
         tickers = table_rows(
-            live_session.reference.tickers(market=dm.Market.STOCKS, limit=1).fetch()
+            live_session.reference.tickers(market=dm.Market.STOCKS, limit=1).fetch(wait=True)
         )
-        status = table_rows(live_session.reference.market_status().fetch())
+        status = table_rows(live_session.reference.market_status().fetch(wait=True))
         evidence(f"reference.tickers(market=stocks, limit=1): {[r['Symbol'] for r in tickers]}")
         evidence(f"reference.market_status(): {len(status)} row")
         after = _attempts(

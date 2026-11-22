@@ -4,16 +4,19 @@ The descriptions are read from merged schemas, the process's catalog's and synth
 the merge is what applies the rules to every column.
 """
 
-from typing import cast
-
 import pytest
 
+import deephaven_massive.namespaces._crypto as crypto
+import deephaven_massive.namespaces._forex as forex
+import deephaven_massive.namespaces._futures as futures
+import deephaven_massive.namespaces._indicators as indicators
+import deephaven_massive.namespaces._indices as indices
+import deephaven_massive.namespaces._stocks as stocks
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.column_descriptions import JSON_TEXT_NOTE, TRANSPORT_LABELS
 from deephaven_massive._datasets.schema import ColumnType, dataset_schema
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, NotBars
 from deephaven_massive._massive import Field, Source, Transport, WireType, WireUnit, source
-from deephaven_massive._namespaces import crypto, forex, futures, indicators, indices, stocks
 from deephaven_massive._session import CATALOG
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -217,7 +220,7 @@ def test_every_transport_has_one_user_facing_spelling() -> None:
         Transport.WS: "WebSocket",
     }
     with pytest.raises(TypeError):  # read-only: no caller can respell a transport
-        cast("dict[Transport, str]", TRANSPORT_LABELS)[Transport.WS] = "WS"
+        TRANSPORT_LABELS[Transport.WS] = "WS"  # type: ignore[index]  # the point: read-only
 
 
 def test_key_columns_quote_the_wire_key_or_the_request_parameter() -> None:
@@ -346,7 +349,11 @@ def description(dataset: DatasetSpec, name: str) -> str:
             "New York time",
             "a week's Monday, a month's, quarter's, or year's first weekday",
         ),
-        (indices.BARS, "New York time", "a week's Sunday, a month's, quarter's, or year's 1st"),
+        (
+            indices.BARS,
+            "Chicago time (01:00 New York time)",
+            "a week's Sunday, a month's, quarter's, or year's 1st",
+        ),
         (forex.BARS, "UTC", "a week's Sunday, a month's, quarter's, or year's 1st)"),
         (crypto.BARS, "UTC", "a week's Sunday, a month's, quarter's, or year's 1st)"),
     ],
@@ -365,8 +372,8 @@ def test_a_bars_start_is_described_as_the_window_start(
         "Every other stamp, as each source sends it (quoted next), is moved there. From REST"
         in (described)
     )
-    # A stamp Massive is not known to use is kept, said before the sources' own stamps.
-    assert "keeps that stamp, has a null `Date`, and ends one period after it" in described
+    # A bar at a stamp Massive is not known to use is withheld, said before the sources' stamps.
+    assert "Massive is not known to use is withheld, with a WARNING" in described
 
 
 def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:
@@ -380,11 +387,13 @@ def test_a_futures_bar_keeps_massive_s_window_start_and_its_session() -> None:
     end = description(futures.BARS, "TimestampEnd")
     assert "17:00 Chicago time on its label, Massive's `session_end_date`, which is its last" in end
     assert "only once no later session can still join it" in end
-    assert "at Massive's `e` as sent, with a WARNING when that is not one second" in end
+    assert "An intraday bar ends at Massive's `e` where the WebSocket sends one" in end
+    stocks_end = description(stocks.BARS, "TimestampEnd")
+    assert "An intraday bar ends at Massive's `e` where the WebSocket sends one" in stocks_end
     trades = description(futures.TRADES, "Date")
     assert "the session Massive's futures schedules place it in" in trades
-    assert "logs a WARNING (once per product and date)" in trades
-    assert "logs at DEBUG only" in trades
+    assert "is never published without a date" in trades
+    assert "`unlisted_contracts` and `unscheduled_products`" in trades
 
 
 def test_the_library_describes_its_time_columns() -> None:
@@ -392,7 +401,19 @@ def test_the_library_describes_its_time_columns() -> None:
     assert stock_end.startswith("The exclusive end of the bar's window, as an Instant")
     assert 'on=["Symbol", "Timestamp>=TimestampEnd"]' in stock_end
     assert "at 00:00 New York time after its window's last day. A row read before" in stock_end
-    assert "Chicago day is not verified. A row read" in description(indices.BARS, "TimestampEnd")
+    index_end = description(indices.BARS, "TimestampEnd")
+    assert (
+        "ends at 00:00 Chicago time (01:00 New York time) after its window's last day. A row"
+        in (index_end)
+    )
+    index_start = description(indices.BARS, "TimestampStart")
+    assert index_start.startswith(
+        "The start of the bar's window, as an Instant. A bar of a day or longer starts at 00:00 "
+        "Chicago time (01:00 New York time) of its window's first day (a week's Sunday, a "
+        "month's, quarter's, or year's 1st), Massive's own stamp. Massive's index days are "
+        "Chicago days"
+    )
+    assert "though Massive's documentation says index days are Eastern" in index_start
     assert description(stocks.BARS, "Date").startswith(
         "The trading day of the bar, as ISO yyyy-MM-dd text: the New York date of `TimestampStart`"
     )
@@ -427,8 +448,22 @@ def test_the_daily_summaries_and_indicators_describe_their_windows() -> None:
         "The exclusive end of the day the summary covers, as an Instant: 00:00 New York time of "
         f"the next day. {FINISHED}"
     )
-    assert description(indices.DAILY_OPEN_CLOSE, "TimestampEnd").endswith(
-        f"Chicago day is not verified. {FINISHED}"
+    chicago = (
+        "Massive's index days are Chicago days: it stamps an index day at midnight in Chicago on "
+        "every source, and its values are those of that Chicago day, though Massive's "
+        "documentation says index days are Eastern."
+    )
+    assert description(indices.DAILY_OPEN_CLOSE, "Date").startswith(
+        "The day the summary covers, as ISO yyyy-MM-dd text: a Chicago calendar day."
+    )
+    assert description(indices.DAILY_OPEN_CLOSE, "TimestampStart") == (
+        "The start of the day the summary covers, as an Instant: 00:00 Chicago time (01:00 New "
+        f"York time) of `Date`, where the index day bar of that date starts. {chicago}"
+    )
+    assert description(indices.DAILY_OPEN_CLOSE, "TimestampEnd") == (
+        "The exclusive end of the day the summary covers, as an Instant: 00:00 Chicago time "
+        "(01:00 New York time) of the next day, where the index day bar of that date ends. "
+        f"{chicago} {FINISHED}"
     )
     # A crypto summary not in UTC gets its date's widest window in any zone.
     for name in ("TimestampStart", "TimestampEnd"):
@@ -442,6 +477,7 @@ def test_the_daily_summaries_and_indicators_describe_their_windows() -> None:
         "The start of the bar the value is computed at, as an Instant."
     )
     assert "day zone of the symbol's class" in description(indicators.SMA, "TimestampEnd")
+    assert "for an index at 00:00 Chicago time" in description(indicators.SMA, "TimestampStart")
     assert "day zone of the symbol's class" in description(indicators.SMA, "Date")
 
 
@@ -450,8 +486,7 @@ FINISHED = (
     'values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows '
     "read after their window ended. That test reads the local clock, which can be off, and a "
     "row read within moments of its end, or from a delayed feed, may still lack the window's "
-    "last trades; an end set later than the window's (an index day's extra hour, a stamp kept "
-    "as sent) only keeps a finished row out longer."
+    "last trades."
 )
 
 

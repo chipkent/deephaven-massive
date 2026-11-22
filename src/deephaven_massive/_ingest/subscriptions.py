@@ -16,12 +16,13 @@ timer queue.
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from deephaven_massive._config import NO_ACK_RESEND
 from deephaven_massive._datasets.wire_symbols import ws_symbol
-from deephaven_massive._log_limits import bounded_list
+from deephaven_massive._log_limits import bounded_list, prose_list
 from deephaven_massive._massive import StatusKind
 
 if TYPE_CHECKING:
@@ -109,6 +110,34 @@ def stream_topics(
     return frozenset(f"{channel}.{ws_symbol(asset_class, s, pairs)}" for s in symbols)
 
 
+def _named(message: str, topics: Iterable[str]) -> list[str]:
+    """Return the topics a server message names whole, not as part of a longer one.
+
+    Args:
+        message: The server's message.
+        topics: The candidate topics, such as `T.1Y:SA 03M` and `T.1Y:SA 03M F6`.
+
+    Returns:
+        The topics, sorted, that appear with no ticker character (a letter, a digit, `.`,
+        `:`, or `-`) on either side, a sentence's closing `.` after one still counting, at a
+        place no longer candidate covers: a topic may hold a space, so `T.1Y:SA 03M F6`
+        names itself, not `T.1Y:SA 03M`, and `T.CL:BF Q6-U6-V6` does not name `T.CL:BF Q6-U6`.
+    """
+    before, after = r"[A-Za-z0-9:.\-]", r"[A-Za-z0-9:\-]|\.\w"
+    found = [
+        (match.span(), topic)
+        for topic in sorted(topics)
+        for match in re.finditer(rf"(?<!{before}){re.escape(topic)}(?!{after})", message)
+    ]
+    return sorted(
+        {
+            topic
+            for (start, end), topic in found
+            if not any(s <= start and end <= e and e - s > end - start for (s, e), _ in found)
+        }
+    )
+
+
 class Sender(Protocol):
     """What `Subscriptions` needs of a client: the loop-thread sending methods of `WsClient`."""
 
@@ -191,6 +220,7 @@ class Subscriptions:
                 cap=None,
                 on_refused=lambda topics, message: None,
                 on_change=lambda: None,
+                url="wss://socket.massive.com/stocks",
             )
             subscriptions.add(["T.AAPL"])
             subscriptions.opened(1)  # subscribes T.AAPL
@@ -205,6 +235,7 @@ class Subscriptions:
         cap: int | None,
         on_refused: Callable[[tuple[str, ...], str], None],
         on_change: Callable[[], None],
+        url: str,
     ) -> None:
         """Start with no topic wanted and no generation open.
 
@@ -217,7 +248,9 @@ class Subscriptions:
             cap: The most explicit topics on the wire (1,000 for `/options`), or None.
             on_refused: Called with refused topics and the server's message.
             on_change: Called after every change of the counts or the deferred topics.
+            url: The connection's URL, which starts each WARNING.
         """
+        self._url = url
         self._sender = sender
         self._call_later = call_later
         self._subscription_confirmation_timeout = subscription_confirmation_timeout
@@ -232,6 +265,7 @@ class Subscriptions:
         self._deferred: frozenset[str] = frozenset()
         self._admission_stale = False
         self._sent: set[str] = set()
+        self._spaced: set[str] = set()  # every topic with a space this connection subscribed
         self._acked: set[str] = set()
         self._noack: set[str] = set()
         self._unreported: list[str] = []  # `NO_ACK` topics of the step not logged yet
@@ -410,6 +444,7 @@ class Subscriptions:
             ordered = sorted(adds)
             self._sender.subscribe(generation, ordered)
             self._sent |= adds
+            self._spaced.update(t for t in adds if " " in t)
             self._pending = set(adds)
             self._step = frozenset(adds)
             for topic in ordered:
@@ -437,6 +472,10 @@ class Subscriptions:
             self._acknowledge(status.topics)
         elif status.kind is StatusKind.REFUSED:
             self._refuse_status(status)
+        elif status.kind is StatusKind.MAX_CONNECTIONS or status.kind is StatusKind.OTHER:
+            pass  # the client turns a lost slot into its TAKEN state; any other answers no topic
+        else:
+            assert_never(status.kind)  # a new kind needs its rule here
         self.reconcile()
 
     def _acknowledge(self, topics: tuple[str, ...]) -> None:
@@ -454,8 +493,9 @@ class Subscriptions:
             if not self._warned_unparsed:
                 self._warned_unparsed = True
                 logger.warning(
-                    "an acknowledgement named no topic; treating it as acknowledging the "
-                    "whole subscription in flight"
+                    "%s: Massive confirmed a subscription without naming it, so the library "
+                    "takes it as confirming every subscription it sent last.",
+                    self._url,
                 )
             topics = self._unanswered()
         late = []  # topics in `NO_ACK` that Massive acknowledges after all
@@ -488,11 +528,20 @@ class Subscriptions:
         and a stream with rows still fails at `max_outage` after a reconnect, so nothing stale
         goes unmarked.
 
+        A wanted topic with a space, such as a futures combo's `T.CL:BF Q6-U6-V6`, is never one
+        word of the message, so it counts as named when the message holds it whole and no
+        longer topic holds that place. The longer topics checked include every topic with a
+        space this connection ever subscribed, also one no stream wants any more: a late
+        refusal of `T.1Y:SA 03M F6`, removed meanwhile, must not fail `T.1Y:SA 03M`.
+
         Args:
             status: A `REFUSED` status.
         """
-        if status.topics:
-            self._refuse(tuple(t for t in status.topics if t in self._refs), status.message)
+        known = self._spaced.union(t for t in self._refs if " " in t)
+        spaced = [t for t in _named(status.message, known) if t in self._refs]
+        if status.topics or spaced:
+            named = [t for t in status.topics if t in self._refs]
+            self._refuse(tuple(dict.fromkeys([*named, *spaced])), status.message)
             return
         awaiting = len(self._pending) + len(self._noack) + len(self._resend)
         if len(self._pending) != 1 or awaiting != 1:
@@ -715,13 +764,12 @@ class Subscriptions:
     def _report_no_ack(self) -> None:
         """Log the `NO_ACK` topics of the step that just resolved, in one WARNING."""
         logger.warning(
-            "generation %d: no acknowledgement from Massive after %.1f s and one re-send for "
-            "the topics %s; they stay subscribed and are re-sent every %.0f s, they count in "
-            "NoAckTopics of m.connections() and in their streams' Error, and the connection is "
-            "not reconnected for them",
-            self.generation,
+            "%s: Massive has not confirmed the subscriptions %s after %.0f s and one re-send, "
+            "so their live tables may miss rows. m.problems() lists them until Massive "
+            "confirms. Nothing to do: the library re-sends them every %.0f s.",
+            self._url,
+            prose_list(sorted(self._unreported), "subscriptions"),
             2 * self._subscription_confirmation_timeout,
-            bounded_list(sorted(self._unreported)),
             NO_ACK_RESEND,
         )
         self._unreported.clear()

@@ -11,16 +11,15 @@ against the same description and no schema is written by hand:
   `Provenance` (the vendor snapshot's date and each source's vendor URLs).
 - `rest.json`, `ws.json`, and `flatfiles.json`, next to this module, are generated from
   Massive's OpenAPI specification, its WebSocket specification, and its flat-file
-  documentation pages by `python -m deephaven_massive._massive.refresh` and committed; they
-  are never edited by hand. Each source there records its fields in its dataset kind's order
-  and its memberships of the kinds (`Source.memberships`), so nothing at run time needs the
-  refresh. `descriptions.json`, generated beside them by the same command, holds each
-  field's description (the vendor's, or the refresh's correction where the vendor's is clearly
-  wrong, and for a source that serves several asset classes any per-class description), the
-  snapshot's fetch date, each source's vendor URLs, and what each vendor page says about
-  Massive's plans. The
-  descriptions are kept out of the schema files so that a refresh that only rewords them
-  leaves those byte for byte unchanged. All ship in the wheel as package data, while the
+  documentation pages by `scripts/refresh.py` and committed; they are never edited by hand.
+  Each source there records its fields in its dataset kind's order and its memberships of the
+  kinds (`Source.memberships`), so nothing at run time needs the refresh. `descriptions.json`,
+  generated beside them by the same command, holds each field's description (the vendor's, or
+  the refresh's correction where the vendor's is clearly wrong, and for a source that serves
+  several asset classes any per-class description), the snapshot's fetch date, each source's
+  vendor URLs, and what each vendor page says about Massive's plans. The descriptions are kept
+  out of the schema files so that a refresh that only rewords them leaves those byte for byte
+  unchanged. All ship in the wheel as package data, while the
   refresh that writes them does not.
 - `spec.values` writes one REST parameter value as wire text by its `ParamKind`
   (`encode_value`), for the REST client and for the library's filter check alike.
@@ -73,6 +72,7 @@ from deephaven_massive._massive.spec.types import (
     RestPath,
     Source,
     Transport,
+    WsChannel,
 )
 
 if TYPE_CHECKING:
@@ -178,6 +178,8 @@ def _load(transport: Transport) -> Mapping[str, Source]:
 @overload
 def sources(transport: Literal[Transport.REST]) -> Mapping[str, RestPath]: ...
 @overload
+def sources(transport: Literal[Transport.WS]) -> Mapping[str, WsChannel]: ...
+@overload
 def sources(transport: Transport) -> Mapping[str, Source]: ...
 def sources(transport: Transport) -> Mapping[str, Source]:
     """Return every generated source of a transport, loading its file on first use.
@@ -198,7 +200,8 @@ def sources(transport: Transport) -> Mapping[str, Source]:
         A read-only mapping from each source's key (a REST path template such as
         `"/v3/trades/{stockTicker}"`, a channel such as `"stocks/T"`, or a prefix such as
         `"us_stocks_sip/trades_v1"`) to its value, in the generated file's order. For REST
-        every value is a `RestPath`. Every call for one transport returns the same mapping.
+        every value is a `RestPath`, and for WebSocket a `WsChannel`. Every call for one
+        transport returns the same mapping.
     """
     with _lock:
         return _load(transport)
@@ -206,6 +209,8 @@ def sources(transport: Transport) -> Mapping[str, Source]:
 
 @overload
 def source(transport: Literal[Transport.REST], key: str) -> RestPath: ...
+@overload
+def source(transport: Literal[Transport.WS], key: str) -> WsChannel: ...
 @overload
 def source(transport: Transport, key: str) -> Source: ...
 def source(transport: Transport, key: str) -> Source:
@@ -221,7 +226,7 @@ def source(transport: Transport, key: str) -> Source:
     propagates.
 
     Returns:
-        The source; a `RestPath` for REST.
+        The source; a `RestPath` for REST, a `WsChannel` for WebSocket.
 
     Raises:
         KeyError: If the transport has no generated source with that key (one that is

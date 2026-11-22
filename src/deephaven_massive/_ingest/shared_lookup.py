@@ -11,7 +11,7 @@ caller makes it again.
 The lookup is shared, but its rate-limit pauses are not: a waiting caller charges each pause of
 the lookup's governor bucket to its own patience (`RequestGovernor.charge_pause`), and gives up
 once a pause outlasts what that patience still covers. So a console command, which waits out
-90 s of pauses, never waits out the ten minutes of the caller it joined. When the maker stops
+90 s of pauses, never waits out the longer patience of the caller it joined. When the maker stops
 for a reason of its own (it gave up on a pause, was interrupted, or its background read was
 stopped), its waiters do not fail with that reason: each tries again with the patience it has
 left, and one of them makes the lookup. A failure from Massive reaches every waiter as a copy
@@ -32,8 +32,8 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from deephaven_massive._errors import ErrorCause, MassiveError, library_bug
-from deephaven_massive._massive import WireError
+from deephaven_massive._errors import ErrorSource, MassiveError, copy_error, library_bug
+from deephaven_massive._massive import WireError, WireFailure
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -85,7 +85,7 @@ def _shared_failure(error: BaseException, context: str, *, stopped: bool) -> Bas
         `MassiveError` with status 429 (its patience ran out; the client never gives up on a
         429 otherwise), or an interruption that is not an `Exception` (`KeyboardInterrupt`).
         Otherwise the `MassiveError` itself, or for any other error a `MassiveError` naming
-        it, a defect of the library (`ErrorCause.LIBRARY_DEFECT`, with how to report it),
+        it, a defect of the library (`ErrorSource.LIBRARY`, with how to report it),
         which every waiter raises a copy of (`_outcome`).
     """
     if stopped:
@@ -96,7 +96,7 @@ def _shared_failure(error: BaseException, context: str, *, stopped: bool) -> Bas
         return error
     if not isinstance(error, Exception):
         return _AbandonedError(repr(error))
-    return MassiveError(library_bug(f"{context}: {error!r}"), cause=ErrorCause.LIBRARY_DEFECT)
+    return MassiveError(library_bug(f"{context}: {error!r}"), source=ErrorSource.LIBRARY)
 
 
 def _outcome(future: Future[V]) -> V:
@@ -109,14 +109,14 @@ def _outcome(future: Future[V]) -> V:
         The result.
 
     A failed lookup raises a copy of the maker's `MassiveError` (its type, text, status,
-    request id, and cause), so that no exception object is raised on two threads at once.
+    request id, source, `is_retryable`, and `is_bug`; `copy_error`), so that no exception
+    object is raised on two threads at once.
     """
     try:
         return future.result()
     except MassiveError as error:
-        raise type(error)(
-            str(error), status=error.status, request_id=error.request_id, cause=error.cause
-        ) from None
+        copied = copy_error(error)
+        raise copied from None
 
 
 def _succeeded_result(future: Future[V] | None) -> V | None:
@@ -372,9 +372,10 @@ class SharedLookup(Generic[K, V]):
             (`_AbandonedError`), so this caller tries again.
 
         Once a pause of the lookup outlasts this caller's patience, it raises the public error
-        of a request that gives up: `MassiveError("rate limited: ...")` with status 429, or
-        `"... is closed"` if the session closed meanwhile. Once `cancel` is set, it raises
-        `MassiveError("waiting for <what>: cancelled")`, or the closed session's error.
+        of a request that gives up, a `MassiveError` with status 429, or `"This session is
+        closed. ..."` if the session closed meanwhile. Once `cancel` is set, it raises
+        `MassiveError("Waiting for <what> ended. The read stopped ...")`, or the closed
+        session's error.
         """
         logger.debug(
             "%s: waits for %s another caller is making, through at most %.0f s of its pauses",
@@ -402,7 +403,9 @@ class SharedLookup(Generic[K, V]):
                         return False
                     return True
                 if cancel is not None and cancel.is_set():
-                    stopped = public(WireError(f"waiting for {what}: cancelled"))
+                    stopped = public(
+                        WireError(f"Waiting for {what} ended.", kind=WireFailure.STOPPED)
+                    )
                     logger.debug(
                         "%s: stops waiting for %s, its read was stopped: %s",
                         self._label,

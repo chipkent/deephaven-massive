@@ -4,20 +4,35 @@ The checks every dataset of the `m.stocks` tree shares (catalog gates, fixtures,
 arguments) are in `test_stocks.py`.
 """
 
+import functools
+import re
 from collections.abc import Callable
-from typing import cast
 
 import pytest
 
 import deephaven_massive as dm
-from deephaven_massive._query import QueryBase
+from deephaven_massive.queries import Query
 
 
-def factory(session: dm.MassiveSession, name: str) -> Callable[..., QueryBase]:
+def whole(text: str) -> str:
+    # A pattern that matches exactly `text`, so a test pins a message's whole text.
+    return f"^{re.escape(text)}$"
+
+
+def factory(session: dm.MassiveSession, name: str) -> Callable[..., Query]:
     target: object = session.stocks
     for part in name.split("."):
         target = getattr(target, part)
-    return cast("Callable[..., QueryBase]", target)
+    assert callable(target)
+    method = target
+
+    @functools.wraps(method)
+    def make(*args: object, **kwargs: object) -> Query:
+        query = method(*args, **kwargs)
+        assert isinstance(query, Query)
+        return query
+
+    return make
 
 
 @pytest.mark.parametrize(
@@ -50,7 +65,14 @@ def test_flow_statements_offer_the_trailing_twelve_months(
 def test_balance_sheets_refuse_the_trailing_twelve_months(
     massive_session: dm.MassiveSession,
 ) -> None:
-    with pytest.raises(ValueError, match="balance sheets have no trailing twelve months"):
+    refusal = (
+        "Balance sheets have no timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS. Pass "
+        "timeframe=dm.Timeframe.ANNUAL or timeframe=dm.Timeframe.QUARTERLY."
+    )
+    sheets = massive_session.stocks.financials.balance_sheets
+    for advised in (dm.Timeframe.ANNUAL, dm.Timeframe.QUARTERLY):
+        assert dict(sheets(timeframe=advised)._request.params) == {"timeframe": advised}
+    with pytest.raises(ValueError, match=whole(refusal)):
         massive_session.stocks.financials.balance_sheets(
             timeframe=dm.Timeframe.TRAILING_TWELVE_MONTHS
         )

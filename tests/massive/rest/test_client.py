@@ -5,18 +5,22 @@ Time is virtual: every client gets a `FakeClock`, so retry waits are recorded, n
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import re
 import ssl
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import pytest
 import urllib3
+from typing_extensions import override
 
-from deephaven_massive._massive.net import USER_AGENT, http
+from deephaven_massive._massive import WireFailure
+from deephaven_massive._massive.net import USER_AGENT, codec, http
 from deephaven_massive._massive.net.cancel import Cancel
 from deephaven_massive._massive.net.errors import (
     WireAuthError,
@@ -33,7 +37,6 @@ from deephaven_massive._massive.rest.governor import (
     RequestGovernor,
 )
 from deephaven_massive._massive.spec.types import Param, ParamKind, RestPath, WireUnit
-from deephaven_massive._types import override
 from tests._fakes.clock import FakeClock
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
@@ -56,6 +59,8 @@ _TRADES = RestPath(
     ),
 )
 _AAPL = {"stockTicker": "AAPL"}
+_CONNECTION = urllib3.connection.HTTPConnection("api.massive.com")
+"""The connection a refused connection names; never opened."""
 
 
 def _governor(clock: FakeClock | None = None) -> RequestGovernor:
@@ -198,13 +203,26 @@ def test_each_connection_has_a_pool_that_never_retries_with_the_timeouts(
 @pytest.mark.parametrize(
     ("base_url", "reason"),
     [
-        ("https://api.massive.com/v3", "must name only a scheme, host, and port"),
-        ("http://api.massive.com", "would send the API key in clear text"),
-        ("ftp://api.massive.com", "is not an absolute http or https URL"),
+        (
+            "https://api.massive.com/v3",
+            (
+                "names more than a scheme, host, and port. Pass only those, such as "
+                "'https://api.massive.com'."
+            ),
+        ),
+        (
+            "http://api.massive.com",
+            (
+                "would send the API key in clear text. Use https, or use http only for a loopback "
+                "host such as a local test server."
+            ),
+        ),
+        ("ftp://api.massive.com", "is not an absolute http or https URL with a valid port."),
     ],
 )
 def test_the_client_refuses_a_base_url_the_shared_rule_refuses(base_url: str, reason: str) -> None:
-    with pytest.raises(ValueError, match=f"^base_url '.*' {reason}"):
+    expected = f"base_url={base_url!r} {reason}"
+    with pytest.raises(ValueError, match=f"^{re.escape(expected)}$"):
         RestClient(_KEY, base_url=base_url, max_concurrency=1, governor=_governor())
 
 
@@ -219,7 +237,13 @@ def test_plain_http_is_allowed_for_loopback() -> None:
 def test_an_api_key_that_cannot_be_a_header_is_refused_without_being_shown(
     api_key: str,
 ) -> None:
-    with pytest.raises(ValueError, match=r"^api_key must be non-empty visible ASCII") as caught:
+    refused = (
+        r"^api_key (is empty\. Pass your Massive API key\.|holds a .* character at index \d+, "
+    )
+    refused += (
+        r"and an API key may hold only visible ASCII\. Pass the key without that character\.)$"
+    )
+    with pytest.raises(ValueError, match=refused) as caught:
         RestClient(
             api_key, base_url="https://api.massive.com", max_concurrency=1, governor=_governor()
         )
@@ -227,7 +251,7 @@ def test_an_api_key_that_cannot_be_a_header_is_refused_without_being_shown(
 
 
 def test_max_concurrency_is_at_least_one() -> None:
-    with pytest.raises(ValueError, match="max_concurrency must be at least 1, not 0"):
+    with pytest.raises(ValueError, match=r"^max_concurrency=0 is not at least 1\.$"):
         RestClient(
             _KEY, base_url="https://api.massive.com", max_concurrency=0, governor=_governor()
         )
@@ -365,14 +389,19 @@ def test_a_body_that_does_not_decompress_is_never_retried_and_is_logged(
     caplog.set_level(logging.DEBUG)
     corrupt = Reply(b"not gzip at all", headers={"Content-Encoding": "gzip"})
     fake_rest.reply("/v3/trades/AAPL", corrupt, _ok())
-    with pytest.raises(WireError, match="does not decompress") as caught:
+    # zlib's own words for the failure vary by version, so they are matched loosely.
+    with pytest.raises(
+        WireError,
+        match=r"^Massive answered GET /v3/trades/AAPL on 127\.0\.0\.1 with HTTP 200, and the "
+        r"library could not read the answer: the body does not decompress: .*\.$",
+    ) as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert caught.value.status == 200
-    assert caught.value.unreadable  # the body arrived whole but cannot be read
+    assert caught.value.kind is WireFailure.UNREADABLE  # the body arrived whole but cannot be read
     assert "not gzip" not in caught.value.message  # the body itself is never quoted
     # The call that raises is what the user sees, so the client records the reply at DEBUG.
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert f"{caught.value.message} (HTTP 200); not retried" in caplog.messages
+    assert f"{caught.value.message} Not retried." in caplog.messages
     assert not any("not gzip" in r.getMessage() for r in caplog.records)
     assert clock.waits == []
     assert len(fake_rest.requests) == 1
@@ -408,7 +437,12 @@ def test_a_429_whose_body_does_not_decompress_is_a_refusal_that_fails(
     rest = _client(fake_rest, governor=governor)
     corrupt = Reply(b"not gzip", status=429, headers={"Content-Encoding": "gzip"})
     fake_rest.reply("/v3/trades/AAPL", corrupt)
-    with pytest.raises(WireError, match="does not decompress") as caught:
+    # zlib's own words for the failure vary by version, so they are matched loosely.
+    with pytest.raises(
+        WireError,
+        match=r"^Massive answered GET /v3/trades/AAPL on 127\.0\.0\.1 with HTTP 429, and the "
+        r"library could not read the answer: the body does not decompress: .*\.$",
+    ) as caught:
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert caught.value.status == 429
     state = governor.snapshot()[0]
@@ -461,13 +495,15 @@ def test_a_numeric_request_id_never_fails_a_call(
     with pytest.raises(WireError) as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert caught.value.request_id == "7"
-    assert "(request_id 7): bad ticker" in str(caught.value)
+    assert '(request_id 7): "bad ticker".' in str(caught.value)
 
 
 def test_parameters_that_do_not_fit_raise_before_any_request(
     client: RestClient, fake_rest: FakeRestServer
 ) -> None:
-    with pytest.raises(ValueError, match="has no query parameter 'apiKey'"):
+    with pytest.raises(
+        ValueError, match="named the query parameter 'apiKey', which that endpoint does not take"
+    ):
         client.get(_TRADES, _AAPL, {"apiKey": _KEY}, bucket="stocks")
     with pytest.raises(TypeError, match="'limit' takes integer values"):
         client.pages(_TRADES, _AAPL, {"limit": "5"}, bucket="stocks")
@@ -531,15 +567,16 @@ def test_a_proxy_that_refuses_the_credentials_is_never_retried(
     clock = FakeClock()
     governor = _governor(clock)
     rest = _client(tunnelled, governor=governor)
-    with pytest.raises(WireError, match="the proxy refused its credentials") as caught:
+    expected = (
+        "The proxy refused its credentials with HTTP 407 for GET /v3/trades/AAPL on 127.0.0.1. "
+        "Correct the user and password in HTTPS_PROXY."
+    )
+    with pytest.raises(WireError, match=rf"^{re.escape(expected)}$") as caught:
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     rest.close()
     assert governor.snapshot()[0].recent == 0  # the tunnel never opened: no slot held
-    assert caught.value.message == (
-        "GET /v3/trades/AAPL: the proxy refused its credentials (HTTP 407 for a tunnel to "
-        "127.0.0.1); check the user and password in HTTPS_PROXY"
-    )
     assert (caught.value.status, caught.value.path) == (407, "/v3/trades/AAPL")
+    assert caught.value.kind is WireFailure.LOCAL  # the proxy setting on this machine is the fix
     assert [r.method for r in fake_rest.requests] == ["CONNECT"]
     assert (tunnelled.requests, clock.waits) == ([], [])
 
@@ -571,7 +608,12 @@ def test_proxy_credentials_never_reach_an_error_or_a_log(
     rest = RestClient(
         _KEY, base_url="https://api.massive.test", max_concurrency=1, governor=_governor()
     )
-    with pytest.raises(WireError, match="failed: ") as caught:
+    # urllib3's own words for the refused connection vary by platform.
+    with pytest.raises(
+        WireError,
+        match=r"^No answer from api\.massive\.test to GET /v3/trades/AAPL after 4 tries: "
+        r"\('Unable to connect to proxy', .*\)\.$",
+    ) as caught:
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert "topsecret" not in caught.value.message
     assert caplog.records
@@ -603,14 +645,46 @@ def test_a_certificate_failure_is_never_retried_and_names_ssl_cert_file(
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
     clock = FakeClock()
     rest = _client(tls_server, clock)
+    # OpenSSL's own words for the failure vary by version, so they are matched loosely.
     with pytest.raises(
-        WireError, match=r"TLS certificate verification failed for 127\.0\.0\.1"
+        WireError,
+        match=r"^The TLS certificate of 127\.0\.0\.1 did not verify for GET /v3/trades/AAPL: "
+        r".*certificate verify failed.*\. If a proxy or a private certificate authority signs "
+        r"it, set SSL_CERT_FILE to a bundle that trusts it\.$",
     ) as caught:
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert "SSL_CERT_FILE" in caught.value.message
     assert (caught.value.status, caught.value.path) == (None, "/v3/trades/AAPL")
+    assert caught.value.kind is WireFailure.LOCAL  # SSL_CERT_FILE, on this machine, is the fix
     assert clock.waits == []
     assert tls_server.requests == []
+
+
+def test_a_certificate_for_another_name_is_never_retried(
+    tls_server: FakeRestServer, no_proxy_env: pytest.MonkeyPatch
+) -> None:
+    # The certificate is trusted but names 127.0.0.1, not localhost.
+    no_proxy_env.setenv("SSL_CERT_FILE", str(_TLS / "tls_cert.pem"))
+    clock = FakeClock()
+    rest = RestClient(
+        _KEY,
+        base_url=tls_server.url.replace("127.0.0.1", "localhost"),
+        max_concurrency=1,
+        governor=_governor(clock),
+    )
+    try:
+        # OpenSSL's own words for the failure vary by version, so they are matched loosely.
+        with pytest.raises(
+            WireError,
+            match=r"^The TLS certificate of localhost did not verify for GET /v3/trades/AAPL: "
+            r".*certificate verify failed.*\. If a proxy or a private certificate authority "
+            r"signs it, set SSL_CERT_FILE to a bundle that trusts it\.$",
+        ) as caught:
+            rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    finally:
+        rest.close()
+    assert caught.value.kind is WireFailure.LOCAL
+    assert (tls_server.requests, clock.waits) == ([], [])
 
 
 def test_ssl_cert_file_supplies_the_trusted_certificates(
@@ -645,7 +719,14 @@ def test_an_unreadable_ssl_cert_dir_warns_once_when_the_client_is_built(
         _client(fake_rest, max_concurrency=3).close()
     assert examined == [str(missing)]
     assert [record.levelno for record in caplog.records] == [logging.WARNING]
-    assert f"cannot list the certificate directory {str(missing)!r}" in caplog.text
+    [record] = caplog.records
+    assert record.getMessage() == (
+        f"The certificate directory {str(missing)!r} in SSL_CERT_DIR cannot be listed: "
+        f"[Errno 2] No such file or directory: {str(missing)!r}. OpenSSL may still use "
+        "its certificates, but the library cannot see changes to them, "
+        "so a later connection may keep trusting a removed certificate. Make the directory "
+        "listable, or remove it from SSL_CERT_DIR."
+    )
 
 
 def test_no_two_requests_in_flight_open_connections_on_one_ssl_context(
@@ -741,7 +822,7 @@ def test_a_persistent_transient_status_fails_after_four_attempts(
     with pytest.raises(WireError) as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert str(caught.value) == (
-        "HTTP 503 from GET /v3/trades/AAPL on 127.0.0.1 (request_id r): busy"
+        'Massive answered GET /v3/trades/AAPL on 127.0.0.1 with HTTP 503 (request_id r): "busy".'
     )
     assert caught.value.status == 503
     assert len(fake_rest.requests) == 4
@@ -760,9 +841,14 @@ def test_a_persistent_connection_failure_names_the_host_and_cause(
     client: RestClient, fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", Reply(reset=True))
-    with pytest.raises(WireError, match=r"^GET /v3/trades/AAPL on 127\.0\.0\.1 failed: ") as caught:
+    expected = (
+        "No answer from 127.0.0.1 to GET /v3/trades/AAPL after 4 tries: ('Connection aborted.', "
+        "RemoteDisconnected('Remote end closed connection without response'))."
+    )
+    with pytest.raises(WireError, match=rf"^{re.escape(expected)}$") as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert (caught.value.status, caught.value.host) == (None, "127.0.0.1")
+    assert caught.value.kind is WireFailure.NO_ANSWER  # no answer, so a later request may get one
     assert len(fake_rest.requests) == 4
     assert len(clock.waits) == 3
 
@@ -775,7 +861,14 @@ def test_a_refused_connection_is_retried_then_fails(no_proxy_env: pytest.MonkeyP
     server.close()
     governor = _governor(clock)
     rest = RestClient(_KEY, base_url=url, max_concurrency=1, governor=governor)
-    with pytest.raises(WireError, match="failed: "):
+    # The operating system's words for the refused connection vary, so they are matched loosely.
+    host, port = url.removeprefix("http://").split(":")
+    with pytest.raises(
+        WireError,
+        match=rf"^No answer from {re.escape(host)} to GET /v3/trades/AAPL after 4 tries: "
+        rf"HTTPConnection\(host='{re.escape(host)}', port={port}\): Failed to establish a new "
+        r"connection: .*\.$",
+    ):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert len(clock.waits) == 3
     # No connection was made, so no attempt reached Massive: none holds a slot.
@@ -835,8 +928,8 @@ def test_a_429_logs_once_at_info_and_the_retry_logs_its_wait(
     infos = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
     assert infos == [
         (
-            "stocks: paused 7.0 s (Retry-After 7 s) after HTTP 429; the refusal: HTTP 429 from GET "
-            "/v3/trades/AAPL on 127.0.0.1: slow down"
+            "stocks: paused 7.0 s (Retry-After 7 s) after HTTP 429; the refusal: Massive answered "
+            'GET /v3/trades/AAPL on 127.0.0.1 with HTTP 429: "slow down".'
         )
     ]
     url = f"{fake_rest.url}/v3/trades/AAPL"
@@ -926,38 +1019,40 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
     fake_rest.reply("/v3/trades/AAPL", refusal)
     with pytest.raises(WireError) as caught:
         client.get(_TRADES, _AAPL, {}, bucket="stocks", patience=Patience(300.0))
-    assert str(caught.value).startswith(
-        "Massive is refusing stocks requests with HTTP 429 (latest refusal: HTTP 429 from GET "
-        "/v3/trades/AAPL on 127.0.0.1 (request_id r): quota). Its next request, a probe, goes at "
-        "2027-01-15T08:05:01+00:00 ("
-    )
-    assert "waits out at most 300 s of pauses and has spent 0 s of its patience" in str(
-        caught.value
+    assert str(caught.value) == (
+        'Massive answered GET /v3/trades/AAPL on 127.0.0.1 with HTTP 429 (request_id r): "quota". '
+        "The next request goes at 2027-01-15 08:05:01 UTC, past the 300 s this read waits "
+        "for Massive's pauses. The usual cause is another program using the same Massive "
+        "account, which shares its limit, and m.rate_limits() shows each subscription's pace. "
+        "Retry after that time, stop the other program, or pass "
+        "rest_requests_per_minute={dm.Subscription.STOCKS: n} to dm.MassiveConfig, with the "
+        "limit n Massive gives you."
     )
     assert caught.value.status == 429
     assert (caught.value.host, caught.value.path) == ("127.0.0.1", "/v3/trades/AAPL")
     # Another call with the same patience fails at once, without being sent.
     fake_rest.reply("/v3/trades/MSFT", _ok())
-    with pytest.raises(WireError, match="Its next request, a probe, goes at") as again:
+    # The pause, and so the message, is the bucket's: the same text, whatever the request.
+    with pytest.raises(WireError, match=rf"^{re.escape(str(caught.value))}$") as again:
         client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks", patience=Patience(300.0))
     assert (again.value.status, again.value.path) == (429, "/v3/trades/MSFT")
     assert len(fake_rest.requests) == 1
     assert clock.waits == []
 
 
-def test_a_refusal_naming_the_per_minute_maximum_paces_the_bucket(
+def test_a_refusal_naming_the_per_minute_maximum_pauses_a_window_and_tells_the_hook(
     fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     heard: list[tuple[str, str, bool]] = []
 
-    def hook(bucket: str, error: WireError, *, basic: bool) -> None:
-        heard.append((bucket, error.message, basic))
+    def hook(bucket: str, error: WireError, *, per_minute: bool) -> None:
+        heard.append((bucket, error.message, per_minute))
 
     rest = RestClient(
         _KEY, base_url=fake_rest.url, max_concurrency=1, governor=_governor(clock), on_refused=hook
     )
-    basic = Reply({"message": "You've exceeded the maximum requests per minute."}, status=429)
-    fake_rest.reply("/v3/trades/AAPL", basic, _ok())
+    per_minute = Reply({"message": "You've exceeded the maximum requests per minute."}, status=429)
+    fake_rest.reply("/v3/trades/AAPL", per_minute, _ok())
     fake_rest.reply("/v3/trades/MSFT", Reply({"message": "busy"}, status=429), _ok())
     rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     rest.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="options")
@@ -965,23 +1060,52 @@ def test_a_refusal_naming_the_per_minute_maximum_paces_the_bucket(
         (
             "stocks",
             (
-                "HTTP 429 from GET /v3/trades/AAPL on 127.0.0.1: You've exceeded the maximum "
-                "requests per minute."
+                "Massive answered GET /v3/trades/AAPL on 127.0.0.1 with HTTP 429: \"You've "
+                'exceeded the maximum requests per minute.".'
             ),
             True,
         ),
-        ("options", "HTTP 429 from GET /v3/trades/MSFT on 127.0.0.1: busy", False),
+        (
+            "options",
+            'Massive answered GET /v3/trades/MSFT on 127.0.0.1 with HTTP 429: "busy".',
+            False,
+        ),
     ]
-    # A paced bucket pauses a whole window; an unpaced one 15 s.
+    # A per-minute refusal pauses a whole window; any other 15 s. Massive answered nothing in
+    # the refused minute, so the retry's answer teaches no limit.
     assert clock.waits == [61.0, 15.0]
-    assert rest.governor.snapshot()[0].learned
+    assert rest.governor.snapshot()[0].learned is None
+    rest.close()
+
+
+def test_the_client_tells_the_governor_when_each_attempt_is_sent(
+    fake_rest: FakeRestServer, clock: FakeClock
+) -> None:
+    # The send, after the wait for a connection, is the minute Massive counts the attempt in.
+    sent: list[str] = []
+
+    class Recording(RequestGovernor):
+        __slots__ = ()
+
+        @override
+        def sending(self, permit: Permit) -> None:
+            sent.append(permit.bucket)
+            super().sending(permit)
+
+    governor = Recording(("stocks", "options"), clock=clock)
+    rest = RestClient(_KEY, base_url=fake_rest.url, max_concurrency=1, governor=governor)
+    fake_rest.reply("/v3/trades/AAPL", Reply({"message": "busy"}, status=429), _ok())
+    rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert sent == ["stocks", "stocks"]  # the refused attempt and its retry
     rest.close()
 
 
 def test_an_unknown_bucket_is_refused_before_anything_is_sent(
     client: RestClient, fake_rest: FakeRestServer
 ) -> None:
-    with pytest.raises(ValueError, match="unknown bucket 'crypto'"):
+    with pytest.raises(
+        ValueError, match=r"^Unknown bucket 'crypto'\. The buckets are stocks and options\.$"
+    ):
         client.get(_TRADES, _AAPL, {}, bucket="crypto")
     assert fake_rest.requests == []
 
@@ -990,7 +1114,7 @@ def test_the_client_waits_for_its_bucket_s_slot(
     fake_rest: FakeRestServer, clock: FakeClock
 ) -> None:
     governor = _governor(clock)
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     rest = _client(fake_rest, governor=governor)
     fake_rest.reply("/v3/trades/AAPL", _ok())
     for _ in range(6):
@@ -1110,7 +1234,7 @@ def test_a_limit_above_the_rows_yields_every_page(
 
 @pytest.mark.parametrize("limit", [0, -1])
 def test_a_limit_below_one_is_refused_at_once(client: RestClient, limit: int) -> None:
-    with pytest.raises(ValueError, match=f"limit must be at least 1, not {limit}"):
+    with pytest.raises(ValueError, match=rf"^limit={limit} is not at least 1\.$"):
         client.pages(_TRADES, _AAPL, {}, bucket="stocks", limit=limit)
 
 
@@ -1135,9 +1259,12 @@ def test_a_next_url_on_another_host_is_refused_and_never_requested(
     fake_rest.reply("/v3/trades/AAPL", _ok(next_url="https://evil.example/v3/trades/AAPL?cursor=1"))
     pages = client.pages(_TRADES, _AAPL, {}, bucket="stocks")
     assert len(next(pages).rows) == 1
-    with pytest.raises(
-        WireError, match=r"refusing to follow next_url 'https://evil\.example"
-    ) as caught:
+    expected = (
+        "Massive answered GET /v3/trades/AAPL on 127.0.0.1 with a next_url the library does not "
+        "follow. next_url 'https://evil.example/v3/trades/AAPL?cursor=1' points to another server "
+        f"than {fake_rest.url}."
+    )
+    with pytest.raises(WireError, match=rf"^{re.escape(expected)}$") as caught:
         next(pages)
     assert caught.value.host == "127.0.0.1"
     assert len(fake_rest.requests) == 1
@@ -1184,10 +1311,12 @@ def test_a_next_url_that_repeats_the_page_is_refused(
     pages = client.pages(_TRADES, _AAPL, {}, bucket="stocks")
     next(pages)
     next(pages)
-    with pytest.raises(
-        WireError,
-        match=r"^/v3/trades/\{stockTicker\}: next_url /v3/trades/AAPL\?cursor=1 repeats a page",
-    ) as caught:
+    expected = (
+        "Massive answered GET /v3/trades/AAPL?cursor=1 on 127.0.0.1 with a next_url, "
+        "/v3/trades/AAPL?cursor=1, that leads back to a page this read already fetched, so the "
+        "library stopped paging instead of looping forever."
+    )
+    with pytest.raises(WireError, match=rf"^{re.escape(expected)}$") as caught:
         next(pages)
     assert caught.value.path == "/v3/trades/AAPL?cursor=1"
     assert "apiKey" not in caught.value.message
@@ -1207,9 +1336,12 @@ def test_a_next_url_cycle_through_earlier_pages_is_refused(
     pages = client.pages(_TRADES, _AAPL, {}, bucket="stocks")
     for _ in range(3):
         next(pages)
-    with pytest.raises(
-        WireError, match=r"repeats a page this pagination already fetched"
-    ) as caught:
+    expected = (
+        "Massive answered GET /v3/trades/AAPL?cursor=2 on 127.0.0.1 with a next_url, "
+        "/v3/trades/AAPL?cursor=1, that leads back to a page this read already fetched, so the "
+        "library stopped paging instead of looping forever."
+    )
+    with pytest.raises(WireError, match=rf"^{re.escape(expected)}$") as caught:
         next(pages)
     assert caught.value.path == "/v3/trades/AAPL?cursor=1"
     assert [r.target for r in fake_rest.requests] == [
@@ -1224,7 +1356,12 @@ def test_a_next_url_back_to_the_first_page_is_refused(
 ) -> None:
     fake_rest.reply("/v3/trades/AAPL", _ok(next_url=f"{fake_rest.url}/v3/trades/AAPL?cursor=1"))
     fake_rest.reply("/v3/trades/AAPL?cursor=1", _ok(next_url=f"{fake_rest.url}/v3/trades/AAPL"))
-    with pytest.raises(WireError, match=r"next_url /v3/trades/AAPL repeats") as caught:
+    expected = (
+        "Massive answered GET /v3/trades/AAPL?cursor=1 on 127.0.0.1 with a next_url, "
+        "/v3/trades/AAPL, that leads back to a page this read already fetched, so the library "
+        "stopped paging instead of looping forever."
+    )
+    with pytest.raises(WireError, match=rf"^{re.escape(expected)}$") as caught:
         list(client.pages(_TRADES, _AAPL, {}, bucket="stocks"))
     assert caught.value.path == "/v3/trades/AAPL"
     assert len(fake_rest.requests) == 2
@@ -1299,13 +1436,20 @@ def test_16_threads_page_through_one_client_with_a_429_and_resets(
 
 # Closing.
 
+_CLOSED = (
+    "GET /v3/trades/AAPL on 127.0.0.1 stopped because the library closed its connections to "
+    "Massive."
+)
+_CANCELLED = "GET /v3/trades/AAPL on 127.0.0.1 stopped because its read was cancelled."
+
 
 def test_a_closed_client_refuses_requests(fake_rest: FakeRestServer) -> None:
     rest = _client(fake_rest)
     rest.close()
     rest.close()
-    with pytest.raises(WireError, match="the REST client is closed"):
+    with pytest.raises(WireError, match=rf"^{re.escape(_CLOSED)}$") as closed:
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
+    assert closed.value.kind is WireFailure.STOPPED  # no answer was asked for
     assert fake_rest.requests == []
 
 
@@ -1314,7 +1458,7 @@ def test_a_client_closed_during_a_retry_wait_stops(fake_rest: FakeRestServer) ->
     rest = _client(fake_rest, clock)
     fake_rest.reply("/v3/trades/AAPL", Reply(b"", status=503))
     fake_rest.on_request(lambda _: rest.close())
-    with pytest.raises(WireError, match="the REST client is closed"):
+    with pytest.raises(WireError, match=rf"^{re.escape(_CLOSED)}$"):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks")
     assert len(fake_rest.requests) == 1
 
@@ -1337,7 +1481,7 @@ def test_close_ends_a_pause_at_once(fake_rest: FakeRestServer) -> None:
     rest.close()
     thread.join(10)
     assert not thread.is_alive()
-    assert [e.message for e in errors] == ["GET /v3/trades/AAPL: the REST client is closed"]
+    assert [e.message for e in errors] == [_CLOSED]
     assert clock.monotonic() == 0.0
     assert len(fake_rest.requests) == 1
 
@@ -1360,7 +1504,7 @@ def test_close_ends_a_transient_retry_wait_at_once(fake_rest: FakeRestServer) ->
     rest.close()
     thread.join(10)
     assert not thread.is_alive()
-    assert [e.message for e in errors] == ["GET /v3/trades/AAPL: the REST client is closed"]
+    assert [e.message for e in errors] == [_CLOSED]
     assert clock.monotonic() == 0.0
 
 
@@ -1387,9 +1531,9 @@ class _Call:
 
 
 def _full(clock: FakeClock, fake_rest: FakeRestServer) -> RequestGovernor:
-    """Return a governor whose Basic stocks bucket has spent its five slots."""
+    """Return a governor whose declared stocks bucket has spent its five slots."""
     governor = _governor(clock)
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     fake_rest.reply("/v3/trades/AAPL", _ok())
     rest = _client(fake_rest, governor=governor)
     for _ in range(5):
@@ -1407,7 +1551,8 @@ def test_the_callers_cancel_ends_a_slot_wait(fake_rest: FakeRestServer) -> None:
     cancel.set()
     call.join()
     assert call.error is not None
-    assert call.error.message == "GET /v3/trades/AAPL: cancelled"
+    assert call.error.message == _CANCELLED
+    assert call.error.kind is WireFailure.STOPPED
     assert (call.error.status, call.error.path) == (None, "/v3/trades/AAPL")
     assert len(fake_rest.requests) == 5
     assert rest.governor.snapshot()[0].waiting == 0
@@ -1425,7 +1570,7 @@ def test_closing_one_client_ends_its_waits_and_nobody_elses(fake_rest: FakeRestS
     closing.close()
     first.join()
     assert first.error is not None
-    assert first.error.message == "GET /v3/trades/AAPL: the REST client is closed"
+    assert first.error.message == _CLOSED
     assert clock.wait_for_sleepers(1) == [61.0]  # the other client's request is the head now
     clock.advance(61.0)
     second.join()
@@ -1449,7 +1594,7 @@ def test_a_cancel_just_as_the_request_is_admitted_sends_nothing(
             cancel.set()
 
     governor.subscribe(admitted)
-    with pytest.raises(WireError, match=r"^GET /v3/trades/AAPL: cancelled$"):
+    with pytest.raises(WireError, match=rf"^{re.escape(_CANCELLED)}$"):
         rest.get(_TRADES, _AAPL, {}, bucket="stocks", cancel=cancel)
     assert fake_rest.requests == []
     state = governor.snapshot()[0]
@@ -1481,7 +1626,12 @@ def test_a_request_interrupted_on_the_wire_hands_its_slot_back(
 def test_a_200_whose_page_cannot_be_read_is_logged_with_its_body(
     client: RestClient, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    fake_rest.reply("/v3/trades/AAPL", Reply(b"<html>not json</html>"))
+    body = b"<html>not json</html>"
+    # The decoder's own words differ between orjson and the standard library and between their
+    # versions, so the test takes them from the decoder the client uses.
+    with pytest.raises(json.JSONDecodeError) as decoded:
+        codec.loads(body)
+    fake_rest.reply("/v3/trades/AAPL", Reply(body))
     with (
         caplog.at_level(logging.DEBUG, logger=client_module.__name__),
         pytest.raises(WireError) as info,
@@ -1491,7 +1641,12 @@ def test_a_200_whose_page_cannot_be_read_is_logged_with_its_body(
     assert line.startswith(
         f"GET {fake_rest.url}/v3/trades/AAPL -> 200 in 0.000 s, waited 0.0 s for a permit, but "
     )
-    assert line.endswith(f"cannot be read ({info.value}); body: <html>not json</html>")
+    assert str(info.value) == (
+        "Massive answered GET /v3/trades/AAPL on 127.0.0.1 with HTTP 200, and the library could "
+        f'not read the answer: the body is not JSON and starts "<html>not json</html>": '
+        f"{decoded.value}."
+    )
+    assert line.endswith(f"cannot be read. {info.value} Body: <html>not json</html>")
 
 
 def test_requests_retries_and_failures_are_logged_without_the_key(
@@ -1525,8 +1680,8 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     assert (
         logging.INFO,
         (
-            "HTTP 503 from GET /v3/trades/AAPL?limit=1 on 127.0.0.1: an empty body; "
-            "retry 1 of 3 in 0.55 s"
+            "Massive answered GET /v3/trades/AAPL?limit=1 on 127.0.0.1 with HTTP 503 and no "
+            "message. Retry 1 of 3 in 0.55 s."
         ),
     ) in messages
     assert (
@@ -1539,7 +1694,10 @@ def test_requests_retries_and_failures_are_logged_without_the_key(
     # The error quotes only the envelope's message, cut to 200 characters.
     assert (
         logging.DEBUG,
-        f"HTTP 502 from GET /v3/trades/MSFT on 127.0.0.1: {'e' * 200}; giving up after 4 attempts",
+        (
+            "Massive answered GET /v3/trades/MSFT on 127.0.0.1 with HTTP 502: "
+            f'"{"e" * 200}". Giving up after 4 attempts.'
+        ),
     ) in messages
     every = [r.getMessage() + repr(r.args) for r in caplog.records]
     assert every
@@ -1580,7 +1738,7 @@ def test_a_hook_that_raises_still_pauses_the_bucket_and_reports_the_attempt(
 ) -> None:
     governor = _governor(clock)
 
-    def interrupted(bucket: str, error: WireError, *, basic: bool) -> None:
+    def interrupted(bucket: str, error: WireError, *, per_minute: bool) -> None:
         raise KeyboardInterrupt
 
     rest = RestClient(
@@ -1643,7 +1801,7 @@ def _caused_by(cause: Exception) -> urllib3.exceptions.HTTPError:
         (
             urllib3.exceptions.ProxyError(
                 "Unable to connect to proxy",
-                urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"),
+                urllib3.exceptions.NewConnectionError(_CONNECTION, "connection refused"),
             ),
             0,
         ),
@@ -1653,8 +1811,8 @@ def _caused_by(cause: Exception) -> urllib3.exceptions.HTTPError:
             ),
             0,
         ),
-        (urllib3.exceptions.NewConnectionError(cast("Any", None), "connection refused"), 0),
-        (_caused_by(urllib3.exceptions.NewConnectionError(cast("Any", None), "refused")), 0),
+        (urllib3.exceptions.NewConnectionError(_CONNECTION, "connection refused"), 0),
+        (_caused_by(urllib3.exceptions.NewConnectionError(_CONNECTION, "refused")), 0),
         # Without a proxy a TLS error may come after the request left: each of its four
         # attempts (it is retried as a transient failure) keeps its slot.
         (urllib3.exceptions.SSLError(ssl.SSLError("handshake failed")), 4),
@@ -1669,7 +1827,7 @@ def test_an_attempt_that_never_connected_frees_its_slot_even_behind_a_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     governor = _governor(clock)
-    governor.declare({"stocks"})
+    governor.declare({"stocks": 5})
     rest = _client(fake_rest, governor=governor)
 
     def unreachable(*_: object, **__: object) -> None:

@@ -24,6 +24,23 @@ stays off until the owner turns it on (see the last section).
 
 ## Versions
 
+### Which number to raise
+
+A change breaks when code written to the last release's documented contract stops working or
+gets a different documented result. The next version depends on the stage:
+
+- **Before `0.1.0`**: alphas, betas, and release candidates are pre-releases and owe no
+  compatibility. Any change goes into the next pre-release (`0.1.0rc3`).
+- **In `0.x`, from `0.1.0`**: a breaking change raises the minor version (`0.1.4` → `0.2.0`);
+  anything else raises the patch (`0.1.4` → `0.1.5`).
+- **From `1.0.0`**: standard [Semantic Versioning](https://semver.org/): a breaking change
+  raises the major version, a backward-compatible feature the minor, and a fix the patch.
+
+From `0.1.0` on, a breaking change needs the owner's permission, and its pull request names the
+next version.
+
+### How a version is spelled
+
 Versions follow [PEP 440](https://peps.python.org/pep-0440/), Python's version standard: pip and
 PyPI read and order versions by it. Semantic Versioning's pre-release form, `0.1.0-rc.1`, is
 not a PEP 440 version; tools normalize it to `0.1.0rc1` or reject it, so the release uses the

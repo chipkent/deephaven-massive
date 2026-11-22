@@ -305,6 +305,9 @@ def compare_minute_file(
 WINDOW_VERDICTS: Final = frozenset({"New York day", "Chicago day"})
 """The verdicts that name one window (`window_verdict`)."""
 
+_INCONCLUSIVE: Final = frozenset({"no bar", "no minute bars", "both days"})
+"""The verdicts that cannot say which window a bar covers (`window_verdict`)."""
+
 
 @dataclass
 class IndexTally:
@@ -329,6 +332,10 @@ class IndexTally:
         no_window_days: The days whose day-file row matched neither window.
         minute_gap_days: The days whose minute file had gaps (`MinuteFileComparison.has_gaps`).
         minute_value_days: The days whose minute file had prices other than REST's.
+        open_close_judged: The days on which the daily open and close was judged: its windows
+            held different minutes and their rebuilt prices differ (`add_open_close`).
+        open_close_misses: One line for each such day on which the open and close did not
+            match the Chicago day alone, with its prices and both rebuilds.
     """
 
     index: str
@@ -341,6 +348,40 @@ class IndexTally:
     no_window_days: set[date] = field(default_factory=set)
     minute_gap_days: set[date] = field(default_factory=set)
     minute_value_days: set[date] = field(default_factory=set)
+    open_close_judged: set[date] = field(default_factory=set)
+    open_close_misses: list[str] = field(default_factory=list)
+
+    def add_open_close(
+        self,
+        day: date,
+        verdict: str,
+        *,
+        values: Prices | None,
+        rebuilds: Mapping[str, Prices | None],
+    ) -> None:
+        """Judge one day's daily open and close against the Chicago day the library gives it.
+
+        Only a day whose windows differ (`windows_differ_days`, so call it after recording
+        them) can tell the two apart; on it, the open and close must match the Chicago day and
+        not the New York one. A day without an open and close or without minute bars says
+        nothing either way and is not judged, and neither is a day whose two windows hold
+        different minutes but rebuild to the same prices (`"both days"`): the extra hour moved
+        no open, high, low, or close, so either window gives the bar sent.
+
+        Args:
+            day: The day.
+            verdict: The open and close's verdict that day (`window_verdict`).
+            values: Its prices, None when Massive sent none.
+            rebuilds: The minute rebuild of each window, by window name.
+        """
+        if day not in self.windows_differ_days or verdict in _INCONCLUSIVE:
+            return
+        self.open_close_judged.add(day)
+        if verdict != "Chicago day":
+            self.open_close_misses.append(
+                f"{self.index} {day}: the open and close {values} matched {verdict}, not the "
+                f"Chicago day alone; rebuilds {dict(rebuilds)}"
+            )
 
     def add_verdict(self, source: str, verdict: str, error: float | None) -> None:
         """Count one day's verdict of one source and keep its largest error.
@@ -447,6 +488,30 @@ def _named(tallies: Sequence[IndexTally], days: Callable[[IndexTally], set[date]
         The index tickers, in order.
     """
     return [t.index for t in tallies if days(t)]
+
+
+def open_close_failure(tallies: Sequence[IndexTally]) -> str | None:
+    """Say why the indices' daily open and close fail to show the Chicago day, if they do.
+
+    Args:
+        tallies: Every index's tally (`IndexTally.add_open_close`).
+
+    Returns:
+        The failure, quoting each day that missed the Chicago day with its prices and both
+        rebuilds; or, when no day told the windows apart, that the check judged nothing; None
+        when at least one day was judged and every judged day matched the Chicago day.
+    """
+    misses = [miss for tally in tallies for miss in tally.open_close_misses]
+    if misses:
+        return "the daily open and close is not the Chicago day:\n" + "\n".join(misses)
+    if not any(tally.open_close_judged for tally in tallies):
+        indices = [tally.index for tally in tallies]
+        return (
+            f"no day of {indices} told the open and close's window apart: on no day did an "
+            "index's New York and Chicago days rebuild to different prices with an open and "
+            "close sent"
+        )
+    return None
 
 
 def summary_lines(tallies: Sequence[IndexTally]) -> list[str]:

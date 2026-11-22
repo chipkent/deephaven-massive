@@ -13,31 +13,40 @@ imported only once the embedded JVM has started.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import threading
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
+
+from typing_extensions import override
 
 import deephaven_massive as dm
 from deephaven_massive import _massive
 from deephaven_massive._enums import Recency
-from deephaven_massive._errors import UnlistedPairError
 from deephaven_massive._ingest import ws, ws_connection
-from deephaven_massive._namespaces.query_building import build_query
-from deephaven_massive._query import SymbolStreamQuery
-from deephaven_massive._tables.transports import HostDecision
-from deephaven_massive._types import override
+from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._ingest.crypto_tickers import NOT_LISTED
+from deephaven_massive._tables.transports import HostDecision, Unsplit
+from deephaven_massive.namespaces._query_building import build_query
+from deephaven_massive.queries import StreamQuery
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
     from deephaven_massive._datasets.catalog import DatasetSpec
+    from deephaven_massive._datasets.symbols import SymbolsLike
     from deephaven_massive._enums import AssetClass, ChannelFamily
-    from deephaven_massive._massive import DriftReport, Reject, Source, Status, WireError, WsState
+    from deephaven_massive._error_policy import ResolvedPolicy
+    from deephaven_massive._massive import DriftReport, RowMarks, Source, Status, WireError, WsState
     from tests._fakes.ws import FakeMassiveServer
 
 TIMEOUT = 15.0
 """Seconds any wait on the session or the server may take before the test fails."""
+
+_DEFAULTS = dm.MassiveConfig(api_key="test-key")
+"""The options a session gets unless a test passes its own."""
 
 REALTIME = HostDecision("socket.test", Recency.REALTIME, "test evidence")
 """The host decision every stream gets unless a test passes its own `decide`."""
@@ -119,9 +128,11 @@ class WsSession:
             order; appended under `cond`, so read it under `cond` (in a `wait` predicate) or
             once the calendar is idle.
         pair_answers: What Massive's crypto ticker list says of each crypto ticker, as the
-            REST transport's `crypto_pair` would read it: its `(base, quote)`, or an exception
-            to raise. A ticker missing from it is refused as unlisted. Change it under `cond`,
-            or before the stream that looks the ticker up.
+            REST transport's `crypto_pair` would read it: its `(base, quote)`, why it has no
+            split, or an exception to raise. A ticker missing from it is not listed. Change it
+            under `cond`, or before the stream that looks the ticker up.
+        pair_policies: Each crypto lookup's ticker and the stream policy it was given, in
+            order; appended under `cond`.
     """
 
     def __init__(
@@ -131,9 +142,14 @@ class WsSession:
         decide: Callable[[AssetClass, ChannelFamily], HostDecision] | None = None,
         flush_interval: float = 3600.0,
         backoff: float = 0.05,
-        **config: object,
+        rest_base_url: str = _DEFAULTS.rest_base_url,
+        subscription_confirmation_timeout: float = _DEFAULTS.subscription_confirmation_timeout,
+        connection_taken: dm.ConnectionTaken = _DEFAULTS.connection_taken,
+        max_outage: float = _DEFAULTS.max_outage,
+        on_error: dm.ErrorPolicy = _DEFAULTS.on_error,
+        delayed_subscriptions: AbstractSet[dm.Subscription] = _DEFAULTS.delayed_subscriptions,
     ) -> None:
-        """Open the session; nothing connects until a stream verb runs.
+        """Open the session; nothing connects until a stream has a topic to subscribe.
 
         Args:
             server: The fake server every connection reaches.
@@ -141,7 +157,12 @@ class WsSession:
             flush_interval: The session's flush interval, in seconds; an hour by default, so
                 rows are published only by `flush()`.
             backoff: Each client's first reconnect backoff, in seconds (twice it at most).
-            **config: Further `MassiveConfig` options.
+            rest_base_url: As `MassiveConfig` takes it.
+            subscription_confirmation_timeout: As `MassiveConfig` takes it.
+            connection_taken: As `MassiveConfig` takes it.
+            max_outage: As `MassiveConfig` takes it.
+            on_error: As `MassiveConfig` takes it.
+            delayed_subscriptions: As `MassiveConfig` takes it.
         """
         self.server = server
         self.backoff = backoff
@@ -156,12 +177,21 @@ class WsSession:
         self._opens = 0
         self.fetched: list[tuple[str, dict[str, object]]] = []
         self.rows: dict[str, list[dict[str, object]]] = {}
-        self.pair_answers: dict[str, tuple[str, str] | Exception] = dict(PAIRS)
-        self.config = dm.MassiveConfig(
-            api_key="test-key", flush_interval=flush_interval, **cast("dict[str, Any]", config)
+        self.pair_answers: dict[str, tuple[str, str] | Unsplit | Exception] = dict(PAIRS)
+        self.pair_policies: list[tuple[str, ResolvedPolicy]] = []
+        self.config = dataclasses.replace(
+            _DEFAULTS,
+            flush_interval=flush_interval,
+            rest_base_url=rest_base_url,
+            subscription_confirmation_timeout=subscription_confirmation_timeout,
+            connection_taken=connection_taken,
+            max_outage=max_outage,
+            on_error=on_error,
+            delayed_subscriptions=delayed_subscriptions,
         )
         self.session = dm.MassiveSession(self.config)
-        clients: Any = self.session._core._ports
+        clients = self.session._core._ports
+        assert isinstance(clients, SessionClients)
         self.connections = ws.WsConnections(
             self.session._core,
             resolve_host=self._resolve,
@@ -195,7 +225,7 @@ class WsSession:
 
     @property
     def items(self) -> int:
-        """How many data items the clients have delivered, rows and rejects alike."""
+        """How many data items the clients have delivered: every object is a row."""
         with self.cond:
             return self._items
 
@@ -232,23 +262,21 @@ class WsSession:
             self.cond.notify_all()
             return list(self.rows.get(template, []))
 
-    def _crypto_pair(self, symbol: str) -> tuple[str, str]:
+    def _crypto_pair(self, symbol: str, policy: ResolvedPolicy) -> tuple[str, str] | Unsplit:
         """Split a crypto ticker as the REST transport's lookup in the ticker list does.
 
+        Each lookup's ticker and policy go to `pair_policies`.
+
         Returns:
-            The ticker's `(base, quote)` from `pair_answers`.
+            The ticker's answer in `pair_answers`, or `NOT_LISTED` when it has none.
 
         Raises:
-            UnlistedPairError: If `pair_answers` does not hold the ticker.
+            Exception: The answer, when it is one.
         """
         with self.cond:
             self._journal.append(("crypto_pair", symbol, threading.current_thread().name))
-            answer = self.pair_answers.get(symbol)
-        if answer is None:
-            raise UnlistedPairError(
-                f"{symbol!r} cannot be split into its two currencies: Massive's reference data "
-                "does not list it"
-            )
+            self.pair_policies.append((symbol, policy))
+            answer = self.pair_answers.get(symbol, NOT_LISTED)
         if isinstance(answer, Exception):
             raise answer
         return answer
@@ -270,7 +298,7 @@ class WsSession:
         sources: Sequence[Source],
         on_open: Callable[[int], None],
         on_status: Callable[[int, Status], None],
-        on_data: Callable[[int, str, list[tuple[object, ...]], list[Reject], DriftReport], None],
+        on_data: Callable[[int, str, list[tuple[object, ...]], RowMarks, DriftReport], None],
         on_state: Callable[[WsState, float | WireError | None], None],
         reconnect_deadline: Callable[[], float | None],
     ) -> SpyClient:
@@ -316,12 +344,17 @@ class WsSession:
             if what == "opens":
                 self._opens += 1
             elif what == "items":
-                rows, rejects = cast("tuple[list[object], list[object]]", event[2:4])
-                self._items += len(rows) + len(rejects)
+                rows = event[2]
+                assert isinstance(rows, list)
+                self._items += len(rows)
             elif what == "statuses":
-                self._statuses.append(cast("Status", event[1]))
+                status = event[1]
+                assert isinstance(status, _massive.Status)
+                self._statuses.append(status)
             else:
-                self._states.append(cast("WsState", event[0]))
+                state = event[0]
+                assert isinstance(state, _massive.WsState)
+                self._states.append(state)
             self.cond.notify_all()
 
     def wait(self, predicate: Callable[[WsSession], bool], what: str | None = None) -> None:
@@ -340,22 +373,26 @@ class WsSession:
             )
 
     def query(
-        self, spec: DatasetSpec, symbols: object, session: dm.MassiveSession | None = None
-    ) -> SymbolStreamQuery:
+        self,
+        spec: DatasetSpec,
+        symbols: SymbolsLike,
+        session: dm.MassiveSession | None = None,
+        *,
+        on_error: dm.ErrorPolicy | None = None,
+    ) -> StreamQuery:
         """Build the stream query of a dataset no namespace needs to declare.
 
         Args:
             spec: The dataset.
             symbols: Its symbols.
             session: The session to build it on; None for this wrapper's own.
+            on_error: The call's policy, as a dataset method takes it.
 
         Returns:
             The query.
         """
         core = (session or self.session)._core
-        q = build_query(core, spec, symbols=cast("list[str]", symbols))
-        assert isinstance(q, SymbolStreamQuery)
-        return q
+        return build_query(core, spec, query_type=StreamQuery, symbols=symbols, on_error=on_error)
 
     def connection(self, url: str = "wss://socket.test/stocks") -> ws_connection.Connection:
         """Return the session's connection to `url`.
@@ -369,8 +406,8 @@ class WsSession:
     def send(self, *items: dict[str, object]) -> None:
         """Send one frame of `items` and wait until the clients have delivered every data item.
 
-        A client delivers a frame one channel at a time, so the wait counts items, rows and
-        rejects alike, not deliveries: it returns only once every channel of the frame has
+        A client delivers a frame one channel at a time, so the wait counts items, every object
+        a row, not deliveries: it returns only once every channel of the frame has
         reached the transport. A status object (`"ev": "status"`) is not a data item and is not
         waited for, and every other item must belong to a channel the connection has a source
         for, since the client drops any other.
@@ -401,16 +438,27 @@ class WsSession:
 
         Returns:
             What `action` returned.
+
+        Raises:
+            Exception: What `action` raised, raised again on the caller's thread.
         """
         done = threading.Event()
         result: list[object] = []
+        raised: list[Exception] = []
 
         def run() -> None:
-            result.append(action())
-            done.set()
+            try:
+                result.append(action())
+            except Exception as error:  # the caller raises it too; the loop still sees it
+                raised.append(error)
+                raise
+            finally:
+                done.set()
 
         assert connection.post(run)
         assert done.wait(TIMEOUT)
+        if raised:
+            raise raised[0]
         return result[0]
 
     def subscribed(self, *topics: str) -> None:

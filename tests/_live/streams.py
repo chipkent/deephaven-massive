@@ -1,17 +1,22 @@
-"""When a live stream must deliver rows: an open session whose delayed feed has caught up.
+"""When a live stream must deliver rows: an open session of the stream's market.
 
-A stream test asserts that Massive acknowledged its topics, whatever the hour, and requires
-rows only when they must arrive. That needs the market open for the stream's kind of rows, and,
-on a delayed plan, open for longer than the plan's delay: a 15-minute delayed index feed sends
-the first values of a session fifteen minutes after its open. Stock trades and quotes are due in
-the extended hours too, from 04:00 New York time. Every other stock stream, and every option
-and index stream, is due only in the regular session, from
-09:30 to its close at 16:00 (13:00 on a half trading day), whatever Massive's status says after
-the close. The futures session opens at the time of Massive's futures market status, and forex
-and crypto at no time this module knows, so their rows are due as soon as their market is open.
-The delays are those of the vendored WebSocket "Plan Recency" tables (`FEED_DELAYS`). Before
-the rows are due, the test skips after the acknowledgement, and a pass always means that rows
-reached the table.
+A stream test asserts that Massive acknowledged its topics, whatever the hour, and requires rows
+only when they must arrive, which needs the market open for the stream's kind of rows. Stock
+trades and quotes are due in every session Massive says the market trades in: the extended hours
+from 04:00 New York time, and the overnight session from 21:00 once Massive's status says the
+market trades then (`opened_at`). One stock can go a minute without either outside the regular
+session, so a test of one stock requires them only in the regular session (`may_go_quiet`).
+Every other stock stream, and every option and index stream, is due only in the regular session,
+from 09:30 to its close at 16:00 (13:00 on a half trading day), whatever Massive's status says
+after the close. The futures session opens at the time of Massive's futures market status, and
+forex and crypto at no time this module knows, so their rows are due as soon as their market is
+open. Before the rows are due, the test skips after the acknowledgement, and a pass always means
+that rows reached the table.
+
+Massive's delayed feed lags the market by an amount this module does not know: Massive decides
+it, and a stream shows it in its rows' age. So the rows are due by the market's clock alone,
+and a test of a subscription the owner lists in `delayed_subscriptions` skips, rather than
+fails, when no row comes while rows are due.
 
 A minute bar arrives only after its minute has ended, so a test that streams minute bars waits
 until a little past the next minute boundary (`minute_bar_deadline`).
@@ -21,8 +26,18 @@ pre-market from 04:00, the regular session from 09:30, and after hours from its 
 (17:00 on a half trading day). Massive sends a bar only for a minute with trades, though, and
 one stock can go a minute without a trade outside the regular session, so a test that streams
 one stock's bars requires them only in the regular session. `stock_session` names the session
-a plan's feed is in, so a test of several stocks, such as the README's streaming examples, can
-check what each session sends, an empty table overnight included.
+of a row's own time, so a test of several stocks, such as the README's streaming examples, can
+check what each session sends.
+
+The overnight session runs from 21:00 to 04:00 New York time on each night before a trading day,
+once the consolidated tape trades 23 hours a day; the hour from 20:00 to 21:00 is its nightly
+pause. `stock_session` names that window by the clock alone, since the clock cannot tell
+whether the session has begun: whether the market trades in it is Massive's status to say
+(`market_state`), so no launch date is written here.
+
+Massive's statuses of `/v1/marketstatus/now` are a closed set to these tests (`MarketState`):
+a value they do not know fails the test that read it (`market_state`), so a new overnight
+status is added by name rather than taken for `closed`.
 
 Every function is pure; `tests/conftest.py`'s `rows_due` fixture reads the market status and
 calls them.
@@ -31,25 +46,10 @@ calls them.
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
-from typing import TYPE_CHECKING, Final
+from enum import Enum
+from typing import Final, assert_never
 
 from tests._live.calendar import NEW_YORK, is_half_day, is_trading_day
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from tests._live.plans import LivePlans
-
-FEED_DELAYS: Final[Mapping[tuple[str, str], timedelta]] = {
-    ("stocks", "starter"): timedelta(minutes=15),
-    ("stocks", "developer"): timedelta(minutes=15),
-    ("options", "starter"): timedelta(minutes=15),
-    ("options", "developer"): timedelta(minutes=15),
-    ("indices", "starter"): timedelta(minutes=15),
-    ("futures", "starter"): timedelta(minutes=10),
-    ("futures", "developer"): timedelta(minutes=10),
-}
-"""How far each plan's stream lags the market; a plan not listed is real-time."""
 
 INDEX_OPEN: Final = time(9, 30)
 """When the regular session opens each trading day, in New York time: the S&P indices start
@@ -63,14 +63,56 @@ A stream that needs the regular session has no rows due from then on, even while
 market status still says `open`: on 2026-11-09 `indicesGroups.s_and_p` read `open` at 17:53,
 though I:SPX's last value came at 16:05. The S&P indices send their closing values for a few
 minutes past 16:00, so a stream that starts before the close still gets values during its wait;
-one that starts later is skipped, even on a delayed plan whose feed still lags behind the
-close, because no value after the close is certain to come."""
+one that starts later is skipped, even on a delayed feed that still lags behind the close,
+because no value after the close is certain to come."""
 
 HALF_DAY_CLOSE: Final = time(13, 0)
 """When the regular session closes on a half trading day, in New York time."""
 
 EXTENDED_OPEN: Final = time(4, 0)
-"""When the stock market's extended hours open each trading day, in New York time."""
+"""When the stock market's extended hours open each trading day, in New York time, and when
+the overnight session before it closes."""
+
+OVERNIGHT_OPEN: Final = time(21, 0)
+"""When the overnight stock session opens, in New York time, on the evening before a trading
+day: Massive's blog post of 2026-08-26 on the consolidated tape's 23-hour day gives 21:00 to
+04:00, after a pause from 20:00 to 21:00."""
+
+
+class MarketState(Enum):
+    """A status `/v1/marketstatus/now` gives a market, as the tests know it by name.
+
+    Massive's page for the endpoint lists no values, so this is what the tests have seen:
+    `open` in the regular session, `extended-hours` before and after it, and `closed`.
+    """
+
+    OPEN = "open"
+    EXTENDED_HOURS = "extended-hours"
+    CLOSED = "closed"
+
+
+def market_state(status: str) -> MarketState:
+    """Read Massive's status of a market by name.
+
+    Args:
+        status: The value `/v1/marketstatus/now` gives the market, such as `market` for stocks.
+
+    Returns:
+        Its `MarketState`.
+
+    Raises:
+        ValueError: If the value is none the tests know, such as a new status Massive sends in
+            the overnight stock session; the message names it, so it can be added here by name.
+    """
+    try:
+        return MarketState(status)
+    except ValueError:
+        known = ", ".join(state.value for state in MarketState)
+        raise ValueError(
+            f"Massive's market status {status!r} is none the tests know ({known}): one entry "
+            "for it in tests/_live/streams.py MarketState fixes every test that read it"
+        ) from None
+
 
 EXTENDED_HOURS_FAMILIES: Final = frozenset({"trades", "quotes"})
 """The stream families whose stock rows are due in the extended hours (Massive's status
@@ -117,28 +159,51 @@ def opened_at(
     Args:
         market: The market, as the `market_status` fixture names it: `"stocks"`, `"options"`,
             `"indices"`, `"fx"`, `"crypto"`, or `"futures"`.
-        status: Massive's status of that market: `"open"`, `"extended-hours"`, `"closed"`,
-            and so on, or the futures `market_event`.
+        status: Massive's status of that market, read by name (`market_state`), or for futures
+            its `market_event`, which is due only when it reads `"open"`.
         family: The stream's family, the last part of its dataset's name, such as `"trades"`.
         now: The present, as an aware instant.
         since: When the market opened, where Massive's status says (the futures status's
             `timestamp`); None when it does not.
 
     Returns:
-        For stock trades and quotes while the market is `open` or `extended-hours`, 04:00 New
-        York time of `now`'s day; for every other stock, option, or index stream while it is
-        `open` and before the regular session's close (`regular_close`), 09:30; for another
-        market that is `open`, `since`, or `now` when it is None; None in every other case.
+        When the stream's rows became due:
+
+        - stock trades and quotes while the status is `open` or `extended-hours`: the open of
+          the session `now` falls in (`session_open`: 04:00, not the overnight session's 21:00,
+          even after an overnight session), or `now` when no session runs, since Massive's
+          status says the market trades;
+        - another stock, option, or index stream while `open` and before the regular
+          session's close (`regular_close`): 09:30;
+        - another market that is `open`: `since`, or `now` when it is None;
+        - otherwise None.
+
+    Raises:
+        ValueError: If `status` is a status of `/v1/marketstatus/now` the tests do not know.
     """
+    if market == "futures":  # Massive documents no values of `market_event`; only `open` is due
+        return (now if since is None else since) if status == "open" else None
+    state = market_state(status)
     if market == "stocks" and family in EXTENDED_HOURS_FAMILIES:
-        if status in {"open", "extended-hours"}:
-            return datetime.combine(now.astimezone(NEW_YORK).date(), EXTENDED_OPEN, NEW_YORK)
-        return None
-    if status != "open":
-        return None
-    if market in {"stocks", "options", "indices"}:
-        return index_session_open(now) if now < regular_close(now) else None
-    return now if since is None else since
+        match state:
+            case MarketState.OPEN | MarketState.EXTENDED_HOURS:
+                opened = session_open(now)
+                # Massive says the market trades at a time no session runs (its status may lag
+                # the after-hours close): its word stands, so the rows are due from now.
+                return now if opened is None else opened
+            case MarketState.CLOSED:
+                return None
+            case _ as unreachable:
+                assert_never(unreachable)
+    match state:
+        case MarketState.OPEN:
+            if market in {"stocks", "options", "indices"}:
+                return index_session_open(now) if now < regular_close(now) else None
+            return now if since is None else since
+        case MarketState.EXTENDED_HOURS | MarketState.CLOSED:
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def minute_bar_deadline(now: datetime) -> datetime:
@@ -154,59 +219,111 @@ def minute_bar_deadline(now: datetime) -> datetime:
     return minute + MINUTE_BAR_LAG
 
 
-def rows_due(plans: LivePlans, name: str, *, opened: datetime | None, now: datetime) -> bool:
-    """Tell whether a class's stream must have delivered rows by now.
-
-    Args:
-        plans: The run's plans, whose class plan sets the feed's delay.
-        name: The class, such as `"stocks"` or `"futures"`.
-        opened: When the market opened, as an aware instant; None when it is not open.
-        now: The present, as an aware instant.
-
-    Returns:
-        True when the market is open and has been open at least the plan's delay.
-    """
-    if opened is None:
-        return False
-    delay = FEED_DELAYS.get((name, plans.tiers[name]), timedelta(0))
-    return now >= opened + delay
-
-
 EXTENDED_CLOSE: Final = time(20, 0)
-"""When after-hours stock trading ends on a full trading day, in New York time."""
+"""When after-hours stock trading ends on a full trading day, in New York time, and the
+overnight session's nightly pause begins."""
 
 HALF_DAY_EXTENDED_CLOSE: Final = time(17, 0)
 """When after-hours stock trading ends on a half trading day, in New York time."""
 
-PRE_MARKET: Final = "pre-market"
-REGULAR: Final = "regular"
-AFTER_HOURS: Final = "after-hours"
-OVERNIGHT: Final = "overnight"
-"""The stock sessions `stock_session` names; `OVERNIGHT` is any time with no session, a day the
-market is closed included."""
+
+class StockSession(Enum):
+    """The stock session an instant falls in, by the New York clock and the exchanges' calendar.
+
+    `OVERNIGHT` names the 21:00-to-04:00 window by the clock alone. Whether anything trades in
+    it is Massive's status to say (`market_state`).
+    """
+
+    PRE_MARKET = "pre-market"
+    REGULAR = "regular"
+    AFTER_HOURS = "after-hours"
+    OVERNIGHT = "overnight"
+    """21:00 on the evening before a trading day to 04:00 of that day."""
+    CLOSED = "closed"
+    """Any time no session runs: a day the market is closed, the hours after the after-hours
+    session before 21:00, and a night not followed by a trading day."""
 
 
-def stock_session(now: datetime, delay: timedelta) -> str:
-    """Name the stock session a feed delayed by `delay` is sending at `now`.
+def stock_session(at: datetime) -> StockSession:
+    """Name the stock session an instant of the feed falls in.
+
+    Args:
+        at: An aware instant of the feed's own time: a row's timestamp, so a delayed feed is
+            named by the time its rows carry, not the wall clock.
+
+    Returns:
+        `PRE_MARKET` from 04:00 to 09:30 New York time on a trading day, `REGULAR` until the
+        close (`regular_close`), `AFTER_HOURS` until 20:00 (17:00 on a half trading day),
+        `OVERNIGHT` from 21:00 to 04:00 on a night before a trading day, and `CLOSED` at any
+        other time.
+    """
+    feed = at.astimezone(NEW_YORK)
+    day, clock = feed.date(), feed.time()
+    if clock < EXTENDED_OPEN:
+        return StockSession.OVERNIGHT if is_trading_day(day) else StockSession.CLOSED
+    if clock >= OVERNIGHT_OPEN:
+        tomorrow = day + timedelta(days=1)
+        return StockSession.OVERNIGHT if is_trading_day(tomorrow) else StockSession.CLOSED
+    late = HALF_DAY_EXTENDED_CLOSE if is_half_day(day) else EXTENDED_CLOSE
+    if not is_trading_day(day) or clock >= late:
+        return StockSession.CLOSED
+    if clock < INDEX_OPEN:
+        return StockSession.PRE_MARKET
+    return StockSession.REGULAR if feed < regular_close(feed) else StockSession.AFTER_HOURS
+
+
+def session_open(now: datetime) -> datetime | None:
+    """Return when the stock session of an instant opened, for trades and quotes.
 
     Args:
         now: An aware instant.
-        delay: The plan's feed delay (`FEED_DELAYS`), zero on a real-time plan.
 
     Returns:
-        `PRE_MARKET` from 04:00 to 09:30 New York time, `REGULAR` until the close
-        (`regular_close`), `AFTER_HOURS` until 20:00 (17:00 on a half trading day), and
-        `OVERNIGHT` at any other time and on a day the market is closed, each of the feed's
-        own time, `now` less the delay.
+        04:00 New York time of `now`'s day in the pre-market, regular, and after-hours sessions,
+        which trades and quotes run through without a break; in the overnight session, 21:00
+        of the evening it began; None at a time no session runs.
     """
-    feed = (now - delay).astimezone(NEW_YORK)
-    day = feed.date()
-    if not is_trading_day(day):
-        return OVERNIGHT
-    clock = feed.time()
-    late = HALF_DAY_EXTENDED_CLOSE if is_half_day(day) else EXTENDED_CLOSE
-    if clock < EXTENDED_OPEN or clock >= late:
-        return OVERNIGHT
-    if clock < INDEX_OPEN:
-        return PRE_MARKET
-    return REGULAR if feed < regular_close(feed) else AFTER_HOURS
+    wall = now.astimezone(NEW_YORK)
+    match stock_session(now):
+        case StockSession.PRE_MARKET | StockSession.REGULAR | StockSession.AFTER_HOURS:
+            return datetime.combine(wall.date(), EXTENDED_OPEN, NEW_YORK)
+        case StockSession.OVERNIGHT:
+            evening = (
+                wall.date() - timedelta(days=1) if wall.time() < EXTENDED_OPEN else wall.date()
+            )
+            return datetime.combine(evening, OVERNIGHT_OPEN, NEW_YORK)
+        case StockSession.CLOSED:
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def may_go_quiet(market: str, family: str, *, now: datetime) -> bool:
+    """Tell whether one symbol's stream may send no row in a test's wait, though rows are due.
+
+    Stock trades and quotes are due outside the regular session too (`EXTENDED_HOURS_FAMILIES`),
+    but one stock trades and quotes far less often then, and can go a minute without either:
+    on 2026-11-10 at 18:40 New York time, in the after-hours session, Massive acknowledged
+    AAPL's quote stream and sent it no quote in 60 s, while AAPL's trade stream got one trade in
+    the same minute. A test that streams one stock then
+    skips when no row comes, and fails only in the regular session.
+
+    Args:
+        market: The market, as the `market_status` fixture names it, such as `"stocks"`.
+        family: The stream's family, the last part of its dataset's name, such as `"quotes"`.
+        now: The present, as an aware instant.
+
+    Returns:
+        True for stock trades and quotes while `now` is in the pre-market, the after hours, or
+        the overnight session (`stock_session`); False for every other stream, and in the
+        regular session or at a time no session runs.
+    """
+    if market != "stocks" or family not in EXTENDED_HOURS_FAMILIES:
+        return False
+    match stock_session(now):
+        case StockSession.PRE_MARKET | StockSession.AFTER_HOURS | StockSession.OVERNIGHT:
+            return True
+        case StockSession.REGULAR | StockSession.CLOSED:
+            return False
+        case _ as unreachable:
+            assert_never(unreachable)

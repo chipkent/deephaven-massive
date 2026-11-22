@@ -12,7 +12,7 @@ Each column of a dataset schema carries one description, chosen for the dataset 
    the wire key and quoted field description behind each source.
 
 A dataset's note on a column follows its description. The derived columns no source carries,
-`OPTION_ROOT` and `RAW_SYMBOL`, take the library's own sentences (`DERIVED_SENTENCES`), and
+`OPTION_ROOT`, take the library's own sentences (`DERIVED_SENTENCES`), and
 `OptionRoot` on a dataset of options and other rows ends with `OTHER_ROWS`. A column of nested
 values kept as JSON text ends with `JSON_TEXT_NOTE`; `with_sentence` adds each closing sentence.
 
@@ -48,7 +48,6 @@ __all__ = [
     "KEY_SENTENCES",
     "OPTION_ROOT",
     "OTHER_ROWS",
-    "RAW_SYMBOL",
     "SYMBOL",
     "TRANSPORT_LABELS",
     "TRANSPORT_ORDER",
@@ -86,23 +85,12 @@ goes on to name the wire key or request parameter behind it on each transport.""
 OPTION_ROOT: Final = "OptionRoot"
 """The derived column of every options dataset with a `Symbol`: the OCC root of the symbol."""
 
-RAW_SYMBOL: Final = "RawSymbol"
-"""The derived column of a dataset that reads its symbol from rows, in a session whose
-`unreadable_symbols` is `LOG` (the default) or `IGNORE`: the text of a symbol the library could
-not read."""
-
 DERIVED_SENTENCES: Final[Mapping[str, str]] = {
     OPTION_ROOT: (
         "The OCC option root, read from `Symbol`: the symbol without its `O:` prefix and its "
         "last 15 characters (expiry, type, and strike), such as `SPXW` for "
         "`O:SPXW251219C06000000`. It is never mapped to the underlying: an adjusted contract "
         "keeps its own root, such as `AAPL1`."
-    ),
-    RAW_SYMBOL: (
-        "The symbol exactly as Massive sent it, on a row whose symbol the library can't read. "
-        "That row's `Symbol` is null. Null on every other row. "
-        "When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the "
-        "table instead, and the column is absent."
     ),
 }
 """The library's description of each derived column."""
@@ -135,26 +123,35 @@ _WINDOW_END: Final = (
 )
 """The first sentences of every bars dataset's `TimestampEnd`."""
 
-_INDEX_HOUR: Final = (
-    "For indices that end is an hour later, 01:00 New York time, since whether an index day bar "
-    "covers the New York or the Chicago day is not verified."
+_INTRADAY_END: Final = (
+    "An intraday bar ends at Massive's `e` where the WebSocket sends one, else its length after "
+    "its start; a WARNING says when the two differ."
 )
-"""Why an index bar of a day or longer ends at 01:00 New York time."""
+"""How an intraday bar's `TimestampEnd` is filled, on every class."""
+
+
+_CHICAGO_DAYS: Final = (
+    "Massive's index days are Chicago days: it stamps an index day at midnight in Chicago on "
+    "every source, and its values are those of that Chicago day, though Massive's documentation "
+    "says index days are Eastern."
+)
+"""Why an index row of a day or longer is cut at midnight in Chicago, said on its start and end."""
+
+_INDEX_MIDNIGHT: Final = "00:00 Chicago time (01:00 New York time)"
+"""Where an index day starts and ends, in both zones: they change clocks together."""
 
 _FINISHED_ROWS: Final = (
     "A row read before its window ended has `TimestampInsert` before `TimestampEnd`, and its "
     'values can still change; `t.where("TimestampEnd <= TimestampInsert")` keeps only the rows '
     "read after their window ended. That test reads the local clock, which can be off, and a "
     "row read within moments of its end, or from a delayed feed, may still lack the window's "
-    "last trades; an end set later than the window's (an index day's extra hour, a stamp kept "
-    "as sent) only keeps a finished row out longer."
+    "last trades."
 )
 """How every `TimestampEnd` description tells finished rows from unfinished ones."""
 
 _KEPT_STAMP: Final = (
-    "A bar of a day or longer stamped at a time or on a day Massive is not known to use keeps "
-    "that stamp, has a null `Date`, and ends one period after it, with a WARNING, since which "
-    "day it covers is not known."
+    "A bar of a day or longer stamped at a time or on a day Massive is not known to use is "
+    "withheld, with a WARNING, since which day it covers is not known."
 )
 """What happens to a bar whose stamp the library does not expect, said on `TimestampStart`."""
 
@@ -216,6 +213,7 @@ def _date_sentence(spec: DatasetSpec) -> str:
     zone = _zone_word(spec)
     times = spec.times
     if times is RowTimes.DAY:
+        zone = "Chicago" if spec.asset_class is AssetClass.INDICES else zone
         return f"The day the summary covers, as ISO yyyy-MM-dd text: a {zone} calendar day."
     if spec.asset_class is AssetClass.FUTURES:
         if times is RowTimes.TICK:
@@ -223,13 +221,11 @@ def _date_sentence(spec: DatasetSpec) -> str:
                 "The futures session the row belongs to (its trading date), as ISO yyyy-MM-dd "
                 "text: Massive's `session_end_date` from REST and the flat files. The WebSocket "
                 "sends none, so a streamed row gets the session Massive's futures schedules "
-                "place it in (between two sessions, the next one). A row they cannot place has "
-                "a null Date, since the 17:00 Chicago rule can be wrong around a holiday, and "
-                "the stream keeps running: a spread, a contract whose schedule lookup failed or "
-                "did not load before the stream opened, or a row outside the loaded schedule "
-                "logs a WARNING (once per product and date); a contract still being looked up "
-                "(one a live watchlist or dm.ALL adds) logs at DEBUG only; a row with no "
-                "readable symbol has a null Date too."
+                "place it in (between two sessions, the next one). A streamed row waits until "
+                "its product's schedule has loaded, usually under a second, and is never "
+                "published without a date. A row Massive's futures lists or schedules can't "
+                "date is left out, as `dm.ErrorPolicy`'s `unlisted_contracts` and "
+                "`unscheduled_products` describe."
             )
         return (
             "The futures session of the bar (its trading date), as ISO yyyy-MM-dd text: "
@@ -265,6 +261,12 @@ def _start_sentence(spec: DatasetSpec) -> str:
     """
     zone = _zone_word(spec)
     if spec.times is RowTimes.DAY:
+        if spec.asset_class is AssetClass.INDICES:
+            return (
+                "The start of the day the summary covers, as an Instant: "
+                f"{_INDEX_MIDNIGHT} of `Date`, where the index day bar of that date starts. "
+                f"{_CHICAGO_DAYS}"
+            )
         utc = f" {_ANY_ZONE}" if spec.asset_class is AssetClass.CRYPTO else ""
         return (
             "The start of the day the summary covers, as an Instant: 00:00 "
@@ -276,14 +278,21 @@ def _start_sentence(spec: DatasetSpec) -> str:
         return (
             "The start of the bar the value is computed at, as an Instant. A bar of a day or "
             "longer starts at 00:00 of its window's first day in the day zone of the symbol's "
-            f"class (UTC for forex and crypto, New York otherwise). {_KEPT_STAMP}"
+            f"class (UTC for forex and crypto, New York otherwise), or for an index at "
+            f"{_INDEX_MIDNIGHT}, where Massive stamps it. {_KEPT_STAMP}"
         )
     first = (
         "a week's Monday, a month's, quarter's, or year's first weekday"
         if spec.asset_class in (AssetClass.STOCKS, AssetClass.OPTIONS)
         else "a week's Sunday, a month's, quarter's, or year's 1st"
     )
-
+    if spec.asset_class is AssetClass.INDICES:
+        return (
+            "The start of the bar's window, as an Instant. A bar of a day or longer starts at "
+            f"{_INDEX_MIDNIGHT} of its window's first day ({first}), Massive's own stamp. "
+            f"{_CHICAGO_DAYS} {_KEPT_STAMP} Every other stamp, as each source sends it (quoted "
+            "next), is moved there."
+        )
     return (
         "The start of the bar's window, as an Instant. A bar of a day or longer starts at "
         f"00:00 {_ZONE_CLOCKS[zone]} of its window's first day ({first}), whichever source "
@@ -304,32 +313,35 @@ def _end_sentence(spec: DatasetSpec) -> str:
     zone = _zone_word(spec)
     indices = spec.asset_class is AssetClass.INDICES
     if spec.times is RowTimes.DAY:
-        later = f" {_INDEX_HOUR}" if indices else ""
+        if indices:
+            return (
+                "The exclusive end of the day the summary covers, as an Instant: "
+                f"{_INDEX_MIDNIGHT} of the next day, where the index day bar of that date ends. "
+                f"{_CHICAGO_DAYS} {_FINISHED_ROWS}"
+            )
         utc = f" {_ANY_ZONE}" if spec.asset_class is AssetClass.CRYPTO else ""
         return (
             "The exclusive end of the day the summary covers, as an Instant: 00:00 "
-            f"{_ZONE_CLOCKS[str(zone)]} of the next day.{later}{utc} {_FINISHED_ROWS}"
+            f"{_ZONE_CLOCKS[str(zone)]} of the next day.{utc} {_FINISHED_ROWS}"
         )
     if spec.asset_class is AssetClass.FUTURES:
         return (
-            f"{_WINDOW_END} An intraday bar ends its length after its start (a one-second "
-            "WebSocket bar at Massive's `e` as sent, with a WARNING when that is not one "
-            "second after its start); a bar of a session or "
-            "longer at 17:00 Chicago time on its label, Massive's `session_end_date`, which is "
-            "its last session. history() returns a bar of several sessions, or of a week or "
+            f"{_WINDOW_END} {_INTRADAY_END} A bar of a session or longer ends at 17:00 "
+            "Chicago time on its label, Massive's `session_end_date`, which is its last "
+            "session. history() returns a bar of several sessions, or of a week or "
             f"longer, only once no later session can still join it. {_FINISHED_ROWS} A bar of "
             "several sessions or longer read before its last session passes that test once its "
             "latest session so far has ended, though later sessions can still join it."
         )
-    where = (
-        f"00:00 {_ZONE_CLOCKS[zone]}"
-        if zone is not None
-        else "00:00, in the day zone of the symbol's class,"
-    )
-    later = f" {_INDEX_HOUR}" if indices else ""
+    if indices:
+        where = _INDEX_MIDNIGHT
+    elif zone is not None:
+        where = f"00:00 {_ZONE_CLOCKS[zone]}"
+    else:
+        where = "00:00, in the day zone of the symbol's class (for an index, midnight in Chicago),"
     return (
-        f"{_WINDOW_END} An intraday bar ends its length after its start; a bar of a day or longer "
-        f"at {where} after its window's last day.{later} {_FINISHED_ROWS}"
+        f"{_WINDOW_END} {_INTRADAY_END} A bar of a day or longer ends at {where} after its "
+        f"window's last day. {_FINISHED_ROWS}"
     )
 
 

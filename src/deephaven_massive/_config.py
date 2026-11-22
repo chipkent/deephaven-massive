@@ -24,12 +24,11 @@ runs past 1,000 lines because all three parts are one subject, the settings: wha
 a file spells them, and how they are documented.
 
 What is deliberately *not* configurable: the options contract cap (1,000 per connection), the
-evidence endpoints of the host decision, the plan tier (Massive offers no entitlement endpoint,
-so the library learns the tier from REST evidence instead), the REST rate of a Basic
-subscription (5 requests per minute, a wire constant; `rest_basic_subscriptions` only names the
-subscriptions on Basic), and the JSON codec. The wire
-package owns the codec: it uses `orjson` when the optional extra `deephaven-massive[orjson]` is
-installed and the standard library otherwise, and logs the choice once at INFO.
+evidence endpoints of the host decision, what a key's plans include (Massive offers no
+entitlement endpoint, so the library learns it only from Massive's refusals and rate-limit
+answers), and the JSON codec. The wire package owns the codec: it uses `orjson` when the
+optional extra `deephaven-massive[orjson]` is installed and the standard library otherwise, and
+logs the choice once at INFO.
 """
 
 from __future__ import annotations
@@ -42,12 +41,14 @@ import os
 import re
 from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import MISSING, dataclass, field, fields
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, NamedTuple, Protocol, TypeVar
 
 import yaml
+from typing_extensions import override
+from yaml.reader import ReaderError
 
 from deephaven_massive._enums import (
     AssetClass,
@@ -57,20 +58,19 @@ from deephaven_massive._enums import (
     _require_enum,
     subscription_of,
 )
-from deephaven_massive._errors import AuthenticationError
+from deephaven_massive._error_policy import ErrorPolicy, check_policy
+from deephaven_massive._errors import AuthenticationError, ErrorSource
 from deephaven_massive._massive import (
     check_api_key,
     check_rest_base_url,
     without_userinfo,
     without_userinfo_or_query,
 )
-from deephaven_massive._types import override
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
 __all__ = [
-    "BUSINESS_HOST",
     "CONFIG_FILE_VARIABLE",
     "DELAYED_HOST",
     "DELAYED_PREFIX",
@@ -79,7 +79,7 @@ __all__ = [
     "REALTIME_HOST",
     "SETTINGS_REFERENCE_END",
     "SETTINGS_REFERENCE_START",
-    "HostMap",
+    "FrozenMap",
     "MassiveConfig",
     "delayed_fix",
     "environment_text",
@@ -111,13 +111,16 @@ round awaits its answer for `subscription_confirmation_timeout`, which must ther
 """
 
 REALTIME_HOST: Final = "socket.massive.com"
-"""Massive's real-time WebSocket feed, and the one documented host of forex and crypto."""
+"""Massive's real-time WebSocket feed, and the one documented host of forex and crypto.
+
+The host every channel's page lists as its `Real-Time` feed, which a test checks against the
+generated channels."""
 
 DELAYED_HOST: Final = "delayed.massive.com"
-"""Massive's delayed WebSocket feed: 15 minutes behind, 10 for futures."""
+"""Massive's delayed WebSocket feed: 15 minutes behind, 10 for futures.
 
-BUSINESS_HOST: Final = "business.massive.com"
-"""The WebSocket host of the Business plans' fair-market-value (FMV) channels, real-time only."""
+The host every channel's page lists as its `Delayed` feed, which a test checks against the
+generated channels."""
 
 _HOSTNAME: Final = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
@@ -145,8 +148,8 @@ def environment_text(name: str) -> str | None:
         return None
     if value != value.strip():
         raise ValueError(
-            f"{name} has leading or trailing whitespace; set it without any (its value is "
-            "not shown, since it may be a secret)"
+            f"The environment variable {name} has leading or trailing whitespace. Set it "
+            "again with the whitespace removed."
         )
     return value
 
@@ -216,38 +219,45 @@ class MassiveConfig:
             needs both S3 credentials; without them, `history()` cannot read flat files.
         s3_secret_access_key: The flat-file S3 secret. Defaults to the
             `MASSIVE_S3_SECRET_ACCESS_KEY` environment variable, else None.
-        delayed_subscriptions: Lists the subscriptions whose plan gets Massive's delayed data, as
-            Stocks Starter and Developer do, so their streams and snapshots work. Defaults to an
-            empty set.
+        delayed_subscriptions: Lists the subscriptions whose data Massive serves you delayed, so
+            their streams use Massive's delayed feed and their snapshots accept its `DELAYED`
+            label. Defaults to an empty set.
 
-            List each subscription on a Starter or Developer plan of stocks, options, or futures,
-            or on Indices Starter. Those plans stream data 15 minutes late, or 10 for futures.
-            Leave out Advanced and Business plans, which are real-time. Never list
+            Massive labels such data `DELAYED` in its answers, and its delayed feed runs 15
+            minutes late, or 10 for futures. Fair market value (FMV) streams always use
+            `business.massive.com`, the one host Massive documents for them. Never list
             `dm.Subscription.CURRENCIES`, the one subscription for forex and crypto: Massive has
             no delayed feed for it.
 
-            Leave a delayed subscription out, and a stream or a `fetch()` of its current data
-            raises `EntitlementError`. Its message gives the line of Python to add. A `poll()`
-            table of it fails with the same message. `history()` and other past data don't
-            depend on this setting.
-        rest_basic_subscriptions: Lists the subscriptions on Massive's free Basic plan, so their
-            requests keep to Basic's five a minute from the start. Defaults to an empty set.
+            Leave a delayed subscription out, and a call for its current data fails with
+            `EntitlementError`. The message gives the line of Python to add. A stream and
+            `fetch(wait=True)` raise it at the call. A `fetch()` or `poll()` table fails with it.
+            A stream from a host you set in `websocket_hosts` is the exception. It opens, and its
+            `Recency` in `m.connections()` shows Massive's label, `DELAYED`.
 
-            Each of the five subscriptions has a free Basic plan, and every subscription you
-            haven't bought is on it: list each of those. Leave out each one you
-            pay for, on any plan, Starter included: a listed subscription's requests are held to
-            five a minute.
+            `history()` and other past data don't depend on this setting.
+        rest_requests_per_minute: Gives each subscription's REST request limit on your plan,
+            so its requests keep to it from the first one. Defaults to an empty mapping.
 
-            A Basic subscription you leave out runs at full speed until Massive first refuses
-            one of its requests for the rate limit. From then on, it keeps to five a minute. The
-            limit is shared by every session in this server that uses your key.
-            `m.rate_limits()` shows each subscription's pace.
+            List each subscription Massive limits, with its limit in requests a minute, such as
+            5 for `dm.Subscription.STOCKS`. Leave out a subscription Massive doesn't limit.
+            Massive's article on its request limits gives each limit:
+            https://massive.com/knowledge-base/article/what-is-the-request-limit-for-massives-restful-apis.
+
+            Leave a limited subscription out, and the session learns its limit from Massive's
+            first rate-limit error, after a pause. `m.rate_limits()` shows the limit a session
+            learned. Copy it here to skip the pause next time. A limit you list wins over a
+            learned one.
+
+            Every session in this server that uses your key shares one limit per subscription.
+            When sessions list different limits, the lowest applies.
         websocket_hosts: Streams an asset class from a WebSocket host you name instead of the one
             the library picks, such as `business.massive.com` for index values. Defaults to an empty
             mapping.
 
-            Set `indices` to `business.massive.com` to stream index values on a real-time Indices
-            plan. Massive's documentation lists no other host for them, delayed or real-time. Set
+            Set `indices` to `business.massive.com` to stream index values when Massive serves
+            your index values there. Massive's documentation lists no other host for them,
+            delayed or real-time. Set
             nothing else unless Massive tells you to.
 
             Without an entry, a subscription listed in `delayed_subscriptions` streams from
@@ -259,6 +269,17 @@ class MassiveConfig:
             An entry must agree with `delayed_subscriptions`. Give a class a host whose name
             starts with `delayed.` exactly when its subscription is listed there, and never give
             one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
+
+            The library opens a stream from a host set here whatever Massive's label says. Its
+            `Recency` in `m.connections()` shows the label:
+
+            - `DELAYED`: Massive labels the data `DELAYED`, or `delayed_subscriptions` lists its
+              subscription.
+            - `REALTIME`: Massive labels the data `REAL-TIME`.
+            - `UNKNOWN`: Massive gave no label the library knows.
+
+            Reading the label costs one REST request, when the first stream of a class set here
+            opens in a session. A subscription listed in `delayed_subscriptions` costs none.
         subscription_confirmation_timeout: Sets how many seconds Massive has to confirm a stream's
             channel before the library asks again. Defaults to 5 seconds.
 
@@ -294,20 +315,31 @@ class MassiveConfig:
             Sessions with the same key and streaming settings share one connection whatever
             this setting. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
-        max_outage: Sets how many seconds a stream or `poll()` table may stay cut off from Massive
-            before it fails. Defaults to 300 seconds.
+        max_outage: Sets how many seconds a live table waits out an outage or Massive's rate
+            limits before it fails. Defaults to 300 seconds.
 
-            Raise it to ride out longer outages, or set `0` to fail at the first one. A stream
-            counts the time its connection is down, and a `poll()` table counts the time its
-            polls keep failing or stop arriving. Until the limit passes, the table's
-            `m.streams()` row shows the problem in `Error`. A failed table stays failed, so call
-            the method again for a new one. See
+            Set `0` to fail at the first outage. Each kind of table counts its own time:
+
+            - A stream counts the time its connection is down.
+            - A `poll()` table counts the time its polls keep failing or stop arriving. A poll
+              that would wait longer than `max_outage` for Massive's rate limits gives up, and
+              counts as a failed poll.
+            - A watchlist's `fetch()` or `history()` counts the time each symbol's reads keep
+              failing with a temporary error. Then `m.symbol_reads()` shows that symbol
+              `FAILED`. Delete its row and add it back to read it again.
+            - Any other `fetch()` or `history()` without `wait=True` counts the time it waits
+              out Massive's rate limits.
+
+            Until the limit passes, `m.problems()` lists the problem with the time it began. A
+            failed table stays failed, so call the method again for a new one. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
         flat_file_symbol_threshold: Sets how many symbols in a list make a `history()` call read
             Massive's flat files instead of a request per symbol, when both can serve it. Defaults
             to 50.
 
             Lower it to read flat files for shorter lists, or raise it to keep them on requests.
+            Each flat file holds a whole day of data, and a flat-file read downloads all of
+            it, however few symbols you ask for.
             A call for this many symbols or more reads flat files when all of these hold:
 
             - `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` are set.
@@ -321,8 +353,10 @@ class MassiveConfig:
             many flat files it reads at a time. Defaults to 8.
 
             Raise it to run more at once, or lower it to open fewer connections. Both limits
-            cover all the session's calls together. A Basic subscription still keeps to five
-            requests a minute.
+            cover all the session's calls together. It also sets how many downloads of
+            `fetch()` and `history()` run at a time, counting each symbol of a watchlist read:
+            the others wait their turn, and `m.streams()` shows them `LOADING`. A subscription
+            with a request limit still keeps to it.
         flush_interval: Sets how many seconds pass between the batches of streamed rows added to
             live tables. Defaults to 0.05 seconds (50 ms).
 
@@ -341,74 +375,17 @@ class MassiveConfig:
         s3_bucket: Sets the S3 bucket flat files are read from. Defaults to `flatfiles`.
 
             Change it only with `s3_endpoint_url`.
-        noncanonical_symbols: Decides what happens when a watchlist or other table you pass holds
-            a value that isn't Massive's exact ticker or futures product code: `SPX` for `I:SPX`,
-            say. Defaults to `LOG`.
+        on_error: Decides what one bad symbol or row does: fail the table, or skip it and keep
+            going. Defaults to `dm.ErrorPolicy()`, which leaves every cause at
+            `dm.ErrorPolicy.DEFAULTS`.
 
-            Set `dm.OnError.RAISE` to catch a typo in a watchlist at once.
+            Set a cause to `dm.OnError.RAISE` when a table must not run past it.
+            `help(dm.ErrorPolicy)` lists the causes. By default each logs, except
+            `refused_venues`, which raises.
 
-            - `dm.OnError.LOG` skips the row and logs a warning naming the value.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` raises `ValueError` for a bad row at the call, and fails a live
-              table when one is added later.
-
-            Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a stream or `poll()` table lists the
-            skipped values in its `m.streams()` row's `Error` until you fix or delete the row. A
-            fixed row is read like a new one.
-
-            Under any setting, a table whose rows are all bad raises `ValueError` at the call. So
-            does a symbol passed in code, as text or a list, that isn't Massive's exact ticker.
-        unlisted_symbols: Decides what happens when a watchlist or other table you pass holds a
-            crypto pair that isn't on Massive's crypto ticker list, or one the library couldn't
-            look up there. Defaults to `LOG`.
-
-            Set `dm.OnError.RAISE` when a stream must not run without every pair you asked for.
-
-            - `dm.OnError.LOG` skips the pair and logs a warning naming it.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` makes a stream or `fetch()` fail with `MassiveError` at the
-              call, and fails a `poll()` table, or a live table when such a pair is added later.
-
-            It applies to streams and to calls for a pair's last trade or daily open and close. A
-            pair that isn't Massive's exact ticker, such as `BTC-USD` for `X:BTCUSD`, falls under
-            `noncanonical_symbols` instead.
-
-            Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a stream keeps its other pairs. A
-            stream of a live table lists the skipped ones in its `m.streams()` row's `Error`
-            until their rows are deleted. A `poll()` lists the pair in `Error`, and a `fetch()`
-            of a live table marks it `FAILED` in `m.symbol_reads()`. A stream or `fetch()` whose
-            pairs are all skipped raises `MassiveError` at the call.
-        unreadable_symbols: Decides what happens to a row of Massive's data whose symbol the library
-            can't read. Defaults to `LOG`.
-
-            Leave it at `dm.OnError.LOG` so the row stays and shows Massive's text, or set
-            `dm.OnError.RAISE` to stop at the first one. Such a symbol is a library bug; to
-            report it, see
-            https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug.
-
-            - `dm.OnError.LOG` keeps the row with a null `Symbol`, puts Massive's text in a
-              `RawSymbol` column, and logs an error naming it.
-            - `dm.OnError.IGNORE` does the same without the error: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` fails the call or stream that received it, naming the text, and
-              the table has no `RawSymbol` column.
-        unavailable_symbols: Decides what happens to a symbol Massive answers as not found, or one a
-            `poll()` can't request with the arguments you gave it. Defaults to `LOG`.
-
-            Set `dm.OnError.RAISE` when a missing symbol means your list is wrong and the read
-            should stop.
-
-            - `dm.OnError.LOG` leaves the symbol out, keeps the others, and logs a warning
-              naming it.
-            - `dm.OnError.IGNORE` does the same with no warning: only the `DEBUG` log names it.
-            - `dm.OnError.RAISE` fails a `poll()` table and makes a `fetch()` or `history()`
-              raise `MassiveError`. A `fetch()` or `history()` of a live table instead marks the
-              symbol `FAILED` in `m.symbol_reads()` and reads the others.
-
-            Such a symbol is one Massive answers with HTTP 404, in any call. In a `poll()`, it's
-            also one the poll can't read, such as a crypto pair in an indicator poll with
-            `adjusted=False`. Under `dm.OnError.LOG` or `dm.OnError.IGNORE`, a `poll()` table
-            lists it in its `m.streams()` row's `Error` until it's readable again or removed, and
-            a `dm.PollMode.REPLACE` poll drops its rows.
+            A dataset method's `on_error=` overrides this policy for one call. A call that
+            leaves it out, or passes None, uses this policy for every cause, and each cause
+            unset here falls back to `dm.ErrorPolicy.DEFAULTS`.
     """
 
     api_key: str = field(default_factory=_env_api_key, repr=False)
@@ -422,27 +399,23 @@ class MassiveConfig:
     max_outage: float = 300.0
     flat_file_symbol_threshold: int = 50
     max_concurrency: int = 8
-    rest_basic_subscriptions: AbstractSet[Subscription] = frozenset()
+    rest_requests_per_minute: Mapping[Subscription, int] = field(default_factory=dict)
     delayed_subscriptions: AbstractSet[Subscription] = frozenset()
     flush_interval: float = 0.05
     rest_base_url: str = "https://api.massive.com"
     s3_endpoint_url: str = "https://files.massive.com"
     s3_bucket: str = "flatfiles"
-    noncanonical_symbols: OnError = OnError.LOG
-    unlisted_symbols: OnError = OnError.LOG
-    unreadable_symbols: OnError = OnError.LOG
-    unavailable_symbols: OnError = OnError.LOG
+    on_error: ErrorPolicy = field(default_factory=ErrorPolicy)
 
     def __post_init__(self) -> None:
-        """Validate every field; freeze `websocket_hosts` and the two subscription sets into copies.
+        """Validate every field; freeze the mappings and the subscription set into copies.
 
-        A `noncanonical_symbols`, `unlisted_symbols`, `unreadable_symbols`, or
-        `unavailable_symbols` that is not a `dm.OnError`, a `connection_taken` that is not a
-        `dm.ConnectionTaken`, a `websocket_hosts` key that is not a
-        `dm.AssetClass`, a host, URL, or bucket that is not a `str`, a
-        `rest_basic_subscriptions` or `delayed_subscriptions` that is not a set of
-        `dm.Subscription`, or a numeric field of a non-numeric type raises `TypeError`; a
-        number that is not positive raises `ValueError`, though `max_outage` may be zero.
+        An `on_error` that is not a `dm.ErrorPolicy`, a `connection_taken` that is not a
+        `dm.ConnectionTaken`, a `websocket_hosts` key that is not a `dm.AssetClass`, a host,
+        URL, or bucket that is not a `str`, a `delayed_subscriptions` that is not a set of
+        `dm.Subscription`, a `rest_requests_per_minute` that is not a mapping of
+        `dm.Subscription` to `int`, or a numeric field of a non-numeric type raises `TypeError`;
+        a number that is not positive raises `ValueError`, though `max_outage` may be zero.
 
         Raises:
             TypeError: If `api_key` is not a `str`.
@@ -466,20 +439,26 @@ class MassiveConfig:
             raise TypeError(f"api_key must be a str, not {type(self.api_key).__name__}")
         if not self.api_key.strip():
             raise AuthenticationError(
-                "no Massive API key: pass MassiveConfig(api_key=...) or set MASSIVE_API_KEY"
+                "No Massive API key is set. Pass dm.MassiveConfig(api_key=...) or set "
+                "MASSIVE_API_KEY.",
+                source=ErrorSource.USER,
             )
         if self.api_key != self.api_key.strip():
             raise ValueError(
-                "api_key has leading or trailing whitespace; pass the key without any (the key "
-                "is not shown)"
+                "api_key has leading or trailing whitespace. Pass the key with the whitespace "
+                "removed."
             )
         check_api_key(self.api_key, setting="api_key")
         _check_s3_credential("s3_access_key_id", self.s3_access_key_id)
         _check_s3_credential("s3_secret_access_key", self.s3_secret_access_key)
         if (self.s3_access_key_id is None) != (self.s3_secret_access_key is None):
+            given = (
+                "s3_access_key_id" if self.s3_secret_access_key is None else "s3_secret_access_key"
+            )
             raise ValueError(
-                "flat files need both s3_access_key_id and s3_secret_access_key "
-                "(MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY)"
+                f"Flat files need both S3 credentials, and only {given} is set. Pass both "
+                "s3_access_key_id and s3_secret_access_key to dm.MassiveConfig, or set both "
+                "MASSIVE_S3_ACCESS_KEY_ID and MASSIVE_S3_SECRET_ACCESS_KEY."
             )
         for name in (
             "subscription_confirmation_timeout",
@@ -492,31 +471,32 @@ class MassiveConfig:
             require_positive_int(name, getattr(self, name))
         if self.reconnect_backoff < MIN_RECONNECT_BACKOFF:
             raise ValueError(
-                f"reconnect_backoff must be at least {MIN_RECONNECT_BACKOFF:g} s, not "
-                f"{self.reconnect_backoff:g}, which limits reconnect churn"
+                f"reconnect_backoff={self.reconnect_backoff:g} is below the minimum of "
+                f"{MIN_RECONNECT_BACKOFF:g} s. Pass reconnect_backoff={MIN_RECONNECT_BACKOFF:g} "
+                "or more."
             )
         if self.subscription_confirmation_timeout >= NO_ACK_RESEND:
             raise ValueError(
-                f"subscription_confirmation_timeout must be below {NO_ACK_RESEND:g} s, not "
-                f"{self.subscription_confirmation_timeout:g}: "
-                f"unacknowledged subscriptions are re-sent every {NO_ACK_RESEND:g} s, and each "
-                "re-send awaits its answer for subscription_confirmation_timeout"
+                f"subscription_confirmation_timeout={self.subscription_confirmation_timeout:g} "
+                f"is not below {NO_ACK_RESEND:g} s, the interval at which the library sends an "
+                f"unconfirmed subscription again. Pass a value below {NO_ACK_RESEND:g}."
             )
         if self.max_reconnect_backoff < self.reconnect_backoff:
-            raise ValueError("max_reconnect_backoff must not be below reconnect_backoff")
+            raise ValueError(
+                f"max_reconnect_backoff={self.max_reconnect_backoff:g} is below "
+                f"reconnect_backoff={self.reconnect_backoff:g}. Pass a max_reconnect_backoff "
+                f"of {self.reconnect_backoff:g} or more."
+            )
         object.__setattr__(self, "max_outage", _check_max_outage(self.max_outage))
-        _require_enum(self.noncanonical_symbols, OnError, "noncanonical_symbols")
-        _require_enum(self.unlisted_symbols, OnError, "unlisted_symbols")
-        _require_enum(self.unreadable_symbols, OnError, "unreadable_symbols")
-        _require_enum(self.unavailable_symbols, OnError, "unavailable_symbols")
+        check_policy(self.on_error)
         _require_enum(self.connection_taken, ConnectionTaken, "connection_taken")
-        _check_url("rest_base_url", self.rest_base_url)
+        _check_url("rest_base_url", self.rest_base_url, example="https://api.massive.com")
         check_rest_base_url(self.rest_base_url, setting="rest_base_url")
-        _check_url("s3_endpoint_url", self.s3_endpoint_url)
+        _check_url("s3_endpoint_url", self.s3_endpoint_url, example="https://files.massive.com")
         _check_bucket(self.s3_bucket)
         object.__setattr__(self, "websocket_hosts", _validate_websocket_hosts(self.websocket_hosts))
-        basic = _validate_subscriptions(self.rest_basic_subscriptions, "rest_basic_subscriptions")
-        object.__setattr__(self, "rest_basic_subscriptions", basic)
+        limits = _validate_request_limits(self.rest_requests_per_minute)
+        object.__setattr__(self, "rest_requests_per_minute", limits)
         delayed = _validate_subscriptions(self.delayed_subscriptions, "delayed_subscriptions")
         _check_delayed_subscriptions(delayed, self.websocket_hosts)
         object.__setattr__(self, "delayed_subscriptions", delayed)
@@ -653,9 +633,9 @@ def require_positive_int(name: str, value: object, *, maximum: int | None = None
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an int, not {type(value).__name__}")
     if maximum is not None and not 1 <= value <= maximum:
-        raise ValueError(f"{name} must be between 1 and {maximum}, got {value}")
+        raise ValueError(f"{name}={value} is not between 1 and {maximum}.")
     if value < 1:
-        raise ValueError(f"{name} must be positive, got {value}")
+        raise ValueError(f"{name}={value} is not positive.")
     return value
 
 
@@ -683,10 +663,10 @@ def require_positive_number(name: str, value: object) -> float:
         number = float(value)
     except OverflowError:  # an int beyond the float range
         raise ValueError(
-            f"{name} must be positive and finite, got an int too large for a float"
+            f"{name} is an int too large to convert to a float. Pass a smaller number."
         ) from None
     if not (math.isfinite(number) and number > 0):
-        raise ValueError(f"{name} must be positive, got {value!r}")
+        raise ValueError(f"{name}={value!r} is not a positive, finite number.")
     return number
 
 
@@ -697,7 +677,7 @@ _CURRENCY_CLASSES: Final = frozenset(
 
 
 def _validate_subscriptions(value: object, name: str) -> frozenset[Subscription]:
-    """Validate a set of subscriptions (`rest_basic_subscriptions`, `delayed_subscriptions`).
+    """Validate a set of subscriptions (`delayed_subscriptions`).
 
     Args:
         value: The value passed for the field.
@@ -708,10 +688,8 @@ def _validate_subscriptions(value: object, name: str) -> frozenset[Subscription]
 
     Raises:
         TypeError: If `value` is not a set (a `set`, a `frozenset`, or another
-            `collections.abc.Set`), or holds anything but `dm.Subscription` members. Forex
-            or crypto (as text or as a `dm.AssetClass`) is refused with a message naming
-            `dm.Subscription.CURRENCIES`, the one subscription that covers both; any other
-            text names the matching member, as `_require_enum` does.
+            `collections.abc.Set`), or holds anything but `dm.Subscription` members, as
+            `_require_subscription` says.
     """
     if not isinstance(value, AbstractSet):
         raise TypeError(
@@ -719,17 +697,64 @@ def _validate_subscriptions(value: object, name: str) -> frozenset[Subscription]
             f"{{dm.Subscription.STOCKS}}, not {type(value).__name__}"
         )
     for item in value:
-        if (
-            isinstance(item, str)
-            and not isinstance(item, Subscription)
-            and item.casefold() in _CURRENCY_CLASSES
-        ):
-            raise TypeError(
-                f"{name} must hold dm.Subscription members; forex and crypto "
-                "are one subscription, dm.Subscription.CURRENCIES"
-            )
-        _require_enum(item, Subscription, f"each {name} member")
+        _require_subscription(item, name, f"each {name} member")
     return frozenset(value)
+
+
+def _require_subscription(item: object, name: str, what: str) -> Subscription:
+    """Return a member of a subscription setting after checking that it is a `dm.Subscription`.
+
+    Args:
+        item: The member as passed.
+        name: The setting's name, for messages.
+        what: How `_require_enum`'s message names the member, such as `"each ... member"`.
+
+    Returns:
+        `item`, narrowed to `Subscription`.
+
+    Raises:
+        TypeError: If `item` is not a `dm.Subscription`. Forex or crypto (as text or as a
+            `dm.AssetClass`) is refused with a message naming `dm.Subscription.CURRENCIES`,
+            the one subscription that covers both; any other text names the matching member,
+            as `_require_enum` does.
+    """
+    if (
+        isinstance(item, str)
+        and not isinstance(item, Subscription)
+        and item.casefold() in _CURRENCY_CLASSES
+    ):
+        raise TypeError(
+            f"{name} holds {str(item)!r}, but forex and crypto are one subscription. "
+            "Pass dm.Subscription.CURRENCIES in its place."
+        )
+    return _require_enum(item, Subscription, what)
+
+
+def _validate_request_limits(value: object) -> Mapping[Subscription, int]:
+    """Validate `rest_requests_per_minute` and return a read-only, hashable copy.
+
+    Args:
+        value: The value passed for the field.
+
+    Returns:
+        The requests per minute of each subscription.
+
+    Raises:
+        TypeError: If `value` is not a mapping, a key is not a `dm.Subscription` (as
+            `_require_subscription` says), or a limit is not an `int`.
+        ValueError: If a limit is below 1.
+    """
+    name = "rest_requests_per_minute"
+    if not isinstance(value, Mapping):
+        raise TypeError(
+            f"{name} must be a mapping of dm.Subscription to requests per minute, such as "
+            f"{{dm.Subscription.STOCKS: 5}}, not {type(value).__name__}"
+        )
+    limits: dict[Subscription, int] = {}
+    for key, limit in value.items():
+        subscription = _require_subscription(key, name, f"each {name} key")
+        limits[subscription] = require_positive_int(f"{name}[{subscription.value}]", limit)
+    return FrozenMap(limits)
 
 
 DELAYED_PREFIX: Final = "delayed."
@@ -757,8 +782,9 @@ def _check_delayed_subscriptions(
     """
     if Subscription.CURRENCIES in delayed:
         raise ValueError(
-            "delayed_subscriptions cannot hold dm.Subscription.CURRENCIES: Massive has no "
-            "delayed forex or crypto feed, so their streams are always real-time"
+            "delayed_subscriptions holds dm.Subscription.CURRENCIES, but Massive has no "
+            "delayed forex or crypto feed, so their streams are always real-time. Remove "
+            "dm.Subscription.CURRENCIES from delayed_subscriptions."
         )
     for asset_class, host in websocket_hosts.items():
         subscription = subscription_of(asset_class)
@@ -766,35 +792,47 @@ def _check_delayed_subscriptions(
         pins_delayed = host.startswith(DELAYED_PREFIX)
         if pins_delayed and subscription is Subscription.CURRENCIES:
             raise ValueError(
-                f"websocket_hosts pins {asset_class} to {host}, but Massive has no delayed forex "
-                "or crypto feed; remove the pin"
+                f"websocket_hosts pins {asset_class} to {host!r}, but Massive has no delayed "
+                f"forex or crypto feed. Remove the {asset_class} pin from websocket_hosts."
             )
         if pins_delayed and not listed:
+            purpose = f"To stream delayed {asset_class} data"
             raise ValueError(
-                f"websocket_hosts pins {asset_class} to the delayed feed {host}, but "
-                f"delayed_subscriptions does not list dm.Subscription.{subscription.name}; "
-                f"to use the delayed feed write {delayed_fix(subscription)}"
+                f"websocket_hosts pins {asset_class} to the delayed feed {host!r}, but "
+                f"delayed_subscriptions does not include dm.Subscription.{subscription.name}. "
+                f"{delayed_fix(subscription, purpose=purpose)}"
             )
         if listed and not pins_delayed:
             raise ValueError(
-                f"delayed_subscriptions lists dm.Subscription.{subscription.name}, "
-                f"whose streams use Massive's delayed feed {DELAYED_HOST}, but websocket_hosts "
-                f"pins {asset_class} to {host}; remove one of the two"
+                f"delayed_subscriptions includes dm.Subscription.{subscription.name}, whose "
+                f"streams use Massive's delayed feed {DELAYED_HOST!r}, but websocket_hosts pins "
+                f"{asset_class} to {host!r}. Remove dm.Subscription.{subscription.name} from "
+                f"delayed_subscriptions, or remove the {asset_class} pin from websocket_hosts."
             )
 
 
-def delayed_fix(subscription: Subscription) -> str:
-    """Return the configuration that asks for a subscription's delayed data, for messages.
+def delayed_fix(subscription: Subscription, *, purpose: str | None = None) -> str:
+    """Return the sentence that tells the user how to ask for a subscription's delayed data.
 
     The one place the setting's spelling appears in the library's messages.
 
     Args:
         subscription: The subscription.
+        purpose: What the setting achieves, as a clause that starts the sentence, such as
+            `"To use Massive's delayed options feed"`; None (absent) for a sentence that
+            starts with the imperative.
 
     Returns:
-        For example `dm.MassiveConfig(delayed_subscriptions={dm.Subscription.OPTIONS})`.
+        `"Pass delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."`, or,
+        with a purpose, `"To use Massive's delayed options feed, pass
+        delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."`.
     """
-    return f"dm.MassiveConfig(delayed_subscriptions={{dm.Subscription.{subscription.name}}})"
+    advice = (
+        f"pass delayed_subscriptions={{dm.Subscription.{subscription.name}}} to dm.MassiveConfig."
+    )
+    if purpose is None:
+        return f"{advice[:1].upper()}{advice[1:]}"
+    return f"{purpose}, {advice}"
 
 
 def _check_max_outage(value: object) -> float:
@@ -817,11 +855,13 @@ def _check_max_outage(value: object) -> float:
     try:
         seconds = float(value)
     except OverflowError:  # an int beyond the float range
-        raise ValueError("max_outage must be finite, got an int too large for a float") from None
+        raise ValueError(
+            "max_outage is an int too large to convert to a float. Pass a smaller number."
+        ) from None
     if not (math.isfinite(seconds) and seconds >= 0):
         raise ValueError(
-            f"max_outage must be zero or more seconds, got {value!r}; 0 fails live tables at "
-            "the first disconnect"
+            f"max_outage={value!r} is not a finite number of seconds, zero or more. Pass 0 to "
+            "fail live tables at the first disconnect, or the seconds to wait out an outage."
         )
     return seconds
 
@@ -839,8 +879,8 @@ def _check_s3_credential(name: str, value: str | None) -> None:
     """
     if value is not None and (not value.strip() or value != value.strip()):
         raise ValueError(
-            f"{name} is blank or has leading or trailing whitespace; pass the credential "
-            "exactly, or None for no flat files (the value is not shown)"
+            f"{name} is blank or has leading or trailing whitespace. Pass the credential "
+            "with nothing around it, or None for no flat files."
         )
 
 
@@ -851,7 +891,7 @@ _HTTP_URL: Final = re.compile(
 password, a host name or bracketed IPv6 address, an optional port, and an optional path."""
 
 
-def _check_url(name: str, value: object) -> None:
+def _check_url(name: str, value: object, *, example: str) -> None:
     """Refuse a base URL that is not an `http` or `https` URL with a host.
 
     Every request the library makes is built on the URL, so a value such as `""`, `~`, or
@@ -860,6 +900,7 @@ def _check_url(name: str, value: object) -> None:
     Args:
         name: The field's name (`rest_base_url` or `s3_endpoint_url`), for the message.
         value: The field's value.
+        example: A valid value the message shows, the field's default.
 
     Raises:
         TypeError: If `value` is not a `str`.
@@ -872,8 +913,8 @@ def _check_url(name: str, value: object) -> None:
         raise TypeError(f"{name} must be a str, not {type(value).__name__}")
     if not _HTTP_URL.fullmatch(value):
         raise ValueError(
-            f"{name} must be an http or https URL with a host, such as "
-            f"'https://api.massive.com', not {shown_setting(name, value)}"
+            f"{name}={shown_setting(name, value)} is not an http or https URL with a host, "
+            f"such as {example!r}."
         )
 
 
@@ -890,7 +931,7 @@ def _check_bucket(value: object) -> None:
     if not isinstance(value, str):
         raise TypeError(f"s3_bucket must be a str, not {type(value).__name__}")
     if not value.strip():
-        raise ValueError(f"s3_bucket must name a bucket, such as 'flatfiles', not {value!r}")
+        raise ValueError(f"s3_bucket={value!r} is not a bucket name, such as 'flatfiles'.")
 
 
 def _validate_websocket_hosts(websocket_hosts: object) -> Mapping[AssetClass, str]:
@@ -910,72 +951,81 @@ def _validate_websocket_hosts(websocket_hosts: object) -> Mapping[AssetClass, st
             a value that would be a hostname once trimmed and lower-cased names that form.
     """
     if not isinstance(websocket_hosts, Mapping):
-        raise TypeError("websocket_hosts must be a mapping of dm.AssetClass to hostname")
+        raise TypeError(
+            "websocket_hosts must be a mapping of dm.AssetClass to hostname, "
+            f"not {type(websocket_hosts).__name__}"
+        )
     hosts: dict[AssetClass, str] = {}
     for key, value in websocket_hosts.items():
         asset_class = _require_enum(key, AssetClass, "websocket_hosts key")
         if not isinstance(value, str):
-            raise TypeError(f"websocket_hosts[{asset_class}] must be a hostname str")
+            raise TypeError(
+                f"websocket_hosts[{asset_class}] must be a str, not {type(value).__name__}"
+            )
         if value != value.strip().lower() and _HOSTNAME.match(value.strip().lower()):
             raise ValueError(
-                f"websocket_hosts[{asset_class}]={value!r} must be written exactly as a lower-case "
-                f"hostname; write {value.strip().lower()!r}"
+                f"websocket_hosts[{asset_class}]={value!r} is not a lower-case hostname with "
+                f"nothing around it. Pass {value.strip().lower()!r}."
             )
         if not _HOSTNAME.match(value):
             raise ValueError(
-                f"websocket_hosts[{asset_class}] must be a bare hostname such as "
-                f"'delayed.massive.com', got {without_userinfo(value)!r}"
+                f"websocket_hosts[{asset_class}]={without_userinfo(value)!r} is not a bare "
+                "hostname, such as 'delayed.massive.com'."
             )
         hosts[asset_class] = value
-    return HostMap(hosts)
+    return FrozenMap(hosts)
 
 
-class HostMap(Mapping[AssetClass, str]):
-    """The read-only, hashable `websocket_hosts` mapping of a `MassiveConfig`.
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+
+class FrozenMap(Mapping[_K, _V]):
+    """A read-only, hashable mapping field of a `MassiveConfig` (`websocket_hosts`, limits).
 
     `MassiveConfig` is a frozen dataclass compared and hashed by value, so its fields must be
     hashable; a dict or `MappingProxyType` is not. Equal mappings hash equally.
     """
 
-    __slots__ = ("_hosts",)
+    __slots__ = ("_items",)
 
-    def __init__(self, hosts: Mapping[AssetClass, str]) -> None:
-        """Copy the validated hosts.
-
-        Args:
-            hosts: Hostname per asset class.
-        """
-        self._hosts: Mapping[AssetClass, str] = dict(hosts)
-
-    @override
-    def __getitem__(self, key: AssetClass) -> str:
-        """Return the host pinned for an asset class.
+    def __init__(self, items: Mapping[_K, _V]) -> None:
+        """Copy the validated items.
 
         Args:
-            key: The asset class.
-
-        Returns:
-            The hostname.
+            items: The mapping's items.
         """
-        return self._hosts[key]
+        self._items: Mapping[_K, _V] = dict(items)
 
     @override
-    def __iter__(self) -> Iterator[AssetClass]:
-        """Iterate over the pinned asset classes.
+    def __getitem__(self, key: _K) -> _V:
+        """Return the value of a key.
+
+        Args:
+            key: The key.
 
         Returns:
-            An iterator of asset classes.
+            Its value.
         """
-        return iter(self._hosts)
+        return self._items[key]
+
+    @override
+    def __iter__(self) -> Iterator[_K]:
+        """Iterate over the keys.
+
+        Returns:
+            An iterator of the keys.
+        """
+        return iter(self._items)
 
     @override
     def __len__(self) -> int:
-        """Count the pinned asset classes.
+        """Count the keys.
 
         Returns:
-            How many hosts are pinned.
+            How many keys the mapping holds.
         """
-        return len(self._hosts)
+        return len(self._items)
 
     @override
     def __hash__(self) -> int:
@@ -984,7 +1034,7 @@ class HostMap(Mapping[AssetClass, str]):
         Returns:
             The hash of the frozen set of items.
         """
-        return hash(frozenset(self._hosts.items()))
+        return hash(frozenset(self._items.items()))
 
     @override
     def __repr__(self) -> str:
@@ -993,7 +1043,7 @@ class HostMap(Mapping[AssetClass, str]):
         Returns:
             For example `{<AssetClass.STOCKS: 'stocks'>: 'delayed.massive.com'}`.
         """
-        return repr(dict(self._hosts))
+        return repr(dict(self._items))
 
 
 # --- The settings file -------------------------------------------------------------------------
@@ -1032,11 +1082,11 @@ def _place(file: Path, position: _Position | None) -> str:
         position: PyYAML's zero-based mark, or None.
 
     Returns:
-        For example `"settings file /home/me/settings.yaml, line 3, column 14"`.
+        For example `"Settings file /home/me/settings.yaml, line 3, column 14"`.
     """
     if position is None:
-        return f"settings file {file}"
-    return f"settings file {file}, line {position.line + 1}, column {position.column + 1}"
+        return f"Settings file {file}"
+    return f"Settings file {file}, line {position.line + 1}, column {position.column + 1}"
 
 
 _NESTING_LIMIT: Final = 10
@@ -1085,22 +1135,23 @@ class _SettingsLoader(yaml.BaseLoader):
         event = peek()
         if isinstance(event, yaml.CollectionStartEvent) and self._depth >= _NESTING_LIMIT:
             raise _SettingsFileError(
-                f"lists and mappings nest more than {_NESTING_LIMIT} deep here; a setting "
-                "needs two levels at most",
+                f"Lists and mappings nest more than {_NESTING_LIMIT} levels deep here. Write "
+                "each setting with two levels at most.",
                 event.start_mark,
             )
         if isinstance(event, yaml.AliasEvent):
             raise _SettingsFileError(
-                "an alias (*name) is not allowed; write the value out", event.start_mark
+                f"The alias *{event.anchor} is not allowed. Write the value out in full.",
+                event.start_mark,
             )
         if isinstance(event, yaml.NodeEvent) and event.anchor is not None:
             raise _SettingsFileError(
-                f"an anchor (&{event.anchor}) is not allowed; write each value out",
+                f"The anchor &{event.anchor} is not allowed. Write each value out in full.",
                 event.start_mark,
             )
         if isinstance(event, yaml.ScalarEvent | yaml.CollectionStartEvent) and event.tag:
             raise _SettingsFileError(
-                f"a tag ({event.tag}) is not allowed; write the plain value", event.start_mark
+                f"The tag {event.tag!r} is not allowed. Write the plain value.", event.start_mark
             )
         self._depth += 1
         try:
@@ -1132,14 +1183,16 @@ def _compose(text: str) -> yaml.MappingNode:
         node = None if loader.check_event(yaml.StreamEndEvent) else loader.compose_document()
         if not loader.check_event(yaml.StreamEndEvent):
             raise _SettingsFileError(
-                "a second document starts here; a settings file holds one",
+                "A second YAML document starts here, and a settings file holds one. Put "
+                "every setting in the first document.",
                 peek_event().start_mark,
             )
     finally:
         loader.dispose()
     if not isinstance(node, yaml.MappingNode):
         raise _SettingsFileError(
-            "the top level must be a mapping of setting names to values, such as 'max_outage: 600'",
+            "The file is not a mapping of setting names to values. Write one setting per "
+            "line, such as 'max_outage: 600'.",
             None if node is None else node.start_mark,
         )
     return node
@@ -1159,12 +1212,29 @@ def _scalar(node: yaml.Node, expected: str) -> str:
         _SettingsFileError: If the node is a list or a mapping.
     """
     if not isinstance(node, yaml.ScalarNode):
-        raise _SettingsFileError(f"must be {expected}, not a list or mapping", node.start_mark)
+        raise _SettingsFileError(
+            f"the value is a list or mapping, not {expected}.", node.start_mark
+        )
     text: str = node.value
     return text
 
 
 _Word = TypeVar("_Word", bound=StrEnum)
+
+
+def _one_of(words: list[str]) -> str:
+    """Return the words a message offers as choices: `a or b`, or `a, b, or c`.
+
+    Args:
+        words: At least two words, in the order to show them.
+
+    Returns:
+        The words joined as prose with "or".
+    """
+    *first, last = words
+    if len(first) == 1:
+        return f"{first[0]} or {last}"
+    return f"{', '.join(first)}, or {last}"
 
 
 def _word(node: yaml.Node, enum_type: type[_Word], what: str) -> _Word:
@@ -1185,26 +1255,48 @@ def _word(node: yaml.Node, enum_type: type[_Word], what: str) -> _Word:
         _SettingsFileError: If the node is not a scalar, or its text is no member's value; the
             message lists the valid spellings.
     """
-    spellings = ", ".join(member.value for member in enum_type)
-    text = _scalar(node, f"{what} ({spellings})")
+    text = _scalar(node, what)
     for member in enum_type:
         if member.value == text:
             return member
+    spellings = _one_of([member.value for member in enum_type])
     raise _SettingsFileError(
-        f"{text!r} is not {what}; write one of {spellings}, exactly as shown", node.start_mark
+        f"{text!r} is not {what}. Write {spellings}, exactly as shown.", node.start_mark
     )
 
 
-def _on_error(node: yaml.Node) -> OnError:
-    """Convert a symbol setting's word: `raise`, `log`, or `ignore` (`_word`).
+def _on_error(node: yaml.Node) -> ErrorPolicy:
+    """Convert `on_error`: a mapping of cause to `raise`, `log`, or `ignore`.
 
     Args:
-        node: The value's node.
+        node: The value's node, such as `{malformed_rows: raise}`.
 
     Returns:
-        The `OnError` member.
+        The policy, setting each cause the mapping names.
+
+    Raises:
+        _SettingsFileError: If the node is not a mapping, a key is not a cause or appears
+            twice, or a setting is not one of the words (`_word`).
     """
-    return _word(node, OnError, "a symbol setting")
+    causes = [f.name for f in fields(ErrorPolicy)]
+    if not isinstance(node, yaml.MappingNode):
+        raise _SettingsFileError(
+            "the value is not a mapping of each cause to raise, log, or ignore. Write one "
+            "such as {malformed_rows: raise}.",
+            node.start_mark,
+        )
+    settings: dict[str, OnError] = {}
+    for key, value in node.value:
+        cause = _scalar(key, "a cause")
+        if cause not in causes:
+            raise _SettingsFileError(
+                f"{cause[:_SHOWN_KEY_LENGTH]!r} is not a cause. Write {_one_of(causes)}.",
+                key.start_mark,
+            )
+        if cause in settings:
+            raise _SettingsFileError(f"{cause!r} is set twice. Remove one.", key.start_mark)
+        settings[cause] = _word(value, OnError, f"an error setting for {cause}")
+    return ErrorPolicy(**settings)
 
 
 def _connection_taken(node: yaml.Node) -> ConnectionTaken:
@@ -1216,7 +1308,7 @@ def _connection_taken(node: yaml.Node) -> ConnectionTaken:
     Returns:
         The `ConnectionTaken` member.
     """
-    return _word(node, ConnectionTaken, "a connection_taken value")
+    return _word(node, ConnectionTaken, "a valid value")
 
 
 def _subscriptions(node: yaml.Node) -> frozenset[Subscription]:
@@ -1234,16 +1326,49 @@ def _subscriptions(node: yaml.Node) -> frozenset[Subscription]:
     """
     if not isinstance(node, yaml.SequenceNode):
         raise _SettingsFileError(
-            "must be a list of subscriptions, such as [stocks, options], or [] for none",
+            "the value is not a list of subscriptions. Write one such as [stocks, options], "
+            "or [] for none.",
             node.start_mark,
         )
     found: set[Subscription] = set()
     for item in node.value:
         subscription = _word(item, Subscription, "a subscription")
         if subscription in found:
-            raise _SettingsFileError(f"lists {subscription.value!r} twice", item.start_mark)
+            raise _SettingsFileError(
+                f"{subscription.value!r} is listed twice. Remove one.", item.start_mark
+            )
         found.add(subscription)
     return frozenset(found)
+
+
+def _request_limits(node: yaml.Node) -> dict[Subscription, int]:
+    """Convert `rest_requests_per_minute`: a mapping of subscription word to a whole number.
+
+    Args:
+        node: The value's node.
+
+    Returns:
+        The requests per minute of each subscription; the constructor checks each one.
+
+    Raises:
+        _SettingsFileError: If the node is not a mapping, a key is not a subscription's word or
+            appears twice, or a limit is not a whole number.
+    """
+    if not isinstance(node, yaml.MappingNode):
+        raise _SettingsFileError(
+            "the value is not a mapping of subscription to requests per minute. Write one "
+            "such as {stocks: 5}, or {} for none.",
+            node.start_mark,
+        )
+    limits: dict[Subscription, int] = {}
+    for key, value in node.value:
+        subscription = _word(key, Subscription, "a subscription")
+        if subscription in limits:
+            raise _SettingsFileError(
+                f"{subscription.value!r} is set twice. Remove one.", key.start_mark
+            )
+        limits[subscription] = _count(value)
+    return limits
 
 
 def _hosts(node: yaml.Node) -> dict[AssetClass, str]:
@@ -1261,14 +1386,17 @@ def _hosts(node: yaml.Node) -> dict[AssetClass, str]:
     """
     if not isinstance(node, yaml.MappingNode):
         raise _SettingsFileError(
-            "must be a mapping of asset class to hostname, such as {stocks: delayed.massive.com}",
+            "the value is not a mapping of asset class to hostname. Write one such as "
+            "{stocks: delayed.massive.com}.",
             node.start_mark,
         )
     hosts: dict[AssetClass, str] = {}
     for key, value in node.value:
         asset_class = _word(key, AssetClass, "an asset class")
         if asset_class in hosts:
-            raise _SettingsFileError(f"pins {asset_class.value!r} twice", key.start_mark)
+            raise _SettingsFileError(
+                f"{asset_class.value!r} is set twice. Remove one.", key.start_mark
+            )
         hosts[asset_class] = _scalar(value, "a hostname")
     return hosts
 
@@ -1296,7 +1424,7 @@ def _seconds(node: yaml.Node) -> float:
     number = float(text) if _DECIMAL.fullmatch(text) else math.nan
     if not math.isfinite(number):
         raise _SettingsFileError(
-            f"{text!r} is not a finite number of seconds; write one such as 300 or 0.5",
+            f"{text!r} is not a finite number of seconds. Write one such as 300 or 0.5.",
             node.start_mark,
         )
     return number
@@ -1318,13 +1446,13 @@ def _count(node: yaml.Node) -> int:
     text = _scalar(node, "a whole number")
     if not _WHOLE.fullmatch(text):
         raise _SettingsFileError(
-            f"{text!r} is not a whole number; write one such as 8", node.start_mark
+            f"{text!r} is not a whole number. Write one such as 8.", node.start_mark
         )
     try:
         return int(text)
     except ValueError:  # more digits than Python's integer conversion limit
         raise _SettingsFileError(
-            f"is a number of {len(text)} characters, too long to read; write one such as 8",
+            f"the number is {len(text)} characters long, too long to read. Write one such as 8.",
             node.start_mark,
         ) from None
 
@@ -1354,7 +1482,7 @@ def _text(node: yaml.Node) -> str:
     plain = isinstance(node, yaml.ScalarNode) and node.style is None
     if not text or (plain and text in _NULL_WORDS):
         raise _SettingsFileError(
-            "is empty; write the value, or leave the setting out for its default",
+            "the value is empty. Write a value, or leave the setting out to keep its default.",
             node.start_mark,
         )
     return text
@@ -1369,16 +1497,13 @@ _CONVERTERS: Final[Mapping[str, Callable[[yaml.Node], object]]] = {
     "max_outage": _seconds,
     "flat_file_symbol_threshold": _count,
     "max_concurrency": _count,
-    "rest_basic_subscriptions": _subscriptions,
+    "rest_requests_per_minute": _request_limits,
     "delayed_subscriptions": _subscriptions,
     "flush_interval": _seconds,
     "rest_base_url": _text,
     "s3_endpoint_url": _text,
     "s3_bucket": _text,
-    "noncanonical_symbols": _on_error,
-    "unlisted_symbols": _on_error,
-    "unreadable_symbols": _on_error,
-    "unavailable_symbols": _on_error,
+    "on_error": _on_error,
 }
 """The converter of each setting a file may hold: every field of `MassiveConfig` but the
 credentials."""
@@ -1397,27 +1522,27 @@ _SHOWN_KEY_LENGTH: Final = 40
 """The most characters of an unknown key a message shows, so a pasted secret is cut short."""
 
 
-def _settings_path(path: str | os.PathLike[str] | None) -> tuple[Path, str]:
-    """Return the settings file's path, with `~` expanded, and where the path came from.
+def _settings_path(path: str | os.PathLike[str] | None) -> tuple[Path, bool]:
+    """Return the settings file's path, with `~` expanded, and whether it came from the variable.
 
     Args:
         path: The path passed to `from_file`, or None to read `CONFIG_FILE_VARIABLE`.
 
     Returns:
-        The path, and `""` or, for a path from the environment, a note naming the variable.
+        The path, and True for a path read from `CONFIG_FILE_VARIABLE`.
 
     Raises:
         ValueError: If `path` is None and the variable is unset, blank, or padded.
     """
     if path is not None:
-        return Path(path).expanduser(), ""
+        return Path(path).expanduser(), False
     text = environment_text(CONFIG_FILE_VARIABLE)
     if text is None:
         raise ValueError(
-            f"no settings file: pass its path to MassiveConfig.from_file, or set "
-            f"{CONFIG_FILE_VARIABLE} to it"
+            "No settings file was given. Pass its path to dm.MassiveConfig.from_file, or set "
+            f"{CONFIG_FILE_VARIABLE} to it."
         )
-    return Path(text).expanduser(), f" (from {CONFIG_FILE_VARIABLE})"
+    return Path(text).expanduser(), True
 
 
 def _settings_values(
@@ -1441,35 +1566,39 @@ def _settings_values(
     values: dict[str, Any] = {}
     positions: dict[str, _Position] = {}
     for key, value in root.value:
-        name = _scalar(key, "a setting name")
+        if not isinstance(key, yaml.ScalarNode):
+            raise _SettingsFileError(
+                "A setting name is a list or mapping here, not text.", key.start_mark
+            )
+        name: str = key.value
         place = _place(file, key.start_mark)
         if name in positions:
             raise ValueError(
-                f"{place}: {name} is set twice; set it once (it is first set on line "
-                f"{positions[name].line + 1})"
+                f"{place}: {name} is set twice, first on line {positions[name].line + 1}. "
+                "Remove one."
             )
         if name in _CREDENTIAL_VARIABLES:
             raise ValueError(
-                f"{place}: {name} is a credential, which a settings file may not hold; remove "
-                f"it and set {_CREDENTIAL_VARIABLES[name]} in the environment, or pass it in "
-                "code (the value is not shown)"
+                f"{place}: {name} is a credential, which a settings file may not hold. Remove "
+                f"it, and set {_CREDENTIAL_VARIABLES[name]} in the environment or pass "
+                f"dm.MassiveConfig({name}=...)."
             )
         convert = _CONVERTERS.get(name)
         if convert is None:
             known = [*_CONVERTERS, *_CREDENTIAL_VARIABLES]
             close = difflib.get_close_matches(name, known, n=1)
             hint = (
-                f"did you mean {close[0]!r}?"
+                f"Write {close[0]} if you meant that setting."
                 if close
-                else f"the settings are {', '.join(_CONVERTERS)}"
+                else f"Write one of {_one_of(list(_CONVERTERS))}."
             )
             shown = name if len(name) <= _SHOWN_KEY_LENGTH else name[:_SHOWN_KEY_LENGTH] + "…"
-            raise ValueError(f"{place}: unknown setting {shown!r}; {hint}")
+            raise ValueError(f"{place}: {shown!r} is not a setting. {hint}")
         try:
             values[name] = convert(value)
         except _SettingsFileError as problem:
             where = _place(file, problem.position)
-            raise ValueError(f"{where}: {name} {problem.problem}") from None
+            raise ValueError(f"{where}: In {name}, {problem.problem}") from None
         positions[name] = key.start_mark
     return values, positions
 
@@ -1487,23 +1616,35 @@ def _read_settings_file(path: str | os.PathLike[str] | None) -> MassiveConfig:
         ValueError: As `from_file` says.
         FileNotFoundError: If the file does not exist.
     """
-    file, source = _settings_path(path)
+    file, from_variable = _settings_path(path)
     try:
         text = file.read_text(encoding="utf-8")
     except FileNotFoundError:
-        raise FileNotFoundError(f"settings file {file} does not exist{source}") from None
+        fix = (
+            f"Set {CONFIG_FILE_VARIABLE} to the path of an existing file."
+            if from_variable
+            else "Pass the path of an existing file."
+        )
+        raise FileNotFoundError(f"Settings file {file} does not exist. {fix}") from None
     except UnicodeDecodeError as error:
         raise ValueError(
-            f"settings file {file} is not UTF-8 text: {error.reason} at byte {error.start}"
+            f"Settings file {file} is not UTF-8 text: {error.reason} at byte {error.start}. "
+            "Save it as UTF-8."
         ) from None
     try:
         values, positions = _settings_values(file, _compose(text))
     except _SettingsFileError as problem:
         raise ValueError(f"{_place(file, problem.position)}: {problem.problem}") from None
     except yaml.MarkedYAMLError as error:
-        raise ValueError(f"{_place(file, error.problem_mark)}: {error.problem}") from None
-    except yaml.YAMLError as error:
-        raise ValueError(f"settings file {file}: {error}") from None
+        raise ValueError(
+            f"{_place(file, error.problem_mark)}: The text is not valid YAML. The YAML parser "
+            f'says "{error.problem}".'
+        ) from None
+    except ReaderError as error:
+        raise ValueError(
+            f"Settings file {file} holds the character U+{error.character:04X} at offset "
+            f"{error.position}, which YAML does not allow. Remove it."
+        ) from None
     try:
         config = MassiveConfig(**values)
     except ValueError as error:
@@ -1515,6 +1656,7 @@ def _read_settings_file(path: str | os.PathLike[str] | None) -> MassiveConfig:
             raise
         where = _place(file, positions.get(match.group(1)))
         raise ValueError(f"{where}: {error}") from None
+    source = f" (from {CONFIG_FILE_VARIABLE})" if from_variable else ""
     logger.info("settings file %s%s set %s", file, source, ", ".join(values) or "no settings")
     return config
 
@@ -1541,24 +1683,23 @@ class _Example(NamedTuple):
 
 
 _EXAMPLE_ACCOUNT: Final = (
-    "This file sets every setting, and a line marked `# the default` can be left out. Its "
-    "other values suit an account with Stocks Starter, Options Developer, and Indices Business, "
-    "and the free Basic plan of Currencies and Futures:"
+    "This file sets every setting, and a line marked `# the default` can be left out. Change "
+    "the other values to match your account:"
 )
 """The sentence before the example settings file: the account its values agree with."""
 
 _EXAMPLE: Final[Mapping[str, _Example]] = {
     "delayed_subscriptions": _Example(
         frozenset({Subscription.STOCKS, Subscription.OPTIONS}),
-        "Plans that stream 15 minutes late: Stocks Starter and Options Developer.",
+        "Subscriptions whose data Massive serves you delayed, 15 minutes late.",
     ),
-    "rest_basic_subscriptions": _Example(
-        frozenset({Subscription.CURRENCIES, Subscription.FUTURES}),
-        "Subscriptions on the free Basic plan, held to five requests a minute.",
+    "rest_requests_per_minute": _Example(
+        {Subscription.CURRENCIES: 5, Subscription.FUTURES: 5},
+        "REST requests a minute Massive allows each subscription it limits.",
     ),
     "max_outage": _Example(
         600.0,
-        "Seconds a stream or poll() table rides out an outage before it fails; 0 fails at once.",
+        "Seconds a live table waits out an outage before it fails, or 0 to fail at once.",
     ),
     "flush_interval": _Example(
         0.05, "Seconds between the batches of streamed rows added to live tables."
@@ -1569,28 +1710,29 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
     "max_concurrency": _Example(
         8, "REST requests at a time, and separately flat files read at a time."
     ),
-    "noncanonical_symbols": _Example(
-        OnError.RAISE, "A watchlist value that isn't Massive's exact ticker: log, ignore, or raise."
-    ),
-    "unlisted_symbols": _Example(
-        OnError.LOG, "A watchlist crypto pair that Massive doesn't list: log, ignore, or raise."
-    ),
-    "unreadable_symbols": _Example(
-        OnError.LOG,
-        "A symbol in Massive's data that the library can't read: log, ignore, or raise.",
-    ),
-    "unavailable_symbols": _Example(
-        OnError.LOG, "A symbol Massive answers as not found: log, ignore, or raise."
+    "on_error": _Example(
+        ErrorPolicy(
+            noncanonical_symbols=OnError.RAISE,
+            unreadable_symbols=OnError.LOG,
+            unavailable_symbols=OnError.LOG,
+            unreadable_keys=OnError.LOG,
+            unconvertible_values=OnError.LOG,
+            malformed_rows=OnError.LOG,
+            unlisted_contracts=OnError.LOG,
+            unscheduled_products=OnError.LOG,
+            refused_venues=OnError.RAISE,
+        ),
+        "What each kind of problem does: raise, log, or ignore.",
     ),
     "websocket_hosts": _Example(
-        {AssetClass.INDICES: BUSINESS_HOST},
+        {AssetClass.INDICES: "business.massive.com"},
         "The WebSocket host per asset class: index values stream only from business.massive.com.",
     ),
     "subscription_confirmation_timeout": _Example(
         5.0, "Seconds Massive has to confirm a stream's channel before the library asks again."
     ),
     "reconnect_backoff": _Example(
-        30.0, "Shortest wait, in seconds, before reconnecting a dropped stream; at least 15."
+        30.0, "Shortest wait, in seconds, before reconnecting a dropped stream: 15 or more."
     ),
     "max_reconnect_backoff": _Example(
         120.0, "Longest wait, in seconds, before reconnecting a dropped stream."
@@ -1612,7 +1754,21 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
 }
 """The example settings file: every setting a file may hold, each once, in the order of the
 page's table, the ones a new user sets first. Its values agree with one account
-(`_EXAMPLE_ACCOUNT`), and the tests load the file and compare each value with these."""
+(`_EXAMPLE_ACCOUNT`), and the tests load the file and compare each value with these. Its
+`on_error` sets every cause, each under its line of `_CAUSE_COMMENTS`."""
+
+_CAUSE_COMMENTS: Final[Mapping[str, str]] = {
+    "noncanonical_symbols": "A watchlist value that isn't Massive's exact ticker.",
+    "unreadable_symbols": "A symbol in Massive's data that the library can't read.",
+    "unavailable_symbols": "A symbol Massive has no data for.",
+    "unreadable_keys": "A row of Massive's data whose key the library can't read.",
+    "unconvertible_values": "A row of Massive's data with a value the library can't read.",
+    "malformed_rows": "A flat-file line that isn't a readable row.",
+    "unlisted_contracts": "A futures ticker Massive streams that its lists don't hold.",
+    "unscheduled_products": "A futures row Massive's schedules give no session for.",
+    "refused_venues": "A futures exchange you name that the plan lacks.",
+}
+"""The comment above each cause of `on_error` in the example settings file, keyed by cause."""
 
 
 _ATTRIBUTE: Final = re.compile(r"^    (\w+): (.*)$")
@@ -1640,15 +1796,18 @@ _DOCS_PAGE_URL: Final = re.compile(
 and the settings page, itself under `docs/`, writes as a relative link."""
 
 
-def _docstring_entries() -> dict[str, list[list[str]]]:
-    """Read each setting's entry from the `Attributes` section of `MassiveConfig`'s docstring.
+def _docstring_entries(cls: type) -> dict[str, list[list[str]]]:
+    """Read each setting's entry from the `Attributes` section of a class's docstring.
+
+    Args:
+        cls: `MassiveConfig`, or `ErrorPolicy` for the causes of `on_error`.
 
     Returns:
         Each entry's paragraphs, keyed by the setting's name: each paragraph is its lines,
         without the entry's indent, so a list item keeps its `- ` and its continuation lines
         their two extra spaces.
     """
-    doc = inspect.cleandoc(MassiveConfig.__doc__ or "")
+    doc = inspect.cleandoc(cls.__doc__ or "")
     section = doc[doc.index("\nAttributes:\n") :].splitlines()[2:]
     entries: dict[str, list[list[str]]] = {}
     new_paragraph = False
@@ -1668,6 +1827,18 @@ def _docstring_entries() -> dict[str, list[list[str]]]:
     return entries
 
 
+def _entries() -> dict[str, list[list[str]]]:
+    """Read every entry of the reference: each setting's, and each cause's by its path.
+
+    Returns:
+        The paragraphs of each entry of `MassiveConfig`'s docstring, keyed by the setting's
+        name, then those of `ErrorPolicy`'s, keyed by the cause's path, such as
+        `on_error.malformed_rows` (`_cause_path`).
+    """
+    causes = {_cause_path(name): entry for name, entry in _docstring_entries(ErrorPolicy).items()}
+    return {**_docstring_entries(MassiveConfig), **causes}
+
+
 def _setting_texts() -> dict[str, str]:
     """Read each setting's summary: the first paragraph of its docstring entry.
 
@@ -1676,11 +1847,11 @@ def _setting_texts() -> dict[str, str]:
 
     Returns:
         Each setting's summary as one line, without its last sentence when that sentence gives
-        the default, keyed by the setting's name.
+        the default, keyed by the setting's name or the cause's path (`_entries`).
     """
     return {
         name: _DEFAULT_SENTENCE.sub("", " ".join(" ".join(paragraphs[0]).split()))
-        for name, paragraphs in _docstring_entries().items()
+        for name, paragraphs in _entries().items()
     }
 
 
@@ -1688,11 +1859,12 @@ def _setting_details() -> dict[str, list[str]]:
     """Read each setting's detail: the paragraphs of its docstring entry after the summary.
 
     Returns:
-        Each setting's later paragraphs as Markdown, line breaks kept, keyed by its name.
+        Each setting's later paragraphs as Markdown, line breaks kept, keyed by its name or the
+        cause's path (`_entries`).
     """
     return {
         name: ["\n".join(lines) for lines in paragraphs[1:]]
-        for name, paragraphs in _docstring_entries().items()
+        for name, paragraphs in _entries().items()
     }
 
 
@@ -1741,12 +1913,23 @@ def _spellings(members: Iterable[StrEnum]) -> str:
 
 
 _HOSTS_KEY: Final = "websocket_hosts"
-"""The one setting whose value is a mapping; the page names each of its keys by its full path."""
+"""The setting whose value maps asset class to host; the page names each of its keys by its full
+path."""
 
 
 def _host_path(asset_class: AssetClass) -> str:
     """Return the full path of one `websocket_hosts` key, such as `websocket_hosts.indices`."""
     return f"{_HOSTS_KEY}.{asset_class.value}"
+
+
+_POLICY_KEY: Final = "on_error"
+"""The setting whose value is a mapping of cause to setting; the page names each cause by its
+full path."""
+
+
+def _cause_path(cause: str) -> str:
+    """Return the full path of one cause of `on_error`, such as `on_error.malformed_rows`."""
+    return f"{_POLICY_KEY}.{cause}"
 
 
 def _value_forms() -> dict[str, str]:
@@ -1757,12 +1940,13 @@ def _value_forms() -> dict[str, str]:
 
     Returns:
         A sentence fragment per row of the page's table, keyed by the row's setting: each
-        setting a file may hold, except that each key of `websocket_hosts` has its own row,
-        named by its full path (`_host_path`). For example, ``A positive whole number, such
+        setting a file may hold, except that each key of `websocket_hosts` and each cause of
+        `on_error` has its own row, named by its full path (`_host_path`, `_cause_path`). For
+        example, ``A positive whole number, such
         as `4` `` for `max_concurrency`.
     """
     delayed = [member for member in Subscription if member is not Subscription.CURRENCIES]
-    symbol_words = _spellings([OnError.LOG, OnError.IGNORE, OnError.RAISE])
+    error_words = _spellings([OnError.LOG, OnError.IGNORE, OnError.RAISE])
     url = (
         "An `https` URL of a host alone, or `http` for your own machine, such as "
         "`https://api.massive.com`"
@@ -1770,16 +1954,13 @@ def _value_forms() -> dict[str, str]:
     forms = {
         "delayed_subscriptions": f"A list of any of {_spellings(delayed)}, such as "
         "`[stocks]`, or `[]` for none",
-        "rest_basic_subscriptions": f"A list of any of {_spellings(Subscription)}, such as "
-        "`[options]`, or `[]` for none",
+        "rest_requests_per_minute": f"A mapping of any of {_spellings(Subscription)} to a "
+        "positive whole number, such as `{options: 5}`, or `{}` for none",
         "max_outage": "A number of seconds, `0` or more, such as `600`",
         "flush_interval": "A positive number of seconds, such as `0.1`",
         "flat_file_symbol_threshold": "A positive whole number, such as `100`",
         "max_concurrency": "A positive whole number, such as `4`",
-        "noncanonical_symbols": symbol_words,
-        "unlisted_symbols": symbol_words,
-        "unreadable_symbols": symbol_words,
-        "unavailable_symbols": symbol_words,
+        **{_cause_path(f.name): error_words for f in fields(ErrorPolicy)},
         "subscription_confirmation_timeout": f"A positive number of seconds below "
         f"{NO_ACK_RESEND:g}, such as `10`",
         "reconnect_backoff": f"A number of seconds from {MIN_RECONNECT_BACKOFF:g} to "
@@ -1792,7 +1973,7 @@ def _value_forms() -> dict[str, str]:
     }
     for asset_class in AssetClass:
         subscription = subscription_of(asset_class)
-        example = BUSINESS_HOST if asset_class is AssetClass.INDICES else REALTIME_HOST
+        example = "business.massive.com" if asset_class is AssetClass.INDICES else REALTIME_HOST
         rule = (
             "never a `delayed.` host"
             if subscription is Subscription.CURRENCIES
@@ -1849,7 +2030,8 @@ def _example_file() -> str:
     """Render the example settings file: every setting of `_EXAMPLE`, each under its comment.
 
     A value equal to the setting's default is marked `# the default`. The `websocket_hosts`
-    mapping is written in block form, one asset class per indented line.
+    mapping is written in block form, one asset class per indented line, and so is `on_error`,
+    each cause under its comment (`_CAUSE_COMMENTS`) and marked against `ErrorPolicy.DEFAULTS`.
 
     Returns:
         The file's YAML text.
@@ -1861,7 +2043,13 @@ def _example_file() -> str:
             lines.append("")
         lines.append(f"# {example.comment}")
         marker = "  # the default" if example.value == defaults[name] else ""
-        if isinstance(example.value, Mapping):
+        if isinstance(example.value, ErrorPolicy):
+            lines.append(f"{name}:")
+            default = asdict(ErrorPolicy.DEFAULTS)
+            for cause, setting in asdict(example.value).items():
+                same = "  # the default" if setting == default[cause] else ""
+                lines += [f"  # {_CAUSE_COMMENTS[cause]}", f"  {cause}: {setting.value}{same}"]
+        elif isinstance(example.value, Mapping):
             lines.append(f"{name}:{marker}")
             lines.extend(f"  {key.value}: {host}" for key, host in example.value.items())
         else:
@@ -1876,24 +2064,19 @@ def settings_reference() -> str:
 
     - the example settings file (`_example_file`), which sets every setting;
     - a table with one row per setting a file may hold, in `_EXAMPLE` order, and one per key of
-      `websocket_hosts`, named by its full path: what the setting is for (the first paragraph of
-      its docstring entry), the values a file may write (`_value_forms`), and its default (from
-      the field's own default);
-    - per setting, the rest of its docstring entry: when to change it and what each value does.
+      `websocket_hosts` and per cause of `on_error`, named by its full path: what the setting is
+      for (the first paragraph of its docstring entry), the values a file may write
+      (`_value_forms`), and its default (from the field's own default, or a cause's in
+      `ErrorPolicy.DEFAULTS`);
+    - per setting, and per cause of `on_error`, the rest of its docstring entry: when to change
+      it and what each value does.
 
     Enum members in the docstring's text are shown as a file spells them (`_as_file_words`).
 
     Returns:
         The Markdown that goes between `SETTINGS_REFERENCE_START` and `SETTINGS_REFERENCE_END`.
-
-    Raises:
-        ValueError: If `_EXAMPLE` does not hold every setting a file may hold.
     """
-    if sorted(_EXAMPLE) != sorted(_CONVERTERS):
-        raise ValueError(
-            f"the settings reference lists {sorted(_EXAMPLE)}, not every file setting "
-            f"once: {sorted(_CONVERTERS)}"
-        )
+    causes = _check_reference_coverage()
     texts = _setting_texts()
     details = _setting_details()
     forms = _value_forms()
@@ -1913,8 +2096,9 @@ def settings_reference() -> str:
         "### Values and defaults",
         "",
         (
-            f"A key inside the `{_HOSTS_KEY}` mapping is named by its full path: "
-            f"`{_host_path(AssetClass.INDICES)}` is the `indices` key under `{_HOSTS_KEY}`."
+            f"A key inside the `{_HOSTS_KEY}` or `{_POLICY_KEY}` mapping is named by its full "
+            f"path: `{_host_path(AssetClass.INDICES)}` is the `indices` key under "
+            f"`{_HOSTS_KEY}`."
         ),
         "",
         "| Setting | What it's for | Values | Default |",
@@ -1923,6 +2107,12 @@ def settings_reference() -> str:
     for name in _EXAMPLE:
         if name == _HOSTS_KEY:
             lines.extend(_host_row(c, forms[_host_path(c)]) for c in AssetClass)
+            continue
+        if name == _POLICY_KEY:
+            for cause, setting in causes.items():
+                path = _cause_path(cause)
+                text = _as_file_words(texts[path])
+                lines.append(f"| `{path}` | {text} | {forms[path]} | `{setting.value}` |")
             continue
         default = _file_value(defaults[name])
         text = _as_file_words(texts[name])
@@ -1936,10 +2126,36 @@ def settings_reference() -> str:
         "`help(dm.MassiveConfig)` shows the same text in the console, written for Python code.",
     ]
     for name in _EXAMPLE:
-        lines += ["", f"#### {name}"]
-        for paragraph in details[name]:
-            lines += ["", _as_page_links(_as_file_words(paragraph))]
+        entries = [name] + ([_cause_path(c) for c in causes] if name == _POLICY_KEY else [])
+        for entry in entries:
+            lines += ["", f"#### {entry}"]
+            for paragraph in details[entry]:
+                lines += ["", _as_page_links(_as_file_words(paragraph))]
     return "\n".join(lines) + "\n"
+
+
+def _check_reference_coverage() -> dict[str, OnError]:
+    """Check that the settings reference covers every file setting and every cause once.
+
+    Returns:
+        The default setting of each cause of `ErrorPolicy`, in field order.
+
+    Raises:
+        ValueError: If `_EXAMPLE` does not hold every setting a file may hold, or
+            `_CAUSE_COMMENTS` every cause of `ErrorPolicy`.
+    """
+    if sorted(_EXAMPLE) != sorted(_CONVERTERS):
+        raise ValueError(
+            f"The settings reference lists {sorted(_EXAMPLE)}, not every file setting once. "
+            f"Give _EXAMPLE one entry for each of {sorted(_CONVERTERS)}."
+        )
+    causes: dict[str, OnError] = asdict(ErrorPolicy.DEFAULTS)
+    if sorted(_CAUSE_COMMENTS) != sorted(causes):
+        raise ValueError(
+            f"The example file comments on {sorted(_CAUSE_COMMENTS)}, not every cause once. "
+            f"Give _CAUSE_COMMENTS one entry for each of {sorted(causes)}."
+        )
+    return causes
 
 
 def with_settings_reference(page: str) -> str:
@@ -1955,12 +2171,29 @@ def with_settings_reference(page: str) -> str:
         ValueError: If the page lacks `SETTINGS_REFERENCE_START`, or
             `SETTINGS_REFERENCE_END` after it.
     """
+    start, end = _reference_bounds(page)
+    head = page[: start + len(SETTINGS_REFERENCE_START)]
+    return f"{head}\n\n{settings_reference()}\n{page[end:]}"
+
+
+def _reference_bounds(page: str) -> tuple[int, int]:
+    """Return where the generated part of `docs/configuration.md` starts and ends.
+
+    Args:
+        page: The page's text.
+
+    Returns:
+        The index of `SETTINGS_REFERENCE_START`, and of `SETTINGS_REFERENCE_END` after it.
+
+    Raises:
+        ValueError: If the page lacks `SETTINGS_REFERENCE_START`, or
+            `SETTINGS_REFERENCE_END` after it.
+    """
     start = page.find(SETTINGS_REFERENCE_START)
     end = page.find(SETTINGS_REFERENCE_END, max(start, 0))
     if start < 0 or end < 0:
         raise ValueError(
-            "the configuration page needs the lines SETTINGS_REFERENCE_START and "
-            "SETTINGS_REFERENCE_END around its generated part"
+            "The configuration page lacks the line SETTINGS_REFERENCE_START, or "
+            "SETTINGS_REFERENCE_END after it. Put the two lines around its generated part."
         )
-    head = page[: start + len(SETTINGS_REFERENCE_START)]
-    return f"{head}\n\n{settings_reference()}\n{page[end:]}"
+    return start, end

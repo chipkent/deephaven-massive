@@ -168,6 +168,9 @@ def test_a_sink_that_raises_never_fails_the_client_and_is_logged_once(
     assert [page.rows for page in pages] == [[{"price": 1.5}]] * 2
     [record] = [r for r in caplog.records if r.name == capture.__name__]
     assert record.levelno == logging.WARNING
+    assert record.getMessage() == (
+        "The reply-capture sink raised, and the library ignores this and its later failures."
+    )
     assert record.exc_info is not None
     assert str(record.exc_info[1]) == "the recorder broke"
 
@@ -199,6 +202,7 @@ def test_frames_after_authentication_reach_the_sink_and_the_handshake_never_does
         clock=FakeClock(),
     )
     client.start()
+    client.connect()
     try:
         fake_ws_server.wait_for(lambda server: len(server.connections) == 1)
         fake_ws_server.wait_for(lambda server: server.connections[0].auth is not None)

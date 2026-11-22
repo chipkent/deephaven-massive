@@ -4,15 +4,13 @@ The live-run program (`live_run`) keeps every check's status in its state (`run_
 module turns that state into what the tester and the owner read:
 
 - `status_lines`, the `status` command's view: the latest probe, the next stream day and
-  stream night, every
-  check with its status, its reason, the subscriptions of its last run, and when its group runs
-  next, then one summary row per group. Skip reasons drop the monthly prices the live tests
-  add, so they read `skipped: needs Stocks Starter`.
+  stream night, every check with its status and its reason (for a refusal, Massive's own
+  words), and when its group runs next, then one summary row per group.
 - `write_checks_csv`, one line per check, and `write_report`, `REPORT.md`: the environment, the
-  probes over time, one table per group, each stream night's findings (`night_lines`), the
-  open verification items of `docs/dev/verification-items.md` (from the tests'
-  `settles` and `verifies` markers) with each one's status, and every check still unverified,
-  grouped by what it needs.
+  probes over time, one table per group, what Massive refused, by day (`refused_lines`), each
+  stream night's findings (`night_lines`), the open verification items of
+  `docs/dev/verification-items/` (from the tests' `settles` and `verifies` markers) with each
+  one's status, and every check still unverified, grouped by why.
 - `pack`, which writes both, scans every file of the results folder for the secrets
   (`secret_scrub.scan`), and only when none is found zips the folder to
   `live-results-<New York date>.zip`.
@@ -24,14 +22,13 @@ from __future__ import annotations
 
 import csv
 import json
-import re
 import zipfile
 from datetime import date
 from typing import TYPE_CHECKING, Final
 
 from tests._live.live_run import timetable
 from tests._live.live_run.secret_scrub import scan
-from tests._live.live_run.state import is_need, tiers_text
+from tests._live.live_run.state import is_daily
 from tests._live.summary import item_order
 
 if TYPE_CHECKING:
@@ -66,21 +63,6 @@ UNLISTED_ITEMS: Final = frozenset({"13", "17", "18"})
 """Open verification items with no live test: checked by CI, retired, and settled without a
 key, so the report leaves them out."""
 
-_PRICE: Final = re.compile(r" \((?:\$[^)]*|free|price on request)\)")
-"""A plan's price in a skip reason, such as ` ($29/month)`."""
-
-
-def shown_reason(reason: str) -> str:
-    """Return a reason without the plans' prices.
-
-    Args:
-        reason: The reason.
-
-    Returns:
-        Such as `"needs Stocks Starter"` for `"needs Stocks Starter ($29/month)"`.
-    """
-    return _PRICE.sub("", reason)
-
 
 def status_text(check: Check) -> str:
     """Describe a check's status in one phrase.
@@ -89,13 +71,33 @@ def status_text(check: Check) -> str:
         check: The check.
 
     Returns:
-        Such as `"passed"`, `"skipped: needs Stocks Starter"`, or, for the upgrade check that
-        never ran, `"not started (optional)"`.
+        Such as `"passed"`, `"refused: HTTP 403 from GET ..."` (a reason that starts with the
+        status says it once), or, for the upgrade check that never ran, `"not started
+        (optional)"`.
     """
     if check.group == "upgrade-check" and check.status == "not run":
         return "not started (optional)"
-    reason = shown_reason(check.reason)
+    reason = check.reason.removeprefix(f"{check.status}: ")
     return f"{check.status}: {reason}" if reason else check.status
+
+
+def why_unverified(check: Check) -> str:
+    """Name why a check is not verified, for grouping in the report.
+
+    Args:
+        check: A check that has not passed.
+
+    Returns:
+        `"refused by Massive (<subscription>)"` for a refusal (without the subscription when
+        the refusal names none), `"not listed as delayed"` for a skip of the owner's delayed
+        listing, else its status.
+    """
+    if not is_daily(check):
+        return check.status
+    if check.status == "skipped":
+        return "not listed as delayed"
+    named = f" ({check.subscription})" if check.subscription else ""
+    return f"refused by Massive{named}"
 
 
 def _ordered(checks: Iterable[Check]) -> list[Check]:
@@ -192,7 +194,6 @@ def status_lines(
         lines.append("latest probe: none yet")
     else:
         lines.append(f"latest probe: {latest_probe['when']}")
-        lines.append(f"  subscriptions: {tiers_text(state, state.current)}")
     lines.append(f"next stream day: {state.stream_day or 'none planned'}")
     lines.append(f"next stream night: {night_text(state)}")
     group = ""
@@ -200,8 +201,7 @@ def status_lines(
         if check.group != group:
             group = check.group
             lines.append(f"{group} (next: {next_start(group)})")
-        last = f" [{tiers_text(state, check.entitlement)}]" if check.entitlement else ""
-        lines.append(f"  {check.name}: {status_text(check)}{last}")
+        lines.append(f"  {check.name}: {status_text(check)}")
     lines.append("")
     header = ["group", *STATUSES]
     lines.append(" | ".join(header))
@@ -218,16 +218,16 @@ def write_checks_csv(folder: Path, state: RunState) -> None:
     """
     with (folder / "checks.csv").open("w", encoding="utf-8", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(["group", "name", "status", "reason", "last_run", "subscriptions"])
+        writer.writerow(["group", "name", "status", "reason", "last_run", "refused_subscription"])
         for check in _ordered(state.checks.values()):
             writer.writerow(
                 [
                     check.group,
                     check.name,
                     check.status,
-                    shown_reason(check.reason),
+                    check.reason,
                     check.last_run,
-                    tiers_text(state, check.entitlement),
+                    check.subscription if check.status == "refused" else "",
                 ]
             )
 
@@ -239,19 +239,37 @@ def item_status(checks: list[Check]) -> str:
         checks: The checks that answer the item.
 
     Returns:
-        `evidence recorded` when all passed, `partly run` when some never ran, `needs <...>`
-        when the rest were skipped for what the key lacks, else `failed`.
+        `evidence recorded` when all passed, `partly run` when some never ran, why the others
+        are unverified (`why_unverified`) when they were refused or not listed as delayed and
+        the rest passed or skipped, else `failed`.
     """
     if all(c.status == "passed" for c in checks):
         return "evidence recorded"
     if any(c.status == "not run" for c in checks):
         return "partly run"
-    needs = sorted(
-        {shown_reason(c.reason) for c in checks if c.status == "skipped" and is_need(c.reason)}
-    )
-    if needs and all(c.status in {"passed", "skipped"} for c in checks):
-        return "; ".join(needs)
+    why = sorted({why_unverified(c) for c in checks if is_daily(c)})
+    if why and all(c.status in {"passed", "skipped", "refused"} for c in checks):
+        return "; ".join(why)
     return "failed"
+
+
+def refused_lines(checks: Iterable[Check]) -> list[str]:
+    """Return the `REPORT.md` table of what Massive refused, by the day of its latest refusal.
+
+    Args:
+        checks: The checks.
+
+    Returns:
+        A table of each refused check's day, subscription, name, and Massive's refusal,
+        oldest day first; a line saying Massive refused nothing when none is refused.
+    """
+    refused = sorted(
+        (c for c in checks if c.status == "refused"), key=lambda c: (c.last_run, c.group, c.name)
+    )
+    if not refused:
+        return ["Massive refused nothing."]
+    rows = [[c.last_run, c.subscription, f"{c.group}: {c.name}", c.reason] for c in refused]
+    return _table(["day", "subscription", "check", "refusal"], rows)
 
 
 def _table(header: list[str], rows: Iterable[list[str]]) -> list[str]:
@@ -287,7 +305,7 @@ def write_report(folder: Path, state: RunState) -> None:
     else:
         lines.append("No environment was recorded.")
     lines.extend(["", "## Probes", ""])
-    probes = folder / "probes" / "entitlements.csv"
+    probes = folder / "probes" / "probes.csv"
     if probes.exists():
         with probes.open(encoding="utf-8") as file:
             records = list(csv.reader(file))
@@ -297,12 +315,9 @@ def write_report(folder: Path, state: RunState) -> None:
     checks = _ordered(state.checks.values())
     for group in dict.fromkeys(c.group for c in checks):
         lines.extend(["", f"## {group}", ""])
-        rows = [
-            [c.name, status_text(c), c.last_run, tiers_text(state, c.entitlement)]
-            for c in checks
-            if c.group == group
-        ]
-        lines.extend(_table(["check", "status", "last run", "subscriptions"], rows))
+        rows = [[c.name, status_text(c), c.last_run] for c in checks if c.group == group]
+        lines.extend(_table(["check", "status", "last run"], rows))
+    lines.extend(["", "## What Massive refused, by day", "", *refused_lines(checks)])
     lines.extend(["", "## Stream nights", *night_lines(folder, state)])
     lines.extend(["", "## Open verification items", ""])
     items: dict[str, list[Check]] = {}
@@ -316,9 +331,9 @@ def write_report(folder: Path, state: RunState) -> None:
     waiting: dict[str, list[str]] = {}
     for check in checks:
         if check.status != "passed":
-            need = shown_reason(check.reason) if is_need(check.reason) else check.status
-            waiting.setdefault(need, []).append(f"{check.group}: {check.name}")
-    lines.extend(f"- **{need}**: " + ", ".join(waiting[need]) for need in sorted(waiting))
+            why = why_unverified(check)
+            waiting.setdefault(why, []).append(f"{check.group}: {check.name}")
+    lines.extend(f"- **{why}**: " + ", ".join(waiting[why]) for why in sorted(waiting))
     (folder / "REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

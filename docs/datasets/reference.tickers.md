@@ -7,7 +7,7 @@ Tickers of stocks, OTC securities, indices, forex, and crypto, with listing deta
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.reference.tickers(symbols=None, *, market=None, ticker_type=None, exchange=None, cusip=None, cik=None, as_of=None, active=True, search=None, sort=None, order=None, limit=None, filters=None)
+m.reference.tickers(symbols=None, *, market=None, ticker_type=None, exchange=None, cusip=None, cik=None, as_of=None, active=True, search=None, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -35,6 +35,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | Per ticker when tickers are named, else in total. |
 | [`filters`](README.md#filters) | Further endpoint parameters. Keys: `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -60,7 +61,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The exchange symbol that this item is traded under." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `Active` | Boolean | Whether or not the asset is actively traded. False means the asset has been delisted. |
 | `BaseCurrencyName` | String | The name of the currency that this asset is priced against. |
 | `BaseCurrencySymbol` | String | The ISO 4217 code of the currency that this asset is priced against. |
@@ -80,14 +80,13 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `Active` | `active` |
 | `BaseCurrencyName` | `base_currency_name` |
 | `BaseCurrencySymbol` | `base_currency_symbol` |
@@ -116,4 +115,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

@@ -3,9 +3,9 @@
 A `history()` or `fetch()` whose `symbols` is a refreshing table follows it
 (`_tables/followed_read.py`): each symbol added to the table is read (by `history()` over the
 call's fixed window, by `fetch()` as Massive answers at that read) and lands in the result
-whole, as one partition of a merged `PartitionedTable`, and each symbol removed leaves it. The
-coordinator adds, replaces, and drops a symbol's partition by publishing its partition row
-(`FollowedRead.publish`); `followed_read.py` explains that model. This module decides, for every
+whole, in one update cycle, and each symbol removed leaves it. The coordinator adds, replaces,
+and frees a symbol's rows by publishing its download (`FollowedRead.publish`);
+`followed_read.py` explains that model. This module decides, for every
 such result of a session, which symbol is read when, what its read's outcome does, and what the
 diagnostics show. It owns:
 
@@ -16,10 +16,12 @@ diagnostics show. It owns:
   queues), each read's start and outcome (from the read pool), and each result's stop (from its
   blink table's shutdown). It is the only thread that reads or changes per-symbol state, so that
   state needs no lock. It makes no request and waits on nothing: it publishes each symbol's
-  partition row (`FollowedRead.publish`, which never waits for an update cycle), times the
+  download (`FollowedRead.publish`, which never waits for an update cycle), times the
   retries, and queues the `m.streams()` and `m.symbol_reads()` rows.
-- **One read pool per session**, a `ThreadPoolExecutor` of `MassiveConfig.max_concurrency`
-  threads (`massive #1 follow-read_0`), made and ended with the coordinator thread.
+- **The session's read pool** (`_tables/read_pool.py`), at most `MassiveConfig.max_concurrency`
+  threads (`massive #1 read_0`), shared with the background reads, so every download of the
+  session counts against one limit. The session owns and stops it; the coordinator only submits
+  to it.
   A read's outcome that arrives once its result's stop token is set is dropped: the result was
   released and is unused, or failed. Each task
   reads some symbols of one result (`FollowPlan.read`) in the session's execution context,
@@ -29,11 +31,14 @@ diagnostics show. It owns:
   one scan in flight, since a scan downloads the same files whatever the number of symbols.
 
 **A symbol's life.** Added, it is `QUEUED`; a read of it makes it `LOADING`; its rows make it
-`DONE`. A failure that may pass (`FailureKind.TRANSIENT`) makes it `RETRYING`, read again 1, 5, and
-15 minutes after the first, second, and third failure (`RETRY_DELAYS`), and `FAILED` after the
-fourth; any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
-an empty partition row replaces its partition row, dropping its partition and freeing its rows, and
-a re-add reads it again; under `Reread.NEVER` its partition row is kept, so a re-add shows the
+`DONE`. A failure that may pass (its error `is_retryable`) makes it `RETRYING`, read again 2, 8,
+and 30 seconds after the first, second, and third failure (`RETRY_DELAYS`), then every
+`RETRY_EVERY`, until it has failed for `MassiveConfig.max_outage`: a failure that lands that long or
+longer after the first failure of its run makes it `FAILED`, with an error that names the
+limit (`_outage_failure`), as a `poll()` table fails after its cycles have failed that long.
+Any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
+an empty download replaces its rows in the result, freeing them, and a re-add reads it again;
+under `Reread.NEVER` its download is kept, so a re-add shows the
 earlier download at once, with no request. A `FAILED` symbol is read again on every re-add. Each add
 and removal moves the symbol to a new *generation*: the outcome of a read of an older one is
 dropped, so no removed or overtaken read ever lands, and a symbol is never read twice at once (a
@@ -44,8 +49,12 @@ changes nothing.
 **Whole-table failures.** A read that raises (`AuthenticationError`, a session closed during
 the read, or a defect) and a symbol table that fails or, under
 `noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
-the coordinator records the failure and publishes it, never the listener. So does a crypto pair
-Massive's crypto ticker list does not hold, under `unlisted_symbols=RAISE`.
+the coordinator records the failure and publishes it, never the listener. So does a call that
+did not wait whose call-time symbols (the table's symbols when the watch started) all end
+`FAILED`, such as on a plan without the dataset, which refuses every symbol: the table fails
+with the first symbol's error, in name order, retryable only when every symbol's error is, as
+a call that waits raises it (`_call_time_outcome`). One of them with rows, or one deleted from
+the table before it failed, settles the check: from then on a symbol's failure is its own.
 
 **Time.** The coordinator reads `CLOCK`: the wall clock for the diagnostics' instants and the
 monotonic clock for the retries. Its queue wait ends at the next retry; tests replace `CLOCK`
@@ -70,54 +79,77 @@ import itertools
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, TypeAlias, cast
+from typing import TYPE_CHECKING, Final, Protocol, TypeAlias
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
-from deephaven_massive._enums import OnError, Reread
+from deephaven_massive._enums import Reread
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    ErrorCause,
+    BrokenGuaranteeError,
+    ErrorSource,
     MassiveError,
-    UnlistedPairError,
+    copy_error,
+    every_symbol_failed,
     failure_text,
     library_bug,
+    required,
 )
-from deephaven_massive._log_limits import bounded_list, log_failure, mark_failure_logged
+from deephaven_massive._log_limits import (
+    bounded_list,
+    log_failure,
+    mark_failure_logged,
+    prose_list,
+)
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
     SYMBOLS_LISTED,
-    NotePart,
     StreamUpdate,
     symbol_list_text,
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import QueueWorker
 from deephaven_massive._tables.poll import SymbolRowError
+from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
-from deephaven_massive._tables.transports import FailureKind, SymbolFailure, SymbolRows
+from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from deephaven.execution_context import ExecutionContext
+    from deephaven.table import Table
 
-    from deephaven_massive._tables.followed_read import FollowedRead
+    from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._tables.followed_read import FollowPlan
     from deephaven_massive._tables.poll import PollClock
+    from deephaven_massive._tables.problem_events import Problem
+    from deephaven_massive._tables.read_pool import ReadPool
     from deephaven_massive._tables.transports import SymbolOutcome
 
-__all__ = ["CLOCK", "RETRY_DELAYS", "FirstRead", "FollowCoordinator"]
+__all__ = [
+    "CLOCK",
+    "RETRY_DELAYS",
+    "RETRY_EVERY",
+    "CoordinatedRead",
+    "FirstRead",
+    "FollowCoordinator",
+    "FollowedReadRows",
+    "FollowingCore",
+]
 
 logger = logging.getLogger(__name__)
 
 CLOCK: PollClock = poll.CLOCK
 """The coordinator's time source; tests replace it with a virtual clock."""
 
-RETRY_DELAYS: Final = (60.0, 300.0, 900.0)
-"""Seconds after a symbol's first, second, and third transient failure before it is read again;
-the fourth failure is final."""
+RETRY_DELAYS: Final = (2.0, 8.0, 30.0)
+"""Seconds after a symbol's first, second, and third transient failure before it is read again:
+soon, since most such failures (a rate-limit pause, a dropped connection) pass in seconds."""
+
+RETRY_EVERY: Final = 60.0
+"""Seconds between a symbol's later reads, until it has failed for `MassiveConfig.max_outage`."""
 
 _FOLLOWING: Final = frozenset(
     {SymbolReadState.QUEUED, SymbolReadState.LOADING, SymbolReadState.RETRYING}
@@ -127,14 +159,145 @@ _FOLLOWING: Final = frozenset(
 _ENDED: Final = frozenset({SymbolReadState.FAILED, SymbolReadState.REMOVED, SymbolReadState.CLOSED})
 """The states a stop leaves as they are; every other becomes `STOPPED`."""
 
-_CAUSES_SHOWN: Final = 3
-"""The most causes one `Error` part of `m.streams()` names."""
+_TROUBLE_CAUSES: Final = {
+    SymbolReadState.RETRYING: ProblemCause.SYMBOL_READ_RETRYING,
+    SymbolReadState.FAILED: ProblemCause.SYMBOL_READ_FAILED,
+}
+"""The cause of each state whose symbols are spans of `m.problems()`."""
 
-_SYMBOLS_SHOWN: Final = 5
-"""The most symbols one cause of an `Error` part lists."""
 
-_CAUSE_SHOWN: Final = 200
-"""The longest text of one cause in `Error`, in characters."""
+class FollowedReadRows(Protocol):
+    """The session's worker tables, as the coordinator shows a followed read's progress."""
+
+    def update_followed_read(
+        self, stream_id: int, update: StreamUpdate, /, *, loading: bool
+    ) -> None:
+        """Apply a read's progress to its `m.streams()` row (`WorkerTables.update_followed_read`).
+
+        Args:
+            stream_id: The read's `StreamId`.
+            update: The row's change.
+            loading: True while any symbol still waits for its rows.
+        """
+        ...
+
+
+class FollowingCore(Protocol):
+    """A followed read's session core, as the coordinator reads and reports to it."""
+
+    @property
+    def closed(self) -> bool:
+        """True once the session has closed (`SessionCore.closed`)."""
+        ...
+
+    @property
+    def config(self) -> MassiveConfig:
+        """The session's settings."""
+        ...
+
+    @property
+    def workers(self) -> FollowedReadRows:
+        """The session's worker tables."""
+        ...
+
+    def write_symbol_reads(self, rows: Sequence[SymbolReadRow], /) -> None:
+        """Write symbol rows to `m.symbol_reads()` (`SessionCore.write_symbol_reads`).
+
+        Args:
+            rows: The rows.
+        """
+        ...
+
+    def problems(self, problems: Sequence[Problem], /) -> None:
+        """Report problems for `m.problems()` (`SessionCore.problems`).
+
+        Args:
+            problems: The problems.
+        """
+        ...
+
+
+class CoordinatedRead(Protocol):
+    """A followed read, as the coordinator drives it: a `FollowedRead`.
+
+    The coordinator reads its settings, hands it each download to publish, and fails it; it
+    calls nothing else, so a test can drive the coordinator with a read of its own.
+    """
+
+    @property
+    def core(self) -> FollowingCore:
+        """The session's core."""
+        ...
+
+    @property
+    def call(self) -> int:
+        """The call's id: the row's `StreamId`."""
+        ...
+
+    @property
+    def dataset(self) -> str:
+        """The dataset's name, such as `"stocks.bars"`."""
+        ...
+
+    @property
+    def reread(self) -> Reread:
+        """Whether a returning symbol is read again."""
+        ...
+
+    @property
+    def plan(self) -> FollowPlan:
+        """How the symbols are read."""
+        ...
+
+    @property
+    def stop_token(self) -> threading.Event:
+        """The result's stop token; every read listens to it."""
+        ...
+
+    @property
+    def built_step(self) -> int:
+        """The update cycle the result was built at."""
+        ...
+
+    @property
+    def shut_down(self) -> bool:
+        """True once the result's blink table has shut down."""
+        ...
+
+    def fail_table(self, error: MassiveError, /) -> bool:
+        """Fail the result, once (`FollowedRead.fail_table`).
+
+        Args:
+            error: The failure.
+
+        Returns:
+            False when it had already failed.
+        """
+        ...
+
+    def publish(
+        self,
+        symbol: str,
+        seq: int,
+        table: Table | None,
+        /,
+        *,
+        decided_at_step: int,
+        parts_before: int,
+    ) -> int:
+        """Publish a symbol's download, or an empty one (`FollowedRead.publish`).
+
+        Args:
+            symbol: The symbol.
+            seq: The download's sequence number.
+            table: The rows, or None for an empty download.
+            decided_at_step: The update cycle the download was decided at.
+            parts_before: The symbol's row groups before this download.
+
+        Returns:
+            The symbol's row groups after it.
+        """
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +323,7 @@ class FirstRead:
 class _Follow:
     """A new followed read, with what its caller already read."""
 
-    read: FollowedRead
+    read: CoordinatedRead
     first: FirstRead | None
 
 
@@ -172,7 +335,7 @@ class _Baseline:
     table at, or 0 when the table held no symbol then.
     """
 
-    read: FollowedRead
+    read: CoordinatedRead
     symbols: frozenset[str]
     step: int
 
@@ -181,25 +344,17 @@ class _Baseline:
 class _Changed:
     """Symbols the table gained and lost in one update cycle, the cycle `step`."""
 
-    read: FollowedRead
+    read: CoordinatedRead
     added: frozenset[str]
     removed: frozenset[str]
     step: int
 
 
 @dataclass(frozen=True, slots=True)
-class _Skipped:
-    """The table's values the result skips now, because they are not Massive's tickers."""
-
-    read: FollowedRead
-    text: str | None
-
-
-@dataclass(frozen=True, slots=True)
 class _Invalid:
     """A bad row under `noncanonical_symbols=RAISE`, or the symbol table's own failure."""
 
-    read: FollowedRead
+    read: CoordinatedRead
     message: str
 
 
@@ -207,7 +362,7 @@ class _Invalid:
 class _Began:
     """A pool thread began reading some symbols of one result, at these generations."""
 
-    read: FollowedRead
+    read: CoordinatedRead
     generations: Mapping[str, int]
 
 
@@ -215,7 +370,7 @@ class _Began:
 class _Outcome:
     """A read's outcome: each symbol's rows or failure, or the error that failed the table."""
 
-    read: FollowedRead
+    read: CoordinatedRead
     generations: Mapping[str, int]
     outcomes: Mapping[str, SymbolOutcome]
     began_at: int
@@ -227,7 +382,7 @@ class _Outcome:
 class _Stop:
     """The result stopped: released and unused, failed, or closed."""
 
-    read: FollowedRead
+    read: CoordinatedRead
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +391,7 @@ class _Wake:
 
 
 _Message: TypeAlias = (
-    "_Follow | _Baseline | _Changed | _Skipped | _Invalid | _Began | _Outcome | _Stop | _Wake"
+    "_Follow | _Baseline | _Changed | _Invalid | _Began | _Outcome | _Stop | _Wake"
 )
 
 
@@ -252,12 +407,16 @@ class _Symbol:
         reading: The generation a read in flight was started for, or None.
         waiting: Whether it waits for a read slot (its result's queue).
         attempts: Reads begun since it was last added with a read queued.
+        failing_since: When the first failure of the run it is in landed (monotonic seconds):
+            its first failure since it was last added or last got rows; None before one.
         due: When its next read is due (monotonic seconds), while `RETRYING`.
         next_attempt_at: The same instant, epoch nanoseconds.
         added_at: When its row last entered the table, epoch nanoseconds.
         read_at: When the download whose rows the result holds began, or None.
-        rows: The rows of its partition in the result (0 for none).
-        kept: Whether the result's newest partition row for it holds rows (is not empty).
+        rows: Its rows in the result (0 for none).
+        kept: Whether the result's newest download of it holds rows (is not empty).
+        parts: How many row groups of its newest published download hold rows: every part
+            from this one up is empty or was never sent (`FollowedRead.publish`).
         error: Its latest failure's text, until a read succeeds.
         cause: Its latest failure's cause, which groups it in `Error`.
         transport: The source of its latest read, as `m.symbol_reads()` shows it.
@@ -272,11 +431,13 @@ class _Symbol:
     reading: int | None = None
     waiting: bool = False
     attempts: int = 0
+    failing_since: float | None = None
     due: float | None = None
     next_attempt_at: int | None = None
     read_at: int | None = None
     rows: int = 0
     kept: bool = False
+    parts: int = 0
     error: str | None = None
     cause: str | None = None
     transport: str | None = None
@@ -313,9 +474,8 @@ class _Progress:
         rows: Their rows in the result, in all.
         troubled: Of them, the `RETRYING` and `FAILED` ones, by state, then by cause.
         members_changed: Whether `members` changed since `symbols` was last made.
-        troubled_changed: Whether `troubled` changed since `notes` were last made.
+        troubled_changed: Whether `troubled` changed since its spans were last reported.
         symbols: The `SymbolCount` and `Symbols` shown (`symbol_list_text`).
-        notes: The `Error` parts shown (`FollowCoordinator._note`).
     """
 
     members: set[str] = field(default_factory=set)
@@ -327,7 +487,6 @@ class _Progress:
     members_changed: bool = True
     troubled_changed: bool = True
     symbols: tuple[int | None, str] = (0, "")
-    notes: dict[NotePart, str | None] = field(default_factory=dict)
 
     def count(self, name: str, symbol: _Symbol) -> None:
         """Replace what a symbol added to the progress with what it adds now.
@@ -375,20 +534,28 @@ class _Result:
         queue: The symbols waiting for a read, in the order they began to wait: a dict used as
             an ordered set, so taking a symbol out costs no scan.
         scanning: Whether a flat-file scan of the result is in flight.
-        seq: The number of the result's latest partition row.
-        ended: Whether it failed or stopped: no read starts, and no partition row is published.
+        seq: The number of the result's latest download.
+        ended: Whether it failed or stopped: no read starts, and no download is published.
         dirty: The symbols whose `m.symbol_reads()` row changed since it was last written.
         warned: The causes of failure already logged at WARNING for the result.
         transports: The sources its reads have used.
-        skipped: The text of its skipped symbol-table values, or None.
+        spans: Its `symbol_read_retrying` and `symbol_read_failed` spans of `m.problems()`.
         progress: Its `m.streams()` progress, kept current by `_show`.
         shown: The `m.streams()` progress last written, to skip an unchanged write.
         decided_at_step: The latest update cycle of the symbol table whose change the
             coordinator has applied (the result's build cycle until the first), stamped on
-            every partition row it publishes; see `FollowedRead.publish`.
+            every download it publishes; see `FollowedRead.publish`.
+        call_time: For a call that did not wait, until its call-time symbols settle: each of
+            them still in the table, in name order, with its final failure once it has
+            one. None until the watch's first set of symbols arrives (`awaits_call_time`), for
+            a call that waited, and once settled (`_call_time_outcome`).
+        awaits_call_time: True from the start of a call that did not wait until the watch's
+            first set of symbols arrives.
+        call_time_open: How many symbols of `call_time` have not failed yet, so each outcome
+            updates the check in constant time.
     """
 
-    read: FollowedRead
+    read: CoordinatedRead
     decided_at_step: int
     symbols: dict[str, _Symbol] = field(default_factory=dict)
     queue: dict[str, None] = field(default_factory=dict)
@@ -398,9 +565,12 @@ class _Result:
     dirty: set[str] = field(default_factory=set)
     warned: set[str] = field(default_factory=set)
     transports: set[str] = field(default_factory=set)
-    skipped: str | None = None
+    spans: dict[SymbolReadState, SpanTracker] = field(default_factory=dict)
     progress: _Progress = field(default_factory=_Progress)
     shown: object = None
+    call_time: dict[str, MassiveError | None] | None = None
+    awaits_call_time: bool = False
+    call_time_open: int = 0
 
 
 def _now_ns() -> int:
@@ -409,19 +579,56 @@ def _now_ns() -> int:
 
 
 def _cause(error: MassiveError) -> str:
-    """Return the key that groups failures of one cause: the error's type and HTTP status.
+    """Return the key that groups failures of one cause: the error's type, source, and status.
+
+    A bug is a cause of its own, so it never shares a key, or its single WARNING or ERROR, with
+    a failure that is none.
 
     Args:
         error: A symbol's failure.
 
     Returns:
-        Such as `"EntitlementError 403"`, or `"MassiveError"` for a failure without a status.
+        Such as `"EntitlementError massive 403"`, `"MassiveError network"` for a failure
+        without a status, or `"MassiveError library bug"`.
     """
-    name = type(error).__name__
-    return name if error.status is None else f"{name} {error.status}"
+    parts = [type(error).__name__, error.source.value]
+    if error.status is not None:
+        parts.append(str(error.status))
+    if error.is_bug:
+        parts.append("bug")
+    return " ".join(parts)
 
 
-def _transport(read: FollowedRead, outcome: SymbolOutcome) -> str:
+def _outage_failure(
+    name: str, error: MassiveError, *, failing_for: float, limit: float
+) -> MassiveError:
+    """Return a symbol's final error once its failures have lasted `MassiveConfig.max_outage`.
+
+    A copy of the latest error (`copy_error`: its class, status, `request_id`, source, and
+    whether it is retryable or a bug) whose message says how long the symbol failed and the
+    limit, then quotes the latest error; chained to it, so its log record carries that error's
+    traceback too.
+
+    Args:
+        name: The symbol.
+        error: Its latest failure, one that may pass.
+        failing_for: Seconds since the run's first failure.
+        limit: `MassiveConfig.max_outage`, in seconds.
+
+    Returns:
+        The error, such as `"AAPL has failed for 340 s, as long as max_outage=300 s allows.
+        The latest error: Massive answered ..."`.
+    """
+    failure = copy_error(
+        error,
+        f"{name} has failed for {failing_for:.0f} s, as long as max_outage={limit:g} s "
+        f"allows. The latest error: {error}",
+    )
+    failure.__cause__ = error
+    return failure
+
+
+def _transport(read: CoordinatedRead, outcome: SymbolOutcome) -> str:
     """Return the source a symbol's read used, as `m.symbol_reads()` shows it.
 
     Args:
@@ -469,7 +676,6 @@ class FollowCoordinator:
         "_exec_ctx",
         "_following",
         "_lock",
-        "_max_workers",
         "_pool",
         "_results",
         "_retries",
@@ -478,26 +684,25 @@ class FollowCoordinator:
         "_worker",
     )
 
-    def __init__(self, exec_ctx: ExecutionContext, thread_prefix: str, max_workers: int) -> None:
+    def __init__(self, exec_ctx: ExecutionContext, thread_prefix: str, pool: ReadPool) -> None:
         """Prepare the coordinator; no thread starts yet.
 
         Args:
             exec_ctx: The session's execution context, entered by the coordinator thread and by
-                each pool thread.
+                each of its reads.
             thread_prefix: The session's thread prefix, such as `"massive #1"`.
-            max_workers: The read pool's size, the session's `max_concurrency`.
+            pool: The session's read pool, which runs the reads.
         """
         self._exec_ctx = exec_ctx
         self._thread_prefix = thread_prefix
-        self._max_workers = max_workers
-        # Guards the thread, the pool, the followed reads, and the stop. Held only
-        # around a queue put or a pool submit, which never waits on another thread's lock.
+        self._pool = pool
+        # Guards the thread, the followed reads, and the stop. Held only around a queue put
+        # or a pool submit, which never waits on another thread's lock.
         self._lock = threading.Lock()
         self._worker: QueueWorker[_Message] | None = None
-        self._pool: ThreadPoolExecutor | None = None
         # Every followed read handed over (`follow`) and not yet forgotten, by `id`: what a
         # dying thread fails, including a read whose start never reached it.
-        self._following: dict[int, FollowedRead] = {}
+        self._following: dict[int, CoordinatedRead] = {}
         self._closed = False
         # Touched only by the coordinator thread.
         self._results: dict[int, _Result] = {}
@@ -521,7 +726,7 @@ class FollowCoordinator:
         with self._lock:
             return len(self._following)
 
-    def follow(self, read: FollowedRead, first: FirstRead | None) -> None:
+    def follow(self, read: CoordinatedRead, first: FirstRead | None) -> None:
         """Start coordinating a new followed read, starting the thread and pool if needed.
 
         Called on the caller thread once the result is registered, before its watch starts,
@@ -536,9 +741,6 @@ class FollowCoordinator:
             if self._closed:  # the session closed: the result's own check refuses it
                 return
             if self._worker is None:
-                self._pool = ThreadPoolExecutor(
-                    self._max_workers, thread_name_prefix=f"{self._thread_prefix} follow-read"
-                )
                 self._worker = QueueWorker(
                     self._exec_ctx,
                     f"{self._thread_prefix} follow",
@@ -555,19 +757,17 @@ class FollowCoordinator:
             logger.debug("%s follow: a followed read starts", self._thread_prefix)
 
     def stop(self) -> None:
-        """End the coordinator thread and its pool, without waiting; idempotent.
+        """End the coordinator thread, without waiting; idempotent.
 
         Called by `SessionCore.close` and, through the reaper, by the collection of a session
         never closed. The events queued before it are handled first; later ones are dropped.
         """
         with self._lock:
             self._closed = True
-            worker, pool = self._worker, self._pool
-            self._worker = self._pool = None
+            worker = self._worker
+            self._worker = None
         if worker is not None:
             worker.stop()
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
 
     def post(self, message: _Message) -> None:
         """Queue an event for the coordinator; never blocks. Dropped when no result follows.
@@ -586,7 +786,7 @@ class FollowCoordinator:
 
     # --- Events from other threads, for a result -------------------------------------------
 
-    def baseline(self, read: FollowedRead, symbols: frozenset[str], step: int) -> None:
+    def baseline(self, read: CoordinatedRead, symbols: frozenset[str], step: int) -> None:
         """Queue the symbol table's set of symbols when its watch started.
 
         Args:
@@ -597,7 +797,7 @@ class FollowCoordinator:
         self.post(_Baseline(read, symbols, step))
 
     def changed(
-        self, read: FollowedRead, added: frozenset[str], removed: frozenset[str], *, step: int
+        self, read: CoordinatedRead, added: frozenset[str], removed: frozenset[str], *, step: int
     ) -> None:
         """Queue one change of the symbol table's set (the watch's listener calls it).
 
@@ -609,16 +809,7 @@ class FollowCoordinator:
         """
         self.post(_Changed(read, added, removed, step))
 
-    def skipped(self, read: FollowedRead, text: str | None) -> None:
-        """Queue the text of the table's skipped values, or None once none is skipped.
-
-        Args:
-            read: The result.
-            text: As `skipped_rows_text` writes it, or None.
-        """
-        self.post(_Skipped(read, text))
-
-    def invalid(self, read: FollowedRead, message: str) -> None:
+    def invalid(self, read: CoordinatedRead, message: str) -> None:
         """Queue a bad row under `RAISE`, or the symbol table's failure: the result fails.
 
         Args:
@@ -627,7 +818,7 @@ class FollowCoordinator:
         """
         self.post(_Invalid(read, message))
 
-    def stop_following(self, read: FollowedRead) -> None:
+    def stop_following(self, read: CoordinatedRead) -> None:
         """Queue the result's stop (its blink table shut down, or it failed or closed).
 
         Args:
@@ -692,17 +883,18 @@ class FollowCoordinator:
             action()
         except Exception as error:  # one result's defect; the others go on
             logger.exception(  # the traceback names the error and its text
-                "call %d follow: %s failed (%s). %s",
+                "%s call %d: %s failed. %s",
+                result.read.dataset,
                 result.read.call,
                 step,
-                result.read.dataset,
                 LIBRARY_BUG,
             )
             try:
                 self._defect(result, step, error)
             except Exception:
                 logger.exception(
-                    "call %d follow: failing its table after %s failed raised too. %s",
+                    "%s call %d: stopping its table after %s failed raised an error too. %s",
+                    result.read.dataset,
                     result.read.call,
                     step,
                     LIBRARY_BUG,
@@ -724,11 +916,12 @@ class FollowCoordinator:
         Args:
             result: The result's state.
             message: The event.
+
+        Raises:
+            BrokenGuaranteeError: If the event is of a kind this method has no rule for.
         """
         if isinstance(message, (_Baseline, _Changed)):
             self._membership(result, message)
-        elif isinstance(message, _Skipped):
-            result.skipped = message.text
         elif isinstance(message, _Invalid):
             self._fail(result, SymbolRowError(message.message))
         elif isinstance(message, _Began):
@@ -748,14 +941,16 @@ class FollowCoordinator:
                     result.dirty.add(name)
         elif isinstance(message, _Outcome):
             self._landed(result, message)
-        else:  # _Stop
+        elif isinstance(message, _Stop):
             self._stopped(result)
+        else:
+            raise BrokenGuaranteeError(library_bug(f"no rule applies {message!r} to a result"))
 
     def _defect(self, result: _Result, step: str, error: Exception) -> None:
         """Fail a result one of whose steps raised: its state may no longer be whole.
 
         The caller logged the defect with its traceback; this fails the result's table with a
-        `MassiveError` that names it (`ErrorCause.LIBRARY_DEFECT`), marked as logged. The
+        `MassiveError` that names it (`ErrorSource.LIBRARY`), marked as logged. The
         table's failure stops the result, so none of its symbols stays queued or loading.
 
         Args:
@@ -765,10 +960,10 @@ class FollowCoordinator:
         """
         failure = MassiveError(
             library_bug(
-                f"{result.read.dataset}: the followed read failed {step}: "
-                f"{type(error).__name__}: {error}"
+                f"{result.read.dataset}: the read that follows its symbol table failed while "
+                f"{step}: {error!r}"
             ),
-            cause=ErrorCause.LIBRARY_DEFECT,
+            source=ErrorSource.LIBRARY,
         )
         mark_failure_logged(failure)  # the caller logged it, with its trace
         self._fail(result, failure)
@@ -783,6 +978,10 @@ class FollowCoordinator:
         if isinstance(message, _Baseline):
             held = {name for name, symbol in result.symbols.items() if symbol.in_table}
             added, removed = message.symbols - held, frozenset(held - message.symbols)
+            if result.awaits_call_time:
+                result.awaits_call_time = False
+                result.call_time = dict.fromkeys(sorted(message.symbols)) or None
+                result.call_time_open = len(message.symbols)
         else:
             added, removed = message.added, message.removed
         result.decided_at_step = max(result.decided_at_step, message.step)
@@ -811,7 +1010,9 @@ class FollowCoordinator:
             logger.debug("call %d follow: the session closed before it started", read.call)
             return
         first = message.first
-        if first is not None:
+        if first is None:  # the call did not wait: its call-time symbols come with the watch
+            result.awaits_call_time = True
+        else:
             # The call warned of its failed symbols already: once per result and cause.
             result.warned.update(
                 _cause(outcome.error)
@@ -827,7 +1028,7 @@ class FollowCoordinator:
                     attempts=1,
                 )
                 result.symbols[name] = symbol
-                if isinstance(outcome, SymbolRows):  # its partition row is in the result's seed
+                if isinstance(outcome, SymbolRows):  # its rows are in the result's seed
                     symbol.kept = True
                 self._record(result, name, outcome, began_at=first.began_at, seconds=first.seconds)
         logger.debug(
@@ -873,19 +1074,19 @@ class FollowCoordinator:
                 "no request",
                 result.read.call,
                 name,
-                _ns_text(cast("int", symbol.read_at)),  # a kept download has begun
+                _ns_text(required(symbol.read_at, f"{name}'s kept download's start")),
             )
             return
         symbol.state = SymbolReadState.QUEUED
         symbol.attempts = 0
-        symbol.due = symbol.next_attempt_at = None
+        symbol.due = symbol.next_attempt_at = symbol.failing_since = None
         self._enqueue(result, name)
 
     def _remove(self, result: _Result, name: str) -> None:
         """A symbol left the table: drop its pending read and retry, and its rows under `ALWAYS`.
 
         Its rows leave the result in the cycle its row left the table (the result joins the
-        table), so the empty partition row only frees them.
+        table), so the empty download only frees them.
 
         Args:
             result: The result's state.
@@ -895,6 +1096,11 @@ class FollowCoordinator:
         symbol.in_table = False
         symbol.generation += 1
         symbol.state = SymbolReadState.REMOVED
+        # A call-time symbol deleted before it failed settles the check; a failed one only
+        # leaves it.
+        pending = result.call_time
+        if pending is not None and name in pending and (pending.pop(name) is None or not pending):
+            result.call_time = None
         symbol.due = symbol.next_attempt_at = None
         result.dirty.add(name)
         if symbol.waiting:
@@ -902,7 +1108,13 @@ class FollowCoordinator:
             del result.queue[name]
         if result.read.reread is Reread.ALWAYS and symbol.kept:
             result.seq += 1
-            result.read.publish(name, result.seq, None, decided_at_step=result.decided_at_step)
+            symbol.parts = result.read.publish(
+                name,
+                result.seq,
+                None,
+                decided_at_step=result.decided_at_step,
+                parts_before=symbol.parts,
+            )
             symbol.kept = False
             symbol.read_at = None
             symbol.rows = 0
@@ -973,7 +1185,7 @@ class FollowCoordinator:
             outcome: Its rows or failure.
             began_at: When the read began, epoch nanoseconds.
             seconds: How long it took.
-            publish: True to publish its partition row; False for a symbol already in the seed.
+            publish: True to publish its download; False for a symbol already in the seed.
         """
         symbol = result.symbols[name]
         read = result.read
@@ -984,17 +1196,23 @@ class FollowCoordinator:
         if isinstance(outcome, SymbolRows):
             if publish:
                 result.seq += 1
-                read.publish(
-                    name, result.seq, outcome.table, decided_at_step=result.decided_at_step
+                symbol.parts = read.publish(
+                    name,
+                    result.seq,
+                    outcome.table,
+                    decided_at_step=result.decided_at_step,
+                    parts_before=symbol.parts,
                 )
+            self._call_time_outcome(result, name, None)
             symbol.state = SymbolReadState.DONE
             symbol.kept = True
             symbol.rows = outcome.table.size
             symbol.read_at = began_at
-            symbol.error = symbol.cause = None
-            symbol.due = symbol.next_attempt_at = None
+            symbol.error = outcome.skipped  # why a read that succeeded gave it no rows, if so
+            symbol.cause = None
+            symbol.due = symbol.next_attempt_at = symbol.failing_since = None
             logger.debug(
-                "call %d %s: %d rows in %.1f s from %s (partition row %d, decided at step %d)",
+                "call %d %s: %d rows in %.1f s from %s (download %d, decided at step %d)",
                 read.call,
                 name,
                 symbol.rows,
@@ -1009,9 +1227,13 @@ class FollowCoordinator:
     def _failed(self, result: _Result, name: str, outcome: SymbolFailure) -> None:
         """Make a failed symbol `RETRYING` or `FAILED`, and log it.
 
-        A crypto pair Massive's crypto ticker list does not hold (`UnlistedPairError`) follows
-        `MassiveConfig.unlisted_symbols`: `FAILED` with a WARNING under `LOG`, with only a
-        DEBUG line under `IGNORE`, and under `RAISE` it fails the whole result.
+        A failure that may pass retries on `RETRY_DELAYS`, then every `RETRY_EVERY`, until one
+        lands `MassiveConfig.max_outage` seconds or more after the run's first failure landed.
+        A read's own time is not counted, since it may have spent most of it receiving pages.
+        The limit is a threshold checked as each failure lands, not a wall-clock bound: the
+        retry delays and each read's own length can carry a symbol past it before the failure
+        that ends it lands. That failure is final, and its error names the limit
+        (`_outage_failure`). Any other failure is final at once.
 
         Args:
             result: The result's state.
@@ -1020,63 +1242,97 @@ class FollowCoordinator:
         """
         symbol = result.symbols[name]
         error = outcome.error
-        unlisted = (
-            result.read.core.config.unlisted_symbols
-            if isinstance(error, UnlistedPairError)
-            else None
-        )
-        if unlisted is OnError.RAISE:
-            logger.debug(
-                "call %d follow %s: fails the result, under unlisted_symbols=RAISE: %s",
-                result.read.call,
-                name,
-                error,
-            )
-            self._fail(result, error)
-            return
-        symbol.error = failure_text(error)
+        now = CLOCK.monotonic()
+        if symbol.failing_since is None:
+            symbol.failing_since = now
+        failing_for = now - symbol.failing_since
+        limit = result.read.core.config.max_outage
         symbol.cause = _cause(error)
         attempts = max(symbol.attempts, 1)
-        if outcome.kind is FailureKind.TRANSIENT and attempts <= len(RETRY_DELAYS):
-            delay = RETRY_DELAYS[attempts - 1]
+        if error.is_retryable and failing_for < limit:
+            delay = RETRY_DELAYS[attempts - 1] if attempts <= len(RETRY_DELAYS) else RETRY_EVERY
+            symbol.error = failure_text(error)
             symbol.state = SymbolReadState.RETRYING
-            symbol.due = CLOCK.monotonic() + delay
+            symbol.due = now + delay
             heapq.heappush(
                 self._retries, (symbol.due, next(self._retry_numbers), id(result.read), name)
             )
             symbol.next_attempt_at = _now_ns() + int(delay * 1e9)
             logger.debug(
-                "call %d follow %s: attempt %d failed in a way that may pass; read again in "
-                "%.0f s: %s",
+                "call %d follow %s: attempt %d failed in a way that may pass, %.0f s into its "
+                "run of failures (max_outage %g s); read again in %.0f s: %s",
                 result.read.call,
                 name,
                 attempts,
+                failing_for,
+                limit,
                 delay,
                 symbol.error,
             )
             return
+        if error.is_retryable:  # final only for its run's length
+            error = _outage_failure(name, error, failing_for=failing_for, limit=limit)
+        symbol.error = failure_text(error)
         symbol.state = SymbolReadState.FAILED
         symbol.due = symbol.next_attempt_at = None
         first = symbol.cause not in result.warned
         result.warned.add(symbol.cause)
         mark_failure_logged(error)
         level = logging.WARNING if first else logging.DEBUG
-        if unlisted is not None:
-            level = logging.WARNING if first and unlisted is OnError.LOG else logging.DEBUG
-        elif error.cause is not ErrorCause.EXPECTED and first:
+        if error.is_bug and first:
             level = logging.ERROR
         logger.log(
             level,
-            "%s call %d: %s failed after %d %s (%s), and is left out of the result; "
-            "delete and re-add its row to read it again: %s",
+            "%s call %d: %s failed after %d %s and is left out of the result. %s To read it "
+            "again, delete its row from the symbol table and add it back.",
             result.read.dataset,
             result.read.call,
             name,
             attempts,
             "attempt" if attempts == 1 else "attempts",
-            outcome.kind.value,
-            symbol.error,
+            symbol.error.removesuffix(".") + ".",
+            exc_info=error if level == logging.ERROR else None,  # a bug, with its traceback
         )
+        self._call_time_outcome(result, name, error)
+
+    def _call_time_outcome(self, result: _Result, name: str, error: MassiveError | None) -> None:
+        """Take a symbol's outcome toward the call-time check of a call that did not wait.
+
+        The check fails the table when every call-time symbol ends `FAILED`, as a call that
+        waits raises when every one of them failed (`_query.QueryBase._first_read`). Rows
+        settle the check without failing; a failure read again later counts only once it is
+        final.
+
+        Args:
+            result: The result's state.
+            name: The symbol.
+            error: Its final failure, or None for rows.
+        """
+        pending = result.call_time
+        if pending is None or name not in pending:
+            return
+        if error is None:
+            result.call_time = None
+            logger.debug(
+                "call %d follow %s: a call-time symbol has rows; the table no longer fails "
+                "for its call-time symbols alone",
+                result.read.call,
+                name,
+            )
+            return
+        pending[name] = error  # final: the symbol's next outcome needs a re-add, which drops it
+        result.call_time_open -= 1
+        if result.call_time_open:
+            return
+        # Every call-time symbol still in the table has failed.
+        result.call_time = None
+        logger.debug(
+            "call %d follow: all %d call-time symbols failed; the table fails, as a call "
+            "that waits raises",
+            result.read.call,
+            len(pending),
+        )
+        self._fail(result, every_symbol_failed([e for e in pending.values() if e is not None]))
 
     def _retry_due(self, touched: dict[int, _Result] | None = None) -> None:
         """Queue every retry whose time has come, taking each off the heap of retries.
@@ -1172,29 +1428,29 @@ class FollowCoordinator:
                 result.symbols[name].reading = generation
             self._submit(result.read, generations)
 
-    def _submit(self, read: FollowedRead, generations: Mapping[str, int]) -> None:
-        """Hand one read to the pool, or drop it once `stop` has ended the pool.
+    def _submit(self, read: CoordinatedRead, generations: Mapping[str, int]) -> None:
+        """Hand one read to the session's read pool, or drop it once the session stopped.
 
-        `stop` may end the pool while this thread still handles the events queued before it;
-        a read of those is dropped, since every result is failed or about to fail. The submit
-        runs under the lock, so `stop` never shuts the pool down between the check and the
-        submit; a submit only queues the task and at most starts a pool thread.
+        `stop`, or the pool's own stop, may come while this thread still handles the events
+        queued before it; a read of those is dropped, since every result is failed or about to
+        fail. A submit only queues the task and at most starts a pool thread.
 
         Args:
             read: The result.
             generations: The symbols to read, at their generations.
         """
         with self._lock:
-            if self._pool is not None:
-                self._pool.submit(self._read, read, dict(generations))
-                return
+            closed = self._closed
+        task = functools.partial(self._read, read, dict(generations))
+        if not closed and self._pool.submit(task):
+            return
         logger.debug(
             "call %d follow: the coordinator stopped; the read of %s is dropped",
             read.call,
             bounded_list(sorted(generations)),
         )
 
-    def _read(self, read: FollowedRead, generations: Mapping[str, int]) -> None:
+    def _read(self, read: CoordinatedRead, generations: Mapping[str, int]) -> None:
         """A pool task: read some symbols of one result and queue the outcome.
 
         Runs in the session's execution context. An error the read raises fails the result:
@@ -1219,13 +1475,18 @@ class FollowCoordinator:
             except BaseException as error:
                 table_error = MassiveError(
                     library_bug(
-                        f"{read.dataset}: the read of {', '.join(names)} failed: "
-                        f"{type(error).__name__}: {error}"
+                        f"{read.dataset}: the read of {prose_list(names, 'symbols')} failed: "
+                        f"{error!r}"
                     ),
-                    cause=ErrorCause.LIBRARY_DEFECT,
+                    source=ErrorSource.LIBRARY,
                 )
                 mark_failure_logged(table_error)  # logged here, with its trace
-                logger.exception("call %d follow: a read failed. %s", read.call, LIBRARY_BUG)
+                logger.exception(
+                    "%s call %d: a read of its symbols failed. %s",
+                    read.dataset,
+                    read.call,
+                    LIBRARY_BUG,
+                )
         self.post(
             _Outcome(
                 read,
@@ -1250,9 +1511,10 @@ class FollowCoordinator:
         log_failure(
             logger,
             error,
-            "%s call %d: the followed read failed, and its table with it: %s",
+            "%s call %d: the read failed, and so did its table: %s",
             result.read.dataset,
             result.read.call,
+            named=result.read.dataset,
         )
         result.read.fail_table(error)
 
@@ -1298,26 +1560,20 @@ class FollowCoordinator:
             progress.symbols = symbol_list_text(len(progress.members), first)
         if progress.troubled_changed:
             progress.troubled_changed = False
-            progress.notes = {
-                NotePart.RETRYING_SYMBOLS: self._note(result, SymbolReadState.RETRYING),
-                NotePart.FAILED_SYMBOLS: self._note(result, SymbolReadState.FAILED),
-            }
+            self._report_troubled(result)
         count, text = progress.symbols
-        loading, rows_now, notes = progress.loading, progress.rows, progress.notes
-        shown = (text, count, loading, rows_now, tuple(notes.items()), result.skipped)
+        loading, rows_now = progress.loading, progress.rows
+        shown = (text, count, loading, rows_now)
         if shown == result.shown:
             return
         result.shown = shown
         transport = _shown_transport(result.transports)
-        core.update_followed_read(
+        core.workers.update_followed_read(
             read.call,
             StreamUpdate(
                 rows_published=rows_now,
                 symbol_count=count,
                 symbols=text,
-                notes=notes,
-                skipped=result.skipped,
-                clear_skipped=result.skipped is None,
                 loading=loading,
                 transport=transport,
             ),
@@ -1353,41 +1609,32 @@ class FollowCoordinator:
         )
 
     @staticmethod
-    def _note(result: _Result, state: SymbolReadState) -> str | None:
-        """Return the `Error` part of the table's symbols in one state, grouped by cause.
+    def _report_troubled(result: _Result) -> None:
+        """Report the result's `RETRYING` and `FAILED` symbols as spans of `m.problems()`.
 
-        Each cause shows the error text of its first symbol in name order, and its first
-        symbols by name.
+        Each symbol in one of those states is one span, `symbol_read_retrying` or
+        `symbol_read_failed`, with its latest error; a span ends when the symbol leaves the
+        state (it is read, retried, removed, or the result stops).
 
         Args:
-            result: The result's state, whose progress groups the symbols.
-            state: `RETRYING` or `FAILED`.
-
-        Returns:
-            Such as `"2 symbols failed (delete and re-add a row to read one again):
-            EntitlementError: HTTP 403 ...: AAPL, MSFT"`, or None when no symbol is in `state`.
+            result: The result's state.
         """
-        groups = result.progress.troubled[state]
-        if not groups:
-            return None
-        total = sum(len(names) for names in groups.values())
-        parts = []
-        for cause in sorted(groups)[:_CAUSES_SHOWN]:
-            names = heapq.nsmallest(_SYMBOLS_SHOWN, groups[cause])
-            shown = ", ".join(names)
-            hidden = len(groups[cause]) - _SYMBOLS_SHOWN
-            more = f" (+{hidden} more)" if hidden > 0 else ""
-            text = result.symbols[names[0]].error or ""
-            text = text if len(text) <= _CAUSE_SHOWN else text[: _CAUSE_SHOWN - 1] + "…"
-            parts.append(f"{text}: {shown}{more}")
-        if len(groups) > _CAUSES_SHOWN:
-            parts.append(f"{len(groups) - _CAUSES_SHOWN} more causes")
-        noun = "symbol" if total == 1 else "symbols"
-        if state is SymbolReadState.FAILED:
-            head = f"{total} {noun} failed (delete and re-add a row to read one again)"
-        else:
-            head = f"{total} {noun} retrying after a failure that may pass"
-        return f"{head}: {'; '.join(parts)}"
+        read = result.read
+        found = []
+        for state, cause in _TROUBLE_CAUSES.items():
+            tracker = result.spans.get(state)
+            if tracker is None:
+                tracker = result.spans[state] = SpanTracker(
+                    cause, dataset=read.dataset, stream_id=read.call, where=f"call {read.call}"
+                )
+            names = {name for names in result.progress.troubled[state].values() for name in names}
+            spans = tracker.update(
+                {name: (name, None, result.symbols[name].error or "", 0) for name in names}
+            )
+            if spans is not None:
+                found.append(spans)
+        if found:
+            read.core.problems(found)
 
     def _forget(self, result: _Result) -> None:
         """Forget a result once its blink table has shut down: no event of it matters any more.
@@ -1425,8 +1672,11 @@ class FollowCoordinator:
             death: What ended the thread.
         """
         error = MassiveError(
-            library_bug(f"the follow coordinator died ({death!r}); this table no longer updates"),
-            cause=ErrorCause.LIBRARY_DEFECT,
+            library_bug(
+                f"The library thread that follows symbol tables died: {death!r}. This table no "
+                "longer updates"
+            ),
+            source=ErrorSource.LIBRARY,
         )
         for result in self._results.values():
             result.ended = True
@@ -1435,10 +1685,7 @@ class FollowCoordinator:
         with self._lock:
             reads = list(self._following.values())
             self._following.clear()
-            pool = self._pool  # None when a stop came first
-            self._worker = self._pool = None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+            self._worker = None
         logger.debug("follow: the coordinator died; failing %d followed reads", len(reads))
         for read in reads:
             read.fail_table(error)

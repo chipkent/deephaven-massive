@@ -21,14 +21,14 @@ import shutil
 import sys
 from dataclasses import dataclass
 from importlib import metadata
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from tests._live.live_run.children import run_command
+from tests._live.live_run.children import S3_VARIABLES, run_command
 from tests._live.live_run.secret_scrub import SECRET_VARIABLES
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from pathlib import Path
 
 GIB: Final = 1 << 30
 
@@ -95,7 +95,7 @@ def secrets_item(environ: Mapping[str, str]) -> Item:
     shown = ", ".join(present) or "none"
     if "MASSIVE_API_KEY" not in present:
         return Item("secrets", FAIL, f"MASSIVE_API_KEY is not set in this terminal; set: {shown}")
-    pair = [name for name in SECRET_VARIABLES[2:] if name in present]
+    pair = [name for name in S3_VARIABLES if name in present]
     if len(pair) == 1:
         return Item("secrets", FAIL, f"set both S3 variables or neither; set: {shown}")
     return Item("secrets", OK, f"set: {shown}")
@@ -194,6 +194,20 @@ def dependency_versions() -> dict[str, str]:
     return found
 
 
+def java_command(environ: Mapping[str, str]) -> str:
+    """Return the `java` the embedded Deephaven server runs, as the server finds it.
+
+    Args:
+        environ: The environment.
+
+    Returns:
+        `$JAVA_HOME/bin/java` when `JAVA_HOME` is set, since the server starts that JDK;
+        otherwise the `java` on the `PATH`, or the bare name when there is none.
+    """
+    home = environ.get("JAVA_HOME", "").strip()
+    return str(Path(home) / "bin" / "java") if home else shutil.which("java") or "java"
+
+
 def check_machine(
     *, root: Path, disk_path: Path, environ: Mapping[str, str], clock_offset: float | None
 ) -> tuple[list[Item], dict[str, object]]:
@@ -210,7 +224,7 @@ def check_machine(
         clean, the versions, which secrets are set, and whether a proxy or a certificate file
         is set; never a secret's value.
     """
-    java = run_command([shutil.which("java") or "java", "-version"])
+    java = run_command([java_command(environ), "-version"])
     uv = run_command([shutil.which("uv") or "uv", "--version"]).strip()
     git = shutil.which("git") or "git"
     commit = run_command([git, "-C", str(root), "rev-parse", "HEAD"]).strip()

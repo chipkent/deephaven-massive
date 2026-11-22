@@ -7,7 +7,7 @@ Daily valuation, profitability, liquidity, and leverage ratios of US stocks.
 Call it from a session `m`, made with `dm.MassiveSession()`:
 
 ```python
-m.stocks.financials.ratios(symbols=None, *, sort=None, order=None, limit=None, filters=None)
+m.stocks.financials.ratios(symbols=None, *, sort=None, order=None, limit=None, filters=None, on_error=None)
 ```
 
 - [Methods](README.md#query-methods): `fetch()`, `poll(interval)`
@@ -27,6 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | [`order`](README.md#order) | The direction of `sort`. |
 | [`limit`](README.md#limit) | The most rows to return, in total. A watchlist's `fetch()` caps every request instead. |
 | [`filters`](README.md#filters) | Further endpoint parameters, such as `{"price_to_earnings_lt": 15}`. Keys: `average_volume`, `average_volume_gt`, `average_volume_gte`, `average_volume_lt`, `average_volume_lte`, `cash`, `cash_gt`, `cash_gte`, `cash_lt`, `cash_lte`, `cik`, `cik_any_of`, `cik_gt`, `cik_gte`, `cik_lt`, `cik_lte`, `current`, `current_gt`, `current_gte`, `current_lt`, `current_lte`, `debt_to_equity`, `debt_to_equity_gt`, `debt_to_equity_gte`, `debt_to_equity_lt`, `debt_to_equity_lte`, `dividend_yield`, `dividend_yield_gt`, `dividend_yield_gte`, `dividend_yield_lt`, `dividend_yield_lte`, `earnings_per_share`, `earnings_per_share_gt`, `earnings_per_share_gte`, `earnings_per_share_lt`, `earnings_per_share_lte`, `enterprise_value`, `enterprise_value_gt`, `enterprise_value_gte`, `enterprise_value_lt`, `enterprise_value_lte`, `ev_to_ebitda`, `ev_to_ebitda_gt`, `ev_to_ebitda_gte`, `ev_to_ebitda_lt`, `ev_to_ebitda_lte`, `ev_to_sales`, `ev_to_sales_gt`, `ev_to_sales_gte`, `ev_to_sales_lt`, `ev_to_sales_lte`, `free_cash_flow`, `free_cash_flow_gt`, `free_cash_flow_gte`, `free_cash_flow_lt`, `free_cash_flow_lte`, `market_cap`, `market_cap_gt`, `market_cap_gte`, `market_cap_lt`, `market_cap_lte`, `price`, `price_gt`, `price_gte`, `price_lt`, `price_lte`, `price_to_book`, `price_to_book_gt`, `price_to_book_gte`, `price_to_book_lt`, `price_to_book_lte`, `price_to_cash_flow`, `price_to_cash_flow_gt`, `price_to_cash_flow_gte`, `price_to_cash_flow_lt`, `price_to_cash_flow_lte`, `price_to_earnings`, `price_to_earnings_gt`, `price_to_earnings_gte`, `price_to_earnings_lt`, `price_to_earnings_lte`, `price_to_free_cash_flow`, `price_to_free_cash_flow_gt`, `price_to_free_cash_flow_gte`, `price_to_free_cash_flow_lt`, `price_to_free_cash_flow_lte`, `price_to_sales`, `price_to_sales_gt`, `price_to_sales_gte`, `price_to_sales_lt`, `price_to_sales_lte`, `quick`, `quick_gt`, `quick_gte`, `quick_lt`, `quick_lte`, `return_on_assets`, `return_on_assets_gt`, `return_on_assets_gte`, `return_on_assets_lt`, `return_on_assets_lte`, `return_on_equity`, `return_on_equity_gt`, `return_on_equity_gte`, `return_on_equity_lt`, `return_on_equity_lte`, `ticker_gt`, `ticker_gte`, `ticker_lt`, `ticker_lte`. |
+| [`on_error`](README.md#on_error) | What a bad symbol or row does in this call (`dm.ErrorPolicy`). None, the default, takes each cause from the session's `MassiveConfig.on_error`. |
 
 ## Plans
 
@@ -47,7 +48,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "Stock ticker symbol for the company." |
-| `RawSymbol` | String | The symbol exactly as Massive sent it, on a row whose symbol the library can't read. That row's `Symbol` is null. Null on every other row. When `MassiveConfig.unreadable_symbols` is `dm.OnError.RAISE`, such a row fails the table instead, and the column is absent. |
 | `Price` | double | Stock price used in ratio calculations, typically the closing price for the given date. |
 | `AverageVolume` | double | Average trading volume over the last 30 trading days, providing context for liquidity. |
 | `Cash` | double | Cash ratio, calculated as cash and cash equivalents divided by current liabilities, measuring the most liquid form of liquidity coverage. |
@@ -74,14 +74,13 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 <a id="massive-fields"></a>
 
-<details><summary>Massive fields</summary>
+<details markdown="1"><summary>Massive fields</summary>
 
 The Massive field behind each column, by source. An empty cell means the source doesn't carry the column, or the library computes it.
 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
-| `RawSymbol` | `ticker` |
 | `Price` | `price` |
 | `AverageVolume` | `average_volume` |
 | `Cash` | `cash` |
@@ -114,4 +113,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-09, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

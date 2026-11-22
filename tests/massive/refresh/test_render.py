@@ -9,6 +9,8 @@ import json
 from deephaven_massive._massive.refresh import render
 from deephaven_massive._massive.spec.generated_schemas import parse
 from deephaven_massive._massive.spec.types import (
+    Feed,
+    FeedHost,
     Field,
     Membership,
     Param,
@@ -20,6 +22,7 @@ from deephaven_massive._massive.spec.types import (
     Transport,
     WireType,
     WireUnit,
+    WsChannel,
 )
 
 _PATH = RestPath(
@@ -51,7 +54,7 @@ _PATH = RestPath(
 def test_render_writes_one_line_per_field_and_parameter() -> None:
     text = render.render_rest([_PATH, _PATH])
     document = json.loads(text)
-    assert document["generated_by"] == "python -m deephaven_massive._massive.refresh"
+    assert document["generated_by"] == "python scripts/refresh.py"
     assert document["sources"][1]["fields"][0] == {
         "column": "Price",
         "conversion": None,
@@ -100,9 +103,12 @@ def test_an_empty_list_member_stays_on_one_line() -> None:
     )
 
 
-_CHANNEL = Source(
+_CHANNEL = WsChannel(
     key="stocks/T",
-    transport=Transport.WS,
+    hosts=(
+        FeedHost(feed=Feed.DELAYED, host="delayed.massive.com"),
+        FeedHost(feed=Feed.REAL_TIME, host="socket.massive.com"),
+    ),
     fields=(
         Field(wire_key="sym", column="Ticker", wire_type=WireType.STRING),
         Field(wire_key="p", column="Price", wire_type=WireType.DOUBLE, description="The price."),
@@ -119,7 +125,7 @@ def test_render_sources_writes_keys_fields_and_memberships_one_per_line() -> Non
     document = json.loads(text)
     assert set(document) == {"generated_by", "sources"}
     (entry,) = document["sources"]
-    assert set(entry) == {"key", "fields", "memberships"}
+    assert set(entry) == {"key", "fields", "memberships"}  # a flat file's file has no hosts
     assert entry["memberships"] == [
         {"group": "stocks", "kind": "trades", "position": 2, "projection": None},
         {"group": "stocks", "kind": "last", "position": 0, "projection": {"p": "LastPrice"}},
@@ -131,10 +137,20 @@ def test_render_sources_writes_keys_fields_and_memberships_one_per_line() -> Non
     assert text.endswith("}\n")
 
 
+def test_render_channels_writes_each_channel_s_hosts_on_one_line() -> None:
+    text = render.render_channels([_CHANNEL])
+    (entry,) = json.loads(text)["sources"]
+    assert entry["hosts"] == [
+        {"feed": "Delayed", "host": "delayed.massive.com"},
+        {"feed": "Real-Time", "host": "socket.massive.com"},
+    ]
+    assert sum('"host"' in line for line in text.splitlines()) == 1
+
+
 def test_rendered_sources_load_back_as_they_were() -> None:
     # The loader reads exactly what the renderer writes, memberships and order included.
     loaded = parse(
-        Transport.WS, render.render_sources([_CHANNEL]), {"stocks/T": {"p": "The price."}}
+        Transport.WS, render.render_channels([_CHANNEL]), {"stocks/T": {"p": "The price."}}
     )
     assert loaded["stocks/T"] == _CHANNEL
     memberships = (
@@ -149,7 +165,7 @@ def test_rendered_sources_load_back_as_they_were() -> None:
 
 def test_ignored_keys_are_written_only_for_a_source_that_has_some() -> None:
     ignoring = dataclasses.replace(_CHANNEL, key="crypto/XQ", ignored_keys=frozenset({"lp", "ls"}))
-    text = render.render_sources([ignoring, _CHANNEL])
+    text = render.render_channels([ignoring, _CHANNEL])
     first, second = json.loads(text)["sources"]
     assert first["ignored_keys"] == ["lp", "ls"]
     assert "ignored_keys" not in second
@@ -214,7 +230,7 @@ def test_render_descriptions_writes_the_documented_format() -> None:
         titles={_URL: "Things", _OTHER: "Crypto things"},
     )
     assert json.loads(text) == {
-        "generated_by": "python -m deephaven_massive._massive.refresh",
+        "generated_by": "python scripts/refresh.py",
         "fetched": "2026-10-27",
         # A source's URLs are sorted.
         "urls": {"REST": {_PATH.key: [_OTHER, _URL]}},

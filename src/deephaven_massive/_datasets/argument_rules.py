@@ -41,9 +41,11 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "- A dataset's page says when `dm.ALL` or leaving `symbols` out reads every symbol.\n"
             "- In text or a list, any other spelling, such as `aapl`, raises `ValueError`, "
             "unless the dataset's page says it takes another source's tickers. In a table, that "
-            "row is skipped and logged.\n"
-            "- To convert another source's tickers, such as Yahoo's `BRK-B`, use "
-            "`dm.canonical_symbol`."
+            "row is skipped, and `m.problems()` lists it.\n"
+            "- To convert another source's tickers, use `dm.canonicalize_symbols` for a table "
+            "or `dm.canonical_symbol` for one value. A stock needs the source's convention: "
+            "`convention=dm.SymbolConvention.YAHOO` converts Yahoo's `BRK-B` to `BRK.B`. A row "
+            "that doesn't convert gets a null `Symbol`, which every dataset skips."
         ),
         "start": (
             "The first day or moment of the range. Give `start` and `end` as two dates or two "
@@ -51,8 +53,9 @@ ARGUMENT_RULES: Final = MappingProxyType(
             "\n"
             '- A date is text such as `"2025-06-02"`, a Python `date`, or a Deephaven '
             "`LocalDate`. It's the day in the market's time zone: New York for stocks, options, "
-            "and indices, and UTC for forex and crypto. For futures, it's the trading session "
-            "that ends that day.\n"
+            "and indices, and UTC for forex and crypto. For index bars of a day or longer, it's "
+            "the Chicago day, since Massive starts those bars at midnight Chicago time. For "
+            "futures, it's the trading session that ends that day.\n"
             "- An instant is a Python `datetime` with a time zone, a Deephaven `Instant`, or "
             'Deephaven time text such as `"2025-06-02T09:30 ET"`.\n'
             "- A dataset whose range is a calendar date, such as an ex-dividend date, takes "
@@ -91,7 +94,8 @@ ARGUMENT_RULES: Final = MappingProxyType(
         ),
         "timespan": (
             "The unit of each bar, a `dm.Timespan` member such as `dm.Timespan.MINUTE` or "
-            "`dm.Timespan.DAY`. Futures take `SESSION` in place of `DAY`. On a bars dataset, "
+            "`dm.Timespan.DAY`. `SESSION`, a trading session, is for futures only; a futures "
+            "`DAY` bar is one session. On a bars dataset, "
             "one-second and one-minute bars with `multiplier=1` also stream. Bars of other "
             "lengths are history only."
         ),
@@ -101,8 +105,35 @@ ARGUMENT_RULES: Final = MappingProxyType(
         ),
         "venues": (
             "The futures exchanges whose flat files `history()` reads, as a set of "
-            "`dm.FuturesVenue` members. The default is all four. Pass the ones your plan "
-            "includes."
+            "`dm.FuturesVenue` members, such as `{dm.FuturesVenue.CME, dm.FuturesVenue.CBOT}`. "
+            "Each exchange's file of a day holds every contract it trades, so naming fewer "
+            "exchanges downloads less.\n"
+            "\n"
+            "Massive refuses the files of an exchange your plan doesn't include. `history()` "
+            "reads REST instead when REST can serve the read. When it must read flat files "
+            "(`dm.ALL`, or `source=dm.HistorySource.FLAT_FILES`):\n"
+            "\n"
+            "- Left out, the read tries every exchange and skips each one Massive refuses. It "
+            "logs one warning naming them. The table's description names them too. For a "
+            "watchlist, each symbol's `Transport` in `m.symbol_reads()` shows them instead.\n"
+            "- An exchange you name follows the `refused_venues` cause of "
+            "[`on_error`](#on_error).\n"
+            "- If Massive refuses every exchange, the read fails."
+        ),
+        "on_error": (
+            "A `dm.ErrorPolicy` that sets what each kind of problem does in this call, such as "
+            "`dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`. A problem is one bad "
+            "symbol, row, file line, or refused futures exchange, and each kind is a cause. "
+            "Each cause the policy leaves unset follows the session's `MassiveConfig.on_error`, "
+            "then `dm.ErrorPolicy.DEFAULTS`. Leave `on_error` out, or pass None, to take every "
+            "cause from the session. By default every cause logs, except "
+            "`refused_venues`, which raises. `help(dm.ErrorPolicy)` lists the causes. "
+            "[Bad symbols and rows]("
+            "https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error"
+            ") says what each value does.\n"
+            "\n"
+            "A live call whose policy changes any cause's setting gets its own stream in "
+            "`m.streams()`."
         ),
     }
 )
