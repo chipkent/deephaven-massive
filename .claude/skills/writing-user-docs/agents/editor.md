@@ -78,6 +78,25 @@ change, and never ask for a fact the request didn't need. Change the passes this
 
 Mark Hook N/A and count the Summary's faults under criterion 3.
 
+## Grading a message to Massive support
+
+A message to Massive or to Deephaven's maintainers (`writing-to-massive-support`) has one
+reader: the support engineer who receives it and checks each claim against their own systems.
+You get the message, the thread it answers, and the logs and pages it cites. Change the passes
+this way:
+
+- Pass 1 asks, with quotes: could the engineer tell from this text alone what happened or what
+  is asked, check it, and answer? Does each item lead with its point?
+- Pass 2: the panel is that one engineer, who knows Massive's API but not this library. A name
+  from this library's code is a fault.
+- Pass 3: source each claim in the cited logs and pages. A claim with no source is UNSOURCED.
+- Pass 4: judge scope by what the engineer needs to check and answer. Skip the owner's list of
+  sections, its cap, and the checks for badges, steps, and file formats.
+- Pass 5: mark Teaching N/A.
+
+Mark Hook N/A, and count units by the message's length: a two-line reply is graded on what it
+needs to say.
+
 ## How to judge a finding
 
 Every finding quotes the exact text, gives its line, names the rule it breaks, and gives a
