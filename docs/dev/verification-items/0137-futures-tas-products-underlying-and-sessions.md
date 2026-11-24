@@ -18,3 +18,10 @@ calendar dates no streamed row of such a product: its rows are withheld under
 Read by `tests/ingest/test_futures_calendar_integration.py::test_response_bodies_of_futures_gaps`,
 on a key with futures data. It records the whole schedules answer for `CLT` and `CL`, and the
 products and contracts records of the 19 TAS products and their underlyings.
+
+Massive's REST trades document `session_end_date`, the trading day. Unknown: whether Massive
+fills it for TAS contracts, and whether the day it gives is the session of the product the TAS
+product settles to. `tests/namespaces/test_futures_integration.py::test_trade_at_settlement_trades_and_their_sessions`
+records it for six TAS products (`CLT`, `SBT`, `HG0`, `HGT`, `GCT`, `ZWT`): each front
+contract's latest trades and their `session_end_date`, whether each trade falls inside the
+underlying's session of that date, and the contracts' snapshot rows.

@@ -24,6 +24,7 @@ from deephaven import dtypes, new_table
 from deephaven.column import string_col
 
 import deephaven_massive as dm
+from deephaven_massive._datasets.epoch import epoch_ns
 from deephaven_massive._massive import (
     RestClient,
     Transport,
@@ -1068,3 +1069,188 @@ def test_contracts_follow_a_live_table_of_product_codes(
         evidence(f"after deleting NQ: {sorted(left)}, {result.size} rows")
     finally:
         m.release(result)
+
+
+_TAS_SAMPLE = {"CLT": "CL", "SBT": "ZS", "HG0": "HG", "HGT": "HG", "GCT": "GC", "ZWT": "ZW"}
+"""Trade at Settlement products with no schedule of their own, each with the product it settles
+to: crude oil, soybeans (`SBT` settles to `ZS`, not `SB`), copper's spot-month and active-month
+TAS (`HG0` and `HGT`, both on `HG`), gold, and wheat."""
+
+_TAS_TRADES = 50
+"""How many of each TAS contract's latest trades to read."""
+
+_TRADES = "/futures/v1/trades/{ticker}"
+
+_SCHEDULE_PAGE = 1000
+"""The schedule events read for one product: one page."""
+
+_EXAMPLES = 5
+"""How many trades outside their session, or with no session, to record whole."""
+
+
+def _front_contracts(client: RestClient, *, evidence: Evidence) -> dict[str, str]:
+    """Return the soonest-expiring active single contract of each sampled TAS product.
+
+    Asks the contracts list for the products' active single contracts on the latest of the last
+    four days it holds rows for, and records the day and the contracts chosen. A contract whose
+    last trade date has passed is skipped.
+    """
+    today = datetime.now(_CHICAGO).date()
+    day, rows = today, []
+    for back in range(4):
+        day = today - timedelta(days=back)
+        query = {
+            "product_code.any_of": list(_TAS_SAMPLE),
+            "date": day,
+            "type": "single",
+            "active": True,
+        }
+        rows = _page(client, _CONTRACTS, query={**query, "limit": 1000})
+        if rows:
+            break
+    fronts: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if str(row["last_trade_date"]) < today.isoformat():
+            continue
+        code = str(row["product_code"])
+        if code not in fronts or str(row["last_trade_date"]) < str(fronts[code]["last_trade_date"]):
+            fronts[code] = row
+    evidence(
+        f"TAS contracts on {day}: {len(rows)} rows; "
+        f"front contracts {[row['ticker'] for row in fronts.values()]}"
+    )
+    return {code: str(row["ticker"]) for code, row in fronts.items()}
+
+
+def _session_windows(
+    client: RestClient, product: str, days: Sequence[str]
+) -> dict[str, tuple[int, int]] | None:
+    """Return each session's first and last schedule event, in epoch nanoseconds, by its date.
+
+    Reads one page of the product's schedule events for the sessions whose `session_end_date`
+    lies between the earliest and the latest of `days`.
+
+    Returns:
+        The windows, or None when the page is full, so later sessions may be missing.
+    """
+    query = {
+        "product_code": product,
+        "session_end_date.gte": date.fromisoformat(min(days)),
+        "session_end_date.lte": date.fromisoformat(max(days)),
+        "limit": _SCHEDULE_PAGE,
+    }
+    rows = _page(client, _SCHEDULES, query=query)
+    if len(rows) == _SCHEDULE_PAGE:
+        return None
+    events: dict[str, list[int]] = {}
+    for row in rows:
+        stamp = datetime.fromisoformat(str(row["timestamp"]))
+        events.setdefault(str(row["session_end_date"]), []).append(epoch_ns(stamp))
+    return {day: (min(stamps), max(stamps)) for day, stamps in events.items()}
+
+
+def _trade_key(trade: Mapping[str, Any]) -> tuple[str, str, str]:
+    """Return what identifies one futures trade: its session, sequence number, and time.
+
+    Sequence numbers restart each session, so the number alone can match another trade.
+    """
+    return (
+        str(trade.get("session_end_date")),
+        str(trade.get("sequence_number")),
+        str(trade.get("timestamp")),
+    )
+
+
+def _compare_with_sessions(
+    client: RestClient,
+    trades: Sequence[Mapping[str, Any]],
+    *,
+    ticker: str,
+    underlying: str,
+    evidence: Evidence,
+) -> None:
+    """Record whether each dated trade falls inside the underlying's session of its date.
+
+    Counts the trades inside their session, outside it, and dated a day the underlying's
+    schedule has no session for. Records up to five trades of each of the last two kinds whole.
+    """
+    days = {str(t.get("session_end_date")) for t in trades}
+    dated = sorted(day for day in days if day != "None")
+    if not dated:
+        return
+    windows = _session_windows(client, underlying, dated)
+    if windows is None:
+        evidence(f"{ticker}: {underlying}'s schedule filled a page; trades not compared")
+        return
+    verdicts: dict[str, list[Mapping[str, Any]]] = {}
+    for trade in trades:
+        if trade.get("session_end_date") is None:
+            continue
+        window = windows.get(str(trade["session_end_date"]))
+        if window is None:
+            verdict = "no session"
+        elif window[0] <= int(trade["timestamp"]) <= window[1]:
+            verdict = "inside"
+        else:
+            verdict = "outside"
+        verdicts.setdefault(verdict, []).append(trade)
+    spans = {day: (_chicago(first), _chicago(last)) for day, (first, last) in windows.items()}
+    counts = {verdict: len(found) for verdict, found in verdicts.items()}
+    evidence(f"{ticker} against {underlying}'s sessions {spans}: {counts}")
+    for verdict in ("outside", "no session"):
+        for trade in verdicts.get(verdict, [])[:_EXAMPLES]:
+            evidence(f"{ticker} {verdict}: {_chicago(int(trade['timestamp']))} {trade}")
+
+
+@pytest.mark.settles("137")
+@pytest.mark.requests(23)
+@pytest.mark.timeout(200)
+def test_trade_at_settlement_trades_and_their_sessions(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Which trading day Massive gives Trade at Settlement (TAS) trades: the underlying's or not.
+
+    Massive's schedules hold no session for a TAS product, so the library withholds its streamed
+    rows. Its REST trades document `session_end_date`, the trading day. For six TAS products,
+    finds each one's front contract on the contracts list (up to 4 requests), reads its latest
+    50 trades and the first 50 of the latest trade's session, the trades nearest the evening
+    open (12 requests), and records how many carry `session_end_date` and its values. Then
+    reads the settling product's schedule for those days (up to 6 requests) and records, for
+    each trade, whether its time falls inside the underlying's session of the same date: from the
+    session's first schedule event to its last. Last, records the snapshot rows of the six
+    contracts whole (1 request), to show any field that names a session or the underlying.
+
+    Passes when every request is answered; the dates and the comparison are evidence.
+    """
+    fronts = _front_contracts(live_rest, evidence=evidence)
+    for code, underlying in _TAS_SAMPLE.items():
+        ticker = fronts.get(code)
+        if ticker is None:
+            evidence(f"{code}: no single contract on the contracts list")
+            continue
+        query = {"ticker": ticker, "sort": "timestamp.desc", "limit": _TAS_TRADES}
+        latest = _page(live_rest, _TRADES, query=query)
+        first: list[dict[str, Any]] = []
+        if latest and latest[0].get("session_end_date") is not None:
+            day = date.fromisoformat(str(latest[0]["session_end_date"]))
+            query = {**query, "sort": "timestamp.asc", "session_end_date": day}
+            first = _page(live_rest, _TRADES, query=query)
+        seen = {_trade_key(t) for t in latest}
+        trades = latest + [t for t in first if _trade_key(t) not in seen]
+        days = Counter(str(t.get("session_end_date")) for t in trades)
+        evidence(
+            f"{ticker}: {len(latest)} latest and {len(first)} first trades of the latest "
+            f"session, {len(trades)} distinct; session_end_date {dict(days)}"
+        )
+        for label, trade in (("latest", latest[:1]), ("first", first[:1])):
+            for row in trade:
+                evidence(f"{ticker} {label} trade, {_chicago(int(row['timestamp']))}: {row}")
+        _compare_with_sessions(
+            live_rest, trades, ticker=ticker, underlying=underlying, evidence=evidence
+        )
+    if not fronts:
+        evidence("no TAS contract found, so no snapshot read")
+        return
+    query = {"ticker.any_of": list(fronts.values()), "limit": 1000}
+    for row in _page(live_rest, _SNAPSHOT, query=query):
+        evidence(f"snapshot row: {row}")
