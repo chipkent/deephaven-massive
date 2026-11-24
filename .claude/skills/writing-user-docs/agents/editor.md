@@ -87,9 +87,11 @@ this way:
 
 - Pass 1 asks, with quotes: could the engineer tell from this text alone what happened or what
   is asked, check it, and answer? Does each item lead with its point?
-- Pass 2: the panel is that one engineer, who knows Massive's API but not this library. A name
-  from this library's code is a fault.
-- Pass 3: source each claim in the cited logs and pages. A claim with no source is UNSOURCED.
+- Pass 2: the panel is that one engineer, who knows Massive's API but not this library. Their
+  "simple?" asks whether they could check each claim and answer after one read. A name from
+  this library's code is a fault.
+- Pass 3: source each claim in the cited logs and pages, and what the thread said in the
+  thread. A claim with no source is UNSOURCED.
 - Pass 4: judge scope by what the engineer needs to check and answer. Skip the owner's list of
   sections, its cap, and the checks for badges, steps, and file formats.
 - Pass 5: mark Teaching N/A.
