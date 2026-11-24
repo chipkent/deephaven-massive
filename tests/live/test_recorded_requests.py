@@ -76,13 +76,18 @@ def test_a_request_is_recorded_as_sent_with_massive_s_request_id(
     ]
 
 
-def test_a_refused_request_is_recorded_before_its_error_propagates(
-    fake_rest: FakeRestServer, client: RestClient
+@pytest.mark.parametrize(("status", "captured"), [(403, "r-403"), (200, "None")])
+def test_a_refused_request_is_recorded_with_massive_s_request_id(
+    fake_rest: FakeRestServer, client: RestClient, *, status: int, captured: str
 ) -> None:
     refusal = {"status": "NOT_AUTHORIZED", "request_id": "r-403", "message": "upgrade"}
-    fake_rest.reply(_CONTRACTS, Reply(refusal, status=403))
+    fake_rest.reply(_CONTRACTS, Reply(refusal, status=status))
     lines: list[str] = []
-    with pytest.raises(WireEntitlementError):
+    with pytest.raises(WireEntitlementError) as raised:
         _get(client, lines)
-    assert len(lines) == 1
-    assert lines[0].endswith(": HTTP 403, request_id r-403")
+    # A 200 whose envelope refuses the request reaches the capture without its request_id, so
+    # the error's own line, which has it, follows the reply's.
+    assert len(lines) == 2
+    assert lines[0].endswith(f": HTTP {status}, request_id {captured}")
+    assert lines[1] == f"failed: {raised.value.message}"
+    assert "r-403" in lines[1]

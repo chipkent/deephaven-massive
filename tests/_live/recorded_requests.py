@@ -3,7 +3,8 @@
 A report to Massive cites each request it quotes by the request as sent and the `request_id`
 Massive gave it, which Massive's support can look up. `get` sends one GET with the live
 client and records, for each reply Massive sent it (a retry's too), one evidence line with the
-path, the query as the client sent it, the host, the status, and the `request_id`. The lines
+path, the query as the client sent it, the host, the status, and the `request_id`, and for a
+request that fails, its error's text, which carries Massive's `request_id` too. The lines
 come from the client's reply-capture hook (`set_reply_capture`), so the query is the text that
 went out, not a rendering of the arguments.
 """
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from deephaven_massive._massive import CapturedReply, set_reply_capture
+from deephaven_massive._massive import CapturedReply, WireError, set_reply_capture
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -31,7 +32,8 @@ def get(
 ) -> Page:
     """Send one GET, and record each reply Massive sent it in the evidence.
 
-    A request Massive refused is recorded too, before its error propagates.
+    A request that fails is recorded too, with one more line of its error's text, before the
+    error propagates.
 
     Args:
         client: The live REST client.
@@ -43,16 +45,26 @@ def get(
 
     Returns:
         The page Massive answered.
+
+    Raises:
+        WireError: When the request fails: Massive refused it, or the client could not read
+            or reach it.
     """
     replies: list[CapturedReply] = []
     # The live tests' process installs no other sink, so this one replaces none.
     set_reply_capture(replies.append)
     try:
-        return client.get(path, path_params, query, bucket=bucket)
-    finally:
-        set_reply_capture(None)
-        for reply in replies:
-            evidence(line(reply))
+        try:
+            return client.get(path, path_params, query, bucket=bucket)
+        finally:
+            set_reply_capture(None)
+            for reply in replies:
+                evidence(line(reply))
+    except WireError as error:
+        # The error's text carries Massive's `request_id` even where the reply's capture has
+        # none: a 200 whose envelope refuses the request.
+        evidence(f"failed: {error.message}")
+        raise
 
 
 def line(reply: CapturedReply) -> str:

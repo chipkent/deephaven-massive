@@ -449,8 +449,8 @@ _UNUSUAL_TRADES = "rest/options/unusual-options-activity/unusual-trades.md"
 """The vendored page of Massive's unusual options trades, by its name in `_documents`."""
 
 
-def _option_price_per_contract(documents: dict[str, str]) -> str:
-    """Say where Massive's options text still prices a trade per contract.
+def _option_price_unit(documents: dict[str, str]) -> tuple[bool, str]:
+    """Tell whether Massive's options text prices a trade per share, and quote what it says.
 
     A fix drops "per whole contract" from every options document and says "per share" in the
     unusual-trades page's `price` row, so a rewording that keeps the contract unit ("per
@@ -460,15 +460,15 @@ def _option_price_per_contract(documents: dict[str, str]) -> str:
         documents: The options documents (`_documents`).
 
     Returns:
-        What still shows the problem, with the documents and the row; empty once fixed.
+        Whether the fix shows, and the documents that say "per whole contract" with the
+        unusual-trades page's `price` row, quoted whether or not the fix shows.
     """
     shown = _saying(documents, "per whole contract")
     page = documents[_UNUSUAL_TRADES]
     rows = [line for line in page.splitlines() if line.startswith("| `results[].price` |")]
     assert len(rows) == 1, f"{_UNUSUAL_TRADES} has {len(rows)} rows of results[].price"
-    if not shown and "per share" in rows[0]:
-        return ""
-    return f"'per whole contract' in {shown}; the {_UNUSUAL_TRADES} price row: {rows[0]}"
+    fixed = not shown and "per share" in rows[0]
+    return fixed, f"'per whole contract' in {shown}; the {_UNUSUAL_TRADES} price row: {rows[0]}"
 
 
 @pytest.mark.parametrize(
@@ -480,7 +480,9 @@ def test_an_option_trade_price_is_fixed_only_when_said_per_share(unit: str, fixe
         _UNUSUAL_TRADES: f"| Field | Type | Description |\n| `results[].price` | number | {said} |",
         "openapi.json /v3/trades/{optionsTicker}": said,
     }
-    assert (_option_price_per_contract(documents) == "") is fixed
+    found, shown = _option_price_unit(documents)
+    assert found is fixed
+    assert shown.endswith(f"price row: | `results[].price` | number | {said} |")
 
 
 @_SNAPSHOT_HERE
@@ -493,8 +495,8 @@ def test_massive_describes_an_option_trade_price_per_share(
     The unusual-trades and options trades `price` is per share of the underlying, as
     Massive confirmed, though its description says "per whole contract".
     """
-    shown = _option_price_per_contract(_documents(vendored, "options"))
-    expect_fixed(evidence=shown_in_report, fixed=not shown, shown=shown)
+    fixed, shown = _option_price_unit(_documents(vendored, "options"))
+    expect_fixed(evidence=shown_in_report, fixed=fixed, shown=shown)
 
 
 @_SNAPSHOT_HERE

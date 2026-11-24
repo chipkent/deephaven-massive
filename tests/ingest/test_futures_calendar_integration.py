@@ -1120,8 +1120,10 @@ def _look_up(
         )
         for row in page.rows:
             # A snapshot row names its ticker in `details`; a contracts row at its top level.
-            details = row.get("details") if path == _SNAPSHOT else row
-            ticker = details.get("ticker") if isinstance(details, dict) else None
+            holder = (row.get("details") or {}) if path == _SNAPSHOT else row
+            # A row of another shape fails the check, never passing as a ticker not listed.
+            assert isinstance(holder, dict), f"a {path} row whose details is no object: {row}"
+            ticker = holder.get("ticker")
             if isinstance(ticker, str):
                 found.add(ticker)
     return found, asked

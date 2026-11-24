@@ -579,7 +579,7 @@ def test_a_stock_day_bar_has_one_stamp_on_every_rest_source(
     expect_fixed(
         evidence=evidence,
         fixed=len({bar[0] for bar in bars.values()}) == 1,
-        shown=f"{_SYMBOL} day bar of {day} stamped differently by each source: {stamps}",
+        shown=f"{_SYMBOL} day bar of {day}, its stamp by source: {stamps}",
     )
 
 

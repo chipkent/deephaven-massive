@@ -1136,11 +1136,13 @@ def test_an_index_day_bar_covers_the_new_york_day(
     assert len(judged) >= 3, f"only {judged} of {days} can be judged ({unjudged})"
     chicago = [str(day) for day, verdict in judged.items() if verdict != "New York day"]
     note = f"; not judged: {unjudged}" if unjudged else ""
+    by_day = {str(day): verdict for day, verdict in judged.items()}
     expect_fixed(
         evidence=evidence,
         fixed=not chicago,
         shown=(
-            f"{_PROBLEM_INDEX}'s range 1-day bars of {chicago} equal a rebuild from REST minute "
-            f"bars over the Chicago day, not the New York (Eastern) day Massive's docs give{note}"
+            f"{_PROBLEM_INDEX}'s range 1-day bars by day, judged against rebuilds from REST "
+            f"minute bars over the Chicago day and the New York (Eastern) day Massive's docs "
+            f"give: {by_day}; those not on the New York day: {chicago}{note}"
         ),
     )
