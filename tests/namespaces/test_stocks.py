@@ -1688,7 +1688,7 @@ def test_fmv_streams_from_its_host_beside_delayed_stock_trades(
     session.server.refuse["FMV.MSFT"] = "not authorized to access FMV.MSFT"
     trades = session.session.stocks.trades("MSFT").blink()
     fmv = session.session.stocks.fmv("MSFT").blink()
-    session.subscribed("FMV.MSFT")
+    session.subscribed_anywhere("T.MSFT", "FMV.MSFT")
     session.wait(lambda s: any(status.kind is StatusKind.REFUSED for status in s.statuses))
     session.flush()
     assert session.urls == [

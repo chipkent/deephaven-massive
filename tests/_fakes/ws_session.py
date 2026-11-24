@@ -463,33 +463,44 @@ class WsSession:
 
     def subscribed(self, *topics: str) -> None:
         """Wait until the latest connection is authenticated and every topic was subscribed."""
-
-        def named() -> bool:
-            sent = {
-                t
-                for f in self.server.frames()
-                if json.loads(f)["action"] == "subscribe"
-                for t in json.loads(f)["params"].split(",")
-            }
-            return set(topics) <= sent
-
         self.server.wait_for(lambda s: bool(s.connections) and s.connections[-1].auth is not None)
-        self.server.wait_for(lambda _: named())
+        self.server.wait_for(lambda s: set(topics) <= _topics(s.frames(), "subscribe"))
+
+    def subscribed_anywhere(self, *topics: str) -> None:
+        """Wait until every topic was subscribed, each on any connection.
+
+        For streams on several connections, which the server may accept in either order, so
+        the latest connection need not be the one that subscribes a given topic.
+        """
+        self.server.wait_for(
+            lambda s: (
+                set(topics)
+                <= {t for i in range(len(s.connections)) for t in _topics(s.frames(i), "subscribe")}
+            )
+        )
 
     def unsubscribed(self, *topics: str) -> None:
         """Wait until every topic was unsubscribed."""
-
-        def named() -> bool:
-            gone = {
-                t
-                for f in self.server.frames()
-                if json.loads(f)["action"] == "unsubscribe"
-                for t in json.loads(f)["params"].split(",")
-            }
-            return set(topics) <= gone
-
-        self.server.wait_for(lambda _: named())
+        self.server.wait_for(lambda s: set(topics) <= _topics(s.frames(), "unsubscribe"))
 
     def close(self) -> None:
         """Close the session, which closes its connections."""
         self.session.close()
+
+
+def _topics(frames: Sequence[str], action: str) -> set[str]:
+    """Return the topics a connection's frames named with one action.
+
+    Args:
+        frames: The frames the connection received after authentication.
+        action: `"subscribe"` or `"unsubscribe"`.
+
+    Returns:
+        Every topic of every frame with that action.
+    """
+    return {
+        topic
+        for frame in frames
+        if json.loads(frame)["action"] == action
+        for topic in json.loads(frame)["params"].split(",")
+    }
