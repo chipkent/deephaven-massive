@@ -29,8 +29,9 @@ the same time. Support read it as a reference-data delay, and the real question 
   planned.
 - **Write to the project's standard.** The prose meets `docs/dev/user-docs.md`: the page an
   O'Reilly development editor would send to print, with none of its AI tells. Lead each item
-  with its point, then the exact request or steps, then the question. Define every term,
-  including any name from this library's code that the reader needs.
+  with its point, then the exact request or steps, then the question. Define terms. A
+  reproduction is the smallest raw request or script that shows the problem, never this
+  library's code.
 
 Before the owner sees a draft, have an agent with no other context check each claim against the
 raw logs and pages, and have the calibrated editor (`writing-user-docs`, `agents/editor.md`)
