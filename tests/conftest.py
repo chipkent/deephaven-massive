@@ -1987,7 +1987,9 @@ def pytest_runtest_makereport(
     expected = call.when == "call" and report.skipped and hasattr(report, "wasxfail")
     if call.when == "call" and (report.failed or expected):
         item.stash[_CALL_FAILED] = True
-    if expected:
+    # pytest stores only an `Exception`, so not the outcome `pytest.xfail()` raises.
+    stored = getattr(sys, "last_value", None)  # absent when no call stored one
+    if expected and call.excinfo is not None and stored is call.excinfo.value:
         # An expected failure has nothing to debug, and a run whose only other outcomes are
         # passes must exit 0, not as if an error escaped pytest (`_final_jvm_exit`).
         _forget_last_error()

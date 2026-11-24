@@ -10,7 +10,6 @@ import os
 import shutil
 import subprocess
 import sys
-import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -256,27 +255,28 @@ def test_a_run_with_no_check_has_no_problem_lines() -> None:
     assert massive_problems.problem_lines({}) == []
 
 
-def test_a_run_ending_in_an_expected_failure_exits_zero(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [
+        (
+            '@pytest.mark.xfail(strict=True, raises=KeyError, reason="r")\ndef test_fails():\n'
+            '    raise KeyError("x")'
+        ),
+        'def test_fails():\n    pytest.xfail("the problem lasts")',
+    ],
+    ids=["marked", "imperative"],
+)
+def test_a_run_ending_in_an_expected_failure_exits_zero(tmp_path: Path, failure: str) -> None:
     # A run in one process (`-n 0`, as the pre-push hook runs one changed test file) with the
     # suite's conftest, whose last test fails as expected, as the checks of Massive's problems
-    # do while the problem lasts.
-    (tmp_path / "test_tiny.py").write_text(
-        textwrap.dedent(
-            """
-            import pytest
-
-            def test_passes():
-                pass
-
-            @pytest.mark.xfail(strict=True, raises=KeyError, reason="the problem lasts")
-            def test_fails_as_expected():
-                raise KeyError("x")
-            """
-        )
-    )
-    # The suite's settings, read from the run's own root, with the suite importable.
+    # do while the problem lasts; `pytest.xfail()` raises an outcome pytest never stores.
+    tiny = f"import pytest\n\n\ndef test_passes():\n    pass\n\n\n{failure}\n"
+    (tmp_path / "test_tiny.py").write_text(tiny)
+    # The suite's settings, read from the run's own root, with the suite importable, and none
+    # of the parent run's options (a `-k` there would deselect the child's tests).
     shutil.copy(ROOT / "pyproject.toml", tmp_path)
     env = {k: v for k, v in os.environ.items() if not k.startswith("MASSIVE_")}
+    env.pop("PYTEST_ADDOPTS", None)
     env |= {"PYTHONPATH": str(ROOT)}
     done = subprocess.run(
         [
