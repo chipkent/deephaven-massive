@@ -42,13 +42,19 @@ def _issue_of(*markers: pytest.Mark) -> int | None:
     return massive_problems.issue_of(item)
 
 
-def test_a_fix_raises_nothing() -> None:
-    massive_problems.expect_fixed(fixed=True, shown="volume 12 against 12")
+def test_a_fix_raises_nothing_and_is_recorded_with_massive_s_values() -> None:
+    lines: list[str] = []
+    massive_problems.expect_fixed(fixed=True, shown="volume 12 against 12", evidence=lines.append)
+    assert lines == ["Massive problem fixed: volume 12 against 12"]
 
 
-def test_a_problem_still_shown_raises_with_massive_s_values() -> None:
+def test_a_problem_still_shown_is_recorded_and_raises_with_massive_s_values() -> None:
+    lines: list[str] = []
     with pytest.raises(massive_problems.ProblemShownError, match=r"^volume 12 against 13$"):
-        massive_problems.expect_fixed(fixed=False, shown="volume 12 against 13")
+        massive_problems.expect_fixed(
+            fixed=False, shown="volume 12 against 13", evidence=lines.append
+        )
+    assert lines == ["Massive problem present: volume 12 against 13"]
 
 
 def test_a_marker_names_its_issue_and_an_unmarked_test_none() -> None:

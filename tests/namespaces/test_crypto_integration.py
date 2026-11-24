@@ -512,6 +512,7 @@ def test_crypto_range_day_bar_volume_equals_prev_and_grouped_daily(
             if error > _TOLERANCE:
                 differ.append(f"{day}: GET {_RANGE} v={bar.get('v')}, {request} v={other.get('v')}")
     expect_fixed(
+        evidence=evidence,
         fixed=not differ,
         shown=f"{_PAIR} range day-bar volumes unlike the other sources': {differ}",
     )
@@ -662,6 +663,7 @@ def test_every_crypto_ticker_list_row_joins_its_currencies_to_its_ticker(
         refused += ticker_lists.unjoined(rows, read)
     evidence(f"rows whose currencies do not join to the ticker: {refused}")
     expect_fixed(
+        evidence=evidence,
         fixed=not refused,
         shown=f"GET {_TICKERS}?market=crypto rows whose currencies do not join: {refused}",
     )

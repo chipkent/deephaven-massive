@@ -66,7 +66,7 @@ from deephaven_massive._massive import (
     object_key,
     source,
 )
-from tests._live import calendar
+from tests._live import calendar, recorded_requests
 from tests._live.futures_trade_frames import TradeFrames, capturing_trade_frames
 from tests._live.massive_problems import expect_fixed
 from tests._live.ticker_lists import ticker_form
@@ -1094,23 +1094,34 @@ def _look_up(
     *,
     query: Mapping[str, object],
     most: int,
+    evidence: Evidence,
 ) -> tuple[set[str], list[str]]:
     """Ask a futures list for tickers by `ticker.any_of`, 100 a request, at most `most` requests.
 
     When `most` requests cannot ask about every ticker, asks about as many as they can,
-    spread evenly over the sorted tickers (`_spread`).
+    spread evenly over the sorted tickers (`_spread`). Records each request as sent, with
+    Massive's `request_id` (`recorded_requests.get`), so a report to Massive can cite it.
 
     Returns:
         The tickers the list returned a row for, and the tickers asked about.
     """
     asked = _spread(sorted(tickers), _LOOKUP_CHUNK * most)
     found: set[str] = set()
+    rest_path = source(Transport.REST, path)
     for start in range(0, len(asked), _LOOKUP_CHUNK):
         chunk = asked[start : start + _LOOKUP_CHUNK]
-        for row in _page(client, path, query={**query, "ticker.any_of": chunk}):
-            ticker = (
-                (row.get("details") or {}).get("ticker") if path == _SNAPSHOT else row.get("ticker")
-            )
+        page = recorded_requests.get(
+            client,
+            rest_path,
+            path_params={},
+            query={**query, "ticker.any_of": chunk},
+            bucket="futures",
+            evidence=evidence,
+        )
+        for row in page.rows:
+            # A snapshot row names its ticker in `details`; a contracts row at its top level.
+            details = row.get("details") if path == _SNAPSHOT else row
+            ticker = details.get("ticker") if isinstance(details, dict) else None
             if isinstance(ticker, str):
                 found.add(ticker)
     return found, asked
@@ -2014,10 +2025,14 @@ def _record_traded_but_unlisted(
     )
     unread = sorted(set(traded) - set(contracts))
     query = {"date": day, "limit": _LIST_PAGE}
-    found, asked = _look_up(client, _CONTRACTS, unread, query=query, most=_CROSS_LOOKUPS)
+    found, asked = _look_up(
+        client, _CONTRACTS, unread, query=query, most=_CROSS_LOOKUPS, evidence=evidence
+    )
     lacking = sorted(set(asked) - found)
     query = {"date.gte": day - timedelta(days=7), "date.lte": day, "limit": _LIST_PAGE}
-    later, again = _look_up(client, _CONTRACTS, lacking, query=query, most=_LATE_LOOKUPS)
+    later, again = _look_up(
+        client, _CONTRACTS, lacking, query=query, most=_LATE_LOOKUPS, evidence=evidence
+    )
     evidence(
         f"snapshot tickers traded in the session of {today}: {len(traded)}; not in the "
         f"contracts pages read: {len(unread)}; asked about {_share(asked, unread)}: "
@@ -2061,7 +2076,12 @@ def test_snapshot_and_contracts_list_differences_on_a_listing_day(
     _record_traded_but_unlisted(live_rest, listed, contracts, day=day, evidence=evidence)
     unsnapped = sorted(set(contracts) - set(listed))
     found, asked = _look_up(
-        live_rest, _SNAPSHOT, unsnapped, query={"limit": _PRODUCTS_PAGE}, most=_SNAPSHOT_LOOKUPS
+        live_rest,
+        _SNAPSHOT,
+        unsnapped,
+        query={"limit": _PRODUCTS_PAGE},
+        most=_SNAPSHOT_LOOKUPS,
+        evidence=evidence,
     )
     missing = sorted(set(asked) - found)
     recent = (day - _NEW_LISTING_DAYS).isoformat()
@@ -2185,13 +2205,13 @@ def _record_streamed_in_neither(
     """
     query: dict[str, object] = {"limit": _PRODUCTS_PAGE}
     in_snapshot, asked = _look_up(
-        client, _SNAPSHOT, seen, query=query, most=_STREAM_SNAPSHOT_LOOKUPS
+        client, _SNAPSHOT, seen, query=query, most=_STREAM_SNAPSHOT_LOOKUPS, evidence=evidence
     )
     unsnapped = sorted(set(asked) - in_snapshot)
     day = _listed_day(client, evidence)
     query = {"date": day, "limit": _LIST_PAGE}
     in_contracts, checked = _look_up(
-        client, _CONTRACTS, unsnapped, query=query, most=_STREAM_CONTRACT_LOOKUPS
+        client, _CONTRACTS, unsnapped, query=query, most=_STREAM_CONTRACT_LOOKUPS, evidence=evidence
     )
     neither = sorted(set(checked) - in_contracts)
     evidence(
@@ -2547,6 +2567,7 @@ def test_trade_at_settlement_product_has_a_schedule_or_names_its_underlying(
     evidence(f"fields naming the underlying, by TAS product: {naming}")
     evidence(f"products record of CLT: {json.dumps(records['CLT'], default=str)}")
     expect_fixed(
+        evidence=evidence,
         fixed=bool(tas) or all(naming.values()),
         shown=(
             f"GET {_SCHEDULES}?product_code=CLT&sort=session_end_date.desc&limit=1 answered "
@@ -2703,13 +2724,15 @@ def _zero_tickers_unlisted(
     query = _days_query(week)
     controls = _most_rows(week, lambda t: is_futures_contract(t) and not _starts_with_zero(t))
     assert controls, "the CME minute files hold no single contract"
-    found, _ = _look_up(client, _CONTRACTS, controls, query=query, most=1)
+    found, _ = _look_up(client, _CONTRACTS, controls, query=query, most=1, evidence=evidence)
     evidence(f"contracts list {query}: control {controls}, held {sorted(found)}")
     assert found == set(controls), f"the contracts list holds no row of {set(controls) - found}"
     zero = _week_tickers(week, _starts_with_zero)
     if not zero:
         return [], []
-    held, asked = _look_up(client, _CONTRACTS, zero, query=query, most=_ZERO_LOOKUPS)
+    held, asked = _look_up(
+        client, _CONTRACTS, zero, query=query, most=_ZERO_LOOKUPS, evidence=evidence
+    )
     unlisted = [t for t in asked if t not in held]
     evidence(f"tickers starting with 0: {_share(asked, zero)} asked, unlisted {unlisted}")
     return unlisted, asked
@@ -2744,6 +2767,7 @@ def test_futures_tickers_starting_with_zero_are_on_the_contracts_list(
             "are gone"
         )
     expect_fixed(
+        evidence=evidence,
         fixed=not unlisted,
         shown=(
             f"GET {_CONTRACTS} ticker.any_of {_days_query(week)} held no row of {unlisted}, "
@@ -2774,6 +2798,7 @@ def test_futures_tickers_starting_with_zero_are_gone_or_listed(
     week = _week_of_tickers(live_flat_files, evidence)
     unlisted, asked = _zero_tickers_unlisted(live_rest, week, evidence)
     expect_fixed(
+        evidence=evidence,
         fixed=not unlisted,
         shown=(
             f"tickers starting with 0 in the CME minute files of {min(week)} to {max(week)}, "
@@ -2801,17 +2826,21 @@ def _unlisted_family(ticker: str) -> bool:
 
 
 def _held_by_either_list(
-    client: RestClient, tickers: Sequence[str], week: Mapping[date, object]
+    client: RestClient, tickers: Sequence[str], week: Mapping[date, object], *, evidence: Evidence
 ) -> set[str]:
     """Return the tickers the snapshot or the contracts list over a week's days holds.
 
-    Sends 2 requests, one to each list, for up to 100 tickers.
+    Sends 2 requests, one to each list, for up to 100 tickers, and records each (`_look_up`).
 
     Returns:
         The tickers either list returned a row for.
     """
-    snapshot, _ = _look_up(client, _SNAPSHOT, tickers, query={"limit": _LIST_PAGE}, most=1)
-    contracts, _ = _look_up(client, _CONTRACTS, tickers, query=_days_query(week), most=1)
+    snapshot, _ = _look_up(
+        client, _SNAPSHOT, tickers, query={"limit": _LIST_PAGE}, most=1, evidence=evidence
+    )
+    contracts, _ = _look_up(
+        client, _CONTRACTS, tickers, query=_days_query(week), most=1, evidence=evidence
+    )
     return snapshot | contracts
 
 
@@ -2845,13 +2874,14 @@ def test_fx_link_and_sofr_fed_funds_spreads_are_listed(
         lambda t: not (is_futures_contract(t) or _unlisted_family(t) or _starts_with_zero(t)),
     )
     assert controls, "the CME minute files hold no other combo"
-    found = _held_by_either_list(live_rest, controls, week)
+    found = _held_by_either_list(live_rest, controls, week, evidence=evidence)
     evidence(f"control combos {controls}: held {sorted(found)}")
     assert found == set(controls), f"neither list holds {set(controls) - found}"
     asked = spreads[:_LOOKUP_CHUNK]
-    held = _held_by_either_list(live_rest, asked, week)
+    held = _held_by_either_list(live_rest, asked, week, evidence=evidence)
     unlisted = [t for t in asked if t not in held]
     expect_fixed(
+        evidence=evidence,
         fixed=not unlisted,
         shown=(
             f"neither GET {_SNAPSHOT} nor GET {_CONTRACTS} {_days_query(week)} by ticker.any_of "
@@ -2925,6 +2955,7 @@ def test_spaced_combo_trades_read_by_the_librarys_path(
     assert _own_trades(controls, control), f"the control's trades are not its own: {controls}"
     trades = _latest_trades(live_rest, combo, evidence)
     expect_fixed(
+        evidence=evidence,
         fixed=bool(trades) and _own_trades(trades, combo),
         shown=(
             f"GET /futures/v1/trades/{quote(combo.ticker, safe='')} returned "
@@ -2980,6 +3011,7 @@ def test_streamed_futures_trades_carry_their_session_end_date(*, evidence: Evide
         f"first without: {frames.undated_example or 'none'}"
     )
     expect_fixed(
+        evidence=evidence,
         fixed=frames.dated > 0,
         shown=(
             f"{frames.dated} of the {frames.trades} futures trade events streamed on "
@@ -3011,6 +3043,7 @@ def test_streamed_futures_trade_prices_are_numbers(*, evidence: Evidence) -> Non
         f"first with a number: {frames.number_price_example or 'none'}"
     )
     expect_fixed(
+        evidence=evidence,
         fixed=frames.text_prices == 0,
         shown=(
             f"{frames.text_prices} of the {frames.trades} futures trade events streamed on "

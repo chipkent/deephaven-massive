@@ -1742,4 +1742,6 @@ def test_an_spx_option_s_underlying_is_spelled_alike_by_the_chain_and_the_refere
     for request, text in spelled.items():
         assert isinstance(text, str), f"{request} {text!r}"
         assert text.removeprefix("I:") == "SPX", f"{request} {text!r} does not name SPX"
-    expect_fixed(fixed=len(set(spelled.values())) == 1, shown=f"{ticker}: {spelled}")
+    expect_fixed(
+        evidence=evidence, fixed=len(set(spelled.values())) == 1, shown=f"{ticker}: {spelled}"
+    )

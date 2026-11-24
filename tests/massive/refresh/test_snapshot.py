@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -21,6 +22,9 @@ from deephaven_massive._massive.refresh.gates import RefreshError
 from deephaven_massive._massive.refresh.openapi import JsonObject, OpenApi, properties, text
 from deephaven_massive._massive.refresh.snapshot import Snapshot, VendorFile
 from tests._live.massive_problems import expect_fixed
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _sha(data: bytes) -> str:
@@ -339,6 +343,21 @@ def vendored() -> Snapshot:
     return Snapshot.load()
 
 
+@pytest.fixture
+def shown_in_report(request: pytest.FixtureRequest) -> Callable[[str], None]:
+    """Return a recorder of what a check found, as a section of its report.
+
+    These checks run with the unit tests, which write no evidence log. A refresh that brings
+    Massive's fix fails the run with a strict unexpected pass, whose report shows the section:
+    what the vendored documentation says now.
+    """
+
+    def record(line: str) -> None:
+        request.node.add_report_section("call", "Massive problem", line)
+
+    return record
+
+
 def _documents(vendored: Snapshot, *asset_classes: str) -> dict[str, str]:
     """Return the text of every vendored page and specification path of the asset classes.
 
@@ -388,6 +407,15 @@ def _channel_fields(vendored: Snapshot, channel: str) -> dict[str, JsonObject]:
     return {key: spec.schema(value, f"{channel} {key}") for key, value in found.items()}
 
 
+def test_a_check_s_report_shows_what_it_found(
+    shown_in_report: Callable[[str], None], request: pytest.FixtureRequest
+) -> None:
+    shown_in_report("Massive problem fixed: /forex/C declares only ['i']")
+    assert request.node._report_sections == [
+        ("call", "Massive problem", "Massive problem fixed: /forex/C declares only ['i']")
+    ]
+
+
 @_SNAPSHOT_HERE
 def test_documents_of_an_asset_class_are_its_pages_and_paths(vendored: Snapshot) -> None:
     documents = _documents(vendored, "options")
@@ -402,7 +430,9 @@ def test_documents_of_an_asset_class_are_its_pages_and_paths(vendored: Snapshot)
 
 @_SNAPSHOT_HERE
 @pytest.mark.massive_issue(779)
-def test_massive_documents_the_day_its_index_bars_cover(vendored: Snapshot) -> None:
+def test_massive_documents_the_day_its_index_bars_cover(
+    vendored: Snapshot, shown_in_report: Callable[[str], None]
+) -> None:
     """Whether Massive's index custom-bars text no longer puts its bars in Eastern Time.
 
     Massive's index day bars and minute files cover the Chicago day, though its custom-bars
@@ -410,7 +440,9 @@ def test_massive_documents_the_day_its_index_bars_cover(vendored: Snapshot) -> N
     settles the item; the data's side is the live check of the same item.
     """
     shown = _saying(_documents(vendored, "indices"), "time interval in Eastern Time (ET)")
-    expect_fixed(fixed=not shown, shown=f"'in Eastern Time (ET)' in {shown}")
+    expect_fixed(
+        evidence=shown_in_report, fixed=not shown, shown=f"'in Eastern Time (ET)' in {shown}"
+    )
 
 
 _UNUSUAL_TRADES = "rest/options/unusual-options-activity/unusual-trades.md"
@@ -453,19 +485,23 @@ def test_an_option_trade_price_is_fixed_only_when_said_per_share(unit: str, fixe
 
 @_SNAPSHOT_HERE
 @pytest.mark.massive_issue(791)
-def test_massive_describes_an_option_trade_price_per_share(vendored: Snapshot) -> None:
+def test_massive_describes_an_option_trade_price_per_share(
+    vendored: Snapshot, shown_in_report: Callable[[str], None]
+) -> None:
     """Whether no options text calls a trade's price the value per whole contract.
 
     The unusual-trades and options trades `price` is per share of the underlying, as
     Massive confirmed, though its description says "per whole contract".
     """
     shown = _option_price_per_contract(_documents(vendored, "options"))
-    expect_fixed(fixed=not shown, shown=shown)
+    expect_fixed(evidence=shown_in_report, fixed=not shown, shown=shown)
 
 
 @_SNAPSHOT_HERE
 @pytest.mark.massive_issue(793)
-def test_massive_types_futures_stream_prices_as_it_sends_them(vendored: Snapshot) -> None:
+def test_massive_types_futures_stream_prices_as_it_sends_them(
+    vendored: Snapshot, shown_in_report: Callable[[str], None]
+) -> None:
     """Whether the specification types the futures stream's prices as the text Massive sends.
 
     The futures stream sends its prices and dollar volume as JSON strings while the
@@ -484,12 +520,16 @@ def test_massive_types_futures_stream_prices_as_it_sends_them(vendored: Snapshot
         for key in keys
     }
     numbers = sorted(name for name, kind in typed.items() if kind != "string")
-    expect_fixed(fixed=not numbers, shown=f"typed other than string: {numbers}")
+    expect_fixed(
+        evidence=shown_in_report, fixed=not numbers, shown=f"typed other than string: {numbers}"
+    )
 
 
 @_SNAPSHOT_HERE
 @pytest.mark.massive_issue(794)
-def test_massive_describes_trade_prices_without_the_stock_example(vendored: Snapshot) -> None:
+def test_massive_describes_trade_prices_without_the_stock_example(
+    vendored: Snapshot, shown_in_report: Callable[[str], None]
+) -> None:
     """Whether no options, crypto, or futures text prices a trade with the stock example.
 
     The example counts 100 shares (or contracts) at $2.00 as $200.00, which leaves out an
@@ -497,12 +537,16 @@ def test_massive_describes_trade_prices_without_the_stock_example(vendored: Snap
     """
     documents = _documents(vendored, "options", "crypto", "futures")
     shown = _saying(documents, _STOCK_PRICE_EXAMPLE)
-    expect_fixed(fixed=not shown, shown=f"the stock price example in {shown}")
+    expect_fixed(
+        evidence=shown_in_report, fixed=not shown, shown=f"the stock price example in {shown}"
+    )
 
 
 @_SNAPSHOT_HERE
 @pytest.mark.massive_issue(794)
-def test_massive_describes_futures_dollar_volume_without_us_dollars(vendored: Snapshot) -> None:
+def test_massive_describes_futures_dollar_volume_without_us_dollars(
+    vendored: Snapshot, shown_in_report: Callable[[str], None]
+) -> None:
     """Whether no futures text calls a bar's dollar volume a value in US dollars.
 
     Futures dollar volume is price times size with no contract multiplier, as Massive's REST
@@ -513,21 +557,31 @@ def test_massive_describes_futures_dollar_volume_without_us_dollars(vendored: Sn
         *_saying(documents, "The total US dollar value of shares traded"),
         *_saying(documents, "The total dollar volume of the transactions"),
     ]
-    expect_fixed(fixed=not shown, shown=f"a US dollar volume text in {shown}")
+    expect_fixed(
+        evidence=shown_in_report, fixed=not shown, shown=f"a US dollar volume text in {shown}"
+    )
 
 
 @_SNAPSHOT_HERE
 @pytest.mark.massive_issue(802)
-def test_massive_documents_the_forex_quote_s_i(vendored: Snapshot) -> None:
+def test_massive_documents_the_forex_quote_s_i(
+    vendored: Snapshot, shown_in_report: Callable[[str], None]
+) -> None:
     """Whether the specification declares the `i` that forex quotes (`C`) carry."""
     declared = sorted(_channel_fields(vendored, "/forex/C"))
-    expect_fixed(fixed="i" in declared, shown=f"/forex/C declares only {declared}")
+    expect_fixed(
+        evidence=shown_in_report, fixed="i" in declared, shown=f"/forex/C declares only {declared}"
+    )
 
 
 @_SNAPSHOT_HERE
 @pytest.mark.massive_issue(802)
-def test_massive_documents_the_crypto_quote_s_lp_and_ls(vendored: Snapshot) -> None:
+def test_massive_documents_the_crypto_quote_s_lp_and_ls(
+    vendored: Snapshot, shown_in_report: Callable[[str], None]
+) -> None:
     """Whether the specification declares the `lp` and `ls` that crypto quotes (`XQ`) carry."""
     declared = sorted(_channel_fields(vendored, "/crypto/XQ"))
     fixed = {"lp", "ls"} <= set(declared)
-    expect_fixed(fixed=fixed, shown=f"/crypto/XQ declares only {declared}")
+    expect_fixed(
+        evidence=shown_in_report, fixed=fixed, shown=f"/crypto/XQ declares only {declared}"
+    )

@@ -984,6 +984,7 @@ def test_the_prev_bar_of_an_index_equals_its_range_day_bar(
     assert range_prices is not None, f"the range sent a bar without prices: {ranged[0]}"
     error = index_day_sources.relative_error(prev_prices, range_prices)
     expect_fixed(
+        evidence=evidence,
         fixed=error <= index_day_sources.MATCH,
         shown=(
             f"{_PREV} of {_PROBLEM_INDEX} sent {prev_prices} (open, high, low, close) for {day}, "
@@ -1032,6 +1033,7 @@ def test_the_short_index_minute_file_holds_every_rest_minute(
         lacking[f"{name} day"] = lacks
     counts = {name: len(lacks) for name, lacks in lacking.items()}
     expect_fixed(
+        evidence=evidence,
         fixed=any(not lacks for lacks in lacking.values()),
         shown=(
             f"{_MINUTE_FILE} of {day} holds {len(filed)} {_PROBLEM_INDEX} minutes and lacks "
@@ -1079,6 +1081,7 @@ def test_the_index_day_files_match_the_rest_day_bars(
                 f"{day}: file {file_prices}, REST {range_prices}, relative error {error:.2e}"
             )
     expect_fixed(
+        evidence=evidence,
         fixed=not differ,
         shown=(
             f"{_PROBLEM_INDEX}'s {_DAY_FILE} rows differ from the range's 1-day bars "
@@ -1134,6 +1137,7 @@ def test_an_index_day_bar_covers_the_new_york_day(
     chicago = [str(day) for day, verdict in judged.items() if verdict != "New York day"]
     note = f"; not judged: {unjudged}" if unjudged else ""
     expect_fixed(
+        evidence=evidence,
         fixed=not chicago,
         shown=(
             f"{_PROBLEM_INDEX}'s range 1-day bars of {chicago} equal a rebuild from REST minute "

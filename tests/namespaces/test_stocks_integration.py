@@ -577,6 +577,7 @@ def test_a_stock_day_bar_has_one_stamp_on_every_rest_source(
     evidence(f"{_SYMBOL} day bar of {day}: {stamps}")
     assert all(_same_prices(bar, prev) for bar in bars.values()), f"not one bar: {bars}"
     expect_fixed(
+        evidence=evidence,
         fixed=len({bar[0] for bar in bars.values()}) == 1,
         shown=f"{_SYMBOL} day bar of {day} stamped differently by each source: {stamps}",
     )
@@ -630,6 +631,7 @@ def _expect_equal_day_volumes(
                 f"{_DAY_FILE} volume={volumes[_DAY_FILE]}"
             )
     expect_fixed(
+        evidence=evidence,
         fixed=not differ,
         shown=f"{_SYMBOL} volumes that differ, {len(differ)} of {len(days)} days: {differ}",
     )
