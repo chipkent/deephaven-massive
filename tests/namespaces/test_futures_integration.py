@@ -1149,6 +1149,18 @@ def _session_windows(
     return {day: (min(stamps), max(stamps)) for day, stamps in events.items()}
 
 
+def _trade_key(trade: Mapping[str, Any]) -> tuple[str, str, str]:
+    """Return what identifies one futures trade: its session, sequence number, and time.
+
+    Sequence numbers restart each session, so the number alone can match another trade.
+    """
+    return (
+        str(trade.get("session_end_date")),
+        str(trade.get("sequence_number")),
+        str(trade.get("timestamp")),
+    )
+
+
 def _compare_with_sessions(
     client: RestClient,
     trades: Sequence[Mapping[str, Any]],
@@ -1223,8 +1235,8 @@ def test_trade_at_settlement_trades_and_their_sessions(
             day = date.fromisoformat(str(latest[0]["session_end_date"]))
             query = {**query, "sort": "timestamp.asc", "session_end_date": day}
             first = _page(live_rest, _TRADES, query=query)
-        seen = {str(t.get("sequence_number")) for t in latest}
-        trades = latest + [t for t in first if str(t.get("sequence_number")) not in seen]
+        seen = {_trade_key(t) for t in latest}
+        trades = latest + [t for t in first if _trade_key(t) not in seen]
         days = Counter(str(t.get("session_end_date")) for t in trades)
         evidence(
             f"{ticker}: {len(latest)} latest and {len(first)} first trades of the latest "
