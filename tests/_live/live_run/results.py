@@ -8,7 +8,8 @@ module turns that state into what the tester and the owner read:
   words), and when its group runs next, then one summary row per group.
 - `write_checks_csv`, one line per check, and `write_report`, `REPORT.md`: the environment, the
   probes over time, one table per group, what Massive refused, by day (`refused_lines`), each
-  stream night's findings (`night_lines`), the open verification items of
+  stream night's findings (`night_lines`), the checks of open Massive problems, by GitHub
+  issue, fixed or still present (`problem_lines`), the open verification items of
   `docs/dev/verification-items/` (from the tests' `settles` and `verifies` markers) with each
   one's status, and every check still unverified, grouped by why.
 - `pack`, which writes both, scans every file of the results folder for the secrets
@@ -26,9 +27,11 @@ import zipfile
 from datetime import date
 from typing import TYPE_CHECKING, Final
 
+from tests._live import massive_problems
 from tests._live.live_run import timetable
 from tests._live.live_run.secret_scrub import scan
-from tests._live.live_run.state import is_daily
+from tests._live.live_run.state import PROBLEM_STATUSES, is_daily
+from tests._live.massive_problems import FIXED, PRESENT
 from tests._live.summary import item_order
 
 if TYPE_CHECKING:
@@ -38,7 +41,16 @@ if TYPE_CHECKING:
     from tests._live.live_run.secret_scrub import SecretFilter
     from tests._live.live_run.state import Check, RunState
 
-STATUSES: Final = ("passed", "failed", "error", "refused", "skipped", "not run")
+STATUSES: Final = (
+    "passed",
+    "failed",
+    "error",
+    "refused",
+    "skipped",
+    "problem present",
+    "problem fixed",
+    "not run",
+)
 """Every status a check can show, in the order of the summary's columns."""
 
 GROUP_ORDER: Final = (
@@ -272,6 +284,41 @@ def refused_lines(checks: Iterable[Check]) -> list[str]:
     return _table(["day", "subscription", "check", "refusal"], rows)
 
 
+def problem_lines(checks: Iterable[Check]) -> list[str]:
+    """Return the `REPORT.md` lines of the checks of open Massive problems that ran.
+
+    Every check of an issue that any check ran for is listed, those not run too, so an issue
+    is FIXED only when every check of it showed the fix.
+
+    Args:
+        checks: The checks.
+
+    Returns:
+        The issues sorted by what their checks showed (`massive_problems.problem_lines`), as a
+        text block, then a table of each such check's issue, name, status, and reason
+        (Massive's values for a problem still present); a line saying none ran when none did.
+    """
+    marked = [(c.issue, c) for c in checks if c.issue is not None]
+    attempted = {issue for issue, c in marked if c.status != "not run"}
+    listed = [(issue, c) for issue, c in marked if issue in attempted]
+    if not listed:
+        return ["No check of an open Massive problem ran."]
+    shown = {"problem present": PRESENT, "problem fixed": FIXED}
+    outcomes: dict[str, tuple[int, str]] = {}
+    for issue, c in listed:
+        # Any other status (failed, refused, skipped, error, not run) is what happened, as it is.
+        happened = f"{c.status}: {c.reason}" if c.reason else c.status
+        outcomes[f"{c.group}: {c.name}"] = (issue, shown.get(c.status, happened))
+    rows = [[f"#{issue}", f"{c.group}: {c.name}", c.status, c.reason] for issue, c in listed]
+    return [
+        "```text",
+        *massive_problems.problem_lines(outcomes),
+        "```",
+        "",
+        *_table(["issue", "check", "status", "Massive's values or what to do"], rows),
+    ]
+
+
 def _table(header: list[str], rows: Iterable[list[str]]) -> list[str]:
     """Return a Markdown table.
 
@@ -327,10 +374,11 @@ def write_report(folder: Path, state: RunState) -> None:
                 items.setdefault(item, []).append(check)
     rows = [[item, item_status(items[item])] for item in sorted(items, key=item_order)]
     lines.extend(_table(["item", "status"], rows))
+    lines.extend(["", "## Massive problems, by GitHub issue", "", *problem_lines(checks)])
     lines.extend(["", "## Still unverified", ""])
     waiting: dict[str, list[str]] = {}
     for check in checks:
-        if check.status != "passed":
+        if check.status != "passed" and check.status not in PROBLEM_STATUSES:
             why = why_unverified(check)
             waiting.setdefault(why, []).append(f"{check.group}: {check.name}")
     lines.extend(f"- **{why}**: " + ", ".join(waiting[why]) for why in sorted(waiting))

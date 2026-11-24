@@ -94,6 +94,7 @@ from tests._live import (
     debug_log_file,
     events,
     key_check,
+    massive_problems,
     pacing,
     parallel,
     recency,
@@ -1780,7 +1781,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     names its tier: `-m integration` runs every live test but those, and
     `-m integration_smoke`, for one, runs only that tier.
     Last, every soak test gets a time limit of its run (`soak_seconds`) plus `_SOAK_MARGIN`, in
-    place of the suite's 60 s.
+    place of the suite's 60 s, and every check of an open Massive problem (`massive_issue`)
+    becomes a strict expected failure of the problem (`massive_problems.track`).
 
     Args:
         config: The pytest configuration, for the `-m` expression and the deselection hook.
@@ -1789,7 +1791,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     Raises:
         pytest.UsageError: If a test of a `*_integration.py` file lacks the `integration`
             marker, a test of another file has it, or a test has one of the separate tiers'
-            markers without `integration`; the message lists them.
+            markers without `integration`; the message lists them. Also when a test's
+            `massive_issue` marker names other than one issue number.
     """
     wrong = [
         item.nodeid
@@ -1827,6 +1830,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if item.get_closest_marker(_SOAK) is not None:
             item.add_marker(pytest.mark.timeout(limit))
+        massive_problems.track(item)
 
 
 def _arrange_live_tests(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -1943,15 +1947,31 @@ _CALL_FAILED: Final = pytest.StashKey[bool]()
 """Whether a test's call failed, so the leak check does not wait on what its traceback holds."""
 
 
+def _forget_last_error() -> None:
+    """Drop the error pytest keeps for post-mortem debugging of the test that just ran.
+
+    pytest stores a call's exception in `sys.last_value` and its siblings until the next
+    test's call. The process's exit reads a stored error as one that escaped pytest
+    (`_final_jvm_exit`), and its traceback keeps the test's frames alive.
+    """
+    del sys.last_type, sys.last_value, sys.last_traceback
+    if sys.version_info >= (3, 12):
+        del sys.last_exc
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[None]
 ) -> Generator[None, pytest.TestReport, pytest.TestReport]:
-    """Note a failed call, so the leak check of its teardown returns at once.
+    """Note a failed call, so the leak check of its teardown returns at once, and judge a check.
 
     A failed assertion's traceback keeps the test's frame, and with it the test's sessions,
     alive until pytest drops the report; waiting 30 s for them to go would only delay the
-    failure already reported.
+    failure already reported. A check of an open Massive problem that failed as expected keeps
+    its traceback just the same, so it counts as failed here, and the error pytest stores for
+    debugging is dropped (`_forget_last_error`). Each report of such a check gets
+    its issue and outcome (`massive_problems.judge`) in its `user_properties`, which the
+    terminal summary reads.
 
     Args:
         item: The test.
@@ -1964,8 +1984,19 @@ def pytest_runtest_makereport(
         The report, unchanged.
     """
     report = yield
-    if call.when == "call" and report.failed:
+    expected = call.when == "call" and report.skipped and hasattr(report, "wasxfail")
+    if call.when == "call" and (report.failed or expected):
         item.stash[_CALL_FAILED] = True
+    # pytest stores only an `Exception`, so not the outcome `pytest.xfail()` raises.
+    stored = getattr(sys, "last_value", None)  # absent when no call stored one
+    if expected and call.excinfo is not None and stored is call.excinfo.value:
+        # An expected failure has nothing to debug, and a run whose only other outcomes are
+        # passes must exit 0, not as if an error escaped pytest (`_final_jvm_exit`).
+        _forget_last_error()
+    issue = massive_problems.issue_of(item)
+    if issue is not None:
+        found = massive_problems.judge(report, call)
+        report.user_properties.append(massive_problems.report_property(issue, found))
     return report
 
 
@@ -2028,12 +2059,9 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
         else:
             raise
         _record(item.config, item.nodeid, reason)
-        # pytest keeps the error for post-mortem debugging until the next test's call; a skip
-        # has nothing to debug, and its traceback's frames would keep the test's sessions alive
-        # past the leak check (`_check_nothing_outlives_the_test`).
-        del sys.last_type, sys.last_value, sys.last_traceback
-        if sys.version_info >= (3, 12):
-            del sys.last_exc
+        # A skip has nothing to debug, and its traceback's frames would keep the test's
+        # sessions alive past the leak check (`_check_nothing_outlives_the_test`).
+        _forget_last_error()
         pytest.skip(reason)
 
 
@@ -2438,6 +2466,28 @@ def _settled_summary(terminalreporter: pytest.TerminalReporter, config: pytest.C
         terminalreporter.write_line(line)
 
 
+def _problems_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    """Print, by GitHub issue, which open Massive problems the run's checks found fixed or present.
+
+    Nothing is printed when no check of a Massive problem (`massive_issue`) ran.
+
+    Args:
+        terminalreporter: The terminal reporter, whose statistics hold every phase's report.
+    """
+    reports = [
+        report
+        for kind in ("failed", "skipped", "error", "xfailed")
+        for report in terminalreporter.stats.get(kind, [])
+        if isinstance(report, pytest.TestReport)
+    ]
+    lines = massive_problems.problem_lines(massive_problems.checks_run(reports))
+    if not lines:
+        return
+    terminalreporter.write_sep("=", "Massive problems, by GitHub issue")
+    for line in lines:
+        terminalreporter.write_line(line)
+
+
 def _narrowed(config: pytest.Config) -> bool:
     """Return whether the run's paths may leave some live tests uncollected.
 
@@ -2456,13 +2506,14 @@ def _narrowed(config: pytest.Config) -> bool:
 def pytest_terminal_summary(
     terminalreporter: pytest.TerminalReporter, config: pytest.Config
 ) -> None:
-    """Print the smoke tier's coverage, the run's debug log, then the live tests' evidence.
+    """Print the smoke tier's coverage, Massive's problems, the debug log, then the evidence.
 
     Args:
         terminalreporter: The terminal reporter that writes the summary.
         config: The pytest configuration, whose stash holds the evidence.
     """
     _smoke_coverage(terminalreporter)
+    _problems_summary(terminalreporter)
     _settled_summary(terminalreporter, config)
     if _DEBUG_LOG in config.stash:
         terminalreporter.write_sep("=", "live debug log")

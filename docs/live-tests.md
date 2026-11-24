@@ -131,17 +131,58 @@ read, and a `verifies` test asserts the answer the library assumes. The summary 
 question under `ran, evidence to read` once its tests all pass and none of them asserts its
 answer. Both kinds name their questions by number.
 
+<a id="massive-problems"></a>
+
+### Checks of Massive's open problems
+
+Some problems in Massive's data and documentation are confirmed and not yet fixed, each tracked
+by an open GitHub issue here. Each has checks marked `massive_issue(N)`, with N the issue's
+number. A check asserts what Massive's fix would bring, so while the problem lasts it fails as
+expected: pytest shows it as `XFAIL`, which is not a failure. The day Massive fixes the problem,
+the check passes, and pytest reports it as a failure, `[XPASS(strict)]`, whose reason names the
+issue to close. A check whose request Massive refuses skips as any other test does, and one that
+fails otherwise (a request fails or returns nothing) is a plain failure that says nothing about
+the problem.
+
+The checks of Massive's documentation read the vendored copy of its docs, so they run in CI too,
+and a refresh that brings Massive's fix fails CI with the issue to close.
+
+The end of a run lists each issue its checks touched, under one of four headings:
+
+```text
+Massive problems FIXED in every check that ran, close the issue once all its checks have run, 1 of 18:
+    #803: test_crypto_range_day_bar_volume_equals_prev_and_grouped_daily
+Massive problems fixed in some checks, read each check, 1 of 18:
+    #779: test_an_index_day_bar_covers_the_new_york_day, test_massive_documents_the_day_its_index_bars_cover
+Massive problems still present, 15 of 18:
+    #797: test_the_prev_bar_of_an_index_equals_its_range_day_bar
+    ...
+Massive problems not judged (a check failed, was skipped, was refused, or did not run), 1 of 18:
+    #778: test_streamed_futures_trades_carry_their_session_end_date [skipped: <its reason>]
+```
+
+A problem is fixed in some checks when one of its checks shows the fix and another does not:
+it still shows the problem, such as Massive correcting its documentation but not its data, or
+it failed, was skipped, was refused, or did not run. Read each check's message before closing
+such an issue. A check whose setup or cleanup failed counts as failed, whatever its call showed.
+
+A run sees only the checks it selected. A CI run reads only the documentation, so a fix there
+lists an issue such as #779 as FIXED though its live check never ran. Close an issue only once
+every check of it has shown the fix. The live-run program's `REPORT.md` also lists the checks of
+an issue that did not run that day.
+
 <a id="read-the-end-of-a-run"></a>
 
 ### Read the end of a run
 
 Each command writes its evidence to `live-evidence-<UTC time>.log` at the repository root, line
 by line, so a run cut short keeps what it recorded. Before pytest's short summary, the run
-prints up to four sections:
+prints up to five sections:
 
 | Section | What it holds |
 |---|---|
 | `smoke coverage` | The smoke tests that passed, passed with drift, were refused, were skipped, and failed. Refusals are grouped by subscription and call, with Massive's text once. Drift is a library WARNING or a row of `m.problems()`, each listed. |
+| `Massive problems, by GitHub issue` | Each issue whose checks ran, as fixed, fixed in some checks, still present, or not judged ([Checks of Massive's open problems](#massive-problems)) |
 | `open questions` | The questions the run touched, in groups: `verified`, `ran, evidence to read`, `refused by Massive`, `not listed as delayed`, and `not verified`. Under each refused or unlisted question, each distinct reason follows, Massive's refusal or the library's message quoted. |
 | `live debug log` | The path of the run's debug log |
 | `live evidence` | The evidence file's lines again |
@@ -225,6 +266,8 @@ results issue. Open the zip's `REPORT.md` first. It gives:
 - a table of each group's checks
 - what Massive refused, by day, with its text
 - each open question the checks answer, with its status
+- Massive's open problems by GitHub issue: fixed, fixed in some checks, still present, or not
+  judged, then a table of each check with Massive's values
 - the checks still unverified
 
 `checks.csv` has one line per check. A comment on that issue can ask them to pack the results again, to rerun a group
@@ -271,6 +314,8 @@ The program reruns a check by itself:
 | Last result | When it runs again |
 |---|---|
 | Passed | Not again |
+| Showed Massive's fix of an open problem | Not again |
+| Showed an open Massive problem still present | At its group's first attempt each day |
 | Failed | Once more |
 | Refused by Massive, or skipped as not listed as delayed | At its group's first attempt each day, and that evening once another check of its subscription stops being refused |
 | Skipped for the moment, such as a closed market | Up to three attempts in all |

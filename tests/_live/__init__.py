@@ -27,6 +27,10 @@ fixtures that call it, so it can be unit-tested against the fakes:
 - `summary`: the open-questions summary that ends a live run;
 - `same_field`: whether two Massive fields carry one quantity, read back to back and compared
   within a tolerance;
+- `massive_problems`: the checks of open Massive problems, each a strict expected failure
+  that names the GitHub issue to close when it passes;
+- `futures_trade_frames`: the futures trade events of the raw WebSocket frames a stream
+  received, tallied for the checks of the stream's problems;
 - `parallel`: which selected tests are live, and the refusal to run them on parallel workers;
 - `key_check`: the key a live test may use, never under CI.
 

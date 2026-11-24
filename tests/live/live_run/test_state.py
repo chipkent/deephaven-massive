@@ -57,6 +57,24 @@ def test_a_new_check_is_due_and_a_pass_is_final() -> None:
     assert not is_due(check, NEXT_DAY)
 
 
+@pytest.mark.parametrize("status", ["problem present", "problem fixed"])
+def test_a_massive_problem_check_that_ran_counts_no_failure(status: str) -> None:
+    state = _state()
+    check = check_of(state, "evidence", "t")
+    record(state, check, status=status, reason="volume 12 against 13", day=DAY)
+    assert (check.status, check.reason, check.failures) == (status, "volume 12 against 13", 0)
+    assert not is_due(check, DAY)
+
+
+def test_a_problem_still_present_is_checked_again_the_next_day_and_a_fix_is_final() -> None:
+    state = _state()
+    present, fixed = check_of(state, "evidence", "a"), check_of(state, "evidence", "b")
+    record(state, present, status="problem present", reason="volume 12", day=DAY)
+    record(state, fixed, status="problem fixed", reason="close it", day=DAY)
+    assert is_due(present, NEXT_DAY)
+    assert not is_due(fixed, NEXT_DAY)
+
+
 def test_two_failures_are_final_and_an_interruption_counts_nothing() -> None:
     state = _state()
     check = check_of(state, "smoke", "t")

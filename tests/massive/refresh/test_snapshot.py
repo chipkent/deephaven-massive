@@ -1,7 +1,9 @@
 """Tests for the vendored snapshot: its location, storing with a manifest, and verified loading.
 
-Synthetic snapshots are written under `tmp_path`; the one test of the real snapshot skips
-where there is none (an sdist leaves it out).
+Synthetic snapshots are written under `tmp_path`; the tests of the real snapshot skip where
+there is none (an sdist leaves it out). The last of them check the real snapshot for the
+documentation problems Massive has confirmed and not yet fixed, each an expected failure until
+a refresh brings the fix.
 """
 
 from __future__ import annotations
@@ -16,7 +18,9 @@ import pytest
 
 from deephaven_massive._massive.refresh import docs, knowledge_base, snapshot
 from deephaven_massive._massive.refresh.gates import RefreshError
+from deephaven_massive._massive.refresh.openapi import JsonObject, OpenApi, properties, text
 from deephaven_massive._massive.refresh.snapshot import Snapshot, VendorFile
+from tests._live.massive_problems import expect_fixed
 
 
 def _sha(data: bytes) -> str:
@@ -311,3 +315,219 @@ def test_a_snapshot_that_is_not_json_objects_is_reported(tmp_path: Path, name: s
     with pytest.raises(RefreshError) as caught:
         Snapshot.load(tmp_path / "s")
     assert [p.gate for p in caught.value.problems] == ["snapshot"]
+
+
+# --- Massive's documentation problems -------------------------------------------------------
+#
+# Each check reads the vendored snapshot and asserts what Massive's corrected documentation
+# says, and its `massive_issue` marker names the GitHub issue that tracks the problem. It is an
+# expected failure while the vendored text keeps the problem; once a refresh brings the fix,
+# it passes, and the strict expected failure stops CI with a message naming the issue to close.
+
+_SNAPSHOT_HERE = pytest.mark.skipif(
+    not snapshot.DIRECTORY.is_dir() and "CI" not in os.environ,
+    reason="no vendored snapshot (vendor/massive/) outside a source checkout; CI never skips",
+)
+
+_STOCK_PRICE_EXAMPLE = "with a price of $2.00 would be worth a total dollar value of $200.00"
+"""The end of Massive's stock trade price text, which counts shares or contracts at $2.00."""
+
+
+@pytest.fixture(scope="module")
+def vendored() -> Snapshot:
+    """Return the vendored snapshot, read once for the module's checks."""
+    return Snapshot.load()
+
+
+def _documents(vendored: Snapshot, *asset_classes: str) -> dict[str, str]:
+    """Return the text of every vendored page and specification path of the asset classes.
+
+    Args:
+        vendored: The vendored snapshot.
+        asset_classes: Such as `"options"`: the first part of a page's name below `rest/`,
+            `websocket/` or `flat-files/`, and a word of a REST path or a WebSocket channel.
+
+    Returns:
+        Each document's text, by its name: a page as `rest/options/...md`, a REST path as
+        `openapi.json <path>`, a channel as `websocket.json <channel>`. The unified snapshot
+        (`/v3/snapshot`), which serves every asset class, is left out.
+    """
+    found: dict[str, str] = {}
+    pages = {"rest": vendored.pages, "websocket": vendored.websocket_pages}
+    pages["flat-files"] = vendored.flat_file_pages
+    for area, texts in pages.items():
+        for name, page in texts.items():
+            if name.split("/", 1)[0] in asset_classes:
+                found[f"{area}/{name}"] = page
+    specifications = {"openapi.json": vendored.openapi, "websocket.json": vendored.websocket}
+    for file, document in specifications.items():
+        paths = document["paths"]
+        assert isinstance(paths, dict)
+        for path, item in paths.items():
+            words = path.lower().replace("{", "/").replace("}", "/").split("/")
+            if any(word.startswith(asset_classes) for word in words if word):
+                found[f"{file} {path}"] = json.dumps(item)
+    return found
+
+
+def _saying(documents: dict[str, str], text: str) -> list[str]:
+    """Return the names of the documents that hold the text, sorted."""
+    return sorted(name for name, document in documents.items() if text in document)
+
+
+def _channel_fields(vendored: Snapshot, channel: str) -> dict[str, JsonObject]:
+    """Return the fields of a WebSocket channel's message, each with its resolved schema."""
+    spec = OpenApi(vendored.websocket)
+    paths = vendored.websocket["paths"]
+    assert isinstance(paths, dict)
+    operation = spec.deref(spec.deref(paths[channel], channel).get("get"), channel)
+    ok = spec.deref(spec.deref(operation.get("responses"), channel).get("200"), channel)
+    media = spec.deref(spec.deref(ok.get("content"), channel).get("application/json"), channel)
+    found = properties(spec.schema(media.get("schema"), channel))
+    assert found, f"{channel}: no message fields"
+    return {key: spec.schema(value, f"{channel} {key}") for key, value in found.items()}
+
+
+@_SNAPSHOT_HERE
+def test_documents_of_an_asset_class_are_its_pages_and_paths(vendored: Snapshot) -> None:
+    documents = _documents(vendored, "options")
+    assert "rest/options/unusual-options-activity/unusual-trades.md" in documents
+    assert "openapi.json /options/v1/unusual-trades" in documents
+    assert "openapi.json /v3/trades/{optionsTicker}" in documents
+    assert "websocket.json /options/T" in documents
+    assert "flat-files/options/trades.md" in documents
+    assert "openapi.json /v3/snapshot" not in documents
+    assert not any("stocks" in name for name in documents)
+
+
+@_SNAPSHOT_HERE
+@pytest.mark.massive_issue(779)
+def test_massive_documents_the_day_its_index_bars_cover(vendored: Snapshot) -> None:
+    """Whether Massive's index custom-bars text no longer puts its bars in Eastern Time.
+
+    Massive's index day bars and minute files cover the Chicago day, though its custom-bars
+    text says the aggregates are in Eastern Time. A fix of either the text or the data
+    settles the item; the data's side is the live check of the same item.
+    """
+    shown = _saying(_documents(vendored, "indices"), "time interval in Eastern Time (ET)")
+    expect_fixed(fixed=not shown, shown=f"'in Eastern Time (ET)' in {shown}")
+
+
+_UNUSUAL_TRADES = "rest/options/unusual-options-activity/unusual-trades.md"
+"""The vendored page of Massive's unusual options trades, by its name in `_documents`."""
+
+
+def _option_price_per_contract(documents: dict[str, str]) -> str:
+    """Say where Massive's options text still prices a trade per contract.
+
+    A fix drops "per whole contract" from every options document and says "per share" in the
+    unusual-trades page's `price` row, so a rewording that keeps the contract unit ("per
+    contract") still shows the problem.
+
+    Args:
+        documents: The options documents (`_documents`).
+
+    Returns:
+        What still shows the problem, with the documents and the row; empty once fixed.
+    """
+    shown = _saying(documents, "per whole contract")
+    page = documents[_UNUSUAL_TRADES]
+    rows = [line for line in page.splitlines() if line.startswith("| `results[].price` |")]
+    assert len(rows) == 1, f"{_UNUSUAL_TRADES} has {len(rows)} rows of results[].price"
+    if not shown and "per share" in rows[0]:
+        return ""
+    return f"'per whole contract' in {shown}; the {_UNUSUAL_TRADES} price row: {rows[0]}"
+
+
+@pytest.mark.parametrize(
+    ("unit", "fixed"), [("share", True), ("contract", False), ("whole contract", False)]
+)
+def test_an_option_trade_price_is_fixed_only_when_said_per_share(unit: str, fixed: bool) -> None:
+    said = f"The price of the trade. This is the actual dollar value per {unit} of this trade."
+    documents = {
+        _UNUSUAL_TRADES: f"| Field | Type | Description |\n| `results[].price` | number | {said} |",
+        "openapi.json /v3/trades/{optionsTicker}": said,
+    }
+    assert (_option_price_per_contract(documents) == "") is fixed
+
+
+@_SNAPSHOT_HERE
+@pytest.mark.massive_issue(791)
+def test_massive_describes_an_option_trade_price_per_share(vendored: Snapshot) -> None:
+    """Whether no options text calls a trade's price the value per whole contract.
+
+    The unusual-trades and options trades `price` is per share of the underlying, as
+    Massive confirmed, though its description says "per whole contract".
+    """
+    shown = _option_price_per_contract(_documents(vendored, "options"))
+    expect_fixed(fixed=not shown, shown=shown)
+
+
+@_SNAPSHOT_HERE
+@pytest.mark.massive_issue(793)
+def test_massive_types_futures_stream_prices_as_it_sends_them(vendored: Snapshot) -> None:
+    """Whether the specification types the futures stream's prices as the text Massive sends.
+
+    The futures stream sends its prices and dollar volume as JSON strings while the
+    specification types them as numbers. Either side's fix settles the item; the stream's
+    side is the live check of the same item.
+    """
+    priced = {
+        "/futures/T": ("p",),
+        "/futures/Q": ("bp", "ap"),
+        "/futures/A": ("o", "h", "l", "c", "dv"),
+        "/futures/AM": ("o", "h", "l", "c", "dv"),
+    }
+    typed = {
+        f"{channel} {key}": text(_channel_fields(vendored, channel)[key], "type")
+        for channel, keys in priced.items()
+        for key in keys
+    }
+    numbers = sorted(name for name, kind in typed.items() if kind != "string")
+    expect_fixed(fixed=not numbers, shown=f"typed other than string: {numbers}")
+
+
+@_SNAPSHOT_HERE
+@pytest.mark.massive_issue(794)
+def test_massive_describes_trade_prices_without_the_stock_example(vendored: Snapshot) -> None:
+    """Whether no options, crypto, or futures text prices a trade with the stock example.
+
+    The example counts 100 shares (or contracts) at $2.00 as $200.00, which leaves out an
+    option's and a futures contract's multiplier and gives a crypto pair shares.
+    """
+    documents = _documents(vendored, "options", "crypto", "futures")
+    shown = _saying(documents, _STOCK_PRICE_EXAMPLE)
+    expect_fixed(fixed=not shown, shown=f"the stock price example in {shown}")
+
+
+@_SNAPSHOT_HERE
+@pytest.mark.massive_issue(794)
+def test_massive_describes_futures_dollar_volume_without_us_dollars(vendored: Snapshot) -> None:
+    """Whether no futures text calls a bar's dollar volume a value in US dollars.
+
+    Futures dollar volume is price times size with no contract multiplier, as Massive's REST
+    futures bars say, while its stream and flat-file texts call it a US dollar value.
+    """
+    documents = _documents(vendored, "futures")
+    shown = [
+        *_saying(documents, "The total US dollar value of shares traded"),
+        *_saying(documents, "The total dollar volume of the transactions"),
+    ]
+    expect_fixed(fixed=not shown, shown=f"a US dollar volume text in {shown}")
+
+
+@_SNAPSHOT_HERE
+@pytest.mark.massive_issue(802)
+def test_massive_documents_the_forex_quote_s_i(vendored: Snapshot) -> None:
+    """Whether the specification declares the `i` that forex quotes (`C`) carry."""
+    declared = sorted(_channel_fields(vendored, "/forex/C"))
+    expect_fixed(fixed="i" in declared, shown=f"/forex/C declares only {declared}")
+
+
+@_SNAPSHOT_HERE
+@pytest.mark.massive_issue(802)
+def test_massive_documents_the_crypto_quote_s_lp_and_ls(vendored: Snapshot) -> None:
+    """Whether the specification declares the `lp` and `ls` that crypto quotes (`XQ`) carry."""
+    declared = sorted(_channel_fields(vendored, "/crypto/XQ"))
+    fixed = {"lp", "ls"} <= set(declared)
+    expect_fixed(fixed=fixed, shown=f"/crypto/XQ declares only {declared}")

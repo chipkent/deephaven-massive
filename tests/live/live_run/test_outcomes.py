@@ -62,8 +62,14 @@ class _Report:
 
 
 @dataclass
+class _ExpectedFailure(_Report):
+    wasxfail: str = "the reason"  # what pytest sets on the report of an expected failure
+
+
+@dataclass
 class _ExcInfo:
     typename: str
+    value: object = None
 
 
 @dataclass
@@ -86,12 +92,14 @@ def test_collection_writes_items(tmp_path: Path) -> None:
     items = [
         _Item("a.py::marked", [pytest.mark.settles("21").mark, pytest.mark.verifies("x").mark]),
         _Item("a.py::plain"),
+        _Item("a.py::check", [pytest.mark.massive_issue(797).mark]),
     ]
     hook: Any = outcomes.pytest_collection_modifyitems
     hook(config, items)
     assert json.loads(target.read_text()) == {
-        "a.py::marked": {"items": ["21", "x"]},
-        "a.py::plain": {"items": []},
+        "a.py::marked": {"items": ["21", "x"], "issue": None},
+        "a.py::plain": {"items": [], "issue": None},
+        "a.py::check": {"items": [], "issue": 797},
     }
 
 
@@ -115,6 +123,27 @@ def test_each_phase_appends_a_line(tmp_path: Path) -> None:
         ("setup", "skipped", "", "refused: HTTP 403: no"),
         ("teardown", "failed", "", ""),
     ]
+
+
+def test_a_problem_check_s_call_records_its_issue_and_massive_s_values(tmp_path: Path) -> None:
+    target = tmp_path / "outcomes.jsonl"
+    item = _Item(
+        "e.py::t",
+        [pytest.mark.massive_issue(797).mark],
+        _Config({outcomes.OUTCOMES_OPTION: str(target)}),
+    )
+    collect: Any = outcomes.pytest_collection_modifyitems
+    collect(_Config(), [item])
+    shown = _ExpectedFailure("call", "skipped", ("e.py", 1, "volume 12"))
+    error = _ExcInfo("ProblemShownError", ValueError("volume 12 against 13"))
+    _report_through_hook(item, shown, _Call(error))
+    [line] = outcomes.read_outcomes(target)
+    assert (line["issue"], line["problem"], line["reason"]) == (
+        797,
+        "present",
+        "volume 12 against 13",
+    )
+    assert outcomes.check_outcome([line]) == ("problem present", "volume 12 against 13")
 
 
 def test_a_phase_writes_nothing_without_the_option() -> None:
@@ -155,6 +184,43 @@ def _phase(phase: str, outcome: str, *, error_type: str = "", reason: str = "") 
             ("failed", "call: AssertionError, teardown: failed"),
         ),
         ([_phase("setup", "passed")], ("error", "did not finish")),
+        (
+            [{**_phase("call", "skipped", reason="volume 12"), "problem": "present"}],
+            ("problem present", "volume 12"),
+        ),
+        (
+            [{**_phase("call", "failed"), "problem": "fixed"}],
+            ("problem fixed", outcomes.PROBLEM_FIXED_REASON),
+        ),
+        ([{**_phase("call", "passed"), "problem": ""}], ("passed", "")),
+        (
+            [
+                {**_phase("call", "failed"), "problem": "fixed"},
+                _phase("teardown", "failed", error_type="AssertionError"),
+            ],
+            ("failed", "teardown: AssertionError"),
+        ),
+        (
+            [
+                {**_phase("call", "skipped", reason="volume 12"), "problem": "present"},
+                _phase("teardown", "failed", error_type="AssertionError"),
+            ],
+            ("failed", "teardown: AssertionError"),
+        ),
+        (
+            [
+                {**_phase("call", "failed"), "problem": "fixed"},
+                _phase("teardown", "skipped", reason="no cleanup"),
+            ],
+            ("skipped", "no cleanup"),
+        ),
+        (
+            [
+                {**_phase("call", "skipped", reason="volume 12"), "problem": "present"},
+                _phase("teardown", "skipped", reason="refused: HTTP 403: not entitled"),
+            ],
+            ("refused", "refused: HTTP 403: not entitled"),
+        ),
     ],
 )
 def test_phases_make_one_check_status(
@@ -164,10 +230,25 @@ def test_phases_make_one_check_status(
 
 
 def test_a_real_pytest_child_records_its_collection_and_phases(tmp_path: Path) -> None:
+    # The suite's conftest makes each `massive_issue` check an expected failure; this one does
+    # only that, so the child starts no Deephaven server.
+    (tmp_path / "conftest.py").write_text(
+        textwrap.dedent(
+            """
+            from tests._live import massive_problems
+
+            def pytest_collection_modifyitems(items):
+                for item in items:
+                    massive_problems.track(item)
+            """
+        )
+    )
     (tmp_path / "test_tiny.py").write_text(
         textwrap.dedent(
             """
             import pytest
+
+            from tests._live.massive_problems import expect_fixed
 
             @pytest.mark.settles("7")
             def test_passes():
@@ -178,6 +259,22 @@ def test_a_real_pytest_child_records_its_collection_and_phases(tmp_path: Path) -
 
             def test_fails():
                 raise KeyError("x")
+
+            @pytest.mark.massive_issue(797)
+            def test_problem_shows():
+                expect_fixed(fixed=False, shown="volume 12 against 13")
+
+            @pytest.mark.massive_issue(803)
+            def test_problem_gone():
+                expect_fixed(fixed=True, shown="volume 12 against 12")
+
+            @pytest.mark.massive_issue(797)
+            def test_problem_check_breaks():
+                assert [], "no rows came back"
+
+            @pytest.mark.massive_issue(797)
+            def test_problem_check_refused():
+                pytest.skip("refused: HTTP 403: not entitled")
             """
         )
     )
@@ -210,7 +307,9 @@ def test_a_real_pytest_child_records_its_collection_and_phases(tmp_path: Path) -
         check=False,
     )
     assert done.returncode == 1, done.stdout + done.stderr
-    assert json.loads(collection.read_text())["test_tiny.py::test_passes"] == {"items": ["7"]}
+    collected = json.loads(collection.read_text())
+    assert collected["test_tiny.py::test_passes"] == {"items": ["7"], "issue": None}
+    assert collected["test_tiny.py::test_problem_gone"] == {"items": [], "issue": 803}
     by_test: dict[str, list[dict[str, Any]]] = {}
     for line in outcomes.read_outcomes(lines):
         by_test.setdefault(line["nodeid"], []).append(line)
@@ -218,8 +317,18 @@ def test_a_real_pytest_child_records_its_collection_and_phases(tmp_path: Path) -
         "test_tiny.py::test_passes": ("passed", ""),
         "test_tiny.py::test_skips": ("refused", "refused: HTTP 403: not entitled"),
         "test_tiny.py::test_fails": ("failed", "call: KeyError"),
+        "test_tiny.py::test_problem_shows": ("problem present", "volume 12 against 13"),
+        "test_tiny.py::test_problem_gone": ("problem fixed", outcomes.PROBLEM_FIXED_REASON),
+        "test_tiny.py::test_problem_check_breaks": ("failed", "call: AssertionError"),
+        "test_tiny.py::test_problem_check_refused": (
+            "refused",
+            "refused: HTTP 403: not entitled",
+        ),
     }
     assert by_test["test_tiny.py::test_passes"][0]["items"] == ["7"]
+    assert {line["issue"] for line in by_test["test_tiny.py::test_problem_shows"]} == {797}
+    assert "[XPASS(strict)]" in done.stdout
+    assert "close issue #803" in done.stdout
 
 
 def test_the_plugin_adds_the_token_and_file_options() -> None:

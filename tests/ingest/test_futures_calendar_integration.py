@@ -13,14 +13,26 @@ Massive's whole answers where those checks found data missing, to quote to Massi
 test sends REST requests only and records what Massive sent (`evidence`), except the
 streamed-tickers test, which streams every futures trade on the key's WebSocket for 10
 minutes: it is marked `integration_all_symbols`, so `-m integration` leaves it out and
-`-m integration_all_symbols` runs it. Every test is marked `settles`: its evidence, not a
-pass, answers its question. A read cut short by its page or request cap says its counts are
-lower bounds. A request Massive refuses for want of entitlement skips the test with Massive's
-refusal. How to run these tests is in `docs/live-tests.md`.
+`-m integration_all_symbols` runs it. Every test but the last seven is marked `settles`: its
+evidence, not a pass, answers its question. The last seven check open Massive problems
+(`massive_issue`): a Trade at Settlement product with no schedule and no field naming its
+underlying, futures tickers starting with `0` and spreads neither list holds, a combo whose
+ticker holds `:` and a space read with no trades, and streamed futures trades that carry no
+`session_end_date` and send their price as a string. Each is an expected failure while the
+problem lasts, and passes once Massive fixes it. The three ticker checks read the CME minute
+files of the recent week from S3 as well, so they need `MASSIVE_S3_ACCESS_KEY_ID` and
+`MASSIVE_S3_SECRET_ACCESS_KEY` and skip without them. The two stream checks send nothing:
+they read the raw trade frames the streamed-tickers test received on its own connection
+(`tests/_live/futures_trade_frames.py`), so they too are marked `integration_all_symbols`,
+and skip when that test kept no frames in the same run. A read cut short by its page or
+request cap says its counts are lower bounds. A request Massive refuses for want of
+entitlement skips the test with Massive's refusal. How to run these tests is in
+`docs/live-tests.md`.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import statistics
@@ -34,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+import pyarrow as pa
 import pytest
 
 import deephaven_massive as dm
@@ -42,14 +55,20 @@ from deephaven_massive._datasets.futures_sessions import futures_session
 from deephaven_massive._datasets.symbols import is_futures_contract
 from deephaven_massive._ingest.futures_calendar import TICKERS_PER_REQUEST, contracts_query
 from deephaven_massive._massive import (
+    ReadColumn,
+    ReadPlan,
     RestClient,
     RestPath,
     Transport,
     WireAuthError,
     WireEntitlementError,
     WireError,
+    object_key,
     source,
 )
+from tests._live import calendar
+from tests._live.futures_trade_frames import TradeFrames, capturing_trade_frames
+from tests._live.massive_problems import expect_fixed
 from tests._live.ticker_lists import ticker_form
 
 if TYPE_CHECKING:
@@ -57,6 +76,8 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from deephaven.table import Table
+
+    from deephaven_massive._massive import FlatFileClient
 
 pytestmark = pytest.mark.integration
 
@@ -2144,6 +2165,15 @@ _STREAM_CONTRACT_LOOKUPS = 10
 """The most contracts lookups by date, 100 tickers each, the streamed-tickers check sends."""
 
 
+_STREAMED_TRADES = "streamed-tickers"
+"""The key of `_CAPTURED` under which the streamed-tickers test keeps its trade frames."""
+
+_CAPTURED: dict[str, TradeFrames] = {}
+"""The trade frames the streamed-tickers test received in this run, kept only once its stream
+ran its time without failing, for the checks after it that read them; written and read only by
+the test thread, which runs the file's tests in order."""
+
+
 def _record_streamed_in_neither(
     client: RestClient, seen: Sequence[str], evidence: Evidence
 ) -> None:
@@ -2240,6 +2270,11 @@ def test_streamed_futures_tickers_are_listed(
     most on a Monday that lists many contracts. Skips at once when Massive's futures market
     status for ES is not `open`, and with Massive's refusal when the stream is refused.
 
+    While it streams, it also tallies the raw trade frames the stream's own connection
+    receives (`capturing_trade_frames`), and keeps the tally, once the stream has run its
+    time without failing, for the two checks at the end of the file that read it: no other
+    connection opens for them.
+
     Passes when trades arrived, the stream never failed, and every lookup is answered; the
     missing tickers are evidence. Sends at most 135 requests of its own: the market status
     and the lookups. The stream's own futures calendar also looks up the contracts it sees,
@@ -2252,24 +2287,29 @@ def test_streamed_futures_tickers_are_listed(
     evidence(f"futures market status (ES): {status}")
     if status != "open":
         pytest.skip(f"the futures market is not open: Massive says {status!r}")
-    board = live_session.futures.trades(dm.ALL).last_by()
-    try:
-        pause = threading.Event()  # never set; only paces the polling
-        deadline = time.monotonic() + _STREAM_SECONDS
-        while time.monotonic() < deadline:
-            if any(r["State"] == "FAILED" for r in table_rows(live_session.streams())):
-                break
-            pause.wait(5.0)
-        seen = sorted({str(r["Symbol"]) for r in table_rows(board)})
-        for row in table_rows(live_session.streams()):
-            evidence(f"stream {row['Dataset']}: {row['State']}, error {row['Error']!r}")
-        skip_if_not_entitled(live_session)
-        failed = [
-            row["Error"] for row in table_rows(live_session.streams()) if row["State"] == "FAILED"
-        ]
-        assert not failed, f"the stream failed before its {_STREAM_SECONDS:.0f} s: {failed}"
-    finally:
-        live_session.release(board)
+    with capturing_trade_frames() as frames:
+        board = live_session.futures.trades(dm.ALL).last_by()
+        try:
+            pause = threading.Event()  # never set; only paces the polling
+            deadline = time.monotonic() + _STREAM_SECONDS
+            while time.monotonic() < deadline:
+                if any(r["State"] == "FAILED" for r in table_rows(live_session.streams())):
+                    break
+                pause.wait(5.0)
+                frames.drain()
+            seen = sorted({str(r["Symbol"]) for r in table_rows(board)})
+            for row in table_rows(live_session.streams()):
+                evidence(f"stream {row['Dataset']}: {row['State']}, error {row['Error']!r}")
+            skip_if_not_entitled(live_session)
+            failed = [
+                row["Error"]
+                for row in table_rows(live_session.streams())
+                if row["State"] == "FAILED"
+            ]
+            assert not failed, f"the stream failed before its {_STREAM_SECONDS:.0f} s: {failed}"
+        finally:
+            live_session.release(board)
+    _CAPTURED[_STREAMED_TRADES] = frames  # the stream ran its time: its frames can be judged
     singles = [t for t in seen if is_futures_contract(t)]
     evidence(
         f"tickers seen in {_STREAM_SECONDS:.0f} s: {len(seen)}, {len(singles)} single contracts"
@@ -2425,3 +2465,556 @@ def test_response_bodies_of_futures_gaps(live_rest: RestClient, *, evidence: Evi
         trades = {"ticker": ticker, "sort": "timestamp.desc", "limit": 10}
         label = f"trades of {ticker!r}, path {quote(ticker, safe='')}"
         _record_body(live_rest, label, _TRADES, query=trades, evidence=evidence)
+
+
+# --- Checks of open Massive problems --------------------------------------------------------
+# Each asserts what Massive's fix brings: an expected failure while the problem lasts, and a
+# pass, failing the run with the issue to close, once Massive fixes it.
+
+_TAS_TRADED_IN_UNDERLYING = {
+    "CLT": "CL",
+    "SBT": "ZS",
+    "HG0": "HG",
+    "HGT": "HG",
+    "GCT": "GC",
+    "ZWT": "ZW",
+}
+"""Trade at Settlement products whose REST trades a run found dated in the sessions of the
+product each settles to: crude oil, soybeans (`SBT` settles to `ZS`, not `SB`), copper's
+spot-month and active-month TAS (`HG0` and `HGT`, both on `HG`), gold, and wheat."""
+
+
+def _fields_holding(record: object, value: str, at: str = "") -> list[str]:
+    """Name the fields of a JSON record, nested ones by dot, whose value is some text.
+
+    Returns:
+        The fields' dotted names (`details.underlying`), a list's items by index.
+    """
+    if isinstance(record, dict):
+        return [
+            name
+            for key, item in record.items()
+            for name in _fields_holding(item, value, f"{at}.{key}" if at else str(key))
+        ]
+    if isinstance(record, list):
+        return [
+            name
+            for index, item in enumerate(record)
+            for name in _fields_holding(item, value, f"{at}[{index}]")
+        ]
+    # Every other JSON value is a leaf (a text, a number, a bool, a null), named when it is
+    # the text.
+    return [at] if record == value else []
+
+
+@pytest.mark.massive_issue(775)
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_trade_at_settlement_product_has_a_schedule_or_names_its_underlying(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether Massive gives a Trade at Settlement (TAS) product a schedule or names its underlying.
+
+    Today `/futures/v1/schedules` holds no session for a TAS product (`CLT`), while its
+    underlying `CL` has sessions, and no field of the products records names the product a TAS
+    product settles to, so the library can't date a streamed TAS trade and withholds it. Massive
+    says TAS products inherit their underlying's schedule. Reads the latest schedule event of
+    `CL`, the control, and asserts it holds one; then of `CLT` (`sort=session_end_date.desc`,
+    `limit=1`); then the products records of six TAS products whose REST trades a run found
+    dated in their underlying's sessions, and of those underlyings, in one request, and asserts
+    each product has a record. A pass means `CLT` has a schedule event, or every one of the six
+    records has a field holding its underlying's code (`SBT`'s holding `ZS`): Massive fixed it,
+    so close the issue. With schedules the library dates TAS trades with no change; with a field
+    the calendar must read it first.
+    """
+    latest = {"sort": "session_end_date.desc", "limit": 1}
+    control = _page(live_rest, _SCHEDULES, query={**latest, "product_code": "CL"})
+    evidence(f"latest schedule event of CL: {control}")
+    assert control, "Massive's schedules hold no event of CL, the control"
+    tas = _page(live_rest, _SCHEDULES, query={**latest, "product_code": "CLT"})
+    evidence(f"latest schedule event of CLT: {tas}")
+    codes = sorted({*_TAS_TRADED_IN_UNDERLYING, *_TAS_TRADED_IN_UNDERLYING.values()})
+    products = _page(live_rest, _PRODUCTS, query={"product_code.any_of": codes, "limit": 100})
+    records: dict[str, list[dict[str, Any]]] = {}
+    for record in products:
+        records.setdefault(str(record.get("product_code")), []).append(record)
+    missing = [code for code in codes if code not in records]
+    assert not missing, f"the products list holds no record of {missing}"
+    naming = {
+        code: [name for record in records[code] for name in _fields_holding(record, underlying)]
+        for code, underlying in _TAS_TRADED_IN_UNDERLYING.items()
+    }
+    evidence(f"fields naming the underlying, by TAS product: {naming}")
+    evidence(f"products record of CLT: {json.dumps(records['CLT'], default=str)}")
+    expect_fixed(
+        fixed=bool(tas) or all(naming.values()),
+        shown=(
+            f"GET {_SCHEDULES}?product_code=CLT&sort=session_end_date.desc&limit=1 answered "
+            f"{tas}, while CL answered {control}; GET {_PRODUCTS}?product_code.any_of={codes}: "
+            f"the fields of each TAS product's record that hold its underlying's code {naming}"
+        ),
+    )
+
+
+_CME_MINUTE_FILE = "us_futures_{venue}/minute_aggs_v1"
+"""The flat-file prefix the ticker checks read, for the venue `cme`. Massive describes the file
+as candlestick data "aggregated from all trades", so every ticker of the day's CME trades file
+has a row in it, at a fraction of the trades file's size."""
+
+_FILE_BLOCK = 1 << 20
+"""Bytes of decompressed CSV per block of a flat-file read."""
+
+_WEEKDAYS = 5
+"""The files the ticker checks read: Monday to Friday of the recent full trading week, so one
+day without the problem's tickers can't pass as Massive's fix."""
+
+_TICKERS_OF_DAY: dict[date, Counter[str | None]] = {}
+"""Each CME minute file's tickers with their row counts, kept for the run, so a second check of
+the same week reads no file again."""
+
+_CONTROLS = 5
+"""The tickers with the most rows a check also looks up, to show its lookup finds a ticker."""
+
+_ZERO_LOOKUPS = 2
+"""The most contracts-list requests, 100 tickers each, the checks of tickers starting with `0`
+send."""
+
+
+def _file_tickers(client: FlatFileClient, day: date) -> Counter[str | None] | None:
+    """Count the rows of each ticker of one day's CME minute aggregates file.
+
+    Reads the `ticker` header only, as the file's text, block by block, so the whole file costs
+    little memory.
+
+    Returns:
+        The rows of each ticker, or None when there is no file for the day. A refusal raises
+        the wire error.
+    """
+    file = client.open(object_key(_CME_MINUTE_FILE, day, "cme"))
+    if file is None:
+        return None
+    plan = ReadPlan(
+        columns=(ReadColumn("ticker", "ticker", pa.string()),),
+        symbol_header="ticker",
+        symbols=None,
+        time_header="window_start",
+        window_ns=None,
+        to_ns=lambda values: values,
+        unplaced=str,
+        block_size=_FILE_BLOCK,
+        chunk_size=16 * _FILE_BLOCK,
+        parse_threads=3,
+        required=frozenset(),
+    )
+    counts: Counter[str | None] = Counter()
+    with file, contextlib.closing(file.batches(plan)) as batches:
+        for batch, _drift, _marks in batches:
+            counts.update(batch.column("ticker").to_pylist())
+    return counts
+
+
+def _starts_with_zero(ticker: str) -> bool:
+    """Tell whether a ticker starts with `0`, as `0NANHX614` and `0BTZ9` do.
+
+    Returns:
+        True for such a ticker.
+    """
+    return ticker.startswith("0")
+
+
+def _week_tickers(
+    week: Mapping[date, Counter[str | None]], keep: Callable[[str], bool]
+) -> list[str]:
+    """Take the tickers of a week's files that a check keeps.
+
+    A row with no ticker names nothing to look up, so it is passed over.
+
+    Returns:
+        The tickers, sorted.
+    """
+    return sorted({t for counts in week.values() for t in counts if t is not None and keep(t)})
+
+
+def _week_of_tickers(client: FlatFileClient, evidence: Evidence) -> dict[date, Counter[str | None]]:
+    """Read the tickers of the CME minute files of the recent full trading week.
+
+    Reads Monday to Friday of the most recent ended week whose weekdays were all trading days
+    (`calendar.recent_week`), a file read earlier in the run from `_TICKERS_OF_DAY`, and
+    records each file's rows, tickers, and the rows of each ticker starting with `0`. Asserts
+    that every file exists and holds rows, so a missing day is never taken for a day without
+    the problem.
+
+    Returns:
+        Each day's tickers with their row counts.
+    """
+    monday, _ = calendar.recent_week(calendar.today())
+    days = [monday + timedelta(days=n) for n in range(_WEEKDAYS)]
+    for day in days:
+        if day not in _TICKERS_OF_DAY:
+            counts = _file_tickers(client, day)
+            if counts is not None:
+                _TICKERS_OF_DAY[day] = counts
+    week = {day: _TICKERS_OF_DAY[day] for day in days if day in _TICKERS_OF_DAY}
+    for day, counts in week.items():
+        zero = {t: counts[t] for t in _week_tickers({day: counts}, _starts_with_zero)}
+        evidence(
+            f"CME minute file of {day}: {counts.total()} rows, {len(counts)} tickers; "
+            f"rows of those starting with 0 {zero}"
+        )
+    empty = [day for day in days if not week.get(day)]
+    assert not empty, f"the CME minute files of {empty} are missing or hold no row"
+    return week
+
+
+def _days_query(week: Mapping[date, object]) -> dict[str, object]:
+    """Return the contracts-list query over a week's days, a page of `_LIST_PAGE` rows.
+
+    Returns:
+        `date.gte` and `date.lte` of the first and last day, so a contract that expired
+        within the week is still found; at most 5 rows a ticker.
+    """
+    return {"date.gte": min(week), "date.lte": max(week), "limit": _LIST_PAGE}
+
+
+def _most_rows(week: Mapping[date, Counter[str | None]], keep: Callable[[str], bool]) -> list[str]:
+    """Take the `_CONTROLS` tickers with the most rows over a week that a check keeps.
+
+    Returns:
+        The tickers, most rows first.
+    """
+    total: Counter[str] = Counter()
+    for counts in week.values():
+        total.update({t: n for t, n in counts.items() if t is not None and keep(t)})
+    return [ticker for ticker, _ in total.most_common(_CONTROLS)]
+
+
+def _zero_tickers_unlisted(
+    client: RestClient, week: Mapping[date, Counter[str | None]], evidence: Evidence
+) -> tuple[list[str], list[str]]:
+    """Look a week's tickers that start with `0` up on the contracts list, beside a control.
+
+    Asks the contracts list, over the week's days, for the `_CONTROLS` single contracts with
+    the most rows that don't start with `0` (1 request), and asserts it holds each; then for
+    the tickers that start with `0`, up to `_ZERO_LOOKUPS` requests (`_look_up`).
+
+    Returns:
+        The tickers starting with `0` the list doesn't hold, and those asked about.
+    """
+    query = _days_query(week)
+    controls = _most_rows(week, lambda t: is_futures_contract(t) and not _starts_with_zero(t))
+    assert controls, "the CME minute files hold no single contract"
+    found, _ = _look_up(client, _CONTRACTS, controls, query=query, most=1)
+    evidence(f"contracts list {query}: control {controls}, held {sorted(found)}")
+    assert found == set(controls), f"the contracts list holds no row of {set(controls) - found}"
+    zero = _week_tickers(week, _starts_with_zero)
+    if not zero:
+        return [], []
+    held, asked = _look_up(client, _CONTRACTS, zero, query=query, most=_ZERO_LOOKUPS)
+    unlisted = [t for t in asked if t not in held]
+    evidence(f"tickers starting with 0: {_share(asked, zero)} asked, unlisted {unlisted}")
+    return unlisted, asked
+
+
+@pytest.mark.massive_issue(776)
+@pytest.mark.requests(3)
+@pytest.mark.timeout(900)
+def test_futures_tickers_starting_with_zero_are_on_the_contracts_list(
+    live_flat_files: FlatFileClient, live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether the contracts list holds every CME ticker starting with `0` that traded.
+
+    Massive's futures feeds carry tickers starting with `0` (`0NANHZ601`, `0BTZ9`) that neither
+    the contracts list nor the snapshot holds, so the library can't find their product or
+    trading day and withholds their streamed rows; Massive calls them a known issue with a fix
+    in progress. Reads the tickers of the CME minute files of Monday to Friday of the recent
+    full trading week (`_week_of_tickers`), and looks the five single contracts with the most
+    rows up on the contracts list over the week's days, the control, asserting it holds each;
+    then every ticker starting with `0` (up to 200, 2 requests). Skips when no file holds such a
+    ticker: then nothing shows whether the list would hold one, and if that lasts, Massive's
+    fix may have renamed them, which the check that such tickers are gone shows. A pass means
+    the list holds every one: Massive fixed it, so close the issue.
+    """
+    week = _week_of_tickers(live_flat_files, evidence)
+    unlisted, asked = _zero_tickers_unlisted(live_rest, week, evidence)
+    if not asked:
+        pytest.skip(
+            f"no CME minute file of {sorted(week)} holds a ticker starting with 0, so nothing "
+            "shows whether the contracts list would hold one; "
+            "test_futures_tickers_starting_with_zero_are_gone_or_listed judges whether they "
+            "are gone"
+        )
+    expect_fixed(
+        fixed=not unlisted,
+        shown=(
+            f"GET {_CONTRACTS} ticker.any_of {_days_query(week)} held no row of {unlisted}, "
+            f"tickers starting with 0 in the CME minute files of {min(week)} to {max(week)}"
+        ),
+    )
+
+
+@pytest.mark.massive_issue(801)
+@pytest.mark.requests(3)
+@pytest.mark.timeout(900)
+def test_futures_tickers_starting_with_zero_are_gone_or_listed(
+    live_flat_files: FlatFileClient, live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether every CME ticker starting with `0` that traded is gone, or on the contracts list.
+
+    The CME trades flat file holds trades of `0NANHX614`, which fits no documented futures
+    ticker form and isn't on the contracts list, so a user can't tell which instrument it is;
+    Massive says such tickers start with `0` by mistake and a fix is queued. Reads the CME
+    minute files instead of the trades files, which are far larger: Massive describes the
+    minute file as aggregated from all trades, so a ticker that traded has a minute bar.
+    Reads the tickers of Monday to Friday of the recent full trading week
+    (`_week_of_tickers`, which asserts each file exists and holds rows) and looks those starting
+    with `0` up on the contracts list beside a control, as the contracts-list check of such
+    tickers does. A pass means no file of the week holds a ticker starting with `0`, or the
+    list holds each, so Massive names the instrument: Massive fixed it, so close the issue.
+    """
+    week = _week_of_tickers(live_flat_files, evidence)
+    unlisted, asked = _zero_tickers_unlisted(live_rest, week, evidence)
+    expect_fixed(
+        fixed=not unlisted,
+        shown=(
+            f"tickers starting with 0 in the CME minute files of {min(week)} to {max(week)}, "
+            f"{len(asked)} asked: GET {_CONTRACTS} ticker.any_of {_days_query(week)} held no "
+            f"row of {unlisted}"
+        ),
+    )
+
+
+_SPREAD_FAMILIES = re.compile(
+    r"^[A-Z0-9]+:XF:[A-Z]{6}:[FGHJKMNQUVXZ]\d{1,2}$"
+    r"|^SR1[FGHJKMNQUVXZ]\d{1,2}-ZQ[FGHJKMNQUVXZ]\d{1,2}$"
+)
+"""The spreads a stream carried that neither list held: CME FX Link spreads
+(`6E:XF:EURUSD:Z6`) and 1-Month SOFR against 30-Day Fed Funds spreads (`SR1H7-ZQH7`)."""
+
+
+def _unlisted_family(ticker: str) -> bool:
+    """Tell whether a ticker is a spread of a kind neither list held (`_SPREAD_FAMILIES`).
+
+    Returns:
+        True for an FX Link or a SOFR against Fed Funds spread.
+    """
+    return _SPREAD_FAMILIES.match(ticker) is not None
+
+
+def _held_by_either_list(
+    client: RestClient, tickers: Sequence[str], week: Mapping[date, object]
+) -> set[str]:
+    """Return the tickers the snapshot or the contracts list over a week's days holds.
+
+    Sends 2 requests, one to each list, for up to 100 tickers.
+
+    Returns:
+        The tickers either list returned a row for.
+    """
+    snapshot, _ = _look_up(client, _SNAPSHOT, tickers, query={"limit": _LIST_PAGE}, most=1)
+    contracts, _ = _look_up(client, _CONTRACTS, tickers, query=_days_query(week), most=1)
+    return snapshot | contracts
+
+
+@pytest.mark.massive_issue(776)
+@pytest.mark.requests(4)
+@pytest.mark.timeout(900)
+def test_fx_link_and_sofr_fed_funds_spreads_are_listed(
+    live_flat_files: FlatFileClient, live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether the snapshot or the contracts list holds the FX Link and SOFR-Fed Funds spreads.
+
+    Massive's futures stream carries CME FX Link spreads (`6E:XF:EURUSD:Z6`) and 1-Month SOFR
+    against 30-Day Fed Funds spreads (`SR1H7-ZQH7`) that neither `/futures/v1/snapshot` nor
+    `/futures/v1/contracts` holds, so the library can't find their product or trading day and
+    withholds their streamed rows. Massive hasn't said whether that is on purpose. Reads the
+    tickers of the CME minute files of Monday to Friday of the recent full trading week
+    (`_week_of_tickers`) and takes the spreads of those two kinds. Looks up the five combos with
+    the most rows of other kinds in both lists, the control, and asserts one list holds each;
+    then the spreads, up to 100 (2 requests each). Skips when no file holds such a spread,
+    since nothing shows whether the lists would hold one. A pass means a list holds every one:
+    Massive fixed this part, so close the issue once the check of tickers starting with `0`
+    passes too.
+    """
+    week = _week_of_tickers(live_flat_files, evidence)
+    spreads = _week_tickers(week, _unlisted_family)
+    evidence(f"FX Link and SOFR-Fed Funds spreads in the files: {spreads}")
+    if not spreads:
+        pytest.skip(f"no CME minute file of {sorted(week)} holds such a spread")
+    controls = _most_rows(
+        week,
+        lambda t: not (is_futures_contract(t) or _unlisted_family(t) or _starts_with_zero(t)),
+    )
+    assert controls, "the CME minute files hold no other combo"
+    found = _held_by_either_list(live_rest, controls, week)
+    evidence(f"control combos {controls}: held {sorted(found)}")
+    assert found == set(controls), f"neither list holds {set(controls) - found}"
+    asked = spreads[:_LOOKUP_CHUNK]
+    held = _held_by_either_list(live_rest, asked, week)
+    unlisted = [t for t in asked if t not in held]
+    expect_fixed(
+        fixed=not unlisted,
+        shown=(
+            f"neither GET {_SNAPSHOT} nor GET {_CONTRACTS} {_days_query(week)} by ticker.any_of "
+            f"held {unlisted}, of {len(asked)} such spreads in the CME minute files of "
+            f"{min(week)} to {max(week)}"
+        ),
+    )
+
+
+def _own_trades(trades: Sequence[Mapping[str, Any]], combo: _Combo) -> bool:
+    """Tell whether every trade read carries the combo's own `ticker`.
+
+    A path Massive read in part (`CL` of `CL%3ABZ%20F7-G7`) would return another ticker's
+    trades, which are no trades of the combo.
+
+    Returns:
+        True when each trade's `ticker` is the combo's.
+    """
+    return all(trade.get("ticker") == combo.ticker for trade in trades)
+
+
+def _latest_trades(client: RestClient, combo: _Combo, evidence: Evidence) -> list[dict[str, Any]]:
+    """Read up to 10 of a combo's trades, latest first, from an hour before its last trade.
+
+    Its ticker goes in the path as the library encodes it (`CL%3ABZ%20F7-G7`).
+
+    Returns:
+        The trades as Massive sent them.
+    """
+    start = _instant(combo.traded) - _SPACED_WINDOW
+    query = {"ticker": combo.ticker, "timestamp.gte": start, "sort": "timestamp.desc"}
+    trades = _page(client, _TRADES, query={**query, "limit": 10})
+    evidence(
+        f"trades of {combo.ticker!r} (path {quote(combo.ticker, safe='')}) from {start}, "
+        f"last snapshot trade {_chicago(combo.traded)}: {len(trades)} trades"
+    )
+    return trades
+
+
+@pytest.mark.massive_issue(777)
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_spaced_combo_trades_read_by_the_librarys_path(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether the trades path returns trades of a combo whose ticker holds `:` and a space.
+
+    Today `/futures/v1/trades/{ticker}` returns no trades for such a combo (`CL:BZ F7-G7`,
+    sent as `CL%3ABZ%20F7-G7`) though the snapshot shows it traded, while a combo without them
+    (`CLZ7-CLM8`) returns trades; Massive calls it a known issue, queued to be fixed. Reads the
+    snapshot from `CL` up to `CM`, and takes the combo traded most recently within 7 days whose
+    ticker holds `:` and a space, and the one whose ticker holds neither, the control. Reads up
+    to 10 trades of each from an hour before its last snapshot trade, its ticker in the path as
+    the library encodes it, and asserts the control's read holds trades, each of the control's
+    own `ticker`. Skips when no such combo traded within 7 days. A pass means the spaced
+    combo's read holds trades and every one carries the combo's own `ticker`, so Massive read
+    the whole path and not a part of it: Massive fixed it, so close the issue; the library
+    then reads such trades with no change.
+    """
+    since = epoch_ns(datetime.now(UTC) - _RECENT_TRADE)
+    query = {"ticker.gte": "CL", "ticker.lt": "CM", "limit": _PRODUCTS_PAGE}
+    _, recent = _snapshot_combos(_page(live_rest, _SNAPSHOT, query=query), since)
+    spaced = [combo for combo in recent if ":" in combo.ticker and " " in combo.ticker]
+    plain = [combo for combo in recent if ":" not in combo.ticker and " " not in combo.ticker]
+    if not spaced:
+        pytest.skip("no CL combo whose ticker holds ':' and a space traded within 7 days")
+    assert plain, "no CL combo whose ticker holds neither ':' nor a space traded within 7 days"
+    control, combo = plain[0], spaced[0]
+    controls = _latest_trades(live_rest, control, evidence)
+    assert controls, f"the control {control.ticker!r} read no trades"
+    assert _own_trades(controls, control), f"the control's trades are not its own: {controls}"
+    trades = _latest_trades(live_rest, combo, evidence)
+    expect_fixed(
+        fixed=bool(trades) and _own_trades(trades, combo),
+        shown=(
+            f"GET /futures/v1/trades/{quote(combo.ticker, safe='')} returned "
+            f"{len(trades)} trades, of tickers {sorted({str(t.get('ticker')) for t in trades})}, "
+            f"from an hour before its last snapshot trade at {_chicago(combo.traded)}, while "
+            f"the control {control.ticker!r} returned {len(controls)} of its own"
+        ),
+    )
+
+
+def _streamed_trade_frames() -> TradeFrames:
+    """Return the trade frames the streamed-tickers test tallied in this run, or skip.
+
+    Returns:
+        The tally, which holds at least one trade event.
+    """
+    if _STREAMED_TRADES not in _CAPTURED:
+        pytest.skip(
+            "test_streamed_futures_tickers_are_listed kept no futures trade frames in this "
+            "run: it streams them before this check, under -m integration_all_symbols, and "
+            "keeps them only when the futures market is open and its stream runs its "
+            f"{_STREAM_SECONDS:.0f} s without failing"
+        )
+    frames = _CAPTURED[_STREAMED_TRADES]
+    if not frames.trades:
+        pytest.skip(
+            f"no futures trade event arrived in {_STREAM_SECONDS:.0f} s on {frames.source}, "
+            f"so there is nothing to judge ({frames.unreadable} frames were not JSON)"
+        )
+    return frames
+
+
+@pytest.mark.integration_all_symbols
+@pytest.mark.massive_issue(778)
+def test_streamed_futures_trades_carry_their_session_end_date(*, evidence: Evidence) -> None:
+    """Whether Massive's streamed futures trades carry `session_end_date`, as its REST trades do.
+
+    Today a futures trade event (`T`) on the WebSocket carries no `session_end_date`, the
+    trading day the trade belongs to, so the library dates each streamed trade from Massive's
+    futures schedules instead, and can't date a product that has none. Sends nothing and opens
+    no connection: reads the raw trade frames that `test_streamed_futures_tickers_are_listed`
+    received in its 10 minutes of every futures trade (`T.*`), earlier in the same run, and
+    skips when it kept none or they held no trade. A pass means a streamed trade carries the
+    field as a `yyyy-MM-dd` date (a null or empty value tells no day, so it shows the problem):
+    Massive has started sending it. Its evidence line counts how many carry it, so a reader can
+    tell a partial rollout from a whole one before closing the issue.
+    """
+    frames = _streamed_trade_frames()
+    evidence(
+        f"trade events on {frames.source} in {_STREAM_SECONDS:.0f} s: {frames.trades}; "
+        f"with a session_end_date date: {frames.dated}; "
+        f"first with: {frames.dated_example or 'none'}; "
+        f"first without: {frames.undated_example or 'none'}"
+    )
+    expect_fixed(
+        fixed=frames.dated > 0,
+        shown=(
+            f"{frames.dated} of the {frames.trades} futures trade events streamed on "
+            f"{frames.source} (T.*) in {_STREAM_SECONDS:.0f} s carry a session_end_date date; the "
+            f"first without: {frames.undated_example}"
+        ),
+    )
+
+
+@pytest.mark.integration_all_symbols
+@pytest.mark.massive_issue(793)
+def test_streamed_futures_trade_prices_are_numbers(*, evidence: Evidence) -> None:
+    """Whether Massive sends a streamed futures trade's price `p` as a JSON number, as documented.
+
+    Massive's futures WebSocket docs type `p` as a number, but today a trade event (`T`) sends
+    it as a JSON string (`"p": "7676.5"`), which the library reads either way. Sends nothing
+    and opens no connection: reads the raw trade frames that
+    `test_streamed_futures_tickers_are_listed` received in its 10 minutes of every futures
+    trade (`T.*`), earlier in the same run, and skips when it kept none or they held no trade.
+    That stream subscribes to trades only, so quotes and bars are not judged here. A pass
+    means every trade event's `p` is a number: Massive fixed it, so close the issue; the
+    library's reading of text prices may go once no futures feed sends them.
+    """
+    frames = _streamed_trade_frames()
+    evidence(
+        f"trade events on {frames.source} in {_STREAM_SECONDS:.0f} s: {frames.trades}; "
+        f"p not a JSON number: {frames.text_prices}; "
+        f"first such: {frames.text_price_example or 'none'}; "
+        f"first with a number: {frames.number_price_example or 'none'}"
+    )
+    expect_fixed(
+        fixed=frames.text_prices == 0,
+        shown=(
+            f"{frames.text_prices} of the {frames.trades} futures trade events streamed on "
+            f"{frames.source} (T.*) in {_STREAM_SECONDS:.0f} s send p as other than a JSON "
+            f"number; the first: {frames.text_price_example}"
+        ),
+    )

@@ -2,9 +2,11 @@
 
 Each test records what Massive sent (`evidence`). A test marked `settles` asserts only that the
 requests worked, and its evidence, not a pass, answers the question; a test marked `verifies` also
-asserts the answer the library assumes, and fails when Massive no longer gives it. Raw responses
-come from the wire REST client, because the library rewrites the very spellings in question; the
-library's own answer is recorded beside them. How to run these tests is in `docs/live-tests.md`.
+asserts the answer the library assumes, and fails when Massive no longer gives it. A test marked
+`massive_issue` checks an open Massive problem: it fails, as expected, until Massive fixes it.
+Raw responses come from the wire REST client, because the library rewrites the very spellings
+in question; the library's own answer is recorded beside them. How to run these
+tests is in `docs/live-tests.md`.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from deephaven_massive._massive import (
     source,
 )
 from tests._live import index_day_sources, refusals
+from tests._live.massive_problems import expect_fixed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -922,3 +925,218 @@ def test_index_day_windows_and_files_across_many_indices(
     assert failure is None, f"{failure} (days {[str(day) for day in days]})"
     assert any(day_file for day_file, _ in files.values()), f"no {_DAY_FILE} file of {days}"
     assert any(minute for _, minute in files.values()), f"no {_MINUTE_FILE} file of {days}"
+
+
+# --- Checks of open Massive problems --------------------------------------------------------
+# Each check below asserts what Massive's fix brings: it fails, as expected, while the problem
+# lasts, and passes once Massive fixes it (`tests/_live/massive_problems.py`).
+
+_PROBLEM_INDEX = index_day_sources.ROUND_THE_CLOCK
+"""The index whose sources disagreed: one that updates around the clock."""
+_SHORT_MINUTE_FILE_DAY = date(2026, 10, 26)
+"""The day whose `I:AAVE100` minute file lacked minutes REST serves."""
+_DIFFERING_DAY_FILE_DAYS = (date(2025, 12, 23), date(2025, 12, 24))
+"""The days whose `I:AAVE100` day-file rows differed from the REST day bar."""
+
+
+def _range_day_bars(
+    range_bars: RangeBars, days: tuple[date, ...]
+) -> dict[date, list[dict[str, Any]]]:
+    """Read `I:AAVE100`'s REST 1-day bars around some days, by each bar's New York day.
+
+    One request, from the day before the first to the day after the last. A bar stamped at
+    midnight in Chicago or in New York falls on its own day either way.
+
+    Returns:
+        Each day's raw bars, an empty list for a day without one.
+    """
+    bars = range_bars(
+        _PROBLEM_INDEX, "day", (min(days) - timedelta(days=1), max(days) + timedelta(days=1))
+    )
+    return {day: [bar for bar in bars if _new_york_day(int(bar["t"])) == day] for day in days}
+
+
+@pytest.mark.massive_issue(797)
+@pytest.mark.requests(2)
+def test_the_prev_bar_of_an_index_equals_its_range_day_bar(
+    *, rest_rows: RestRows, range_bars: RangeBars, evidence: Evidence
+) -> None:
+    """Whether `I:AAVE100`'s `/prev` bar has the prices of the range endpoint's bar of its day.
+
+    Today `/prev` (`/v2/aggs/ticker/I:AAVE100/prev`) can send other prices than the range
+    endpoint's 1-day bar of the same day: on 2026-11-02 it closed 2026-11-01 at 134.0462, the
+    range bar at 133.4228. Massive confirmed it as a data issue. Reads the `/prev` bar and the
+    range's 1-day bars around its New York day, 2 requests, and asserts that both came back
+    for the same day. A pass, the two bars' open, high, low, and close equal within a relative
+    1e-6, means Massive fixed it: close the issue. `/prev` serves only the most recent day, so
+    each run judges that one day.
+    """
+    prevs = rest_rows(_PREV, {"indicesTicker": _PROBLEM_INDEX}, {})
+    assert len(prevs) == 1, f"{_PREV} of {_PROBLEM_INDEX} sent {len(prevs)} bars: {prevs}"
+    prev = prevs[0]
+    day = _new_york_day(int(prev["t"]))
+    ranged = _range_day_bars(range_bars, (day,))[day]
+    evidence(f"{_PROBLEM_INDEX} {day} /prev: {prev}; range 1-day bars: {ranged}")
+    assert len(ranged) == 1, f"the range sent {len(ranged)} 1-day bars of {day}: {ranged}"
+    prev_prices = index_day_sources.prices(prev)
+    range_prices = index_day_sources.prices(ranged[0])
+    assert prev_prices is not None, f"/prev sent a bar without prices: {prev}"
+    assert range_prices is not None, f"the range sent a bar without prices: {ranged[0]}"
+    error = index_day_sources.relative_error(prev_prices, range_prices)
+    expect_fixed(
+        fixed=error <= index_day_sources.MATCH,
+        shown=(
+            f"{_PREV} of {_PROBLEM_INDEX} sent {prev_prices} (open, high, low, close) for {day}, "
+            f"and the range's 1-day bar of {day} {range_prices}: a relative error of {error:.2e}"
+        ),
+    )
+
+
+@pytest.mark.massive_issue(798)
+@pytest.mark.requests(1)
+@pytest.mark.timeout(160)
+def test_the_short_index_minute_file_holds_every_rest_minute(
+    *, flat_file_tickers: FlatFileTickers, range_bars: RangeBars, evidence: Evidence
+) -> None:
+    """Whether the 2026-10-26 index minute file holds every `I:AAVE100` minute REST serves.
+
+    Today the `us_indices/minute_aggs_v1` file of 2026-10-26 holds 1,155 `I:AAVE100` minutes
+    while REST serves all 1,440, and nothing marks the gap; Massive confirmed it and promised
+    a backfill. Reads the file's `I:AAVE100` rows and the REST minute bars from the day before
+    to the day after, 1 request, and compares them over the day `history()` reads the file
+    as, midnight to midnight in Chicago, and over the New York day too, in case the backfill
+    cuts the file there. It asserts that the file was published and that REST has minutes in
+    both days. A pass, no REST minute of either day missing from the file, means Massive
+    backfilled it: close the issue.
+    """
+    day = _SHORT_MINUTE_FILE_DAY
+    read = flat_file_tickers(
+        _MINUTE_FILE, day, wire_spellings(dm.AssetClass.INDICES, _PROBLEM_INDEX)
+    )
+    rows = _file_rows(read, _PROBLEM_INDEX)
+    assert rows is not None, f"{_MINUTE_FILE} has no file for {day}"
+    filed = {int(str(row["window_start"])) // _NS_PER_MS for row in rows}
+    bounds = (day - timedelta(days=1), day + timedelta(days=1))
+    minutes = range_bars(_PROBLEM_INDEX, "minute", bounds)
+    lacking: dict[str, list[int]] = {}
+    for name, zone in index_day_sources.WINDOWS:
+        first, last = index_day_sources.day_window_ms(day, zone)
+        rest_day = sorted({int(m["t"]) for m in minutes if first <= int(m["t"]) < last})
+        assert rest_day, f"REST sent no {_PROBLEM_INDEX} minute in the {name} day of {day}"
+        lacks = [stamp for stamp in rest_day if stamp not in filed]
+        ends = [_wall_clock(stamp) for stamp in lacks[:1] + lacks[-1:]]
+        evidence(
+            f"{_MINUTE_FILE} {day} {_PROBLEM_INDEX}: {len(filed)} rows; REST minutes of the "
+            f"{name} day: {len(rest_day)}, the file lacks {len(lacks)}, first and last {ends}"
+        )
+        lacking[f"{name} day"] = lacks
+    counts = {name: len(lacks) for name, lacks in lacking.items()}
+    expect_fixed(
+        fixed=any(not lacks for lacks in lacking.values()),
+        shown=(
+            f"{_MINUTE_FILE} of {day} holds {len(filed)} {_PROBLEM_INDEX} minutes and lacks "
+            f"REST minutes (range {bounds[0]} to {bounds[1]}) of both days: {counts}"
+        ),
+    )
+
+
+@pytest.mark.massive_issue(806)
+@pytest.mark.requests(1)
+@pytest.mark.timeout(100)
+def test_the_index_day_files_match_the_rest_day_bars(
+    *, flat_file_tickers: FlatFileTickers, range_bars: RangeBars, evidence: Evidence
+) -> None:
+    """Whether `I:AAVE100`'s day-file rows of 2025-12-23 and -24 match its REST day bars.
+
+    Today the `us_indices/day_aggs_v1` rows of those days have the REST day bar's start but
+    other prices: closes of 151.2113 (file) and 148.7037 (REST) on 2025-12-23. Massive
+    confirmed it as a data issue. Reads both files' `I:AAVE100` rows and the range's 1-day
+    bars around both days, 1 request, and asserts that each file holds one row and REST one
+    bar for each day. A pass, each day's file row and REST bar equal in open, high, low, and
+    close within a relative 1e-6 on both days, means Massive fixed it: close the issue.
+    """
+    days = _DIFFERING_DAY_FILE_DAYS
+    spellings = wire_spellings(dm.AssetClass.INDICES, _PROBLEM_INDEX)
+    filed = {
+        day: _file_rows(flat_file_tickers(_DAY_FILE, day, spellings), _PROBLEM_INDEX)
+        for day in days
+    }
+    ranged = _range_day_bars(range_bars, days)
+    differ: list[str] = []
+    for day in days:
+        rows, bars = filed[day], ranged[day]
+        evidence(f"{_PROBLEM_INDEX} {day}: day file rows {rows}; range 1-day bars {bars}")
+        assert rows is not None, f"{_DAY_FILE} has no file for {day}"
+        assert len(rows) == 1, f"{_DAY_FILE} {day} holds {len(rows)} {_PROBLEM_INDEX} rows"
+        assert len(bars) == 1, f"the range sent {len(bars)} 1-day bars of {day}: {bars}"
+        file_prices = index_day_sources.prices(rows[0])
+        range_prices = index_day_sources.prices(bars[0])
+        assert file_prices is not None, f"{_DAY_FILE} {day} row without prices: {rows[0]}"
+        assert range_prices is not None, f"range bar of {day} without prices: {bars[0]}"
+        error = index_day_sources.relative_error(file_prices, range_prices)
+        if error > index_day_sources.MATCH:
+            differ.append(
+                f"{day}: file {file_prices}, REST {range_prices}, relative error {error:.2e}"
+            )
+    expect_fixed(
+        fixed=not differ,
+        shown=(
+            f"{_PROBLEM_INDEX}'s {_DAY_FILE} rows differ from the range's 1-day bars "
+            f"(open, high, low, close) on {len(differ)} of {len(days)} days: {'; '.join(differ)}"
+        ),
+    )
+
+
+@pytest.mark.massive_issue(779)
+@pytest.mark.requests(2)
+@pytest.mark.timeout(100)
+def test_an_index_day_bar_covers_the_new_york_day(
+    *, recent_week: tuple[date, date], range_bars: RangeBars, evidence: Evidence
+) -> None:
+    """Whether `I:AAVE100`'s REST day bars hold the New York day, as Massive's docs say.
+
+    Massive's index aggregates page says its aggregates are in Eastern Time, but today an
+    index day bar holds the day from midnight to midnight in Chicago, an hour later: its
+    prices equal a rebuild from the REST minute bars over the Chicago day, not over the New
+    York one. Massive confirmed it and is deciding whether its data or its docs change; a
+    docs change instead leaves this check failing, as expected, while the docs check passes.
+    Reads the range's 1-day bars and minute bars of the most recent ended week without a
+    holiday, 2 requests, and rebuilds each day over both windows. A day is judged when its two
+    windows hold different minutes and its bar matches one rebuild within a relative 1e-6; a
+    day whose bar matches neither, or both, says nothing of the window and is recorded. It
+    asserts that at least three days are judged. A pass, every judged day's bar matching the
+    New York rebuild, means Massive moved its index days to New York days: close the issue,
+    and move the library's index day windows with it.
+    """
+    monday = recent_week[0]
+    days = tuple(monday + timedelta(days=n) for n in range(7))
+    ranged = _range_day_bars(range_bars, days)
+    (span,) = index_day_sources.minute_read_spans(days)
+    minutes = range_bars(_PROBLEM_INDEX, "minute", span)
+    differing = [day for day in days if index_day_sources.windows_differ(minutes, day)]
+    evidence(f"{_PROBLEM_INDEX}: {len(minutes)} minute bars {span}; differing days {differing}")
+    verdicts: dict[date, str] = {}
+    for day in differing:
+        assert len(ranged[day]) == 1, f"the range sent {ranged[day]} as the 1-day bars of {day}"
+        rebuilds = {
+            name: index_day_sources.rebuilt(minutes, *index_day_sources.day_window_ms(day, zone))
+            for name, zone in index_day_sources.WINDOWS
+        }
+        verdict, error = index_day_sources.window_verdict(
+            index_day_sources.prices(ranged[day][0]), rebuilds
+        )
+        evidence(f"{_PROBLEM_INDEX} {day}: {ranged[day][0]}; {rebuilds}; {verdict} ({error})")
+        verdicts[day] = verdict
+    judged = {d: v for d, v in verdicts.items() if v in index_day_sources.WINDOW_VERDICTS}
+    unjudged = {str(d): v for d, v in verdicts.items() if d not in judged}
+    evidence(f"{_PROBLEM_INDEX}: judged {judged}; not judged {unjudged}")
+    assert len(judged) >= 3, f"only {judged} of {days} can be judged ({unjudged})"
+    chicago = [str(day) for day, verdict in judged.items() if verdict != "New York day"]
+    note = f"; not judged: {unjudged}" if unjudged else ""
+    expect_fixed(
+        fixed=not chicago,
+        shown=(
+            f"{_PROBLEM_INDEX}'s range 1-day bars of {chicago} equal a rebuild from REST minute "
+            f"bars over the Chicago day, not the New York (Eastern) day Massive's docs give{note}"
+        ),
+    )

@@ -135,9 +135,9 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
         print=[f"collecting with {PLANTED_KEY}", "Server started on port 1"],
         evidence="evidence line\n",
         collection={
-            A: {"items": ["21"]},
-            B: {"items": []},
-            C: {"items": ["22"]},
+            A: {"items": ["21"], "issue": None},
+            B: {"items": [], "issue": 797},
+            C: {"items": ["22"], "issue": None},
         },
         outcomes={
             A: PASS,
@@ -162,6 +162,7 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
     assert (folder / "collection.json").exists()  # its file came on the command line too
     assert harness.check("evidence", A).status == "passed"
     assert harness.check("evidence", A).items == ["21"]
+    assert (harness.check("evidence", A).issue, harness.check("evidence", B).issue) == (None, 797)
     assert (harness.check("evidence", B).status, harness.check("evidence", B).reason) == (
         "skipped",
         "no LULD frame arrived",
@@ -183,7 +184,7 @@ def test_a_pytest_group_runs_only_its_due_tests_and_records_each(harness: Harnes
 
 
 def test_a_test_that_left_no_record_stays_due_without_a_failure(harness: Harness) -> None:
-    harness.script(collection={A: {"items": []}}, exit=1)
+    harness.script(collection={A: {"items": [], "issue": None}}, exit=1)
     _run(harness)
     check = harness.check("evidence", A)
     assert (check.status, check.failures) == ("not run", 0)
@@ -191,7 +192,7 @@ def test_a_test_that_left_no_record_stays_due_without_a_failure(harness: Harness
 
 def test_a_test_that_started_and_never_finished_is_an_error(harness: Harness) -> None:
     started = [_phase("setup", "passed")]
-    harness.script(collection={A: {"items": []}}, outcomes={A: started}, exit=1)
+    harness.script(collection={A: {"items": [], "issue": None}}, outcomes={A: started}, exit=1)
     _run(harness)
     check = harness.check("evidence", A)
     assert (check.status, check.reason, check.failures) == ("error", "did not finish", 1)
@@ -199,7 +200,7 @@ def test_a_test_that_started_and_never_finished_is_an_error(harness: Harness) ->
 
 def test_a_group_with_nothing_due_runs_no_tests(harness: Harness) -> None:
     record(harness.state, harness.check("smoke", A), status="passed", reason="", day="")
-    harness.script(collection={A: {"items": []}})
+    harness.script(collection={A: {"items": [], "issue": None}})
     _run(harness, "smoke")
     folder = harness.ctx.out / "smoke" / "2026-11-04-1"
     assert not (folder / "argv.json").exists()
@@ -218,7 +219,7 @@ def test_a_test_massive_refused_is_recorded_refused_with_its_subscription(
 ) -> None:
     refusal = "refused: HTTP 403 from GET /v3/quotes/AAPL on h (request_id 1): not entitled"
     refused = [_phase("setup", "passed"), _phase("call", "skipped", reason=refusal)]
-    harness.script(collection={A: {"items": []}}, outcomes={A: refused})
+    harness.script(collection={A: {"items": [], "issue": None}}, outcomes={A: refused})
     _run(harness)
     check = harness.check("evidence", A)
     assert (check.status, check.reason, check.subscription) == ("refused", refusal, "stocks")
@@ -229,13 +230,13 @@ def test_half_day_checks_carry_their_half_day(
 ) -> None:
     monday = datetime(2026, 11, 30, 12, tzinfo=NEW_YORK)
     monkeypatch.setattr(harness.ctx, "now", lambda: monday)
-    harness.script(collection={A: {"items": []}}, outcomes={A: PASS})
+    harness.script(collection={A: {"items": [], "issue": None}}, outcomes={A: PASS})
     _run(harness, "half-day", until=monday + timedelta(hours=1))
     assert harness.check("half-day", f"{A} after 2026-11-27").status == "passed"
 
 
 def test_a_child_running_past_its_stop_is_stopped_and_its_tests_stay_due(harness: Harness) -> None:
-    harness.script(collection={A: {"items": []}}, hang=True)
+    harness.script(collection={A: {"items": [], "issue": None}}, hang=True)
     _run(harness, until=NOW + timedelta(seconds=1))
     check = harness.check("evidence", A)
     assert (check.status, check.failures) == ("not run", 0)
@@ -256,7 +257,7 @@ def test_a_child_that_ignores_the_interrupt_is_killed(harness: Harness) -> None:
     harness.ctx.echo = echo
     harness.ctx.now = lambda: until if ignoring.is_set() else NOW
     harness.ctx.stop_grace = 0.0
-    harness.script(collection={A: {"items": []}}, hang=True, ignore_interrupt=True)
+    harness.script(collection={A: {"items": [], "issue": None}}, hang=True, ignore_interrupt=True)
     _run(harness, until=until)
     assert harness.state.attempts[-1].exit_code == -signal.SIGKILL
 
@@ -287,7 +288,7 @@ def test_control_c_stops_the_child_and_records_the_attempt_interrupted(
 
     monkeypatch.setattr(children, "wait", wait)
     harness.ctx.echo = interrupt
-    harness.script(collection={A: {"items": []}}, hang=True)
+    harness.script(collection={A: {"items": [], "issue": None}}, hang=True)
     with pytest.raises(KeyboardInterrupt):
         _run(harness)
     assert harness.state.attempts[-1].status == "interrupted"
@@ -534,7 +535,7 @@ def test_a_stream_day_or_night_short_of_disk_waits_and_spends_no_start(
 
 
 def test_a_limits_group_names_its_file_only_to_collect(harness: Harness) -> None:
-    harness.script(collection={A: {"items": []}}, outcomes={A: PASS})
+    harness.script(collection={A: {"items": [], "issue": None}}, outcomes={A: PASS})
     _run(harness, "limits-ws")
     argv = json.loads((harness.ctx.out / "limits-ws" / "2026-11-04-1" / "argv.json").read_text())
     assert "tests/massive/ws/test_client_integration.py" not in argv
