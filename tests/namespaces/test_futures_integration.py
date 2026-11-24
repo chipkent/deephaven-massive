@@ -1110,7 +1110,7 @@ def _front_contracts(client: RestClient, *, evidence: Evidence) -> dict[str, str
             break
     fronts: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if str(row["last_trade_date"]) < day.isoformat():
+        if str(row["last_trade_date"]) < today.isoformat():
             continue
         code = str(row["product_code"])
         if code not in fronts or str(row["last_trade_date"]) < str(fronts[code]["last_trade_date"]):
