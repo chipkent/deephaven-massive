@@ -89,7 +89,8 @@ this way:
   is asked, check it, and answer? Does each item lead with its point?
 - Pass 2: the panel is that one engineer, who knows Massive's API but not this library. Their
   "simple?" asks whether they could check each claim and answer after one read. A name from
-  this library's code is a fault.
+  this library's code that the message doesn't define is a fault; one quoted in a log or
+  traceback is not.
 - Pass 3: source each claim in the cited logs and pages, and what the thread said in the
   thread. A claim with no source is UNSOURCED.
 - Pass 4: judge scope by what the engineer needs to check and answer. Skip the owner's list of

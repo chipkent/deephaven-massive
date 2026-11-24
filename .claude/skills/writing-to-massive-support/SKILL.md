@@ -29,11 +29,12 @@ the same time. Support read it as a reference-data delay, and the real question 
   planned.
 - **Write to the project's standard.** The prose meets `docs/dev/user-docs.md`: the page an
   O'Reilly development editor would send to print, with none of its AI tells. Lead each item
-  with its point, then the exact request or steps, then the question. Define terms and leave out
-  this library's internal names.
+  with its point, then the exact request or steps, then the question. Define every term,
+  including any name from this library's code that the reader needs.
 
 Before the owner sees a draft, have an agent with no other context check each claim against the
 raw logs and pages, and have the calibrated editor (`writing-user-docs`, `agents/editor.md`)
-grade it as a message to Massive support. Give the owner the text, the message it answers, and
+grade it as a message to Massive support, giving it the draft, the whole thread it answers, and
+every log and page the draft cites. Give the owner the text, the message it answers, and
 anything the checker couldn't confirm. The owner sends it; when support answers, record the
 answer on the issue it touches.
