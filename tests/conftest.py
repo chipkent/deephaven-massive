@@ -93,6 +93,7 @@ from tests._live import (
     contracts,
     debug_log_file,
     events,
+    evidence_layout,
     key_check,
     massive_problems,
     pacing,
@@ -2271,7 +2272,8 @@ def evidence(request: pytest.FixtureRequest) -> Callable[[str], None]:
     (`_evidence_path`), under the test's id, and flushed, so nothing recorded is lost if the
     run is cut short (a timeout that ends the process). The lines are printed again, grouped
     by test, in the "live evidence" section of the terminal summary, whatever the test's
-    outcome. Safe to call from any thread.
+    outcome. A recorded text that holds line breaks, such as Massive's error message, keeps
+    every line indented under the test's id (`evidence_layout`). Safe to call from any thread.
 
     Args:
         request: The requesting test, whose id heads its lines.
@@ -2322,11 +2324,11 @@ def _record(config: pytest.Config, test_id: str, line: str) -> None:
     with _EVIDENCE_LOCK:
         heading = not records or records[-1][0] != test_id
         records.append((test_id, line))
-        with _evidence_path(config).open("a", encoding="utf-8") as file:
-            if heading:
-                file.write(f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ} {test_id}\n")
-            file.write(f"    {line}\n")
-            file.flush()
+        evidence_layout.append(
+            _evidence_path(config),
+            f"{datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ} {test_id}" if heading else None,
+            line,
+        )
 
 
 def _skip_reason(report: pytest.TestReport) -> str:
@@ -2531,7 +2533,8 @@ def pytest_terminal_summary(
         if test_id != current:
             terminalreporter.write_line(test_id)
             current = test_id
-        terminalreporter.write_line(f"    {line}")
+        for indented in evidence_layout.indented_lines(line):
+            terminalreporter.write_line(indented)
 
 
 _OWNER_SETTINGS: Final = pytest.StashKey["MassiveConfig | None"]()
