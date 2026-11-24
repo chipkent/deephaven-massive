@@ -144,8 +144,16 @@ issue to close. A check whose request Massive refuses skips as any other test do
 fails otherwise (a request fails or returns nothing) is a plain failure that says nothing about
 the problem.
 
+The `XFAIL` line gives only the issue, so each check also records what it found in the run's
+evidence, with Massive's values, whichever way it went: a line such as `Massive problem present:
+neither GET /futures/v1/snapshot nor ... held ['6A:XF:AUDUSD:F7', ...]`, or `Massive problem
+fixed: ...`. The futures checks also record each request that looks tickers up by
+`ticker.any_of` on the futures snapshot or contracts list, as sent, with the `request_id`
+Massive gave it, so a report to Massive can cite the request.
+
 The checks of Massive's documentation read the vendored copy of its docs, so they run in CI too,
-and a refresh that brings Massive's fix fails CI with the issue to close.
+and a refresh that brings Massive's fix fails CI with the issue to close, its report showing
+what the docs say now.
 
 The end of a run lists each issue its checks touched, under one of four headings:
 

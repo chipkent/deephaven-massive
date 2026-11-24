@@ -4,8 +4,9 @@ Massive has confirmed problems in its data and documentation and not yet fixed t
 GitHub issue in this repository, and one or more checks marked `massive_issue(N)` with its
 number. A check asserts what Massive's fix brings: it first asserts its evidence with plain
 `assert`s (the rows came back, a control read worked), then calls `expect_fixed` once per part
-of the problem. At collection `track` makes every marked check a strict expected failure of
-`ProblemShownError`, so:
+of the problem, which records what Massive sent, with its values, whichever way it went. At
+collection `track` makes every marked check a strict expected failure of `ProblemShownError`,
+so:
 
 - the problem still shows: `expect_fixed` raises `ProblemShownError`, and pytest reports an
   expected failure (XFAIL), outcome `PRESENT`;
@@ -27,7 +28,7 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
 MARKER: Final = "massive_issue"
 """The marker that names the GitHub issue of the Massive problem a check tracks."""
@@ -47,16 +48,24 @@ class ProblemShownError(Exception):
     """Massive's data or documentation still shows the problem a check looks for."""
 
 
-def expect_fixed(*, fixed: bool, shown: str) -> None:
-    """Raise `ProblemShownError` unless Massive's fix shows.
+def expect_fixed(*, fixed: bool, shown: str, evidence: Callable[[str], None]) -> None:
+    """Record what Massive sent, and raise `ProblemShownError` unless Massive's fix shows.
+
+    pytest reports an expected failure with its marker's reason, not its message, so the line
+    recorded is where a run keeps the values, the problem's or the fix's, for a report to
+    Massive or an issue to close.
 
     Args:
         fixed: Whether what Massive sent is what its fix brings.
-        shown: What Massive sent, with its values, for the expected failure's message.
+        shown: What Massive sent, with its values: the recorded line and the expected
+            failure's message.
+        evidence: Records one line: a live check's `evidence` fixture, or for a check of the
+            vendored documentation, which writes no evidence log, a section of its report.
 
     Raises:
         ProblemShownError: When `fixed` is false, with `shown` as its message.
     """
+    evidence(f"Massive problem {FIXED if fixed else PRESENT}: {shown}")
     if not fixed:
         raise ProblemShownError(shown)
 

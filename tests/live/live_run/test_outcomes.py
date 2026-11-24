@@ -262,11 +262,11 @@ def test_a_real_pytest_child_records_its_collection_and_phases(tmp_path: Path) -
 
             @pytest.mark.massive_issue(797)
             def test_problem_shows():
-                expect_fixed(fixed=False, shown="volume 12 against 13")
+                expect_fixed(fixed=False, shown="volume 12 against 13", evidence=print)
 
             @pytest.mark.massive_issue(803)
             def test_problem_gone():
-                expect_fixed(fixed=True, shown="volume 12 against 12")
+                expect_fixed(fixed=True, shown="volume 12 against 12", evidence=print)
 
             @pytest.mark.massive_issue(797)
             def test_problem_check_breaks():
