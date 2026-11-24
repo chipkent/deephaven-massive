@@ -207,6 +207,20 @@ def _phase(phase: str, outcome: str, *, error_type: str = "", reason: str = "") 
             ],
             ("failed", "teardown: AssertionError"),
         ),
+        (
+            [
+                {**_phase("call", "failed"), "problem": "fixed"},
+                _phase("teardown", "skipped", reason="no cleanup"),
+            ],
+            ("skipped", "no cleanup"),
+        ),
+        (
+            [
+                {**_phase("call", "skipped", reason="volume 12"), "problem": "present"},
+                _phase("teardown", "skipped", reason="refused: HTTP 403: not entitled"),
+            ],
+            ("refused", "refused: HTTP 403: not entitled"),
+        ),
     ],
 )
 def test_phases_make_one_check_status(

@@ -203,37 +203,38 @@ def check_outcome(phases: Iterable[dict[str, Any]]) -> tuple[str, str]:
     """Turn one test's phase records into its check status and reason.
 
     A test failed when any phase failed, other than the call of a check of an open Massive
-    problem that passed against its expectation (pytest reports it as a failure). Otherwise a
-    check shows the problem (`problem present`) when its call failed as expected, and its fix
-    (`problem fixed`) when its call passed against that expectation, so a failed setup or
-    teardown is never read as either. Otherwise a test passed when its call passed; it was
-    refused when a phase skipped with Massive's refusal (its reason starts `REFUSED`), and
-    skipped when a phase skipped otherwise. A test with no call record and no failure did not
-    finish: its child was stopped or died.
+    problem that passed against its expectation (pytest reports it as a failure). Otherwise it
+    was refused when a phase skipped with Massive's refusal (its reason starts `REFUSED`), and
+    skipped when a phase skipped otherwise, other than the call of such a check that failed as
+    expected (pytest reports it as a skip). Otherwise a check shows the problem (`problem
+    present`) when its call failed as expected, and its fix (`problem fixed`) when its call
+    passed against that expectation, so a setup or teardown that failed or skipped is never
+    read as either. Otherwise a test passed when its call passed. A test with no call record
+    and no failure did not finish: its child was stopped or died.
 
     Args:
         phases: The test's records, in order.
 
     Returns:
-        `(status, reason)`: `failed` (with each failed phase), `problem present` (with
-        Massive's values) or `problem fixed`, `passed`, `refused` or `skipped` (with its
-        reason), or `error` (`"did not finish"`).
+        `(status, reason)`: `failed` (with each failed phase), `refused` or `skipped` (with
+        its reason), `problem present` (with Massive's values) or `problem fixed`, `passed`,
+        or `error` (`"did not finish"`).
     """
     records = list(phases)
     # A line written before the checks of Massive's problems existed has no `problem`.
     failed = [r for r in records if r["outcome"] == "failed" and r.get("problem", "") != FIXED]
     if failed:
         return "failed", ", ".join(f"{r['phase']}: {r['error_type'] or 'failed'}" for r in failed)
+    skipped = [r for r in records if r["outcome"] == "skipped" and r.get("problem", "") != PRESENT]
+    if skipped:
+        reason = str(skipped[0]["reason"])
+        return ("refused" if reason.startswith(REFUSED) else "skipped"), reason
     for record in records:
         problem = record.get("problem", "")
         if problem == PRESENT:
             return "problem present", str(record["reason"])
         if problem == FIXED:
             return "problem fixed", PROBLEM_FIXED_REASON
-    skipped = [r for r in records if r["outcome"] == "skipped"]
-    if skipped:
-        reason = str(skipped[0]["reason"])
-        return ("refused" if reason.startswith(REFUSED) else "skipped"), reason
     if any(r["phase"] == "call" and r["outcome"] == "passed" for r in records):
         return "passed", ""
     return "error", "did not finish"
