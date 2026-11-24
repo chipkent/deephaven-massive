@@ -1,6 +1,6 @@
 ---
 name: writing-a-pr-description
-description: "Use this skill whenever you write or rewrite a pull request description, an issue body, a bug report to Massive or Deephaven (wrong data, a defect), or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, runs that page's self-edit checklist, and has a fresh editor grade it, at most three times. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner)."
+description: "Use this skill whenever you write or rewrite a pull request description, an issue body, or a report another agent or the owner will read as a record of work: opening a PR, rewriting a description after a push, filing an issue, or when the owner calls a description rambly, padded, machine-sounding, or hard to scan. It picks the facts a reader needs, drafts them into the structure of docs/dev/pull-requests.md in an editor's prose, runs that page's self-edit checklist, and has a fresh editor grade it, at most three times. Not for a PR title alone (the Title section of the same page), review replies, or questions and status messages to the owner (writing-to-the-owner), or anything sent to Massive or Deephaven, such as a support email, a bug report, or a roadmap request (writing-to-massive-support)."
 ---
 
 # Writing a PR description
@@ -107,21 +107,7 @@ name, so `git add` never stages it, and two agents never overwrite each other's 
 - Existing PR: `gh pr edit <n> --body-file <file>`, in the same batch as the push it describes.
 - Confirm the issue link: `gh pr view <n> --json closingIssuesReferences`.
 
-## A bug report to Massive or Deephaven
+## A report to Massive or Deephaven
 
-Report only a clear error that would mislead a user. First read Massive's wording in its market
-context: "the price per share of the underlying" is right for an option premium, since a
-contract usually covers 100 shares, and the same words in two datasets can mean different
-things in each. A copy-pasted description that misleads no one, or a type that differs by asset
-class because the data does (fractional crypto sizes), isn't worth a report.
-
-A report of wrong vendor data (`AGENTS.md`, Supply Massive's data), a Deephaven defect, or any
-text for another project goes to a maintainer who knows nothing of this library, and an unclear
-report is declined or ignored. It carries facts only. Lead with the problem they can see, in one
-or two plain sentences. Then give a minimal reproduction (the exact request, or symbol and date,
-and the versions involved), the expected and the actual result, the evidence, and the cause
-where you know it. Propose no fix unless the owner asks for one: the maintainers decide the fix.
-Run the reproduction before sending, exactly as written; one that needs Massive's API with a key
-is the owner's to run (`AGENTS.md`, Limits). Use short paragraphs, define every term, and leave
-out this project's internal names. Have a Fable agent with no other context critique it for
-clarity, and post nothing until the owner has approved the text.
+Anything sent to Massive or to Deephaven's maintainers, such as a support email, a bug report,
+a reply in a support thread, or a roadmap request, follows `writing-to-massive-support`.
