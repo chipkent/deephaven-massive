@@ -73,13 +73,16 @@ class Check:
     Attributes:
         group: The group that runs it, such as `"evidence"`.
         name: Its name in the group: a pytest node id, an example's name, or a unit.
-        status: `passed`, `failed`, `error`, `refused`, `skipped`, or `not run`.
+        status: `passed`, `failed`, `error`, `refused`, `skipped`, `problem present`, `problem
+            fixed`, or `not run`.
         reason: Why it failed or was skipped; `""` otherwise.
         failures: How many of its results were `failed` or `error` (a stopped child's
             unfinished checks are not counted).
         condition_skips: How many times it was skipped for a condition of the moment.
         last_run: The New York date of its last run, ISO.
         items: The open verification items it answers (`settles` and `verifies`).
+        issue: The GitHub issue of the open Massive problem it checks (`massive_issue`), or
+            None for a check of none.
         passed_rules: The `ROW_RULES` version in force at its last pass; 0 for a pass recorded
             before the version existed, or none.
         subscription: The subscription its latest refusal, or skip for its delayed listing,
@@ -96,6 +99,7 @@ class Check:
     condition_skips: int = 0
     last_run: str = ""
     items: list[str] = field(default_factory=list)
+    issue: int | None = None
     passed_rules: int = 0
     subscription: str = ""
     rerun: bool = False
@@ -249,6 +253,11 @@ def refused_subscription(name: str, reason: str) -> str:
     return {"crypto": "currencies", "forex": "currencies"}.get(word.group(1), word.group(1))
 
 
+PROBLEM_STATUSES: Final = frozenset({"problem present", "problem fixed"})
+"""The statuses of a check of an open Massive problem that ran: the problem still shows, or
+Massive fixed it."""
+
+
 def is_daily(check: Check) -> bool:
     """Tell whether a check's result may change only with what the key holds or the settings say.
 
@@ -284,10 +293,12 @@ def needs_rows(check: Check) -> bool:
 def is_due(check: Check, today: str) -> bool:
     """Decide whether a check runs at its group's next attempt.
 
-    A check is due unless it passed; it failed `MAX_FAILURES` times; it was refused, or skipped
-    for its delayed listing (`is_daily`), and already ran today, unless another check of its
-    subscription stopped being refused or unlisted since (`Check.rerun`); or it was skipped for a
-    condition `MAX_CONDITION_SKIPS` times. A check that needs rows (`needs_rows`) and passed
+    A check is due unless it passed; it showed Massive's fix of an open problem (`problem
+    fixed`); it showed the problem still present and already ran today, since Massive may fix
+    it any day; it failed `MAX_FAILURES` times; it was refused, or skipped for its delayed
+    listing (`is_daily`), and already ran today, unless another check of its subscription
+    stopped being refused or unlisted since (`Check.rerun`); or it was skipped for a condition
+    `MAX_CONDITION_SKIPS` times. A check that needs rows (`needs_rows`) and passed
     under an older `ROW_RULES` proved nothing, so it is due until it passes again.
 
     Args:
@@ -299,9 +310,9 @@ def is_due(check: Check, today: str) -> bool:
     """
     if check.status == "passed":
         return needs_rows(check) and check.passed_rules < ROW_RULES
-    if check.failures >= MAX_FAILURES:
+    if check.status == "problem fixed" or check.failures >= MAX_FAILURES:
         return False
-    if is_daily(check):
+    if is_daily(check) or check.status == "problem present":
         return check.last_run != today or check.rerun
     if check.status == "skipped":
         return check.condition_skips < MAX_CONDITION_SKIPS
@@ -329,7 +340,8 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
     (Control-C, a hard stop) come as `interrupted` and are not stored, so they stay due
     without counting as a failure. A refusal, or a skip whose reason starts with `NOT_LISTED`,
     stores the subscription it names (`refused_subscription`). When a refused check's new
-    result is one Massive answered (a pass, a failure, or a skip whose reason starts with
+    result is one Massive answered (a pass, a failure, a check of an open Massive problem that
+    ran, or a skip whose reason starts with
     `NOT_LISTED`), the key gained something; when an unlisted check's is a pass or a failure,
     the settings now list its subscription. Either way every other refused or unlisted check
     of the same subscription (`is_daily`) is marked to run again at once (`Check.rerun`). A
@@ -339,8 +351,9 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
     Args:
         state: The run's state.
         check: The check.
-        status: `passed`, `failed`, `error`, `refused`, `skipped`, or `interrupted` (left as
-            it was, still due).
+        status: `passed`, `failed`, `error`, `refused`, `skipped`, `problem present` or
+            `problem fixed` (a check of an open Massive problem), or `interrupted` (left as it
+            was, still due).
         reason: The reason; `""` for a pass.
         day: The New York date of the run, ISO.
 
@@ -353,7 +366,9 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
         check.last_run, check.rerun = day, False
         return
     unlisted = status == "skipped" and reason.startswith(NOT_LISTED)
-    cleared = status in {"passed", "failed"} or (unlisted and check.status == "refused")
+    cleared = status in {"passed", "failed", *PROBLEM_STATUSES} or (
+        unlisted and check.status == "refused"
+    )
     freed = check.subscription if is_daily(check) and cleared else ""
     if status == "refused" or unlisted:
         check.subscription = refused_subscription(check.name, reason)
@@ -363,10 +378,10 @@ def record(state: RunState, check: Check, *, status: str, reason: str, day: str)
         check.failures += 1
     elif status == "skipped":
         check.condition_skips += 1
-    else:
+    elif status not in PROBLEM_STATUSES:
         msg = (
             f"{check.name}: unknown status {status!r}; expected passed, failed, error, "
-            "refused, skipped, or interrupted"
+            "refused, skipped, problem present, problem fixed, or interrupted"
         )
         raise ValueError(msg)
     check.last_run, check.rerun = day, False

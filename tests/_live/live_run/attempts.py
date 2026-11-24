@@ -284,7 +284,8 @@ def run_pytest_group(
     suffix = half_day_suffix(today) if group == "half-day" else ""
     collection = collect(ctx, state, attempt, group=group, until=until)
     for nodeid, entry in collection.items():
-        check_of(state, group, nodeid + suffix).items = list(entry["items"])
+        check = check_of(state, group, nodeid + suffix)
+        check.items, check.issue = list(entry["items"]), entry["issue"]
     due = [
         n
         for n in sorted(collection)

@@ -6,6 +6,10 @@ when Massive no longer gives it. Streams assert that Massive acknowledged their 
 rows only while their market is open, and are released at once; raw bars come from the wire REST
 client, because the library filters the very bars in question. How to run these tests is in
 `docs/live-tests.md`.
+
+A test marked `massive_issue` checks an open Massive problem: it asserts what Massive's fix
+brings, so it fails as expected while the problem lasts, and a pass means Massive fixed it
+(`tests/_live/massive_problems.py`).
 """
 
 from __future__ import annotations
@@ -25,9 +29,10 @@ from deephaven_massive._massive import RestClient, Transport, WireError, source
 from tests._live import streams
 from tests._live.calendar import is_trading_day, trading_day_after, trading_day_before
 from tests._live.feeds import with_delayed
+from tests._live.massive_problems import expect_fixed
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from typing import TypeAlias
 
     from deephaven.table import Table
@@ -482,6 +487,211 @@ def test_stock_day_bar_stamps_of_the_day_file(
     assert all(files.values()), f"the day file lacks a stamp day: {files}"
     odd = {day: [b[0] for b in bars if not _day_stamp(b[0], day)] for day, bars in files.items()}
     assert not any(odd.values()), f"day-file stamps the library does not expect: {odd}"
+
+
+_PREV = "/v2/aggs/ticker/{stocksTicker}/prev"
+_VOLUME_DAYS: Final = (date(2025, 12, 23), date(2025, 12, 24))
+"""The days on which grouped daily was first seen to report less AAPL volume than the range day
+bar and the day file: 29,593,863 against 29,641,999, and 17,892,492 against 17,910,574."""
+
+
+def _new_york_text(millis: int) -> str:
+    """Write a bar stamp as New York time, the zone the stock day-bar stamps are read in.
+
+    Args:
+        millis: Massive's `t`, in epoch milliseconds.
+
+    Returns:
+        Text such as `"2026-11-18 04:00 New York"`.
+    """
+    local = datetime.fromtimestamp(millis / 1000, UTC).astimezone(_NEW_YORK)
+    return f"{local:%Y-%m-%d %H:%M} New York"
+
+
+def _same_prices(left: StampedBar, right: StampedBar) -> bool:
+    """Tell whether two stamped bars have the same open, high, low, and close.
+
+    Returns:
+        True when each price is present on both and they agree within `_SAME_PRICE`.
+    """
+    pairs = list(zip(left[1][:4], right[1][:4], strict=True))
+    return all(
+        a is not None and b is not None and abs(a - b) <= _SAME_PRICE * max(abs(a), abs(b))
+        for a, b in pairs
+    )
+
+
+def _same_volume(left: StampedBar, right: StampedBar) -> bool:
+    """Tell whether two stamped bars have the same volume, within `_SAME_VOLUME`.
+
+    Returns:
+        True when both have a volume and they agree.
+    """
+    a, b = left[1][4], right[1][4]
+    return a is not None and b is not None and abs(a - b) <= _SAME_VOLUME * max(abs(a), abs(b))
+
+
+def _only_bar(bars: Sequence[StampedBar], name: str, day: date) -> StampedBar:
+    """Return the one bar a source sent for a day, failing plainly when it sent none or several.
+
+    Returns:
+        The bar.
+    """
+    assert len(bars) == 1, f"{name} sent {len(bars)} {_SYMBOL} bars for {day}: {bars}"
+    return bars[0]
+
+
+@pytest.mark.massive_issue(792)
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_a_stock_day_bar_has_one_stamp_on_every_rest_source(
+    *, rest_rows: RestRows, stamped_bar: ToStampedBar, evidence: Evidence
+) -> None:
+    """Whether `/prev`, the range endpoint, and grouped daily stamp AAPL's day bar alike.
+
+    Reads AAPL's `/prev` bar, the range endpoint's 1-day bar of the same New York day, and that
+    day's grouped-daily row: 3 requests. Today Massive stamps one bar three ways: 00:00 New York
+    time on the range, 04:00 on `/prev`, and 16:00 on grouped daily (and `/prev` moved from 16:00
+    to 04:00 without notice). The evidence first asserts that each source sent one bar of the
+    day with the same prices, so the three stamps belong to one bar. A pass means Massive
+    stamps the bar alike on all three: close the issue, then update the library's per-source
+    stamp handling and the dataset docs that list each source's stamp.
+    """
+    prevs = rest_rows(_PREV, {"stocksTicker": _SYMBOL}, {})
+    assert len(prevs) == 1, f"/prev sent {len(prevs)} {_SYMBOL} bars: {prevs}"
+    prev = stamped_bar(prevs[0])
+    day = _new_york_date(prev[0])
+    params = {"stocksTicker": _SYMBOL, "multiplier": 1, "timespan": "day", "from": day, "to": day}
+    ranged = [stamped_bar(r) for r in rest_rows(_RANGE, params, {})]
+    grouped = [
+        stamped_bar(r) for r in rest_rows(_GROUPED, {"date": day}, {}) if r.get("T") == _SYMBOL
+    ]
+    bars = {
+        f"GET {_PREV}": prev,
+        f"GET {_RANGE} {day}..{day}": _only_bar(
+            [b for b in ranged if _new_york_date(b[0]) == day], "the range", day
+        ),
+        f"GET {_GROUPED} {day}": _only_bar(grouped, "grouped daily", day),
+    }
+    stamps = {request: f"t={bar[0]} ({_new_york_text(bar[0])})" for request, bar in bars.items()}
+    evidence(f"{_SYMBOL} day bar of {day}: {stamps}")
+    assert all(_same_prices(bar, prev) for bar in bars.values()), f"not one bar: {bars}"
+    expect_fixed(
+        fixed=len({bar[0] for bar in bars.values()}) == 1,
+        shown=f"{_SYMBOL} day bar of {day} stamped differently by each source: {stamps}",
+    )
+
+
+def _expect_equal_day_volumes(
+    days: Sequence[date],
+    *,
+    rest_rows: RestRows,
+    flat_file_tickers: FlatFileTickers,
+    stamped_bar: ToStampedBar,
+    evidence: Evidence,
+) -> None:
+    """Expect grouped daily's AAPL volume of each day to equal the range day bar's and the file's.
+
+    Reads the as-traded range day bars over the days (1 request), each day's as-traded
+    grouped-daily row (1 request a day), and each day's `us_stocks_sip/day_aggs_v1` row, which is
+    as traded. Asserts first that every source sent one bar of each day, with the same prices,
+    so the volumes compared belong to one bar; then expects the three volumes of every day
+    equal, so a fix of only some days still shows the problem.
+    """
+    params = {"stocksTicker": _SYMBOL, "multiplier": 1, "timespan": "day"}
+    params |= {"from": days[0], "to": days[-1]}
+    ranged = [stamped_bar(r) for r in rest_rows(_RANGE, params, {"adjusted": False})]
+    differ: list[str] = []
+    for day in days:
+        grouped_rows = rest_rows(_GROUPED, {"date": day}, {"adjusted": False})
+        read = flat_file_tickers(_DAY_FILE, day, [_SYMBOL])
+        assert read is not None, f"{_DAY_FILE} has no file for {day}"
+        bars = {
+            "range": _only_bar(
+                [b for b in ranged if _new_york_date(b[0]) == day], "the range", day
+            ),
+            "grouped daily": _only_bar(
+                [stamped_bar(r) for r in grouped_rows if r.get("T") == _SYMBOL],
+                "grouped daily",
+                day,
+            ),
+            _DAY_FILE: _only_bar([stamped_bar(r) for r in read[0]], _DAY_FILE, day),
+        }
+        volumes = {name: bar[1][4] for name, bar in bars.items()}
+        evidence(f"{_SYMBOL} {day} volumes: {volumes}")
+        assert all(_same_prices(bar, bars["range"]) for bar in bars.values()), f"{day}: {bars}"
+        grouped = bars["grouped daily"]
+        if not (_same_volume(grouped, bars["range"]) and _same_volume(grouped, bars[_DAY_FILE])):
+            differ.append(
+                f"{day}: GET {_GROUPED} adjusted=false v={volumes['grouped daily']}, "
+                f"GET {_RANGE} adjusted=false v={volumes['range']}, "
+                f"{_DAY_FILE} volume={volumes[_DAY_FILE]}"
+            )
+    expect_fixed(
+        fixed=not differ,
+        shown=f"{_SYMBOL} volumes that differ, {len(differ)} of {len(days)} days: {differ}",
+    )
+
+
+@pytest.mark.massive_issue(799)
+@pytest.mark.requests(3)
+@pytest.mark.timeout(200)
+def test_grouped_daily_stock_volume_equals_the_range_bar_on_the_reported_days(
+    *,
+    rest_rows: RestRows,
+    flat_file_tickers: FlatFileTickers,
+    stamped_bar: ToStampedBar,
+    evidence: Evidence,
+) -> None:
+    """Whether grouped daily's AAPL volume equals the range bar's and the day file's, 2025-12-23/24.
+
+    These are the days the problem was reported on, so a pass here means Massive corrected the
+    data it already served. Today grouped daily sends less volume than the range day bar and the
+    day file, which agree: 29,593,863 against 29,641,999 on 2025-12-23 (0.16% lower), and
+    17,892,492 against 17,910,574 on 2025-12-24, with the same prices on all three. Reads the
+    range once, grouped daily for each day, and each day's day file: 3 requests and two files.
+    A pass means Massive fixed these days: close the issue if the recent-days check passes too,
+    and remove the stamp test's note that grouped-daily volume runs lower.
+    """
+    _expect_equal_day_volumes(
+        _VOLUME_DAYS,
+        rest_rows=rest_rows,
+        flat_file_tickers=flat_file_tickers,
+        stamped_bar=stamped_bar,
+        evidence=evidence,
+    )
+
+
+@pytest.mark.massive_issue(799)
+@pytest.mark.requests(6)
+@pytest.mark.timeout(300)
+def test_grouped_daily_stock_volume_equals_the_range_bar_on_recent_days(
+    *,
+    recent_week: DaySpan,
+    rest_rows: RestRows,
+    flat_file_tickers: FlatFileTickers,
+    stamped_bar: ToStampedBar,
+    evidence: Evidence,
+) -> None:
+    """Whether grouped daily's AAPL volume equals the range bar's and the day file's this week.
+
+    Compares the five trading days of the most recent ended week without a holiday, so a fix
+    of only the data Massive builds from now on shows apart from a correction of the old days
+    (the reported-days check), and one lucky day does not read as a fix. Grouped daily has sent
+    less volume than the range day bar and the day file, which agree, with the same prices on
+    all three. Reads the range once, grouped daily for each day, and each day's day file: 6
+    requests and five files. A pass means Massive's recent data is fixed: close the issue if the
+    reported-days check passes too, and remove the stamp test's note that grouped-daily volume
+    runs lower.
+    """
+    monday = recent_week[0]
+    _expect_equal_day_volumes(
+        [monday + timedelta(days=n) for n in range(5)],
+        rest_rows=rest_rows,
+        flat_file_tickers=flat_file_tickers,
+        stamped_bar=stamped_bar,
+        evidence=evidence,
+    )
 
 
 _DIVIDEND_TRIES: Final = 10

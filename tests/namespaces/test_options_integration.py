@@ -7,6 +7,10 @@ from the wire REST client, because "a key is missing" and "a key holds an empty 
 once the library has read them; the library's own answer is recorded beside them. The underlying
 and contract-symbol tests send values the library refuses or used to (`tests/_live/bad_values.py`)
 and record whether Massive refuses them too. How to run these tests is in `docs/live-tests.md`.
+
+A test marked `massive_issue` checks an open Massive problem: it asserts what Massive's fix
+brings, so it fails as expected while the problem lasts, and a pass means Massive fixed it
+(`tests/_live/massive_problems.py`).
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from deephaven_massive._massive import (
 )
 from tests._live import bad_values, calendar, greeks, option_requests, refusals
 from tests._live.feeds import with_delayed
+from tests._live.massive_problems import expect_fixed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -1295,8 +1300,8 @@ def test_underlying_matches_the_contracts_reference(
             live_session, source_name, ticker, day=day, table_rows=table_rows
         )
         evidence(
-            f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r}, "
-            f"library {sorted(set(published))}"
+            f"{source_name} {ticker} {day}: Massive {sent!r}, "
+            f"library contract_details {reference!r}, library {sorted(set(published))}"
         )
         if reference is None:
             continue
@@ -1596,14 +1601,15 @@ def _compare_collision(
         raise
     except dm.MassiveError as error:
         evidence(
-            f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r} "
-            f"(CFI {cfi!r}), library read failed: {type(error).__name__}: {error}"
+            f"{source_name} {ticker} {day}: Massive {sent!r}, "
+            f"library contract_details {reference!r} (CFI {cfi!r}), "
+            f"library read failed: {type(error).__name__}: {error}"
         )
         failed = [] if reference is None else [f"{source_name} {ticker}: library read failed"]
         return "not compared", failed
     evidence(
-        f"{source_name} {ticker} {day}: Massive {sent!r}, contracts {reference!r} (CFI {cfi!r}), "
-        f"library {sorted(set(published))}"
+        f"{source_name} {ticker} {day}: Massive {sent!r}, "
+        f"library contract_details {reference!r} (CFI {cfi!r}), library {sorted(set(published))}"
     )
     if reference is None:
         return "not compared", []
@@ -1688,3 +1694,52 @@ def test_underlying_of_a_ticker_on_the_index_list_matches_the_contracts_referenc
         )
     assert sides.get("index"), "no option on an index was compared"
     assert not problems, problems
+
+
+@pytest.mark.massive_issue(790)
+@pytest.mark.requests(3)
+@pytest.mark.timeout(100)
+def test_an_spx_option_s_underlying_is_spelled_alike_by_the_chain_and_the_reference(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether the chain snapshot, the contract reference, and open interest spell SPX alike.
+
+    Reads one contract from the first page of the `SPX` option chain snapshot
+    (`underlying_asset.ticker`), that contract's reference (`underlying_ticker`), and the
+    latest open-interest row of the contract's root (`underlying_ticker`): 3 requests. Today
+    the chain snapshot, like the unified snapshot, says `I:SPX`, while the contract reference,
+    open interest, and unusual trades say `SPX`, which is ambiguous where a ticker is both a
+    stock and an index (`DJT` and `I:DJT`). The evidence first asserts that all three name
+    `SPX` once an `I:` prefix is set aside, so the spellings name one underlying. A pass means
+    all three send the same text, whichever form Massive settled on: close the issue, and see
+    whether the library's rule for reading an index option's underlying can be simplified.
+    Unusual trades, which can't be asked for one underlying, are not judged.
+    """
+    chain = live_rest.get(
+        source(Transport.REST, _CHAIN), {"underlyingAsset": "SPX"}, {"limit": 1}, bucket="options"
+    ).rows
+    assert chain, f"GET {_CHAIN} SPX sent no contract"
+    details, underlying = chain[0].get("details"), chain[0].get("underlying_asset")
+    assert isinstance(details, dict), f"a chain row without details: {chain[0]}"
+    assert isinstance(underlying, dict), f"a chain row without underlying_asset: {chain[0]}"
+    ticker, snapshot = details.get("ticker"), underlying.get("ticker")
+    assert isinstance(ticker, str), f"a chain row without details.ticker: {chain[0]}"
+    reference = live_rest.get(
+        source(Transport.REST, _CONTRACT), {"options_ticker": ticker}, {}, bucket="options"
+    ).rows
+    assert len(reference) == 1, f"GET {_CONTRACT} {ticker} sent {reference}"
+    root = _root(ticker)
+    interest = _page(live_rest, option_requests.open_interest(limit=1, root=root))
+    assert len(interest) == 1, f"GET {option_requests.OPEN_INTEREST} root={root} sent {interest}"
+    spelled = {
+        f"GET {_CHAIN} (underlyingAsset=SPX) underlying_asset.ticker": snapshot,
+        f"GET {_CONTRACT} underlying_ticker": reference[0].get("underlying_ticker"),
+        f"GET {option_requests.OPEN_INTEREST} (root={root}) underlying_ticker": (
+            interest[0].get("underlying_ticker")
+        ),
+    }
+    evidence(f"{ticker}: {spelled}")
+    for request, text in spelled.items():
+        assert isinstance(text, str), f"{request} {text!r}"
+        assert text.removeprefix("I:") == "SPX", f"{request} {text!r} does not name SPX"
+    expect_fixed(fixed=len(set(spelled.values())) == 1, shown=f"{ticker}: {spelled}")

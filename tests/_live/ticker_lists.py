@@ -262,7 +262,7 @@ def spread_report(
     return lines
 
 
-def _unjoined(rows: Iterable[Mapping[str, Any]], read: str) -> list[str]:
+def unjoined(rows: Iterable[Mapping[str, Any]], read: str) -> list[str]:
     """Describe the rows whose two currencies do not join to their ticker.
 
     The library's rule: a crypto ticker splits only when `X:` + `base_currency_symbol` +
@@ -319,7 +319,7 @@ def crypto_report(
         f"e.g. {both[:SHARED_SHOWN]}"
     )
     lines.append(f"tickers without the X: prefix: {sorted(t for t in tickers if t[:2] != 'X:')}")
-    unjoined = [*_unjoined(listed, "listed"), *_unjoined(delisted, "delisted")]
-    lines.append(f"rows whose currencies do not join to the ticker: {len(unjoined)}")
-    lines.extend(f"    {line}" for line in unjoined[:UNJOINED_SHOWN])
+    split_refused = [*unjoined(listed, "listed"), *unjoined(delisted, "delisted")]
+    lines.append(f"rows whose currencies do not join to the ticker: {len(split_refused)}")
+    lines.extend(f"    {line}" for line in split_refused[:UNJOINED_SHOWN])
     return lines

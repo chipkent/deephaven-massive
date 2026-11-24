@@ -7,6 +7,10 @@ from the wire REST and flat-file clients, because the library moves the very sta
 the library's own answer to the same request is recorded beside them. How to run these
 tests is in `docs/live-tests.md`.
 
+A test marked `massive_issue` checks an open Massive problem: it asserts what Massive's fix
+brings, so it fails as expected while the problem lasts, and a pass means Massive fixed it
+(`tests/_live/massive_problems.py`).
+
 The library's rule under test: a crypto bar of one day covers one UTC day and is stamped at
 00:00 UTC of it, from every source; a 1-day bar stamped anywhere else in its day but its first
 or last millisecond is still served, labelled by the UTC day its stamp falls on, and logs a
@@ -28,6 +32,8 @@ import pytest
 import deephaven_massive as dm
 from deephaven_massive._datasets.wire_symbols import canonical_from_wire, wire_spellings
 from deephaven_massive._massive import RestClient, Transport, source
+from tests._live import ticker_lists
+from tests._live.massive_problems import expect_fixed
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
@@ -443,6 +449,72 @@ def test_crypto_day_bars_rebuilt_from_minute_bars_over_the_utc_and_new_york_days
     assert utc <= new_york / _CLOSER, "/prev is not much closer to the UTC day's rebuild"
 
 
+_VOLUME_DAYS = 5
+"""How many UTC days, ending with `/prev`'s, the volume check compares: the range bar's volume has
+differed on one day and agreed on another, so one day alone could pass by luck."""
+
+
+def _volume_error(left: Mapping[str, Any], right: Mapping[str, Any]) -> float | None:
+    """Return the relative error of two raw REST bars' volumes.
+
+    Returns:
+        The error, or None when either bar lacks a volume.
+    """
+    return _errors(_ohlcv(left), _ohlcv(right))[4]
+
+
+@pytest.mark.massive_issue(803)
+@pytest.mark.requests(7)
+@pytest.mark.timeout(100)
+def test_crypto_range_day_bar_volume_equals_prev_and_grouped_daily(
+    *, rest_rows: RestRows, instant_text: Text, evidence: Evidence
+) -> None:
+    """Whether `X:BTCUSD`'s range day bar has the volume of `/prev` and grouped daily.
+
+    Reads `/prev`, the range day bars of `/prev`'s UTC day and the four days before it, and
+    grouped daily of each of those five days: 7 requests. `/prev` serves one day only, so it is
+    compared on its day, and grouped daily on all five. Today the range bar's volume sometimes
+    runs above the other sources, which agree with each other and with the day's minute bars:
+    12,811.42 against 12,791.71 (0.15%) for 2026-11-02, while 2026-10-26 agreed everywhere.
+    Five days make one lucky day no fix. The evidence first asserts that every source sent one
+    bar of each day with the same prices, so the volumes compared belong to one bar. A pass
+    means every volume agrees within 1e-6 on every day: Massive fixed it, so close the issue.
+    """
+    prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
+    assert len(prevs) == 1, f"/prev returned {prevs}"
+    (prev,) = prevs
+    last = _utc_day(int(prev["t"]))
+    days = [last - timedelta(days=n) for n in reversed(range(_VOLUME_DAYS))]
+    ranged = rest_rows(
+        _RANGE,
+        {"cryptoTicker": _PAIR, "multiplier": 1, "timespan": "day", "from": days[0], "to": last},
+        {"sort": "asc"},
+    )
+    differ: list[str] = []
+    for day in days:
+        same_day = [b for b in ranged if _utc_day(int(b["t"])) == day]
+        assert len(same_day) == 1, f"range bars of {day}: {same_day}"
+        (bar,) = same_day
+        grouped = [r for r in rest_rows(_GROUPED, {"date": day}, {}) if r.get("T") == _PAIR]
+        assert len(grouped) == 1, f"grouped rows of {_PAIR} on {day}: {grouped}"
+        others = {f"GET {_GROUPED} {day}": grouped[0]}
+        if day == last:
+            others[f"GET {_PREV}"] = prev
+        for request, other in others.items():
+            assert _same(_prices(bar), _prices(other)), f"{day}: range {bar} vs {request} {other}"
+            error = _volume_error(bar, other)
+            evidence(
+                f"{day}: range t={instant_text(bar['t'] * _MS)} v={bar.get('v')}, "
+                f"{request} v={other.get('v')}, relative error {error}"
+            )
+            if error is None or error > _TOLERANCE:
+                differ.append(f"{day}: GET {_RANGE} v={bar.get('v')}, {request} v={other.get('v')}")
+    expect_fixed(
+        fixed=not differ,
+        shown=f"{_PAIR} range day-bar volumes unlike the other sources': {differ}",
+    )
+
+
 def _canonical(raw: Iterable[str]) -> set[str]:
     """Read crypto pairs as Massive spelled them into the canonical form, for a comparison.
 
@@ -560,6 +632,37 @@ def test_crypto_ticker_list_currencies_join(
     for line in crypto_report(*reads, listed_limit=None, delisted_limit=None):
         evidence(line)
     assert reads[0], "Massive listed no crypto pair"
+
+
+@pytest.mark.massive_issue(800)
+@pytest.mark.requests(10)
+@pytest.mark.timeout(100)
+def test_every_crypto_ticker_list_row_joins_its_currencies_to_its_ticker(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether every row of Massive's crypto ticker list names currencies that join to its ticker.
+
+    Reads `/v3/reference/tickers?market=crypto`, every page of 1,000 rows, with `active=true`
+    and with `active=false`, as the library does: one page each on 2026-11-10, ten requests
+    declared. Today two rows do not join (`X:` + `base_currency_symbol` + `currency_symbol` is
+    not the ticker): `X:DNYUSD` has base `DNT`, and `X:TUSDEUR` has quote `USD`, so the library
+    refuses those pairs. The evidence first asserts that the listed read holds rows. A pass
+    means every row of both reads joins: Massive fixed the list, so close the issue; the library
+    then splits the two pairs with no change.
+    """
+    refused: list[str] = []
+    for active, read in ((True, "listed"), (False, "delisted")):
+        query = {"market": "crypto", "active": active, "limit": _TICKERS_PAGE}
+        pages = live_rest.pages(source(Transport.REST, _TICKERS), {}, query, bucket="currencies")
+        rows = [row for page in pages for row in page.rows]
+        evidence(f"GET {_TICKERS} {query}: {len(rows)} rows")
+        assert rows or not active, "Massive listed no crypto pair"
+        refused += ticker_lists.unjoined(rows, read)
+    evidence(f"rows whose currencies do not join to the ticker: {refused}")
+    expect_fixed(
+        fixed=not refused,
+        shown=f"GET {_TICKERS}?market=crypto rows whose currencies do not join: {refused}",
+    )
 
 
 @pytest.mark.verifies("3")

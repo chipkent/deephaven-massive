@@ -185,3 +185,15 @@ def test_the_crypto_report_shows_at_most_the_limits(monkeypatch: pytest.MonkeyPa
         "rows whose currencies do not join to the ticker: 4",
         "    X:AUSD (listed): base None, quote None",
     ]
+
+
+def test_unjoined_describes_only_the_rows_whose_currencies_do_not_join() -> None:
+    rows = [
+        {"ticker": "X:BTCUSD", "base_currency_symbol": "BTC", "currency_symbol": "USD"},
+        {"ticker": "X:DNYUSD", "base_currency_symbol": "DNT", "currency_symbol": "USD"},
+        {"ticker": "X:ETHUSD", "base_currency_symbol": "ETH"},
+    ]
+    assert ticker_lists.unjoined(rows, "listed") == [
+        "X:DNYUSD (listed): base 'DNT', quote 'USD'",
+        "X:ETHUSD (listed): base 'ETH', quote None",
+    ]

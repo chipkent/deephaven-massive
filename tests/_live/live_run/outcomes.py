@@ -11,12 +11,17 @@ own reports would be lost with the process. Each line holds:
 - `reason`, a skip's reason without pytest's `Skipped: ` prefix, else `""`;
 - `error_type`, the class name of a failure's exception (such as `AssertionError`), else `""`;
 - `items`, the open verification items the test answers (its `settles` and `verifies`
-  markers), collected once per run, since a report carries no markers.
+  markers), collected once per run, since a report carries no markers;
+- `issue`, for a check of an open Massive problem, the GitHub issue its `massive_issue` marker
+  names, else `null`;
+- `problem`, for such a check's call, `present` when it failed as expected and `fixed` when it
+  passed against its expectation (`massive_problems.judge`), else `""`; the `reason` of a
+  present one is the values Massive sent (the `ProblemShownError` message).
 
 At collection, with its option `--live-collection` given, the plugin also writes that file: a
-JSON object of every collected test's items, from which the program lists a group's checks. The
-plugin adds the option `--live-run-token`, which only marks the child's command line so the
-program can tell it from another process (`children.is_alive`).
+JSON object of every collected test's items and issue, from which the program lists a group's
+checks. The plugin adds the option `--live-run-token`, which only marks the child's command
+line so the program can tell it from another process (`children.is_alive`).
 
 Without either file option the plugin writes nothing. `read_outcomes` reads the file back
 for the program, which turns each test's phases into one check status (`check_outcome`).
@@ -31,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
+from tests._live.massive_problems import FIXED, PRESENT, issue_of, judge
 from tests._live.summary import REFUSED
 
 if TYPE_CHECKING:
@@ -42,8 +48,14 @@ OUTCOMES_OPTION: Final = "--live-outcomes"
 COLLECTION_OPTION: Final = "--live-collection"
 """The option that names the file the plugin writes the collected tests to."""
 
+PROBLEM_FIXED_REASON: Final = "the check passed: Massive fixed the problem, so close its issue"
+"""The reason of a `problem fixed` check."""
+
 _ITEMS: dict[str, list[str]] = {}
 """Each collected test's open-question items, by node id."""
+
+_ISSUES: dict[str, int | None] = {}
+"""Each collected test's GitHub issue of a Massive problem (`massive_issue`), by node id."""
 
 _LOCK = threading.Lock()
 """Serializes the appends, since a report may come from a timeout thread."""
@@ -77,7 +89,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Keep each test's items, and write the collection when the program asks for it.
+    """Keep each test's items and issue, and write the collection when the program asks for it.
 
     Runs last, after `tests/conftest.py` has deselected the tests the run leaves out.
 
@@ -93,7 +105,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             for marker in item.iter_markers(name)
             for arg in marker.args
         ]
-        collection[item.nodeid] = {"items": _ITEMS[item.nodeid]}
+        _ISSUES[item.nodeid] = issue_of(item)
+        collection[item.nodeid] = {"items": _ITEMS[item.nodeid], "issue": _ISSUES[item.nodeid]}
     target = str(config.getoption(COLLECTION_OPTION))
     if target:
         Path(target).write_text(json.dumps(collection, indent=1) + "\n", encoding="utf-8")
@@ -119,13 +132,22 @@ def pytest_runtest_makereport(
     target = str(item.config.getoption(OUTCOMES_OPTION))
     if target:
         error_type = call.excinfo.typename if report.failed and call.excinfo is not None else ""
+        problem = judge(report, call) if _ISSUES.get(item.nodeid) is not None else ""
+        if problem == PRESENT and call.excinfo is not None:
+            reason = str(call.excinfo.value)
+        elif report.skipped:
+            reason = skip_reason(report.longrepr)
+        else:
+            reason = ""
         line = {
             "nodeid": item.nodeid,
             "phase": report.when,
             "outcome": report.outcome,
-            "reason": skip_reason(report.longrepr) if report.skipped else "",
+            "reason": reason,
             "error_type": error_type,
             "items": _ITEMS.get(item.nodeid, []),
+            "issue": _ISSUES.get(item.nodeid),
+            "problem": problem,
         }
         append_line(Path(target), line)
     return report
@@ -180,19 +202,31 @@ def read_outcomes(path: Path) -> list[dict[str, Any]]:
 def check_outcome(phases: Iterable[dict[str, Any]]) -> tuple[str, str]:
     """Turn one test's phase records into its check status and reason.
 
-    A test passed when its call passed and no phase failed; it failed when any phase failed;
-    it was refused when a phase skipped with Massive's refusal (its reason starts `REFUSED`),
-    and skipped when a phase skipped otherwise. A test with no call record and no failure did
-    not finish: its child was stopped or died.
+    A check of an open Massive problem shows the problem (`problem present`) when its call
+    failed as expected, and its fix (`problem fixed`) when its call passed against that
+    expectation; that outcome is read before any other, since pytest reports the first as a
+    skip and the second as a failure. Otherwise a test passed when its call passed and no
+    phase failed; it failed when any phase failed; it was refused when a phase skipped with
+    Massive's refusal (its reason starts `REFUSED`), and skipped when a phase skipped
+    otherwise. A test with no call record and no failure did not finish: its child was
+    stopped or died.
 
     Args:
         phases: The test's records, in order.
 
     Returns:
-        `(status, reason)`: `passed`, `failed`, `refused` or `skipped` (with its reason), or
-        `error` (`"did not finish"`).
+        `(status, reason)`: `problem present` (with Massive's values) or `problem fixed`,
+        `passed`, `failed`, `refused` or `skipped` (with its reason), or `error` (`"did not
+        finish"`).
     """
     records = list(phases)
+    for record in records:
+        # A line written before the checks of Massive's problems existed has no `problem`.
+        problem = record.get("problem", "")
+        if problem == PRESENT:
+            return "problem present", str(record["reason"])
+        if problem == FIXED:
+            return "problem fixed", PROBLEM_FIXED_REASON
     failed = [r for r in records if r["outcome"] == "failed"]
     if failed:
         return "failed", ", ".join(f"{r['phase']}: {r['error_type'] or 'failed'}" for r in failed)

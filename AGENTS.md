@@ -248,7 +248,8 @@ These protect the owner's repository, money, and secrets.
   connection with the user's key can take their own stream (decision 97).
 - **No decision or planning references** in code, comments, docstrings, test names, error
   messages, CI step names, or config, since a reader may never see the plan: state the behavior
-  or the reason. Only the live tests' `verifies` and `settles` markers cite numbers.
+  or the reason. Only the live tests' `verifies` and `settles` markers, and the `massive_issue`
+  marker that names the GitHub issue a check of a Massive problem tracks, cite numbers.
 - **Tests mirror the package**, one leading underscore dropped per path component
   (`_massive/rest/client.py` → `tests/massive/rest/test_client.py`). `tests/scripts/` may mirror
   `scripts/` the same way, a `conftest.py` may live in any test folder, and helper packages

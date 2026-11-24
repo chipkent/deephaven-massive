@@ -334,7 +334,7 @@ def test_a_run_any_time_runs_every_group_it_can_then_idles_and_packs(harness: Ha
             f"key {KEY} id {S3_PAIR[0]} secret {S3_PAIR[1]}",
             f"GET /v3?apiKey={KEY}",
         ],
-        collection={NODE: {"items": ["21"]}},
+        collection={NODE: {"items": ["21"], "issue": None}},
         outcomes={NODE: PASS},
         results=[{"name": "market-status", "status": "passed", "reason": ""}],
     )
@@ -416,7 +416,7 @@ def test_a_probe_step_reprobes_during_a_run(harness: Harness) -> None:
 def test_an_idle_pack_that_finds_a_secret_says_so(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    harness.script(collection={NODE: {"items": []}}, outcomes={NODE: PASS})
+    harness.script(collection={NODE: {"items": [], "issue": None}}, outcomes={NODE: PASS})
     harness.clock = Clock(2)
 
     def refuse(*_args: object, **_options: object) -> tuple[None, list[str]]:
@@ -525,7 +525,7 @@ def test_pack_waits_for_disk_space(harness: Harness) -> None:
 
 
 def test_an_idle_pack_waits_for_disk_space(harness: Harness) -> None:
-    harness.script(collection={NODE: {"items": []}}, outcomes={NODE: PASS})
+    harness.script(collection={NODE: {"items": [], "issue": None}}, outcomes={NODE: PASS})
     harness.clock = Clock(2)
     harness.ctx.free_disk = lambda _folder: 0
     commands.command_run(harness.ctx, any_time=True)

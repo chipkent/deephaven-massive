@@ -65,9 +65,10 @@ def test_the_status_view_lists_the_probe_every_check_and_a_summary() -> None:
     assert "evidence (next: soon (evidence))" in lines
     assert f"  t.py::test_b: {REFUSAL}" in lines  # Massive's refusal, its word said once
     assert "  stocks: not started (optional)" in lines
-    assert "group | passed | failed | error | refused | skipped | not run" in lines
-    assert "evidence | 1 | 0 | 0 | 1 | 0 | 0" in lines
-    assert "upgrade-check | 0 | 0 | 0 | 0 | 0 | 1" in lines
+    header = "group | passed | failed | error | refused | skipped | problem present | problem fixed"
+    assert f"{header} | not run" in lines
+    assert "evidence | 1 | 0 | 0 | 1 | 0 | 0 | 0 | 0" in lines
+    assert "upgrade-check | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1" in lines
 
 
 def test_the_status_view_before_any_probe() -> None:
@@ -102,9 +103,59 @@ def test_an_items_status_follows_its_checks() -> None:
     assert results.item_status([refused, failed]) == "failed"
 
 
+def _problem_checks(state: RunState) -> None:
+    present = check_of(state, "evidence", "t.py::test_shows")
+    present.issue = 797
+    record(
+        state, present, status="problem present", reason="volume 12 against 13", day="2026-11-04"
+    )
+    fixed = check_of(state, "evidence", "t.py::test_gone")
+    fixed.issue = 803
+    record(state, fixed, status="problem fixed", reason="close it", day="2026-11-04")
+    half = check_of(state, "smoke", "t.py::test_docs")
+    half.issue = 779
+    record(state, half, status="problem fixed", reason="close it", day="2026-11-04")
+    other_half = check_of(state, "smoke", "t.py::test_data")
+    other_half.issue = 779
+    record(state, other_half, status="problem present", reason="Chicago", day="2026-11-04")
+    refused = check_of(state, "smoke", "t.py::test_refused")
+    refused.issue = 778
+    record(state, refused, status="refused", reason=REFUSAL, day="2026-11-04")
+    check_of(state, "smoke", "t.py::test_never").issue = 775
+
+
+def test_the_report_lists_the_massive_problems_by_issue(tmp_path: Path) -> None:
+    state = _state()
+    _problem_checks(state)
+    results.write_report(tmp_path, state)
+    report = (tmp_path / "REPORT.md").read_text()
+    section = report.split("## Massive problems, by GitHub issue\n\n", 1)[1]
+    block, table = section.split("\n\n", 2)[:2]
+    assert block.splitlines() == [
+        "```text",
+        "Massive problems FIXED, close the issue, 1 of 4:",
+        "    #803: evidence: t.py::test_gone",
+        "Massive problems partly fixed, read each check, 1 of 4:",
+        "    #779: smoke: t.py::test_data, smoke: t.py::test_docs",
+        "Massive problems still present, 1 of 4:",
+        "    #797: evidence: t.py::test_shows",
+        "Massive problems not judged (a check failed, was skipped, or was refused), 1 of 4:",
+        f"    #778: smoke: t.py::test_refused [refused: {REFUSAL}]",
+        "```",
+    ]
+    assert table.splitlines()[2:] == [
+        "| #803 | evidence: t.py::test_gone | problem fixed | close it |",
+        "| #797 | evidence: t.py::test_shows | problem present | volume 12 against 13 |",
+        "| #779 | smoke: t.py::test_data | problem present | Chicago |",
+        "| #779 | smoke: t.py::test_docs | problem fixed | close it |",
+        f"| #778 | smoke: t.py::test_refused | refused | {REFUSAL} |",
+    ]
+    assert "test_shows" not in report.split("## Still unverified", 1)[1]
+
+
 def test_the_report_has_every_section(tmp_path: Path) -> None:
     (tmp_path / "preflight").mkdir()
-    environment = {"items": [{"name": "java", "verdict": "OK", "detail": "Java 21"}]}
+    environment = {"items": [{"name": "java", "verdict": "OK", "detail": "Java 21"}], "issue": None}
     (tmp_path / "preflight" / "environment.json").write_text(json.dumps(environment))
     (tmp_path / "probes").mkdir()
     (tmp_path / "probes" / "probes.csv").write_text(
@@ -131,6 +182,7 @@ def test_the_report_without_an_environment_or_a_probe(tmp_path: Path) -> None:
     assert "No environment was recorded." in report
     assert "No probe was recorded." in report
     assert "Massive refused nothing." in report
+    assert "No check of an open Massive problem ran." in report
 
 
 def test_pack_zips_every_file_but_the_lock_and_earlier_zips(tmp_path: Path) -> None:
