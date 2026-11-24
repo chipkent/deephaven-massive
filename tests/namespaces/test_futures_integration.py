@@ -1223,11 +1223,12 @@ def test_trade_at_settlement_trades_and_their_sessions(
             day = date.fromisoformat(str(latest[0]["session_end_date"]))
             query = {**query, "sort": "timestamp.asc", "session_end_date": day}
             first = _page(live_rest, _TRADES, query=query)
-        trades = latest + first
+        seen = {str(t.get("sequence_number")) for t in latest}
+        trades = latest + [t for t in first if str(t.get("sequence_number")) not in seen]
         days = Counter(str(t.get("session_end_date")) for t in trades)
         evidence(
             f"{ticker}: {len(latest)} latest and {len(first)} first trades of the latest "
-            f"session; session_end_date {dict(days)}"
+            f"session, {len(trades)} distinct; session_end_date {dict(days)}"
         )
         for label, trade in (("latest", latest[:1]), ("first", first[:1])):
             for row in trade:
