@@ -1135,8 +1135,8 @@ def _session_windows(
     """
     query = {
         "product_code": product,
-        "session_end_date.gte": min(days),
-        "session_end_date.lte": max(days),
+        "session_end_date.gte": date.fromisoformat(min(days)),
+        "session_end_date.lte": date.fromisoformat(max(days)),
         "limit": _SCHEDULE_PAGE,
     }
     rows = _page(client, _SCHEDULES, query=query)
@@ -1191,7 +1191,7 @@ def _compare_with_sessions(
 
 
 @pytest.mark.settles("137")
-@pytest.mark.requests(17)
+@pytest.mark.requests(23)
 @pytest.mark.timeout(200)
 def test_trade_at_settlement_trades_and_their_sessions(
     live_rest: RestClient, *, evidence: Evidence
@@ -1201,7 +1201,8 @@ def test_trade_at_settlement_trades_and_their_sessions(
     Massive's schedules hold no session for a TAS product, so the library withholds its streamed
     rows. Its REST trades document `session_end_date`, the trading day. For six TAS products,
     finds each one's front contract on the contracts list (up to 4 requests), reads its latest
-    50 trades (6 requests), and records how many carry `session_end_date` and its values. Then
+    50 trades and the first 50 of the latest trade's session, the trades nearest the evening
+    open (12 requests), and records how many carry `session_end_date` and its values. Then
     reads the settling product's schedule for those days (up to 6 requests) and records, for
     each trade, whether its time falls inside the underlying's session of the same date: from the
     session's first schedule event to its last. Last, records the snapshot rows of the six
@@ -1216,11 +1217,21 @@ def test_trade_at_settlement_trades_and_their_sessions(
             evidence(f"{code}: no single contract on the contracts list")
             continue
         query = {"ticker": ticker, "sort": "timestamp.desc", "limit": _TAS_TRADES}
-        trades = _page(live_rest, _TRADES, query=query)
+        latest = _page(live_rest, _TRADES, query=query)
+        first: list[dict[str, Any]] = []
+        if latest and latest[0].get("session_end_date") is not None:
+            day = date.fromisoformat(str(latest[0]["session_end_date"]))
+            query = {**query, "sort": "timestamp.asc", "session_end_date": day}
+            first = _page(live_rest, _TRADES, query=query)
+        trades = latest + first
         days = Counter(str(t.get("session_end_date")) for t in trades)
-        evidence(f"{ticker}: {len(trades)} trades; session_end_date {dict(days)}")
-        if trades:
-            evidence(f"{ticker} latest trade: {trades[0]}")
+        evidence(
+            f"{ticker}: {len(latest)} latest and {len(first)} first trades of the latest "
+            f"session; session_end_date {dict(days)}"
+        )
+        for label, trade in (("latest", latest[:1]), ("first", first[:1])):
+            for row in trade:
+                evidence(f"{ticker} {label} trade, {_chicago(int(row['timestamp']))}: {row}")
         _compare_with_sessions(
             live_rest, trades, ticker=ticker, underlying=underlying, evidence=evidence
         )
