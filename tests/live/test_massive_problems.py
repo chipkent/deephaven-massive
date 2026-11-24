@@ -1,12 +1,18 @@
 """Tests of the checks of open Massive problems (`tests/_live/massive_problems.py`).
 
 How pytest reports such a check, end to end, is tested in a real pytest child by
-`tests/live/live_run/test_outcomes.py`.
+`tests/live/live_run/test_outcomes.py`, and the suite's own exit status after one here.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
@@ -16,6 +22,8 @@ from tests._live.massive_problems import FIXED, PRESENT
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass
@@ -246,3 +254,49 @@ def test_a_fix_beside_a_check_that_showed_nothing_is_no_close(other: str) -> Non
 
 def test_a_run_with_no_check_has_no_problem_lines() -> None:
     assert massive_problems.problem_lines({}) == []
+
+
+def test_a_run_ending_in_an_expected_failure_exits_zero(tmp_path: Path) -> None:
+    # A run in one process (`-n 0`, as the pre-push hook runs one changed test file) with the
+    # suite's conftest, whose last test fails as expected, as the checks of Massive's problems
+    # do while the problem lasts.
+    (tmp_path / "test_tiny.py").write_text(
+        textwrap.dedent(
+            """
+            import pytest
+
+            def test_passes():
+                pass
+
+            @pytest.mark.xfail(strict=True, raises=KeyError, reason="the problem lasts")
+            def test_fails_as_expected():
+                raise KeyError("x")
+            """
+        )
+    )
+    # The suite's settings, read from the run's own root, with the suite importable.
+    shutil.copy(ROOT / "pyproject.toml", tmp_path)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("MASSIVE_")}
+    env |= {"PYTHONPATH": str(ROOT)}
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "tests.conftest",
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "0",
+            "-q",
+            "test_tiny.py",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "1 passed, 1 xfailed" in done.stdout

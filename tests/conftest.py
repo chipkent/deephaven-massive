@@ -1947,6 +1947,18 @@ _CALL_FAILED: Final = pytest.StashKey[bool]()
 """Whether a test's call failed, so the leak check does not wait on what its traceback holds."""
 
 
+def _forget_last_error() -> None:
+    """Drop the error pytest keeps for post-mortem debugging of the test that just ran.
+
+    pytest stores a call's exception in `sys.last_value` and its siblings until the next
+    test's call. The process's exit reads a stored error as one that escaped pytest
+    (`_final_jvm_exit`), and its traceback keeps the test's frames alive.
+    """
+    del sys.last_type, sys.last_value, sys.last_traceback
+    if sys.version_info >= (3, 12):
+        del sys.last_exc
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(
     item: pytest.Item, call: pytest.CallInfo[None]
@@ -1956,7 +1968,8 @@ def pytest_runtest_makereport(
     A failed assertion's traceback keeps the test's frame, and with it the test's sessions,
     alive until pytest drops the report; waiting 30 s for them to go would only delay the
     failure already reported. A check of an open Massive problem that failed as expected keeps
-    its traceback just the same, so it counts as failed here. Each report of such a check gets
+    its traceback just the same, so it counts as failed here, and the error pytest stores for
+    debugging is dropped (`_forget_last_error`). Each report of such a check gets
     its issue and outcome (`massive_problems.judge`) in its `user_properties`, which the
     terminal summary reads.
 
@@ -1971,8 +1984,13 @@ def pytest_runtest_makereport(
         The report, unchanged.
     """
     report = yield
-    if call.when == "call" and (report.failed or (report.skipped and hasattr(report, "wasxfail"))):
+    expected = call.when == "call" and report.skipped and hasattr(report, "wasxfail")
+    if call.when == "call" and (report.failed or expected):
         item.stash[_CALL_FAILED] = True
+    if expected:
+        # An expected failure has nothing to debug, and a run whose only other outcomes are
+        # passes must exit 0, not as if an error escaped pytest (`_final_jvm_exit`).
+        _forget_last_error()
     issue = massive_problems.issue_of(item)
     if issue is not None:
         found = massive_problems.judge(report, call)
@@ -2039,12 +2057,9 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, object, object]:
         else:
             raise
         _record(item.config, item.nodeid, reason)
-        # pytest keeps the error for post-mortem debugging until the next test's call; a skip
-        # has nothing to debug, and its traceback's frames would keep the test's sessions alive
-        # past the leak check (`_check_nothing_outlives_the_test`).
-        del sys.last_type, sys.last_value, sys.last_traceback
-        if sys.version_info >= (3, 12):
-            del sys.last_exc
+        # A skip has nothing to debug, and its traceback's frames would keep the test's
+        # sessions alive past the leak check (`_check_nothing_outlives_the_test`).
+        _forget_last_error()
         pytest.skip(reason)
 
 
