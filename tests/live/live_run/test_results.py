@@ -112,6 +112,10 @@ def _problem_checks(state: RunState) -> None:
     fixed = check_of(state, "evidence", "t.py::test_gone")
     fixed.issue = 803
     record(state, fixed, status="problem fixed", reason="close it", day="2026-11-04")
+    alone = check_of(state, "evidence", "t.py::test_alone")
+    alone.issue = 806
+    record(state, alone, status="problem fixed", reason="close it", day="2026-11-04")
+    check_of(state, "smoke", "t.py::test_unrun").issue = 806
     half = check_of(state, "smoke", "t.py::test_docs")
     half.issue = 779
     record(state, half, status="problem fixed", reason="close it", day="2026-11-04")
@@ -133,22 +137,31 @@ def test_the_report_lists_the_massive_problems_by_issue(tmp_path: Path) -> None:
     block, table = section.split("\n\n", 2)[:2]
     assert block.splitlines() == [
         "```text",
-        "Massive problems FIXED, close the issue, 1 of 4:",
-        "    #803: evidence: t.py::test_gone",
-        "Massive problems partly fixed, read each check, 1 of 4:",
-        "    #779: smoke: t.py::test_data, smoke: t.py::test_docs",
-        "Massive problems still present, 1 of 4:",
-        "    #797: evidence: t.py::test_shows",
-        "Massive problems not judged (a check failed, was skipped, or was refused), 1 of 4:",
-        f"    #778: smoke: t.py::test_refused [refused: {REFUSAL}]",
+        (
+            "Massive problems FIXED in every check that ran, close the issue once all its checks "
+            "have run, 1 of 5:"
+        ),
+        "    #803: test_gone",
+        "Massive problems fixed in some checks, read each check, 2 of 5:",
+        "    #779: test_data, test_docs",
+        "    #806: test_alone, test_unrun [not run]",
+        "Massive problems still present, 1 of 5:",
+        "    #797: test_shows",
+        (
+            "Massive problems not judged (a check failed, was skipped, was refused, or did not "
+            "run), 1 of 5:"
+        ),
+        f"    #778: test_refused [refused: {REFUSAL}]",
         "```",
     ]
     assert table.splitlines()[2:] == [
+        "| #806 | evidence: t.py::test_alone | problem fixed | close it |",
         "| #803 | evidence: t.py::test_gone | problem fixed | close it |",
         "| #797 | evidence: t.py::test_shows | problem present | volume 12 against 13 |",
         "| #779 | smoke: t.py::test_data | problem present | Chicago |",
         "| #779 | smoke: t.py::test_docs | problem fixed | close it |",
         f"| #778 | smoke: t.py::test_refused | refused | {REFUSAL} |",
+        "| #806 | smoke: t.py::test_unrun | not run |  |",
     ]
     assert "test_shows" not in report.split("## Still unverified", 1)[1]
 

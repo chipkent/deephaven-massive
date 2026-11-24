@@ -193,6 +193,20 @@ def _phase(phase: str, outcome: str, *, error_type: str = "", reason: str = "") 
             ("problem fixed", outcomes.PROBLEM_FIXED_REASON),
         ),
         ([{**_phase("call", "passed"), "problem": ""}], ("passed", "")),
+        (
+            [
+                {**_phase("call", "failed"), "problem": "fixed"},
+                _phase("teardown", "failed", error_type="AssertionError"),
+            ],
+            ("failed", "teardown: AssertionError"),
+        ),
+        (
+            [
+                {**_phase("call", "skipped", reason="volume 12"), "problem": "present"},
+                _phase("teardown", "failed", error_type="AssertionError"),
+            ],
+            ("failed", "teardown: AssertionError"),
+        ),
     ],
 )
 def test_phases_make_one_check_status(

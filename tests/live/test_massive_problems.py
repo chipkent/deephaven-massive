@@ -140,24 +140,25 @@ def test_a_call_shows_the_problem_its_fix_or_neither(
     assert massive_problems.judge(report, calls) == expected
 
 
-def test_a_run_s_reports_give_each_check_s_issue_and_outcome() -> None:
-    def tagged(issue: int, outcome: str) -> list[tuple[str, object]]:
-        return [massive_problems.report_property(issue, outcome)]
+def _tagged(issue: int, outcome: str) -> list[tuple[str, object]]:
+    return [massive_problems.report_property(issue, outcome)]
 
+
+def test_a_run_s_reports_give_each_check_s_issue_and_outcome() -> None:
     reports = [
-        _report("skipped", "x", properties=tagged(797, PRESENT)),
-        _report("failed", "x", properties=tagged(803, FIXED)),
+        _report("skipped", "x", properties=_tagged(797, PRESENT)),
+        _report("failed", "x", properties=_tagged(803, FIXED)),
         _report(
             "skipped",
             ("t.py", 1, "Skipped: refused: 403"),
             when="setup",
-            properties=tagged(778, ""),
+            properties=_tagged(778, ""),
         ),
-        _report("failed", "x", properties=tagged(800, "")),
-        _report("failed", "x", when="teardown", properties=tagged(800, "")),
-        _report("failed", "x", when="setup", properties=tagged(799, "")),
-        _report("skipped", "Skipped: no spaced combo", properties=tagged(777, "")),
-        _report("passed", when="setup", properties=tagged(801, "")),
+        _report("failed", "x", properties=_tagged(800, "")),
+        _report("failed", "x", when="teardown", properties=_tagged(800, "")),
+        _report("failed", "x", when="setup", properties=_tagged(799, "")),
+        _report("skipped", "Skipped: no spaced combo", properties=_tagged(777, "")),
+        _report("passed", when="setup", properties=_tagged(801, "")),
         _report("failed", "x"),
     ]
     for report, name in zip(
@@ -167,36 +168,79 @@ def test_a_run_s_reports_give_each_check_s_issue_and_outcome() -> None:
     ):
         report.nodeid = f"t.py::{name}"
     assert massive_problems.checks_run(reports) == {
-        "shows": (797, PRESENT),
-        "gone": (803, FIXED),
-        "refused": (778, "skipped: refused: 403"),
-        "breaks": (800, "failed"),
-        "errs": (799, "error"),
-        "nothing": (777, "skipped: no spaced combo"),
+        "t.py::shows": (797, PRESENT),
+        "t.py::gone": (803, FIXED),
+        "t.py::refused": (778, "skipped: refused: 403"),
+        "t.py::breaks": (800, "failed"),
+        "t.py::errs": (799, "error"),
+        "t.py::nothing": (777, "skipped: no spaced combo"),
     }
+
+
+@pytest.mark.parametrize(
+    ("call", "outcome"),
+    [
+        (_report("failed", "x", properties=_tagged(803, FIXED)), FIXED),
+        (_report("skipped", "x", properties=_tagged(803, PRESENT)), PRESENT),
+    ],
+)
+def test_a_failed_teardown_wins_over_what_the_call_showed(
+    call: pytest.TestReport, outcome: str
+) -> None:
+    teardown = _report("failed", "x", when="teardown", properties=_tagged(803, ""))
+    assert massive_problems.checks_run([call]) == {"t.py::test_x": (803, outcome)}
+    for reports in ([call, teardown], [teardown, call]):
+        assert massive_problems.checks_run(reports) == {"t.py::test_x": (803, "error")}
+
+
+def test_checks_of_one_name_in_two_files_stay_apart() -> None:
+    shows = _report("skipped", "x", properties=_tagged(779, PRESENT))
+    gone = _report("failed", "x", properties=_tagged(779, FIXED))
+    shows.nodeid, gone.nodeid = "a.py::test_same", "b.py::test_same"
+    checks = massive_problems.checks_run([shows, gone])
+    assert checks == {"a.py::test_same": (779, PRESENT), "b.py::test_same": (779, FIXED)}
+    assert massive_problems.problem_lines(checks) == [
+        "Massive problems fixed in some checks, read each check, 1 of 1:",
+        "    #779: test_same, test_same",
+    ]
 
 
 def test_issues_sort_by_what_their_checks_showed() -> None:
     lines = massive_problems.problem_lines(
         {
-            "b": (803, FIXED),
-            "a": (803, FIXED),
-            "docs": (779, FIXED),
-            "data": (779, PRESENT),
-            "x": (797, PRESENT),
-            "y": (798, PRESENT),
-            "z": (798, "skipped: refused: 403"),
+            "t.py::b": (803, FIXED),
+            "t.py::a": (803, FIXED),
+            "t.py::docs": (779, FIXED),
+            "t.py::data": (779, PRESENT),
+            "t.py::x": (797, PRESENT),
+            "t.py::y": (798, PRESENT),
+            "t.py::z": (798, "skipped: refused: 403"),
         }
     )
     assert lines == [
-        "Massive problems FIXED, close the issue, 1 of 4:",
+        (
+            "Massive problems FIXED in every check that ran, close the issue once all its checks "
+            "have run, 1 of 4:"
+        ),
         "    #803: a, b",
-        "Massive problems partly fixed, read each check, 1 of 4:",
+        "Massive problems fixed in some checks, read each check, 1 of 4:",
         "    #779: data, docs",
         "Massive problems still present, 1 of 4:",
         "    #797: x",
-        "Massive problems not judged (a check failed, was skipped, or was refused), 1 of 4:",
+        (
+            "Massive problems not judged (a check failed, was skipped, was refused, or did not "
+            "run), 1 of 4:"
+        ),
         "    #798: y, z [skipped: refused: 403]",
+    ]
+
+
+@pytest.mark.parametrize("other", ["failed", "not run", "skipped: refused: 403"])
+def test_a_fix_beside_a_check_that_showed_nothing_is_no_close(other: str) -> None:
+    lines = massive_problems.problem_lines({"t.py::docs": (779, FIXED), "t.py::data": (779, other)})
+    assert lines == [
+        "Massive problems fixed in some checks, read each check, 1 of 1:",
+        f"    #779: data [{other}], docs",
     ]
 
 

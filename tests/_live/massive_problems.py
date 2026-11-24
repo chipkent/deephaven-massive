@@ -15,8 +15,8 @@ of the problem. At collection `track` makes every marked check a strict expected
 - anything else fails (a network error, an empty answer, a failed precondition): an exception
   other than `ProblemShownError` is a plain failure, never taken for the problem or its fix.
 
-`problem_outcome` tells the two outcomes from a phase's report, and `problem_lines` sorts the
-issues a run checked into fixed, partly fixed, still present, and not judged, for the terminal
+`judge` tells the two outcomes from a phase's report, and `problem_lines` sorts the issues a
+run checked into fixed, fixed in some checks, still present, and not judged, for the terminal
 summary and the live-run program's report.
 """
 
@@ -153,69 +153,79 @@ def report_property(issue: int, outcome: str) -> tuple[str, str]:
 def checks_run(reports: Iterable[pytest.TestReport]) -> dict[str, tuple[int, str]]:
     """Gather each check's issue and outcome from a run's reports.
 
+    A phase that failed or skipped outside the call (a fixture's setup or teardown) wins over
+    what the call showed, so a check whose cleanup failed is never read as the problem or its
+    fix.
+
     Args:
         reports: Every phase's report of the run; those without a `PROPERTY` entry (tests that
             are not checks of a Massive problem) are passed over.
 
     Returns:
-        Each check that ran, by its test's name: its issue, and `PRESENT` or `FIXED` when its
-        call showed either, else the first phase that failed or skipped (`"failed"`,
-        `"error"`, or `"skipped: <reason>"`); a check whose phases all passed (which a strict
-        expected failure never allows) is left out.
+        Each check that ran, by its test's node ID: its issue, and `PRESENT` or `FIXED` when
+        its call showed either and no other phase failed or skipped, else the first phase that
+        failed or skipped (`"failed"`, `"error"`, or `"skipped: <reason>"`); a check whose
+        phases all passed (which a strict expected failure never allows) is left out.
     """
-    found: dict[str, tuple[int, str]] = {}
+    shown: dict[str, tuple[int, str]] = {}
+    happened: dict[str, tuple[int, str]] = {}
     for report in reports:
         marked = [str(value) for name, value in report.user_properties if name == PROPERTY]
         if not marked or report.passed:
             continue
         number, _, outcome = marked[0].partition(" ")
         issue = int(number)
-        name = report.nodeid.rpartition("::")[2]
         if outcome:
-            found[name] = (issue, outcome)
+            shown[report.nodeid] = (issue, outcome)
             continue
         if report.skipped:
             longrepr = report.longrepr
             text = str(longrepr[2]) if isinstance(longrepr, tuple) else str(longrepr)
-            happened = f"skipped: {text.removeprefix('Skipped: ')}"
+            what = f"skipped: {text.removeprefix('Skipped: ')}"
         else:
-            happened = "failed" if report.when == "call" else "error"
-        found.setdefault(name, (issue, happened))
-    return found
+            what = "failed" if report.when == "call" else "error"
+        happened.setdefault(report.nodeid, (issue, what))
+    return shown | happened
 
 
 def problem_lines(checks: Mapping[str, tuple[int, str]]) -> list[str]:
     """Sort the issues a run checked by what their checks showed.
 
-    An issue is FIXED when every check of it that ran showed the fix, partly fixed when some
-    showed the fix and the rest the problem, still present when every one showed the problem,
-    and not judged when one failed otherwise, was skipped, or was refused: then neither its
-    problem nor its fix is shown.
+    An issue is FIXED when every check of it that ran showed the fix. A run may leave some of
+    an issue's checks out (a CI run reads only the documentation, a narrowed run selects one
+    file), so the heading says to close the issue only once all its checks have run. An issue
+    is fixed in some checks when one showed the fix and another did not (it showed the
+    problem, failed, was skipped, was refused, or did not run), still present when every check
+    showed the problem, and not judged when none showed the fix and one failed, was skipped,
+    was refused, or did not run: then neither its problem nor its fix is shown.
 
     Args:
-        checks: Each check that ran, by name: its issue and its outcome, `PRESENT`, `FIXED`,
-            or what else happened (such as `"failed"` or `"skipped: refused: ..."`).
+        checks: Each check of the run, by node ID: its issue and its outcome, `PRESENT`,
+            `FIXED`, or what else happened (such as `"failed"`, `"not run"`, or
+            `"skipped: refused: ..."`).
 
     Returns:
         A heading per group that has issues, with its count, each issue on a line of its own
-        under it, by number, with its checks: `#803: test_a, test_b`, and for a check not
-        judged its outcome in brackets. Empty when no check ran.
+        under it, by number, with its checks' test names: `#803: test_a, test_b`, and for a
+        check that showed neither its outcome in brackets. Empty when no check ran.
     """
-    by_issue: dict[int, dict[str, str]] = {}
-    for name, (issue, outcome) in checks.items():
-        by_issue.setdefault(issue, {})[name] = outcome
+    by_issue: dict[int, list[tuple[str, str]]] = {}
+    for node, (issue, outcome) in checks.items():
+        by_issue.setdefault(issue, []).append((node.rpartition("::")[2], outcome))
     groups: dict[str, list[int]] = {
-        "Massive problems FIXED, close the issue": [],
-        "Massive problems partly fixed, read each check": [],
+        "Massive problems FIXED in every check that ran, close the issue once all its checks "
+        "have run": [],
+        "Massive problems fixed in some checks, read each check": [],
         "Massive problems still present": [],
-        "Massive problems not judged (a check failed, was skipped, or was refused)": [],
+        "Massive problems not judged (a check failed, was skipped, was refused, or did not "
+        "run)": [],
     }
     headings = list(groups)
     for issue in sorted(by_issue):
-        outcomes = set(by_issue[issue].values())
+        outcomes = {outcome for _, outcome in by_issue[issue]}
         if outcomes == {FIXED}:
             groups[headings[0]].append(issue)
-        elif outcomes == {FIXED, PRESENT}:
+        elif FIXED in outcomes:
             groups[headings[1]].append(issue)
         elif outcomes == {PRESENT}:
             groups[headings[2]].append(issue)
@@ -231,7 +241,7 @@ def problem_lines(checks: Mapping[str, tuple[int, str]]) -> list[str]:
         for issue in issues:
             named = [
                 name if outcome in {FIXED, PRESENT} else f"{name} [{outcome}]"
-                for name, outcome in sorted(by_issue[issue].items())
+                for name, outcome in sorted(by_issue[issue])
             ]
             lines.append(f"    #{issue}: {', '.join(named)}")
     return lines

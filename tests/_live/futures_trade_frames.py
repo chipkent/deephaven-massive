@@ -17,7 +17,9 @@ from __future__ import annotations
 import contextlib
 import json
 import queue
+import re
 from dataclasses import dataclass, field
+from datetime import date
 from typing import TYPE_CHECKING, assert_never
 
 from deephaven_massive._massive import CapturedReply, set_reply_capture
@@ -42,11 +44,11 @@ class TradeFrames:
     trades: int = 0
     """Trade (`T`) events received."""
     dated: int = 0
-    """Trade events that carry `session_end_date`."""
+    """Trade events whose `session_end_date` is a date (`yyyy-MM-dd`)."""
     dated_example: str = ""
-    """The first trade event with `session_end_date`, as Massive sent it."""
+    """The first trade event with a dated `session_end_date`, as Massive sent it."""
     undated_example: str = ""
-    """The first trade event without it, as Massive sent it."""
+    """The first trade event without one (absent, null, or not a date), as Massive sent it."""
     text_prices: int = 0
     """Trade events whose `p` is not a JSON number (a string, or absent)."""
     text_price_example: str = ""
@@ -95,7 +97,7 @@ class TradeFrames:
                 continue
             self.trades += 1
             sent = json.dumps(event, separators=(",", ":"))
-            if "session_end_date" in event:
+            if _is_date(event.get("session_end_date")):  # absent is not a date either
                 self.dated += 1
                 self.dated_example = self.dated_example or sent
             else:
@@ -126,3 +128,22 @@ def capturing_trade_frames() -> Iterator[TradeFrames]:
     finally:
         set_reply_capture(None)
         frames.drain()
+
+
+def _is_date(value: object) -> bool:
+    """Tell whether a trade event's `session_end_date` is a calendar date, `yyyy-MM-dd`.
+
+    Args:
+        value: The field's value as sent; None when the event has none.
+
+    Returns:
+        True for a real date in that form; False for null, empty text, another form, or an
+        impossible date, none of which tells the trading day.
+    """
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True

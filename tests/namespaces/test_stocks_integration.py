@@ -620,6 +620,8 @@ def _expect_equal_day_volumes(
         volumes = {name: bar[1][4] for name, bar in bars.items()}
         evidence(f"{_SYMBOL} {day} volumes: {volumes}")
         assert all(_same_prices(bar, bars["range"]) for bar in bars.values()), f"{day}: {bars}"
+        # A missing volume is no measurement, so it never reads as the volumes disagreeing.
+        assert all(v is not None for v in volumes.values()), f"{day}: no volume in {volumes}"
         grouped = bars["grouped daily"]
         if not (_same_volume(grouped, bars["range"]) and _same_volume(grouped, bars[_DAY_FILE])):
             differ.append(

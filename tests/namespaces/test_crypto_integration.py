@@ -507,7 +507,9 @@ def test_crypto_range_day_bar_volume_equals_prev_and_grouped_daily(
                 f"{day}: range t={instant_text(bar['t'] * _MS)} v={bar.get('v')}, "
                 f"{request} v={other.get('v')}, relative error {error}"
             )
-            if error is None or error > _TOLERANCE:
+            # A missing volume is no measurement, so it never reads as the volumes disagreeing.
+            assert error is not None, f"{day}: no volume in range {bar} or {request} {other}"
+            if error > _TOLERANCE:
                 differ.append(f"{day}: GET {_RANGE} v={bar.get('v')}, {request} v={other.get('v')}")
     expect_fixed(
         fixed=not differ,

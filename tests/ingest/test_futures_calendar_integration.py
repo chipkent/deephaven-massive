@@ -2968,20 +2968,22 @@ def test_streamed_futures_trades_carry_their_session_end_date(*, evidence: Evide
     no connection: reads the raw trade frames that `test_streamed_futures_tickers_are_listed`
     received in its 10 minutes of every futures trade (`T.*`), earlier in the same run, and
     skips when it kept none or they held no trade. A pass means a streamed trade carries the
-    field: Massive has started sending it. Its evidence line counts how many carry it, so a
-    reader can tell a partial rollout from a whole one before closing the issue.
+    field as a `yyyy-MM-dd` date (a null or empty value tells no day, so it shows the problem):
+    Massive has started sending it. Its evidence line counts how many carry it, so a reader can
+    tell a partial rollout from a whole one before closing the issue.
     """
     frames = _streamed_trade_frames()
     evidence(
         f"trade events on {frames.source} in {_STREAM_SECONDS:.0f} s: {frames.trades}; "
-        f"with session_end_date: {frames.dated}; first with: {frames.dated_example or 'none'}; "
+        f"with a session_end_date date: {frames.dated}; "
+        f"first with: {frames.dated_example or 'none'}; "
         f"first without: {frames.undated_example or 'none'}"
     )
     expect_fixed(
         fixed=frames.dated > 0,
         shown=(
             f"{frames.dated} of the {frames.trades} futures trade events streamed on "
-            f"{frames.source} (T.*) in {_STREAM_SECONDS:.0f} s carry session_end_date; the "
+            f"{frames.source} (T.*) in {_STREAM_SECONDS:.0f} s carry a session_end_date date; the "
             f"first without: {frames.undated_example}"
         ),
     )

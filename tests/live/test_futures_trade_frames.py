@@ -60,6 +60,14 @@ def test_the_examples_keep_the_first_event_of_each_kind() -> None:
     assert tally.text_price_example == json.dumps(_UNDATED_TEXT, separators=(",", ":"))
 
 
+@pytest.mark.parametrize("value", [None, "", "2026-13-01", "20261124", "Nov 24, 2026", 2026])
+def test_a_session_end_date_that_is_not_a_date_counts_as_undated(value: object) -> None:
+    event = {**_DATED, "session_end_date": value}
+    tally = _tallied([event])
+    assert (tally.trades, tally.dated, tally.dated_example) == (1, 0, "")
+    assert tally.undated_example == json.dumps(event, separators=(",", ":"))
+
+
 @pytest.mark.parametrize("price", [None, True, "7676.5"])
 def test_a_price_that_is_not_a_json_number_counts_as_text(price: object) -> None:
     event = {"ev": "T", "sym": "ESZ6", "s": 1}

@@ -8,6 +8,7 @@ a refresh brings the fix.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import json
@@ -413,6 +414,53 @@ def test_massive_documents_the_day_its_index_bars_cover(vendored: Snapshot) -> N
     expect_fixed(fixed=not shown, shown=f"'in Eastern Time (ET)' in {shown}")
 
 
+_UNUSUAL_TRADES = "options/unusual-options-activity/unusual-trades.md"
+"""The vendored page of Massive's unusual options trades."""
+
+
+def _option_price_per_contract(vendored: Snapshot) -> str:
+    """Say where Massive's options text still prices a trade per contract.
+
+    A fix drops "per whole contract" from every options document and says "per share" in the
+    unusual-trades page's `price` row, so a rewording that keeps the contract unit ("per
+    contract") still shows the problem.
+
+    Returns:
+        What still shows the problem, with the documents and the row; empty once fixed.
+    """
+    shown = _saying(_documents(vendored, "options"), "per whole contract")
+    page = vendored.pages[_UNUSUAL_TRADES]
+    rows = [line for line in page.splitlines() if line.startswith("| `results[].price` |")]
+    assert len(rows) == 1, f"{_UNUSUAL_TRADES} has {len(rows)} rows of results[].price"
+    if not shown and "per share" in rows[0]:
+        return ""
+    return f"'per whole contract' in {shown}; the {_UNUSUAL_TRADES} price row: {rows[0]}"
+
+
+@_SNAPSHOT_HERE
+@pytest.mark.parametrize(
+    ("wording", "fixed"), [("per share", True), ("per contract", False), (None, False)]
+)
+def test_an_option_trade_price_is_fixed_only_when_said_per_share(
+    vendored: Snapshot, wording: str | None, fixed: bool
+) -> None:
+    def reworded(text: str) -> str:
+        return text if wording is None else text.replace("per whole contract", wording)
+
+    pages = {name: reworded(page) for name, page in vendored.pages.items()}
+    openapi = json.loads(reworded(json.dumps(vendored.openapi)))
+    websocket = json.loads(reworded(json.dumps(vendored.websocket)))
+    flat_file_pages = {name: reworded(page) for name, page in vendored.flat_file_pages.items()}
+    changed = dataclasses.replace(
+        vendored,
+        pages=pages,
+        openapi=openapi,
+        websocket=websocket,
+        flat_file_pages=flat_file_pages,
+    )
+    assert (_option_price_per_contract(changed) == "") is fixed
+
+
 @_SNAPSHOT_HERE
 @pytest.mark.massive_issue(791)
 def test_massive_describes_an_option_trade_price_per_share(vendored: Snapshot) -> None:
@@ -421,8 +469,8 @@ def test_massive_describes_an_option_trade_price_per_share(vendored: Snapshot) -
     The unusual-trades and options trades `price` is per share of the underlying, as
     Massive confirmed, though its description says "per whole contract".
     """
-    shown = _saying(_documents(vendored, "options"), "per whole contract")
-    expect_fixed(fixed=not shown, shown=f"'per whole contract' in {shown}")
+    shown = _option_price_per_contract(vendored)
+    expect_fixed(fixed=not shown, shown=shown)
 
 
 @_SNAPSHOT_HERE

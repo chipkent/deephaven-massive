@@ -287,6 +287,9 @@ def refused_lines(checks: Iterable[Check]) -> list[str]:
 def problem_lines(checks: Iterable[Check]) -> list[str]:
     """Return the `REPORT.md` lines of the checks of open Massive problems that ran.
 
+    Every check of an issue that any check ran for is listed, those not run too, so an issue
+    is FIXED only when every check of it showed the fix.
+
     Args:
         checks: The checks.
 
@@ -295,16 +298,18 @@ def problem_lines(checks: Iterable[Check]) -> list[str]:
         text block, then a table of each such check's issue, name, status, and reason
         (Massive's values for a problem still present); a line saying none ran when none did.
     """
-    shown = {"problem present": PRESENT, "problem fixed": FIXED}
-    ran = [(c.issue, c) for c in checks if c.issue is not None and c.status != "not run"]
-    if not ran:
+    marked = [(c.issue, c) for c in checks if c.issue is not None]
+    attempted = {issue for issue, c in marked if c.status != "not run"}
+    listed = [(issue, c) for issue, c in marked if issue in attempted]
+    if not listed:
         return ["No check of an open Massive problem ran."]
+    shown = {"problem present": PRESENT, "problem fixed": FIXED}
     outcomes: dict[str, tuple[int, str]] = {}
-    for issue, c in ran:
-        # Any other status (failed, refused, skipped, error) is what happened, as it is.
+    for issue, c in listed:
+        # Any other status (failed, refused, skipped, error, not run) is what happened, as it is.
         happened = f"{c.status}: {c.reason}" if c.reason else c.status
         outcomes[f"{c.group}: {c.name}"] = (issue, shown.get(c.status, happened))
-    rows = [[f"#{issue}", f"{c.group}: {c.name}", c.status, c.reason] for issue, c in ran]
+    rows = [[f"#{issue}", f"{c.group}: {c.name}", c.status, c.reason] for issue, c in listed]
     return [
         "```text",
         *massive_problems.problem_lines(outcomes),
