@@ -1081,23 +1081,37 @@ _TAS_TRADES = 50
 
 _TRADES = "/futures/v1/trades/{ticker}"
 
+_SCHEDULE_PAGE = 1000
+"""The schedule events read for one product: one page."""
+
+_EXAMPLES = 5
+"""How many trades outside their session, or with no session, to record whole."""
+
 
 def _front_contracts(client: RestClient, *, evidence: Evidence) -> dict[str, str]:
-    """Return the soonest-expiring single contract of each sampled TAS product.
+    """Return the soonest-expiring active single contract of each sampled TAS product.
 
-    Asks the contracts list for the products' single contracts on the latest of the last four
-    days it holds rows for, and records the day and the contracts chosen.
+    Asks the contracts list for the products' active single contracts on the latest of the last
+    four days it holds rows for, and records the day and the contracts chosen. A contract whose
+    last trade date has passed is skipped.
     """
     today = datetime.now(_CHICAGO).date()
     day, rows = today, []
     for back in range(4):
         day = today - timedelta(days=back)
-        query = {"product_code.any_of": list(_TAS_SAMPLE), "date": day, "type": "single"}
+        query = {
+            "product_code.any_of": list(_TAS_SAMPLE),
+            "date": day,
+            "type": "single",
+            "active": True,
+        }
         rows = _page(client, _CONTRACTS, query={**query, "limit": 1000})
         if rows:
             break
     fronts: dict[str, dict[str, Any]] = {}
     for row in rows:
+        if str(row["last_trade_date"]) < day.isoformat():
+            continue
         code = str(row["product_code"])
         if code not in fronts or str(row["last_trade_date"]) < str(fronts[code]["last_trade_date"]):
             fronts[code] = row
@@ -1110,22 +1124,70 @@ def _front_contracts(client: RestClient, *, evidence: Evidence) -> dict[str, str
 
 def _session_windows(
     client: RestClient, product: str, days: Sequence[str]
-) -> dict[str, tuple[int, int]]:
+) -> dict[str, tuple[int, int]] | None:
     """Return each session's first and last schedule event, in epoch nanoseconds, by its date.
 
-    Reads the product's schedule events for the sessions whose `session_end_date` is in `days`.
+    Reads one page of the product's schedule events for the sessions whose `session_end_date`
+    lies between the earliest and the latest of `days`.
+
+    Returns:
+        The windows, or None when the page is full, so later sessions may be missing.
     """
     query = {
         "product_code": product,
         "session_end_date.gte": min(days),
         "session_end_date.lte": max(days),
-        "limit": 1000,
+        "limit": _SCHEDULE_PAGE,
     }
+    rows = _page(client, _SCHEDULES, query=query)
+    if len(rows) == _SCHEDULE_PAGE:
+        return None
     events: dict[str, list[int]] = {}
-    for row in _page(client, _SCHEDULES, query=query):
+    for row in rows:
         stamp = datetime.fromisoformat(str(row["timestamp"]))
         events.setdefault(str(row["session_end_date"]), []).append(epoch_ns(stamp))
     return {day: (min(stamps), max(stamps)) for day, stamps in events.items()}
+
+
+def _compare_with_sessions(
+    client: RestClient,
+    trades: Sequence[Mapping[str, Any]],
+    *,
+    ticker: str,
+    underlying: str,
+    evidence: Evidence,
+) -> None:
+    """Record whether each dated trade falls inside the underlying's session of its date.
+
+    Counts the trades inside their session, outside it, and dated a day the underlying's
+    schedule has no session for. Records up to five trades of each of the last two kinds whole.
+    """
+    days = {str(t.get("session_end_date")) for t in trades}
+    dated = sorted(day for day in days if day != "None")
+    if not dated:
+        return
+    windows = _session_windows(client, underlying, dated)
+    if windows is None:
+        evidence(f"{ticker}: {underlying}'s schedule filled a page; trades not compared")
+        return
+    verdicts: dict[str, list[Mapping[str, Any]]] = {}
+    for trade in trades:
+        if trade.get("session_end_date") is None:
+            continue
+        window = windows.get(str(trade["session_end_date"]))
+        if window is None:
+            verdict = "no session"
+        elif window[0] <= int(trade["timestamp"]) <= window[1]:
+            verdict = "inside"
+        else:
+            verdict = "outside"
+        verdicts.setdefault(verdict, []).append(trade)
+    spans = {day: (_chicago(first), _chicago(last)) for day, (first, last) in windows.items()}
+    counts = {verdict: len(found) for verdict, found in verdicts.items()}
+    evidence(f"{ticker} against {underlying}'s sessions {spans}: {counts}")
+    for verdict in ("outside", "no session"):
+        for trade in verdicts.get(verdict, [])[:_EXAMPLES]:
+            evidence(f"{ticker} {verdict}: {_chicago(int(trade['timestamp']))} {trade}")
 
 
 @pytest.mark.settles("137")
@@ -1159,21 +1221,12 @@ def test_trade_at_settlement_trades_and_their_sessions(
         evidence(f"{ticker}: {len(trades)} trades; session_end_date {dict(days)}")
         if trades:
             evidence(f"{ticker} latest trade: {trades[0]}")
-        dated = sorted(day for day in days if day != "None")
-        if not dated:
-            continue
-        windows = _session_windows(live_rest, underlying, dated)
-        inside = Counter(
-            "no session"
-            if (window := windows.get(str(t["session_end_date"]))) is None
-            else "inside"
-            if window[0] <= int(t["timestamp"]) <= window[1]
-            else "outside"
-            for t in trades
-            if t.get("session_end_date") is not None
+        _compare_with_sessions(
+            live_rest, trades, ticker=ticker, underlying=underlying, evidence=evidence
         )
-        spans = {day: (_chicago(first), _chicago(last)) for day, (first, last) in windows.items()}
-        evidence(f"{ticker} against {underlying}'s sessions {spans}: {dict(inside)}")
+    if not fronts:
+        evidence("no TAS contract found, so no snapshot read")
+        return
     query = {"ticker.any_of": list(fronts.values()), "limit": 1000}
     for row in _page(live_rest, _SNAPSHOT, query=query):
         evidence(f"snapshot row: {row}")
