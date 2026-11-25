@@ -74,6 +74,7 @@ from deephaven_massive._errors import (
     AuthenticationError,
     EntitlementError,
     ErrorSource,
+    FeedRefusalError,
     MassiveError,
     SessionClosedError,
     copy_error,
@@ -91,6 +92,7 @@ from deephaven_massive._ingest.subscriptions import (
     Subscriptions,
     Timer,
     channel_of,
+    is_wildcard,
     stream_topics,
     wildcard,
 )
@@ -1311,7 +1313,10 @@ class Connection:
         """Fail the streams of refused topics with `EntitlementError`, naming the feed's fix.
 
         The streams of a dataset Massive documents on one feed add that feed and its page
-        (`ConnectionStream.refusal_note`), and only theirs.
+        (`ConnectionStream.refusal_note`), and only theirs. A stream whose refused topic is a
+        channel's wildcard (`T.*`) asked for the feed itself, so its error is a
+        `FeedRefusalError`; one whose refused topics name symbols gets a plain
+        `EntitlementError`.
 
         Args:
             topics: The refused topics.
@@ -1325,20 +1330,27 @@ class Connection:
         hint = self._refusal_hint(refused)
         self._last_error = f"{answered} {hint}"
         # One error per note, so a note reaches only the streams that carry it, logged once
-        # here, and each dataset's streams get their own copy of it.
-        by_note: dict[tuple[str, str], list[int]] = {}
+        # here, and each dataset's streams get their own copy of it; a stream whose refused
+        # topic is a wildcard gets the feed's kind of the same error, logged by the note's.
+        by_note: dict[tuple[str, bool, str], list[int]] = {}
         for stream in self._streams.values():
-            if stream.topics & refused:
-                key = (stream.refusal_note, stream.plan.dataset)
+            own = stream.topics & refused
+            if own:
+                feed = any(is_wildcard(topic) for topic in own)
+                key = (stream.refusal_note, feed, stream.plan.dataset)
                 by_note.setdefault(key, []).append(stream.stream_id)
         errors: dict[str, EntitlementError] = {}
-        for (note, dataset), ids in by_note.items():
+        for (note, feed, dataset), ids in by_note.items():
             if note not in errors:
                 # The note says where Massive documents the dataset: a why, before the fix.
                 text = f"{answered} {note.removesuffix('.')}. {hint}" if note else self._last_error
                 errors[note] = EntitlementError(text)
                 log_failure(logger, errors[note], "%s")
-            self.flusher.fail(ids, stream_copy(errors[note], dataset))
+            error = errors[note]
+            if feed:
+                error = FeedRefusalError(str(error))
+                mark_failure_logged(error)  # a repeat of the note's error, logged above
+            self.flusher.fail(ids, stream_copy(error, dataset))
 
     def _refusal_hint(self, refused: set[str]) -> str:
         """Return what a refusal's message adds after Massive's answer, by the connection's feed.

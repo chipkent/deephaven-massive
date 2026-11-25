@@ -93,6 +93,7 @@ __all__ = [
     "CutShortError",
     "EntitlementError",
     "ErrorSource",
+    "FeedRefusalError",
     "MassiveError",
     "PermanentError",
     "RowDataError",
@@ -391,6 +392,19 @@ class EntitlementError(MassiveError):
                 day = m.stocks.trades("AAPL").history("2025-06-06", "2025-06-06", wait=True)
             except dm.EntitlementError as e:
                 print(f"not on this plan: {e}")
+    """
+
+
+class FeedRefusalError(EntitlementError):
+    """A refusal of the feed itself, which no symbol of the request or stream escapes.
+
+    Internal: not exported from `dm`; raised as the `EntitlementError` it is. A refusal is the
+    feed's when what was refused names no symbol: a `DELAYED` label on the subscription a
+    request is charged to, or on every class a request of several classes names, when
+    `MassiveConfig.delayed_subscriptions` does not list it (`_ingest/rest.py`), and a refused
+    wildcard subscription such as `T.*` (`_ingest/ws_connection.py`). Every other refusal
+    names a symbol, and is that symbol's plain `EntitlementError`. The class says only whose
+    the refusal is: its message, status, and source are those the plain error would carry.
     """
 
 

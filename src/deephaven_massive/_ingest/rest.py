@@ -156,11 +156,11 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
-    AuthenticationError,
     BrokenGuaranteeError,
     CutShortError,
     EntitlementError,
     ErrorSource,
+    FeedRefusalError,
     MassiveError,
     RowDataError,
     SessionClosedError,
@@ -1283,16 +1283,22 @@ class RestReader:
         current: bool,
         cancel: Cancel | None,
         patience: Patience,
+        fails_read: Callable[[MassiveError], bool],
+        on_recency: Callable[[Recency], None] | None = None,
+        record: Callable[[DriftReport], None] | None = None,
+        executor: ThreadPoolExecutor | None = None,
     ) -> tuple[list[RequestRows | MassiveError | None], int]:
         """Make each planned request and return each one's rows or failure, in plan order.
 
         The read by symbol (`_ingest/symbol_reads.py`): unlike `read`, a request that fails
-        leaves the others running, so one symbol's failure never ends another's read. The
-        requests may span several paths. They run on this thread when there is one, else on a
-        pool of `min(max_concurrency, requests)` threads made for this read, and listen to a
-        `Cancel` token of the read's own (following `cancel`), which is also the read's lane in
-        the rate governor. Each is made as `read` makes it (`_call`), capped at `limit`. A
-        symbol Massive answered HTTP 404 on its first request has no data and follows
+        leaves the others running, so one symbol's failure never ends another's read, unless
+        the failure is the whole read's, which `fails_read` says: such a failure is raised,
+        and the requests not yet made are cancelled. The requests may span several
+        paths. They run on this thread when there is one, else on `executor` or a pool of
+        `min(max_concurrency, requests)` threads made for this read, and listen to a `Cancel`
+        token of the read's own (following `cancel`), which is also the read's lane in the
+        rate governor. Each is made as `read` makes it (`_call`), capped at `limit`. A symbol
+        Massive answered HTTP 404 on its first request has no data and follows
         `ErrorPolicy.unavailable_symbols`: under `LOG` and `IGNORE` it has no rows and one
         line per path names it (`_report_missing`); under `RAISE` its result is an
         `UnavailableSymbolError`. The read's tally counts nothing here: the caller counts each
@@ -1308,6 +1314,12 @@ class RestReader:
             current: True when the pages are checked for a `DELAYED` label (`read`).
             cancel: Ends the read's waits when set, or None.
             patience: The patience of the whole read, shared by every request.
+            fails_read: Tells whether a request's failure fails the whole read
+                (`symbol_reads.fails_followed_read`); any other failure is its own request's.
+            on_recency: Given what each page of current data shows about its recency
+                (`read`), or None.
+            record: Also given each page's drift (`read`), or None.
+            executor: The caller's pool for the requests, or None for one of this read's own.
 
         Returns:
             Each request's rows with its withheld rows and source (`RequestRows`), its
@@ -1316,8 +1328,9 @@ class RestReader:
             all withheld gives its symbols no rows.
 
         Raises:
-            AuthenticationError: If Massive rejects the API key on any request: every request
-                would be refused, so the requests not yet made are cancelled.
+            MassiveError: If a request fails and `fails_read` says the failure is the read's:
+                that error, with the requests not yet made cancelled. Massive rejecting the
+                API key (`AuthenticationError`) is one, since every request would be refused.
 
         Any exception that is not a `MassiveError`, a defect, is raised as `read` raises it.
         """
@@ -1336,11 +1349,14 @@ class RestReader:
                 current=current,
                 stop=stop,
                 patience=patience,
+                fails_read=fails_read,
+                on_recency=on_recency,
+                record=record,
             )
             if len(units) <= 1:
                 done = [run(unit) for unit in units]
             else:
-                done = self._fan_out(run, units, executor=None, stop=stop)
+                done = self._fan_out(run, units, executor=executor, stop=stop)
         answered = [
             (rest_path.template, outcome)
             for (rest_path, _), outcome in zip(units, done, strict=True)
@@ -1376,6 +1392,9 @@ class RestReader:
         current: bool,
         stop: Cancel,
         patience: Patience,
+        fails_read: Callable[[MassiveError], bool],
+        on_recency: Callable[[Recency], None] | None,
+        record: Callable[[DriftReport], None] | None,
     ) -> _Outcome | MassiveError:
         """Make one request of a read by symbol, returning its failure instead of raising it.
 
@@ -1389,12 +1408,16 @@ class RestReader:
             current: Whether the pages are checked for a `DELAYED` label.
             stop: The read's token.
             patience: The read's patience.
+            fails_read: Tells whether the request's failure is the whole read's (`read_each`).
+            on_recency: Given each page's recency evidence, or None.
+            record: Also given each page's drift, or None.
 
         Returns:
             The request's outcome (`_call`), or the `MassiveError` it failed with.
 
         Raises:
-            AuthenticationError: If Massive rejects the API key, which fails the whole read.
+            MassiveError: If the request fails and `fails_read` says the failure is the whole
+                read's.
         """
         rest_path, call = unit
         try:
@@ -1406,14 +1429,21 @@ class RestReader:
                 limit=limit,
                 window=window,
                 current=current,
-                on_recency=None,
-                record=None,
+                on_recency=on_recency,
+                record=record,
                 stop=stop,
                 patience=patience,
             )
-        except AuthenticationError:
-            raise  # every request of the read would be refused: the whole read fails
         except MassiveError as error:
+            if fails_read(error):
+                logger.debug(
+                    "%s: the request of %s for %s failed, and fails the whole read: %s",
+                    spec.name,
+                    rest_path.template,
+                    ", ".join(call.symbols) or "no symbol",
+                    error,
+                )
+                raise
             logger.debug(
                 "%s: the request of %s for %s failed, and fails only its own symbols: %s",
                 spec.name,
@@ -2203,6 +2233,14 @@ class RestReader:
         listed subscription's labels pass. A `timeframe` that is neither label is served and logs a
         WARNING once per subscription, field, and value in the session (`_warn_unknown_label`).
 
+        A refusal is the feed's (`FeedRefusalError`) when the label leaves no symbol of the
+        request served: any label on a page charged to a subscription, since the page is that
+        subscription's data, and an envelope label on a page of the `other` bucket when every
+        class the request names is unlisted. A row's label on a page of the `other` bucket,
+        and an envelope label on one that names a listed class beside an unlisted one, are a
+        plain `EntitlementError`: the request's own, which a read by symbol gives to every
+        symbol the request named.
+
         Args:
             spec: The dataset, for the message.
             page: The page.
@@ -2216,7 +2254,8 @@ class RestReader:
 
         Raises:
             EntitlementError: If a label says delayed for a subscription not listed
-                (`recency_labels.delayed_refusal`).
+                (`recency_labels.delayed_refusal`): a `FeedRefusalError` when the label is
+                the feed's.
         """
         listed = self.delayed_subscriptions
         fixed = None if bucket == OTHER else Subscription(bucket)
@@ -2234,7 +2273,10 @@ class RestReader:
                     listed=listed,
                     streams=False,
                 )
-                raise refusal
+                # The feed's when the label leaves no class of the request served: the one
+                # subscription the page is charged to, or every class a mixed page names.
+                # Currencies are never unlisted, so a mixed page naming them is a symbol's.
+                raise _feed_refusal(refusal) if named <= set(unlisted) else refusal
         recency = _page_recency(
             page.rows, fixed=fixed, listed=listed, symbol_key=symbol_key, symbol=call.symbol
         )
@@ -2250,7 +2292,9 @@ class RestReader:
                 listed=listed,
                 streams=False,
             )
-            raise refusal
+            # A row's label on a page charged to a subscription is held against that
+            # subscription, so it is the feed's; on the `other` bucket it is the row's own.
+            raise _feed_refusal(refusal) if fixed is not None else refusal
         delayed = recency.delayed or (page.status == DELAYED_LABEL and bool(named))
         if on_recency is not None and (delayed or recency.real_time):
             on_recency(Recency.DELAYED if delayed else Recency.REALTIME)
@@ -3619,6 +3663,26 @@ def _withheld_symbol_column(spec: DatasetSpec, converter: RowConverter) -> str |
     if asked not in converter.arrow_schema.names or spec.index_prefix.prefixed_by_lookup == asked:
         return None
     return asked
+
+
+def _feed_refusal(refusal: EntitlementError) -> FeedRefusalError:
+    """Return a refusal of delayed data as the feed's: the same message and source, typed so.
+
+    Args:
+        refusal: The refusal (`recency_labels.delayed_refusal`), built for the refused
+            subscription and the rows or request it labels.
+
+    Returns:
+        The same refusal, its status, request id, and source included, as a
+        `FeedRefusalError`.
+    """
+    return FeedRefusalError(
+        str(refusal),
+        status=refusal.status,
+        request_id=refusal.request_id,
+        source=refusal.source,
+        is_retryable=refusal.is_retryable,
+    )
 
 
 def _delayed_what(spec: DatasetSpec, tickers: Sequence[str]) -> str:

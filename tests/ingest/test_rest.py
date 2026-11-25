@@ -13,7 +13,7 @@ from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoo
 from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
 from types import MethodType
-from typing import Any, NoReturn, ParamSpec, TypedDict
+from typing import Any, NoReturn, ParamSpec, TypedDict, TypeVar
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -50,6 +50,8 @@ from deephaven_massive._errors import (
     LIBRARY_BUG,
     BrokenGuaranteeError,
     CutShortError,
+    FeedRefusalError,
+    MassiveError,
     RowDataError,
     UnavailableSymbolError,
     session_closed,
@@ -67,8 +69,9 @@ from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, Crypt
 from deephaven_massive._ingest.rate_limits import Waiter
 from deephaven_massive._ingest.rest_rows import RowConverter
 from deephaven_massive._ingest.shared_lookup import SharedLookup
+from deephaven_massive._ingest.symbol_reads import RequestRows, fails_followed_read, fetch_units
 from deephaven_massive._log_limits import LoggedKeys
-from deephaven_massive._massive import Cancel, RestPath, Transport
+from deephaven_massive._massive import Cancel, DriftReport, RestPath, Transport
 from deephaven_massive._tables import poll, problem_reporter
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.diagnostics import Diagnostics
@@ -472,6 +475,7 @@ def _endpoints(m: dm.MassiveSession) -> rest.RestEndpoints:
 
 
 _P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 class ReadArguments(TypedDict, total=False):
@@ -4663,6 +4667,7 @@ def test_a_delayed_row_fails_a_real_time_fetch(
     )
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    assert type(info.value) is FeedRefusalError  # the page is the subscription's data
     assert str(info.value) == (
         "indices.snapshots data for I:SPX would be delayed, since Massive reports "
         "timeframe=DELAYED, and dm.Subscription.INDICES is not in delayed_subscriptions, so the "
@@ -4677,8 +4682,9 @@ def test_a_delayed_envelope_fails_a_real_time_fetch(
 ) -> None:
     gainers = "/v2/snapshot/locale/us/markets/stocks/gainers"
     fake_rest.reply(gainers, Reply(envelope(status="DELAYED", tickers=[{"ticker": "NVDA"}])))
-    with pytest.raises(dm.EntitlementError, match=r"Massive reports status=DELAYED"):
+    with pytest.raises(dm.EntitlementError, match=r"Massive reports status=DELAYED") as info:
         fetch(session, MOVERS, params={"direction": Direction.GAINERS})
+    assert type(info.value) is FeedRefusalError  # the page is the stocks subscription's data
 
 
 def test_a_listed_subscription_serves_delayed_rest_data_and_says_so(
@@ -4933,6 +4939,7 @@ def test_a_delayed_stock_row_fails_a_unified_snapshot(
     )
     with pytest.raises(dm.EntitlementError) as info:
         _unified(session, "AAPL")
+    assert type(info.value) is not FeedRefusalError  # a row's label refuses its own ticker
     assert str(info.value).startswith(
         "snapshots data for AAPL would be delayed, since Massive reports "
         "last_trade.timeframe=DELAYED, and dm.Subscription.STOCKS is not in delayed_subscriptions"
@@ -4981,10 +4988,38 @@ def test_a_delayed_envelope_needs_every_class_of_the_request_listed(
         if refused is None:
             assert [r["Symbol"] for r in _unified(m, "AAPL", contract)] == ["AAPL"]
         else:
-            with pytest.raises(dm.EntitlementError, match=rf"dm\.Subscription\.{refused} is"):
+            with pytest.raises(dm.EntitlementError, match=rf"dm\.Subscription\.{refused} is") as e:
                 _unified(m, "AAPL", contract)
+            # Stocks are served under the label, so the refusal is the options symbols', not
+            # the feed's.
+            assert type(e.value) is not FeedRefusalError
     finally:
         m.close()
+
+
+@pytest.mark.parametrize(
+    ("tickers", "feed"),
+    [
+        (("AAPL",), True),
+        (("AAPL", "O:SPY251219C00600000"), True),
+        (("AAPL", "X:BTCUSD"), False),
+    ],
+    ids=["one class", "two unlisted classes", "a class beside currencies"],
+)
+def test_a_delayed_envelope_on_a_mixed_page_is_the_feed_s_only_when_no_class_is_served(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    tickers: tuple[str, ...],
+    feed: bool,
+) -> None:
+    # Nothing is listed as delayed. An envelope label refuses the feed when every class the
+    # request names is unlisted; currencies are never held to a label, so a request naming a
+    # crypto pair beside a stock has a class served, and the refusal is the stock's.
+    fake_rest.reply(UNIFIED_PATH, Reply(envelope([{"ticker": tickers[0]}], status="DELAYED")))
+    with pytest.raises(dm.EntitlementError, match=r"is not in delayed_subscriptions") as info:
+        _unified(session, *tickers)
+    assert isinstance(info.value, FeedRefusalError) is feed
 
 
 def test_a_delay_label_is_never_held_against_currencies(
@@ -5901,3 +5936,136 @@ def test_a_marked_row_whose_readable_list_names_none_of_the_tickers_is_left_out(
     out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
     assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [(1, "MSFT")]
     assert _unlisted_events(events) == [_unlisted(1, asked="AAPL and MSFT", only=", only TSLA,")]
+
+
+# --- The read by symbol's reader --------------------------------------------------------------
+
+
+def _reader(m: dm.MassiveSession) -> rest.RestReader:
+    return _endpoints(m)._reader("call-1", m._core.policy, waiter=Waiter.CALL)
+
+
+def _is_refusal(error: MassiveError) -> bool:
+    return error.status == 403
+
+
+@pytest.mark.parametrize(
+    ("status", "fails_read", "raises"),
+    [
+        (500, fails_followed_read, False),
+        (401, fails_followed_read, True),
+        (403, _is_refusal, True),
+        (500, _is_refusal, False),
+    ],
+    ids=[
+        "a server error is a followed symbol's own",
+        "a rejected key fails a followed read",
+        "a rule of the caller's: the failure it names is raised",
+        "a rule of the caller's: any other failure is the request's",
+    ],
+)
+def test_read_each_raises_only_the_failures_its_caller_says_are_the_read_s(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    status: int,
+    fails_read: Callable[[MassiveError], bool],
+    raises: bool,
+) -> None:
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply({"status": "ERROR"}, status=status))
+    reader = _reader(session)
+    request = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])._request
+    units, failed = fetch_units(reader, INDEX_SNAPSHOTS, request, symbols=["I:SPX"], cancel=None)
+    assert not failed
+    read = functools.partial(
+        reader.read_each,
+        INDEX_SNAPSHOTS,
+        units,
+        request=request,
+        limit=None,
+        window=None,
+        current=False,
+        cancel=None,
+        patience=reader.patience(),
+        fails_read=fails_read,
+    )
+    if raises:
+        with pytest.raises(dm.MassiveError, match=f"HTTP {status}"):
+            read()
+        return
+    results, answered = read()
+    assert answered == 0
+    [result] = results
+    assert isinstance(result, MassiveError)
+    assert result.status == status
+
+
+def test_read_each_hands_each_page_s_recency_and_drift_to_its_caller(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    rows = [{"ticker": "I:SPX", "timeframe": "REAL-TIME", "bogus": 1}]
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope(rows)))
+    reader = _reader(session)
+    request = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])._request
+    units, _ = fetch_units(reader, INDEX_SNAPSHOTS, request, symbols=["I:SPX"], cancel=None)
+    seen: list[Recency] = []
+    drifts: list[DriftReport] = []
+    results, answered = reader.read_each(
+        INDEX_SNAPSHOTS,
+        units,
+        request=request,
+        limit=None,
+        window=None,
+        current=True,
+        cancel=None,
+        patience=reader.patience(),
+        fails_read=fails_followed_read,
+        on_recency=seen.append,
+        record=drifts.append,
+    )
+    assert answered == 1
+    [result] = results
+    assert isinstance(result, RequestRows)
+    assert result.rows.num_rows == 1
+    assert seen == [Recency.REALTIME]
+    assert [sorted(d.extra) for d in drifts] == [["bogus"]]
+
+
+class _CountingPool(ThreadPoolExecutor):
+    """A pool that counts the calls submitted to it."""
+
+    def __init__(self, workers: int) -> None:
+        super().__init__(workers)
+        self.submitted = 0
+
+    @override
+    def submit(self, fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs) -> Future[_T]:
+        self.submitted += 1
+        return super().submit(fn, *args, **kwargs)
+
+
+def test_read_each_runs_its_requests_on_the_caller_s_pool(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    for ticker in ("AAPL", "MSFT"):
+        fake_rest.reply(f"/v1/indicators/sma/{ticker}", Reply(envelope({"values": [_SMA_VALUE]})))
+    reader = _reader(session)
+    request = query(session, SMA, symbols=["AAPL", "MSFT"])._request
+    units, _ = fetch_units(reader, SMA, request, symbols=["AAPL", "MSFT"], cancel=None)
+    assert len(units) == 2
+    with _CountingPool(2) as pool:
+        results, answered = reader.read_each(
+            SMA,
+            units,
+            request=request,
+            limit=None,
+            window=None,
+            current=False,
+            cancel=None,
+            patience=reader.patience(),
+            fails_read=fails_followed_read,
+            executor=pool,
+        )
+        assert pool.submitted == 2
+    assert answered == 2
+    assert all(isinstance(result, RequestRows) for result in results)

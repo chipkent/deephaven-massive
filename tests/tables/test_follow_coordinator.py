@@ -40,7 +40,7 @@ from deephaven_massive._errors import (
     session_closed,
 )
 from deephaven_massive._massive import Transport
-from deephaven_massive._tables import follow_coordinator
+from deephaven_massive._tables import follow_coordinator, symbol_retry
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
     ConnectionRow,
@@ -48,10 +48,11 @@ from deephaven_massive._tables.diagnostics import (
     StreamRow,
 )
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.follow_coordinator import RETRY_DELAYS, RETRY_EVERY, FirstRead
+from deephaven_massive._tables.follow_coordinator import FirstRead
 from deephaven_massive._tables.followed_read import FollowedRead, FollowPlan, open_followed_read
 from deephaven_massive._tables.read_pool import ReadPool
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
+from deephaven_massive._tables.symbol_retry import RETRY_DELAYS, RETRY_EVERY
 from deephaven_massive._tables.transports import (
     SymbolFailure,
     SymbolOutcome,
@@ -531,7 +532,7 @@ def test_a_retry_wakes_the_coordinator_by_itself(
     # once the coordinator waits for it, so no batch of events can find it due first.
     script = Script(massive_session)
     script.answers["AAPL"] = [refused(500), SymbolRows(rows_of(massive_session, "AAPL", 1))]
-    monkeypatch.setattr(follow_coordinator, "RETRY_DELAYS", (0.05, 0.05, 0.05))
+    monkeypatch.setattr(symbol_retry, "RETRY_DELAYS", (0.05, 0.05, 0.05))
     waiting = threading.Event()
     next_due = follow_coordinator.FollowCoordinator._next_due
 
@@ -2174,8 +2175,8 @@ def test_a_read_that_starts_after_its_symbol_left_leaves_the_symbol_removed(
     started = symbols["AAPL"].generation
     handle([follow_coordinator._Changed(read, frozenset(), frozenset({"AAPL"}), 2)])
     handle([follow_coordinator._Began(read, {"AAPL": started})])
-    assert symbols["AAPL"].state is SymbolReadState.REMOVED
-    assert symbols["AAPL"].attempts == 0
+    assert symbols["AAPL"].run.state is SymbolReadState.REMOVED
+    assert symbols["AAPL"].run.attempts == 0
 
 
 class _ShutsDownAtOnce(QuietRead):
@@ -2209,7 +2210,7 @@ def test_a_table_shut_down_before_its_batch_ends_still_stops_its_symbols(
     assert result.ended
     assert coordinator._results == {id(read): result}  # kept until its stop is applied
     handle([follow_coordinator._Stop(read)])
-    assert result.symbols["AAPL"].state is SymbolReadState.STOPPED
+    assert result.symbols["AAPL"].run.state is SymbolReadState.STOPPED
     assert not coordinator._results
 
 
@@ -2225,11 +2226,11 @@ def test_a_result_stopped_before_its_table_shuts_down_is_kept_until_then(
     result = coordinator._results[id(read)]
     handle([follow_coordinator._Baseline(read, frozenset({"AAPL"}), 1)])
     handle([follow_coordinator._Stop(read)])
-    assert result.symbols["AAPL"].state is SymbolReadState.STOPPED
+    assert result.symbols["AAPL"].run.state is SymbolReadState.STOPPED
     assert coordinator._results == {id(read): result}
     read.shut_down = True
     handle([follow_coordinator._Stop(read)])
-    assert result.symbols["AAPL"].state is SymbolReadState.STOPPED
+    assert result.symbols["AAPL"].run.state is SymbolReadState.STOPPED
     assert not coordinator._results
 
 
@@ -2258,3 +2259,19 @@ def test_an_event_the_coordinator_has_no_rule_for_is_a_defect(
     result = coordinator._results[id(read)]
     with pytest.raises(BrokenGuaranteeError, match=r"^no rule applies 'text' to a result\."):
         coordinator._apply(result, "text")  # type: ignore[arg-type]  # the point: refused at run time
+
+
+def test_a_retry_step_no_case_handles_fails_the_result_as_a_defect(
+    dh_exec_ctx: ExecutionContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "step test", _stopped_pool())
+    read = QuietRead()
+    handle = coordinator._handle
+    handle([follow_coordinator._Follow(read, None)])
+    handle([follow_coordinator._Baseline(read, frozenset({"AAPL"}), 1)])
+    handle([follow_coordinator._Began(read, {"AAPL": 1})])
+    monkeypatch.setattr(symbol_retry.SymbolRun, "failed", lambda *_, **__: "bogus")
+    handle([follow_coordinator._Outcome(read, {"AAPL": 1}, {"AAPL": refused(503)}, 0, 0.0)])
+    assert read.failed is not None
+    assert read.failed.is_bug
+    assert "bogus" in str(read.failed)

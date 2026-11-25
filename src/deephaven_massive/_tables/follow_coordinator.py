@@ -32,14 +32,16 @@ diagnostics show. It owns:
 
 **A symbol's life.** Added, it is `QUEUED`; a read of it makes it `LOADING`; its rows make it
 `DONE`. A failure that may pass (its error `is_retryable`) makes it `RETRYING`, read again 2, 8,
-and 30 seconds after the first, second, and third failure (`RETRY_DELAYS`), then every
-`RETRY_EVERY`, until it has failed for `MassiveConfig.max_outage`: a failure that lands that long or
-longer after the first failure of its run makes it `FAILED`, with an error that names the
-limit (`_outage_failure`), as a `poll()` table fails after its cycles have failed that long.
-Any other failure makes it `FAILED` at once. Removed, it is `REMOVED`: under `Reread.ALWAYS`
-an empty download replaces its rows in the result, freeing them, and a re-add reads it again;
-under `Reread.NEVER` its download is kept, so a re-add shows the
-earlier download at once, with no request. A `FAILED` symbol is read again on every re-add. Each add
+and 30 seconds after the first, second, and third failure, then every minute, until it has
+failed for `MassiveConfig.max_outage`: a failure that lands that long or longer after the first
+failure of its run makes it `FAILED`, with an error that names the limit, as a `poll()` table
+fails after its cycles have failed that long. Any other failure makes it `FAILED` at once.
+That rule, and each symbol's count of reads and run of failures, is `_tables/symbol_retry.py`'s
+(`SymbolRun`); the coordinator keeps one per symbol and schedules the retries it decides.
+Removed, it is `REMOVED`: under `Reread.ALWAYS` an empty download replaces its rows in the
+result, freeing them, and a re-add reads it again; under `Reread.NEVER` its download is kept, so
+a re-add shows the earlier download at once, with no request. A `FAILED` symbol is read again
+on every re-add. Each add
 and removal moves the symbol to a new *generation*: the outcome of a read of an older one is
 dropped, so no removed or overtaken read ever lands, and a symbol is never read twice at once (a
 re-add during a read waits for it to end). When the result stops (released and unused, or failed),
@@ -80,7 +82,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, assert_never
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._enums import Reread
@@ -89,7 +91,6 @@ from deephaven_massive._errors import (
     BrokenGuaranteeError,
     ErrorSource,
     MassiveError,
-    copy_error,
     every_symbol_failed,
     failure_text,
     library_bug,
@@ -113,6 +114,7 @@ from deephaven_massive._tables.liveness import QueueWorker
 from deephaven_massive._tables.poll import SymbolRowError
 from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
+from deephaven_massive._tables.symbol_retry import Failed, Retry, SymbolRun
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
@@ -130,8 +132,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CLOCK",
-    "RETRY_DELAYS",
-    "RETRY_EVERY",
     "CoordinatedRead",
     "FirstRead",
     "FollowCoordinator",
@@ -143,13 +143,6 @@ logger = logging.getLogger(__name__)
 
 CLOCK: PollClock = poll.CLOCK
 """The coordinator's time source; tests replace it with a virtual clock."""
-
-RETRY_DELAYS: Final = (2.0, 8.0, 30.0)
-"""Seconds after a symbol's first, second, and third transient failure before it is read again:
-soon, since most such failures (a rate-limit pause, a dropped connection) pass in seconds."""
-
-RETRY_EVERY: Final = 60.0
-"""Seconds between a symbol's later reads, until it has failed for `MassiveConfig.max_outage`."""
 
 _FOLLOWING: Final = frozenset(
     {SymbolReadState.QUEUED, SymbolReadState.LOADING, SymbolReadState.RETRYING}
@@ -400,17 +393,15 @@ class _Symbol:
     """One symbol of one followed read; touched only by the coordinator thread.
 
     Attributes:
-        state: Its `m.symbol_reads()` state.
+        run: Its `m.symbol_reads()` state, its reads begun since it was last added with a read
+            queued, and its run of failures, if any, with when its next read is due
+            (`SymbolRun`); made anew on each such add.
         in_table: Whether the symbol table holds it now.
         generation: Moves on every add and removal; a read's outcome counts only at the
             generation it was started for.
         reading: The generation a read in flight was started for, or None.
         waiting: Whether it waits for a read slot (its result's queue).
-        attempts: Reads begun since it was last added with a read queued.
-        failing_since: When the first failure of the run it is in landed (monotonic seconds):
-            its first failure since it was last added or last got rows; None before one.
-        due: When its next read is due (monotonic seconds), while `RETRYING`.
-        next_attempt_at: The same instant, epoch nanoseconds.
+        next_attempt_at: When its next read is due, epoch nanoseconds, while `RETRYING`.
         added_at: When its row last entered the table, epoch nanoseconds.
         read_at: When the download whose rows the result holds began, or None.
         rows: Its rows in the result (0 for none).
@@ -424,15 +415,12 @@ class _Symbol:
             it is not counted: it was never shown, or it left the table.
     """
 
-    state: SymbolReadState
     in_table: bool
     generation: int
     added_at: int
+    run: SymbolRun = field(default_factory=SymbolRun)
     reading: int | None = None
     waiting: bool = False
-    attempts: int = 0
-    failing_since: float | None = None
-    due: float | None = None
     next_attempt_at: int | None = None
     read_at: int | None = None
     rows: int = 0
@@ -496,7 +484,9 @@ class _Progress:
             symbol: Its state.
         """
         before = symbol.counted
-        after = _Counted(symbol.state, symbol.rows, symbol.cause or "") if symbol.in_table else None
+        after = (
+            _Counted(symbol.run.state, symbol.rows, symbol.cause or "") if symbol.in_table else None
+        )
         if before == after:
             return
         for counted, sign in ((before, -1), (after, 1)):
@@ -602,35 +592,6 @@ def _cause(error: MassiveError) -> str:
     if error.is_bug:
         parts.append("bug")
     return " ".join(parts)
-
-
-def _outage_failure(
-    name: str, error: MassiveError, *, failing_for: float, limit: float
-) -> MassiveError:
-    """Return a symbol's final error once its failures have lasted `MassiveConfig.max_outage`.
-
-    A copy of the latest error (`copy_error`: its class, status, `request_id`, source, and
-    whether it is retryable or a bug) whose message says how long the symbol failed and the
-    limit, then quotes the latest error; chained to it, so its log record carries that error's
-    traceback too.
-
-    Args:
-        name: The symbol.
-        error: Its latest failure, one that may pass.
-        failing_for: Seconds since the run's first failure.
-        limit: `MassiveConfig.max_outage`, in seconds.
-
-    Returns:
-        The error, such as `"AAPL has failed for 340 s, as long as max_outage=300 s allows.
-        The latest error: Massive answered ..."`.
-    """
-    failure = copy_error(
-        error,
-        f"{name} has failed for {failing_for:.0f} s, as long as max_outage={limit:g} s "
-        f"allows. The latest error: {error}",
-    )
-    failure.__cause__ = error
-    return failure
 
 
 def _transport(read: CoordinatedRead, outcome: SymbolOutcome) -> str:
@@ -941,8 +902,7 @@ class FollowCoordinator:
             for name, generation in message.generations.items():
                 symbol = result.symbols[name]
                 if symbol.generation == generation and symbol.in_table:
-                    symbol.state = SymbolReadState.LOADING
-                    symbol.attempts += 1
+                    symbol.run.started()
                     result.dirty.add(name)
         elif isinstance(message, _Outcome):
             self._landed(result, message)
@@ -1026,11 +986,10 @@ class FollowCoordinator:
             )
             for name, outcome in first.outcomes.items():
                 symbol = _Symbol(
-                    state=SymbolReadState.LOADING,
                     in_table=True,
                     generation=1,
                     added_at=first.began_at,
-                    attempts=1,
+                    run=SymbolRun(SymbolReadState.LOADING, attempts=1),
                 )
                 result.symbols[name] = symbol
                 if isinstance(outcome, SymbolRows):  # its rows are in the result's seed
@@ -1057,15 +1016,13 @@ class FollowCoordinator:
         """
         symbol = result.symbols.get(name)
         if symbol is None:
-            symbol = result.symbols[name] = _Symbol(
-                state=SymbolReadState.QUEUED, in_table=True, generation=0, added_at=now
-            )
+            symbol = result.symbols[name] = _Symbol(in_table=True, generation=0, added_at=now)
         symbol.in_table = True
         symbol.generation += 1
         symbol.added_at = now
         result.dirty.add(name)
         if result.ended:
-            symbol.state = SymbolReadState.STOPPED
+            symbol.run.state = SymbolReadState.STOPPED
             logger.debug(
                 "call %d follow %s: added after the result failed or stopped; not read",
                 result.read.call,
@@ -1073,7 +1030,7 @@ class FollowCoordinator:
             )
             return
         if result.read.reread is Reread.NEVER and symbol.kept:
-            symbol.state = SymbolReadState.DONE
+            symbol.run.state = SymbolReadState.DONE
             logger.debug(
                 "call %d follow %s: back in the table; its download of %s is kept (NEVER), "
                 "no request",
@@ -1082,9 +1039,8 @@ class FollowCoordinator:
                 _ns_text(required(symbol.read_at, f"{name}'s kept download's start")),
             )
             return
-        symbol.state = SymbolReadState.QUEUED
-        symbol.attempts = 0
-        symbol.due = symbol.next_attempt_at = symbol.failing_since = None
+        symbol.run = SymbolRun()
+        symbol.next_attempt_at = None
         self._enqueue(result, name)
 
     def _remove(self, result: _Result, name: str) -> None:
@@ -1100,13 +1056,13 @@ class FollowCoordinator:
         symbol = result.symbols[name]
         symbol.in_table = False
         symbol.generation += 1
-        symbol.state = SymbolReadState.REMOVED
+        symbol.run.state = SymbolReadState.REMOVED
         # A call-time symbol deleted before it failed settles the check; a failed one only
         # leaves it.
         pending = result.call_time
         if pending is not None and name in pending and (pending.pop(name) is None or not pending):
             result.call_time = None
-        symbol.due = symbol.next_attempt_at = None
+        symbol.run.due = symbol.next_attempt_at = None
         result.dirty.add(name)
         if symbol.waiting:
             symbol.waiting = False
@@ -1209,13 +1165,13 @@ class FollowCoordinator:
                     parts_before=symbol.parts,
                 )
             self._call_time_outcome(result, name, None)
-            symbol.state = SymbolReadState.DONE
+            symbol.run.succeeded()
             symbol.kept = True
             symbol.rows = outcome.table.size
             symbol.read_at = began_at
             symbol.error = outcome.skipped  # why a read that succeeded gave it no rows, if so
             symbol.cause = None
-            symbol.due = symbol.next_attempt_at = symbol.failing_since = None
+            symbol.next_attempt_at = None
             logger.debug(
                 "call %d %s: %d rows in %.1f s from %s (download %d, decided at step %d)",
                 read.call,
@@ -1232,13 +1188,11 @@ class FollowCoordinator:
     def _failed(self, result: _Result, name: str, outcome: SymbolFailure) -> None:
         """Make a failed symbol `RETRYING` or `FAILED`, and log it.
 
-        A failure that may pass retries on `RETRY_DELAYS`, then every `RETRY_EVERY`, until one
-        lands `MassiveConfig.max_outage` seconds or more after the run's first failure landed.
-        A read's own time is not counted, since it may have spent most of it receiving pages.
-        The limit is a threshold checked as each failure lands, not a wall-clock bound: the
-        retry delays and each read's own length can carry a symbol past it before the failure
-        that ends it lands. That failure is final, and its error names the limit
-        (`_outage_failure`). Any other failure is final at once.
+        The symbol's run decides which (`SymbolRun.failed`): a failure that may pass is read
+        again after its delay, until one lands `MassiveConfig.max_outage` seconds or more
+        after the run's first failure landed; that failure, and any other, is final. A
+        read's own time is not counted, since it may have spent most of it receiving pages.
+        A retry goes on the heap of retries, due at the run's time.
 
         Args:
             result: The result's state.
@@ -1247,39 +1201,34 @@ class FollowCoordinator:
         """
         symbol = result.symbols[name]
         error = outcome.error
-        now = CLOCK.monotonic()
-        if symbol.failing_since is None:
-            symbol.failing_since = now
-        failing_for = now - symbol.failing_since
         limit = result.read.core.config.max_outage
         symbol.cause = _cause(error)
-        attempts = max(symbol.attempts, 1)
-        if error.is_retryable and failing_for < limit:
-            delay = RETRY_DELAYS[attempts - 1] if attempts <= len(RETRY_DELAYS) else RETRY_EVERY
-            symbol.error = failure_text(error)
-            symbol.state = SymbolReadState.RETRYING
-            symbol.due = now + delay
-            heapq.heappush(
-                self._retries, (symbol.due, next(self._retry_numbers), id(result.read), name)
-            )
-            symbol.next_attempt_at = _now_ns() + int(delay * 1e9)
-            logger.debug(
-                "call %d follow %s: attempt %d failed in a way that may pass, %.0f s into its "
-                "run of failures (max_outage %g s); read again in %.0f s: %s",
-                result.read.call,
-                name,
-                attempts,
-                failing_for,
-                limit,
-                delay,
-                symbol.error,
-            )
-            return
-        if error.is_retryable:  # final only for its run's length
-            error = _outage_failure(name, error, failing_for=failing_for, limit=limit)
+        step = symbol.run.failed(error, name=name, now=CLOCK.monotonic(), limit=limit)
+        match step:
+            case Retry():
+                symbol.error = failure_text(error)
+                heapq.heappush(
+                    self._retries, (step.due, next(self._retry_numbers), id(result.read), name)
+                )
+                symbol.next_attempt_at = _now_ns() + int(step.delay * 1e9)
+                logger.debug(
+                    "call %d follow %s: attempt %d failed in a way that may pass, %.0f s into "
+                    "its run of failures (max_outage %g s); read again in %.0f s: %s",
+                    result.read.call,
+                    name,
+                    step.attempts,
+                    step.failing_for,
+                    limit,
+                    step.delay,
+                    symbol.error,
+                )
+                return
+            case Failed():
+                error, attempts = step.error, step.attempts
+            case _:
+                assert_never(step)
         symbol.error = failure_text(error)
-        symbol.state = SymbolReadState.FAILED
-        symbol.due = symbol.next_attempt_at = None
+        symbol.next_attempt_at = None
         first = symbol.cause not in result.warned
         result.warned.add(symbol.cause)
         mark_failure_logged(error)
@@ -1381,8 +1330,8 @@ class FollowCoordinator:
         if (
             result.ended
             or symbol is None
-            or symbol.state is not SymbolReadState.RETRYING
-            or symbol.due != due
+            or symbol.run.state is not SymbolReadState.RETRYING
+            or symbol.run.due != due
         ):
             logger.debug(
                 "call %d follow %s: a cancelled or replaced retry came due; dropped",
@@ -1390,8 +1339,8 @@ class FollowCoordinator:
                 name,
             )
             return
-        symbol.state = SymbolReadState.QUEUED
-        symbol.due = symbol.next_attempt_at = None
+        symbol.run.state = SymbolReadState.QUEUED
+        symbol.run.due = symbol.next_attempt_at = None
         result.dirty.add(name)
         self._enqueue(result, name)
         touched[id(result.read)] = result
@@ -1532,9 +1481,9 @@ class FollowCoordinator:
         result.ended = True
         result.stopped = True
         for name, symbol in result.symbols.items():
-            if symbol.state not in _ENDED:
-                symbol.state = SymbolReadState.STOPPED
-                symbol.due = symbol.next_attempt_at = None
+            if symbol.run.state not in _ENDED:
+                symbol.run.state = SymbolReadState.STOPPED
+                symbol.run.due = symbol.next_attempt_at = None
                 result.dirty.add(name)
         result.queue.clear()
         logger.debug("call %d follow: stopped", result.read.call)
@@ -1603,12 +1552,12 @@ class FollowCoordinator:
             stream_id=result.read.call,
             symbol=name,
             dataset=result.read.dataset,
-            state=symbol.state,
+            state=symbol.run.state,
             transport=symbol.transport,
             added_at=symbol.added_at,
             read_at=symbol.read_at if symbol.in_table or symbol.kept else None,
             rows=symbol.rows if symbol.in_table else 0,
-            attempts=symbol.attempts,
+            attempts=symbol.run.attempts,
             next_attempt_at=symbol.next_attempt_at,
             error=symbol.error,
             updated_at=now,
