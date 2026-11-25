@@ -4679,8 +4679,8 @@ def test_a_delayed_fetch_also_removes_a_real_time_pin_the_advice_would_contradic
         "and dm.Subscription.INDICES is not in delayed_subscriptions, so the library serves only "
         "real-time indices data. To accept delayed indices data, whose streams then use "
         "Massive's delayed feed too, pass "
-        "delayed_subscriptions={dm.Subscription.INDICES} to dm.MassiveConfig and remove the "
-        "indices pin 'socket.massive.com' from websocket_hosts."
+        "delayed_subscriptions={dm.Subscription.INDICES} to dm.MassiveConfig and remove "
+        "dm.AssetClass.INDICES from websocket_hosts."
     )
     # The advice works: MassiveConfig accepts the listed subscription without the indices pin.
     advised = dm.MassiveConfig(

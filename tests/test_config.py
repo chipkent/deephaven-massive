@@ -549,8 +549,8 @@ def test_the_delayed_fix_removes_a_pin_that_would_contradict_it() -> None:
     # A listed subscription may pin only a delayed feed, so the advice removes a real-time pin.
     pins = {AssetClass.STOCKS: "socket.massive.com"}
     assert delayed_fix(Subscription.STOCKS, listed=set(), pins=pins) == (
-        "Pass delayed_subscriptions={dm.Subscription.STOCKS} to dm.MassiveConfig and remove the "
-        "stocks pin 'socket.massive.com' from websocket_hosts."
+        "Pass delayed_subscriptions={dm.Subscription.STOCKS} to dm.MassiveConfig and remove "
+        "dm.AssetClass.STOCKS from websocket_hosts."
     )
     with pytest.raises(ValueError, match=r"websocket_hosts pins stocks to 'socket.massive.com'"):
         MassiveConfig(
@@ -575,7 +575,7 @@ def test_the_delayed_fix_without_a_known_set_still_removes_the_pin() -> None:
     pins = {AssetClass.FUTURES: "socket.massive.com"}
     assert delayed_fix(Subscription.FUTURES, pins=pins, purpose="To accept it") == (
         "To accept it, add dm.Subscription.FUTURES to delayed_subscriptions in dm.MassiveConfig "
-        "and remove the futures pin 'socket.massive.com' from websocket_hosts."
+        "and remove dm.AssetClass.FUTURES from websocket_hosts."
     )
 
 

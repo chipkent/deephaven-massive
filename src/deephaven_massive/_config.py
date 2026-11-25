@@ -841,8 +841,7 @@ def delayed_fix(
         dm.MassiveConfig."`, the members in `Subscription` order, or, without `listed`, `"Add
         dm.Subscription.OPTIONS to delayed_subscriptions in dm.MassiveConfig."`; with a
         purpose, `"To use Massive's delayed options feed, pass ..."`; with a contradicting pin,
-        `"... to dm.MassiveConfig and remove the stocks pin 'socket.massive.com' from
-        websocket_hosts."`.
+        `"... to dm.MassiveConfig and remove dm.AssetClass.STOCKS from websocket_hosts."`.
     """
     if listed is None:
         advice = (
@@ -857,7 +856,7 @@ def delayed_fix(
         advice = f"pass delayed_subscriptions={{{members}}} to dm.MassiveConfig"
     known: Mapping[AssetClass, str] = {} if pins is None else pins
     contradicting = [
-        f"the {asset_class} pin {host!r}"
+        f"dm.AssetClass.{asset_class.name}"
         for asset_class, host in known.items()
         if subscription_of(asset_class) is subscription and not host.startswith(DELAYED_PREFIX)
     ]
