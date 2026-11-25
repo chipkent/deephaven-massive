@@ -91,6 +91,7 @@ def test_a_bad_value_of_a_static_table_raises(dh_exec_ctx: ExecutionContext) -> 
         r"first 5: 'BRK-B' is not a Massive stock ticker\. ",
     ) as raised:
         dm.canonicalize_symbols(table, AssetClass.STOCKS, on_error=OnError.RAISE)
+    assert type(raised.value) is ValueError  # a plain one: no private class in a traceback
     message = str(raised.value)
     assert "'b4'" in message  # the first five in sorted order
     assert "'b5'" not in message
@@ -285,8 +286,9 @@ def test_the_row_converter_raises_or_nulls(caplog: pytest.LogCaptureFixture) -> 
     )
     assert strict(None) is None
     assert strict("EUR/USD") == "C:EURUSD"
-    with pytest.raises(ValueError, match=r"^'no pe!' is not a forex pair of two"):
+    with pytest.raises(ValueError, match=r"^'no pe!' is not a forex pair of two") as raised:
         strict("no pe!")
+    assert type(raised.value) is ValueError  # a plain one: no private class in a traceback
     lenient = _row_converter(
         convert, effect=effect_of(OnError.LOG), log=log, consequence="becomes a null S"
     )

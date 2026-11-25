@@ -18,10 +18,11 @@ owns that grammar and two things built on it:
   returns canonical text unchanged, converts the spellings its class or convention defines, and,
   for anything else, does what its `on_error` says: raises `ValueError` with a hint
   (`OnError.RAISE`, the default), or returns None and logs the value once (`LOG` at WARNING,
-  `IGNORE` at DEBUG). The table converter,
+  `IGNORE` at DEBUG). Inside the module a refusal is a `SymbolRefusalError`, which holds the
+  reason and the fix apart; a user meets it as a plain `ValueError`. The table converter,
   `dm.canonicalize_symbols` in `_tables/symbols.py`, takes its verdict and its effect from the
   same functions (`strict_converter`, `refusal`, `convert_under`), so a value converts, or is
-  refused with one reason, the same way in both.
+  refused with one reason, the same way in both, and `m.problems()` gets the reason alone.
 
 `option_roots` computes the `OptionRoot` column from canonical option symbols. The spellings
 Massive's transports write instead (`EUR/USD` in WebSocket forex frames, say) are read and
@@ -507,6 +508,35 @@ def is_forex_currency(code: str) -> bool:
 # --- the converters ------------------------------------------------------------------------------
 
 
+class SymbolRefusalError(ValueError):
+    """A converter's refusal of text: why it does not convert, and the fix, held apart.
+
+    A `ValueError`, so the converters' callers catch it as one. `reason` says what the text
+    is, with its value (`'msft' is not a Massive stock ticker, because Massive's tickers are
+    case-sensitive.`); `fix` is the imperative sentence that follows (`If you mean 'MSFT',
+    pass 'MSFT'.`), or empty when the reason makes the fix obvious. The message is the two
+    joined by a space, or the reason alone. A user never sees this class: `convert_under` and
+    `check_symbol` raise its message as a plain `ValueError`, and `m.problems()` takes
+    `reason` alone for its `Detail` (`_tables/refused_values.py`).
+
+    Attributes:
+        reason: What the text is, as sentences, with its value.
+        fix: What to pass instead, as an imperative sentence, or empty.
+    """
+
+    def __init__(self, reason: str, fix: str = "") -> None:
+        """Create the refusal from its two parts.
+
+        Args:
+            reason: What the text is, as sentences, with its value.
+            fix: What to pass instead, as an imperative sentence; empty when the reason makes
+                it obvious.
+        """
+        super().__init__(f"{reason} {fix}" if fix else reason)
+        self.reason: Final = reason
+        self.fix: Final = fix
+
+
 def _converter_name(asset_class: AssetClass) -> str:
     """Return the name of a class's public converter, for messages.
 
@@ -543,11 +573,11 @@ def _refuse_surrounding_whitespace(text: str) -> None:
         text: The text.
 
     Raises:
-        ValueError: If the text holds more than whitespace and starts or ends with some,
-            naming the stripped text.
+        SymbolRefusalError: If the text holds more than whitespace and starts or ends with
+            some, naming the stripped text.
     """
     if text.strip() and text != text.strip():
-        raise ValueError(f"{text!r} has surrounding whitespace. Pass {text.strip()!r}.")
+        raise SymbolRefusalError(f"{text!r} has surrounding whitespace.", f"Pass {text.strip()!r}.")
 
 
 def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
@@ -558,7 +588,7 @@ def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
         text: The text.
 
     Raises:
-        ValueError: If the text starts with the prefix of another class, for example
+        SymbolRefusalError: If the text starts with the prefix of another class, for example
             `'C:EURUSD' is a forex ticker, not a stock one. Call
             dm.canonical_symbol_forex('C:EURUSD').`
     """
@@ -566,9 +596,9 @@ def _refuse_other_prefix(asset_class: AssetClass, text: str) -> None:
     other = _CLASS_BY_PREFIX.get(prefix)
     if other is not None and other is not asset_class:
         found, wanted = _class_noun_with_article(other), _class_noun_with_article(asset_class)
-        raise ValueError(
-            f"{text!r} is {found} ticker, not {wanted} one. "
-            f"Call {_converter_name(other)}({text!r})."
+        raise SymbolRefusalError(
+            f"{text!r} is {found} ticker, not {wanted} one.",
+            f"Call {_converter_name(other)}({text!r}).",
         )
 
 
@@ -586,30 +616,30 @@ def _convert_stock(text: str) -> str:
         Nothing: it always raises; the return type is the converters' common one.
 
     Raises:
-        ValueError: Always. Separators of another convention (`-`, `/`, a space) lead with
-            the fix, Yahoo's convention, and name the others; all lower-case text says that
-            case matters and names the upper-case ticker to use if that is the one meant. It
-            is only offered,
-            never converted to: Massive's tickers are case-sensitive, so `kimpl` may mean
-            `KIMpL`.
+        SymbolRefusalError: Always. Separators of another convention (`-`, `/`, a space) lead
+            with the fix, Yahoo's convention, and name the others; all lower-case text says
+            that case matters and names the upper-case ticker to use if that is the one
+            meant. It is only offered, never converted to: Massive's tickers are
+            case-sensitive, so `kimpl` may mean `KIMpL`.
     """
     _refuse_other_prefix(AssetClass.STOCKS, text)
     _refuse_surrounding_whitespace(text)
     if text.strip() and _SEPARATORS.intersection(text):
-        raise ValueError(
-            f"{text!r} is not a Massive stock ticker. If it is Yahoo's spelling, convert it with "
-            f"dm.canonical_symbol({text!r}, dm.AssetClass.STOCKS, "
-            "convention=dm.SymbolConvention.YAHOO), or name dm.SymbolConvention.NASDAQ or "
-            "dm.SymbolConvention.CMS for those spellings."
+        raise SymbolRefusalError(
+            f"{text!r} is not a Massive stock ticker.",
+            f"If it is Yahoo's spelling, convert it with dm.canonical_symbol({text!r}, "
+            "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), or name "
+            "dm.SymbolConvention.NASDAQ or dm.SymbolConvention.CMS for those spellings.",
         )
     if is_lower_case(text):
-        raise ValueError(
+        raise SymbolRefusalError(
             f"{text!r} is not a Massive stock ticker, because Massive's tickers are "
-            f"case-sensitive. If you mean {text.upper()!r}, pass {text.upper()!r}."
+            "case-sensitive.",
+            f"If you mean {text.upper()!r}, pass {text.upper()!r}.",
         )
-    raise ValueError(
-        f"{text!r} is not a Massive stock ticker, which looks like 'AAPL', 'BRK.B', or "
-        "'KIMpL'. Pass the ticker as m.reference.tickers() lists it."
+    raise SymbolRefusalError(
+        f"{text!r} is not a Massive stock ticker, which looks like 'AAPL', 'BRK.B', or 'KIMpL'.",
+        "Pass the ticker as m.reference.tickers() lists it.",
     )
 
 
@@ -626,9 +656,9 @@ def _convert_option(text: str) -> str:
         `O:` and the OCC symbol, upper case.
 
     Raises:
-        ValueError: If the text is no OCC symbol with a real expiry date: an OCC-shaped
-            symbol whose date does not exist is refused for its date, and an underlying such
-            as `AAPL` is named as one; or if it names another class.
+        SymbolRefusalError: If the text is no OCC symbol with a real expiry date: an
+            OCC-shaped symbol whose date does not exist is refused for its date, and an
+            underlying such as `AAPL` is named as one; or if it names another class.
     """
     _refuse_other_prefix(AssetClass.OPTIONS, text)
     body = text.upper().removeprefix("O:")
@@ -640,19 +670,19 @@ def _convert_option(text: str) -> str:
         return symbol
     shaped = _OCC.fullmatch(symbol)
     if shaped is not None:
-        raise ValueError(
+        raise SymbolRefusalError(
             f"{text!r} has the shape of an OCC option symbol, but its expiry "
-            f"{shaped['expiry']}, read as YYMMDD, is not a real date. Pass the symbol as "
-            "m.options.contracts() lists it."
+            f"{shaped['expiry']}, read as YYMMDD, is not a real date.",
+            "Pass the symbol as m.options.contracts() lists it.",
         )
     if _STOCK.fullmatch(text) is not None:
-        raise ValueError(
-            f"{text!r} is an underlying, not an OCC option symbol such as "
-            f"'O:AAPL250117C00150000'. Pass a contract's symbol from m.options.contracts({text!r})."
+        raise SymbolRefusalError(
+            f"{text!r} is an underlying, not an OCC option symbol such as 'O:AAPL250117C00150000'.",
+            f"Pass a contract's symbol from m.options.contracts({text!r}).",
         )
-    raise ValueError(
-        f"{text!r} is not an OCC option symbol, which looks like 'O:AAPL250117C00150000'. "
-        "Pass the symbol as m.options.contracts() lists it."
+    raise SymbolRefusalError(
+        f"{text!r} is not an OCC option symbol, which looks like 'O:AAPL250117C00150000'.",
+        "Pass the symbol as m.options.contracts() lists it.",
     )
 
 
@@ -667,16 +697,16 @@ def _convert_future(text: str) -> str:
         Nothing: it always raises; the return type is the converters' common one.
 
     Raises:
-        ValueError: Always, naming the reason: another class's prefix names that class's
-            function, surrounding whitespace names the stripped text, and any other text gets
-            the forms a contract and a spread take; nothing is re-cased.
+        SymbolRefusalError: Always, naming the reason: another class's prefix names that
+            class's function, surrounding whitespace names the stripped text, and any other
+            text gets the forms a contract and a spread take; nothing is re-cased.
     """
     _refuse_other_prefix(AssetClass.FUTURES, text)
     _refuse_surrounding_whitespace(text)
-    raise ValueError(
+    raise SymbolRefusalError(
         f"{text!r} is not a Massive futures ticker. A contract looks like 'ESZ5' or 'NGZ26' and "
-        "a spread like 'GCQ6-GCZ6', in upper case. Pass the ticker as m.futures.contracts() "
-        "lists it."
+        "a spread like 'GCQ6-GCZ6', in upper case.",
+        "Pass the ticker as m.futures.contracts() lists it.",
     )
 
 
@@ -690,15 +720,15 @@ def _convert_single_future(text: str) -> str:
         The ticker unchanged.
 
     Raises:
-        ValueError: If the text is a spread (`canonical_symbol_future_spread` takes it) or no
-            futures ticker at all (`_convert_future`).
+        SymbolRefusalError: If the text is a spread (`canonical_symbol_future_spread` takes
+            it) or no futures ticker at all (`_convert_future`).
     """
     if is_futures_contract(text):
         return text
     if _is_spread(text):
-        raise ValueError(
-            f"{text!r} is a futures combo, such as a spread, not a single contract. "
-            f"Call dm.canonical_symbol_future_spread({text!r})."
+        raise SymbolRefusalError(
+            f"{text!r} is a futures combo, such as a spread, not a single contract.",
+            f"Call dm.canonical_symbol_future_spread({text!r}).",
         )
     return _convert_future(text)
 
@@ -713,21 +743,22 @@ def _convert_spread(text: str) -> str:
         The ticker unchanged.
 
     Raises:
-        ValueError: If the text is a single contract (`canonical_symbol_future` takes it), or
-            not in Massive's combo shape; the message describes it.
+        SymbolRefusalError: If the text is a single contract (`canonical_symbol_future` takes
+            it), or not in Massive's combo shape; the message describes it.
     """
     if _is_spread(text):
         return text
     if is_futures_contract(text):
-        raise ValueError(
-            f"{text!r} is a single futures contract, not a combo. "
-            f"Call dm.canonical_symbol_future({text!r})."
+        raise SymbolRefusalError(
+            f"{text!r} is a single futures contract, not a combo.",
+            f"Call dm.canonical_symbol_future({text!r}).",
         )
     _refuse_other_prefix(AssetClass.FUTURES, text)
     _refuse_surrounding_whitespace(text)
-    raise ValueError(
+    raise SymbolRefusalError(
         f"{text!r} is not a Massive futures combo ticker, which looks like 'GCQ6-GCZ6', "
-        "'BOB 02-01 U6', or 'CL:BF Q6-U6-V6'. Pass the ticker as m.futures.contracts() lists it."
+        "'BOB 02-01 U6', or 'CL:BF Q6-U6-V6'.",
+        "Pass the ticker as m.futures.contracts() lists it.",
     )
 
 
@@ -741,21 +772,21 @@ def _convert_index(text: str) -> str:
         `I:` and the root, such as `I:SPX`.
 
     Raises:
-        ValueError: If the root is not an index ticker, or the text names another class. A
-            root with a lower-case letter names the upper-case ticker to use, if that is the
-            one meant; it is only offered, never converted to.
+        SymbolRefusalError: If the root is not an index ticker, or the text names another
+            class. A root with a lower-case letter names the upper-case ticker to use, if that
+            is the one meant; it is only offered, never converted to.
     """
     _refuse_other_prefix(AssetClass.INDICES, text)
     symbol = text if text.startswith("I:") else f"I:{text}"
     if symbol != symbol.upper() and _INDEX.fullmatch(symbol.upper()) is not None:
-        raise ValueError(
-            f"{text!r} is not a Massive index ticker. Index tickers are upper case. If you mean "
-            f"{symbol.upper()!r}, pass {symbol.upper()!r}."
+        raise SymbolRefusalError(
+            f"{text!r} is not a Massive index ticker. Index tickers are upper case.",
+            f"If you mean {symbol.upper()!r}, pass {symbol.upper()!r}.",
         )
     if _INDEX.fullmatch(symbol) is None:
-        raise ValueError(
-            f"{text!r} is not a Massive index ticker, which looks like 'I:SPX'. Pass the ticker "
-            "as m.reference.tickers(market=dm.Market.INDICES) lists it."
+        raise SymbolRefusalError(
+            f"{text!r} is not a Massive index ticker, which looks like 'I:SPX'.",
+            "Pass the ticker as m.reference.tickers(market=dm.Market.INDICES) lists it.",
         )
     return symbol
 
@@ -831,24 +862,25 @@ def _convert_forex(text: str) -> str:
         `C:` and the two codes, such as `C:EURUSD`.
 
     Raises:
-        ValueError: If the codes are not two three-letter currency codes (text ending in `=X`,
-            Yahoo Finance's spelling, gets a message that shows Massive's form), or the text
-            names another class.
+        SymbolRefusalError: If the codes are not two three-letter currency codes (text ending
+            in `=X`, Yahoo Finance's spelling, gets a message that shows Massive's form), or
+            the text names another class.
     """
     _refuse_other_prefix(AssetClass.FOREX, text)
     symbol = read_forex_pair(text.upper(), ("C:",))
     if symbol is None and text.upper().endswith("=X"):
         # Yahoo Finance writes a pair as `EURUSD=X`; reading it would guess at another vendor's
         # grammar, so the message only shows Massive's form.
-        raise ValueError(
+        raise SymbolRefusalError(
             f"{text!r} is Yahoo Finance's spelling of a forex pair, which the library does not "
-            "read. Write the pair as 'EUR/USD', 'EUR-USD', or 'EURUSD', or pass Massive's "
-            "ticker, such as 'C:EURUSD'."
+            "read.",
+            "Write the pair as 'EUR/USD', 'EUR-USD', or 'EURUSD', or pass Massive's ticker, "
+            "such as 'C:EURUSD'.",
         )
     if symbol is None:
-        raise ValueError(
-            f"{text!r} is not a forex pair of two three-letter currency codes. Write it as "
-            "BASE/QUOTE, such as 'EUR/USD'."
+        raise SymbolRefusalError(
+            f"{text!r} is not a forex pair of two three-letter currency codes.",
+            "Write it as BASE/QUOTE, such as 'EUR/USD'.",
         )
     return symbol
 
@@ -866,19 +898,20 @@ def _convert_crypto(text: str) -> str:
         `X:` and the joined pair, such as `X:BTCUSD`.
 
     Raises:
-        ValueError: If the text is not a pair of letters and digits, is too short to hold a
-            base and a three-letter quote (`BTC` names one currency), or names another class.
+        SymbolRefusalError: If the text is not a pair of letters and digits, is too short to
+            hold a base and a three-letter quote (`BTC` names one currency), or names another
+            class.
     """
     _refuse_other_prefix(AssetClass.CRYPTO, text)
     symbol = read_crypto_pair(text.upper(), ("X:",))
     if symbol is None:
-        raise ValueError(
-            f"{text!r} is not a crypto pair. Write it as BASE-QUOTE, such as 'BTC-USD'."
+        raise SymbolRefusalError(
+            f"{text!r} is not a crypto pair.", "Write it as BASE-QUOTE, such as 'BTC-USD'."
         )
     if _CRYPTO.fullmatch(symbol) is None:
-        raise ValueError(
-            f"{text!r} is too short to hold a base currency and a quote currency. Write the pair "
-            "as BASE-QUOTE, such as 'BTC-USD'."
+        raise SymbolRefusalError(
+            f"{text!r} is too short to hold a base currency and a quote currency.",
+            "Write the pair as BASE-QUOTE, such as 'BTC-USD'.",
         )
     return symbol
 
@@ -894,9 +927,9 @@ _CONVERTERS: Final[dict[AssetClass, Callable[[str], str]]] = {
 
 _UNDOCUMENTED_SPELLINGS: Final = (
     "Massive documents no spelling for warrants, units, rights, when-issued, "
-    "when-distributed, called, or test issues, so the library converts none of them. Pass "
-    "Massive's own ticker, as m.reference.tickers() lists it."
+    "when-distributed, called, or test issues, so the library converts none of them."
 )
+"""The reason a convention's other spellings are refused, after the text's own sentence."""
 _STOCK_CONVENTIONS: Final[dict[SymbolConvention, tuple[tuple[re.Pattern[str], str], ...]]] = {
     SymbolConvention.YAHOO: (
         (re.compile(rf"^{_ROOT}$"), r"\g<root>"),
@@ -936,23 +969,27 @@ def _convert_stock_from(text: str, convention: SymbolConvention) -> str:
         series.
 
     Raises:
-        ValueError: If the text is not one of the convention's plain, class, or preferred
-            spellings. Surrounding whitespace names the stripped text, empty text says it is
-            empty, all lower-case text names the upper-case form, a Yahoo ticker
+        SymbolRefusalError: If the text is not one of the convention's plain, class, or
+            preferred spellings. Surrounding whitespace names the stripped text, empty text
+            says it is empty, all lower-case text names the upper-case form, a Yahoo ticker
             with a dot is named a foreign listing, and every other refusal says which
-            suffixes the library does not convert.
+            suffixes the library does not convert. Empty text and a foreign listing carry no
+            fix: the reason makes it obvious.
     """
     _refuse_surrounding_whitespace(text)
     if not text.strip():
-        raise ValueError(f"{text!r} is {'only whitespace' if text else 'empty'}, not a ticker.")
+        raise SymbolRefusalError(
+            f"{text!r} is {'only whitespace' if text else 'empty'}, not a ticker."
+        )
     _refuse_other_prefix(AssetClass.STOCKS, text)
     if is_lower_case(text):
-        raise ValueError(
+        raise SymbolRefusalError(
             f"{text!r} is not a {convention.name} ticker. The {convention.name} convention "
-            f"writes tickers in upper case. If you mean {text.upper()!r}, pass {text.upper()!r}."
+            "writes tickers in upper case.",
+            f"If you mean {text.upper()!r}, pass {text.upper()!r}.",
         )
     if convention is SymbolConvention.YAHOO and "." in text:
-        raise ValueError(
+        raise SymbolRefusalError(
             f"{text!r} is a Yahoo ticker of a listing outside the US, since Yahoo's dot names "
             "the exchange. Massive's stock tickers are US listings, so no Massive ticker matches "
             "it."
@@ -961,9 +998,10 @@ def _convert_stock_from(text: str, convention: SymbolConvention) -> str:
         match = pattern.fullmatch(text)
         if match is not None:
             return match.expand(template)
-    raise ValueError(
+    raise SymbolRefusalError(
         f"{text!r} is not a plain, class, or preferred ticker of the {convention.name} "
-        f"convention. {_UNDOCUMENTED_SPELLINGS}"
+        f"convention. {_UNDOCUMENTED_SPELLINGS}",
+        "Pass Massive's own ticker, as m.reference.tickers() lists it.",
     )
 
 
@@ -1047,7 +1085,7 @@ def strict_converter(asset_class: AssetClass, convention: SymbolConvention) -> C
     return convert
 
 
-def refusal(text: str, convert: Callable[[str], str]) -> str | None:
+def refusal(text: str, convert: Callable[[str], str]) -> SymbolRefusalError | None:
     """Return why text does not convert, or None when it does.
 
     Args:
@@ -1055,12 +1093,16 @@ def refusal(text: str, convert: Callable[[str], str]) -> str | None:
         convert: The strict verdict (`strict_converter`, or a futures form's converter).
 
     Returns:
-        The `ValueError` message, or None.
+        The refusal, with its `reason` and `fix` apart and the message they make as its
+        text; None for text that converts.
     """
     try:
         convert(text)
-    except ValueError as error:
-        return str(error)
+    except SymbolRefusalError as error:
+        # Returned as a value, the refusal must not keep its traceback: through the frames it
+        # holds, and each finished frame's caller, it reaches the caller's own locals and
+        # forms a cycle with them that only a garbage collection frees.
+        return error.with_traceback(None)
     return None
 
 
@@ -1094,13 +1136,17 @@ def convert_under(
         The canonical ticker, or None for text that does not convert when the effect does not
         fail.
 
-    Errors are those of `convert`, under an effect that fails.
+    Raises:
+        ValueError: Under an effect that fails, the converter's refusal, reason and fix
+            together.
     """
-    if effect.fails:
-        return convert(text)
     try:
         return convert(text)
-    except ValueError as error:
+    except SymbolRefusalError as error:
+        if effect.fails:
+            # A plain ValueError, from None: the public contract, so neither a traceback nor
+            # its chain shows the private class.
+            raise ValueError(str(error)) from None
         log.log(text, "%s: %r %s. %s", caller, text, consequence, error)
         return None
 
@@ -1695,7 +1741,9 @@ def check_symbol(
         )
     try:
         fixed = _CONVERTERS[resolved](text)
-    except ValueError as error:
+    except SymbolRefusalError as error:
+        # A plain ValueError, from None: the public contract, so neither a traceback nor its
+        # chain shows the private class.
         raise ValueError(str(error)) from None
     raise ValueError(
         f"{text!r} is not Massive's {CLASS_NOUNS[resolved]} ticker. Pass {fixed!r}, which "
