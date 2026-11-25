@@ -2630,14 +2630,19 @@ def read_aapl_and_msft_by_symbol(
     return tally.judge(TRADES.name, out)
 
 
-def test_a_symbol_whose_rows_are_all_unreadable_beside_one_read_whole_gets_no_rows(
+def test_a_symbol_whose_rows_are_all_unreadable_beside_one_read_whole_fails_alone(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
+    # Each symbol is judged by its own rows: AAPL's only row was withheld, so AAPL fails,
+    # and MSFT keeps its row.
     out = read_aapl_and_msft_by_symbol(session, fake_rest, msft_price=1.0)
     aapl, msft = out["AAPL"], out["MSFT"]
-    assert isinstance(aapl, SymbolRows)
+    assert isinstance(aapl, SymbolFailure)
+    assert str(aapl.error).startswith(
+        "stocks.trades: the library could not read the 1 row Massive sent for AAPL from "
+        "GET /v3/trades/AAPL whole, so it withheld it. "
+    )
     assert isinstance(msft, SymbolRows)
-    assert aapl.table.size == 0
     assert msft.table.size == 1
 
 
@@ -2650,7 +2655,10 @@ def test_a_read_by_symbol_whose_rows_are_all_unreadable_fails_each_symbol_alone(
         failed = out[symbol]
         assert isinstance(failed, SymbolFailure)
         assert isinstance(failed.error, RowDataError)
-        assert "could read none of the 2 rows of the read's symbols" in str(failed.error)
+        assert str(failed.error).startswith(
+            f"stocks.trades: the library could not read the 1 row Massive sent for {symbol} "
+            f"from GET /v3/trades/{symbol} whole, so it withheld it. "
+        )
 
 
 def test_a_symbol_massive_has_no_data_for_keeps_its_rows_when_the_read_fails(
@@ -2662,7 +2670,7 @@ def test_a_symbol_massive_has_no_data_for_keeps_its_rows_when_the_read_fails(
     assert isinstance(aapl, SymbolFailure)
     assert isinstance(aapl.error, RowDataError)
     assert isinstance(msft, SymbolRows)
-    assert (msft.table.size, msft.no_data) == (0, True)
+    assert msft.table.size == 0
 
 
 def test_unreadable_rows_outside_the_window_are_neither_published_nor_reported(
@@ -5722,10 +5730,10 @@ def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
         (reference.RELATED_COMPANIES, "Underlying"),
         (reference.MARKET_STATUS, None),  # its rows name no symbol
         (options_ns.OPEN_INTEREST, "Symbol"),  # the lookup prefixes Underlying, not Symbol
-        (options_ns.OPEN_INTEREST_BY_UNDERLYING, None),  # the lookup prefixes Symbol
+        (options_ns.OPEN_INTEREST_BY_UNDERLYING, "Symbol"),  # bare until the lookup prefixes it
     ],
 )
-def test_withheld_rows_are_grouped_by_the_asked_column_where_the_page_carries_it_canonical(
+def test_withheld_rows_are_grouped_by_the_asked_column_where_the_page_carries_it(
     session: dm.MassiveSession, spec: DatasetSpec, expected: str | None
 ) -> None:
     reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)

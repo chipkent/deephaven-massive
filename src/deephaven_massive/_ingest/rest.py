@@ -941,6 +941,7 @@ class RestReader:
         patience: Patience,
         where: str,
         others: Mapping[str, _OtherSpelling],
+        symbol: str | None,
     ) -> Withheld:
         """Give a page's index underlyings their `I:` the way the dataset's rows allow.
 
@@ -950,7 +951,7 @@ class RestReader:
         reference can't classify are withheld as `unreadable_symbols` and reported as
         `_page_rows` reports its own (`_report_withheld`); the call counts them with the
         page's withheld rows (`_Outcome.withheld`), grouped by the symbol as Massive sent it
-        and no known canonical symbol. A call that asked for an underlying by a bare ticker
+        and by `symbol`, as the page's are. A call that asked for an underlying by a bare ticker
         that names another instrument too then has its kept rows checked for that
         instrument's (`_warn_other_instruments` by root, `_check_index_rows` by CFI code); by
         bare underlying, the lookup itself warns about a ticker that names a stock too
@@ -966,6 +967,7 @@ class RestReader:
             where: The request template, for the events.
             others: The instruments the call's bare underlyings also name, by canonical
                 ticker (`_other_spellings`); empty for any other call.
+            symbol: The column the withheld rows are grouped by (`_withheld_symbol_column`).
 
         Returns:
             The rows to publish, and the rows the lookup withheld, grouped.
@@ -987,6 +989,7 @@ class RestReader:
                     rows,
                     functools.partial(self.root_kind, patience=patience, cancel=stop),
                     dataset=spec.name,
+                    symbol=symbol,
                 )
                 self._report_lookup_withheld(spec, by_root, where=where)
                 self._warn_other_instruments(spec, list(by_root.rows.to_batches()), others)
@@ -996,6 +999,7 @@ class RestReader:
                     rows,
                     functools.partial(self.underlying_kind, patience=patience, cancel=stop),
                     dataset=spec.name,
+                    symbol=symbol,
                 )
                 self._report_lookup_withheld(spec, by_underlying, where=where)
                 return by_underlying
@@ -1680,11 +1684,9 @@ class RestReader:
         `history()` window dropped (`keep_window`), and its rows given the library's time columns
         (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
         call's day zone follows its own symbols' class (`dates.day_class`). The rows the
-        library withholds are grouped by the asked column (`symbol_reads.asked_column`), so
-        that a read by symbol can tell which are its symbols'; by no column where the index
-        lookup (`_underlyings`) gives that column its `I:` only after the page is withheld
-        (`IndexPrefix.prefixed_by_lookup`), since such a row's bare `SPX` may be the asked
-        `I:SPX`.
+        library withholds, on the page and in the index lookup (`_underlyings`), are grouped by
+        the asked column (`_withheld_symbol_column`), so that a read by symbol can tell which
+        are its symbols'.
 
         Args:
             converter: The path's conversion.
@@ -1787,6 +1789,7 @@ class RestReader:
                         patience=patience,
                         where=f"GET {template}",
                         others=others,
+                        symbol=grouped,
                     )
                     kept.extend(looked_up.rows.to_batches())
                     parts.append(looked_up)
@@ -3645,24 +3648,22 @@ _DELAYED_TICKERS_SHOWN: Final = 5
 def _withheld_symbol_column(spec: DatasetSpec, converter: RowConverter) -> str | None:
     """Return the column a call's withheld rows are grouped by, for a read by symbol's count.
 
-    A withheld row counts as the request's unless its asked symbol names another
+    A withheld row counts for the asked symbol it would have gone to
     (`symbol_reads._attribute`), so the rows are grouped by the asked column
-    (`symbol_reads.asked_column`) where it is canonical as the page is withheld. Where the
-    index lookup gives that column its `I:` only afterwards (`IndexPrefix.prefixed_by_lookup`),
-    a withheld row's bare `SPX` may be the asked `I:SPX`, so its asked symbol is unknown and
-    the rows are grouped by no column.
+    (`symbol_reads.asked_column`) as it reads when the row is withheld. Where the index lookup
+    gives that column its `I:` only afterwards (`IndexPrefix.prefixed_by_lookup`), the value
+    is the bare ticker, which the read by symbol resolves against its request's asked
+    spellings (`symbol_reads._owners`).
 
     Args:
         spec: The dataset.
         converter: The path's conversion, whose schema says whether the rows carry the column.
 
     Returns:
-        The column, or None for a dataset whose rows lack it or whose lookup prefixes it.
+        The column, or None for a dataset whose rows lack it.
     """
     asked = asked_column(spec, converter.rest_path.template)
-    if asked not in converter.arrow_schema.names or spec.index_prefix.prefixed_by_lookup == asked:
-        return None
-    return asked
+    return asked if asked in converter.arrow_schema.names else None
 
 
 def _feed_refusal(refusal: EntitlementError) -> FeedRefusalError:

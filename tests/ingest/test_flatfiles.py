@@ -1049,6 +1049,43 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
         assert not failed.error.is_retryable
 
 
+def test_each_symbol_s_outcome_holds_only_its_own_rows(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+) -> None:
+    # One file for AAPL, MSFT, and NVDA: AAPL's only row has a price the library can't read,
+    # the file holds no row of MSFT, and NVDA's row reads whole. AAPL fails for its own row,
+    # naming itself; MSFT gets no rows and no failure; NVDA gets its row.
+    at = 1741012200000000000
+    unreadable = f"12,,4,1,{at},x,1,{at},10,1,AAPL,,\n"
+    fake_s3.put(
+        TRADES_0303,
+        gzip.compress((TRADE_HEADER + unreadable + trade(2, at + 2, "NVDA")).encode()),
+    )
+    asked = Request(start=date(2025, 3, 3), end=date(2025, 3, 3))
+    window = whole_days(STOCK_TRADES, "2025-03-03")
+    with dm.MassiveSession(CONFIG) as m:
+        out = files_transport(m).history_by_symbol(
+            STOCK_TRADES,
+            asked,
+            window,
+            symbols=["AAPL", "MSFT", "NVDA"],
+            dates=(date(2025, 3, 3),),
+            call=1,
+            forced=True,
+            logged=LoggedKeys(),
+        )
+        aapl, msft, nvda = out["AAPL"], out["MSFT"], out["NVDA"]
+        assert isinstance(aapl, SymbolFailure)
+        assert str(aapl.error).startswith(
+            "stocks.trades: the library could not read the 1 row Massive sent for AAPL from "
+            "the flat files of us_stocks_sip/trades_v1 whole, so it withheld it. "
+        )
+        assert isinstance(msft, SymbolRows)
+        assert msft.table.size == 0
+        assert isinstance(nvda, SymbolRows)
+        assert dh_arrow.to_arrow(nvda.table).column("Symbol").to_pylist() == ["NVDA"]
+
+
 def test_a_file_whose_every_line_is_malformed_fails_the_call(
     *,
     session: dm.MassiveSession,

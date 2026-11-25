@@ -269,9 +269,10 @@ class WithheldGroup:
 
     Attributes:
         fault: Their fault.
-        symbol: The canonical symbol the payload's consumer gives rows to by (a stream's
-            symbol, a request's asked symbol), or None when it is not known: the rows have
-            none, it could not be read, or it is canonical only after a later step.
+        symbol: The symbol the payload's consumer gives rows to by (a stream's symbol, a
+            request's asked symbol), as the rows read when withheld: canonical, or bare where
+            an index lookup gives it its `I:` only later (`IndexPrefix.prefixed_by_lookup`);
+            None when it is not known: the rows have none, or it could not be read.
         sent: Their symbol as Massive sent it, or None.
         field: The column that could not be read.
         rows: How many.
@@ -339,22 +340,6 @@ class Withheld:
             if group.symbol is not None:
                 found[group.symbol] = found.get(group.symbol, 0) + group.rows
         return found
-
-    def for_symbols(self, holds: Callable[[str], bool]) -> Withheld:
-        """Return the withheld rows one consumer of the payload would have received.
-
-        For a read by symbol, whose request's rows go to the symbols it named: the withheld
-        rows of those symbols, and those whose symbol is not known, which could be any
-        symbol's (`_groups_for`).
-
-        Args:
-            holds: Whether the consumer holds a canonical symbol.
-
-        Returns:
-            Those groups, in their order, with the first of them's reason; no rows.
-        """
-        groups = tuple(self._groups_for(holds))
-        return Withheld(pa.table({}), groups, groups[0].reason if groups else "")
 
     def events(
         self,

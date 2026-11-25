@@ -710,6 +710,7 @@ def canonical_underlyings(
     kind: KindOf,
     *,
     dataset: str,
+    symbol: str | None,
 ) -> Withheld:
     """Give the `Underlying` of each row on an index its `I:`, and withhold the rows it can't.
 
@@ -724,15 +725,18 @@ def canonical_underlyings(
         batches: A page's rows in the dataset's schema, with their `Date`; at least one.
         kind: Returns a root's kind (`RestReader.root_kind`).
         dataset: The dataset's name, for messages.
+        symbol: The column the withheld rows are grouped by, for a read by symbol to tell
+            whose they are (`withhold_rows`), or None.
 
     Returns:
         The rows to publish, each index underlying with its `I:`, and the withheld rows
-        grouped by their underlying as Massive sent it, for the reader to report.
+        grouped by their underlying as Massive sent it and by `symbol`, for the reader to
+        report.
 
     A failed lookup raises the `MassiveError` of `kind`.
     """
     marked = [_canonical(batch, kind, dataset=dataset) for batch in batches]
-    return withhold_rows(pa.Table.from_batches(marked), symbol=None)
+    return withhold_rows(pa.Table.from_batches(marked), symbol=symbol)
 
 
 def _canonical(batch: pa.RecordBatch, kind: KindOf, *, dataset: str) -> pa.RecordBatch:
@@ -873,6 +877,7 @@ def canonical_symbols(
     kind: UnderlyingKindOf,
     *,
     dataset: str,
+    symbol: str | None,
 ) -> Withheld:
     """Give the `Symbol` of each row on an index its `I:`, and withhold the rows it can't.
 
@@ -887,15 +892,17 @@ def canonical_symbols(
         batches: A page's rows in the dataset's schema, with their `Date`; at least one.
         kind: Returns a bare underlying's kind (`RestReader.underlying_kind`).
         dataset: The dataset's name, for messages.
+        symbol: The column the withheld rows are grouped by, for a read by symbol to tell
+            whose they are (`withhold_rows`), or None.
 
     Returns:
         The rows to publish, each index with its `I:`, and the withheld rows grouped by the
-        symbol as Massive sent it, for the reader to report.
+        symbol as Massive sent it and by `symbol`, for the reader to report.
 
     A failed lookup raises the `MassiveError` of `kind`.
     """
     marked = [_canonical_symbol(batch, kind, dataset=dataset) for batch in batches]
-    return withhold_rows(pa.Table.from_batches(marked), symbol=None)
+    return withhold_rows(pa.Table.from_batches(marked), symbol=symbol)
 
 
 def _canonical_symbol(

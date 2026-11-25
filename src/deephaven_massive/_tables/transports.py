@@ -167,15 +167,11 @@ class SymbolRows:
         skipped: Why the read sent no request for the symbol and gave it no rows: a crypto
             pair whose currencies, as Massive's crypto ticker list gives them, don't make up its
             ticker. `m.symbol_reads()` shows it in `Error`. None when the symbol was read.
-        no_data: True when Massive has no data for the symbol (HTTP 404 on its first
-            request), so its empty rows stand even when the rest of its read fails because
-            the library could read none of its rows whole (`ReadTally.judge`).
     """
 
     table: Table
     source: str | None = None
     skipped: str | None = None
-    no_data: bool = False
 
 
 @dataclass(frozen=True, slots=True)

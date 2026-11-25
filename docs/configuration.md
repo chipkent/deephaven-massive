@@ -148,8 +148,12 @@ A read or stream fails, whatever the setting, when Massive's rows stop being rea
 would otherwise hold nothing and show no error. The rows are Massive's data, and `m.problems()`
 gives what Massive sent and why, for a report to Massive.
 
-- A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows. For
-  a watchlist read, its symbols fail instead, and `m.symbol_reads()` shows them `FAILED`.
+- A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows.
+- A watchlist read judges each symbol by its own rows. A symbol that got no row fails when the
+  library withheld rows Massive sent for it, and `m.symbol_reads()` shows it `FAILED`. A
+  symbol Massive sent no rows for gets no rows and no failure, and a withheld row of another
+  symbol fails no one. A withheld row whose symbol the library can't read could be any symbol
+  the request named, so those symbols fail when the request kept no row at all.
 - A watchlist read without `wait=True` fails its table when every symbol it started with fails.
 - A `dm.ALL` stream fails after 100 unreadable rows with none read between them.
 - A stream of the symbols you list fails after 100 rows whose symbol it can't read, with none

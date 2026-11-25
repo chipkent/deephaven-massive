@@ -629,9 +629,8 @@ class HistoryQuery(Query):
             stop: A read's stop token, or None.
 
         Returns:
-            Each symbol's outcome (`RestTransport.history_by_symbol`); when the library could
-            read none of the read's rows whole, each symbol it gave rows fails
-            (`ReadTally.judge`).
+            Each symbol's outcome (`RestTransport.history_by_symbol`); a symbol that got no
+            row fails when the library withheld rows that were its own (`ReadTally.judge`).
         """
         spec = self._spec
         tally = ReadTally()
