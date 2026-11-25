@@ -102,9 +102,9 @@ def test_column_sets() -> None:
         "Evidence",
         "State",
         "Topics",
-        "AckedTopics",
+        "ConfirmedTopics",
         "PendingTopics",
-        "NoAckTopics",
+        "UnconfirmedTopics",
         "BufferedRows",
         "Reconnects",
         "LastMessageAt",
@@ -633,9 +633,9 @@ def test_fresh_rows_start_at_zero() -> None:
     )
     counts = (
         "Topics",
-        "AckedTopics",
+        "ConfirmedTopics",
         "PendingTopics",
-        "NoAckTopics",
+        "UnconfirmedTopics",
         "BufferedRows",
         "Reconnects",
     )

@@ -2902,7 +2902,7 @@ def stream_report(
         lines = [
             f"connection {r['Transport']} {r['AssetClass']}/{r['Family']} host={r['Host']} "
             f"recency={r['Recency']} evidence={r['Evidence']!r} state={r['State']} "
-            f"topics={r['Topics']} acked={r['AckedTopics']} pending={r['PendingTopics']} "
+            f"topics={r['Topics']} acked={r['ConfirmedTopics']} pending={r['PendingTopics']} "
             f"error={r['LastError']!r}"
             for r in table_rows(session.connections())
         ]
@@ -3155,7 +3155,7 @@ def wait_acked(
 
     Returns:
         A function `(session, topics, deadline)`, the deadline a `time.monotonic()` value: it
-        returns the sum of `AckedTopics` over the session's connections once it reaches
+        returns the sum of `ConfirmedTopics` over the session's connections once it reaches
         `topics`, once one of the session's streams has `FAILED`, or once the deadline has
         passed, whichever comes first.
     """
@@ -3163,7 +3163,7 @@ def wait_acked(
     def wait(session: MassiveSession, topics: int, deadline: float) -> int:
         pause = threading.Event()  # never set; only paces the polling
         while True:
-            acked = sum(int(r["AckedTopics"] or 0) for r in table_rows(session.connections()))
+            acked = sum(int(r["ConfirmedTopics"] or 0) for r in table_rows(session.connections()))
             failed = any(r["State"] == "FAILED" for r in table_rows(session.streams()))
             if acked >= topics or failed or time.monotonic() >= deadline:
                 return acked

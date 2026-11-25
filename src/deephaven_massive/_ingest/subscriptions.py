@@ -512,7 +512,7 @@ class Subscriptions:
                 self._resend_resolved(topic)
         if late:
             logger.info(
-                "generation %d: Massive acknowledged %s after all; they leave NoAckTopics",
+                "generation %d: Massive acknowledged %s after all; they leave UnconfirmedTopics",
                 self.generation,
                 bounded_list(sorted(late)),
             )
