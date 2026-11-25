@@ -688,6 +688,9 @@ def test_admin_messages_on_the_delayed_options_feed(
     assert state == "RUNNING", f"the admin messages stream is {state}: {error}"
 
 
+_REFUSAL_LINGER = 10.0
+"""Seconds the two-topic check keeps listening after the stream fails or the wait ends."""
+
 _FMV_SYMBOLS = ("AAPL", "MSFT")
 """Two stocks whose fair market value topics one subscribe frame asks for together."""
 
@@ -725,20 +728,23 @@ def test_a_refusal_of_two_topics_in_one_step_names_them(
     wait_acked: WaitAcked,
     table_rows: TableRows,
     stream_report: Report,
+    skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     evidence: Evidence,
 ) -> None:
     """Whether Massive names each topic in its refusal of a subscribe frame of two topics.
 
     Streams `m.stocks.fmv` of two symbols in one session, which subscribes both fair market
     value topics in one frame to `business.massive.com`, and records every status object Massive
-    sends on that connection while the library waits up to 45 s for both topics to be
-    acknowledged or the stream to fail. Records the stream's `Error` and, for each status,
-    which of the two symbols its message names. Skips, quoting the statuses, when Massive
-    acknowledged both topics and refused none: the key is entitled and there is no refusal to
-    read. Passes when Massive refused with at least one status. A refusal that names both
-    symbols means Massive refuses a step of several topics topic by topic, in text the library
-    can read; one that names neither or only one means it refuses the step as a whole, and the
-    library cannot tell which topic Massive refused. Fails when Massive neither acknowledged
+    sends on that connection. Waits up to 45 s for both topics to be acknowledged or the stream
+    to fail, then another 10 s so that a second refusal, if Massive sends one per topic, is
+    captured too. Records, for each status, which of the two symbols its message names. Skips,
+    quoting the statuses, when Massive acknowledged both topics and refused none: the key is
+    entitled and there is no refusal to read. Passes when Massive refused with at least one
+    status, since the refusal is the evidence, which reads three ways. A refusal naming both
+    symbols, or two refusals each naming one, mean Massive names the topics it refuses. A
+    refusal naming neither symbol means a step of several topics is refused as a whole, and the
+    library cannot tell which topic Massive refused. Skips, quoting Massive, when a stream
+    failed with a refusal and no status was captured. Fails when Massive neither acknowledged
     both topics nor refused any within the wait, since there is then nothing to record.
     """
     frames: list[CapturedReply] = []
@@ -754,6 +760,8 @@ def test_a_refusal_of_two_topics_in_one_step_names_them(
         try:
             table = session.stocks.fmv(list(_FMV_SYMBOLS)).blink()
             acked = wait_acked(session, len(_FMV_SYMBOLS), time.monotonic() + _WAIT)
+            if acked < len(_FMV_SYMBOLS):
+                threading.Event().wait(_REFUSAL_LINGER)  # never set; only waits for later frames
             for line in stream_report(session):
                 evidence(line)
             hosts = {
@@ -761,19 +769,20 @@ def test_a_refusal_of_two_topics_in_one_step_names_them(
                 for r in table_rows(session.connections())
                 if r["Transport"] == "WebSocket"
             }
+            with lock:
+                statuses = _status_messages(list(frames), hosts)
+            refused = [message for status, message in statuses if status == "error"]
+            if not refused:
+                skip_if_not_entitled(session)
             session.release(table)
         finally:
             session.close()
     finally:
         set_reply_capture(None)
-    with lock:
-        seen = list(frames)
-    statuses = _status_messages(seen, hosts)
     evidence(f"acknowledged topics {acked} of {len(_FMV_SYMBOLS)}; hosts {sorted(hosts)}")
     for status, message in statuses:
         named = [symbol for symbol in _FMV_SYMBOLS if symbol in message]
         evidence(f"status {status!r}: {message!r}; names {named or 'neither symbol'}")
-    refused = [message for status, message in statuses if status == "error"]
     if acked == len(_FMV_SYMBOLS) and not refused:
         pytest.skip(
             f"Massive acknowledged both fair market value topics, so nothing was refused: "

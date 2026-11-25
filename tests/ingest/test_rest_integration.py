@@ -279,8 +279,14 @@ def _ask(
 
 
 def _record_rows(label: str, rows: list[dict[str, Any]], evidence: Evidence) -> None:
-    """Record how many rows an answer has, and the first few of them."""
+    """Record how many rows an answer has, every row's `error`, and the first few rows."""
     evidence(f"{label}: {len(rows)} rows")
+    for row in rows:
+        if row.get("error"):
+            evidence(
+                f"    error row: ticker {row.get('ticker')!r}, error {row.get('error')!r}, "
+                f"message {row.get('message')!r}"
+            )
     for row in rows[:_ROWS_RECORDED]:
         evidence(f"    {str(row)[:_ROW_EXCERPT]}")
 
@@ -327,4 +333,7 @@ def test_a_list_request_with_an_unentitled_ticker(
     evidence(f"the whole request was refused: {answer.refusal}")
     for ticker in tickers:
         alone = _ask(live_rest, endpoint, [ticker], evidence=evidence)
-        evidence(f"{ticker} alone: {alone.refusal or f'HTTP 200, {len(alone.rows)} rows'}")
+        if alone.refusal is None:
+            _record_rows(f"{ticker} alone: HTTP 200", alone.rows, evidence)
+        else:
+            evidence(f"{ticker} alone: {alone.refusal}")

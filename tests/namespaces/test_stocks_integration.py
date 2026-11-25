@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import deephaven_massive as dm
+from deephaven_massive._ingest.recency_labels import TIMEFRAME_FIELDS
 from deephaven_massive._massive import RestClient, Transport, WireError, source
 from tests._live import recency, recorded_requests, streams
 from tests._live.calendar import is_trading_day, trading_day_after, trading_day_before
@@ -1437,6 +1438,22 @@ _MIXED_CLASSES = ("AAPL", "I:SPX")
 """A stock and an index, which the unified snapshot answers in one request."""
 
 
+def _timeframes(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return every recency label a snapshot row carries, by its dotted field.
+
+    Returns:
+        Each of `TIMEFRAME_FIELDS` the row has, with its value as sent.
+    """
+    found: dict[str, Any] = {}
+    for field in TIMEFRAME_FIELDS:
+        node: Any = row
+        for part in field.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node is not None:
+            found[field] = node
+    return found
+
+
 @pytest.mark.settles("149")
 @pytest.mark.requests(1)
 @pytest.mark.timeout(60)
@@ -1470,7 +1487,7 @@ def test_a_mixed_class_snapshot_labels_rows_not_the_envelope(
             key: row.get(key) for key in ("ticker", "type", "market_status", "error", "message")
         }
         label = recency.answered("row", "", [row]).text()
-        evidence(f"row {fields}; {label}")
+        evidence(f"row {fields}; timeframes {_timeframes(row)}; {label}")
     whole = recency.answered("answer", page.status, page.rows)
     evidence(whole.text())
     if not whole.delayed:
