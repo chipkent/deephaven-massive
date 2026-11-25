@@ -212,7 +212,9 @@ from deephaven_massive._ingest.rest_rows import (
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
 from deephaven_massive._ingest.stop_tokens import as_cancel
 from deephaven_massive._ingest.symbol_reads import (
+    RequestRows,
     RestUnit,
+    asked_column,
     fetch_units,
     history_units,
     read_rest_by_symbol,
@@ -248,6 +250,7 @@ from deephaven_massive._tables.withheld import (
     failure_of,
     logs_withheld,
     mark,
+    merged,
     placed,
     withhold_rows,
 )
@@ -263,6 +266,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._datasets.row_times import TimeRule
     from deephaven_massive._enums import ChannelFamily, PollMode
     from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._log_limits import BoundedLog
@@ -600,6 +604,11 @@ class _Outcome:
     Attributes:
         batches: Its rows, in the dataset's schema and then `SYMBOL_SENT`.
         requests: How many requests it made (pages, and a dropped symbol's 404).
+        withheld: The rows of its pages inside the window that the library withheld, grouped
+            (`_page_rows`, and the index lookup of `_underlyings`); no rows.
+        source: What the rows were read from, as the read's tally names it: the request as
+            sent, such as `GET /v3/trades/AAPL`, or the path template for a call that sent
+            none (`_unsplit_outcome`), which has no rows to name it for.
         missing: The symbol Massive has no data for, so left out, with the futures session it
             was asked for and why; None when the call was answered.
         received: How many rows Massive sent, before any was withheld, listed under its
@@ -608,8 +617,15 @@ class _Outcome:
 
     batches: tuple[pa.RecordBatch, ...]
     requests: int
+    withheld: Withheld
+    source: str
     missing: _Missing | None = None
     received: int = 0
+
+    @property
+    def rows(self) -> int:
+        """How many rows the call kept."""
+        return sum(batch.num_rows for batch in self.batches)
 
 
 class _PathRows(NamedTuple):
@@ -924,37 +940,35 @@ class RestReader:
         stop: Cancel,
         patience: Patience,
         where: str,
-        tally: ReadTally,
         others: Mapping[str, _OtherSpelling],
-    ) -> list[pa.RecordBatch]:
+    ) -> Withheld:
         """Give a page's index underlyings their `I:` the way the dataset's rows allow.
 
         `DatasetSpec.index_prefix` says how (`IndexPrefix`). The rows' `Date` is filled by
         now, which dates each lookup. By option root (`option_roots.canonical_underlyings`) or
         by bare underlying (`option_roots.canonical_symbols`), the rows Massive's contracts
         reference can't classify are withheld as `unreadable_symbols` and reported as
-        `_page_rows` reports its own (`_report_withheld`), and counted in `tally` as withheld,
-        since `_page_rows` counted them among the page's rows already: a read whose every row
-        is withheld fails. A call that asked for an underlying by a bare ticker that names
-        another instrument too then has its kept rows checked for that instrument's
-        (`_warn_other_instruments` by root, `_check_index_rows` by CFI code); by bare
-        underlying, the lookup itself warns about a ticker that names a stock too
+        `_page_rows` reports its own (`_report_withheld`); the call counts them with the
+        page's withheld rows (`_Outcome.withheld`), grouped by the symbol as Massive sent it
+        and no known canonical symbol. A call that asked for an underlying by a bare ticker
+        that names another instrument too then has its kept rows checked for that
+        instrument's (`_warn_other_instruments` by root, `_check_index_rows` by CFI code); by
+        bare underlying, the lookup itself warns about a ticker that names a stock too
         (`OptionRootKinds.underlying_kind`), since its row is Massive's total for the ticker.
 
         Args:
             spec: The dataset.
-            rows: The page's kept rows, with the library's time columns.
+            rows: The page's kept rows, with the library's time columns; at least one.
             stop: The read's token, which ends a lookup's waits.
             patience: The read's patience, taken on its own thread, which a lookup's pauses
                 are charged to: `_call` may run on a fan-out worker, whose own patience would
                 not know a console caller holds the update graph's lock.
             where: The request template, for the events.
-            tally: The read's count of its rows and of those withheld.
             others: The instruments the call's bare underlyings also name, by canonical
                 ticker (`_other_spellings`); empty for any other call.
 
         Returns:
-            The rows to publish.
+            The rows to publish, and the rows the lookup withheld, grouped.
 
         Raises:
             RowDataError: If rows are withheld and `unreadable_symbols` is `RAISE` in the
@@ -962,55 +976,46 @@ class RestReader:
 
         A failed lookup raises the `MassiveError` of `root_kind` or `underlying_kind`.
         """
-        if not rows:
-            return rows
         match spec.index_prefix:
             case IndexPrefix.NONE:
-                return rows
+                return Withheld(pa.Table.from_batches(rows))
             case IndexPrefix.FROM_CFI:
                 self._check_index_rows(spec, rows, others)
-                return rows
+                return Withheld(pa.Table.from_batches(rows))
             case IndexPrefix.BY_ROOT:
                 by_root = canonical_underlyings(
                     rows,
                     functools.partial(self.root_kind, patience=patience, cancel=stop),
                     dataset=spec.name,
                 )
-                kept = self._kept_underlyings(spec, by_root, where=where, tally=tally)
-                self._warn_other_instruments(spec, kept, others)
-                return kept
+                self._report_lookup_withheld(spec, by_root, where=where)
+                self._warn_other_instruments(spec, list(by_root.rows.to_batches()), others)
+                return by_root
             case IndexPrefix.BY_UNDERLYING:
                 by_underlying = canonical_symbols(
                     rows,
                     functools.partial(self.underlying_kind, patience=patience, cancel=stop),
                     dataset=spec.name,
                 )
-                return self._kept_underlyings(spec, by_underlying, where=where, tally=tally)
+                self._report_lookup_withheld(spec, by_underlying, where=where)
+                return by_underlying
             case _:
                 assert_never(spec.index_prefix)
 
-    def _kept_underlyings(
-        self, spec: DatasetSpec, withheld: Withheld, *, where: str, tally: ReadTally
-    ) -> list[pa.RecordBatch]:
-        """Report and count a lookup's withheld rows, and return the rows to publish.
+    def _report_lookup_withheld(self, spec: DatasetSpec, withheld: Withheld, *, where: str) -> None:
+        """Report a lookup's withheld rows, if any, as `_page_rows` reports its own.
 
         Args:
             spec: The dataset.
             withheld: The lookup's outcome: the rows to publish and the withheld groups.
             where: The request template, for the events.
-            tally: The read's count of its rows and of those withheld.
-
-        Returns:
-            The rows to publish.
 
         Raises:
             RowDataError: If rows are withheld and `unreadable_symbols` is `RAISE` in the
                 read's policy.
         """
         if withheld.groups:
-            tally.add(0, withheld, source=where)
             self._report_withheld(spec, withheld, where=where)
-        return list(withheld.rows.to_batches())
 
     def _warn_other_instruments(
         self,
@@ -1203,8 +1208,9 @@ class RestReader:
             patience: The patience of the whole read (`patience()`, taken once when the read
                 began, on its own thread): the most time its requests wait out pauses, shared
                 by every path of a read that spans several.
-            tally: The whole read's count of its rows and of those withheld, which the caller
-                checks after the read's last path (`ReadTally.check`).
+            tally: The whole read's count of its rows and of those withheld, which this read
+                adds each call's to, every row of a static read being the read's, and the
+                caller checks after the read's last path (`ReadTally.check`).
             on_missing: Given the symbols of the read Massive has no data for, each with why
                 (`_Outcome.missing`), in call order, when there are any; the caller then
                 applies `ErrorPolicy.unavailable_symbols` (a `poll()` cycle). None to apply
@@ -1235,7 +1241,6 @@ class RestReader:
                 spec=spec,
                 stop=stop,
                 patience=patience,
-                tally=tally,
             )
             if len(calls) <= 1:
                 outcomes = [run(call) for call in calls]
@@ -1249,6 +1254,10 @@ class RestReader:
                         spec, [o.missing for o in done if o.missing is not None]
                     ),
                 )
+        for outcome in outcomes:
+            tally.add(
+                outcome.rows + outcome.withheld.total, outcome.withheld, source=outcome.source
+            )
         missing = [o.missing for o in outcomes if o.missing is not None]
         if missing and on_missing is not None:
             on_missing(missing)
@@ -1274,8 +1283,7 @@ class RestReader:
         current: bool,
         cancel: Cancel | None,
         patience: Patience,
-        tally: ReadTally,
-    ) -> tuple[list[pa.Table | MassiveError | None], int]:
+    ) -> tuple[list[RequestRows | MassiveError | None], int]:
         """Make each planned request and return each one's rows or failure, in plan order.
 
         The read by symbol (`_ingest/symbol_reads.py`): unlike `read`, a request that fails
@@ -1287,8 +1295,8 @@ class RestReader:
         symbol Massive answered HTTP 404 on its first request has no data and follows
         `ErrorPolicy.unavailable_symbols`: under `LOG` and `IGNORE` it has no rows and one
         line per path names it (`_report_missing`); under `RAISE` its result is an
-        `UnavailableSymbolError`. Every page's rows count in `tally`, which the read's entry
-        point judges after its last part (`ReadTally.judge`).
+        `UnavailableSymbolError`. The read's tally counts nothing here: the caller counts each
+        request's rows once it knows which are the read's symbols' (`symbol_reads._attribute`).
 
         Args:
             spec: The dataset.
@@ -1300,15 +1308,12 @@ class RestReader:
             current: True when the pages are checked for a `DELAYED` label (`read`).
             cancel: Ends the read's waits when set, or None.
             patience: The patience of the whole read, shared by every request.
-            tally: The whole read's count of its rows and of those withheld, which this read
-                adds to and never checks.
 
         Returns:
-            Each request's rows (an Arrow table of the dataset's schema and then
-            `SYMBOL_SENT`, each row's symbol as Massive sent it), its `MassiveError`, or None
-            for a request of a symbol Massive has no data for, in plan order; and the number
-            of requests that were answered. A request whose rows are all withheld gives its
-            symbols no rows.
+            Each request's rows with its withheld rows and source (`RequestRows`), its
+            `MassiveError`, or None for a request of a symbol Massive has no data for, in plan
+            order; and the number of requests that were answered. A request whose rows are
+            all withheld gives its symbols no rows.
 
         Raises:
             AuthenticationError: If Massive rejects the API key on any request: every request
@@ -1331,7 +1336,6 @@ class RestReader:
                 current=current,
                 stop=stop,
                 patience=patience,
-                tally=tally,
             )
             if len(units) <= 1:
                 done = [run(unit) for unit in units]
@@ -1346,7 +1350,7 @@ class RestReader:
         missing = [o.missing for _, o in answered if o.missing is not None]
         if missing and not refused:
             self._report_missing(spec, missing)
-        results: list[pa.Table | MassiveError | None] = []
+        results: list[RequestRows | MassiveError | None] = []
         for (rest_path, _), outcome in zip(units, done, strict=True):
             if not isinstance(outcome, _Outcome):
                 results.append(outcome)
@@ -1356,7 +1360,8 @@ class RestReader:
             else:
                 schema = converters[rest_path.template].arrow_schema
                 sent = schema.append(pa.field(SYMBOL_SENT, pa.string()))
-                results.append(pa.Table.from_batches(outcome.batches, schema=sent))
+                rows = pa.Table.from_batches(outcome.batches, schema=sent)
+                results.append(RequestRows(rows, outcome.withheld, outcome.source))
         return results, sum(outcome.requests for _, outcome in answered)
 
     def _call_alone(
@@ -1371,7 +1376,6 @@ class RestReader:
         current: bool,
         stop: Cancel,
         patience: Patience,
-        tally: ReadTally,
     ) -> _Outcome | MassiveError:
         """Make one request of a read by symbol, returning its failure instead of raising it.
 
@@ -1385,7 +1389,6 @@ class RestReader:
             current: Whether the pages are checked for a `DELAYED` label.
             stop: The read's token.
             patience: The read's patience.
-            tally: The read's count of its rows and of those withheld.
 
         Returns:
             The request's outcome (`_call`), or the `MassiveError` it failed with.
@@ -1407,7 +1410,6 @@ class RestReader:
                 record=None,
                 stop=stop,
                 patience=patience,
-                tally=tally,
             )
         except AuthenticationError:
             raise  # every request of the read would be refused: the whole read fails
@@ -1506,7 +1508,9 @@ class RestReader:
             for symbol, why in found
         ]
 
-    def _unsplit_outcome(self, spec: DatasetSpec, call: Call, unsplit: Unsplit) -> _Outcome:
+    def _unsplit_outcome(
+        self, spec: DatasetSpec, call: Call, unsplit: Unsplit, *, template: str
+    ) -> _Outcome:
         """Return the outcome of a call for a crypto pair with no split, which sends no request.
 
         A pair Massive has no data for is named in `missing`, as HTTP 404 is. One whose
@@ -1517,18 +1521,23 @@ class RestReader:
             spec: The dataset.
             call: The call, planned for one pair.
             unsplit: Why the pair has no split (`call.unsplit`).
+            template: The call's path, which stands as the outcome's source: no request was
+                sent whose target could name it.
 
         Returns:
-            No rows and no request.
+            No rows, no request, and nothing withheld.
         """
         logger.debug(
             "%s: %s has no split (%s); no request is sent", spec.name, call.symbol, unsplit.why
         )
         symbol = required(call.symbol, "a split call's symbol")
+        nothing = Withheld(pa.table({}))
+        source = f"GET {template}"
         if unsplit.no_data:
-            return _Outcome((), 0, missing=_Missing(symbol, f"({unsplit.why})"))
+            missing = _Missing(symbol, f"({unsplit.why})")
+            return _Outcome((), 0, nothing, source, missing=missing)
         self.problems(self._unreadable_events(spec, [(symbol, unsplit.why)]))
-        return _Outcome((), 0, missing=None)
+        return _Outcome((), 0, nothing, source, missing=None)
 
     def _unreadable_events(
         self, spec: DatasetSpec, found: Sequence[tuple[str, str]]
@@ -1631,7 +1640,6 @@ class RestReader:
         record: Callable[[DriftReport], None] | None,
         stop: Cancel,
         patience: Patience,
-        tally: ReadTally,
     ) -> _Outcome:
         """Request one call's pages and convert their rows.
 
@@ -1641,7 +1649,12 @@ class RestReader:
         withheld and logs one WARNING per form of stamp per session), its rows outside the
         `history()` window dropped (`keep_window`), and its rows given the library's time columns
         (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
-        call's day zone follows its own symbols' class (`dates.day_class`).
+        call's day zone follows its own symbols' class (`dates.day_class`). The rows the
+        library withholds are grouped by the asked column (`symbol_reads.asked_column`), so
+        that a read by symbol can tell which are its symbols'; by no column where the index
+        lookup (`_underlyings`) gives that column its `I:` only after the page is withheld
+        (`IndexPrefix.prefixed_by_lookup`), since such a row's bare `SPX` may be the asked
+        `I:SPX`.
 
         Args:
             converter: The path's conversion.
@@ -1655,13 +1668,12 @@ class RestReader:
             record: Also given each page's drift, or None.
             stop: The read's token, which ends the call's waits.
             patience: The patience of the call's read, which its pause waits are charged to.
-            tally: The read's count of its rows and of those withheld (`_page_rows`).
 
         Returns:
-            The call's rows and request count; no rows for a symbol with no data, logged at
-            DEBUG and named in `missing`: a call planned with `Call.unsplit` for a pair Massive
-            has no data for, or a per-symbol call whose first request Massive answered with
-            HTTP 404. Any `Call.unsplit` sends no request.
+            The call's rows, request count, withheld rows, and source; no rows for a symbol
+            with no data, logged at DEBUG and named in `missing`: a call planned with
+            `Call.unsplit` for a pair Massive has no data for, or a per-symbol call whose first
+            request Massive answered with HTTP 404. Any `Call.unsplit` sends no request.
             `read` warns once per read for the symbols new to the session. Each page logs one
             DEBUG line with its rows after each step (`_page_rows`).
 
@@ -1677,19 +1689,24 @@ class RestReader:
         `rest_rows.RowConverter.convert`, a page on another adjustment basis the `MassiveError`
         of `_check_adjusted`, and delayed data the `EntitlementError` of `_check_recency`.
         """
+        template = converter.rest_path.template
         if call.unsplit is not None:
-            return self._unsplit_outcome(spec, call, call.unsplit)
+            return self._unsplit_outcome(spec, call, call.unsplit, template=template)
         kept: list[pa.RecordBatch] = []
+        parts: list[Withheld] = []
         requests = 0
         received_rows = 0
-        template = converter.rest_path.template
         # The path as sent, with the call's values in place of the template's placeholders.
         requested = f"GET {request_target(converter.rest_path, call.path_params, {})}"
-        own = call.symbols
-        zone_class = day_class(spec, map(symbol_class, own))
-        times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
+        times = time_rule(
+            spec,
+            request,
+            asset_class=day_class(spec, map(symbol_class, call.symbols)),
+            warnings=self.warnings,
+        )
         bucket = _request_bucket(spec, template, call)
         others = _other_spellings(request)
+        grouped = _withheld_symbol_column(spec, converter)
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
@@ -1711,59 +1728,38 @@ class RestReader:
                         spec,
                         page,
                         bucket=bucket,
-                        own=own,
+                        own=call.symbols,
                         call=call,
                         symbol_key=converter.symbol_key,
                         on_recency=on_recency,
                     )
                 self._check_adjusted(spec, request, template=template, echoed=page.adjusted)
-                batches, drift, flagged = converter.convert(page.rows, call.symbol)
-                if drift.extra:
-                    self.problems(
-                        drift_events(
-                            drift,
-                            dataset=spec.name,
-                            stream_id=self.stream_id,
-                            where=f"GET {template}",
-                            symbol=call.symbol,
-                        )
-                    )
-                if record is not None:
-                    record(drift)
-                self._warn_error_rows(converter, flagged, call.symbol, template=template)
-                if spec.ticker_list is not None:
-                    batches, unlisted = self._listed(spec, batches, own)
-                    self._report_unlisted(spec, unlisted, named=own, template=template)
-                # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
-                # unexpected stamp outside the window still logs its WARNING.
-                if times.stamps is not None:
-                    batches = [
-                        _stamped(times.stamps, spec.name, b, source=template, policy=self.policy)
-                        for b in batches
-                    ]
-                kept.extend(
-                    self._underlyings(
+                rows, withheld = self._page_rows(
+                    spec,
+                    self._page_batches(
+                        converter, page, call, spec=spec, times=times, record=record
+                    ),
+                    window=window,
+                    time_name=converter.time_name,
+                    fill=functools.partial(times.fill, received=received),
+                    where=f"GET {template}",
+                    page=f"{spec.name}: page {requests} of {template} for "
+                    f"{call.symbol or 'the request'}",
+                    read=len(page.rows),
+                    symbol=grouped,
+                )
+                parts.append(withheld)
+                if rows:
+                    looked_up = self._underlyings(
                         spec,
-                        self._page_rows(
-                            spec,
-                            batches,
-                            window=window,
-                            time_name=converter.time_name,
-                            fill=functools.partial(times.fill, received=received),
-                            where=f"GET {template}",
-                            requested=requested,
-                            page=f"{spec.name}: page {requests} of {template} for "
-                            f"{call.symbol or 'the request'}",
-                            read=len(page.rows),
-                            tally=tally,
-                        ),
+                        rows,
                         stop=stop,
                         patience=patience,
                         where=f"GET {template}",
-                        tally=tally,
                         others=others,
                     )
-                )
+                    kept.extend(looked_up.rows.to_batches())
+                    parts.append(looked_up)
         except WireError as error:
             return self._not_found(
                 error,
@@ -1772,10 +1768,66 @@ class RestReader:
                 requested=requested,
                 bucket=bucket,
                 window=window,
-                kept=kept,
                 requests=requests,
             )
-        return _Outcome(tuple(kept), requests, received=received_rows)
+        return _Outcome(tuple(kept), requests, merged(parts), requested, received=received_rows)
+
+    def _page_batches(
+        self,
+        converter: RowConverter,
+        page: Page,
+        call: Call,
+        *,
+        spec: DatasetSpec,
+        times: TimeRule,
+        record: Callable[[DriftReport], None] | None,
+    ) -> list[pa.RecordBatch]:
+        """Convert one page's rows, and fill and stamp them as the dataset's rows are.
+
+        The page's drift is reported (`drift_events`), its error rows warned about
+        (`_warn_error_rows`), its `Symbol` filled from each row's ticker list where the dataset
+        has one (`_listed`), and its bars of a day or longer stamped (`_stamped`).
+
+        Args:
+            converter: The path's conversion.
+            page: The page.
+            call: The call, whose symbols a ticker-list row must list.
+            spec: The dataset.
+            times: The call's time rule, whose stamps the bars take.
+            record: Also given the page's drift, or None.
+
+        Returns:
+            The page's rows, converted, with the mark columns.
+
+        A row that breaks the schema raises the `RowDataError` of
+        `rest_rows.RowConverter.convert`.
+        """
+        template = converter.rest_path.template
+        batches, drift, flagged = converter.convert(page.rows, call.symbol)
+        if drift.extra:
+            self.problems(
+                drift_events(
+                    drift,
+                    dataset=spec.name,
+                    stream_id=self.stream_id,
+                    where=f"GET {template}",
+                    symbol=call.symbol,
+                )
+            )
+        if record is not None:
+            record(drift)
+        self._warn_error_rows(converter, flagged, call.symbol, template=template)
+        if spec.ticker_list is not None:
+            batches, unlisted = self._listed(spec, batches, call.symbols)
+            self._report_unlisted(spec, unlisted, named=call.symbols, template=template)
+        # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
+        # unexpected stamp outside the window still logs its WARNING.
+        if times.stamps is not None:
+            batches = [
+                _stamped(times.stamps, spec.name, b, source=template, policy=self.policy)
+                for b in batches
+            ]
+        return batches
 
     def _not_found(
         self,
@@ -1786,7 +1838,6 @@ class RestReader:
         requested: str,
         bucket: str,
         window: HistoryWindow | None,
-        kept: Sequence[pa.RecordBatch],
         requests: int,
     ) -> _Outcome:
         """Settle a call's failed request: a symbol with no data, or the call's failure.
@@ -1800,14 +1851,15 @@ class RestReader:
             error: The request's failure.
             spec: The dataset.
             call: The call.
-            requested: The call's request as sent, such as `GET /v3/trades/AAPL`, for messages.
+            requested: The call's request as sent, such as `GET /v3/trades/AAPL`, for messages
+                and as the outcome's source.
             bucket: The call's rate-limit bucket, for the public error.
             window: The `history()` window whose rows the call keeps, or None.
-            kept: The rows the call kept before the failure.
             requests: How many of the call's requests were answered before the failure.
 
         Returns:
-            The call's outcome for a symbol with no data, the 404 counted as a request.
+            The call's outcome for a symbol with no data, the 404 counted as a request: no
+            rows and nothing withheld, since the 404 was its first answer.
 
         Raises:
             CutShortError: If a per-symbol call's later page answers HTTP 404, so the symbol's
@@ -1856,7 +1908,7 @@ class RestReader:
             error.message,
         )
         missing = _Missing(call.symbol, f"{scope} (HTTP 404 from {requested})".lstrip())
-        return _Outcome(tuple(kept), requests + 1, missing=missing)
+        return _Outcome((), requests + 1, Withheld(pa.table({})), requested, missing=missing)
 
     def _page_rows(
         self,
@@ -1867,11 +1919,10 @@ class RestReader:
         time_name: str,
         fill: Callable[[pa.RecordBatch], pa.RecordBatch],
         where: str,
-        requested: str,
         page: str,
         read: int,
-        tally: ReadTally,
-    ) -> list[pa.RecordBatch]:
+        symbol: str | None,
+    ) -> tuple[list[pa.RecordBatch], Withheld]:
         """Keep a page's rows of the window and its whole bars, withhold its marked rows, and fill.
 
         The rows the library could not read whole are withheld (`withheld.withhold_rows`) after
@@ -1880,12 +1931,11 @@ class RestReader:
         (`withheld.placed`), so a bar that is not the read's is never reported or counted;
         and before the time columns are filled for good. The withheld rows count in the page's
         drift, give the session their problem events, and log each unreadable symbol spelling
-        once at the level the read's `unreadable_symbols` gives. The page's rows inside the
-        window, and those withheld, are added to `tally`, which the read's entry point checks
-        after its last part (`ReadTally.check`), so a page whose rows are all withheld never
-        fails a read on its
-        own. Logs one DEBUG line per page with the rows left after each step, so an empty table
-        can be traced to the step that emptied it.
+        once at the level the read's `unreadable_symbols` gives. The call counts them with its
+        kept rows for the read's tally (`_Outcome.withheld`), which the read's entry point
+        checks after its last part (`ReadTally.check`), so a page whose rows are all withheld
+        never fails a read on its own. Logs one DEBUG line per page with the rows left after
+        each step, so an empty table can be traced to the step that emptied it.
 
         Args:
             spec: The dataset.
@@ -1894,21 +1944,21 @@ class RestReader:
             time_name: The dataset's time column, for `keep_window`.
             fill: Fills the library's time columns (`row_times.TimeRule.fill`).
             where: The request template, for the drift and the events.
-            requested: The request with its path filled in, such as `"GET /v3/trades/AAPL"`,
-                for the message of a read that withheld every row (`ReadTally.failure`).
             page: The dataset, page, path, and symbol, for the DEBUG line.
             read: How many rows the page held, before conversion.
-            tally: The read's count of its rows inside the window and of those withheld.
+            symbol: The column the withheld rows are grouped by, the asked symbol's where the
+                page carries it canonical (`_withheld_symbol_column`), or None.
 
         Returns:
-            The rows kept, with `SYMBOL_SENT` after the dataset's columns.
+            The rows kept, with `SYMBOL_SENT` after the dataset's columns, and the withheld
+            rows, grouped.
 
         Raises:
             RowDataError: If a cause of a withheld row is `RAISE` in the read's policy
                 (`withheld.failure_of`).
         """
         if not batches:
-            return []
+            return [], Withheld(pa.table({}))
         considered = sum(batch.num_rows for batch in batches)
         windowed = pa.Table.from_batches(
             [keep_window(batch, window, time=time_name) for batch in batches]
@@ -1918,7 +1968,6 @@ class RestReader:
             # outside it is neither reported nor counted, whatever is wrong with it.
             bounds = window.bars
             windowed = placed(windowed, lambda rows: whole(fill(rows), bounds))
-        symbol = _SYMBOL if _SYMBOL in windowed.schema.names else None
         # Each row's symbol as Massive sent it (the converter's `SENT`: the request's symbol on
         # a path whose rows carry none, null on a request that named none) stays on the kept
         # rows as `SYMBOL_SENT`, for a read by symbol to name a row it leaves out by that
@@ -1928,8 +1977,6 @@ class RestReader:
         )
         if withheld.groups:
             self._report_withheld(spec, withheld, where=where)
-        asked = windowed.num_rows
-        tally.add(asked, withheld, source=requested)
         kept = [fill(batch) for batch in withheld.rows.to_batches()]
         logger.debug(
             "%s: %d rows read, %d converted, %d in the window, %d withheld, %d kept as whole bars",
@@ -1940,7 +1987,7 @@ class RestReader:
             withheld.total,
             sum(batch.num_rows for batch in kept),
         )
-        return kept
+        return kept, withheld
 
     def _report_withheld(self, spec: DatasetSpec, withheld: Withheld, *, where: str) -> None:
         """Fail on a page's withheld rows under `RAISE`, or report them and go on.
@@ -3549,6 +3596,29 @@ class RestEndpoints:
 
 _DELAYED_TICKERS_SHOWN: Final = 5
 """How many tickers a refusal of delayed data names before it counts the rest."""
+
+
+def _withheld_symbol_column(spec: DatasetSpec, converter: RowConverter) -> str | None:
+    """Return the column a call's withheld rows are grouped by, for a read by symbol's count.
+
+    A withheld row counts as the request's unless its asked symbol names another
+    (`symbol_reads._attribute`), so the rows are grouped by the asked column
+    (`symbol_reads.asked_column`) where it is canonical as the page is withheld. Where the
+    index lookup gives that column its `I:` only afterwards (`IndexPrefix.prefixed_by_lookup`),
+    a withheld row's bare `SPX` may be the asked `I:SPX`, so its asked symbol is unknown and
+    the rows are grouped by no column.
+
+    Args:
+        spec: The dataset.
+        converter: The path's conversion, whose schema says whether the rows carry the column.
+
+    Returns:
+        The column, or None for a dataset whose rows lack it or whose lookup prefixes it.
+    """
+    asked = asked_column(spec, converter.rest_path.template)
+    if asked not in converter.arrow_schema.names or spec.index_prefix.prefixed_by_lookup == asked:
+        return None
+    return asked
 
 
 def _delayed_what(spec: DatasetSpec, tickers: Sequence[str]) -> str:

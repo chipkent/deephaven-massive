@@ -5,8 +5,11 @@ on several threads; an `AUTO` `history()` may read both. One unreadable row with
 row (`withheld.withhold_rows`); the read fails, whatever its policy, only when the library could
 read none of the rows of its symbols and window whole, a problem of every row it would publish.
 The read's entry point makes its one `ReadTally` and hands it to every part of the read, which
-adds each page's or file's counts as it is read and never checks it; the entry point checks it
-once, after the read's last part: `check` for a static read, `judge` for a read by symbol.
+adds each call's or file's rows of the read's symbols once it knows which rows those are (a
+static read's are all of a call's, `RestReader.read`; a read by symbol's are those its
+request's asked column names, `symbol_reads._attribute`; a flat-file scan's are its asked
+symbols', `flatfiles`), and never checks it; the entry point checks it once, after the read's
+last part: `check` for a static read, `judge` for a read by symbol.
 """
 
 from __future__ import annotations
@@ -47,13 +50,14 @@ class ReadTally:
         self._sources: dict[str, None] = {}
 
     def add(self, asked: int, withheld: Withheld, *, source: str) -> None:
-        """Count one page's or file's rows.
+        """Count one call's or file's rows.
 
         Args:
-            asked: The page's or file's rows of the read's symbols and window, withheld ones
+            asked: The call's or file's rows of the read's symbols and window, withheld ones
                 included.
-            withheld: The rows of those the library withheld.
-            source: What the page or file was read from, for the failure's message, such as
+            withheld: The rows of those the library withheld; its first reason is the first
+                such row's.
+            source: What the call or file was read from, for the failure's message, such as
                 `"GET /v2/aggs/..."` or `"the flat files of us_stocks_sip/trades_v1"`.
         """
         with self._lock:
@@ -63,20 +67,6 @@ class ReadTally:
                 self._sources.setdefault(source, None)
             if withheld.total and not self._first_reason:
                 self._first_reason = withheld.first_reason
-
-    def exclude(self, rows: int) -> None:
-        """Count out rows that were counted as the read's but belong to none of its symbols.
-
-        A page is counted when it is read (`add`), and the rows naming a symbol the read did
-        not ask for are found later, when the page's rows are given to the symbols
-        (`symbol_reads._attribute`). They are no rows of the read's symbols, so a read whose
-        own rows were all withheld fails although it received such rows too.
-
-        Args:
-            rows: How many rows to count out.
-        """
-        with self._lock:
-            self._asked -= rows
 
     @property
     def rows(self) -> int:

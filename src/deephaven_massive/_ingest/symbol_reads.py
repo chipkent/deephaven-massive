@@ -22,8 +22,11 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   `unrequested_symbols` problem, one event per symbol such rows name, by the symbol as
   Massive sent it (`ProblemEvent`; `SPX` for a row the table would name `I:SPX`), which
   `m.problems()` lists and the session's reporter alarms once per table; under `RAISE` the
-  request's symbols fail (`RowDataError`). A request's failure is the failure of each symbol
-  it names. A dataset whose rows list their tickers fills `Symbol` with the asked ticker each
+  request's symbols fail (`RowDataError`). The same rule says which of a request's rows are
+  the read's for its tally (`ReadTally`): its kept rows of the symbols it names, and its
+  withheld rows but those whose asked symbol names another symbol, so a withheld row of
+  another symbol never fails the request's own. A request's failure is the failure of each
+  symbol it names. A dataset whose rows list their tickers fills `Symbol` with the asked ticker each
   row lists before this step (`rest._listed_rows`), so its rows follow the same rule. A
   flat-file scan reads every symbol at once (`history_reads.read_history_by_symbol`): its rows
   are split by `Symbol` (`split_by_symbol`) under the same rule, and its failure is every
@@ -60,8 +63,8 @@ import functools
 import logging
 import time
 from collections import Counter
-from dataclasses import replace
-from typing import TYPE_CHECKING, TypeAlias
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, TypeAlias, assert_never
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -97,7 +100,7 @@ from deephaven_massive._tables.execution_context import entered, holds_update_gr
 from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
-from deephaven_massive._tables.withheld import SYMBOL_SENT
+from deephaven_massive._tables.withheld import SYMBOL_SENT, Withheld
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -115,6 +118,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = [
+    "RequestRows",
     "RestUnit",
     "UnsupportedParameterError",
     "asked_column",
@@ -130,6 +134,25 @@ logger = logging.getLogger(__name__)
 
 RestUnit: TypeAlias = "tuple[RestPath, Call]"
 """One planned request of a read by symbol, with the path it reads."""
+
+
+@dataclass(frozen=True, slots=True)
+class RequestRows:
+    """What one answered request of a read by symbol returned (`RestReader.read_each`).
+
+    Attributes:
+        rows: Its rows, an Arrow table of the dataset's schema and then `SYMBOL_SENT`, each
+            row's symbol as Massive sent it.
+        withheld: The rows of its pages inside the window that the library withheld, grouped
+            by the asked column where the page carries it canonical, else by no symbol
+            (`rest._withheld_symbol_column`); no rows.
+        source: What the rows were read from, as the read's tally names it, such as
+            `GET /v3/trades/AAPL`.
+    """
+
+    rows: pa.Table
+    withheld: Withheld
+    source: str
 
 
 class UnsupportedParameterError(PermanentError):
@@ -332,8 +355,9 @@ def read_rest_by_symbol(
 
     Each request's rows go to the symbols it names (see the module docstring), and each
     symbol's rows become one static table, in plan order. A symbol whose every request Massive
-    had no data for is marked so (`SymbolRows.no_data`). The rows count in `tally`, which the
-    read's entry point judges (`ReadTally.judge`); this read never does.
+    had no data for is marked so (`SymbolRows.no_data`). Each answered request's rows of its
+    symbols count in `tally` (`_attribute`), which the read's entry point judges
+    (`ReadTally.judge`); this read never does.
 
     Args:
         reader: The reader of the session's paths.
@@ -369,7 +393,6 @@ def read_rest_by_symbol(
         current=current,
         cancel=cancel,
         patience=patience,
-        tally=tally,
     )
     logger.debug(
         "call %d %s by symbol: %d of %d requests answered, waiting out at most %.0f s of pauses",
@@ -390,7 +413,7 @@ def read_rest_by_symbol(
                 failures.setdefault(symbol, result)
         elif result is None:
             absent.update(own)
-        else:
+        elif isinstance(result, RequestRows):
             answered.update(own)
             unrequested = _attribute(
                 reader,
@@ -404,6 +427,8 @@ def read_rest_by_symbol(
             if unrequested is not None:
                 for symbol in own:
                     failures.setdefault(symbol, unrequested)
+        else:
+            assert_never(result)
     empty = core.dataset_schema(spec).arrow_schema().empty_table()
     tables = {
         symbol: to_table(pa.concat_tables(rows) if rows else empty)
@@ -563,7 +588,7 @@ def asked_column(spec: DatasetSpec, template: str) -> str:
 def _attribute(
     reader: RestReader,
     spec: DatasetSpec,
-    rows: pa.Table,
+    answered: RequestRows,
     *,
     template: str,
     planned: Call,
@@ -577,20 +602,26 @@ def _attribute(
     not, or no symbol, is left out: the read's `unrequested_symbols` problem, one event per
     symbol such rows name, by the symbol as Massive sent it (`SYMBOL_SENT`; `ProblemEvent`),
     with the table's spelling in the detail where it differs, handed to the session's
-    reporter, which alarms once per table and lists each in `m.problems()`. Its page counted
-    it among the read's rows (`ReadTally.add`), so it is counted out again, as no row of the
-    read's symbols. A request that failed has no rows to give, so none of its rows is left
-    out: its failure is its symbols' outcome.
+    reporter, which alarms once per table and lists each in `m.problems()`. The same rule
+    counts the request's rows for the read's tally (`ReadTally.add`), once, here: its kept
+    rows of the symbols it named, and its withheld rows but those whose asked symbol names
+    another (`Withheld.for_symbols`). A withheld row whose asked symbol is not known, a
+    symbol the library could not read or one its index lookup would have prefixed, could be
+    any symbol's, so it stays the request's, and the tally's reason is the first such row's.
+    The withheld rows were reported under their own cause at the page, by the symbol as
+    Massive sent it, so none is reported here again. A request that failed has no rows to
+    give, so none of its rows is left out or counted: its failure is its symbols' outcome.
 
     Args:
         reader: The reader, whose policy and problem sink the read uses.
         spec: The dataset.
-        rows: The request's rows, with `SYMBOL_SENT` after the dataset's columns
-            (`RestReader.read_each`); the symbols get them without it.
+        answered: The request's rows, with `SYMBOL_SENT` after the dataset's columns, its
+            withheld rows, and its source (`RestReader.read_each`); the symbols get the rows
+            without `SYMBOL_SENT`.
         template: The request's path, for the events.
         planned: The request, whose symbols are those it named (`Call.symbols`).
         pieces: Each symbol's rows so far, which receive the request's.
-        tally: The read's count of its rows, which the rows left out are counted out of.
+        tally: The read's count of its rows and of those withheld, which the request's add to.
 
     Returns:
         The failure of the request's symbols when a row was left out under
@@ -598,8 +629,8 @@ def _attribute(
     """
     own = planned.symbols
     column = asked_column(spec, template)
-    sent = rows[SYMBOL_SENT]
-    rows = rows.drop_columns([SYMBOL_SENT])
+    sent = answered.rows[SYMBOL_SENT]
+    rows = answered.rows.drop_columns([SYMBOL_SENT])
     symbols = rows[column]
     for symbol in own:
         mine = pc.equal(symbols, symbol)
@@ -612,9 +643,11 @@ def _attribute(
     others = Counter(
         zip(pc.filter(sent, left).to_pylist(), pc.filter(symbols, left).to_pylist(), strict=True)
     )
+    withheld = answered.withheld.for_symbols(own.__contains__)
+    kept = rows.num_rows - sum(others.values())
+    tally.add(kept + withheld.total, withheld, source=answered.source)
     if not others:
         return None
-    tally.exclude(sum(others.values()))
     return _report_unrequested(reader, spec, others, own=own, column=column, template=template)
 
 
@@ -714,7 +747,8 @@ def split_by_symbol(
     rows. A row naming none of the symbols, or null, belongs to no symbol: it is left out as
     an `unrequested_symbols` problem, one event per symbol such rows name, handed to the
     session's reporter, which alarms once per table and lists each in `m.problems()`. The
-    scan counted only the asked symbols' rows (`ReadTally.add`), so none is counted out.
+    scan counted only the asked symbols' rows in the read's tally (`ReadTally.add`), so the
+    rows left out were never the read's.
 
     Args:
         core: The session's core, whose execution context the split runs in and whose

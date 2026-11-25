@@ -144,6 +144,25 @@ def test_internal_enums() -> None:
     assert not hasattr(dm, "IndexPrefix")
 
 
+@pytest.mark.parametrize("prefix", list(IndexPrefix))
+def test_every_index_prefix_names_the_column_its_lookup_prefixes(prefix: IndexPrefix) -> None:
+    # The rows of the two lookup datasets name an index bare in one column until the lookup.
+    expected = {
+        IndexPrefix.NONE: None,
+        IndexPrefix.FROM_CFI: None,
+        IndexPrefix.BY_ROOT: "Underlying",
+        IndexPrefix.BY_UNDERLYING: "Symbol",
+    }
+    assert prefix.prefixed_by_lookup == expected[prefix]
+
+
+def test_an_index_prefix_no_case_handles_names_no_column() -> None:
+    # The property itself, past the member lookup, so a value that is no member reaches it.
+    unbound = vars(IndexPrefix)["prefixed_by_lookup"]
+    with pytest.raises(AssertionError, match="got: 'other'"):
+        unbound.fget("other")
+
+
 def test_require_enum_returns_members() -> None:
     assert _require_enum(dm.Timespan.MINUTE, dm.Timespan, "timespan") is dm.Timespan.MINUTE
 

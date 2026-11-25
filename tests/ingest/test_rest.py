@@ -65,6 +65,7 @@ from deephaven_massive._ingest import (
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, CryptoTickers
 from deephaven_massive._ingest.rate_limits import Waiter
+from deephaven_massive._ingest.rest_rows import RowConverter
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Cancel, RestPath, Transport
@@ -81,6 +82,7 @@ from deephaven_massive._tables.transports import (
     SymbolOutcome,
     SymbolRows,
 )
+from deephaven_massive._tables.withheld import Withheld
 from deephaven_massive.namespaces import _crypto as crypto_ns
 from deephaven_massive.namespaces import _futures as futures_ns
 from deephaven_massive.namespaces import _options as options_ns
@@ -5661,7 +5663,6 @@ def _not_found(
         requested=f"GET /v3/trades/{symbol}",
         bucket="stocks",
         window=None,
-        kept=[],
         requests=requests,
     )
 
@@ -5674,8 +5675,29 @@ def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
     )
     outcome = _not_found(session, error, symbol="ZZZZ", requests=0)
     missing = rest._Missing("ZZZZ", "(HTTP 404 from GET /v3/trades/ZZZZ)")
-    assert outcome == rest._Outcome((), 1, missing=missing)
+    nothing = Withheld(pa.table({}))
+    assert outcome == rest._Outcome((), 1, nothing, "GET /v3/trades/ZZZZ", missing=missing)
     assert str(missing) == "ZZZZ (HTTP 404 from GET /v3/trades/ZZZZ)"
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [
+        (TRADES, "Symbol"),
+        (reference.RELATED_COMPANIES, "Underlying"),
+        (reference.MARKET_STATUS, None),  # its rows name no symbol
+        (options_ns.OPEN_INTEREST, "Symbol"),  # the lookup prefixes Underlying, not Symbol
+        (options_ns.OPEN_INTEREST_BY_UNDERLYING, None),  # the lookup prefixes Symbol
+    ],
+)
+def test_withheld_rows_are_grouped_by_the_asked_column_where_the_page_carries_it_canonical(
+    session: dm.MassiveSession, spec: DatasetSpec, expected: str | None
+) -> None:
+    reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
+    template = spec.fetch_path or spec.history_path
+    assert template is not None
+    converter = RowConverter.build(reader.catalog, spec, reader.rest_path(template))
+    assert rest._withheld_symbol_column(spec, converter) == expected
 
 
 def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:

@@ -26,7 +26,7 @@ private. `subscription_of` maps an asset class to the subscription that covers i
 from __future__ import annotations
 
 from enum import Enum, StrEnum
-from typing import TypeVar, overload
+from typing import TypeVar, assert_never, overload
 
 __all__ = [
     "AssetClass",
@@ -657,6 +657,27 @@ class IndexPrefix(StrEnum):
     """`Symbol` is the bare underlying, with no contract: one lookup of Massive's contracts list
     per bare ticker (`_ingest/option_roots.py`). The dataset's symbols are stock and index
     tickers (`DatasetSpec.symbols_class`)."""
+
+    @property
+    def prefixed_by_lookup(self) -> str | None:
+        """The column whose bare index tickers get their `I:` by a lookup, once the rows are read.
+
+        Until the lookup, a row of such a dataset may name an index bare in that column (`SPX`
+        for `I:SPX`), so the column is canonical only after it.
+
+        Returns:
+            `Underlying` for `BY_ROOT`, `Symbol` for `BY_UNDERLYING`; None for `NONE` and
+            `FROM_CFI`, whose rows arrive canonical.
+        """
+        match self:
+            case IndexPrefix.NONE | IndexPrefix.FROM_CFI:
+                return None
+            case IndexPrefix.BY_ROOT:
+                return "Underlying"
+            case IndexPrefix.BY_UNDERLYING:
+                return "Symbol"
+            case _:
+                assert_never(self)
 
 
 def _require_enum(value: object, enum_type: type[_E], name: str) -> _E:

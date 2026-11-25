@@ -17,6 +17,7 @@ import logging
 import re
 import threading
 from datetime import UTC, date, datetime, time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -1811,12 +1812,16 @@ def test_an_index_prefix_no_case_handles_fails_the_read(
 ) -> None:
     fake_rest.reply("/options/v1/open-interest", Reply({"status": "OK", "results": [LIST_ROW]}))
     spec = options.OPEN_INTEREST
-    object.__setattr__(spec, "index_prefix", "other")  # past the frozen spec's checks
+    # Past the frozen spec's checks: a value that is no member, which names no column the
+    # lookup prefixes, so the page is read and the lookup meets it.
+    other = SimpleNamespace(prefixed_by_lookup=None)
+    object.__setattr__(spec, "index_prefix", other)
     try:
         # The verb reports the defect as the library's, with the refused value.
         with pytest.raises(
             dm.MassiveError,
-            match=r"unexpected error: AssertionError\(.*got: 'other'.\)\. This is a bug",
+            match=r"unexpected error: AssertionError\(.*got: namespace\(prefixed_by_lookup=None\)"
+            r".\)\. This is a bug",
         ):
             rest_session.options.open_interest().fetch(wait=True)
     finally:

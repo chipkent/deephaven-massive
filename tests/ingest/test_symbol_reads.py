@@ -36,7 +36,7 @@ from deephaven_massive._errors import (
     UnavailableSymbolError,
     session_closed,
 )
-from deephaven_massive._ingest import rate_limits
+from deephaven_massive._ingest import rate_limits, rest
 from deephaven_massive._ingest.symbol_reads import (
     UnsupportedParameterError,
     asked_column,
@@ -51,6 +51,7 @@ from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive.namespaces import _futures as futures
+from deephaven_massive.namespaces import _options as options
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
@@ -164,7 +165,23 @@ INDEX = DatasetSpec(
     symbol_param="ticker.any_of",
     keys={(R, INDEX_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
 )
-SPECS = (DIVIDENDS, LISTED, CRYPTO_LAST, PREV, TRADES, RELATED, RATINGS, INDEX)
+SPECS = (
+    DIVIDENDS,
+    LISTED,
+    CRYPTO_LAST,
+    PREV,
+    TRADES,
+    RELATED,
+    RATINGS,
+    INDEX,
+    # The datasets whose index lookup prefixes a column after the page is read: the open
+    # interest by contract (`Underlying`) and by underlying (`Symbol`).
+    options.OPEN_INTEREST,
+    options.OPEN_INTEREST_BY_UNDERLYING,
+)
+BY_ROOT_PATH = "/options/v1/open-interest"
+BY_UNDERLYING_PATH = "/options/v1/open-interest/underlying"
+CONTRACTS_LIST_PATH = "/v3/reference/options/contracts"
 
 TICKERS_PATH = "/v3/reference/tickers"
 MONDAY = date(2025, 3, 3)
@@ -203,6 +220,35 @@ def _dividend(ticker: str, amount: float) -> dict[str, object]:
 
 def _trade(nanos: int) -> dict[str, object]:
     return {"sip_timestamp": nanos, "price": 1.0, "size": 10}
+
+
+def _contract_open_interest(contract: str, open_interest: object) -> dict[str, object]:
+    # One row of the open interest by contract; `root` names the contract's option root.
+    root = contract[2:].rstrip("0123456789CP")
+    return {
+        "ticker": contract,
+        "root": root,
+        "date": "2026-01-23",
+        "underlying_ticker": root,
+        "open_interest": open_interest,
+    }
+
+
+def _underlying_open_interest(underlying: str, open_interest: object) -> dict[str, object]:
+    # One row of the open interest by underlying: Massive writes an index bare (`SPX`).
+    return {
+        "underlying_ticker": underlying,
+        "date": "2026-01-23",
+        "open_interest": open_interest,
+        "open_interest_calls": 1,
+        "open_interest_puts": 2,
+    }
+
+
+def _serve_index_list(server: FakeRestServer, *names: str) -> None:
+    # Massive's index ticker list, which the index lookup reads once per session.
+    rows = [{"ticker": f"I:{name}", "market": "indices"} for name in names]
+    server.reply(TICKERS_PATH, Reply(envelope(rows)))
 
 
 def _fetch(
@@ -422,6 +468,160 @@ def test_a_row_of_another_symbol_is_no_row_of_the_read_s_symbols(
         (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", 1),
         (ProblemCause.UNREQUESTED_SYMBOLS, "IBM", 1),
     ]
+
+
+def test_a_request_answered_with_only_another_symbol_s_rows_fails_no_symbol(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Massive answers AAPL's request with two IBM rows, one of them unreadable. Neither is
+    # AAPL's, withheld or not: AAPL gets no rows and no failure. The withheld row stays an
+    # unconvertible_values problem under IBM, and the kept one an unrequested_symbols problem.
+    events = _problems(session, monkeypatch)
+    rows = [{**_dividend("IBM", 1.67), "cash_amount": "a lot"}, _dividend("IBM", 1.68)]
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(rows)))
+    with caplog.at_level(logging.DEBUG):
+        out = _fetch(session, DIVIDENDS, ["AAPL"])
+    assert _rows(out["AAPL"]) == []
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "IBM", 1),
+        (ProblemCause.UNREQUESTED_SYMBOLS, "IBM", 1),
+    ]
+    assert len(alarms(caplog)) == 2
+
+
+def test_a_withheld_row_of_another_symbol_leaves_the_read_s_count_and_its_reason(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Over the request's two pages, IBM's rows are withheld first and AAPL's one row last:
+    # AAPL fails for its own row alone, and the failure quotes that row's reason, not IBM's.
+    events = _problems(session, monkeypatch)
+    second = f"{DIVIDENDS_PATH}?cursor=2"
+    first_page = [{**_dividend("IBM", 1.67), "cash_amount": "a lot"}]
+    second_page = [
+        {**_dividend("IBM", 1.68), "cash_amount": "a lot"},
+        {**_dividend("AAPL", 0.25), "cash_amount": "plenty"},
+    ]
+    fake_rest.reply(
+        DIVIDENDS_PATH, Reply(envelope(first_page, next_url=f"{fake_rest.url}{second}"))
+    )
+    fake_rest.reply(second, Reply(envelope(second_page)))
+    out = _fetch(session, DIVIDENDS, ["AAPL"])
+    failed = _failure(out["AAPL"])
+    assert isinstance(failed.error, RowDataError)
+    assert str(failed.error) == (
+        "stocks.dividends: the library could not read the 1 row of the read's symbols and window "
+        "from GET /stocks/v1/dividends whole, so it withheld it. /stocks/v1/dividends: row 1: "
+        "CashAmount (wire key 'cash_amount') expects double, got \"plenty\". m.problems() counts "
+        "the withheld rows by cause and symbol."
+    )
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "IBM", 1),
+        (ProblemCause.UNCONVERTIBLE_VALUES, "IBM", 1),
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", 1),
+    ]
+
+
+def test_a_withheld_row_of_another_symbol_s_request_is_not_the_read_s(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # By a symbol's own path, AAPL's request is answered with an unreadable IBM row and MSFT's
+    # with an unreadable row of its own: the read could read none of its one own row, so its
+    # symbols fail, and the failure names only MSFT's request as the source of that row.
+    fake_rest.reply("/v2/aggs/ticker/AAPL/prev", Reply(envelope([{"T": "IBM", "c": "a lot"}])))
+    fake_rest.reply("/v2/aggs/ticker/MSFT/prev", Reply(envelope([{"T": "MSFT", "c": "a lot"}])))
+    out = _fetch(session, PREV, ["AAPL", "MSFT"])
+    message = (
+        "stocks.previous_day_bar: the library could not read the 1 row of the read's symbols "
+        "and window from GET /v2/aggs/ticker/MSFT/prev whole, so it withheld it. "
+        "/v2/aggs/ticker/{stocksTicker}/prev: row 0: Close (wire key 'c') expects double, got "
+        '"a lot". m.problems() counts the withheld rows by cause and symbol.'
+    )
+    assert {symbol: str(_failure(outcome).error) for symbol, outcome in out.items()} == {
+        "AAPL": message,
+        "MSFT": message,
+    }
+
+
+def test_a_withheld_row_of_another_contract_is_not_the_read_s_by_root(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The open interest by contract gives `Underlying` its I: by a lookup after the page is
+    # read, but the asked column is `Symbol`, the contract, which the page carries canonical:
+    # an unreadable row of another contract is counted out, and the asked contract gets no
+    # rows and no failure.
+    events = _problems(session, monkeypatch)
+    asked, other = "O:AAPL260116C00200000", "O:MSFT260116C00300000"
+    fake_rest.reply(BY_ROOT_PATH, Reply(envelope([_contract_open_interest(other, "a lot")])))
+    out = _fetch(session, options.OPEN_INTEREST, [asked])
+    assert _rows(out[asked]) == []
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, other, 1)
+    ]
+
+
+def test_a_withheld_row_of_a_bare_underlying_stays_the_read_s_by_underlying(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The open interest by underlying gives `Symbol` its I: by a lookup after the page is
+    # read, so a withheld row's bare SPX may be the asked I:SPX, or QQQ's may be another's:
+    # neither is known, so both stay the read's, and I:SPX fails for them. Each bare ticker
+    # keeps its own problem.
+    events = _problems(session, monkeypatch)
+    page = [
+        _underlying_open_interest("SPX", "a lot"),
+        _underlying_open_interest("QQQ", "plenty"),
+    ]
+    fake_rest.reply(BY_UNDERLYING_PATH, Reply(envelope(page)))
+    out = _fetch(session, options.OPEN_INTEREST_BY_UNDERLYING, ["I:SPX"])
+    failed = _failure(out["I:SPX"])
+    assert isinstance(failed.error, RowDataError)
+    assert str(failed.error).startswith(
+        "options.open_interest_by_underlying: the library could read none of the 2 rows of the "
+        "read's symbols and window from GET /options/v1/open-interest/underlying whole, so it "
+        "withheld them all. "
+    )
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "SPX", 1),
+        (ProblemCause.UNCONVERTIBLE_VALUES, "QQQ", 1),
+    ]
+
+
+def test_a_row_the_index_lookup_withholds_stays_the_read_s(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Massive answers SPY's request with a row of SPX, whose contracts list can't say whether
+    # it is an index: the lookup withholds the row under no known symbol, so it stays possibly
+    # the read's, and SPY fails for it, as for a row whose symbol could not be read.
+    events = _problems(session, monkeypatch)
+    fake_rest.reply(BY_UNDERLYING_PATH, Reply(envelope([_underlying_open_interest("SPX", 3)])))
+    _serve_index_list(fake_rest, "SPX")
+    fake_rest.reply(CONTRACTS_LIST_PATH, Reply(envelope([])))
+    out = _fetch(session, options.OPEN_INTEREST_BY_UNDERLYING, ["SPY"])
+    failed = _failure(out["SPY"])
+    assert isinstance(failed.error, RowDataError)
+    assert str(failed.error).startswith(
+        "options.open_interest_by_underlying: the library could not read the 1 row of the "
+        "read's symbols and window from GET /options/v1/open-interest/underlying whole, so it "
+        "withheld it. Massive's contracts list has no contract with a CFI code for SPX"
+    )
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNREADABLE_SYMBOLS, "SPX", 1)
+    ]
+
+
+def test_a_request_result_no_case_handles_is_refused(
+    *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def answered(self: object, spec: object, units: Sequence[object], **_: object) -> object:
+        return ["bogus"] * len(units), 0
+
+    monkeypatch.setattr(rest.RestReader, "read_each", answered)
+    with pytest.raises(AssertionError, match="got: 'bogus'"):
+        _fetch(session, DIVIDENDS, ["AAPL"])
 
 
 @pytest.mark.parametrize("setting", list(dm.OnError))

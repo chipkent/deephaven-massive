@@ -269,7 +269,9 @@ class WithheldGroup:
 
     Attributes:
         fault: Their fault.
-        symbol: Their canonical symbol, or None when it could not be read or they have none.
+        symbol: The canonical symbol the payload's consumer gives rows to by (a stream's
+            symbol, a request's asked symbol), or None when it is not known: the rows have
+            none, it could not be read, or it is canonical only after a later step.
         sent: Their symbol as Massive sent it, or None.
         field: The column that could not be read.
         rows: How many.
@@ -337,6 +339,22 @@ class Withheld:
             if group.symbol is not None:
                 found[group.symbol] = found.get(group.symbol, 0) + group.rows
         return found
+
+    def for_symbols(self, holds: Callable[[str], bool]) -> Withheld:
+        """Return the withheld rows one consumer of the payload would have received.
+
+        For a read by symbol, whose request's rows go to the symbols it named: the withheld
+        rows of those symbols, and those whose symbol is not known, which could be any
+        symbol's (`_groups_for`).
+
+        Args:
+            holds: Whether the consumer holds a canonical symbol.
+
+        Returns:
+            Those groups, in their order, with the first of them's reason; no rows.
+        """
+        groups = tuple(self._groups_for(holds))
+        return Withheld(pa.table({}), groups, groups[0].reason if groups else "")
 
     def events(
         self,
@@ -423,7 +441,9 @@ def withhold_rows(rows: _Rows, *, symbol: str | None) -> Withheld:
 
     Args:
         rows: The payload's rows, with the mark columns.
-        symbol: The rows' canonical symbol column, or None for a dataset whose rows name none.
+        symbol: The column of the canonical symbol the payload's consumer gives rows to by
+            (`WithheldGroup.symbol`), or None when the rows name none or that column is
+            canonical only after a later step.
 
     Returns:
         The rows to publish, and the withheld rows grouped.
