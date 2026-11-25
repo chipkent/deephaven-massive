@@ -51,11 +51,11 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "Options contract ticker in Massive format (e.g. O:AMD261121C00220000)". |
+| `Date` | String | The trading date the values reflect |
 | `OptionRoot` | String | Option root symbol |
 | `BidPrice` | double | NBBO bid 15 minutes before the close |
 | `AskPrice` | double | NBBO ask 15 minutes before the close |
 | `Volume` | long | Contracts traded on date |
-| `Date` | String | The trading date the values reflect |
 | `ContractType` | String | call or put |
 | `Delta` | double | Change in option price per $1 move in the underlying |
 | `DividendYield` | double | The most recent regular dividend by ex-date times its yearly frequency, divided by underlying_price, as a decimal. 0 if none |
@@ -86,11 +86,11 @@ The Massive field behind each column, by source. An empty cell means the source 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
+| `Date` | `date` |
 | `OptionRoot` | `root` |
 | `BidPrice` | `bid` |
 | `AskPrice` | `ask` |
 | `Volume` | `volume` |
-| `Date` | `date` |
 | `ContractType` | `contract_type` |
 | `Delta` | `delta` |
 | `DividendYield` | `dividend_yield` |

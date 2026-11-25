@@ -157,22 +157,24 @@ def _keys(symbol: str, time: str | None = None, *, fanout: str | None = None) ->
     )
 
 
-def _list_keys(time: str | None = None) -> SourceKeys:
-    """Build the keys of the open interest or the unusual trades: contract, time, underlying.
+def _list_keys(time: str | None = None, *, date: str | None = None) -> SourceKeys:
+    """Build the keys of a contract list (the open interest, greeks, or unusual trades).
 
-    Massive declares `underlying_ticker` optional on both, so a row without one keeps a null
+    Massive declares `underlying_ticker` optional on each, so a row without one keeps a null
     `Underlying` rather than being withheld.
 
     Args:
         time: The column holding the row's time, renamed to `Timestamp`; None for none.
+        date: The column holding the row's trading day, renamed to `Date`; None for none.
 
     Returns:
-        The source's keys.
+        The source's keys: the contract, the time or the day, and the underlying.
     """
     return SourceKeys(
         symbol=KeySpec("Ticker"),
         time=None if time is None else KeySpec(time),
         fanout=KeySpec("UnderlyingTicker", required=False),
+        date=None if date is None else KeySpec(date),
     )
 
 
@@ -391,7 +393,8 @@ OPEN_INTEREST: Final = DatasetSpec(
     summary="The open interest of each US-listed options contract at the end of each trading day.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_OPEN_INTEREST,
-    keys={(_REST, _OPEN_INTEREST): _list_keys()},
+    # The row's day is Massive's `date`, so a row without one is withheld, as a daily summary's.
+    keys={(_REST, _OPEN_INTEREST): _list_keys(date="Date")},
     time_axis=("date.gte", "date.lte"),
     symbol_param="ticker.any_of",
     # A chain's contracts can number thousands, so a table of them is sent 250 to a request,
@@ -421,8 +424,13 @@ OPEN_INTEREST_BY_UNDERLYING: Final = DatasetSpec(
     # stocks and indices, whose grammar `index_prefix` selects (`DatasetSpec.symbols_class`).
     asset_class=AssetClass.OPTIONS,
     fetch_path=_OPEN_INTEREST_BY_UNDERLYING,
-    # The row's symbol is the underlying itself: Massive totals every root on it.
-    keys={(_REST, _OPEN_INTEREST_BY_UNDERLYING): SourceKeys(symbol=KeySpec("UnderlyingTicker"))},
+    # The row's symbol is the underlying itself: Massive totals every root on it. Its day is
+    # Massive's `date`, so a row without one is withheld.
+    keys={
+        (_REST, _OPEN_INTEREST_BY_UNDERLYING): SourceKeys(
+            symbol=KeySpec("UnderlyingTicker"), date=KeySpec("Date")
+        )
+    },
     time_axis=("date.gte", "date.lte"),
     symbol_param="underlying_ticker.any_of",
     # A watchlist of underlyings is sent 250 to a request, as the contracts are.
@@ -437,7 +445,7 @@ GREEKS: Final = DatasetSpec(
     summary="The end-of-day greeks and implied volatility of each US-listed options contract.",
     asset_class=AssetClass.OPTIONS,
     fetch_path=_GREEKS,
-    keys={(_REST, _GREEKS): _list_keys()},
+    keys={(_REST, _GREEKS): _list_keys(date="Date")},
     time_axis=("date.gte", "date.lte"),
     symbol_param="ticker.any_of",
     # One row per contract per day, as the open interest: the same 250 contracts a request.

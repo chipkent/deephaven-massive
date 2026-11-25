@@ -210,8 +210,11 @@ class SourceKeys:
             to `Underlying`, or, with `KeySpec.instrument` False, another identifier (a filer
             CIK), which keeps its column.
         date: The row's trading day as the source sends it: the futures `session_end_date`, a
-            daily summary's `from` or `day`; renamed to `Date`. Only `symbol` and `fanout`
-            may come from the request.
+            daily summary's `from` or `day`, the `date` of the options open interest and
+            greeks; renamed to `Date`, and required, so a row without it is withheld
+            (`unreadable_keys`). Its column must be a `date` field of the source
+            (`source_columns.rename` refuses the rest). Only `symbol` and `fanout` may come
+            from the request.
     """
 
     symbol: KeySpec | None = None
@@ -853,13 +856,14 @@ class DatasetSpec:
         Raises:
             ValueError: If `keys` names a source the dataset does not read; a `time`, `end`, or
                 `date` key is filled from the request; an `end` key is declared outside a bars
-                dataset, or a `date` key on a dataset whose rows have no `Date` (`times` is `NONE`);
-                a daily summary (`DAY`) leaves a source without its `date` key; or a key other than
-                `fanout` is marked as no instrument, a fan-out key that is no instrument is filled
-                from the request (it would have no column to keep), or a key other than a `symbol`
-                or `fanout` key read from a REST path's rows is optional (`KeySpec.required`
-                False). The message names the dataset. A `poll()` keyed on the `Symbol` of an
-                optional symbol key is refused by `_check_poll_keys`.
+                dataset; a daily summary (`DAY`) leaves a source without its `date` key; or a key
+                other than `fanout` is marked as no instrument, a fan-out key that is no
+                instrument is filled from the request (it would have no column to keep), or a key
+                other than a `symbol` or `fanout` key read from a REST path's rows is optional
+                (`KeySpec.required` False). The message names the dataset. A `poll()` keyed on
+                the `Symbol` of an optional symbol key is refused by `_check_poll_keys`, and a
+                `date` key whose column is no `date` field of the source (a list whose rows carry
+                no date) by `source_columns.rename`, which sees the generated fields.
         """
         unused = sorted(f"{t.value} {k}" for t, k in set(self.keys) - set(self.sources))
         if unused:
@@ -877,8 +881,6 @@ class DatasetSpec:
             where = f"{self.name}: {transport.value} {key}"
             if declared.end is not None and times is not RowTimes.BAR:
                 raise ValueError(f"{where}: only a bars dataset declares an end key")
-            if declared.date is not None and times is RowTimes.NONE:
-                raise ValueError(f"{where}: a date key needs a dataset whose rows have a Date")
             for role, spec in declared.declared():
                 spec.check(role, transport, where=where)
 

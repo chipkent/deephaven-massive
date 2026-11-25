@@ -24,6 +24,7 @@ from deephaven_massive._datasets.catalog import (
 )
 from deephaven_massive._datasets.row_times import LIBRARY_COLUMNS, RowTimes
 from deephaven_massive._datasets.schema import ColumnType
+from deephaven_massive._datasets.source_columns import rename
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,
@@ -35,6 +36,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._massive import RestPath, Source, Transport, sources
+from deephaven_massive._massive import source as wire_source
 from deephaven_massive._session import CATALOG
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -377,13 +379,29 @@ def test_a_rest_fanout_key_can_be_optional() -> None:
     assert found == KeySpec("Id", required=False)
 
 
-def test_an_end_key_needs_bars_and_a_date_key_a_dated_dataset() -> None:
+def test_an_end_key_needs_bars() -> None:
     with pytest.raises(ValueError, match=r"only a bars dataset declares an end key"):
         dataclasses.replace(
             STOCK_TRADES, keys={**STOCK_TRADES.keys, (W, "stocks/T"): keys("Ticker", end="E")}
         )
-    with pytest.raises(ValueError, match=r"a date key needs a dataset whose rows have a Date"):
-        dataclasses.replace(EXCHANGES, keys={(R, "/v3/reference/exchanges"): keys(date="Date")})
+
+
+def test_a_date_key_needs_a_date_column_of_the_source() -> None:
+    # A dataset with no time columns of the library's may still date its rows by Massive's
+    # `date`, as the options open interest does; the declaration says only which column.
+    dated = dataclasses.replace(
+        DIVIDENDS, keys={(R, "/stocks/v1/dividends"): keys("Ticker", date="ExDividendDate")}
+    )
+    assert dated.keys_for(R, "/stocks/v1/dividends").date == KeySpec("ExDividendDate")
+    # A list whose rows carry no date is refused where the generated fields are known.
+    path = "/v3/reference/exchanges"
+    undated = dataclasses.replace(EXCHANGES, keys={(R, path): keys(date="Date")})
+    refusal = (
+        "declared keys: reference.exchanges: REST /v3/reference/exchanges: the date key "
+        "'Date' is not a column of the source"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
+        rename(undated, wire_source(R, path))
 
 
 def test_a_daily_summary_needs_its_date_key_on_every_source() -> None:

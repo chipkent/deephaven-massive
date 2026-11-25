@@ -17,7 +17,7 @@ import logging
 import re
 import threading
 from datetime import UTC, date, datetime, time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -1950,6 +1950,99 @@ def test_greeks_send_their_filters_and_read_each_contract_s_day(
     )
     assert "Root" not in row
     assert "UnderlyingTicker" not in row
+
+
+# --- A day without its date -----------------------------------------------------------------
+
+
+class DatedList(NamedTuple):
+    # A dataset that dates its rows by Massive's `date`: the call, Massive's path, its sample
+    # page, and the symbol and day of the sample's second row, which has its date.
+    call: Callable[[dm.MassiveSession], FetchQuery]
+    path: str
+    fixture: str
+    whole: tuple[str, str]
+
+
+DATED_LISTS = (
+    pytest.param(
+        DatedList(
+            lambda m: m.options.open_interest(),
+            "/options/v1/open-interest",
+            "open_interest.json",
+            ("O:SPY260123C00687000", "2026-01-22"),
+        ),
+        id="open_interest",
+    ),
+    pytest.param(
+        DatedList(
+            lambda m: m.options.open_interest_by_underlying(),
+            BY_UNDERLYING,
+            "open_interest_by_underlying.json",
+            ("QQQ", "2026-01-23"),
+        ),
+        id="open_interest_by_underlying",
+    ),
+    pytest.param(
+        DatedList(
+            lambda m: m.options.greeks(),
+            "/options/v1/analytics",
+            "greeks.json",
+            ("O:AMD261121P00220000", "2026-10-29"),
+        ),
+        id="greeks",
+    ),
+)
+
+
+def undated_page(load_fixture: Callable[[str, str], bytes], fixture: str) -> Reply:
+    # Massive's first sample row without its date, beside a whole row: the sample's second,
+    # or, where the sample has one row, the put of the same strike.
+    sample = body(load_fixture, fixture)
+    assert isinstance(sample, dict)
+    first, *rest = sample["results"]
+    whole = rest[0] if rest else {**first, "ticker": "O:AMD261121P00220000", "contract_type": "put"}
+    page = [{k: v for k, v in first.items() if k != "date"}, whole]
+    return Reply({"status": "OK", "results": page})
+
+
+@pytest.mark.parametrize("dated", DATED_LISTS)
+def test_a_row_without_its_date_is_withheld(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    dated: DatedList,
+) -> None:
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    fake_rest.reply(dated.path, undated_page(load_fixture, dated.fixture))
+    serve_indices(fake_rest)
+    out = rows(dated.call(rest_session).fetch(wait=True))
+    # No trace of the undated row, not even a null `Date`; the whole one beside it lands.
+    assert [(r["Symbol"], r["Date"]) for r in out] == [dated.whole]
+    assert [(e.cause, e.rows, e.stream_id is not None) for e in events] == [
+        (ProblemCause.UNREADABLE_KEYS, 1, True)
+    ]
+
+
+@pytest.mark.parametrize("dated", DATED_LISTS)
+def test_a_row_without_its_date_under_raise_fails_the_table(
+    *, fake_rest: FakeRestServer, load_fixture: Callable[[str, str], bytes], dated: DatedList
+) -> None:
+    fake_rest.reply(dated.path, undated_page(load_fixture, dated.fixture))
+    serve_indices(fake_rest)
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unreadable_keys=dm.OnError.RAISE),
+    )
+    with (
+        dm.MassiveSession(config) as m,
+        pytest.raises(RowDataError, match="1 under unreadable_keys"),
+    ):
+        dated.call(m).fetch(wait=True)
 
 
 def test_greeks_send_one_underlying_bare_and_keep_the_canonical_one(

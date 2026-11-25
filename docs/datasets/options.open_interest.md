@@ -51,9 +51,9 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | Column | Type | Description |
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "The options ticker symbol (e.g., O:SPY260123C00687000)." |
+| `Date` | String | The trading date the open interest applies to (formatted as YYYY-MM-DD). |
 | `OptionRoot` | String | The OCC root symbol of the contract (e.g., SPXW). Differs from the underlying for weekly roots and for contracts adjusted after a corporate action (e.g., AMCR1). |
 | `ContractType` | String | The contract type. Possible values: call, put. |
-| `Date` | String | The trading date the open interest applies to (formatted as YYYY-MM-DD). |
 | `ExpirationDate` | String | The date the contract expires (formatted as YYYY-MM-DD). |
 | `OpenInterest` | long | The number of outstanding contracts that have not been closed or exercised, as of the last open interest update of the day. |
 | `StrikePrice` | double | The strike price of the contract. |
@@ -69,9 +69,9 @@ The Massive field behind each column, by source. An empty cell means the source 
 | Column | REST field |
 | --- | --- |
 | `Symbol` | `ticker` |
+| `Date` | `date` |
 | `OptionRoot` | `root` |
 | `ContractType` | `contract_type` |
-| `Date` | `date` |
 | `ExpirationDate` | `expiration_date` |
 | `OpenInterest` | `open_interest` |
 | `StrikePrice` | `strike_price` |
