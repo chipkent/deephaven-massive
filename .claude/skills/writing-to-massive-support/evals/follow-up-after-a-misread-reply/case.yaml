@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: follow-up-after-a-misread-reply
+expected_outcome: |
+  A short, structured reply to Kyle's item 2 that shows the problem with a small complete example from the logs: the spread's trades, a control's trades, and the contracts list and snapshot returning only the control, each as a short runnable request with its request ID and trimmed response. It corrects our earlier flawed example, asks only whether the omission is intended, and makes no commitment or escalation request. note.md explains the problem to the owner in plain words.
+context:
+  scaffold_script: place-files.sh
