@@ -1802,10 +1802,9 @@ def test_open_interest_by_underlying_skips_a_watchlist_row_that_is_no_underlying
     assert [(e.cause, e.symbol) for e in events] == [
         (ProblemCause.NONCANONICAL_SYMBOLS, "C:EURUSD")
     ]
-    assert (
-        "A table of underlyings holds 'C:EURUSD', which is not a stock or index ticker such as "
-        "'AAPL' or 'I:SPX'. Fix or delete the row."
-    ) in events[0].detail
+    assert events[0].detail == (
+        "'C:EURUSD' is not a stock or index ticker such as 'AAPL' or 'I:SPX'."
+    )
 
 
 def test_open_interest_by_underlying_follows_a_watchlist_that_names_an_index(
