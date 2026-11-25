@@ -24,7 +24,7 @@ import math
 import time
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -310,6 +310,80 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     evidence(f"library dm.ALL history(REST) (grouped daily): {shown}")
 
 
+def _assert_day_file_bar_is_the_range_bar(
+    live_session: dm.MassiveSession,
+    day: date,
+    *,
+    rest_rows: RestRows,
+    flat_file_tickers: FlatFileTickers,
+    table_rows: TableRows,
+    instant_text: Text,
+    evidence: Evidence,
+) -> None:
+    """Record the `X:BTCUSD` day file row of `day` and the REST range bars around it, and report.
+
+    Asserts the file's one row and its stamp, then reports through `expect_fixed` whether the
+    file's row equals the range bar of the same UTC day.
+    """
+    read = flat_file_tickers(_DAY_FILE, day, wire_spellings(dm.AssetClass.CRYPTO, _PAIR))
+    assert read is not None, f"{_DAY_FILE} has no file for {day}"
+    rows, extra = read
+    for row in rows:
+        stamp = row["window_start"]
+        shown = "<missing>" if stamp is None else instant_text(int(stamp))
+        evidence(f"{_DAY_FILE} {day}: window_start={shown} row={row}")
+    evidence(f"{_DAY_FILE} undocumented headers: {sorted(extra)}")
+    ranged = rest_rows(
+        _RANGE,
+        {
+            "cryptoTicker": _PAIR,
+            "multiplier": 1,
+            "timespan": "day",
+            "from": day - timedelta(days=1),
+            "to": day + timedelta(days=1),
+        },
+        {"sort": "asc"},
+    )
+    for row in rows:
+        values = tuple(
+            None if row[k] is None else float(str(row[k]))
+            for k in ("open", "high", "low", "close", "volume")
+        )
+        for bar in ranged:
+            evidence(
+                f"file row vs range bar {instant_text(bar['t'] * _MS)}: "
+                f"same={_same(values, _ohlcv(bar))} "
+                f"relative errors (o, h, l, c, v) {_errors(values, _ohlcv(bar))}"
+            )
+    flat = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
+    outcome = _library_rows(
+        lambda: flat.history(day, day, source=dm.HistorySource.FLAT_FILES, wait=True),
+        table_rows,
+    )
+    evidence(f"library history(FLAT_FILES): {outcome}")
+    assert len(rows) == 1, f"{_DAY_FILE} holds {len(rows)} rows of {_PAIR}"
+    (row,) = rows
+    stamp = row["window_start"]
+    assert stamp is not None, f"{_DAY_FILE} row without window_start"
+    assert _at_day_edge(int(stamp) // _MS, day), f"file row stamped {stamp}"
+    values = tuple(float(str(row[k])) for k in ("open", "high", "low", "close", "volume"))
+    same_day = [b for b in ranged if _utc_day(int(b["t"])) == day]
+    assert same_day, f"REST sent no {_PAIR} range bar of {day}: {ranged}"
+    expect_fixed(
+        evidence=evidence,
+        fixed=any(_same(values, _ohlcv(b)) for b in same_day),
+        shown=(
+            f"{_DAY_FILE} {day} row (o, h, l, c, v) {values} is not the REST range bar "
+            f"of that day: {[_ohlcv(b) for b in same_day]}"
+        ),
+    )
+
+
+_REPORTED_DAY: Final = date(2026, 11, 23)
+"""The day whose `global_crypto` day file Massive built with less volume and fewer pairs than
+its REST sources (issues 860 and 861)."""
+
+
 @pytest.mark.massive_issue(860)
 @pytest.mark.verifies("1")
 @pytest.mark.timeout(100)
@@ -332,63 +406,47 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     when the file holds one row, stamped at 00:00 or 23:59:59.999 UTC of its day, and equal to the
     range bar of the same UTC day, so both sources cut days alike.
 
-    Today the file's day bar of 2026-11-23 is not the range bar: its `X:BTC-USD` volume is 6.1%
-    below the REST sources'. The evidence first asserts the file's one row and its stamp. A pass
-    means the file's day bar equals the range bar: Massive rebuilt the file, so close the issue.
+    A pass means the file's day bar equals the range bar of the most recent published Monday. It
+    shows only that day: the issue counts as fixed only when the reported day's check, below,
+    passes too.
     """
-    read = flat_file_tickers(_DAY_FILE, recent_monday, wire_spellings(dm.AssetClass.CRYPTO, _PAIR))
-    assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
-    rows, extra = read
-    for row in rows:
-        stamp = row["window_start"]
-        shown = "<missing>" if stamp is None else instant_text(int(stamp))
-        evidence(f"{_DAY_FILE} {recent_monday}: window_start={shown} row={row}")
-    evidence(f"{_DAY_FILE} undocumented headers: {sorted(extra)}")
-    ranged = rest_rows(
-        _RANGE,
-        {
-            "cryptoTicker": _PAIR,
-            "multiplier": 1,
-            "timespan": "day",
-            "from": recent_monday - timedelta(days=1),
-            "to": recent_monday + timedelta(days=1),
-        },
-        {"sort": "asc"},
-    )
-    for row in rows:
-        values = tuple(
-            None if row[k] is None else float(str(row[k]))
-            for k in ("open", "high", "low", "close", "volume")
-        )
-        for bar in ranged:
-            evidence(
-                f"file row vs range bar {instant_text(bar['t'] * _MS)}: "
-                f"same={_same(values, _ohlcv(bar))} "
-                f"relative errors (o, h, l, c, v) {_errors(values, _ohlcv(bar))}"
-            )
-    flat = live_session.crypto.bars(_PAIR, dm.Timespan.DAY)
-    outcome = _library_rows(
-        lambda: flat.history(
-            recent_monday, recent_monday, source=dm.HistorySource.FLAT_FILES, wait=True
-        ),
-        table_rows,
-    )
-    evidence(f"library history(FLAT_FILES): {outcome}")
-    assert len(rows) == 1, f"{_DAY_FILE} holds {len(rows)} rows of {_PAIR}"
-    (row,) = rows
-    stamp = row["window_start"]
-    assert stamp is not None, f"{_DAY_FILE} row without window_start"
-    assert _at_day_edge(int(stamp) // _MS, recent_monday), f"file row stamped {stamp}"
-    values = tuple(float(str(row[k])) for k in ("open", "high", "low", "close", "volume"))
-    same_day = [b for b in ranged if _utc_day(int(b["t"])) == recent_monday]
-    assert same_day, f"REST sent no {_PAIR} range bar of {recent_monday}: {ranged}"
-    expect_fixed(
+    _assert_day_file_bar_is_the_range_bar(
+        live_session,
+        recent_monday,
+        rest_rows=rest_rows,
+        flat_file_tickers=flat_file_tickers,
+        table_rows=table_rows,
+        instant_text=instant_text,
         evidence=evidence,
-        fixed=any(_same(values, _ohlcv(b)) for b in same_day),
-        shown=(
-            f"{_DAY_FILE} {recent_monday} row (o, h, l, c, v) {values} is not the REST range bar "
-            f"of that day: {[_ohlcv(b) for b in same_day]}"
-        ),
+    )
+
+
+@pytest.mark.massive_issue(860)
+@pytest.mark.verifies("1")
+@pytest.mark.timeout(100)
+def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range_on_the_reported_day(
+    live_session: dm.MassiveSession,
+    *,
+    rest_rows: RestRows,
+    flat_file_tickers: FlatFileTickers,
+    table_rows: TableRows,
+    instant_text: Text,
+    evidence: Evidence,
+) -> None:
+    """Whether the `global_crypto/day_aggs_v1` row of 2026-11-23 is the REST range bar of that day.
+
+    Today the file's `X:BTC-USD` volume of that day is 6.1% below the REST sources' (open, high,
+    low, and close agree). The evidence first asserts the file's one row and its stamp. A pass
+    means Massive rebuilt that file: close the issue once the recent-day check passes too.
+    """
+    _assert_day_file_bar_is_the_range_bar(
+        live_session,
+        _REPORTED_DAY,
+        rest_rows=rest_rows,
+        flat_file_tickers=flat_file_tickers,
+        table_rows=table_rows,
+        instant_text=instant_text,
+        evidence=evidence,
     )
 
 
@@ -540,6 +598,37 @@ def _canonical(raw: Iterable[str]) -> set[str]:
     return {canonical_from_wire(dm.AssetClass.CRYPTO, text) or text for text in raw}
 
 
+def _assert_grouped_daily_and_day_file_pairs_equal(
+    day: date,
+    *,
+    rest_rows: RestRows,
+    flat_file_tickers: FlatFileTickers,
+    evidence: Evidence,
+) -> None:
+    """Record the pairs only grouped daily or only the day file lists on `day`, and report.
+
+    Asserts that both list pairs, then reports through `expect_fixed` whether the sets are equal.
+    """
+    grouped = _canonical(str(row["T"]) for row in rest_rows(_GROUPED, {"date": day}, {}))
+    read = flat_file_tickers(_DAY_FILE, day, None)
+    assert read is not None, f"{_DAY_FILE} has no file for {day}"
+    filed = _canonical(str(row["ticker"]) for row in read[0])
+    evidence(f"{day}: grouped daily {len(grouped)} pairs, {_DAY_FILE} {len(filed)} pairs")
+    evidence(f"only in grouped daily: {sorted(grouped - filed)}")
+    evidence(f"only in the flat file: {sorted(filed - grouped)}")
+    assert grouped
+    assert filed, f"{_DAY_FILE} of {day} lists no pair"
+    expect_fixed(
+        evidence=evidence,
+        fixed=grouped == filed,
+        shown=(
+            f"{day}: {len(grouped)} pairs in grouped daily, {len(filed)} in {_DAY_FILE}; "
+            f"only in grouped daily {sorted(grouped - filed)}, only in the file "
+            f"{sorted(filed - grouped)}"
+        ),
+    )
+
+
 @pytest.mark.massive_issue(861)
 @pytest.mark.verifies("39")
 @pytest.mark.timeout(100)
@@ -556,27 +645,31 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     `X:BTC-USD` or `C:EUR-USD`), so both are compared in the canonical form the library reads
     them into; a spelling the library cannot read is kept as written, and so shows up as a
     difference. Records the pairs only one of them holds on the most recent published Monday.
-    Today the file of 2026-11-23 lists 364 pairs and grouped daily 384. The evidence first asserts
-    that grouped daily lists pairs. A pass means the two sets are equal, so `dm.ALL` crypto day bars
-    hold the same pairs from either source: Massive rebuilt the file, so close the issue.
+    A pass means the two sets are equal on that day. It shows only that day: the issue counts as
+    fixed only when the reported day's check, below, passes too.
     """
-    grouped = _canonical(str(row["T"]) for row in rest_rows(_GROUPED, {"date": recent_monday}, {}))
-    read = flat_file_tickers(_DAY_FILE, recent_monday, None)
-    assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
-    filed = _canonical(str(row["ticker"]) for row in read[0])
-    evidence(f"{recent_monday}: grouped daily {len(grouped)} pairs, {_DAY_FILE} {len(filed)} pairs")
-    evidence(f"only in grouped daily: {sorted(grouped - filed)}")
-    evidence(f"only in the flat file: {sorted(filed - grouped)}")
-    assert grouped
-    assert filed, f"{_DAY_FILE} of {recent_monday} lists no pair"
-    expect_fixed(
-        evidence=evidence,
-        fixed=grouped == filed,
-        shown=(
-            f"{recent_monday}: {len(grouped)} pairs in grouped daily, {len(filed)} in {_DAY_FILE}; "
-            f"only in grouped daily {sorted(grouped - filed)}, only in the file "
-            f"{sorted(filed - grouped)}"
-        ),
+    _assert_grouped_daily_and_day_file_pairs_equal(
+        recent_monday, rest_rows=rest_rows, flat_file_tickers=flat_file_tickers, evidence=evidence
+    )
+
+
+@pytest.mark.massive_issue(861)
+@pytest.mark.verifies("39")
+@pytest.mark.timeout(100)
+def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs_on_the_reported_day(
+    *,
+    rest_rows: RestRows,
+    flat_file_tickers: FlatFileTickers,
+    evidence: Evidence,
+) -> None:
+    """Whether grouped daily and `global_crypto/day_aggs_v1` list the same pairs on 2026-11-23.
+
+    Today the file lists 364 pairs and grouped daily 384. A pass means the two sets are equal, so
+    `dm.ALL` crypto day bars hold the same pairs from either source: Massive rebuilt the file, so
+    close the issue once the recent-day check passes too.
+    """
+    _assert_grouped_daily_and_day_file_pairs_equal(
+        _REPORTED_DAY, rest_rows=rest_rows, flat_file_tickers=flat_file_tickers, evidence=evidence
     )
 
 
