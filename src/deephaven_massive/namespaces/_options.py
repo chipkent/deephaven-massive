@@ -32,10 +32,11 @@ too, or a table of them in a `Symbol` column (`value_table`), each read as if pa
 The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes it bare
 (`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
 (`wire_symbols.contracts_underlying`) and the rows' index underlyings get their `I:` back by
-their CFI code (`wire_symbols.index_underlyings`). The open interest, the greeks, and the
-unusual trades write it bare with no code, so their rows' `Underlying` gets its `I:` by one
-lookup per option root, and the open interest by underlying, whose `Symbol` is the underlying
-itself, by one lookup per bare ticker (`DatasetSpec.index_prefix`, `_ingest/option_roots.py`).
+their CFI code (`wire_symbols.index_underlyings`). The open interest and the unusual trades
+write it bare with no code, and the greeks carry no code either, so all three rows' `Underlying`
+gets its `I:` by one lookup per option root, and the open interest by underlying, whose
+`Symbol` is the underlying itself, by one lookup per bare ticker (`DatasetSpec.index_prefix`,
+`_ingest/option_roots.py`).
 
 One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count topics
 against that cap and raise `ValueError` before subscribing a static list that would cross it.
@@ -407,14 +408,15 @@ _UNDERLYING_SYMBOL_NOTE: Final = (
     "[All Contracts](https://massive.com/docs/rest/options/contracts/all-contracts) list "
     "can't say whether a ticker is an index, the library leaves its rows out and lists them in "
     "`m.problems()` as `unreadable_symbols`. A ticker that names both a stock and an index "
-    "(`DJT`) is classified by the first contract Massive lists for it, while Massive's row may "
-    "total the options on both."
+    "(`DJT`) is classified by the first contract Massive lists for it, and the library can't "
+    "tell whether Massive's row counts the stock's options, the index's, or both."
 )
 """The note on `Symbol` of the dataset whose rows name the bare underlying alone."""
 
 OPEN_INTEREST_BY_UNDERLYING: Final = DatasetSpec(
     name="options.open_interest_by_underlying",
-    summary="Each underlying's open interest at the end of each trading day, calls and puts apart.",
+    summary="Each underlying's open interest at the end of each trading day, calls and puts split "
+    "out.",
     fetch_path=_OPEN_INTEREST_BY_UNDERLYING,
     # The row's symbol is the underlying itself: Massive totals every root on it.
     keys={(_REST, _OPEN_INTEREST_BY_UNDERLYING): SourceKeys(symbol=KeySpec("UnderlyingTicker"))},
@@ -620,8 +622,9 @@ class OptionsNamespace(Namespace):
     - market data: trades, quotes, bars, and fair market value;
     - each contract's last trade, previous day's bar, and daily open and close;
     - option chains, snapshots, and contract reference data;
-    - each contract's open interest and end-of-day greeks by day, each underlying's open
-      interest by day, and the unusual trades Massive flags;
+    - each contract's open interest and greeks, and each underlying's open interest, by
+      trading day;
+    - the unusual trades Massive flags;
     - OPRA's administrative messages.
 
     A contract's ticker is `O:` followed by its OCC symbol, such as `O:AAPL250117C00150000`. A
@@ -1395,22 +1398,16 @@ class OptionsNamespace(Namespace):
         filters: Mapping[str, FilterValue] | None = None,
         on_error: ErrorPolicy | None = None,
     ) -> FetchQuery:
-        """Each underlying's open interest at the end of each trading day, calls and puts apart.
+        """Each underlying's open interest at the end of each trading day, calls and puts split out.
 
-        Each row holds one underlying's open interest on one trading day, summed over every
-        contract on it, whatever its root (`SPX` and `SPXW` alike), with the calls' and the
-        puts' shares apart. `Symbol` is the underlying, a stock, ETF, or index ticker. Massive
-        publishes a day's figures the next morning, so the latest `Date` is the previous
-        trading day. Leave out `symbols` to read every underlying.
+        Each row holds one underlying's open interest on one trading day, with calls and puts
+        split out. The total covers every root on the underlying, so `SPX` includes `SPXW`.
+        Massive publishes a day's figures the next morning, so the latest `Date` is the
+        previous trading day.
 
-        `Symbol` has `I:` for an index (`I:SPX`), as in `m.options.contracts()`. To tell which
-        tickers are indices, a session reads Massive's list of index tickers once. A ticker not
-        on that list costs nothing more. A ticker on it, such as `SPX`, costs one request to
-        Massive's contracts list the first time the session meets it. If Massive can't say, the
-        library leaves the ticker's rows out and lists them in `m.problems()` as
-        `unreadable_symbols`. A ticker that names both a stock and an index, such as `DJT`,
-        takes the class of the first contract Massive lists for it, while Massive's row may
-        total the options on both.
+        `Symbol` is the underlying, with `I:` for an index (`I:SPX`), as in
+        `m.options.contracts()`. A ticker the library can't tell is a stock's or an index's has
+        its rows left out and listed in `m.problems()` as `unreadable_symbols`.
 
         Args:
             symbols: Stock, ETF, or index tickers, such as `"AAPL"` or `"I:SPX"`; leave it
@@ -1433,8 +1430,9 @@ class OptionsNamespace(Namespace):
             TypeError: If an argument has the wrong type.
             ValueError: If:
                 - `symbols` is `dm.ALL` or empty;
-                - a ticker isn't Massive's exact ticker of a stock or an index, such as
-                  `"C:EURUSD"`;
+                - a ticker isn't Massive's exact spelling of a stock or index ticker;
+                - a ticker is another asset class's, such as a forex pair (`"C:EURUSD"`) or an
+                  option contract;
                 - a bound isn't a date, or `end` is before `start`;
                 - `limit` isn't positive;
                 - `order` is given without `sort`, or with a `sort` that has its own `.asc` or

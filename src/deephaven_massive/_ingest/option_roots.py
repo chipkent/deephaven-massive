@@ -1,31 +1,31 @@
 """Which bare option underlyings are indices, from Massive's contracts reference.
 
-Massive's options open interest, greeks, and unusual trades name each contract's underlying
-bare (`SPX`, `AAPL`), with no CFI code or market beside it, and the open interest by underlying
-names the bare underlying alone, with no contract, so a row alone cannot say whether `SPX` is
-an index (`I:SPX`) or a stock. Massive's contracts reference can: a contract's CFI code (ISO
-10962) marks an option on an index. `OptionRootKinds` answers by two keys. For a row with a
-contract, by its OCC option root (`SPXW`, `AAPL1`), which names one underlying, so one contract
-of a root answers for every contract of that root (`kind`). For a row with no contract, by the
-bare underlying itself, from the first contract Massive's contracts list gives for it
+Massive's options open interest and unusual trades name each contract's underlying bare (`SPX`,
+`AAPL`), with no CFI code or market beside it, the greeks carry no code either, and the open
+interest by underlying names the bare underlying alone, with no contract, so a row alone cannot say
+whether `SPX` is an index (`I:SPX`) or a stock. Massive's contracts reference can: a contract's CFI
+code (ISO 10962) marks an option on an index. `OptionRootKinds` answers by two keys. For a row with
+a contract, by its OCC option root (`SPXW`, `AAPL1`), which names one underlying, so one contract
+of a root answers for every contract of that root (`kind`). For a row with no contract, by the bare
+underlying itself, from the first contract Massive's contracts list gives for it
 (`underlying_kind`). Most underlyings are stocks, so both first read Massive's list of index
 tickers, once per session (`/v3/reference/tickers?market=indices`): a bare ticker not on it
 (`AAPL`) is a stock's or a fund's, with no further request. Only a listed index's ticker (`SPX`)
 costs a request: the reference of a root's first contract
-(`/v3/reference/options/contracts/{options_ticker}`), or the contracts list's first contract of
-the underlying (`/v3/reference/options/contracts?underlying_ticker=SPX&limit=1`), as of that
-row's trading day. Every answer is kept for the session and shared between every caller, so a
-stock and an index that share a bare ticker each get their own root's answer; by bare
-underlying alone they share one, the first contract's. The pre-filter assumes the underlying
-of every option on an index is a ticker on Massive's index list, active or retired, which a
-live test checks; an index missing from it would keep its bare ticker with no warning. The
-rows the reference can't classify are withheld as `unreadable_symbols`, since their underlying
-may be an index's without its `I:` (`canonical_underlyings`, `canonical_symbols`).
+(`/v3/reference/options/contracts/{options_ticker}`), or the contracts list's first contract of the
+underlying (`/v3/reference/options/contracts?underlying_ticker=SPX&limit=1`), as of that row's
+trading day. Every answer but an unknown one, asked again after an hour, is kept for the session
+and shared between every caller, so a stock and an index that share a bare ticker each get their
+own root's answer; by bare underlying alone they share one, the first contract's. The pre-filter
+assumes the underlying of every option on an index is a ticker on Massive's index list, active or
+retired, which a live test checks; an index missing from it would keep its bare ticker with no
+warning. The rows the reference can't classify are withheld as `unreadable_symbols`, since their
+underlying may be an index's without its `I:` (`canonical_underlyings`, `canonical_symbols`).
 
-The REST transport (`_ingest/rest.py`) holds the session's kinds in its `RestState` and reads
-them through a `RestReader`, whose patience and error conversion the lookups use, and reports
-the withheld rows as problems of its table. The single-flight sharing itself is
-`SharedLookup`'s (`_ingest/shared_lookup.py`).
+The REST transport (`_ingest/rest.py`) holds the session's kinds in its `RestState` and reads them
+through a `RestReader`, whose patience and error conversion the lookups use, and reports the
+withheld rows as problems of its table. The single-flight sharing itself is `SharedLookup`'s
+(`_ingest/shared_lookup.py`).
 """
 
 from __future__ import annotations
@@ -246,8 +246,7 @@ class OptionRootKinds:
 
         Args:
             underlying: The bare underlying Massive's row names, such as `"SPX"`.
-            day: The trading day of the row, as ISO text, for `as_of`, so a contract listed
-                then is still found.
+            day: The trading day of the row, as ISO text, sent as `as_of`.
             reader: The read the lookup serves, whose error conversion it uses.
             patience: The patience of the read, taken on its own thread (`RestReader.patience`),
                 which the lookup's pauses are charged to.

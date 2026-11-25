@@ -640,7 +640,8 @@ class IndexPrefix(StrEnum):
 
     Massive's options endpoints disagree on how they write an index underlying: the chain and
     the snapshots write `I:SPX`, the contracts list writes `SPX` beside the contract's CFI code,
-    and the open interest, the greeks, and the unusual trades write `SPX` with no code at all.
+    and the open interest and the unusual trades write `SPX` with no code at all (the greeks
+    carry no code either, and are read the same way).
     The library publishes only the canonical `I:SPX`, so each dataset says which of its rows'
     columns can tell an index from a stock, and the REST transport restores the prefix that way.
     """
