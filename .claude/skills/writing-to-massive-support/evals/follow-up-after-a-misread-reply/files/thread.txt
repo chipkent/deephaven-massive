@@ -1,0 +1,18 @@
+From: Kyle from Massive.com
+Date: Tue, 24 Nov 2026 18:06:34 +0000
+Subject: Re: Re: Futures API: three data gaps and one feature request (with request IDs)
+
+1. I don't see related fields anywhere. I checked /futures/v1/products for CLT against CL directly and the schema is identical with nothing cross-referencing the underlying, so filing this as a roadmap feature request is the right call.
+2. It seems a delay in reference data. Feel free to check back tomorrow and see if the query would be available by then, or otherwise let me know and I can help you escalate to internal team for further look!
+Kyle
+Support Team
+Massive.com
+  On Tue, Nov 24, 2026 at 09:42 AM, Chip Kent <owner@example.com> wrote:
+Hi Kyle,
+Thanks. Items 3 and 4 are settled on my side, and I’ve submitted item 4 on the roadmap page.
+Two follow-ups:
+Item 1. Understood that a TAS product follows its underlying. Does anything in the API say which underlying that is? The code alone doesn’t settle it (SBT settles to ZS, and HG0 has no T suffix at all), the product and contract records carry no such field, and the schedules are empty for TAS codes: GET /futures/v1/schedules?product_code=CLT&sort=session_end_date.desc&limit=1 on 2026-11-23 (request 5aeaccd491694877a8a051e27f196533) returned no results. Your REST trades already know the answer: on 2026-11-24, the first 50 and latest 50 CLTF7 trades of the session all carry session_end_date 2026-11-24, including the first, at timestamp 1795474800000000000 (17:00 Chicago on 2026-11-23), which is inside CL’s session. A field on the product record naming the underlying, or schedule rows for the TAS codes, would let a streaming client do the same. If neither exists today, should I file it on the roadmap page too?
+Item 2. Your answer covered the tickers that start with 0. Does that fix also cover the FX Link spreads (such as 6E:XF:EURUSD:Z6) and the 1-Month SOFR vs. 30-Day Fed Funds spreads (such as SR1H7-ZQH7)? On 2026-11-23 they were still absent from both lists: GET /futures/v1/snapshot?ticker.any_of=6E:XF:EURUSD:Z6,SR1H7-ZQH7,0BTZ9,0NANHZ601&limit=1000 (request 198e06a8934641d6b9e1bb582c57c9bb) and GET /futures/v1/contracts?ticker.any_of=6E:XF:EURUSD:Z6,SR1H7-ZQH7,0BTZ9,0NANHZ601&limit=1000&date=2026-11-23 (request 62f88995011e403a92cb099bbe224831) both returned no results.
+Thanks,
+Chip
+ --

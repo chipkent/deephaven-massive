@@ -1,0 +1,162 @@
+
+2026-11-24 23:32:12 UTC
+GET /futures/v1/trades/SR1H7-ZQH7?session_end_date=2026-11-20&limit=3
+HTTP 200
+{
+ "status": "OK",
+ "request_id": "13f10e3625614608963f7395c902f0f2",
+ "results": [
+  {
+   "ticker": "SR1H7-ZQH7",
+   "timestamp": 1795211679178383311,
+   "sequence_number": 391798763,
+   "report_sequence": 2059118,
+   "price": -3.0,
+   "size": 5,
+   "channel": 312,
+   "session_end_date": "2026-11-20"
+  },
+  {
+   "ticker": "SR1H7-ZQH7",
+   "timestamp": 1795211023934048695,
+   "sequence_number": 391509953,
+   "report_sequence": 2056844,
+   "price": -3.0,
+   "size": 15,
+   "channel": 312,
+   "session_end_date": "2026-11-20"
+  },
+  {
+   "ticker": "SR1H7-ZQH7",
+   "timestamp": 1795210581284963751,
+   "sequence_number": 391333975,
+   "report_sequence": 2055620,
+   "price": -3.0,
+   "size": 1,
+   "channel": 312,
+   "session_end_date": "2026-11-20"
+  }
+ ]
+}
+
+2026-11-24 23:32:13 UTC
+GET /futures/v1/trades/CLZ7-CLM8?session_end_date=2026-11-20&limit=3
+HTTP 200
+{
+ "status": "OK",
+ "request_id": "8226c1992d234a7396e29405a3d73573",
+ "results": [
+  {
+   "ticker": "CLZ7-CLM8",
+   "timestamp": 1795211832287377659,
+   "sequence_number": 670646981,
+   "report_sequence": 2558099,
+   "price": 2.74,
+   "size": 1,
+   "channel": 382,
+   "session_end_date": "2026-11-20"
+  },
+  {
+   "ticker": "CLZ7-CLM8",
+   "timestamp": 1795211464485448259,
+   "sequence_number": 670219039,
+   "report_sequence": 2555936,
+   "price": 2.74,
+   "size": 1,
+   "channel": 382,
+   "session_end_date": "2026-11-20"
+  },
+  {
+   "ticker": "CLZ7-CLM8",
+   "timestamp": 1795210908653070633,
+   "sequence_number": 669510369,
+   "report_sequence": 2553061,
+   "price": 2.75,
+   "size": 5,
+   "channel": 382,
+   "session_end_date": "2026-11-20"
+  }
+ ]
+}
+
+2026-11-24 23:32:13 UTC
+GET /futures/v1/contracts?ticker.any_of=SR1H7-ZQH7,CLZ7-CLM8&date=2026-11-20
+HTTP 200
+{
+ "status": "OK",
+ "request_id": "cccf2821ab1649559a42ebd8f903ad23",
+ "results": [
+  {
+   "active": true,
+   "date": "2026-11-20",
+   "first_trade_date": "2019-06-10",
+   "last_trade_date": "2027-11-19",
+   "max_order_quantity": 5999,
+   "min_order_quantity": 1,
+   "name": "CLZ7-CLM8",
+   "product_code": "CL",
+   "settlement_date": "2027-11-19",
+   "settlement_tick_size": 0.01,
+   "ticker": "CLZ7-CLM8",
+   "trade_tick_size": 0.01,
+   "trading_venue": "XNYM",
+   "type": "combo",
+   "group_code": "CL",
+   "provider_id": "2HZJJPIJ33G4",
+   "provider_product_id": "GKCAP6BH3LHQ"
+  }
+ ]
+}
+
+2026-11-24 23:32:13 UTC
+GET /futures/v1/snapshot?ticker.any_of=SR1H7-ZQH7,CLZ7-CLM8
+HTTP 200
+{
+ "status": "OK",
+ "request_id": "5274ff424759458cb4f8dac956b70d7e",
+ "results": [
+  {
+   "details": {
+    "ticker": "CLZ7-CLM8",
+    "product_code": "CL",
+    "settlement_date": "2027-11-19"
+   },
+   "session": {
+    "open": 2.69,
+    "high": 2.69,
+    "low": 2.68,
+    "close": 2.69,
+    "volume": 5,
+    "settlement_price": 2.69,
+    "previous_settlement": 2.7,
+    "change": -0.01,
+    "change_percent": -0.37037037037
+   },
+   "last_minute": {
+    "timeframe": "REAL-TIME",
+    "open": 2.69,
+    "high": 2.69,
+    "low": 2.69,
+    "close": 2.69,
+    "volume": 2,
+    "last_updated": 1795561980000000000
+   },
+   "last_trade": {
+    "timeframe": "REAL-TIME",
+    "price": 2.69,
+    "size": 2,
+    "last_updated": 1795561975196723555
+   },
+   "last_quote": {
+    "timeframe": "REAL-TIME",
+    "ask": 2.69,
+    "ask_size": 3,
+    "ask_timestamp": 1795563111696882791,
+    "bid": 2.68,
+    "bid_size": 2,
+    "bid_timestamp": 1795562834431331857,
+    "last_updated": 1795563111696882791
+   }
+  }
+ ]
+}

@@ -33,11 +33,13 @@ ended, and a control in the same request where possible. Each request is a short
 support can run as written, with every parameter and no placeholder, followed by its request ID,
 time, and the response, trimmed to what shows the point and marked as trimmed. Show the thing
 existing where Massive has it, not only missing where it doesn't. List any further cases once,
-rather than in long URLs.
+rather than in long URLs. A problem in a flat file, a WebSocket stream, or a local bug is shown
+the same way, by the shortest script or steps that reproduce it and their output.
 
 Every fact rests on a request, a public page, or a log you can point to, dated. A test constant,
 an earlier run's inputs, or our own mapping is a guess, not evidence. The owner runs any request
-that needs a key, exactly as the message will show it, before it is sent (`AGENTS.md`, Limits).
+or script that needs a key, exactly as the message will show it, before it is sent (`AGENTS.md`,
+Limits).
 
 ## The message
 
