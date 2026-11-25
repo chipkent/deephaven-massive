@@ -3847,15 +3847,18 @@ def requests_by_bucket(m: dm.MassiveSession) -> dict[str, int]:
 
 
 def test_each_request_is_charged_to_its_subscription() -> None:
-    aapl = rest_requests.Call({}, {"ticker.any_of": ("AAPL",)})
+    aapl = rest_requests.Call({}, {"ticker.any_of": ("AAPL",)}, symbols=("AAPL",))
     assert rest.call_bucket(DIVIDENDS, DIVIDENDS_PATH, aapl) == "stocks"
-    btc = rest_requests.Call({}, {}, "X:BTCUSD")
+    btc = rest_requests.Call({}, {}, "X:BTCUSD", symbols=("X:BTCUSD",))
     assert rest.call_bucket(CRYPTO_LAST, CRYPTO_LAST_PATH, btc) == "currencies"
-    eur = rest_requests.Call({}, {}, "C:EURUSD")
+    eur = rest_requests.Call({}, {}, "C:EURUSD", symbols=("C:EURUSD",))
     assert rest.call_bucket(CONVERSION, CONVERSION_PATH, eur) == "currencies"
     # A dataset with a path per symbol class follows the class its request's symbols share.
     assert rest.call_bucket(SMA, SMA_CRYPTO, btc) == "currencies"
-    assert rest.call_bucket(SMA, SMA_STOCK, rest_requests.Call({}, {}, "AAPL")) == "stocks"
+    assert (
+        rest.call_bucket(SMA, SMA_STOCK, rest_requests.Call({}, {}, "AAPL", symbols=("AAPL",)))
+        == "stocks"
+    )
 
 
 @pytest.mark.parametrize("market", list(Market))
@@ -3864,11 +3867,13 @@ def test_a_reference_request_is_charged_to_other_whatever_market_it_filters(
 ) -> None:
     # Massive counts reference requests in a bucket of their own, not under the asset class
     # they filter by; the session's own crypto ticker list goes there too.
-    call = rest_requests.Call({}, {"market": market, "active": True})
+    call = rest_requests.Call({}, {"market": market, "active": True}, symbols=())
     tickers = "/v3/reference/tickers"
     assert rest.call_bucket(reference.TICKERS, tickers, call) == "other"
     assert (
-        rest.call_bucket(reference.TICKERS, tickers, rest_requests.Call({}, {"active": True}))
+        rest.call_bucket(
+            reference.TICKERS, tickers, rest_requests.Call({}, {"active": True}, symbols=())
+        )
         == "other"
     )
 
@@ -3887,7 +3892,10 @@ def test_every_reference_endpoint_is_charged_to_other_whatever_its_dataset_class
 ) -> None:
     # A dataset of one class (options contracts, IPOs) still reads a reference endpoint,
     # which Massive counts in the reference bucket.
-    assert rest.call_bucket(spec, template, rest_requests.Call({}, {}, "AAPL")) == "other"
+    assert (
+        rest.call_bucket(spec, template, rest_requests.Call({}, {}, "AAPL", symbols=("AAPL",)))
+        == "other"
+    )
 
 
 def test_each_path_logs_its_bucket_and_why_once(
@@ -4093,7 +4101,10 @@ def test_a_fan_out_raises_the_real_failure_not_a_call_it_cancelled(
             raise dm.MassiveError("cancelled")
         raise dm.EntitlementError("not entitled")
 
-    calls = [rest_requests.Call({}, {}, "A"), rest_requests.Call({}, {}, "B")]
+    calls = [
+        rest_requests.Call({}, {}, "A", symbols=("A",)),
+        rest_requests.Call({}, {}, "B", symbols=("B",)),
+    ]
     with ThreadPoolExecutor(2) as pool, pytest.raises(dm.EntitlementError):
         reader._fan_out(run, calls, executor=pool, stop=stop)
     assert stop.is_set()
@@ -5495,7 +5506,15 @@ def test_limit_counts_the_rows_massive_sent_not_those_kept(
 def test_a_read_mixing_per_symbol_and_shared_requests_is_a_library_defect() -> None:
     # Neither cap fits such a plan, and no dataset makes one.
     path = RestPath(key="/x", fields=(), params=())
-    planned = [(path, [rest_requests.Call({}, {}, "AAPL"), rest_requests.Call({}, {})])]
+    planned = [
+        (
+            path,
+            [
+                rest_requests.Call({}, {}, "AAPL", symbols=("AAPL",)),
+                rest_requests.Call({}, {}, symbols=()),
+            ],
+        )
+    ]
     with pytest.raises(
         BrokenGuaranteeError,
         match=r"^stocks\.dividends planned requests of one symbol beside requests of several, so "
@@ -5503,7 +5522,10 @@ def test_a_read_mixing_per_symbol_and_shared_requests_is_a_library_defect() -> N
         r"deephaven-massive\. ",
     ):
         rest._per_symbol("stocks.dividends", planned)
-    assert rest._per_symbol("stocks.dividends", [(path, [rest_requests.Call({}, {})])]) is False
+    assert (
+        rest._per_symbol("stocks.dividends", [(path, [rest_requests.Call({}, {}, symbols=())])])
+        is False
+    )
     assert rest._per_symbol("stocks.dividends", []) is False
 
 
@@ -5633,7 +5655,9 @@ def _not_found(
     return reader._not_found(
         error,
         spec=TRADES,
-        call=rest_requests.Call({"stockTicker": symbol}, {}, symbol),
+        call=rest_requests.Call(
+            {"stockTicker": symbol}, {}, symbol, symbols=() if symbol is None else (symbol,)
+        ),
         requested=f"GET /v3/trades/{symbol}",
         bucket="stocks",
         window=None,
@@ -5731,8 +5755,8 @@ def test_a_call_with_no_data_is_never_counted_as_a_request(session: dm.MassiveSe
         ._reader("call-1", session._core.policy, waiter=Waiter.CALL)
         .rest_path(CRYPTO_LAST_PATH)
     )
-    sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD")
-    unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED)
+    sent = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, "X:BTCUSD", symbols=("X:BTCUSD",))
+    unsent = rest_requests.Call({}, {}, "X:DOTUSD", NOT_LISTED, symbols=("X:DOTUSD",))
     assert len(rest._buckets(CRYPTO_LAST, [(path, [sent, unsent])])) == 1
 
 
