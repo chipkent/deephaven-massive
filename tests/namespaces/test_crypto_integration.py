@@ -310,6 +310,7 @@ def test_crypto_day_bars_of_every_rest_source_share_one_day_cut(
     evidence(f"library dm.ALL history(REST) (grouped daily): {shown}")
 
 
+@pytest.mark.massive_issue(860)
 @pytest.mark.verifies("1")
 @pytest.mark.timeout(100)
 def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
@@ -329,8 +330,11 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     equal, the rest within 1e-6) with each field's relative error. The file writes the pair
     `X:BTC-USD`, so the read keeps every spelling the library's own file filter keeps. Passes
     when the file holds one row, stamped at 00:00 or 23:59:59.999 UTC of its day, and equal to the
-    range bar of the same UTC day, so both sources cut days alike; a file row equal to no REST
-    bar, or to a bar of another day, means the two sources cut days differently.
+    range bar of the same UTC day, so both sources cut days alike.
+
+    Today the file's day bar of 2026-11-23 is not the range bar: its `X:BTC-USD` volume is 6.1%
+    below the REST sources'. The evidence first asserts the file's one row and its stamp. A pass
+    means the file's day bar equals the range bar: Massive rebuilt the file, so close the issue.
     """
     read = flat_file_tickers(_DAY_FILE, recent_monday, wire_spellings(dm.AssetClass.CRYPTO, _PAIR))
     assert read is not None, f"{_DAY_FILE} has no file for {recent_monday}"
@@ -377,7 +381,14 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     assert _at_day_edge(int(stamp) // _MS, recent_monday), f"file row stamped {stamp}"
     values = tuple(float(str(row[k])) for k in ("open", "high", "low", "close", "volume"))
     same_day = [b for b in ranged if _utc_day(int(b["t"])) == recent_monday]
-    assert any(_same(values, _ohlcv(b)) for b in same_day), "the file row is not the range bar"
+    expect_fixed(
+        evidence=evidence,
+        fixed=any(_same(values, _ohlcv(b)) for b in same_day),
+        shown=(
+            f"{_DAY_FILE} {recent_monday} row (o, h, l, c, v) {values} is not the REST range bar "
+            f"of that day: {[_ohlcv(b) for b in same_day]}"
+        ),
+    )
 
 
 @pytest.mark.verifies("38")
@@ -528,6 +539,7 @@ def _canonical(raw: Iterable[str]) -> set[str]:
     return {canonical_from_wire(dm.AssetClass.CRYPTO, text) or text for text in raw}
 
 
+@pytest.mark.massive_issue(861)
 @pytest.mark.verifies("39")
 @pytest.mark.timeout(100)
 def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
@@ -543,8 +555,9 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     `X:BTC-USD` or `C:EUR-USD`), so both are compared in the canonical form the library reads
     them into; a spelling the library cannot read is kept as written, and so shows up as a
     difference. Records the pairs only one of them holds on the most recent published Monday.
-    Passes when the two sets are equal, so `dm.ALL` crypto day bars hold the same pairs from either
-    source; a failure means the difference belongs in the documentation of `dm.ALL` day bars.
+    Today the file of 2026-11-23 lists 364 pairs and grouped daily 384. The evidence first asserts
+    that grouped daily lists pairs. A pass means the two sets are equal, so `dm.ALL` crypto day bars
+    hold the same pairs from either source: Massive rebuilt the file, so close the issue.
     """
     grouped = _canonical(str(row["T"]) for row in rest_rows(_GROUPED, {"date": recent_monday}, {}))
     read = flat_file_tickers(_DAY_FILE, recent_monday, None)
@@ -554,7 +567,15 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     evidence(f"only in grouped daily: {sorted(grouped - filed)}")
     evidence(f"only in the flat file: {sorted(filed - grouped)}")
     assert grouped
-    assert grouped == filed, "grouped daily and the day file hold different pairs"
+    expect_fixed(
+        evidence=evidence,
+        fixed=grouped == filed,
+        shown=(
+            f"{recent_monday}: {len(grouped)} pairs in grouped daily, {len(filed)} in {_DAY_FILE}; "
+            f"only in grouped daily {sorted(grouped - filed)}, only in the file "
+            f"{sorted(filed - grouped)}"
+        ),
+    )
 
 
 @pytest.mark.verifies("33")
