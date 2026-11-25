@@ -31,7 +31,7 @@ the reader (`plan-parallel-prs`, section 6). Three ways to run it, each with onl
 standard library:
 
     uv run python scripts/check_pr_body.py              # the branch: .git-pr-body.md and git diff
-    uv run python scripts/check_pr_body.py --pr 613     # a pull request, read with gh
+    uv run python scripts/check_pr_body.py --pr 613     # a pull request, read with gh and git
     python3 -I scripts/check_pr_body.py --body-file b.md --diff-file d.patch \
         --changed-file AGENTS.md
 
@@ -394,7 +394,11 @@ def _run(command: list[str]) -> str:
 
 
 def _from_gh(number: int) -> tuple[str, list[str], str, list[str]]:
-    """Read a pull request's body, file list, diff, and its base's decision files with gh.
+    """Read a pull request's body, file list, diff, and its base's decision files.
+
+    The body and the base come from gh. The diff and the file list come from git, as the
+    Conventional PR workflow builds them, since GitHub's diff API refuses a pull request past
+    20,000 lines.
 
     Args:
         number: The pull request number.
@@ -403,15 +407,31 @@ def _from_gh(number: int) -> tuple[str, list[str], str, list[str]]:
         The body, the changed paths, the unified diff, and the decision file names on the
         pull request's base branch, read from the repository rather than this worktree.
     """
-    fields = "body,files,baseRefName"
-    view = json.loads(_run(["gh", "pr", "view", str(number), "--json", fields]))
-    diff = _run(["gh", "pr", "diff", str(number)])
+    view = json.loads(_run(["gh", "pr", "view", str(number), "--json", "body,baseRefName"]))
+    base = _fetch(f"refs/heads/{view['baseRefName']}")
+    head = _fetch(f"refs/pull/{number}/head")
+    # Three dots diff from the merge base, as GitHub's pull request diff does.
+    diff = _run(["git", "diff", f"{base}...{head}"])
+    names = _run(["git", "diff", "--name-only", f"{base}...{head}"])
     contents = (
         f"repos/{{owner}}/{{repo}}/contents/{DECISIONS_DIR.as_posix()}?ref={view['baseRefName']}"
     )
     listing = _run(["gh", "api", contents, "--jq", ".[].name"])
     decisions = [name for name in listing.splitlines() if name[:1].isdigit()]
-    return str(view["body"]), [str(f["path"]) for f in view["files"]], diff, decisions
+    return str(view["body"]), [line for line in names.splitlines() if line], diff, decisions
+
+
+def _fetch(ref: str) -> str:
+    """Fetch one ref from `origin` without changing any branch, and name its commit.
+
+    Args:
+        ref: The full ref on the remote, such as `refs/pull/613/head`.
+
+    Returns:
+        The commit's hash, read from `FETCH_HEAD`, which only this fetch has just written.
+    """
+    _run(["git", "fetch", "-q", "--no-tags", "origin", ref])
+    return _run(["git", "rev-parse", "FETCH_HEAD"]).strip()
 
 
 def _base(body: str) -> tuple[str, str]:
@@ -523,7 +543,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     source = parser.add_mutually_exclusive_group()
-    source.add_argument("--pr", type=int, help="the pull request number, read with gh")
+    source.add_argument("--pr", type=int, help="the pull request number, read with gh and git")
     source.add_argument("--body-file", type=pathlib.Path, help="a file holding the body")
     parser.add_argument(
         "--changed-file", action="append", default=[], help="a changed path (with --body-file)"

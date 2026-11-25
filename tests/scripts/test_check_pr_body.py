@@ -382,35 +382,107 @@ def _fake_run(outputs: dict[str, str]) -> Callable[[list[str]], str]:
 _LISTING = "gh api repos/{owner}/{repo}/contents/docs/dev/decisions?ref=main --jq .[].name"
 
 
-def test_main_reads_a_pull_request_with_gh(
+@pytest.fixture
+def pull_request_7(
+    check: ModuleType, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> pathlib.Path:
+    """A clone whose `origin` holds `main` and pull request 7, as GitHub serves them.
+
+    The pull request rewrites a rule of `AGENTS.md`. After it branched, `main` gained
+    `later.md`, which a two-dot diff would count as the pull request's and a three-dot one,
+    as GitHub's and the workflow's, does not.
+
+    Returns:
+        The clone, which is also the working directory.
+    """
+    # The user's own git settings (signing, hooks, a default branch) stay out of the test.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "Test")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "test@example.com")
+
+    def _git(repo: pathlib.Path, *args: str) -> None:
+        check._run(["git", "-C", str(repo), *args])
+
+    origin = tmp_path / "origin"
+    _git(tmp_path, "init", "-q", "-b", "main", str(origin))
+    (origin / "AGENTS.md").write_text("- **Old rule.** Text.\n")
+    _git(origin, "add", "AGENTS.md")
+    _git(origin, "commit", "-q", "-m", "rules")
+    _git(origin, "checkout", "-q", "-b", "fix/rule")
+    (origin / "AGENTS.md").write_text("- **New rule.** Text.\n")
+    _git(origin, "commit", "-q", "-am", "new rule")
+    _git(origin, "update-ref", "refs/pull/7/head", "fix/rule")
+    _git(origin, "checkout", "-q", "main")
+    (origin / "later.md").write_text("Later.\n")
+    _git(origin, "add", "later.md")
+    _git(origin, "commit", "-q", "-m", "later")
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", str(origin), str(clone))
+    monkeypatch.chdir(clone)
+    return clone
+
+
+def _gh_then_git(check: ModuleType, outputs: dict[str, str]) -> Callable[[list[str]], str]:
+    """A stand-in for the script's runner that fakes gh and runs git for real.
+
+    Args:
+        check: The script, whose own runner runs git.
+        outputs: gh's answer to each command, keyed by the command's words.
+
+    Returns:
+        The runner: a gh command not in `outputs` fails as gh would.
+    """
+    fake, real = _fake_run(outputs), check._run
+
+    def run(command: list[str]) -> str:
+        return real(command) if command[0] == "git" else fake(command)
+
+    return run
+
+
+_VIEW = "gh pr view 7 --json body,baseRefName"
+
+
+@pytest.mark.usefixtures("pull_request_7")
+def test_a_pull_request_s_diff_and_files_come_from_git_as_the_workflow_builds_them(
+    check: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gh answers only the body, the base, and the decisions: `gh pr diff` refuses a diff past
+    # 20,000 lines, so a call to it fails here.
+    view = {"body": CLEAN, "baseRefName": "main"}
+    outputs = {_VIEW: json.dumps(view), _LISTING: "0104-canonical-ticker-refused.md\nREADME.md\n"}
+    monkeypatch.setattr(check, "_run", _gh_then_git(check, outputs))
+    body, changed, diff, decisions = check._from_gh(7)
+    assert body == CLEAN
+    assert changed == ["AGENTS.md"]
+    assert "-- **Old rule.** Text.\n+- **New rule.** Text.\n" in diff
+    assert "later.md" not in diff
+    assert decisions == ["0104-canonical-ticker-refused.md"]
+
+
+@pytest.mark.usefixtures("pull_request_7")
+def test_main_reads_a_pull_request_with_gh_and_git(
     check: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    view = {"body": CLEAN, "files": [{"path": "AGENTS.md"}], "baseRefName": "main"}
-    outputs = {
-        "gh pr view 7 --json body,files,baseRefName": json.dumps(view),
-        "gh pr diff 7": AGENTS_DIFF,
-        _LISTING: "0104-canonical-ticker-refused.md\nREADME.md\n",
-    }
-    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    view = {"body": CLEAN, "baseRefName": "main"}
+    outputs = {_VIEW: json.dumps(view), _LISTING: "0104-canonical-ticker-refused.md\n"}
+    monkeypatch.setattr(check, "_run", _gh_then_git(check, outputs))
     assert check.main(["--pr", "7"]) == 1
     assert "Decisions touched" in capsys.readouterr().out
 
 
 def test_a_cited_decision_is_resolved_against_the_pull_request_s_base(
-    check: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    check: ModuleType, monkeypatch: pytest.MonkeyPatch, pull_request_7: pathlib.Path
 ) -> None:
     # The worktree holds decision 120; the reviewed PR's base does not.
-    monkeypatch.chdir(tmp_path)
-    folder = tmp_path / "docs" / "dev" / "decisions"
+    folder = pull_request_7 / "docs" / "dev" / "decisions"
     folder.mkdir(parents=True)
     (folder / "0120-local-only.md").write_text("# 120. Local only\n")
-    view = {"body": "- Owner-approved (decision 120).\n", "files": [], "baseRefName": "main"}
-    outputs = {
-        "gh pr view 7 --json body,files,baseRefName": json.dumps(view),
-        "gh pr diff 7": "",
-        _LISTING: "0104-canonical-ticker-refused.md\n",
-    }
-    monkeypatch.setattr(check, "_run", _fake_run(outputs))
+    view = {"body": "- Owner-approved (decision 120).\n", "baseRefName": "main"}
+    outputs = {_VIEW: json.dumps(view), _LISTING: "0104-canonical-ticker-refused.md\n"}
+    monkeypatch.setattr(check, "_run", _gh_then_git(check, outputs))
     assert check.main(["--pr", "7"]) == 1
 
 
