@@ -755,6 +755,8 @@ class RestReader:
         delayed_subscriptions: The subscriptions whose delayed data the session accepts
             (`MassiveConfig.delayed_subscriptions`); a current-data read of any other fails on
             a `DELAYED` label (`_check_recency`).
+        websocket_hosts: The session's `MassiveConfig.websocket_hosts`, which that failure's
+            fix names when a pin contradicts it.
         threads: The name prefix of the threads of a fan-out pool this reader makes, such as
             `"massive #1 call-7 rest"`: the session, the call, and the transport.
         exec_ctx: The session's execution context, which tells whether a read's thread holds
@@ -776,6 +778,7 @@ class RestReader:
     policy: ResolvedPolicy
     problems: ProblemSink
     delayed_subscriptions: AbstractSet[Subscription]
+    websocket_hosts: Mapping[AssetClass, str]
     threads: str
     exec_ctx: ExecutionContext
     warnings: BoundedLog
@@ -1911,6 +1914,7 @@ class RestReader:
                     _delayed_what(spec, own),
                     f"status={DELAYED_LABEL}",
                     listed=listed,
+                    pins=self.websocket_hosts,
                     streams=False,
                 )
                 raise refusal
@@ -1927,6 +1931,7 @@ class RestReader:
                 _delayed_what(spec, list(tickers)),
                 evidence,
                 listed=listed,
+                pins=self.websocket_hosts,
                 streams=False,
             )
             raise refusal
@@ -2691,6 +2696,7 @@ class RestEndpoints:
             policy,
             core.problems,
             core.config.delayed_subscriptions,
+            core.config.websocket_hosts,
             f"{core.thread_prefix} {role} rest",
             core.exec_ctx,
             core.warnings,

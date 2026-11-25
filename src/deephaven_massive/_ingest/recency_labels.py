@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from collections.abc import Set as AbstractSet
 
-    from deephaven_massive._enums import Subscription
+    from deephaven_massive._enums import AssetClass, Subscription
 
 __all__ = [
     "TIMEFRAME_FIELDS",
@@ -153,6 +153,7 @@ def delayed_refusal(
     evidence: str,
     *,
     listed: AbstractSet[Subscription],
+    pins: Mapping[AssetClass, str] | None = None,
     streams: bool,
 ) -> DelayedDataError:
     """Return the error of delayed data for a subscription not listed as delayed.
@@ -164,6 +165,9 @@ def delayed_refusal(
         listed: The session's `MassiveConfig.delayed_subscriptions`, which the fix repeats
             with the subscription added.
         evidence: The label that shows it (`RecencyLabels.delayed`).
+        pins: The session's `MassiveConfig.websocket_hosts`, which a REST read passes so the
+            fix also removes a pin that contradicts the listed subscription; None (absent) for
+            a stream, whose host decision never refuses a pinned class.
         streams: True for a stream, whose fix is Massive's delayed feed; False for a REST
             read, whose fix accepts Massive's delayed data and also moves the subscription's
             streams to the delayed feed.
@@ -185,5 +189,5 @@ def delayed_refusal(
         f"{what} would be delayed, since Massive reports {evidence}, and "
         f"dm.Subscription.{subscription.name} is not in delayed_subscriptions, so the library "
         f"serves only real-time {subscription} data. "
-        f"{delayed_fix(subscription, listed=listed, purpose=purpose)}"
+        f"{delayed_fix(subscription, listed=listed, pins=pins, purpose=purpose)}"
     )

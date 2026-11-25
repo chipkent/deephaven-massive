@@ -4652,6 +4652,46 @@ def test_a_delayed_row_fails_a_real_time_fetch(
     )
 
 
+@pytest.mark.parametrize(
+    ("body", "evidence"),
+    [
+        (envelope([{"ticker": "I:SPX", "timeframe": "DELAYED"}]), "timeframe=DELAYED"),
+        (envelope([{"ticker": "I:SPX"}], status="DELAYED"), "status=DELAYED"),
+    ],
+    ids=["row label", "response status"],
+)
+def test_a_delayed_fetch_also_removes_a_real_time_pin_the_advice_would_contradict(
+    *, fake_rest: FakeRestServer, body: dict[str, object], evidence: str
+) -> None:
+    pinned = {dm.AssetClass.INDICES: "socket.massive.com", dm.AssetClass.STOCKS: "proxy.example"}
+    m = dm.MassiveSession(
+        dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, websocket_hosts=pinned)
+    )
+    try:
+        fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(body))
+        with pytest.raises(dm.EntitlementError) as info:
+            fetch(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    finally:
+        m.close()
+    # Only the indices pin contradicts the advice, so the stocks pin is kept.
+    assert str(info.value) == (
+        f"indices.snapshots data for I:SPX would be delayed, since Massive reports {evidence}, "
+        "and dm.Subscription.INDICES is not in delayed_subscriptions, so the library serves only "
+        "real-time indices data. To accept delayed indices data, whose streams then use "
+        "Massive's delayed feed too, pass "
+        "delayed_subscriptions={dm.Subscription.INDICES} to dm.MassiveConfig and remove the "
+        "indices pin 'socket.massive.com' from websocket_hosts."
+    )
+    # The advice works: MassiveConfig accepts the listed subscription without the indices pin.
+    advised = dm.MassiveConfig(
+        api_key="test-key",
+        delayed_subscriptions={Subscription.INDICES},
+        websocket_hosts={dm.AssetClass.STOCKS: "proxy.example"},
+    )
+    assert advised.delayed_subscriptions == {Subscription.INDICES}
+    assert dict(advised.websocket_hosts) == {dm.AssetClass.STOCKS: "proxy.example"}
+
+
 def test_a_delayed_envelope_fails_a_real_time_fetch(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

@@ -545,6 +545,40 @@ def test_the_delayed_fix_without_a_known_set_says_what_to_add() -> None:
     )
 
 
+def test_the_delayed_fix_removes_a_pin_that_would_contradict_it() -> None:
+    # A listed subscription may pin only a delayed feed, so the advice removes a real-time pin.
+    pins = {AssetClass.STOCKS: "socket.massive.com"}
+    assert delayed_fix(Subscription.STOCKS, listed=set(), pins=pins) == (
+        "Pass delayed_subscriptions={dm.Subscription.STOCKS} to dm.MassiveConfig and remove the "
+        "stocks pin 'socket.massive.com' from websocket_hosts."
+    )
+    with pytest.raises(ValueError, match=r"websocket_hosts pins stocks to 'socket.massive.com'"):
+        MassiveConfig(
+            api_key="k", delayed_subscriptions={Subscription.STOCKS}, websocket_hosts=pins
+        )
+    # The advice works: the subscription listed and the pin removed.
+    advised = MassiveConfig(api_key="k", delayed_subscriptions={Subscription.STOCKS})
+    assert advised.delayed_subscriptions == {Subscription.STOCKS}
+    assert dict(advised.websocket_hosts) == {}
+
+
+def test_the_delayed_fix_keeps_pins_that_agree_with_it() -> None:
+    # A delayed-feed pin of the class, and a pin of another class, agree with the listed
+    # subscription, so the advice names only the setting.
+    pins = {AssetClass.STOCKS: "delayed.massive.com", AssetClass.OPTIONS: "socket.massive.com"}
+    assert delayed_fix(Subscription.STOCKS, listed=set(), pins=pins) == (
+        "Pass delayed_subscriptions={dm.Subscription.STOCKS} to dm.MassiveConfig."
+    )
+
+
+def test_the_delayed_fix_without_a_known_set_still_removes_the_pin() -> None:
+    pins = {AssetClass.FUTURES: "socket.massive.com"}
+    assert delayed_fix(Subscription.FUTURES, pins=pins, purpose="To accept it") == (
+        "To accept it, add dm.Subscription.FUTURES to delayed_subscriptions in dm.MassiveConfig "
+        "and remove the futures pin 'socket.massive.com' from websocket_hosts."
+    )
+
+
 def test_a_delayed_pin_needs_the_subscription_listed(base: MassiveConfig) -> None:
     pinned = {AssetClass.OPTIONS: "delayed.massive.com"}
     refusal = (
