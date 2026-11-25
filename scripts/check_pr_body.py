@@ -396,9 +396,10 @@ def _run(command: list[str]) -> str:
 def _from_pull_request(number: int) -> tuple[str, list[str], str, list[str]]:
     """Read a pull request's body, file list, diff, and its base's decision files.
 
-    The body and the base come from gh. The diff and the file list come from git, as the
+    The body and the commits come from gh. The diff and the file list come from git, as the
     Conventional PR workflow builds them, since GitHub's diff API refuses a pull request past
-    20,000 lines.
+    20,000 lines. The commits are fetched by the hashes gh gives, so the diff is the pull
+    request's own even when `origin` is another repository: git then fails to fetch them.
 
     Args:
         number: The pull request number.
@@ -406,32 +407,47 @@ def _from_pull_request(number: int) -> tuple[str, list[str], str, list[str]]:
     Returns:
         The body, the changed paths, the unified diff, and the decision file names on the
         pull request's base branch, read from the repository rather than this worktree.
+
+    Raises:
+        SystemExit: With status 2, after saying so, when `origin` lacks the commits.
     """
-    view = json.loads(_run(["gh", "pr", "view", str(number), "--json", "body,baseRefName"]))
-    base = _fetch(f"refs/heads/{view['baseRefName']}")
-    head = _fetch(f"refs/pull/{number}/head")
-    # Three dots diff from the merge base, as GitHub's pull request diff does.
-    diff = _run(["git", "diff", f"{base}...{head}"])
-    names = _run(["git", "diff", "--name-only", f"{base}...{head}"])
+    fields = "body,baseRefName,baseRefOid,headRefOid"
+    view = json.loads(_run(["gh", "pr", "view", str(number), "--json", fields]))
+    base, head = str(view["baseRefOid"]), str(view["headRefOid"])
+    try:
+        _run(["git", "fetch", "-q", "--no-tags", "origin", base, head])
+    except subprocess.CalledProcessError as error:
+        sys.stderr.write(
+            f"git could not fetch pull request {number}'s commits {base} and {head} from "
+            f"origin: {error.stderr.strip()}\nRun the check from a clone whose origin is the "
+            f"repository gh reads (gh repo set-default --view).\n"
+        )
+        raise SystemExit(2) from error
+    diff, changed = _diff(base, head)
     contents = (
         f"repos/{{owner}}/{{repo}}/contents/{DECISIONS_DIR.as_posix()}?ref={view['baseRefName']}"
     )
     listing = _run(["gh", "api", contents, "--jq", ".[].name"])
     decisions = [name for name in listing.splitlines() if name[:1].isdigit()]
-    return str(view["body"]), [line for line in names.splitlines() if line], diff, decisions
+    return str(view["body"]), changed, diff, decisions
 
 
-def _fetch(ref: str) -> str:
-    """Fetch one ref from `origin` without changing a local branch, and name its commit.
+def _diff(base: str, head: str) -> tuple[str, list[str]]:
+    """Diff a branch against its base as GitHub does, whatever the user's git settings.
 
     Args:
-        ref: The full ref on the remote, such as `refs/pull/613/head`.
+        base: The base commit or branch.
+        head: The branch's commit.
 
     Returns:
-        The commit's hash, read from `FETCH_HEAD`, which the fetch has just written.
+        The unified diff from the merge base, with `a/` and `b/` prefixes and no color as the
+        rule checks read it, and the changed paths unquoted.
     """
-    _run(["git", "fetch", "-q", "--no-tags", "origin", ref])
-    return _run(["git", "rev-parse", "FETCH_HEAD"]).strip()
+    span = f"{base}...{head}"
+    plain = ["--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"]
+    diff = _run(["git", "diff", *plain, span])
+    names = _run(["git", "diff", "--name-only", "-z", span])
+    return diff, [name for name in names.split("\0") if name]
 
 
 def _base(body: str) -> tuple[str, str]:
@@ -527,9 +543,8 @@ def _from_branch() -> tuple[str, list[str], str, str]:
     body = BODY_FILE.read_text()
     base, how = _base(body)
     sys.stdout.write(f"Comparing the branch with {base} ({how}).\n")
-    diff = _run(["git", "diff", f"{base}...HEAD"])
-    names = _run(["git", "diff", "--name-only", f"{base}...HEAD"])
-    return body, [line for line in names.splitlines() if line], diff, base
+    diff, changed = _diff(base, "HEAD")
+    return body, changed, diff, base
 
 
 def main(argv: list[str] | None = None) -> int:

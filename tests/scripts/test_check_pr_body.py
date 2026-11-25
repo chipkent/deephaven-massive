@@ -380,21 +380,30 @@ def _fake_run(outputs: dict[str, str]) -> Callable[[list[str]], str]:
     return run
 
 
+#: The flags that keep the user's settings out of the diff the rules read.
+_DIFF = "git diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/"
+
 _LISTING = "gh api repos/{owner}/{repo}/contents/docs/dev/decisions?ref=main --jq .[].name"
+
+
+#: A skill path git quotes in a plain `--name-only` list, as it quotes every non-ASCII name.
+_SKILL = ".claude/skills/café/SKILL.md"
 
 
 @pytest.fixture
 def pull_request_7(
     check: ModuleType, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> pathlib.Path:
+) -> dict[str, str]:
     """A clone whose `origin` holds `main` and pull request 7, as GitHub serves them.
 
-    The pull request rewrites a rule of `AGENTS.md`. After it branched, `main` gained
-    `later.md`, which a two-dot diff would count as the pull request's and a three-dot one,
-    as GitHub's and the workflow's, does not.
+    The pull request rewrites a rule of `AGENTS.md` and adds a skill. Its commit is reachable
+    only from `refs/pull/7/head`, so the clone holds it only once the check fetches it. After
+    the pull request branched, `main` gained `later.md`, which a two-dot diff would count as
+    the pull request's and a three-dot one, as GitHub's and the workflow's, does not.
 
     Returns:
-        The clone, which is also the working directory.
+        The fields `gh pr view 7` gives for the base and the commits. The clone is the working
+        directory.
     """
     # The user's own git settings (signing, hooks, a default branch) stay out of the test, and
     # so does the repository a git hook running these tests points at (`GIT_INDEX_FILE`).
@@ -406,8 +415,8 @@ def pull_request_7(
         monkeypatch.setenv(f"GIT_{role}_NAME", "Test")
         monkeypatch.setenv(f"GIT_{role}_EMAIL", "test@example.com")
 
-    def _git(repo: pathlib.Path, *args: str) -> None:
-        check._run(["git", "-C", str(repo), *args])
+    def _git(repo: pathlib.Path, *args: str) -> str:
+        return str(check._run(["git", "-C", str(repo), *args])).strip()
 
     origin = tmp_path / "origin"
     _git(tmp_path, "init", "-q", "-b", "main", str(origin))
@@ -416,16 +425,22 @@ def pull_request_7(
     _git(origin, "commit", "-q", "-m", "rules")
     _git(origin, "checkout", "-q", "-b", "fix/rule")
     (origin / "AGENTS.md").write_text("- **New rule.** Text.\n")
-    _git(origin, "commit", "-q", "-am", "new rule")
-    _git(origin, "update-ref", "refs/pull/7/head", "fix/rule")
+    (origin / _SKILL).parent.mkdir(parents=True)
+    (origin / _SKILL).write_text("A skill.\n")
+    _git(origin, "add", "AGENTS.md", _SKILL)
+    _git(origin, "commit", "-q", "-m", "new rule")
+    head = _git(origin, "rev-parse", "HEAD")
+    _git(origin, "update-ref", "refs/pull/7/head", head)
     _git(origin, "checkout", "-q", "main")
+    _git(origin, "branch", "-q", "-D", "fix/rule")
     (origin / "later.md").write_text("Later.\n")
     _git(origin, "add", "later.md")
     _git(origin, "commit", "-q", "-m", "later")
     clone = tmp_path / "clone"
     _git(tmp_path, "clone", "-q", str(origin), str(clone))
     monkeypatch.chdir(clone)
-    return clone
+    base = _git(origin, "rev-parse", "main")
+    return {"baseRefName": "main", "baseRefOid": base, "headRefOid": head}
 
 
 def _gh_then_git(check: ModuleType, outputs: dict[str, str]) -> Callable[[list[str]], str]:
@@ -446,48 +461,96 @@ def _gh_then_git(check: ModuleType, outputs: dict[str, str]) -> Callable[[list[s
     return run
 
 
-_VIEW = "gh pr view 7 --json body,baseRefName"
+_VIEW = "gh pr view 7 --json body,baseRefName,baseRefOid,headRefOid"
 
 
-@pytest.mark.usefixtures("pull_request_7")
 def test_a_pull_request_s_diff_and_files_come_from_git_as_the_workflow_builds_them(
-    check: ModuleType, monkeypatch: pytest.MonkeyPatch
+    check: ModuleType, monkeypatch: pytest.MonkeyPatch, pull_request_7: dict[str, str]
 ) -> None:
-    # gh answers only the body, the base, and the decisions: `gh pr diff` refuses a diff past
-    # 20,000 lines, so a call to it fails here.
-    view = {"body": CLEAN, "baseRefName": "main"}
+    # gh answers only the body, the commits, and the decisions: `gh pr diff` refuses a diff
+    # past 20,000 lines, so a call to it fails here.
+    view = {"body": CLEAN, **pull_request_7}
     outputs = {_VIEW: json.dumps(view), _LISTING: "0104-canonical-ticker-refused.md\nREADME.md\n"}
     monkeypatch.setattr(check, "_run", _gh_then_git(check, outputs))
     body, changed, diff, decisions = check._from_pull_request(7)
     assert body == CLEAN
-    assert changed == ["AGENTS.md"]
+    assert changed == [_SKILL, "AGENTS.md"]
     assert "-- **Old rule.** Text.\n+- **New rule.** Text.\n" in diff
     assert "later.md" not in diff
     assert decisions == ["0104-canonical-ticker-refused.md"]
 
 
-@pytest.mark.usefixtures("pull_request_7")
 def test_main_reads_a_pull_request_with_gh_and_git(
-    check: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    pull_request_7: dict[str, str],
 ) -> None:
-    view = {"body": CLEAN, "baseRefName": "main"}
+    view = {"body": CLEAN, **pull_request_7}
     outputs = {_VIEW: json.dumps(view), _LISTING: "0104-canonical-ticker-refused.md\n"}
     monkeypatch.setattr(check, "_run", _gh_then_git(check, outputs))
     assert check.main(["--pr", "7"]) == 1
     assert "Decisions touched" in capsys.readouterr().out
 
 
-def test_a_cited_decision_is_resolved_against_the_pull_request_s_base(
-    check: ModuleType, monkeypatch: pytest.MonkeyPatch, pull_request_7: pathlib.Path
+def test_the_user_s_diff_settings_never_hide_a_rule_rewrite(
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    pull_request_7: dict[str, str],
 ) -> None:
-    # The worktree holds decision 120; the reviewed PR's base does not.
-    folder = pull_request_7 / "docs" / "dev" / "decisions"
-    folder.mkdir(parents=True)
-    (folder / "0120-local-only.md").write_text("# 120. Local only\n")
-    view = {"body": "- Owner-approved (decision 120).\n", "baseRefName": "main"}
+    # Each setting changes the `diff --git a/... b/...` header the rule check reads.
+    for setting, value in (("diff.noprefix", "true"), ("color.ui", "always")):
+        check._run(["git", "config", setting, value])
+    view = {"body": ANSWERED, **pull_request_7}
     outputs = {_VIEW: json.dumps(view), _LISTING: "0104-canonical-ticker-refused.md\n"}
     monkeypatch.setattr(check, "_run", _gh_then_git(check, outputs))
     assert check.main(["--pr", "7"]) == 1
+    assert "Decisions touched" in capsys.readouterr().out
+
+
+def test_a_pull_request_origin_does_not_hold_stops_with_what_to_do(
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    pull_request_7: dict[str, str],
+) -> None:
+    # gh reads another repository than `origin`, whose pull request 7 is another change.
+    missing = "0" * 40
+    view = {"body": CLEAN, **pull_request_7, "headRefOid": missing}
+    outputs = {_VIEW: json.dumps(view), _LISTING: "0104-canonical-ticker-refused.md\n"}
+    monkeypatch.setattr(check, "_run", _gh_then_git(check, outputs))
+    with pytest.raises(SystemExit) as stopped:
+        check.main(["--pr", "7"])
+    assert stopped.value.code == 2
+    err = capsys.readouterr().err
+    base = pull_request_7["baseRefOid"]
+    assert f"git could not fetch pull request 7's commits {base} and {missing} from" in err
+    assert err.endswith(
+        "Run the check from a clone whose origin is the repository gh reads "
+        "(gh repo set-default --view).\n"
+    )
+
+
+def test_a_cited_decision_is_resolved_against_the_pull_request_s_base(
+    *,
+    check: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    pull_request_7: dict[str, str],
+) -> None:
+    # The worktree holds decision 120; the reviewed PR's base does not.
+    folder = pathlib.Path("docs") / "dev" / "decisions"
+    folder.mkdir(parents=True)
+    (folder / "0120-local-only.md").write_text("# 120. Local only\n")
+    view = {"body": "- Owner-approved (decision 120).\n", **pull_request_7}
+    outputs = {_VIEW: json.dumps(view), _LISTING: "0104-canonical-ticker-refused.md\n"}
+    monkeypatch.setattr(check, "_run", _gh_then_git(check, outputs))
+    assert check.main(["--pr", "7"]) == 1
+    assert "An approval is claimed ('Owner-approved')" in capsys.readouterr().out
 
 
 def test_the_branch_is_measured_against_its_pull_request_s_base(
@@ -498,8 +561,8 @@ def test_the_branch_is_measured_against_its_pull_request_s_base(
     (tmp_path / ".git-pr-body.md").write_text("<!-- base: fix/stale -->\n" + CLEAN)
     outputs = {
         "gh pr view --json baseRefName": json.dumps({"baseRefName": "fix/below"}),
-        "git diff origin/fix/below...HEAD": "",
-        "git diff --name-only origin/fix/below...HEAD": "src/x.py\n",
+        f"{_DIFF} origin/fix/below...HEAD": "",
+        "git diff --name-only -z origin/fix/below...HEAD": "src/x.py\0",
     }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main([]) == 0
@@ -537,8 +600,8 @@ def test_a_stacked_branch_before_its_pull_request_is_measured_against_the_branch
     (tmp_path / ".git-pr-body.md").write_text("## Summary\n\nAdds a column.\n")
     outputs = {
         **_STACKED,
-        "git diff origin/feat/problems-table...HEAD": "",
-        "git diff --name-only origin/feat/problems-table...HEAD": "src/x.py\n",
+        f"{_DIFF} origin/feat/problems-table...HEAD": "",
+        "git diff --name-only -z origin/feat/problems-table...HEAD": "src/x.py\0",
     }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main([]) == 0
@@ -554,8 +617,8 @@ def test_a_declared_base_is_used_before_the_open_pull_requests_are_searched(
     )
     outputs = {
         "git rev-list --count origin/feat/problems-table..HEAD": "2\n",
-        "git diff origin/feat/problems-table...HEAD": "",
-        "git diff --name-only origin/feat/problems-table...HEAD": "src/x.py\n",
+        f"{_DIFF} origin/feat/problems-table...HEAD": "",
+        "git diff --name-only -z origin/feat/problems-table...HEAD": "src/x.py\0",
     }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main([]) == 0
@@ -576,8 +639,8 @@ def test_a_declared_base_that_already_holds_the_branch_is_ignored(
     outputs = {
         **_STACKED,
         "git rev-list --count origin/fix/mine..HEAD": "0\n",
-        "git diff origin/feat/problems-table...HEAD": "",
-        "git diff --name-only origin/feat/problems-table...HEAD": ".claude/skills/x/SKILL.md\n",
+        f"{_DIFF} origin/feat/problems-table...HEAD": "",
+        "git diff --name-only -z origin/feat/problems-table...HEAD": ".claude/skills/x/SKILL.md\0",
     }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main([]) == 1
@@ -598,8 +661,8 @@ def test_a_declared_base_git_cannot_find_is_ignored(
     )
     outputs = {
         **_STACKED,
-        "git diff origin/feat/problems-table...HEAD": "",
-        "git diff --name-only origin/feat/problems-table...HEAD": "src/x.py\n",
+        f"{_DIFF} origin/feat/problems-table...HEAD": "",
+        "git diff --name-only -z origin/feat/problems-table...HEAD": "src/x.py\0",
     }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main([]) == 0
@@ -628,8 +691,8 @@ def test_a_branch_cut_from_main_is_measured_against_main_and_told_how_to_declare
     outputs = {
         **_STACKED,
         "git rev-list --count origin/main..HEAD": "2\n",
-        "git diff origin/main...HEAD": "",
-        "git diff --name-only origin/main...HEAD": ".claude/skills/x/SKILL.md\n",
+        f"{_DIFF} origin/main...HEAD": "",
+        "git diff --name-only -z origin/main...HEAD": ".claude/skills/x/SKILL.md\0",
     }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main([]) == 1
@@ -646,8 +709,8 @@ def test_a_branch_whose_open_pull_requests_cannot_be_listed_is_measured_against_
     outputs = {
         "git branch --show-current": "fix/mine\n",
         "git rev-list --count origin/main..HEAD": "2\n",
-        "git diff origin/main...HEAD": "",
-        "git diff --name-only origin/main...HEAD": ".claude/skills/x/SKILL.md\n",
+        f"{_DIFF} origin/main...HEAD": "",
+        "git diff --name-only -z origin/main...HEAD": ".claude/skills/x/SKILL.md\0",
     }
     monkeypatch.setattr(check, "_run", _fake_run(outputs))
     assert check.main([]) == 1
