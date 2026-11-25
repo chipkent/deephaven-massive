@@ -184,6 +184,13 @@ minor choices yourself instead of running multi-agent debates, and don't re-run 
 whose last pass found little. The project settings also make agents compact at about 300,000
 tokens.
 
+Match the model to the hardest judgment the task needs. Fable designs, attacks a design or a
+finished diff as its critic, and judges concurrency or data-integrity risk. Opus builds from a
+settled design and writes most code and tests. Sonnet does lookups and inventories, applies a
+given list of edits, makes mechanical refactors, watches CI, and answers review threads. When a
+task mixes them, the cheaper model gathers and Fable judges only the hard part. Name the model
+in every Agent call; an unnamed one inherits the coordinator's.
+
 ## 8. After a merge
 
 Delete the merged PR's local branch and worktree; GitHub deletes the remote branch itself. A

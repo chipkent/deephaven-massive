@@ -956,20 +956,19 @@ def _range_day_bars(
     return {day: [bar for bar in bars if _new_york_day(int(bar["t"])) == day] for day in days}
 
 
-@pytest.mark.massive_issue(797)
 @pytest.mark.requests(2)
 def test_the_prev_bar_of_an_index_equals_its_range_day_bar(
     *, rest_rows: RestRows, range_bars: RangeBars, evidence: Evidence
 ) -> None:
     """Whether `I:AAVE100`'s `/prev` bar has the prices of the range endpoint's bar of its day.
 
-    Today `/prev` (`/v2/aggs/ticker/I:AAVE100/prev`) can send other prices than the range
+    `/prev` (`/v2/aggs/ticker/I:AAVE100/prev`) once sent other prices than the range
     endpoint's 1-day bar of the same day: on 2026-11-02 it closed 2026-11-01 at 134.0462, the
-    range bar at 133.4228. Massive confirmed it as a data issue. Reads the `/prev` bar and the
-    range's 1-day bars around its New York day, 2 requests, and asserts that both came back
-    for the same day. A pass, the two bars' open, high, low, and close equal within a relative
-    1e-6, means Massive fixed it: close the issue. `/prev` serves only the most recent day, so
-    each run judges that one day.
+    range bar at 133.4228. Massive fixed it. Reads the `/prev` bar and the range's 1-day bars
+    around its New York day, 2 requests, and asserts that both came back for the same day.
+    Passes when the two bars' open, high, low, and close are equal within a relative 1e-6; a
+    failure means they differ again. `/prev` serves only the most recent day, so each run
+    judges that one day.
     """
     prevs = rest_rows(_PREV, {"indicesTicker": _PROBLEM_INDEX}, {})
     assert len(prevs) == 1, f"{_PREV} of {_PROBLEM_INDEX} sent {len(prevs)} bars: {prevs}"
@@ -983,17 +982,14 @@ def test_the_prev_bar_of_an_index_equals_its_range_day_bar(
     assert prev_prices is not None, f"/prev sent a bar without prices: {prev}"
     assert range_prices is not None, f"the range sent a bar without prices: {ranged[0]}"
     error = index_day_sources.relative_error(prev_prices, range_prices)
-    expect_fixed(
-        evidence=evidence,
-        fixed=error <= index_day_sources.MATCH,
-        shown=(
-            f"{_PREV} of {_PROBLEM_INDEX} sent {prev_prices} (open, high, low, close) for {day}, "
-            f"and the range's 1-day bar of {day} {range_prices}: a relative error of {error:.2e}"
-        ),
+    shown = (
+        f"{_PREV} of {_PROBLEM_INDEX} sent {prev_prices} (open, high, low, close) for {day}, "
+        f"and the range's 1-day bar of {day} {range_prices}: a relative error of {error:.2e}"
     )
+    evidence(shown)
+    assert error <= index_day_sources.MATCH, shown
 
 
-@pytest.mark.massive_issue(798)
 @pytest.mark.requests(1)
 @pytest.mark.timeout(160)
 def test_the_short_index_minute_file_holds_every_rest_minute(
@@ -1001,14 +997,14 @@ def test_the_short_index_minute_file_holds_every_rest_minute(
 ) -> None:
     """Whether the 2026-10-26 index minute file holds every `I:AAVE100` minute REST serves.
 
-    Today the `us_indices/minute_aggs_v1` file of 2026-10-26 holds 1,155 `I:AAVE100` minutes
-    while REST serves all 1,440, and nothing marks the gap; Massive confirmed it and promised
-    a backfill. Reads the file's `I:AAVE100` rows and the REST minute bars from the day before
-    to the day after, 1 request, and compares them over the day `history()` reads the file
-    as, midnight to midnight in Chicago, and over the New York day too, in case the backfill
-    cuts the file there. It asserts that the file was published and that REST has minutes in
-    both days. A pass, no REST minute of either day missing from the file, means Massive
-    backfilled it: close the issue.
+    The `us_indices/minute_aggs_v1` file of 2026-10-26 once held 1,155 `I:AAVE100` minutes
+    while REST served all 1,440, and nothing marked the gap. Massive backfilled it. Reads the
+    file's `I:AAVE100` rows and the REST minute bars from the day before to the day after,
+    1 request, and compares them over the day `history()` reads the file as, midnight to
+    midnight in Chicago, and over the New York day too, in case the backfill cut the file
+    there. It asserts that the file was published and that REST has minutes in both days.
+    Passes when no REST minute of either day is missing from the file; a failure means the
+    file lacks minutes again.
     """
     day = _SHORT_MINUTE_FILE_DAY
     read = flat_file_tickers(
@@ -1032,17 +1028,14 @@ def test_the_short_index_minute_file_holds_every_rest_minute(
         )
         lacking[f"{name} day"] = lacks
     counts = {name: len(lacks) for name, lacks in lacking.items()}
-    expect_fixed(
-        evidence=evidence,
-        fixed=any(not lacks for lacks in lacking.values()),
-        shown=(
-            f"{_MINUTE_FILE} of {day} holds {len(filed)} {_PROBLEM_INDEX} minutes and lacks "
-            f"REST minutes (range {bounds[0]} to {bounds[1]}) of both days: {counts}"
-        ),
+    shown = (
+        f"{_MINUTE_FILE} of {day} holds {len(filed)} {_PROBLEM_INDEX} minutes and lacks "
+        f"REST minutes (range {bounds[0]} to {bounds[1]}) of both days: {counts}"
     )
+    evidence(shown)
+    assert any(not lacks for lacks in lacking.values()), shown
 
 
-@pytest.mark.massive_issue(806)
 @pytest.mark.requests(1)
 @pytest.mark.timeout(100)
 def test_the_index_day_files_match_the_rest_day_bars(
@@ -1050,12 +1043,12 @@ def test_the_index_day_files_match_the_rest_day_bars(
 ) -> None:
     """Whether `I:AAVE100`'s day-file rows of 2025-12-23 and -24 match its REST day bars.
 
-    Today the `us_indices/day_aggs_v1` rows of those days have the REST day bar's start but
-    other prices: closes of 151.2113 (file) and 148.7037 (REST) on 2025-12-23. Massive
-    confirmed it as a data issue. Reads both files' `I:AAVE100` rows and the range's 1-day
-    bars around both days, 1 request, and asserts that each file holds one row and REST one
-    bar for each day. A pass, each day's file row and REST bar equal in open, high, low, and
-    close within a relative 1e-6 on both days, means Massive fixed it: close the issue.
+    The `us_indices/day_aggs_v1` rows of those days once had the REST day bar's start but
+    other prices: closes of 151.2113 (file) and 148.7037 (REST) on 2025-12-23. Massive fixed
+    it. Reads both files' `I:AAVE100` rows and the range's 1-day bars around both days,
+    1 request, and asserts that each file holds one row and REST one bar for each day. Passes
+    when each day's file row and REST bar are equal in open, high, low, and close within a
+    relative 1e-6 on both days; a failure means they differ again.
     """
     days = _DIFFERING_DAY_FILE_DAYS
     spellings = wire_spellings(dm.AssetClass.INDICES, _PROBLEM_INDEX)
@@ -1080,14 +1073,12 @@ def test_the_index_day_files_match_the_rest_day_bars(
             differ.append(
                 f"{day}: file {file_prices}, REST {range_prices}, relative error {error:.2e}"
             )
-    expect_fixed(
-        evidence=evidence,
-        fixed=not differ,
-        shown=(
-            f"{_PROBLEM_INDEX}'s {_DAY_FILE} rows differ from the range's 1-day bars "
-            f"(open, high, low, close) on {len(differ)} of {len(days)} days: {'; '.join(differ)}"
-        ),
+    shown = (
+        f"{_PROBLEM_INDEX}'s {_DAY_FILE} rows differ from the range's 1-day bars "
+        f"(open, high, low, close) on {len(differ)} of {len(days)} days: {'; '.join(differ)}"
     )
+    evidence(shown)
+    assert not differ, shown
 
 
 @pytest.mark.massive_issue(779)
