@@ -345,8 +345,8 @@ def test_bar_prices_say_how_they_are_adjusted() -> None:
 @pytest.mark.parametrize(
     ("spec", "gone"),
     [
-        (options.CHAIN, {"Ticker", "UnderlyingAssetTicker"}),
-        (options.SNAPSHOTS, {"Ticker", "UnderlyingAssetTicker"}),
+        (options.CHAIN, {"Ticker", "UnderlyingTicker"}),
+        (options.SNAPSHOTS, {"Ticker", "UnderlyingTicker"}),
         (options.CONTRACTS, {"Ticker", "UnderlyingTicker"}),
     ],
 )
@@ -363,7 +363,7 @@ def test_contract_rows_carry_symbol_and_underlying(spec: DatasetSpec, gone: set[
 
 def test_snapshots_carry_the_greeks_and_the_per_ticker_error() -> None:
     names = set(CATALOG.dataset_schema(options.SNAPSHOTS).column_names)
-    assert {"GreeksDelta", "GreeksGamma", "GreeksTheta", "GreeksVega"} <= names
+    assert {"Delta", "Gamma", "Theta", "Vega"} <= names
     assert {"ImpliedVolatility", "OpenInterest", "Error", "Message"} <= names
 
 
@@ -441,7 +441,7 @@ def test_the_snapshot_fixture_has_a_per_ticker_error_row(
     assert marks == {}  # every row read whole
     table = batch.to_pydict()
     assert table["Ticker"] == ["O:NCLH221014C00005000", "O:NCLH221014C00999000"]
-    assert table["UnderlyingAssetTicker"] == ["NCLH", None]
+    assert table["UnderlyingTicker"] == ["NCLH", None]
     assert table["Error"] == [None, "NOT_FOUND"]
 
 
@@ -1155,7 +1155,7 @@ def test_chain_reads_one_underlying(
     (row,) = out
     assert (row["Symbol"], row["Underlying"]) == ("O:AAPL220121C00150000", "AAPL")
     assert row["OptionRoot"] == "AAPL"
-    assert (row["StrikePrice"], row["GreeksTheta"], row["OpenInterest"]) == (
+    assert (row["StrikePrice"], row["Theta"], row["OpenInterest"]) == (
         150.0,
         0.00229,
         1543.0,
@@ -1210,7 +1210,7 @@ def test_snapshots_keep_the_error_row_of_a_contract(
         "NCLH",
         None,
     )
-    assert found["GreeksDelta"] == 0.5520187372272933
+    assert found["Delta"] == 0.5520187372272933
     assert found["LastTradeSipTimestamp"] == 1675280958783136800
     assert (missing["Symbol"], missing["Underlying"]) == ("O:NCLH221014C00999000", None)
     assert (missing["Error"], missing["Message"]) == ("NOT_FOUND", "Ticker not found.")

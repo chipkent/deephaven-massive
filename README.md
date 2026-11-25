@@ -595,7 +595,7 @@ m = dm.MassiveSession(dm.MassiveConfig.from_file("~/massive/settings.yaml"))
 calls = m.options.chain("AAPL", contract_type=dm.ContractType.CALL).fetch(wait=True)
 nearest = calls.where_in(calls.agg_by(agg.min_("ExpirationDate")), "ExpirationDate")
 nearest_calls = nearest.view(
-    ["StrikePrice", "DayClose", "ImpliedVolatility", "OpenInterest", "GreeksDelta"]
+    ["StrikePrice", "DayClose", "ImpliedVolatility", "OpenInterest", "Delta"]
 ).sort("StrikePrice")
 ```
 

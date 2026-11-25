@@ -67,10 +67,10 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `StrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. |
 | `Fmv` | double | Fair Market Value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). |
 | `FmvLastUpdated` | Instant | If Fair Market Value (FMV) is available, this field is the nanosecond timestamp of the last FMV calculation. |
-| `GreeksDelta` | double | The change in the option's price per $0.01 increment in the price of the underlying asset. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
-| `GreeksGamma` | double | The change in delta per $0.01 change in the price of the underlying asset. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
-| `GreeksTheta` | double | The change in the option's price per day. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
-| `GreeksVega` | double | The change in the option's price per 1% increment in volatility. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
+| `Delta` | double | Change in option price per $1 move in the underlying. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
+| `Gamma` | double | Change in delta per $1 move in the underlying. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
+| `Theta` | double | The change in the option's price per day. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
+| `Vega` | double | The change in the option's price per 1% increment in volatility. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
 | `ImpliedVolatility` | double | The market's forecast for the volatility of the underlying asset, based on this option's current price. |
 | `LastQuoteBidPrice` | double | The bid price. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
 | `LastQuoteBidSize` | double | The bid size. From the `last_quote` object: The most recent quote for this contract. This is only returned if your current plan includes quotes. |
@@ -88,12 +88,12 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `LastTradeSipTimestamp` | Instant | The nanosecond accuracy SIP Unix Timestamp. This is the timestamp of when the SIP received this trade from the exchange which produced it. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. |
 | `LastTradeTimeframe` | String | The time relevance of the data. From the `last_trade` object: The most recent trade for this contract. This is only returned if your current plan includes trades. |
 | `OpenInterest` | double | The quantity of this contract held at the end of the last trading day. |
-| `UnderlyingAssetPrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
-| `UnderlyingAssetValue` | double | The value of the underlying index. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
-| `UnderlyingAssetChangeToBreakEven` | double | The change in price for the contract to break even. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
-| `UnderlyingAssetLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingPrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingValue` | double | The value of the underlying index. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingChangeToBreakEven` | double | The change in price for the contract to break even. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `Underlying` | String | The instrument Massive lists the row under, as Massive's ticker. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan." |
-| `UnderlyingAssetTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
 <a id="massive-fields"></a>
@@ -124,10 +124,10 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `StrikePrice` | `details.strike_price` |
 | `Fmv` | `fmv` |
 | `FmvLastUpdated` | `fmv_last_updated` |
-| `GreeksDelta` | `greeks.delta` |
-| `GreeksGamma` | `greeks.gamma` |
-| `GreeksTheta` | `greeks.theta` |
-| `GreeksVega` | `greeks.vega` |
+| `Delta` | `greeks.delta` |
+| `Gamma` | `greeks.gamma` |
+| `Theta` | `greeks.theta` |
+| `Vega` | `greeks.vega` |
 | `ImpliedVolatility` | `implied_volatility` |
 | `LastQuoteBidPrice` | `last_quote.bid` |
 | `LastQuoteBidSize` | `last_quote.bid_size` |
@@ -145,12 +145,12 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `LastTradeSipTimestamp` | `last_trade.sip_timestamp` |
 | `LastTradeTimeframe` | `last_trade.timeframe` |
 | `OpenInterest` | `open_interest` |
-| `UnderlyingAssetPrice` | `underlying_asset.price` |
-| `UnderlyingAssetValue` | `underlying_asset.value` |
-| `UnderlyingAssetChangeToBreakEven` | `underlying_asset.change_to_break_even` |
-| `UnderlyingAssetLastUpdated` | `underlying_asset.last_updated` |
+| `UnderlyingPrice` | `underlying_asset.price` |
+| `UnderlyingValue` | `underlying_asset.value` |
+| `UnderlyingChangeToBreakEven` | `underlying_asset.change_to_break_even` |
+| `UnderlyingLastUpdated` | `underlying_asset.last_updated` |
 | `Underlying` | `underlying_asset.ticker` |
-| `UnderlyingAssetTimeframe` | `underlying_asset.timeframe` |
+| `UnderlyingTimeframe` | `underlying_asset.timeframe` |
 | `TimestampInsert` |  |
 
 </details>

@@ -1208,6 +1208,29 @@ _FUTURES_FILES = "us_futures_{venue}"
 # The unified snapshot serves every asset class, and its trade texts are the stock ones.
 _UNIFIED_SNAPSHOT = "/v3/snapshot"
 
+_OPTION_SNAPSHOTS = ("/v3/snapshot/options/{underlyingAsset}", _UNIFIED_SNAPSHOT)
+"""The two snapshots that carry an options contract's `greeks` object."""
+
+
+def _greeks_per_dollar(key: str, vendor: str, text: str) -> DescriptionFix:
+    """Return the fix of a snapshot greek Massive describes per $0.01 of the underlying."""
+    return DescriptionFix(
+        vendor=vendor,
+        text=text,
+        reason='Massive\'s own documentation of the field contradicts the "$0.01": its snapshot '
+        "samples (`vendor/massive/rest/options/snapshots/option-contract-snapshot.md`) show a "
+        "call with `delta` 0.552, impossible per $0.01 since a call's delta per $1 is at most "
+        "1, and the article the `greeks` object links (https://massive.com/blog/greeks-and-"
+        'implied-volatility/) works its examples per $1.00: delta "with a delta of 0.5 and all '
+        "else being held equal, a $1.00 change in the underlying price approximately nets a "
+        '$0.50 change in the option\'s premium", gamma "if gamma is 0.01, a $1.00 change in '
+        'the underlying price would approximately net a 0.01 change in delta", under the '
+        "binomial model the article names. The text is "
+        f"Massive's own for the same field of the greeks endpoint (`/options/v1/analytics` "
+        f"`{key}`).",
+    )
+
+
 _PARAMETER_TEXT_REASON = (
     "Massive describes the response field with its request parameter's text (what passing it "
     "returns or filters), which says nothing about the value a row carries; the text says "
@@ -1306,6 +1329,25 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
             "not a stock. Written here because no Massive sibling exists: the options chain "
             "snapshot has no minute aggregate. Every column of the object carries this text as "
             "its note.",
+        ),
+        **_for(
+            _OPTION_SNAPSHOTS,
+            ("greeks.delta",),
+            _greeks_per_dollar(
+                "delta",
+                vendor="The change in the option's price per $0.01 increment in the price of "
+                "the underlying asset.",
+                text="Change in option price per $1 move in the underlying",
+            ),
+        ),
+        **_for(
+            _OPTION_SNAPSHOTS,
+            ("greeks.gamma",),
+            _greeks_per_dollar(
+                "gamma",
+                vendor="The change in delta per $0.01 change in the price of the underlying asset.",
+                text="Change in delta per $1 move in the underlying",
+            ),
         ),
         **_for(("futures/A", "futures/AM"), ("dv",), _FUTURES_WS_DOLLAR_VOLUME),
         **_for(
@@ -1832,6 +1874,42 @@ _OPTION_DETAILS = Spelling(
     'gives them flat (`strike_price`: "The strike price of the option contract."), with the '
     "same types, so its name is dropped.",
 )
+_OPTION_GREEKS = Spelling(
+    long_name="",
+    source="/options/v1/analytics `delta`, `gamma`, `theta`, `vega`",
+    reason='The `greeks` object ("The greeks for this contract.") holds the contract\'s delta, '
+    "gamma, theta, and vega, which `/options/v1/analytics` serves flat under the same keys, "
+    'each a number on the same scale: delta "Change in option price per $1 move in the '
+    'underlying" (the snapshot\'s "$0.01" is corrected by its `DESCRIPTION_FIXES` entry), '
+    'theta "Change in option price per calendar day" against "per day", and vega "Change in '
+    'option price per 1 point move in implied volatility" against "per 1% increment in '
+    'volatility", which the article the object links (https://massive.com/blog/greeks-and-'
+    'implied-volatility/) reads as one scale: "If vega is 0.6, then a 1% increase in volatility '
+    "approximately nets a $0.60 change in the option's premium.\" The object's name is dropped, "
+    "as `details` is, so every table says `Delta`, `Gamma`, `Theta`, and `Vega`, the names "
+    "every options tool uses, and a filter on one works on the chain and the greeks alike.",
+)
+_OPTION_UNDERLYING = Spelling(
+    long_name="underlying",
+    source="/v3/reference/options/contracts `underlying_ticker`; /options/v1/analytics "
+    "`underlying_price`, `underlying_timestamp`",
+    reason='The `underlying_asset` object ("Information on the underlying stock for this options '
+    "contract.\") holds the underlying's ticker and price, which Massive serves flat under an "
+    '`underlying_` prefix elsewhere: `underlying_asset.ticker` ("The ticker symbol for the '
+    "contract's underlying asset.\") is `/v3/reference/options/contracts` `underlying_ticker` "
+    '("The underlying ticker that the option contract relates to."), a string, the column the '
+    "contracts already carry as `UnderlyingTicker` and every options dataset keys as "
+    "`Underlying`; `underlying_asset.price`, the underlying's last trade (\"The price of the "
+    'trade. This is the actual dollar value per whole share of this trade.") is '
+    '`/options/v1/analytics` `underlying_price` ("Underlying price used by the solver: the '
+    "last SIP trade, or the last published index value, at or before 15 minutes before the "
+    "close\"), a number, at the solver's time instead of now. The object takes that prefix, so "
+    "its other fields follow it (`UnderlyingValue`, `UnderlyingLastUpdated`, "
+    "`UnderlyingTimeframe`, `UnderlyingChangeToBreakEven`). For an index underlying the "
+    'snapshots carry the index level in `UnderlyingValue` ("The value of the underlying '
+    'index."), where the greeks\' `UnderlyingPrice` holds it ("or the last published index '
+    'value").',
+)
 _QUOTE = (
     'The `last_quote` object ("The most recent quote for this contract.") documents `{key}` '
     'as "The {side} price.", the text, type, and unit of `{key}_price` in `/v3/quotes`, and '
@@ -1938,6 +2016,10 @@ SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
         },
         (_CHAIN, "details"): _OPTION_DETAILS,
         (_UNIFIED, "details"): _OPTION_DETAILS,
+        (_CHAIN, "greeks"): _OPTION_GREEKS,
+        (_UNIFIED, "greeks"): _OPTION_GREEKS,
+        (_CHAIN, "underlying_asset"): _OPTION_UNDERLYING,
+        (_UNIFIED, "underlying_asset"): _OPTION_UNDERLYING,
         (_FUTURES, "details"): Spelling(
             long_name="",
             source="/futures/v1/contracts",

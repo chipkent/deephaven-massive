@@ -34,7 +34,7 @@ SNAPSHOTS: Final = DatasetSpec(
             symbol=KeySpec("Ticker"),
             # The underlying of an options row, `Underlying` as on `m.options.snapshots`; the
             # rows of other classes have none.
-            fanout=KeySpec("UnderlyingAssetTicker", required=False),
+            fanout=KeySpec("UnderlyingTicker", required=False),
         )
     },
     option_rows=True,
