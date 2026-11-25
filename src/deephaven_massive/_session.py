@@ -694,8 +694,7 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
               pause, which is the session's.
             - `StreamId`: the table's row in `m.streams()`, or a `wait=True` read's own id.
             - `Query`: the call that made the table, such as `m.stocks.trades('AAPL')`.
-            - `Symbol`: the symbol the problem concerns, as Massive sent it, as the table
-              would name it for a row the library read whole, or as you gave it.
+            - `Symbol`: the symbol the problem concerns, as Massive sent it or you gave it.
             - `Field`: the column or field the problem concerns. For a flat-file line, the
               file; for a rate-limit pause, its `Bucket` in `m.rate_limits()`; for a refused
               exchange, its name.

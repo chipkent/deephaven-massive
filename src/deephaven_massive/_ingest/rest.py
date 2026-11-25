@@ -27,7 +27,7 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   financial statements, insider and 8-K filings) gets its `Symbol` from the request: each
   ticker the request named that a row lists, the row repeated once per such ticker, however
   many the request named (`_listed_rows`). A row listing none of them is left out as an
-  `unrequested_symbols` problem of the call (`_report_unlisted`). The split comes after
+  `unrequested_symbols` problem of its page (`_report_unlisted`). The split comes after
   Massive's cap on a request's rows, so the read then cuts the split rows to `limit`, and a
   row listed under several tickers may keep only some.
 - **History.** `history()` requests the instants its window covers
@@ -243,6 +243,8 @@ from deephaven_massive._tables.problem_events import (
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.withheld import (
     FAULT,
+    SENT,
+    SYMBOL_SENT,
     Withheld,
     failure_of,
     logs_withheld,
@@ -597,7 +599,7 @@ class _Outcome:
     """What one call returned.
 
     Attributes:
-        batches: Its rows, in the dataset's schema.
+        batches: Its rows, in the dataset's schema and then `SYMBOL_SENT`.
         requests: How many requests it made (pages, and a dropped symbol's 404).
         missing: The symbol Massive has no data for, so left out, with the futures session it
             was asked for and why; None when the call was answered.
@@ -1253,7 +1255,9 @@ class RestReader:
             on_missing(missing)
         elif missing:
             self._report_missing(spec, missing)
-        batches = [batch for outcome in outcomes for batch in outcome.batches]
+        batches = [
+            batch.drop_columns([SYMBOL_SENT]) for outcome in outcomes for batch in outcome.batches
+        ]
         return _PathRows(
             pa.Table.from_batches(batches, schema=converter.arrow_schema),
             sum(outcome.requests for outcome in outcomes),
@@ -1301,10 +1305,11 @@ class RestReader:
                 adds to and never checks.
 
         Returns:
-            Each request's rows (an Arrow table of the dataset's schema), its `MassiveError`,
-            or None for a request of a symbol Massive has no data for, in plan order; and the
-            number of requests that were answered. A request whose rows are all withheld gives
-            its symbols no rows.
+            Each request's rows (an Arrow table of the dataset's schema and then
+            `SYMBOL_SENT`, each row's symbol as Massive sent it), its `MassiveError`, or None
+            for a request of a symbol Massive has no data for, in plan order; and the number
+            of requests that were answered. A request whose rows are all withheld gives its
+            symbols no rows.
 
         Raises:
             AuthenticationError: If Massive rejects the API key on any request: every request
@@ -1351,7 +1356,8 @@ class RestReader:
                 results.append(_missing_error(spec, [outcome.missing]) if refused else None)
             else:
                 schema = converters[rest_path.template].arrow_schema
-                results.append(pa.Table.from_batches(outcome.batches, schema=schema))
+                sent = schema.append(pa.field(SYMBOL_SENT, pa.string()))
+                results.append(pa.Table.from_batches(outcome.batches, schema=sent))
         return results, sum(outcome.requests for _, outcome in answered)
 
     def _call_alone(
@@ -1685,7 +1691,6 @@ class RestReader:
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
         bucket = _request_bucket(spec, template, call)
         others = _other_spellings(request)
-        unlisted: list[list[str]] = []  # a ticker-list dataset's rows that list no named ticker
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
@@ -1728,7 +1733,8 @@ class RestReader:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
                 if spec.ticker_list is not None:
-                    batches = self._listed(spec, batches, own, unlisted=unlisted)
+                    batches, unlisted = self._listed(spec, batches, own)
+                    self._report_unlisted(spec, unlisted, named=own, template=template)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if times.stamps is not None:
@@ -1770,7 +1776,6 @@ class RestReader:
                 kept=kept,
                 requests=requests,
             )
-        self._report_unlisted(spec, unlisted, named=own, template=template)
         return _Outcome(tuple(kept), requests, received=received_rows)
 
     def _not_found(
@@ -1897,7 +1902,7 @@ class RestReader:
             tally: The read's count of its rows inside the window and of those withheld.
 
         Returns:
-            The rows kept.
+            The rows kept, with `SYMBOL_SENT` after the dataset's columns.
 
         Raises:
             RowDataError: If a cause of a withheld row is `RAISE` in the read's policy
@@ -1915,7 +1920,13 @@ class RestReader:
             bounds = window.bars
             windowed = placed(windowed, lambda rows: whole(fill(rows), bounds))
         symbol = _SYMBOL if _SYMBOL in windowed.schema.names else None
-        withheld = withhold_rows(windowed, symbol=symbol)
+        # Each row's symbol as Massive sent it (the converter's `SENT`: the request's symbol on
+        # a path whose rows carry none, null on a request that named none) stays on the kept
+        # rows as `SYMBOL_SENT`, for a read by symbol to name a row it leaves out by that
+        # spelling (`symbol_reads._attribute`); `read` takes it off, `read_each` keeps it.
+        withheld = withhold_rows(
+            windowed.append_column(SYMBOL_SENT, windowed.column(SENT)), symbol=symbol
+        )
         if withheld.groups:
             self._report_withheld(spec, withheld, where=where)
         asked = windowed.num_rows
@@ -1959,32 +1970,27 @@ class RestReader:
             raise RowDataError(failure)
 
     def _listed(
-        self,
-        spec: DatasetSpec,
-        batches: Sequence[pa.RecordBatch],
-        named: Sequence[str],
-        *,
-        unlisted: list[list[str]],
-    ) -> list[pa.RecordBatch]:
+        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], named: Sequence[str]
+    ) -> tuple[list[pa.RecordBatch], list[list[str]]]:
         """Fill the `Symbol` of a dataset whose rows list their tickers (`_listed_rows`).
 
         Args:
             spec: The dataset, with a `ticker_list`.
             batches: One page's rows in the dataset's schema.
             named: The tickers the request named.
-            unlisted: Receives the list of each row left out, which `_report_unlisted` reports
-                once the call's pages are read.
 
         Returns:
-            The rows with their `Symbol`.
+            The rows with their `Symbol`, and the list of each row left out, for
+            `_report_unlisted`.
         """
         column = required(spec.ticker_list, f"{spec.name}'s ticker list")
         listed: list[pa.RecordBatch] = []
+        unlisted: list[list[str]] = []
         for batch in batches:
             rows, missed = _listed_rows(batch, named, column=column)
             listed.append(rows)
             unlisted.extend(missed)
-        return listed
+        return listed, unlisted
 
     def _report_unlisted(
         self,
@@ -1994,21 +2000,22 @@ class RestReader:
         named: Sequence[str],
         template: str,
     ) -> None:
-        """Report a call's rows that list none of the tickers its request named.
+        """Report a page's rows that list none of the tickers its request named.
 
-        One `unrequested_symbols` event per call (`ProblemEvent`), with the rows' count and the
+        One `unrequested_symbols` event per page (`ProblemEvent`), with the rows' count and the
         tickers they list, handed to the session's reporter, which alarms once per table and
-        lists it in `m.problems()`.
+        lists it in `m.problems()`. Reported as each page is read, like the page's withheld
+        rows (`_report_withheld`), so a later page's failure loses no report.
 
         Args:
             spec: The dataset, with a `ticker_list`.
-            unlisted: The list of each row left out (`_listed_rows`).
+            unlisted: The list of each row the page left out (`_listed`).
             named: The tickers the request named.
             template: The path, for the event.
 
         Raises:
             RowDataError: If a row was left out and `unrequested_symbols` is `RAISE` in the
-                read's policy: the call's failure.
+                read's policy: the call's failure, raised on the first such page.
         """
         if not unlisted:
             return

@@ -5397,15 +5397,47 @@ def test_one_named_ticker_keeps_only_the_rows_that_list_it_and_none_leaves_symbo
     assert len(events) == 1
 
 
-def test_rows_listing_no_named_ticker_are_one_event_a_call_and_fail_it_under_raise(
+def _two_pages(fake_rest: FakeRestServer, second: Reply) -> None:
+    # Two pages of articles, the first leaving out one row listing only TSLA.
+    articles = [{"benzinga_id": 1, "tickers": ["TSLA"]}, {"benzinga_id": 2, "tickers": ["AAPL"]}]
+    fake_rest.reply(
+        LISTED_PATH,
+        Reply(envelope(articles, next_url=f"{fake_rest.url}{LISTED_PATH}?cursor=2")),
+        second,
+    )
+
+
+def test_each_page_s_rows_listing_no_named_ticker_are_its_own_event(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Two pages leave out three rows: one event counts them all, and under RAISE the call
-    # fails once its pages are read.
-    second = f"{fake_rest.url}{LISTED_PATH}?cursor=2"
-    articles = [{"benzinga_id": 1, "tickers": ["TSLA"]}, {"benzinga_id": 2, "tickers": ["AAPL"]}]
-    first = Reply(envelope(articles, next_url=second))
-    fake_rest.reply(LISTED_PATH, first, _listed((3, []), (4, ["IBM", "TSLA"])))
+    # Each page reports the rows it leaves out as it is read, as it reports its withheld rows.
+    _two_pages(fake_rest, _listed((3, []), (4, ["IBM", "TSLA"])))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    out = fetch(session, LISTED, symbols=["AAPL"])
+    assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [(2, "AAPL")]
+    assert _unlisted_events(events) == [
+        _unlisted(1, asked="AAPL", only=", only TSLA,"),
+        _unlisted(2, asked="AAPL", only=", only IBM and TSLA,"),
+    ]
+
+
+def test_a_page_s_rows_left_out_are_reported_before_a_later_page_fails(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _two_pages(fake_rest, Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    with pytest.raises(dm.EntitlementError):
+        fetch(session, LISTED, symbols=["AAPL"])
+    assert _unlisted_events(events) == [_unlisted(1, asked="AAPL", only=", only TSLA,")]
+
+
+def test_rows_listing_no_named_ticker_fail_the_call_under_raise_on_their_page(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first page leaves out a row, so the call fails there: the second page is never asked.
+    _two_pages(fake_rest, _listed((3, []), (4, ["IBM", "TSLA"])))
     events: list[ProblemEvent] = []
     monkeypatch.setattr(session._core, "problems", events.extend)
     with pytest.raises(RowDataError) as raised:
@@ -5416,14 +5448,29 @@ def test_rows_listing_no_named_ticker_are_one_event_a_call_and_fail_it_under_rai
             on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.RAISE),
         )
     assert str(raised.value) == (
-        "partners.benzinga.news: Massive answered the request for AAPL with 3 rows whose "
-        "Tickers lists no ticker asked for, only TSLA and IBM, so the library left them out. To "
-        "go on without such rows, pass on_error=dm.ErrorPolicy(unrequested_symbols="
-        "dm.OnError.LOG) to the call or to dm.MassiveConfig."
+        "partners.benzinga.news: Massive answered the request for AAPL with 1 row whose "
+        "Tickers lists no ticker asked for, only TSLA, so the library left it out. To go on "
+        "without such rows, pass on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) "
+        "to the call or to dm.MassiveConfig."
     )
-    assert _unlisted_events(events) == [_unlisted(3, asked="AAPL", only=", only TSLA and IBM,")]
+    assert _unlisted_events(events) == [_unlisted(1, asked="AAPL", only=", only TSLA,")]
     assert [e.policy for e in events] == [dm.OnError.RAISE]
-    assert len({p for p, _ in fake_rest.get_queries()}) == 1
+    assert len(fake_rest.get_queries()) == 1
+
+
+def test_a_static_read_keeps_every_row_and_only_the_dataset_s_columns(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A read that is not by symbol publishes a row of another symbol too, and the symbol as
+    # Massive sent it, carried on the rows for a read by symbol, is no column of the table.
+    page = [{"ticker": "I:SPX", "value": 1.0}, {"ticker": "NDX", "value": 2.0}]
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope(page)))
+    q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    assert isinstance(q, FetchQuery)
+    table = q.fetch(wait=True)
+    assert [(r["Symbol"], r["Value"]) for r in rows(table)] == [("I:SPX", 1.0), ("I:NDX", 2.0)]
+    names = session._core.dataset_schema(INDEX_SNAPSHOTS).arrow_schema().names
+    assert dh_arrow.to_arrow(table).column_names == names
 
 
 def test_limit_counts_the_rows_massive_sent_not_those_kept(

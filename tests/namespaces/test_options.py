@@ -1655,7 +1655,8 @@ def test_a_watchlist_of_one_index_by_its_bare_ticker_gets_no_rows_and_a_problem(
 ) -> None:
     # Massive's row for SPX is the index's, which the library names I:SPX. A watchlist of SPX
     # did not ask for I:SPX, so the row is left out as its problem, whatever the watchlist's
-    # size: the rule of a watchlist of several symbols.
+    # size: the rule of a watchlist of several symbols. The problem names the row by the
+    # symbol as Massive sent it, and its detail gives the table's spelling.
     events: list[ProblemEvent] = []
     monkeypatch.setattr(rest_session._core, "problems", events.extend)
     fake_rest.reply(BY_UNDERLYING, Reply({"status": "OK", "results": [by_underlying_row("SPX")]}))
@@ -1675,12 +1676,12 @@ def test_a_watchlist_of_one_index_by_its_bare_ticker_gets_no_rows_and_a_problem(
     assert [(e.cause, e.symbol, e.field, e.rows, e.detail) for e in events] == [
         (
             ProblemCause.UNREQUESTED_SYMBOLS,
-            "I:SPX",
+            "SPX",
             "Symbol",
             1,
             (
-                "Massive answered the request for SPX with rows of I:SPX, which the read did "
-                "not ask for, so they are left out"
+                "Massive answered the request for SPX with rows of SPX, which the read did "
+                "not ask for, so they are left out. The table spells SPX as I:SPX."
             ),
         )
     ]

@@ -17,6 +17,7 @@ from deephaven_massive._tables.problem_events import (
 from deephaven_massive._tables.withheld import (
     MARK_COLUMNS,
     REASON,
+    SYMBOL_SENT,
     Withheld,
     WithheldGroup,
     failure_of,
@@ -181,6 +182,21 @@ def test_a_payload_read_whole_is_returned_without_the_mark_columns() -> None:
     assert (withheld.groups, withheld.first_reason, withheld.total) == ((), "", 0)
     assert withheld.drift == DriftReport()
     assert withheld.counts() == {}
+
+
+def test_a_column_beside_the_marks_stays_on_the_published_rows() -> None:
+    # A caller keeps each published row's symbol as sent by copying `SENT` under `SYMBOL_SENT`
+    # before the mark columns come off.
+    rows = with_marks(
+        rows_of(["A", "B", "C"]), {VALUES: one_mark(1)}, sent=pa.array(["a", "b", "c"])
+    )
+    withheld = withhold_rows(rows.append_column(SYMBOL_SENT, rows.column(SENT)), symbol="Symbol")
+    assert withheld.rows.to_pydict() == {
+        "Symbol": ["A", "C"],
+        "Price": [0.0, 2.0],
+        SYMBOL_SENT: ["a", "c"],
+    }
+    assert withheld.total == 1
 
 
 def test_withheld_rows_are_taken_out_and_grouped() -> None:

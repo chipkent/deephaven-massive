@@ -400,9 +400,8 @@ class ProblemEvent:
             None for a problem of no table or read.
         where: The request, the WebSocket URL and channel, or the flat file, as the transport
             names it in its log lines, with no secret; for the log only.
-        symbol: The symbol the problem concerns, or None: exactly as Massive sent it for a row
-            the library could not read, as the table would name it for a row it read whole (an
-            `unrequested_symbols` row), or as the caller gave it.
+        symbol: The symbol the problem concerns, exactly as Massive sent it or the caller gave
+            it, or None.
         field: The column the problem concerns, or None.
         rows: How many rows the event counts; 0 for a problem of no rows.
         detail: Why, in one line: the field, the expected type, and the value's first 200

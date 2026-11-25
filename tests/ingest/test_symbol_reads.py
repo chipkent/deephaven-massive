@@ -154,7 +154,17 @@ RATINGS = DatasetSpec(
     keys={(R, RATINGS_PATH): SourceKeys(symbol=KeySpec("Ticker", required=False))},
     poll_keys=("BenzingaId",),
 )
-SPECS = (DIVIDENDS, LISTED, CRYPTO_LAST, PREV, TRADES, RELATED, RATINGS)
+INDEX_PATH = "/v3/snapshot/indices"
+# A list parameter on indices, which Massive may write bare (`NDX`) and the table names `I:NDX`.
+INDEX = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="indices.snapshots",
+    asset_class=AssetClass.INDICES,
+    fetch_path=INDEX_PATH,
+    symbol_param="ticker.any_of",
+    keys={(R, INDEX_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+)
+SPECS = (DIVIDENDS, LISTED, CRYPTO_LAST, PREV, TRADES, RELATED, RATINGS, INDEX)
 
 TICKERS_PATH = "/v3/reference/tickers"
 MONDAY = date(2025, 3, 3)
@@ -445,6 +455,50 @@ def test_a_request_that_lists_one_symbol_keeps_only_its_rows(
         )
     else:
         assert [(r["Symbol"], r["CashAmount"]) for r in _rows(out["AAPL"])] == [("AAPL", 0.25)]
+
+
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.RAISE])
+def test_a_row_left_out_is_named_as_massive_sent_it(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
+) -> None:
+    # Massive writes the index bare, `NDX`, and the table would name it `I:NDX`: the problem
+    # names the row as Massive sent it, and its detail and the failure give the table's
+    # spelling. The symbol's own table has the dataset's columns and nothing else.
+    events = _problems(session, monkeypatch)
+    page = [{"ticker": "I:SPX", "value": 1.0}, {"ticker": "NDX", "value": 2.0}]
+    fake_rest.reply(INDEX_PATH, Reply(envelope(page)))
+    out = _fetch(session, INDEX, ["I:SPX"], unrequested=setting)
+    assert _zeroed(events) == [
+        _unrequested(
+            "NDX",
+            1,
+            asked="I:SPX",
+            setting=setting,
+            spec=INDEX,
+            where=f"REST GET {INDEX_PATH}",
+            detail=(
+                "Massive answered the request for I:SPX with rows of NDX, which the read did "
+                "not ask for, so they are left out. The table spells NDX as I:NDX."
+            ),
+        )
+    ]
+    if setting is dm.OnError.RAISE:
+        failed = _failure(out["I:SPX"])
+        assert isinstance(failed.error, RowDataError)
+        assert str(failed.error) == (
+            "indices.snapshots: Massive answered the request for I:SPX with 1 row of NDX, "
+            "which the read did not ask for, so the library left it out. The table spells NDX "
+            "as I:NDX. To go on without such rows, pass on_error=dm.ErrorPolicy("
+            "unrequested_symbols=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+        )
+    else:
+        rows = _rows(out["I:SPX"])
+        assert [(r["Symbol"], r["Value"]) for r in rows] == [("I:SPX", 1.0)]
+        assert list(rows[0]) == session._core.dataset_schema(INDEX).arrow_schema().names
 
 
 @pytest.mark.parametrize(
