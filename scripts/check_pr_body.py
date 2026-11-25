@@ -390,7 +390,23 @@ def find_problems(
 
 
 def _run(command: list[str]) -> str:
-    return subprocess.run(command, check=True, capture_output=True, text=True).stdout  # noqa: S603 - fixed argv, no shell
+    """Run a command and return its output, decoded as the file system decodes a file name.
+
+    Args:
+        command: The program and its arguments, run without a shell.
+
+    Returns:
+        The standard output. A byte the encoding cannot read, such as one in a file name git
+        lists with `-z`, decodes as `os.fsdecode` decodes it instead of raising, so such a name
+        is read and checked like any other.
+    """
+    return subprocess.run(  # noqa: S603 - fixed argv, no shell
+        command,
+        check=True,
+        capture_output=True,
+        encoding=sys.getfilesystemencoding(),
+        errors=sys.getfilesystemencodeerrors(),
+    ).stdout
 
 
 def _from_pull_request(number: int) -> tuple[str, list[str], str, list[str]]:
@@ -441,12 +457,21 @@ def _diff(base: str, head: str) -> tuple[str, list[str]]:
 
     Returns:
         The unified diff from the merge base, with `a/` and `b/` prefixes and no color as the
-        rule checks read it, and the changed paths unquoted.
+        rule checks read it, and the changed paths unquoted. Both cover the whole repository
+        wherever the script runs (`--no-relative`), and the diff shows each file's own text,
+        never a `textconv` filter's rendering of it.
     """
     span = f"{base}...{head}"
-    plain = ["--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"]
+    plain = [
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-relative",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ]
     diff = _run(["git", "diff", *plain, span])
-    names = _run(["git", "diff", "--name-only", "-z", span])
+    names = _run(["git", "diff", "--name-only", "-z", "--no-relative", span])
     return diff, [name for name in names.split("\0") if name]
 
 

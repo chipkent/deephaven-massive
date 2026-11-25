@@ -119,9 +119,11 @@ jobs:
           unset header
           # Three dots diff from the merge base, as GitHub's pull request diff does.
           git -C "$repo" diff pr/base...pr/head > "$RUNNER_TEMP/diff.patch"
-          git -C "$repo" diff --name-only pr/base...pr/head > "$RUNNER_TEMP/files"
+          # NUL-separated, so git leaves a non-ASCII path unquoted and the list matches the one
+          # `check_pr_body.py --pr` builds.
+          git -C "$repo" diff --name-only -z pr/base...pr/head > "$RUNNER_TEMP/files"
           args=()
-          while IFS= read -r path; do
+          while IFS= read -r -d '' path; do
             [ -n "$path" ] && args+=(--changed-file "$path")
           done < "$RUNNER_TEMP/files"
           python3 -I scripts/check_pr_body.py --body-file "$RUNNER_TEMP/body.md" \
