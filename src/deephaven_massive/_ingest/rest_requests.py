@@ -67,9 +67,11 @@ __all__ = [
     "fetch_paths",
     "history_calls",
     "largest_page",
+    "listed_part",
     "page_size",
     "plan_calls",
     "shared_params",
+    "wire_group",
     "wire_query",
 ]
 
@@ -730,6 +732,41 @@ def capped_call(spec: DatasetSpec, rest_path: RestPath, call: Call, *, cap: int)
     if not any(param.name == "limit" and not param.in_path for param in rest_path.params):
         return call
     return replace(call, query={**call.query, "limit": _page_limit(spec, rest_path, cap)})
+
+
+def wire_group(spec: DatasetSpec, symbol: str) -> str:
+    """Return the key of the symbols a listed request can never send apart: one wire spelling.
+
+    `DJT` and `I:DJT` are both `DJT` in the options underlyings' list, so a request names both
+    or neither (`_symbol_parts`).
+
+    Args:
+        spec: The dataset, whose symbol parameter lists the request's symbols.
+        symbol: A canonical symbol of the request.
+
+    Returns:
+        The symbol as the request's list sends it.
+    """
+    return _wire_symbol(required(spec.symbol_param, f"{spec.name}'s symbol parameter"), symbol)
+
+
+def listed_part(spec: DatasetSpec, call: Call, part: Sequence[str]) -> Call:
+    """Return a listed request narrowed to some of its symbols, to send them on their own.
+
+    A request naming several symbols lists them in the dataset's list parameter
+    (`_symbol_parts`), and can be sent again for any of them: a search for the symbols
+    Massive refuses among them sends such parts (`refusal_search.RefusalSearch`).
+
+    Args:
+        spec: The dataset.
+        call: A planned request naming several symbols.
+        part: Some of its symbols, every symbol of a wire group (`wire_group`) or none.
+
+    Returns:
+        The request naming only `part`.
+    """
+    listed = required(spec.symbol_param, f"{spec.name}'s symbol parameter")
+    return replace(call, symbols=tuple(part), query={**call.query, listed: tuple(part)})
 
 
 def fetch_paths(

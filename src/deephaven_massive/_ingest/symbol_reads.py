@@ -66,7 +66,7 @@ import logging
 import time
 from collections import Counter
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, TypeAlias, assert_never
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias, assert_never
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -122,6 +122,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AttributedRows",
+    "ReadEach",
     "RequestRows",
     "RestUnit",
     "UnsupportedParameterError",
@@ -159,6 +160,23 @@ class RequestRows:
     rows: pa.Table
     withheld: Withheld
     source: str
+
+
+class ReadEach(NamedTuple):
+    """What a read by symbol's requests returned (`RestReader.read_each`).
+
+    Attributes:
+        units: The requests the results answer, in plan order, each symbol in one of them: a
+            planned request, or, for a listed request Massive refused whole, the parts of it
+            sent again that each symbol's answer came from (`refusal_search.RefusalSearch`).
+        results: Each unit's rows, its failure, or None for a request of a symbol Massive has
+            no data for.
+        requests: How many requests Massive answered, those of the search included.
+    """
+
+    units: list[RestUnit]
+    results: list[RequestRows | MassiveError | None]
+    requests: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,7 +444,7 @@ def read_rest_by_symbol(
     """
     ordered = _ordered(symbols)
     patience = reader.patience()  # once for every request, on this thread, before any fan-out
-    results, requests = reader.read_each(
+    read = reader.read_each(
         spec,
         units,
         request=request,
@@ -438,14 +456,17 @@ def read_rest_by_symbol(
         fails_read=fails_followed_read,
     )
     logger.debug(
-        "call %d %s by symbol: %d of %d requests answered, waiting out at most %.0f s of pauses",
+        "call %d %s by symbol: %d requests answered for %d planned, waiting out at most %.0f s "
+        "of pauses",
         call,
         spec.name,
-        requests,
+        read.requests,
         len(units),
         patience.seconds,
     )
-    attributed = attribute_units(reader, spec, units, results=results, symbols=ordered, tally=tally)
+    attributed = attribute_units(
+        reader, spec, read.units, results=read.results, symbols=ordered, tally=tally
+    )
     failures = {**attributed.failures, **failed}  # a planning failure comes first
     empty = core.dataset_schema(spec).arrow_schema().empty_table()
     tables = {

@@ -10,6 +10,7 @@ import dataclasses
 import logging
 import re
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -450,7 +451,7 @@ def test_attribution_gives_each_request_s_rows_failure_or_no_data_to_its_symbols
 # --- fetch by symbol ----------------------------------------------------------------------------
 
 
-def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
+def test_a_batched_request_splits_its_rows_by_symbol_and_searches_its_refusal(
     *,
     session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -466,13 +467,15 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
         out = _fetch(session, DIVIDENDS, ["TSLA", "MSFT", "AAPL", "NVDA", "AAPL"])
     assert list(out) == ["TSLA", "MSFT", "AAPL", "NVDA"]  # as given, each once
     sent = [query["ticker.any_of"] for _, query in fake_rest.get_queries()]
-    assert sent == [["AAPL,MSFT"], ["NVDA,TSLA"]]
+    # Massive refused NVDA and TSLA together, so each is sent alone to learn whose refusal it
+    # is; both are refused, so the search ends there.
+    assert sorted(sent) == [["AAPL,MSFT"], ["NVDA"], ["NVDA,TSLA"], ["TSLA"]]
     assert [(r["Symbol"], r["CashAmount"]) for r in _rows(out["AAPL"])] == [("AAPL", 0.25)]
     assert [(r["Symbol"], r["CashAmount"]) for r in _rows(out["MSFT"])] == [("MSFT", 0.83)]
     nvda, tsla = _failure(out["NVDA"]), _failure(out["TSLA"])
-    assert nvda.error is tsla.error
-    assert isinstance(nvda.error, EntitlementError)
-    assert not nvda.error.is_retryable
+    for failure in (nvda, tsla):
+        assert isinstance(failure.error, EntitlementError)
+        assert not failure.error.is_retryable
     # The row of a symbol no one asked for belongs to no symbol's read: it is the read's
     # problem, alarmed once.
     assert _zeroed(events) == [_unrequested("IBM", 1, asked="AAPL and MSFT")]
@@ -485,13 +488,13 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
             "DEBUG only."
         )
     ]
-    # The shared failure is logged once, at DEBUG: it is expected, and the caller reports it.
+    # Each refusal is logged at DEBUG: it is expected, and the caller reports it.
     failed = [r for r in caplog.records if "failed alone" in r.getMessage()]
     assert [r.levelno for r in failed] == [logging.DEBUG, logging.DEBUG]
     assert failed[0].getMessage() == (
         "call 7 stocks.dividends TSLA failed alone, in its read from REST: Massive refused this "
         "read for the Stocks subscription. Massive answered GET /stocks/v1/dividends?limit=5000&"
-        'ticker.any_of=NVDA%2CTSLA on 127.0.0.1 with HTTP 403: "upgrade".'
+        'ticker.any_of=TSLA on 127.0.0.1 with HTTP 403: "upgrade".'
     )
 
 
@@ -782,7 +785,7 @@ def test_a_request_result_no_case_handles_is_refused(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def answered(self: object, spec: object, units: Sequence[object], **_: object) -> object:
-        return ["bogus"] * len(units), 0
+        return SimpleNamespace(units=units, results=["bogus"] * len(units), requests=0)
 
     monkeypatch.setattr(rest.RestReader, "read_each", answered)
     with pytest.raises(AssertionError, match="got: 'bogus'"):

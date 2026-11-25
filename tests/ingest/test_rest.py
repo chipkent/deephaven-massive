@@ -69,7 +69,12 @@ from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, Crypt
 from deephaven_massive._ingest.rate_limits import Waiter
 from deephaven_massive._ingest.rest_rows import RowConverter
 from deephaven_massive._ingest.shared_lookup import SharedLookup
-from deephaven_massive._ingest.symbol_reads import RequestRows, fails_followed_read, fetch_units
+from deephaven_massive._ingest.symbol_reads import (
+    ReadEach,
+    RequestRows,
+    fails_followed_read,
+    fetch_units,
+)
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Cancel, DriftReport, RestPath, Transport
 from deephaven_massive._tables import poll, problem_reporter
@@ -6001,7 +6006,7 @@ def test_read_each_raises_only_the_failures_its_caller_says_are_the_read_s(
         with pytest.raises(dm.MassiveError, match=f"HTTP {status}"):
             read()
         return
-    results, answered = read()
+    _, results, answered = read()
     assert answered == 0
     [result] = results
     assert isinstance(result, MassiveError)
@@ -6018,7 +6023,7 @@ def test_read_each_hands_each_page_s_recency_and_drift_to_its_caller(
     units, _ = fetch_units(reader, INDEX_SNAPSHOTS, request, symbols=["I:SPX"], cancel=None)
     seen: list[Recency] = []
     drifts: list[DriftReport] = []
-    results, answered = reader.read_each(
+    _, results, answered = reader.read_each(
         INDEX_SNAPSHOTS,
         units,
         request=request,
@@ -6062,7 +6067,7 @@ def test_read_each_runs_its_requests_on_the_caller_s_pool(
     units, _ = fetch_units(reader, SMA, request, symbols=["AAPL", "MSFT"], cancel=None)
     assert len(units) == 2
     with _CountingPool(2) as pool:
-        results, answered = reader.read_each(
+        _, results, answered = reader.read_each(
             SMA,
             units,
             request=request,
@@ -6077,3 +6082,121 @@ def test_read_each_runs_its_requests_on_the_caller_s_pool(
         assert pool.submitted == 2
     assert answered == 2
     assert all(isinstance(result, RequestRows) for result in results)
+
+
+_INDICES = ["I:SPX", "I:NDX", "I:DJI"]
+
+
+def _indices_target(*tickers: str) -> str:
+    """Return the indices snapshot request that names `tickers`, as the client sends it."""
+    listed = "%2C".join(t.replace(":", "%3A") for t in sorted(tickers))
+    return f"{INDEX_SNAPSHOT_PATH}?limit=250&ticker.any_of={listed}"
+
+
+_REFUSED = Reply({"status": "NOT_AUTHORIZED", "message": "Not entitled."}, status=403)
+
+
+def _read_indices(session: dm.MassiveSession) -> ReadEach:
+    reader = _reader(session)
+    request = query(session, INDEX_SNAPSHOTS, symbols=_INDICES)._request
+    units, failed = fetch_units(reader, INDEX_SNAPSHOTS, request, symbols=_INDICES, cancel=None)
+    assert not failed
+    assert len(units) == 1
+    return reader.read_each(
+        INDEX_SNAPSHOTS,
+        units,
+        request=request,
+        limit=None,
+        window=None,
+        current=False,
+        cancel=None,
+        patience=reader.patience(),
+        fails_read=fails_followed_read,
+    )
+
+
+def _by_symbol(read: ReadEach) -> dict[str, RequestRows | MassiveError | None]:
+    """Return each symbol's result, checking that each symbol is in exactly one unit."""
+    named = [symbol for _, call in read.units for symbol in call.symbols]
+    assert sorted(named) == sorted(set(named)), named
+    return {
+        symbol: result
+        for (_, call), result in zip(read.units, read.results, strict=True)
+        for symbol in call.symbols
+    }
+
+
+def test_read_each_resends_a_refused_list_request_in_halves_and_returns_the_units_it_answered(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(_indices_target(*_INDICES), _REFUSED)
+    fake_rest.reply(_indices_target("I:DJI"), _REFUSED)
+    rows = [{"ticker": "I:NDX", "value": 1.0}, {"ticker": "I:SPX", "value": 2.0}]
+    fake_rest.reply(_indices_target("I:NDX", "I:SPX"), Reply(envelope(rows)))
+    read = _read_indices(session)
+    # Both halves reached the server: the search's round never inherits a finished token.
+    assert sorted(r.target for r in fake_rest.requests) == sorted(
+        [_indices_target(*_INDICES), _indices_target("I:DJI"), _indices_target("I:NDX", "I:SPX")]
+    )
+    assert read.requests == 1
+    results = _by_symbol(read)
+    answered = results["I:SPX"]
+    assert isinstance(answered, RequestRows)
+    assert results["I:NDX"] is answered
+    assert answered.rows.column("Symbol").to_pylist() == ["I:NDX", "I:SPX"]
+    refused = results["I:DJI"]
+    assert isinstance(refused, dm.EntitlementError)
+    assert _indices_target("I:DJI").split("?")[1] in str(refused)
+
+
+def test_a_list_request_refused_in_both_halves_marks_every_symbol_after_two_more_requests(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, _REFUSED)
+    read = _read_indices(session)
+    assert len(fake_rest.requests) == 3
+    assert read.requests == 0
+    results = _by_symbol(read)
+    assert sorted(results) == sorted(_INDICES)
+    assert all(isinstance(result, dm.EntitlementError) for result in results.values())
+
+
+def test_a_5xx_inside_the_search_is_its_symbols_own_failure_and_the_refused_half_is_found(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(_indices_target(*_INDICES), _REFUSED)
+    fake_rest.reply(_indices_target("I:DJI"), Reply({"status": "ERROR"}, status=500))
+    fake_rest.reply(_indices_target("I:NDX", "I:SPX"), _REFUSED)
+    fake_rest.reply(_indices_target("I:NDX"), Reply(envelope([{"ticker": "I:NDX"}])))
+    fake_rest.reply(_indices_target("I:SPX"), _REFUSED)
+    results = _by_symbol(_read_indices(session))
+    failed = results["I:DJI"]
+    assert isinstance(failed, MassiveError)
+    assert failed.status == 500
+    assert not isinstance(failed, dm.EntitlementError)
+    assert isinstance(results["I:NDX"], RequestRows)
+    assert isinstance(results["I:SPX"], dm.EntitlementError)
+
+
+def test_a_refused_request_of_one_symbol_is_not_searched(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, _REFUSED)
+    reader = _reader(session)
+    request = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])._request
+    units, _ = fetch_units(reader, INDEX_SNAPSHOTS, request, symbols=["I:SPX"], cancel=None)
+    read = reader.read_each(
+        INDEX_SNAPSHOTS,
+        units,
+        request=request,
+        limit=None,
+        window=None,
+        current=False,
+        cancel=None,
+        patience=reader.patience(),
+        fails_read=fails_followed_read,
+    )
+    assert len(fake_rest.requests) == 1
+    assert read.units == units
+    [refused] = read.results
+    assert isinstance(refused, dm.EntitlementError)
