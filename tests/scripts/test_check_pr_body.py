@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import subprocess
 from typing import TYPE_CHECKING
@@ -395,7 +396,10 @@ def pull_request_7(
     Returns:
         The clone, which is also the working directory.
     """
-    # The user's own git settings (signing, hooks, a default branch) stay out of the test.
+    # The user's own git settings (signing, hooks, a default branch) stay out of the test, and
+    # so does the repository a git hook running these tests points at (`GIT_INDEX_FILE`).
+    for name in [name for name in os.environ if name.startswith("GIT_")]:
+        monkeypatch.delenv(name)
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     for role in ("AUTHOR", "COMMITTER"):
