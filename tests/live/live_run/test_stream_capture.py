@@ -918,9 +918,10 @@ def test_a_unit_whose_stream_massive_refused_is_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_ws_server.refuse["AM.I:SPX"] = "not authorized"
-    # The refusal names no topic, and `I:NDX` awaits its answer in the same step, so the
-    # library pins it on `AM.I:SPX` only once that topic goes unconfirmed and is sent again.
+    # A stream keeps running while Massive serves any symbol it was opened with, so the unit
+    # is refused only when Massive refuses both of its indices.
+    for topic in ("AM.I:SPX", "AM.I:NDX"):
+        fake_ws_server.refuse[topic] = "not authorized"
     harness = make_ws_session(subscription_confirmation_timeout=0.5)
 
     def refused() -> None:
