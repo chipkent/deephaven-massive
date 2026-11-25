@@ -326,6 +326,21 @@ def rule_deletions(diff: str) -> bool:
     return False
 
 
+def readable(path: str) -> str:
+    r"""Return a path as a message can print and write it in any locale.
+
+    Args:
+        path: A path as git lists it, decoded as `os.fsdecode` decodes it, so each byte the
+            encoding cannot read is a lone surrogate.
+
+    Returns:
+        The path's bytes read as UTF-8, each byte UTF-8 cannot read written as a `\xNN`
+        escape: `caf\xe9` for `café` written in Latin-1. A lone surrogate left in the message
+        would make writing it raise, to standard output or to `GITHUB_OUTPUT`.
+    """
+    return os.fsencode(path).decode("utf-8", "backslashreplace")
+
+
 def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
     """Return the problems of a pull request that edits AGENTS.md or a skill.
 
@@ -345,8 +360,9 @@ def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
         return []
     problems = []
     if not is_answered_question(body):
+        shown = ", ".join(readable(path) for path in rule_files)
         problems.append(
-            f"The pull request changes a rule ({', '.join(rule_files)}) without the question "
+            f"The pull request changes a rule ({shown}) without the question "
             f"and the owner's dated answer that approve it (AGENTS.md, an approval is a "
             f"decision file or the owner's answer to a question)."
         )

@@ -7,11 +7,13 @@ with a body, a changed-file list, and a diff, as the hook and the workflow do.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import pathlib
 import re
 import subprocess
+import sys
 import textwrap
 from typing import TYPE_CHECKING
 
@@ -361,6 +363,47 @@ def test_main_reads_a_body_file_and_reports_the_exit_status(
     assert "error_message<<" in output.read_text()
     body.write_text("## Summary\n\nClean.\n")
     assert check.main(["--body-file", str(body)]) == 0
+
+
+@pytest.mark.parametrize(
+    "errors",
+    [
+        pytest.param("strict", id="a-UTF-8-locale-such-as-en_US"),
+        pytest.param("surrogateescape", id="the-C-locale"),
+    ],
+)
+def test_a_rule_file_name_the_encoding_cannot_read_is_printed_and_written_escaped(
+    *,
+    check: ModuleType,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    errors: str,
+) -> None:
+    # A Latin-1 byte, as the workflow's `--changed-file` and `git diff -z` read it, decodes to a
+    # lone surrogate; written as it is, the message would raise instead of printing.
+    name = os.fsdecode(b".claude/skills/caf\xe9/SKILL.md")
+    body = tmp_path / "body.md"
+    body.write_text("## Summary\n\nA new skill.\n")
+    output = tmp_path / "out.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    printed = io.BytesIO()
+    stdout = io.TextIOWrapper(printed, encoding="utf-8", errors=errors)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    assert check.main(["--body-file", str(body), "--changed-file", name]) == 1
+    message = (
+        r"The pull request changes a rule (.claude/skills/caf\xe9/SKILL.md) without the "
+        "question and the owner's dated answer that approve it (AGENTS.md, an approval is a "
+        "decision file or the owner's answer to a question)."
+    )
+    stdout.flush()
+    assert printed.getvalue().decode() == f"{message}\n"
+    written = output.read_text(encoding="utf-8").splitlines()
+    assert written[1:-1] == [message]
+    assert written[0] == f"error_message<<{written[-1]}"
+
+
+def test_a_readable_rule_file_name_is_printed_as_it_is(check: ModuleType) -> None:
+    assert check.readable(".claude/skills/café/SKILL.md") == ".claude/skills/café/SKILL.md"
 
 
 def test_main_without_a_draft_in_the_worktree_passes_and_says_so(
