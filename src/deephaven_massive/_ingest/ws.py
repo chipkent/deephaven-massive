@@ -392,6 +392,9 @@ class WsConnections:
         self._closing: Final = threading.Event()
         # The crypto pairs each stream does not subscribe, by stream; guarded by the group's lock.
         self._pair_states: dict[int, _PairState] = {}
+        # The symbols each opening symbol table's watch replays, its call-time symbols, by
+        # stream; guarded by the group's lock.
+        self._replays: dict[int, set[str]] = {}
         self._closed = False
 
     @property
@@ -503,6 +506,9 @@ class WsConnections:
                 topics,
                 static,
                 refusal_note=refusal_note(spec),
+                # A symbol list's symbols, its crypto pairs included; a table's come with its
+                # watch's replay below, and `dm.ALL` has none.
+                call_time=(pairs | (wanted or frozenset())) or None if static else None,
             )
             if asset_class is AssetClass.CRYPTO:  # its pairs are split by the stream's policy
                 with self._lock:
@@ -517,7 +523,14 @@ class WsConnections:
                     removed=frozenset(),
                 )
             if opened.watch is not None:
-                opened.watch.start()
+                with self._lock:
+                    self._replays[stream_id] = set()
+                try:
+                    opened.watch.start()  # replays the table's rows on this thread
+                finally:
+                    with self._lock:
+                        replayed = frozenset(self._replays.pop(stream_id))
+                connection.post(connection.settle_call_time, stream_id, replayed)
         except BaseException:
             release_scope(core.exec_ctx, opened.handle.scope)
             self._abandon(connection, stream_id)
@@ -775,6 +788,9 @@ class WsConnections:
         """
         with self._lock:
             connection = self.group.streams.get(stream_id)
+            replay = self._replays.get(stream_id)
+            if replay is not None:  # the watch's replay: the stream's call-time symbols
+                replay.update(added)
         if connection is None:
             return
         asset_class = connection.asset_class

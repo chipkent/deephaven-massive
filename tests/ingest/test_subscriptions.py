@@ -668,15 +668,252 @@ def test_a_refusal_naming_no_topic_refuses_the_one_topic_awaiting_an_answer() ->
     assert loop.refused == [(("Q.AAPL",), "not authorized")]
 
 
-def test_a_refusal_naming_no_topic_of_a_step_of_several_fails_nothing(
+def test_an_unnamed_refusal_of_a_step_of_several_marks_it_and_fails_nothing_yet(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Massive answers a step of several topics it refuses with "not authorized" naming none.
     loop = make_loop()
     loop.subs.add(["Q.AAPL", "Q.MSFT"])
     loop.subs.opened(1)
-    refused_nothing(
-        loop, caplog, "2 topics await an answer (2 in flight, 0 never acknowledged, 0 re-sent)"
-    )
+    loop.sender.take()
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.subscriptions"):
+        loop.subs.status(refusal())
+    assert loop.refused == []
+    assert loop.sender.take() == []
+    assert loop.subs.counts() == (2, 0, 2, 0)
+    assert caplog.messages == [
+        (
+            "generation 1: a refusal named no topic while the step's 2 [Q.AAPL, Q.MSFT] await "
+            "an answer; they are judged at the step's timeout: not authorized"
+        )
+    ]
+
+
+# --- a step refused whole: the search ---------------------------------------------------------
+
+
+def refused_step(*topics: str) -> Loop:
+    # A loop whose first step, of several topics, drew a refusal naming none, with what it sent
+    # taken; nothing is judged until the step's timeout.
+    loop = make_loop()
+    loop.subs.add(topics)
+    loop.subs.opened(1)
+    loop.sender.take()
+    loop.subs.status(refusal())
+    return loop
+
+
+def test_a_marked_step_without_acknowledgements_is_searched_one_half_at_a_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loop = refused_step("T.A", "T.B", "T.C", "T.D")
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._ingest.subscriptions"):
+        loop.timers.fire()  # the step's timeout: a search, its first half sent
+        assert loop.sender.take() == [("subscribe", 1, ("T.A", "T.B"))]
+        loop.subs.status(ack("T.A", "T.B"))  # answered: the other half goes
+        assert loop.sender.take() == [("subscribe", 1, ("T.C", "T.D"))]
+        loop.subs.status(refusal())
+        loop.subs.status(ack("T.C"))
+        assert loop.refused == []  # T.D may still be answered until the part's timeout
+        loop.timers.fire()
+    assert loop.refused == [(("T.D",), "not authorized")]
+    assert loop.sender.take() == []
+    assert loop.subs.acknowledged == {"T.A", "T.B", "T.C"}
+    assert caplog.messages == [
+        (
+            f'{URL}: Massive answered a subscription step with "not authorized" and named no '
+            "subscription, so the library sends its subscriptions again in parts to find the "
+            "refused ones: 4 subscriptions, the first 3: T.A, T.B, and T.C."
+        ),
+        f"{URL}: the search of a refused subscription step sent 2 parts and found T.D refused.",
+    ]
+
+
+def test_a_marked_step_with_acknowledgements_searches_only_its_unanswered_topics() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.A", "T.B", "T.C"])
+    loop.subs.opened(1)
+    loop.sender.take()
+    loop.subs.status(ack("T.A"))
+    loop.subs.status(refusal())
+    loop.timers.fire()
+    assert loop.sender.take() == [("subscribe", 1, ("T.B",))]
+    loop.subs.status(refusal())  # a part of one topic awaiting an answer: judged at once
+    assert loop.sender.take() == [("subscribe", 1, ("T.C",))]
+    loop.subs.status(ack("T.C"))
+    assert loop.refused == [(("T.B",), "not authorized")]
+    assert loop.subs.acknowledged == {"T.A", "T.C"}
+
+
+def test_two_refused_halves_refuse_the_whole_step_after_two_sub_steps() -> None:
+    loop = refused_step("T.A", "T.B", "T.C", "T.D")
+    loop.timers.fire()
+    loop.subs.status(refusal())
+    loop.timers.fire()  # the half is refused whole: it waits for its sibling
+    loop.subs.status(refusal())
+    loop.timers.fire()
+    assert loop.sender.take() == [
+        ("subscribe", 1, ("T.A", "T.B")),
+        ("subscribe", 1, ("T.C", "T.D")),
+    ]
+    assert loop.refused == [(("T.A", "T.B", "T.C", "T.D"), "not authorized")]
+    assert loop.subs.counts() == (0, 0, 0, 0)
+
+
+def test_a_search_s_sub_steps_carry_no_other_topic_and_other_adds_wait() -> None:
+    loop = make_loop()
+    loop.subs.add(["T.X"])
+    loop.subs.opened(1)
+    loop.subs.status(ack("T.X"))
+    loop.subs.add(["T.A", "T.B"])
+    loop.subs.reconcile()
+    loop.sender.take()
+    loop.subs.status(refusal())
+    loop.timers.fire()
+    assert loop.sender.take() == [("subscribe", 1, ("T.A",))]
+    loop.subs.add(["T.C"])
+    loop.subs.remove(["T.X"])
+    loop.subs.reconcile()
+    assert loop.sender.take() == []  # a part is in flight
+    loop.subs.status(ack("T.A"))
+    # The next part goes alone; the removal goes with it, and T.C waits for the search's end.
+    assert loop.sender.take() == [("subscribe", 1, ("T.B",)), ("unsubscribe", 1, ("T.X",))]
+    loop.subs.status(ack("T.B"))
+    assert loop.sender.take() == [("subscribe", 1, ("T.C",))]
+    assert loop.refused == []
+
+
+def test_a_topic_the_search_refuses_is_never_no_ack_nor_re_sent() -> None:
+    loop = refused_step("T.A", "T.B")
+    loop.timers.fire()
+    loop.subs.status(refusal())  # T.A, alone in its part
+    loop.subs.status(ack("T.B"))
+    loop.sender.take()
+    for _ in range(3):
+        loop.timers.fire()
+    assert loop.sender.take() == []
+    assert loop.subs.no_ack == frozenset()
+    assert loop.timers.live() == []
+    loop.subs.opened(2)  # a reconnect subscribes what the streams may have
+    assert loop.sender.take() == [("subscribe", 2, ("T.B",))]
+
+
+def test_a_wildcard_in_a_searched_step_is_refused_alone() -> None:
+    # A wildcard asks for the feed itself, so it is a part of its own, apart from its channel.
+    loop = refused_step("Q.AAPL", "T.*", "T.MSFT")
+    loop.timers.fire()
+    assert loop.sender.take() == [("subscribe", 1, ("Q.AAPL",))]
+    loop.subs.status(ack("Q.AAPL"))
+    assert loop.sender.take() == [("subscribe", 1, ("T.*",))]
+    loop.subs.status(refusal())
+    assert loop.sender.take() == [("subscribe", 1, ("T.MSFT",))]
+    loop.subs.status(ack("T.MSFT"))
+    assert loop.refused == [(("T.*",), "not authorized")]
+
+
+def test_a_part_with_no_answer_returns_its_topics_to_the_ordinary_steps(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Silence says nothing about entitlement: the topic is re-sent until Massive confirms.
+    loop = refused_step("T.A", "T.B")
+    loop.timers.fire()
+    loop.timers.fire()  # T.A's part had no answer
+    loop.subs.status(ack("T.B"))
+    assert loop.sender.take() == [
+        ("subscribe", 1, ("T.A",)),
+        ("subscribe", 1, ("T.B",)),
+        ("subscribe", 1, ("T.A",)),
+    ]
+    loop.timers.fire()
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive._ingest.subscriptions"):
+        loop.timers.fire()
+    assert loop.sender.take() == [("subscribe", 1, ("T.A",))]
+    assert loop.subs.no_ack == {"T.A"}
+    assert loop.refused == []
+
+
+def test_a_search_finding_nothing_refused_says_so(caplog: pytest.LogCaptureFixture) -> None:
+    loop = refused_step("T.A", "T.B")
+    loop.timers.fire()
+    with caplog.at_level(logging.INFO, logger="deephaven_massive._ingest.subscriptions"):
+        loop.subs.status(ack("T.A"))
+        loop.subs.status(ack("T.B"))
+    assert caplog.messages == [
+        (
+            f"{URL}: the search of a refused subscription step sent 2 parts and found no "
+            "subscription refused."
+        )
+    ]
+
+
+def test_a_part_whose_topics_leave_the_watchlist_is_dropped_and_the_search_goes_on() -> None:
+    loop = refused_step("T.A", "T.B", "T.C", "T.D")
+    loop.timers.fire()
+    loop.subs.remove(["T.A", "T.B"])  # the part in flight: no topic of it awaits an answer
+    loop.subs.reconcile()
+    assert loop.sender.take() == [
+        ("subscribe", 1, ("T.A", "T.B")),
+        ("subscribe", 1, ("T.C", "T.D")),
+        ("unsubscribe", 1, ("T.A", "T.B")),
+    ]
+    loop.subs.status(ack("T.C", "T.D"))
+    assert loop.refused == []
+    assert loop.subs.acknowledged == {"T.C", "T.D"}
+
+
+def test_a_part_whose_topics_left_before_its_turn_is_never_sent() -> None:
+    loop = refused_step("T.A", "T.B", "T.C", "T.D")
+    loop.timers.fire()
+    loop.subs.remove(["T.C", "T.D"])
+    loop.subs.status(refusal())
+    loop.timers.fire()  # refused whole; its sibling, never sent, lets it split
+    assert loop.sender.take() == [
+        ("subscribe", 1, ("T.A", "T.B")),
+        ("subscribe", 1, ("T.A",)),
+    ]
+    loop.subs.status(ack("T.A"))
+    loop.subs.status(refusal())
+    assert loop.refused == [(("T.B",), "not authorized")]
+
+
+def test_a_topic_removed_from_a_refused_part_is_never_refused() -> None:
+    loop = refused_step("T.A", "T.B", "T.C", "T.D")
+    loop.timers.fire()
+    loop.subs.status(refusal())
+    loop.subs.remove(["T.B"])  # nobody wants it any more: no verdict on it reaches a stream
+    loop.timers.fire()
+    loop.subs.status(refusal())
+    loop.timers.fire()  # both halves refused whole
+    assert loop.refused == [(("T.A", "T.C", "T.D"), "not authorized")]
+
+
+def test_a_refusal_naming_a_topic_during_a_search_refuses_it_once() -> None:
+    loop = refused_step("T.A", "T.B", "T.C", "T.D")
+    loop.timers.fire()
+    loop.subs.status(refusal("T.A", message="not authorized to access T.A"))
+    loop.subs.status(ack("T.B"))
+    loop.subs.status(ack("T.C", "T.D"))
+    assert loop.refused == [(("T.A",), "not authorized to access T.A")]
+
+
+def test_a_new_generation_drops_the_search() -> None:
+    loop = refused_step("T.A", "T.B")
+    loop.timers.fire()
+    loop.sender.take()
+    loop.subs.opened(2)
+    assert loop.sender.take() == [("subscribe", 2, ("T.A", "T.B"))]
+    loop.subs.status(ack("T.A", "T.B"))
+    assert loop.refused == []
+
+
+def test_a_marked_step_with_one_topic_left_re_sends_it_alone() -> None:
+    # One unanswered topic needs no search: a refusal of its re-send alone is surely its.
+    loop = refused_step("T.A", "T.B")
+    loop.subs.status(ack("T.A"))
+    loop.timers.fire()
+    assert loop.sender.take() == [("subscribe", 1, ("T.B",))]
+    loop.subs.status(refusal())
+    assert loop.refused == [(("T.B",), "not authorized")]
 
 
 def test_a_refusal_naming_no_topic_skips_the_resolved_topics() -> None:

@@ -722,7 +722,7 @@ def _status_messages(frames: list[CapturedReply], hosts: set[str]) -> list[tuple
 
 @pytest.mark.settles("148")
 @pytest.mark.timeout(110)
-def test_a_refusal_of_two_topics_in_one_step_names_them(
+def test_a_refusal_of_two_topics_in_one_step_names_neither_and_the_library_finds_both(
     live_config: dm.MassiveConfig,
     *,
     wait_acked: WaitAcked,
@@ -731,21 +731,23 @@ def test_a_refusal_of_two_topics_in_one_step_names_them(
     skip_if_not_entitled: Callable[[dm.MassiveSession], None],
     evidence: Evidence,
 ) -> None:
-    """Whether Massive names each topic in its refusal of a subscribe frame of two topics.
+    """Massive's refusal of a subscribe frame of two topics names neither; the library finds both.
 
     Streams `m.stocks.fmv` of two symbols in one session, which subscribes both fair market
     value topics in one frame to `business.massive.com`, and records every status object Massive
-    sends on that connection. Waits up to 45 s for both topics to be acknowledged or the stream
-    to fail, then another 10 s so that a second refusal, if Massive sends one per topic, is
+    sends on that connection and the stream's state. Waits up to 45 s for both topics to be
+    acknowledged or the stream to fail, then another 10 s so that every later status is
     captured too. Records, for each status, which of the two symbols its message names. Skips,
     quoting the statuses, when Massive acknowledged both topics and refused none: the key is
-    entitled and there is no refusal to read. Passes when Massive refused with at least one
-    status, since the refusal is the evidence, which reads three ways. A refusal naming both
-    symbols, or two refusals each naming one, mean Massive names the topics it refuses. A
-    refusal naming neither symbol means a step of several topics is refused as a whole, and the
-    library cannot tell which topic Massive refused. Skips, quoting Massive, when a stream
-    failed with a refusal and no status was captured. Fails when Massive neither acknowledged
-    both topics nor refused any within the wait, since there is then nothing to record.
+    entitled and there is no refusal to read. Skips, quoting Massive, when a stream failed with
+    a refusal and no status was captured.
+
+    The settled answer, which it pins: Massive refuses the step with "not authorized" statuses
+    that name neither symbol. The library then sends each topic again on its own, learns that
+    Massive refuses both, and fails the stream, since Massive refused every symbol it was opened
+    with, naming both subscriptions. Fails when a refusal names a symbol (Massive's answer
+    changed: the item's text must be updated), when the stream did not fail naming both, or
+    when Massive neither acknowledged both topics nor refused any within the wait.
     """
     frames: list[CapturedReply] = []
     lock = threading.Lock()
@@ -774,6 +776,7 @@ def test_a_refusal_of_two_topics_in_one_step_names_them(
             refused = [message for status, message in statuses if status == "error"]
             if not refused:
                 skip_if_not_entitled(session)
+            streams = [(r["State"], r["Error"]) for r in table_rows(session.streams())]
             session.release(table)
         finally:
             session.close()
@@ -791,3 +794,9 @@ def test_a_refusal_of_two_topics_in_one_step_names_them(
     assert refused, (
         f"Massive neither acknowledged both topics nor refused any in {_WAIT:.0f} s: {statuses}"
     )
+    evidence(f"streams {streams}")
+    named = [m for m in refused if any(symbol in m for symbol in _FMV_SYMBOLS)]
+    assert not named, f"Massive's refusal now names a symbol: {named}"
+    [(state, error)] = streams
+    assert state == "FAILED", f"the stream is {state}: {error}"
+    assert "FMV.AAPL and FMV.MSFT" in str(error), error

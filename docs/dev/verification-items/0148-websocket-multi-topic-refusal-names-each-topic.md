@@ -2,7 +2,7 @@
 
 Date: 2026-11-25
 
-Status: open
+Status: settled 2026-11-25: no; Massive answers a refused step of several topics with "not authorized" statuses that name none of them
 
 Unknown: whether the status Massive sends when it refuses a subscribe frame of two topics names
 the topics it refuses, as the fake server's "not authorized to access T.AAPL" does. Every
@@ -17,9 +17,15 @@ await and the refusal names none, it fails nothing and the topics stay unacknowl
 the key lacks can be refused symbol by symbol from the text. If it does not, that case keeps
 the unacknowledged path, and the fake server's text is corrected to Massive's.
 
-Settled by `test_a_refusal_of_two_topics_in_one_step_names_them` in
-`tests/ingest/test_ws_integration.py`. It streams `m.stocks.fmv` of `AAPL` and `MSFT`, which
-subscribes both fair market value topics to the business host in one frame, and records every
-status object Massive sends on that connection and which of the two symbols each message
-names. It skips, quoting the statuses, when Massive acknowledges both topics: only a key
-without fair market value gives a refusal to read.
+Settled by the owner's live run of 2026-11-25 (`live-evidence-20261125T214724Z.log`):
+subscribing `FMV.AAPL` and `FMV.MSFT` together on `business.massive.com` drew four status
+objects `status 'error': 'not authorized'`, none naming either symbol, and neither topic was
+acknowledged. Left on the unacknowledged path, a refused topic would be re-sent forever. So
+the library now takes such a refusal as the step's and finds the refused topics by sending the
+unanswered ones again in parts, one part at a time (`_ingest/subscriptions.py`,
+`_ingest/refusal_search.py`); a topic it finds refused is final and never re-sent. The test,
+`test_a_refusal_of_two_topics_in_one_step_names_neither_and_the_library_finds_both` in
+`tests/ingest/test_ws_integration.py`, streams `m.stocks.fmv` of `AAPL` and `MSFT`, records
+every status object and the stream's state, and fails if a refusal names a symbol or the stream
+does not fail naming both subscriptions. It skips when Massive acknowledges both topics: only a
+key without fair market value gives a refusal to read.

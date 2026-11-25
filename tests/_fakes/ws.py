@@ -8,7 +8,9 @@ knowledge base shows it: one "subscribed to: <topic>" status object per topic, a
 array (or, with `combined_acks`, one object naming the comma-separated topics). Tests may also
 script the answers: `refuse` maps a topic to the message of the error status that refuses it,
 `silent` holds topics never answered, and each entry of `step_refusals` answers the next
-subscribe frame with one error status that names no topic.
+subscribe frame with one error status that names no topic. With `refuse_whole_frame`, a
+subscribe frame holding a refused topic is refused whole: its refused topics' error statuses
+are its only answer, and no topic of it is acknowledged.
 
 The server logs through its own logger at WARNING, so its DEBUG frame log (which would show
 the client's authentication frame) never reaches a test that captures every logger.
@@ -104,7 +106,7 @@ def _auth_reply(reply: str | tuple[str, str] | bytes) -> tuple[str | bytes, str 
 
 
 def _ack_frame(
-    params: str, *, combined: bool, refuse: dict[str, str], silent: set[str]
+    params: str, *, combined: bool, refuse: dict[str, str], silent: set[str], whole: bool
 ) -> str | None:
     """Return the answer to one subscribe frame.
 
@@ -113,12 +115,15 @@ def _ack_frame(
         combined: One status object for all acknowledged topics, instead of one per topic.
         refuse: Topics to refuse, each with the message of its error status.
         silent: Topics never answered.
+        whole: Whether a frame holding a refused topic is refused whole, acknowledging none.
 
     Returns:
         The status frame, or None when no topic is answered.
     """
     topics = params.split(",")
     acked = [t for t in topics if t not in refuse and t not in silent]
+    if whole and any(t in refuse for t in topics):
+        acked = []
     statuses = [
         {"ev": "status", "status": "error", "message": refuse[t]} for t in topics if t in refuse
     ]
@@ -173,6 +178,7 @@ class FakeMassiveServer:
         self.combined_acks = False
         self.close_after_refusal = True
         self.refuse: dict[str, str] = {}
+        self.refuse_whole_frame = False
         self.silent: set[str] = set()
         self.step_refusals: list[str] = []
         self._slot_held = False
@@ -415,19 +421,23 @@ class FakeMassiveServer:
                 subscribe = request.get("action") == "subscribe"
                 with self._lock:
                     self._record(record, str(frame), request)
-                    ack = self.auto_ack
-                    combined = self.combined_acks
-                    refuse, silent = dict(self.refuse), set(self.silent)
                     step = self.step_refusals.pop(0) if subscribe and self.step_refusals else None
+                    answer = (
+                        _ack_frame(
+                            request["params"],
+                            combined=self.combined_acks,
+                            refuse=self.refuse,
+                            silent=self.silent,
+                            whole=self.refuse_whole_frame,
+                        )
+                        if self.auto_ack and subscribe
+                        else None
+                    )
                     self._lock.notify_all()
                 if step is not None:
                     await ws.send(status_frame("error", step))
-                elif ack and subscribe:
-                    answer = _ack_frame(
-                        request["params"], combined=combined, refuse=refuse, silent=silent
-                    )
-                    if answer is not None:
-                        await ws.send(answer)
+                elif answer is not None:
+                    await ws.send(answer)
         except ConnectionClosed:
             pass  # the client went away mid-protocol, as a client under test may
         finally:

@@ -360,6 +360,347 @@ def test_a_refused_topic_fails_only_its_streams(
     del quotes
 
 
+# --- a refused symbol is its own problem ---------------------------------------------------------
+
+_ANOTHER_HOST = (
+    'To stream from another host, pass websocket_hosts={dm.AssetClass.STOCKS: "<host>"} to '
+    "dm.MassiveConfig."
+)
+"""The fix a refusal on the tests' real-time host names."""
+
+
+def refused_text(*topics: str) -> str:
+    # The text of Massive's refusal of the topics on the tests' stocks connection, as a span's
+    # Detail and a failed stream's Error give it.
+    listed = " and ".join(topics)
+    return (
+        f'Massive answered the subscription to {listed} on wss://socket.test/stocks: "not '
+        f'authorized". {_ANOTHER_HOST}'
+    )
+
+
+def watchlist_of(dh_input_table: Callable[..., InputTable], *symbols: str) -> InputTable:
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols=["Symbol"])
+    if symbols:
+        watchlist.add(new_table([string_col("Symbol", list(symbols))]))
+    return watchlist
+
+
+def refusals_of(ws_session: WsSession, dh_to_pylist: ToPylist) -> list[tuple[object, ...]]:
+    # The session's refused_symbols spans as (stream, symbol, detail, ended).
+    spans = spans_of(ws_session, dh_to_pylist, "refused_symbols")
+    return [(stream, symbol, detail, ended) for stream, _, symbol, detail, _, ended in spans]
+
+
+def test_a_refused_symbol_added_later_lists_it_and_keeps_the_stream(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+    rows_when: RowsWhen,
+) -> None:
+    fake_ws_server.refuse["T.XYZ"] = "not authorized"
+    watchlist = watchlist_of(dh_input_table, "AAPL")
+    result = ws_session.query(TRADES, watchlist).append_only()
+    ws_session.subscribed("T.AAPL")
+    watchlist.add(new_table([string_col("Symbol", ["XYZ"])]))
+    [row] = streams_of(ws_session, dh_to_pylist)
+    listed = (row["StreamId"], "XYZ", refused_text("T.XYZ"), False)
+    wait_for(lambda: refusals_of(ws_session, dh_to_pylist) == [listed])
+    [row] = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
+    ws_session.send(trade("AAPL"))
+    ws_session.flush()
+    rows_when(result, lambda rows: [r["Symbol"] for r in rows] == ["AAPL"])
+
+
+def test_a_stream_opened_empty_keeps_running_when_its_first_symbol_is_refused(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # No symbol was the call's, so the first one's refusal is the symbol's, never the stream's.
+    fake_ws_server.refuse["T.XYZ"] = "not authorized"
+    watchlist = watchlist_of(dh_input_table)
+    result = ws_session.query(TRADES, watchlist).append_only()
+    watchlist.add(new_table([string_col("Symbol", ["XYZ"])]))
+    [row] = streams_of(ws_session, dh_to_pylist)
+    listed = (row["StreamId"], "XYZ", refused_text("T.XYZ"), False)
+    wait_for(lambda: refusals_of(ws_session, dh_to_pylist) == [listed])
+    assert not failed_after_flush(ws_session, result)
+    [row] = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
+
+
+def test_a_stream_whose_every_call_time_symbol_is_refused_fails(
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Massive refuses the step of both without naming either: the search finds both refused.
+    custom_session = make_ws_session(subscription_confirmation_timeout=0.05)
+    fake_ws_server.refuse.update({"T.QQQ": "not authorized", "T.XYZ": "not authorized"})
+    result = custom_session.query(TRADES, ["QQQ", "XYZ"]).blink()
+    wait_for(lambda: failed_after_flush(custom_session, result))
+    [row] = streams_of(custom_session, dh_to_pylist)
+    assert row["State"] == "FAILED"
+    assert row["Error"] == f"test.trades: {refused_text('T.QQQ', 'T.XYZ')}"
+
+
+def test_a_watchlist_stream_whose_every_starting_symbol_is_refused_fails(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # The rows a watchlist holds when the stream opens are the call's, as a list's symbols are.
+    fake_ws_server.refuse["T.XYZ"] = "not authorized"
+    result = ws_session.query(TRADES, watchlist_of(dh_input_table, "XYZ")).blink()
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    [row] = streams_of(ws_session, dh_to_pylist)
+    assert row["Error"] == f"test.trades: {refused_text('T.XYZ')}"
+
+
+def test_a_refusal_before_the_watchlist_s_replay_arrives_is_judged_with_it(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # The replay's symbols reach the connection after its change; a refusal in between is a
+    # span until they do, and fails the stream once they show every starting symbol refused.
+    fake_ws_server.refuse["T.XYZ"] = "not authorized"
+    watchlist = watchlist_of(dh_input_table)
+    result = ws_session.query(TRADES, watchlist).blink()
+    watchlist.add(new_table([string_col("Symbol", ["XYZ"])]))
+    [row] = streams_of(ws_session, dh_to_pylist)
+    wait_for(lambda: len(refusals_of(ws_session, dh_to_pylist)) == 1)
+    connection = ws_session.connection("wss://socket.test/stocks")
+    assert connection.post(connection.settle_call_time, 999, frozenset({"XYZ"}))  # no stream
+    assert connection.post(connection.settle_call_time, row["StreamId"], frozenset({"XYZ"}))
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    [row] = streams_of(ws_session, dh_to_pylist)
+    assert row["Error"] == f"test.trades: {refused_text('T.XYZ')}"
+
+
+def test_only_a_starting_symbol_s_acknowledgement_settles_the_check(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # XYZ, the watchlist's row at the call, is not answered yet when AAPL, added later, is
+    # acknowledged: Massive serves the call nothing, so XYZ's refusal still fails the stream.
+    fake_ws_server.silent.add("T.XYZ")
+    watchlist = watchlist_of(dh_input_table, "XYZ")
+    result = ws_session.query(TRADES, watchlist).blink()
+    ws_session.subscribed("T.XYZ")
+    watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+    ws_session.wait(lambda s: any("T.AAPL" in status.topics for status in s.statuses))
+    connection = ws_session.connection()
+    ws_session.on_loop(connection, lambda: connection._refused(("T.XYZ",), "not authorized"))
+    wait_for(lambda: failed_after_flush(ws_session, result))
+    [row] = streams_of(ws_session, dh_to_pylist)
+    assert row["Error"] == f"test.trades: {refused_text('T.XYZ')}"
+
+
+def test_a_refused_symbol_removed_from_the_watchlist_ends_its_span(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    fake_ws_server.refuse["T.XYZ"] = "not authorized"
+    watchlist = watchlist_of(dh_input_table, "AAPL")
+    result = ws_session.query(TRADES, watchlist).append_only()
+    ws_session.subscribed("T.AAPL")
+    watchlist.add(new_table([string_col("Symbol", ["XYZ"])]))
+    [row] = streams_of(ws_session, dh_to_pylist)
+    stream_id = row["StreamId"]
+    wait_for(lambda: len(refusals_of(ws_session, dh_to_pylist)) == 1)
+    watchlist.delete(new_table([string_col("Symbol", ["XYZ"])]))
+    ended = (stream_id, "XYZ", refused_text("T.XYZ"), True)
+    wait_for(lambda: refusals_of(ws_session, dh_to_pylist) == [ended])
+    del result
+
+
+def test_a_refused_symbol_acknowledged_later_ends_its_span(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # Another stream asks for the symbol again, and Massive now serves it: the span ends.
+    fake_ws_server.refuse["T.XYZ"] = "not authorized"
+    watchlist = watchlist_of(dh_input_table, "AAPL")
+    first = ws_session.query(TRADES, watchlist).append_only()
+    ws_session.subscribed("T.AAPL")
+    watchlist.add(new_table([string_col("Symbol", ["XYZ"])]))
+    [row] = streams_of(ws_session, dh_to_pylist)
+    stream_id = row["StreamId"]
+    wait_for(lambda: len(refusals_of(ws_session, dh_to_pylist)) == 1)
+    del fake_ws_server.refuse["T.XYZ"]
+    second = ws_session.query(TRADES, ["XYZ"]).append_only()
+    ended = (stream_id, "XYZ", refused_text("T.XYZ"), True)
+    wait_for(lambda: refusals_of(ws_session, dh_to_pylist) == [ended])
+    del first, second
+
+
+def test_a_refused_symbol_fails_the_stream_under_raise(
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+    rows_when: RowsWhen,
+) -> None:
+    # The session raises; a call that follows the error's advice keeps streaming the others.
+    strict = dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE)
+    custom_session = make_ws_session(on_error=strict)
+    fake_ws_server.refuse["T.XYZ"] = "not authorized"
+    watchlist = watchlist_of(dh_input_table, "AAPL")
+    raised = custom_session.query(TRADES, watchlist).append_only()
+    advice = dm.ErrorPolicy(refused_symbols=dm.OnError.LOG)
+    logged = custom_session.query(TRADES, watchlist, on_error=advice).append_only()
+    custom_session.subscribed("T.AAPL")
+    watchlist.add(new_table([string_col("Symbol", ["XYZ"])]))
+    wait_for(lambda: failed_after_flush(custom_session, raised))
+    failed, running = streams_of(custom_session, dh_to_pylist)
+    assert (failed["State"], running["State"]) == ("FAILED", "RUNNING")
+    assert failed["Error"] == (
+        f"test.trades: {refused_text('T.XYZ')} To keep streaming the other symbols without it, "
+        "pass on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    # m.problems() lists the symbol of both, whatever the setting; the failed stream's span ended.
+    wait_for(
+        lambda: (
+            [(s, ended) for s, _, _, ended in refusals_of(custom_session, dh_to_pylist)]
+            == [(failed["StreamId"], True), (running["StreamId"], False)]
+        )
+    )
+    custom_session.send(trade("AAPL"))
+    custom_session.flush()
+    rows_when(logged, lambda rows: [r["Symbol"] for r in rows] == ["AAPL"])
+
+
+def test_a_wildcard_refusal_fails_the_stream(
+    ws_session: WsSession, fake_ws_server: FakeMassiveServer, dh_to_pylist: ToPylist
+) -> None:
+    # A wildcard asks for the feed itself: its refusal is the stream's, whatever the setting.
+    fake_ws_server.refuse["T.*"] = "not authorized"
+    every = ws_session.query(TRADES, dm.ALL).blink()
+    wait_for(lambda: failed_after_flush(ws_session, every))
+    [row] = streams_of(ws_session, dh_to_pylist)
+    assert row["Error"] == f"test.trades: {refused_text('T.*')}"
+    assert refusals_of(ws_session, dh_to_pylist) == []
+
+
+def test_a_watchlist_removing_a_symbol_another_stream_holds_keeps_its_topic(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+    rows_when: RowsWhen,
+) -> None:
+    watchlist = watchlist_of(dh_input_table, "AAPL", "MSFT")
+    first = ws_session.query(TRADES, watchlist).append_only()
+    second = ws_session.query(TRADES, ["MSFT"]).append_only()
+    ws_session.subscribed("T.AAPL", "T.MSFT")
+    watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
+    wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Symbols"] == "AAPL")
+    assert fake_ws_server.connections[-1].topics == {"T.AAPL", "T.MSFT"}  # never unsubscribed
+    ws_session.send(trade("AAPL"), trade("MSFT"))
+    ws_session.flush()
+    rows_when(second, lambda rows: [r["Symbol"] for r in rows] == ["MSFT"])
+    rows_when(first, lambda rows: [r["Symbol"] for r in rows] == ["AAPL"])
+
+
+def test_two_refused_symbols_in_one_step_are_listed_and_the_stream_keeps_running(
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    rows_when: RowsWhen,
+) -> None:
+    # Massive's "not authorized" names no symbol: the library finds each refused one.
+    custom_session = make_ws_session(subscription_confirmation_timeout=0.05)
+    fake_ws_server.refuse.update({"T.QQQ": "not authorized", "T.XYZ": "not authorized"})
+    result = custom_session.query(TRADES, ["AAPL", "QQQ", "XYZ"]).append_only()
+    [row] = streams_of(custom_session, dh_to_pylist)
+    stream_id = row["StreamId"]
+    listed = [
+        (stream_id, "QQQ", refused_text("T.QQQ"), False),
+        (stream_id, "XYZ", refused_text("T.XYZ"), False),
+    ]
+    wait_for(lambda: refusals_of(custom_session, dh_to_pylist) == listed)
+    custom_session.send(trade("AAPL"))
+    custom_session.flush()
+    rows_when(result, lambda rows: [r["Symbol"] for r in rows] == ["AAPL"])
+    [row] = streams_of(custom_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
+
+
+def test_a_refused_symbol_among_entitled_ones_is_found_under_a_whole_frame_refusal(
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    rows_when: RowsWhen,
+) -> None:
+    # Massive refuses a frame holding one refused topic whole, acknowledging none of it: the
+    # library sends it again in halves, and the half answered keeps its rows.
+    custom_session = make_ws_session(subscription_confirmation_timeout=0.05)
+    fake_ws_server.refuse_whole_frame = True
+    fake_ws_server.refuse["T.XYZ"] = "not authorized"
+    result = custom_session.query(TRADES, ["AAPL", "MSFT", "XYZ"]).append_only()
+    [row] = streams_of(custom_session, dh_to_pylist)
+    listed = (row["StreamId"], "XYZ", refused_text("T.XYZ"), False)
+    wait_for(lambda: refusals_of(custom_session, dh_to_pylist) == [listed])
+    sent = [json.loads(f)["params"] for f in fake_ws_server.frames()]
+    assert sent == ["T.AAPL,T.MSFT,T.XYZ", "T.AAPL", "T.MSFT,T.XYZ", "T.MSFT", "T.XYZ"]
+    custom_session.send(trade("AAPL"), trade("MSFT"))
+    custom_session.flush()
+    rows_when(result, lambda rows: sorted(r["Symbol"] for r in rows) == ["AAPL", "MSFT"])
+
+
+def test_every_symbol_a_refusal_leaves_without_rows_has_its_own_problem(
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+    rows_when: RowsWhen,
+) -> None:
+    # No silent gap: a symbol that gets no rows because Massive refused it, alone or in a step
+    # with others, shows in m.problems() under its own name.
+    custom_session = make_ws_session(subscription_confirmation_timeout=0.05)
+    fake_ws_server.refuse.update({"T.QQQ": "not authorized", "T.XYZ": "not authorized"})
+    watchlist = watchlist_of(dh_input_table, "AAPL", "MSFT")
+    result = custom_session.query(TRADES, watchlist).append_only()
+    custom_session.subscribed("T.AAPL", "T.MSFT")
+    watchlist.add(new_table([string_col("Symbol", ["QQQ", "XYZ"])]))  # one step of two
+    refused = {"QQQ", "XYZ"}
+    wait_for(lambda: {s for _, s, _, _ in refusals_of(custom_session, dh_to_pylist)} == refused)
+    custom_session.send(trade("AAPL"), trade("MSFT"))  # Massive sends no row of a refused one
+    custom_session.flush()
+    rows = rows_when(result, lambda rows: sorted(r["Symbol"] for r in rows) == ["AAPL", "MSFT"])
+    silent = {"AAPL", "MSFT", "QQQ", "XYZ"} - {r["Symbol"] for r in rows}
+    listed = {symbol for _, symbol, _, _ in refusals_of(custom_session, dh_to_pylist)}
+    assert silent == listed == refused
+    [row] = streams_of(custom_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
+
+
 def test_publish_waits_for_every_channel_of_a_frame(
     ws_session: WsSession, monkeypatch: pytest.MonkeyPatch, *, rows_when: RowsWhen
 ) -> None:
