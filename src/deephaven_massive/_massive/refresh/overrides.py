@@ -1329,12 +1329,13 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
                 vendor="The change in the option's price per $0.01 increment in the price of "
                 "the underlying asset.",
                 text="Change in option price per $1 move in the underlying",
-                why='Ambiguous: the "$0.01" reads two ways that give the same number on a '
-                "standard contract of 100 shares: the change in one share's price per $1 move in "
-                "the underlying, and the change in the contract's price per $0.01 move, since 100 "
-                "shares times $0.01 is $1. Only a contract whose deliverable is not 100 shares "
-                "tells them apart, and live searches for one have been inconclusive. The text "
-                "states the per-share reading, right for every standard contract.",
+                why='The snapshot\'s own gamma contradicts the "$0.01": one per-share model '
+                "gives all four greeks, and its gamma is per share per $1 move, about 100 times "
+                "a per-$0.01 gamma and within 1% to 3% of Black-Scholes gamma per share per $1 "
+                "on SPY calls near the money, so its delta is per share per $1 too. The snapshot "
+                "samples' `delta` of 0.552 does not show this alone: on a standard contract of "
+                "100 shares, the contract's change in dollars per $0.01 move equals one share's "
+                "change per $1 move, since 100 shares times $0.01 is $1.",
             ),
         ),
         **_for(
