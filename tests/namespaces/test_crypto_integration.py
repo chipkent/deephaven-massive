@@ -463,7 +463,6 @@ def _volume_error(left: Mapping[str, Any], right: Mapping[str, Any]) -> float | 
     return _errors(_ohlcv(left), _ohlcv(right))[4]
 
 
-@pytest.mark.massive_issue(803)
 @pytest.mark.requests(7)
 @pytest.mark.timeout(100)
 def test_crypto_range_day_bar_volume_equals_prev_and_grouped_daily(
@@ -473,12 +472,12 @@ def test_crypto_range_day_bar_volume_equals_prev_and_grouped_daily(
 
     Reads `/prev`, the range day bars of `/prev`'s UTC day and the four days before it, and
     grouped daily of each of those five days: 7 requests. `/prev` serves one day only, so it is
-    compared on its day, and grouped daily on all five. Today the range bar's volume sometimes
-    runs above the other sources, which agree with each other and with the day's minute bars:
-    12,811.42 against 12,791.71 (0.15%) for 2026-11-02, while 2026-10-26 agreed everywhere.
-    Five days make one lucky day no fix. The evidence first asserts that every source sent one
-    bar of each day with the same prices, so the volumes compared belong to one bar. A pass
-    means every volume agrees within 1e-6 on every day: Massive fixed it, so close the issue.
+    compared on its day, and grouped daily on all five. The range bar's volume once ran above the
+    other sources, which agreed with each other and with the day's minute bars: 12,811.42
+    against 12,791.71 (0.15%) for 2026-11-02. Massive fixed it. Five days make one lucky day no
+    proof. The evidence first asserts that every source sent one bar of each day with the same
+    prices, so the volumes compared belong to one bar. Passes when every volume agrees within
+    1e-6 on every day; a failure means the range bar's volume differs from the others' again.
     """
     prevs = rest_rows(_PREV, {"cryptoTicker": _PAIR}, {})
     assert len(prevs) == 1, f"/prev returned {prevs}"
@@ -511,11 +510,9 @@ def test_crypto_range_day_bar_volume_equals_prev_and_grouped_daily(
             assert error is not None, f"{day}: no volume in range {bar} or {request} {other}"
             if error > _TOLERANCE:
                 differ.append(f"{day}: GET {_RANGE} v={bar.get('v')}, {request} v={other.get('v')}")
-    expect_fixed(
-        evidence=evidence,
-        fixed=not differ,
-        shown=f"{_PAIR} range day-bar volumes unlike the other sources': {differ}",
-    )
+    shown = f"{_PAIR} range day-bar volumes unlike the other sources': {differ}"
+    evidence(shown)
+    assert not differ, shown
 
 
 def _canonical(raw: Iterable[str]) -> set[str]:

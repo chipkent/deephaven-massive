@@ -421,7 +421,7 @@ def test_stock_day_and_longer_bar_stamps_from_rest(
     confirm the library's day label; minute bars ending at 12:59 on the half day confirm a
     whole day cut short; a raw stamp of any other form is withheld by the library, with a
     WARNING in the log.
-    Grouped-daily volume runs a little below the range bar's, so only the stamps are asserted.
+    Only the stamps are asserted; the volume checks below compare the volumes.
     """
     days = stamp_days["day"]
     grouped = {
@@ -584,7 +584,7 @@ def test_a_stock_day_bar_has_one_stamp_on_every_rest_source(
     )
 
 
-def _expect_equal_day_volumes(
+def _assert_equal_day_volumes(
     days: Sequence[date],
     *,
     rest_rows: RestRows,
@@ -592,13 +592,13 @@ def _expect_equal_day_volumes(
     stamped_bar: ToStampedBar,
     evidence: Evidence,
 ) -> None:
-    """Expect grouped daily's AAPL volume of each day to equal the range day bar's and the file's.
+    """Assert grouped daily's AAPL volume of each day to equal the range day bar's and the file's.
 
     Reads the as-traded range day bars over the days (1 request), each day's as-traded
     grouped-daily row (1 request a day), and each day's `us_stocks_sip/day_aggs_v1` row, which is
     as traded. Asserts first that every source sent one bar of each day, with the same prices,
-    so the volumes compared belong to one bar; then expects the three volumes of every day
-    equal, so a fix of only some days still shows the problem.
+    so the volumes compared belong to one bar; then asserts the three volumes of every day
+    equal.
     """
     params = {"stocksTicker": _SYMBOL, "multiplier": 1, "timespan": "day"}
     params |= {"from": days[0], "to": days[-1]}
@@ -631,14 +631,11 @@ def _expect_equal_day_volumes(
                 f"GET {_RANGE} adjusted=false v={volumes['range']}, "
                 f"{_DAY_FILE} volume={volumes[_DAY_FILE]}"
             )
-    expect_fixed(
-        evidence=evidence,
-        fixed=not differ,
-        shown=f"{_SYMBOL} volumes that differ, {len(differ)} of {len(days)} days: {differ}",
-    )
+    shown = f"{_SYMBOL} volumes that differ, {len(differ)} of {len(days)} days: {differ}"
+    evidence(shown)
+    assert not differ, shown
 
 
-@pytest.mark.massive_issue(799)
 @pytest.mark.requests(3)
 @pytest.mark.timeout(200)
 def test_grouped_daily_stock_volume_equals_the_range_bar_on_the_reported_days(
@@ -650,15 +647,14 @@ def test_grouped_daily_stock_volume_equals_the_range_bar_on_the_reported_days(
 ) -> None:
     """Whether grouped daily's AAPL volume equals the range bar's and the day file's, 2025-12-23/24.
 
-    These are the days the problem was reported on, so a pass here means Massive corrected the
-    data it already served. Today grouped daily sends less volume than the range day bar and the
-    day file, which agree: 29,593,863 against 29,641,999 on 2025-12-23 (0.16% lower), and
-    17,892,492 against 17,910,574 on 2025-12-24, with the same prices on all three. Reads the
-    range once, grouped daily for each day, and each day's day file: 3 requests and two files.
-    A pass means Massive fixed these days: close the issue if the recent-days check passes too,
-    and remove the stamp test's note that grouped-daily volume runs lower.
+    These are the days Massive once sent a lower grouped-daily volume on: 29,593,863 against
+    29,641,999 for the range bar and the day file on 2025-12-23, and 17,892,492 against
+    17,910,574 on 2025-12-24, with the same prices on all three. Massive corrected it, so this
+    guards the corrected data. Reads the range once, grouped daily for each day, and each day's
+    day file: 3 requests and two files. Passes when the three volumes agree on both days; a
+    failure means grouped daily's volume is below the others' again.
     """
-    _expect_equal_day_volumes(
+    _assert_equal_day_volumes(
         _VOLUME_DAYS,
         rest_rows=rest_rows,
         flat_file_tickers=flat_file_tickers,
@@ -667,7 +663,6 @@ def test_grouped_daily_stock_volume_equals_the_range_bar_on_the_reported_days(
     )
 
 
-@pytest.mark.massive_issue(799)
 @pytest.mark.requests(6)
 @pytest.mark.timeout(300)
 def test_grouped_daily_stock_volume_equals_the_range_bar_on_recent_days(
@@ -682,15 +677,14 @@ def test_grouped_daily_stock_volume_equals_the_range_bar_on_recent_days(
 
     Compares the five trading days of the most recent ended week without a holiday, so a fix
     of only the data Massive builds from now on shows apart from a correction of the old days
-    (the reported-days check), and one lucky day does not read as a fix. Grouped daily has sent
-    less volume than the range day bar and the day file, which agree, with the same prices on
-    all three. Reads the range once, grouped daily for each day, and each day's day file: 6
-    requests and five files. A pass means Massive's recent data is fixed: close the issue if the
-    reported-days check passes too, and remove the stamp test's note that grouped-daily volume
-    runs lower.
+    (the reported-days check). Grouped daily once sent less volume than the range day bar and
+    the day file, which agree, with the same prices on all three. Reads the range once, grouped
+    daily for each day, and each day's day file: 6 requests and five files. Passes when the
+    three volumes agree on all five days; a failure means the problem is back in the data
+    Massive builds now.
     """
     monday = recent_week[0]
-    _expect_equal_day_volumes(
+    _assert_equal_day_volumes(
         [monday + timedelta(days=n) for n in range(5)],
         rest_rows=rest_rows,
         flat_file_tickers=flat_file_tickers,

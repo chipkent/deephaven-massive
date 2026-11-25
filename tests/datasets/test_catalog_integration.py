@@ -367,10 +367,13 @@ def _symbol(name: str, spec: DatasetSpec, client: RestClient, *, symbols: Mappin
     """Return the one symbol a dataset is called with.
 
     Returns:
-        The symbol of its class (an ETF for the ETF Global datasets, AAPL for data of no class).
+        The symbol of its class (an ETF for the ETF Global datasets, a stock for a dataset whose
+        symbols are underlyings, AAPL for data of no class).
     """
     if name.startswith("partners.etf_global."):
         return _ETF
+    if spec.symbols_are_underlyings:
+        return symbols[dm.AssetClass.STOCKS]
     if spec.asset_class is dm.AssetClass.OPTIONS:
         return _option(client)
     return symbols.get(spec.asset_class, "AAPL")
