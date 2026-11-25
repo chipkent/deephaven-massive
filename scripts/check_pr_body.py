@@ -428,7 +428,7 @@ def _fetch(ref: str) -> str:
         ref: The full ref on the remote, such as `refs/pull/613/head`.
 
     Returns:
-        The commit's hash, read from `FETCH_HEAD`, which only this fetch has just written.
+        The commit's hash, read from `FETCH_HEAD`, which the fetch has just written.
     """
     _run(["git", "fetch", "-q", "--no-tags", "origin", ref])
     return _run(["git", "rev-parse", "FETCH_HEAD"]).strip()
