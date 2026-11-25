@@ -606,7 +606,8 @@ def test_forex_and_crypto_cannot_pin_a_delayed_feed(
 ) -> None:
     refusal = (
         f"websocket_hosts pins {asset_class} to 'delayed.massive.com', but Massive has no "
-        f"delayed forex or crypto feed. Remove the {asset_class} pin from websocket_hosts."
+        f"delayed forex or crypto feed. Remove dm.AssetClass.{asset_class.name} from "
+        "websocket_hosts."
     )
     with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         dataclasses.replace(base, websocket_hosts={asset_class: "delayed.massive.com"})
@@ -619,7 +620,7 @@ def test_a_listed_subscription_cannot_pin_another_host(base: MassiveConfig) -> N
         "delayed_subscriptions includes dm.Subscription.STOCKS, whose streams use Massive's "
         "delayed feed 'delayed.massive.com', but websocket_hosts pins stocks to "
         "'socket.massive.com'. Remove dm.Subscription.STOCKS from delayed_subscriptions, or "
-        "remove the stocks pin from websocket_hosts."
+        "remove dm.AssetClass.STOCKS from websocket_hosts."
     )
     with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
         dataclasses.replace(base, delayed_subscriptions=listed, websocket_hosts=pinned)

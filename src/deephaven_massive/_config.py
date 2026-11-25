@@ -793,7 +793,8 @@ def _check_delayed_subscriptions(
         if pins_delayed and subscription is Subscription.CURRENCIES:
             raise ValueError(
                 f"websocket_hosts pins {asset_class} to {host!r}, but Massive has no delayed "
-                f"forex or crypto feed. Remove the {asset_class} pin from websocket_hosts."
+                f"forex or crypto feed. Remove dm.AssetClass.{asset_class.name} from "
+                "websocket_hosts."
             )
         if pins_delayed and not listed:
             purpose = f"To stream delayed {asset_class} data"
@@ -807,7 +808,8 @@ def _check_delayed_subscriptions(
                 f"delayed_subscriptions includes dm.Subscription.{subscription.name}, whose "
                 f"streams use Massive's delayed feed {DELAYED_HOST!r}, but websocket_hosts pins "
                 f"{asset_class} to {host!r}. Remove dm.Subscription.{subscription.name} from "
-                f"delayed_subscriptions, or remove the {asset_class} pin from websocket_hosts."
+                f"delayed_subscriptions, or remove dm.AssetClass.{asset_class.name} from "
+                "websocket_hosts."
             )
 
 
