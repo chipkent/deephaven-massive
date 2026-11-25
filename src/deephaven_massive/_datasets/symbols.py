@@ -1634,7 +1634,11 @@ def canonical_symbol_crypto(text: str | None, *, on_error: OnError = OnError.RAI
 
 
 def check_symbol(
-    asset_class: AssetClass | ClassFromPrefix, text: object, *, as_written: bool = False
+    asset_class: AssetClass | ClassFromPrefix,
+    text: object,
+    *,
+    as_written: bool = False,
+    underlying: bool = False,
 ) -> str:
     """Return a symbol that must already be canonical, or raise with the fix.
 
@@ -1647,6 +1651,11 @@ def check_symbol(
         text: The value as passed.
         as_written: True for a dataset whose symbols are kept as Massive writes them
             (`is_canonical`): any text of that grammar passes.
+        underlying: True where the symbol is an option's underlying, which only a stock or
+            index ticker can be (`UNDERLYING_CLASSES`): a canonical ticker of another class is
+            refused, as a symbol table's row is (`watchlist.SymbolRowRule`), because Massive
+            answers a currency or crypto pair asked for as an underlying with no error and no
+            rows (the contracts list did).
 
     Returns:
         The text, unchanged.
@@ -1657,11 +1666,19 @@ def check_symbol(
             the dataset takes the other class and names the namespace of that class's
             datasets; otherwise the message names the canonical form when the class's
             converter gives one (`'EUR/USD' is not Massive's forex ticker. Pass 'C:EURUSD',
-            ...`), and the converter's reason when it gives none.
+            ...`), and the converter's reason when it gives none. With `underlying`, a
+            canonical ticker that is no stock's or index's names its class and the tickers to
+            pass.
     """
     if not isinstance(text, str):
         raise TypeError(f"a symbol must be a str, not {type(text).__name__}")
     if is_canonical(asset_class, text, as_written=as_written):
+        if underlying and symbol_class(text) not in UNDERLYING_CLASSES:
+            raise ValueError(
+                f"{text!r} is {_class_noun_with_article(symbol_class(text))} ticker, and "
+                "options are listed on stocks and indices only. Pass a stock or index ticker, "
+                "such as 'AAPL' or 'I:SPX'."
+            )
         return text
     if as_written:
         raise ValueError(
@@ -1691,6 +1708,7 @@ def check_symbols(
     symbols: str | Iterable[str] | AllSymbols,
     *,
     as_written: bool = False,
+    underlying: bool = False,
 ) -> tuple[str, ...] | AllSymbols:
     """Check a `Symbols` argument other than a table when a query is built.
 
@@ -1706,6 +1724,8 @@ def check_symbols(
         symbols: The argument as the user passed it.
         as_written: True for a dataset whose symbols are kept as Massive writes them
             (`check_symbol`).
+        underlying: True for a dataset whose symbols are option underlyings, stock and index
+            tickers only (`check_symbol`).
 
     Returns:
         A sorted tuple of canonical symbols, or `ALL`.
@@ -1733,7 +1753,14 @@ def check_symbols(
             "symbols holds no tickers. Pass at least one ticker, or dm.ALL for every ticker "
             "where the dataset takes it."
         )
-    return tuple(sorted({check_symbol(asset_class, i, as_written=as_written) for i in items}))
+    return tuple(
+        sorted(
+            {
+                check_symbol(asset_class, i, as_written=as_written, underlying=underlying)
+                for i in items
+            }
+        )
+    )
 
 
 # --- the wire ------------------------------------------------------------------------------------

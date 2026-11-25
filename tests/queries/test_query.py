@@ -505,8 +505,9 @@ def faked_session(monkeypatch: pytest.MonkeyPatch) -> Iterator[dm.MassiveSession
     session.close()
 
 
-# A valid symbol of each asset class, for the symbols every query below names; a dataset
-# without a class reads it as a stock ticker, and one without instruments ignores it.
+# A valid symbol of each class whose grammar a dataset's symbols follow, for the symbols every
+# query below names; a dataset without a class, or one whose symbols are option underlyings,
+# reads it as a stock ticker, and one without instruments ignores it.
 SAMPLE_SYMBOLS = {
     AssetClass.STOCKS: "AAPL",
     AssetClass.OPTIONS: "O:AAPL250117C00150000",
@@ -523,7 +524,7 @@ def every_query(session: dm.MassiveSession, spec: DatasetSpec) -> Iterator[Query
     # symbol table (which changes the shape of `last_by()`): a bars dataset gets them for every
     # timespan it accepts (the timespan decides whether its query has stream methods), any other
     # dataset once.
-    symbol = SAMPLE_SYMBOLS[spec.asset_class]
+    symbol = SAMPLE_SYMBOLS[spec.symbols_class]
     refused = Timespan.DAY if spec.asset_class is AssetClass.FUTURES else Timespan.SESSION
     spans = [span for span in Timespan if span is not refused] if spec.is_bars else [None]
     start = "2025-01-02" if spec.is_feed else None  # a feed polls only with a start

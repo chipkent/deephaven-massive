@@ -18,18 +18,25 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CONTRACTS",
+    "GREEKS",
     "OPEN_INTEREST",
+    "OPEN_INTEREST_BY_UNDERLYING",
     "TICKERS",
     "UNUSUAL_TRADES",
     "Request",
     "contracts",
+    "first_contract",
+    "greeks",
     "index_list",
     "open_interest",
+    "open_interest_by_underlying",
     "stock_list",
     "unusual_trades",
 ]
 
 OPEN_INTEREST = "/options/v1/open-interest"
+OPEN_INTEREST_BY_UNDERLYING = "/options/v1/open-interest/underlying"
+GREEKS = "/options/v1/analytics"
 UNUSUAL_TRADES = "/options/v1/unusual-trades"
 TICKERS = "/v3/reference/tickers"
 CONTRACTS = "/v3/reference/options/contracts"
@@ -50,6 +57,54 @@ def open_interest(*, limit: int, root: str | None = None, through: date | None =
         The path and query.
     """
     return OPEN_INTEREST, {"root": root, "date.lte": through, "limit": limit}
+
+
+def open_interest_by_underlying(
+    *, limit: int, underlying: str | None = None, through: date | None = None
+) -> Request:
+    """Return a request of one page of open interest by underlying.
+
+    Args:
+        limit: The most rows on the page.
+        underlying: The underlying as sent (`underlying_ticker`), such as `"SPX"`; None for
+            every underlying.
+        through: The last day to read (`date.lte`); None for the latest.
+
+    Returns:
+        The path and query.
+    """
+    return OPEN_INTEREST_BY_UNDERLYING, {
+        "underlying_ticker": underlying,
+        "date.lte": through,
+        "limit": limit,
+    }
+
+
+def first_contract(*, underlying: str, as_of: date | None = None) -> Request:
+    """Return the request the library's per-underlying lookup sends: one contract, as of a day.
+
+    Args:
+        underlying: The underlying as the contracts list takes it, bare for an index (`SPX`).
+        as_of: The day the contract must be listed on; None for today.
+
+    Returns:
+        The path and query.
+    """
+    return CONTRACTS, {"underlying_ticker": underlying, "limit": 1, "as_of": as_of}
+
+
+def greeks(*, limit: int, underlying: str | None = None) -> Request:
+    """Return a request of one page of the latest greeks.
+
+    Args:
+        limit: The most rows on the page.
+        underlying: The underlying as sent (`underlying_ticker`), such as `"SPX"` or `"I:SPX"`,
+            to see which spelling Massive answers; None for every underlying.
+
+    Returns:
+        The path and query.
+    """
+    return GREEKS, {"underlying_ticker": underlying, "limit": limit}
 
 
 def unusual_trades(*, limit: int) -> Request:

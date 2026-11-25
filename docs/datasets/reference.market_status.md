@@ -71,6 +71,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `IndicesGroupsSAndP` | String | The status of Standard & Poor's ("S&P") indices trading hours. From the `indicesGroups` object: Contains the status of various index groups (e.g., MSCI, FTSE Russell). |
 | `IndicesGroupsSocieteGenerale` | String | The status of Societe Generale indices trading hours. From the `indicesGroups` object: Contains the status of various index groups (e.g., MSCI, FTSE Russell). |
 | `Market` | String | The status of the market as a whole. |
+| `Overnight` | Boolean | Whether or not the market is in overnight hours (9:00 PM to 4:00 AM ET). |
 | `ServerTime` | Instant | The current time of the server, returned as a date-time in RFC3339 format. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
@@ -100,6 +101,7 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `IndicesGroupsSAndP` | `indicesGroups.s_and_p` |
 | `IndicesGroupsSocieteGenerale` | `indicesGroups.societe_generale` |
 | `Market` | `market` |
+| `Overnight` | `overnight` |
 | `ServerTime` | `serverTime` |
 | `TimestampInsert` |  |
 
@@ -115,4 +117,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-25, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

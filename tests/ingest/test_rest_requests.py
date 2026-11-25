@@ -238,6 +238,61 @@ def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None
     ]
 
 
+def test_a_list_of_underlyings_keeps_each_index_canonical_and_sends_it_bare() -> None:
+    # The open interest by underlying takes its symbols in `underlying_ticker.any_of`, which
+    # finds an index only by its bare ticker. The planned call keeps the canonical tickers,
+    # which the read attributes rows by; the wire gets each one bare, once. Two tickers the
+    # wire spells alike (DJT and I:DJT) share a request, so no two requests read DJT's rows.
+    path_name = "/options/v1/open-interest/underlying"
+    spec = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="options.by_underlying",
+        fetch_path=path_name,
+        symbol_param=rest_requests.BARE_INDEX_LIST_PARAM,
+        symbols_per_request=2,
+        keys={(R, path_name): SourceKeys(symbol=KeySpec("UnderlyingTicker"))},
+    )
+    path = _rest_path(path_name)
+    symbols = ("AAPL", "DJT", "I:DJT", "I:NDX", "I:SPX")
+    calls = rest_requests.plan_calls(spec, path, Request(), symbols=symbols, split=split_pair)
+    assert [dict(c.query) for c in calls] == [
+        {"limit": 50000, "underlying_ticker.any_of": ("AAPL", "DJT", "I:DJT")},
+        {"limit": 50000, "underlying_ticker.any_of": ("I:NDX", "I:SPX")},
+    ]
+    assert [rest_requests.wire_query(c.query) for c in calls] == [
+        {"limit": 50000, "underlying_ticker.any_of": ("AAPL", "DJT")},
+        {"limit": 50000, "underlying_ticker.any_of": ("NDX", "SPX")},
+    ]
+    assert rest_requests.BARE_INDEX_LIST_PARAM == "underlying_ticker.any_of"
+    # The typed forms, the greeks' `underlying=`, are planned canonical and sent the same way.
+    greeks = _rest_path("/options/v1/analytics")
+    request = Request(params=(("underlying_ticker.any_of", ("I:SPX", "SPX", "AAPL")),))
+    (call,) = rest_requests.plan_calls(spec, greeks, request, symbols=None, split=split_pair)
+    assert call.query["underlying_ticker.any_of"] == ("I:SPX", "SPX", "AAPL")
+    assert rest_requests.wire_query(call.query)["underlying_ticker.any_of"] == ("SPX", "AAPL")
+    assert rest_requests.wire_query({"underlying_ticker": "I:SPX"}) == {"underlying_ticker": "SPX"}
+    assert rest_requests.wire_query({"underlying_ticker": "AAPL"}) == {"underlying_ticker": "AAPL"}
+
+
+def test_any_other_list_parameter_is_sent_as_planned() -> None:
+    path = _rest_path(DIVIDENDS_PATH)
+    spec = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="stocks.dividends",
+        asset_class=AssetClass.STOCKS,
+        fetch_path=DIVIDENDS_PATH,
+        symbol_param="ticker.any_of",
+        keys={(R, DIVIDENDS_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+    )
+    (call,) = rest_requests.plan_calls(
+        spec, path, Request(), symbols=("A", "B", "B"), split=split_pair
+    )
+    assert dict(call.query) == {"limit": 5000, "ticker.any_of": ("A", "B", "B")}
+    assert rest_requests.wire_query(call.query) == dict(call.query)
+    # A query without an underlying parameter, such as a per-symbol request's, is sent as is.
+    assert rest_requests.wire_query({"limit": 5}) == {"limit": 5}
+
+
 def test_a_symbol_filled_into_a_query_parameter() -> None:
     spec = DatasetSpec(
         summary="A dataset for the tests.",

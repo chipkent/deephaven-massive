@@ -1177,6 +1177,104 @@ def test_root_is_the_ticker_s_occ_root(
     assert all(r["OptionRoot"] == _root(r["Symbol"]) for r in library)
 
 
+@pytest.mark.settles("146")
+@pytest.mark.requests(9)
+@pytest.mark.timeout(300)
+def test_greeks_take_and_write_an_index_underlying_bare(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """How the greeks endpoint spells an index underlying, asked for and in its rows.
+
+    Reads one page of five rows of the latest greeks for `underlying_ticker=SPX` and one for
+    `underlying_ticker=I:SPX` through the wire client (2 requests), and records each page's
+    row count and its first row's `ticker`, `root`, and `underlying_ticker`. Then reads
+    `m.options.greeks(underlying="I:SPX", limit=5)` through the library, which sends the index
+    bare (1 request, then Massive's index list in two pages and the Contract Overview of each
+    root met, 2 or so), and records each row's `Symbol`, `OptionRoot`, and `Underlying`. Fails
+    when neither raw page has a row, since the evidence would then rest on nothing. The
+    evidence settles which spelling the endpoint takes and which it writes; a refusal skips the
+    test, quoting Massive.
+    """
+    pages = {
+        spelled: _page(live_rest, option_requests.greeks(underlying=spelled, limit=5))
+        for spelled in ("SPX", "I:SPX")
+    }
+    for spelled, found in pages.items():
+        first = found[0] if found else None
+        wrote = (
+            None
+            if first is None
+            else (first.get("ticker"), first.get("root"), first.get("underlying_ticker"))
+        )
+        evidence(
+            f"GET {option_requests.GREEKS} underlying_ticker={spelled}: {len(found)} rows, "
+            f"first {wrote}"
+        )
+    library = table_rows(live_session.options.greeks(underlying="I:SPX", limit=5).fetch(wait=True))
+    evidence(
+        f"library underlying='I:SPX': "
+        f"{[(r['Symbol'], r['OptionRoot'], r['Underlying']) for r in library]}"
+    )
+    assert any(pages.values()), f"GET {option_requests.GREEKS} sent no row for SPX or I:SPX"
+
+
+@pytest.mark.settles("147")
+@pytest.mark.requests(12)
+@pytest.mark.timeout(300)
+def test_open_interest_by_underlying_names_an_index_as_the_contracts_reference_does(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """Whether the contracts list as of a past day still classifies an index underlying.
+
+    Reads the latest day of open interest by underlying for `SPX` through the wire client (1
+    request) to learn the latest `date`, then one contract of the contracts list for `SPX` and
+    for `AAPL` as of that day and as of a year earlier (4 requests), and records each page's
+    row count and its first row's `ticker` and `cfi`. Then reads
+    `m.options.open_interest_by_underlying(["I:SPX", "AAPL", "I:DJT"])` for the latest day and
+    for the day a year earlier through the library (2 requests, then Massive's index list in two
+    pages and one contracts-list request per index ticker met, 4 or so), and records each row's
+    `Symbol` and `Date` with the problems the session reports. The evidence settles whether
+    `as_of` alone reaches a contract listed a year back, so a past day's index keeps its `I:`,
+    and shows how `DJT`, a stock and an index, is classified; a refusal skips the test, quoting
+    Massive.
+    """
+    latest = _page(
+        live_rest, option_requests.open_interest_by_underlying(underlying="SPX", limit=1)
+    )
+    evidence(f"GET {option_requests.OPEN_INTEREST_BY_UNDERLYING} underlying_ticker=SPX: {latest}")
+    assert latest, f"GET {option_requests.OPEN_INTEREST_BY_UNDERLYING} sent no row for SPX"
+    day = date.fromisoformat(str(latest[0]["date"]))
+    year_back = day - timedelta(days=365)
+    for underlying in ("SPX", "AAPL"):
+        for as_of in (day, year_back):
+            found = _page(
+                live_rest, option_requests.first_contract(underlying=underlying, as_of=as_of)
+            )
+            first = found[0] if found else None
+            wrote = None if first is None else (first.get("ticker"), first.get("cfi"))
+            evidence(
+                f"GET {option_requests.CONTRACTS} underlying_ticker={underlying} limit=1 "
+                f"as_of={as_of}: {len(found)} rows, first {wrote}"
+            )
+    for as_of in (day, year_back):
+        library = table_rows(
+            live_session.options.open_interest_by_underlying(
+                ["I:SPX", "AAPL", "I:DJT"], start=as_of, end=as_of
+            ).fetch(wait=True)
+        )
+        evidence(f"library {as_of}: {[(r['Symbol'], r['Date']) for r in library]}")
+    problems = table_rows(live_session.problems())
+    evidence(f"problems: {[(r['Cause'], r['Symbol'], r['Detail']) for r in problems]}")
+
+
 _UNDERLYING_ROOTS = ("SPX", "SPXW", "NDX", "VIX", "RUT", "DJT", "AMCR1", "AAPL")
 """Roots whose underlying the two new datasets must name as the contracts reference does: index
 roots and their weeklies, the stock `DJT`, an adjusted root, and a plain stock. `DJT` is also on

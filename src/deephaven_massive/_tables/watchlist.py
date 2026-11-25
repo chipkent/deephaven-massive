@@ -380,8 +380,10 @@ class SymbolRowRule:
         noncanonical: The call's `noncanonical_symbols` setting (`Request.on_error`).
         column: The table's column that holds the values: `Symbol`, or `ProductCode` for a
             table of futures product codes.
-        underlying: True when each value must be a stock or index ticker, the underlying of
-            an option chain; False for any value of the grammar.
+        underlying: True when each value must be a stock or index ticker, an option's
+            underlying: a table passed as `underlying=`, or the symbol table of a dataset whose
+            symbols are underlyings (`DatasetSpec.symbols_are_underlyings`); False for any value
+            of the grammar.
     """
 
     dataset: str
@@ -402,7 +404,13 @@ class SymbolRowRule:
         Returns:
             The rule.
         """
-        return cls(spec.name, spec.asset_class, spec.symbols_as_written, noncanonical)
+        return cls(
+            spec.name,
+            spec.symbols_class,
+            spec.symbols_as_written,
+            noncanonical,
+            underlying=spec.symbols_are_underlyings,
+        )
 
     @classmethod
     def for_values(

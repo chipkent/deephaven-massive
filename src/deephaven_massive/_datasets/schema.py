@@ -516,13 +516,15 @@ def _derived(
             computes none beside it.
 
     Returns:
-        `OptionRoot` for an options dataset, or one whose rows include options contracts
+        `OptionRoot` for a dataset whose symbols are options contracts
+        (`DatasetSpec.symbols_class`; not the open interest by underlying, whose `Symbol` is
+        the underlying), or one whose rows include options contracts
         (`DatasetSpec.option_rows`), with a `Symbol`: a `String` column with the transports
         and wire keys of `Symbol`, from which it is computed, or the carried column.
     """
     if symbol is None:
         return []
-    options = spec.asset_class is AssetClass.OPTIONS or spec.option_rows
+    options = spec.symbols_class is AssetClass.OPTIONS or spec.option_rows
     names = [OPTION_ROOT] if options else []
     mixed = OTHER_ROWS if spec.option_rows else ""
     return [

@@ -10,6 +10,7 @@ import re
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from typing import assert_never
 
 import pytest
 
@@ -23,9 +24,11 @@ from deephaven_massive._datasets.catalog import (
 )
 from deephaven_massive._datasets.row_times import LIBRARY_COLUMNS, RowTimes
 from deephaven_massive._datasets.schema import ColumnType
+from deephaven_massive._datasets.source_columns import rename
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,
+    IndexPrefix,
     NotBars,
     PollMode,
     Subscription,
@@ -33,6 +36,7 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._massive import RestPath, Source, Transport, sources
+from deephaven_massive._massive import source as wire_source
 from deephaven_massive._session import CATALOG
 
 R, W, F = Transport.REST, Transport.WS, Transport.FLAT_FILES
@@ -375,13 +379,29 @@ def test_a_rest_fanout_key_can_be_optional() -> None:
     assert found == KeySpec("Id", required=False)
 
 
-def test_an_end_key_needs_bars_and_a_date_key_a_dated_dataset() -> None:
+def test_an_end_key_needs_bars() -> None:
     with pytest.raises(ValueError, match=r"only a bars dataset declares an end key"):
         dataclasses.replace(
             STOCK_TRADES, keys={**STOCK_TRADES.keys, (W, "stocks/T"): keys("Ticker", end="E")}
         )
-    with pytest.raises(ValueError, match=r"a date key needs a dataset whose rows have a Date"):
-        dataclasses.replace(EXCHANGES, keys={(R, "/v3/reference/exchanges"): keys(date="Date")})
+
+
+def test_a_date_key_needs_a_date_column_of_the_source() -> None:
+    # A dataset with no time columns of the library's may still date its rows by Massive's
+    # `date`, as the options open interest does; the declaration says only which column.
+    dated = dataclasses.replace(
+        DIVIDENDS, keys={(R, "/stocks/v1/dividends"): keys("Ticker", date="ExDividendDate")}
+    )
+    assert dated.keys_for(R, "/stocks/v1/dividends").date == KeySpec("ExDividendDate")
+    # A list whose rows carry no date is refused where the generated fields are known.
+    path = "/v3/reference/exchanges"
+    undated = dataclasses.replace(EXCHANGES, keys={(R, path): keys(date="Date")})
+    refusal = (
+        "declared keys: reference.exchanges: REST /v3/reference/exchanges: the date key "
+        "'Date' is not a column of the source"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
+        rename(undated, wire_source(R, path))
 
 
 def test_a_daily_summary_needs_its_date_key_on_every_source() -> None:
@@ -1841,14 +1861,64 @@ def test_history_columns_refuse_a_transport_history_never_reads() -> None:
         CATALOG.history_columns(CATALOG.by_name["stocks.trades"], Transport.WS)
 
 
-def test_only_an_options_rest_dataset_classifies_its_underlyings_by_root() -> None:
-    with pytest.raises(ValueError, match="underlying_by_root is for an options REST dataset"):
-        dataclasses.replace(
-            ADMIN,
-            underlying_by_root=True,
-            history_path=None,
-            keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
-            time_axis=None,
-        )
-    with pytest.raises(ValueError, match="underlying_by_root is for an options REST dataset"):
-        dataclasses.replace(EXCHANGES, underlying_by_root=True)
+BY_UNDERLYING_PATH = "/options/v1/open-interest/underlying"
+BY_UNDERLYING = DatasetSpec(
+    name="options.by_underlying",
+    summary="A dataset for the tests.",
+    asset_class=AssetClass.OPTIONS,
+    fetch_path=BY_UNDERLYING_PATH,
+    keys={(R, BY_UNDERLYING_PATH): SourceKeys(symbol=KeySpec("UnderlyingTicker"))},
+    symbol_param="underlying_ticker.any_of",
+    index_prefix=IndexPrefix.BY_UNDERLYING,
+)
+
+
+@pytest.mark.parametrize("prefix", list(IndexPrefix))
+def test_each_index_prefix_fits_only_the_datasets_whose_rows_can_tell_an_index(
+    prefix: IndexPrefix,
+) -> None:
+    options_only = "is for an options REST dataset"
+    from_rows = "BY_UNDERLYING is for an options REST dataset whose rows carry their symbol"
+    stream = dataclasses.replace(
+        ADMIN,
+        history_path=None,
+        keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+        time_axis=None,
+    )
+    from_request = dataclasses.replace(
+        STOCK_TRADES,
+        asset_class=ClassFromPrefix.ANY,
+        kind=None,
+        channels={},
+        flat_file_prefixes={},
+        keys={k: v for k, v in STOCK_TRADES.keys.items() if k[0] is R},
+        time_axis=None,
+    )
+    match prefix:
+        case IndexPrefix.NONE:
+            for spec in (CONTRACTS, EXCHANGES, stream, from_request, BY_UNDERLYING):
+                assert dataclasses.replace(spec, index_prefix=prefix).index_prefix is prefix
+        case IndexPrefix.FROM_CFI | IndexPrefix.BY_ROOT:
+            for spec in (CONTRACTS, BY_UNDERLYING):
+                assert dataclasses.replace(spec, index_prefix=prefix).index_prefix is prefix
+            for spec in (EXCHANGES, stream):
+                with pytest.raises(ValueError, match=f"{prefix.value} {options_only}"):
+                    dataclasses.replace(spec, index_prefix=prefix)
+        case IndexPrefix.BY_UNDERLYING:
+            # The data is options data; the symbols are the underlyings, read by prefix.
+            assert BY_UNDERLYING.symbols_are_underlyings
+            assert BY_UNDERLYING.symbols_class is ClassFromPrefix.ANY
+            assert not CONTRACTS.symbols_are_underlyings
+            assert CONTRACTS.symbols_class is AssetClass.OPTIONS
+            assert dataclasses.replace(CONTRACTS, index_prefix=prefix).index_prefix is prefix
+            options_from_request = dataclasses.replace(from_request, asset_class=AssetClass.OPTIONS)
+            for spec in (EXCHANGES, stream, from_request, options_from_request):
+                with pytest.raises(ValueError, match=from_rows):
+                    dataclasses.replace(spec, index_prefix=prefix)
+        case _:
+            assert_never(prefix)
+
+
+def test_an_index_prefix_no_case_handles_is_refused() -> None:
+    with pytest.raises(AssertionError):
+        dataclasses.replace(EXCHANGES, index_prefix="other")  # type: ignore[arg-type]  # the point

@@ -598,6 +598,7 @@ _FILE_TIMES: tuple[tuple[str, tuple[str, ...]], ...] = (
 UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
     {
         **_for(("/options/v1/admin-messages",), ("timestamp",), _NS_TICKS),
+        **_for(("/options/v1/analytics",), ("quote_timestamp", "underlying_timestamp"), _NS_TICKS),
         **_for(("/options/v1/unusual-trades",), ("sip_timestamp",), _NS_TICKS),
         **_for(BAR_PATHS, ("t",), _MS_BARS),
         **_for(
@@ -1836,6 +1837,13 @@ _QUOTE = (
     'as "The {side} price.", the text, type, and unit of `{key}_price` in `/v3/quotes`, and '
     "of the v2 snapshots' `lastQuote.{short}`, read as `{key}_price`."
 )
+_GREEKS_QUOTE = (
+    'The greeks document `{key}` as "NBBO {side} 15 minutes before the close": the NBBO {side} '
+    "price of the contract, a number in dollars, which `/v3/quotes/{{optionsTicker}}` "
+    'documents as "The {side} price." under `{key}_price`, and which the options snapshots\' '
+    "`last_quote.{key}` already takes as `{key}_price` so the merged table has one column per "
+    "field (`_QUOTE_PRICES`). The time of the quote is the greeks' own `quote_timestamp`."
+)
 _FUTURES_QUOTE = (
     'The futures snapshot\'s `last_quote.{key}` is "The {text}", the {side} price, beside '
     "`{key}_size` and `{key}_timestamp`, which `/futures/v1/quotes/{{ticker}}` spells alike. "
@@ -2018,13 +2026,27 @@ SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
                 source="every options dataset's `OptionRoot`, read from the contract's ticker",
                 reason='Massive describes `root` as "The OCC root symbol of the contract (e.g., '
                 "SPXW). Differs from the underlying for weekly roots and for contracts adjusted "
-                'after a corporate action (e.g., AMCR1)." That is the root every other options '
-                "dataset carries as `OptionRoot`, the OCC symbol's root read from the ticker "
-                "(`SPXW` for `O:SPXW251219C06000000`, `AMCR1` for an adjusted contract), so "
-                "Massive's value takes that column and the library derives none beside it.",
+                'after a corporate action (e.g., AMCR1)." (the greeks say "Option root symbol"). '
+                "That is the root every other options dataset carries as `OptionRoot`, the OCC "
+                "symbol's root read from the ticker (`SPXW` for `O:SPXW251219C06000000`, `AMCR1` "
+                "for an adjusted contract), so Massive's value takes that column and the library "
+                "derives none beside it.",
                 whole_key=True,
             )
-            for path in ("/options/v1/open-interest", "/options/v1/unusual-trades")
+            for path in (
+                "/options/v1/open-interest",
+                "/options/v1/unusual-trades",
+                "/options/v1/analytics",
+            )
+        },
+        **{
+            ("/options/v1/analytics", key): Spelling(
+                long_name=f"{key}_price",
+                source=f"/v3/quotes/{{optionsTicker}} `{key}_price`",
+                reason=_GREEKS_QUOTE.format(key=key, side=side),
+                whole_key=True,
+            )
+            for key, side in (("bid", "bid"), ("ask", "ask"))
         },
     }
 )

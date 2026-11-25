@@ -37,7 +37,7 @@ import re
 import threading
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 from deephaven_massive._datasets.dates import DAY_ZONES
 from deephaven_massive._datasets.filters import param_base, param_family
@@ -48,6 +48,7 @@ from deephaven_massive._enums import (
     AssetClass,
     ChannelFamily,
     ClassFromPrefix,
+    IndexPrefix,
     NotBars,
     PollMode,
     Subscription,
@@ -209,8 +210,11 @@ class SourceKeys:
             to `Underlying`, or, with `KeySpec.instrument` False, another identifier (a filer
             CIK), which keeps its column.
         date: The row's trading day as the source sends it: the futures `session_end_date`, a
-            daily summary's `from` or `day`; renamed to `Date`. Only `symbol` and `fanout`
-            may come from the request.
+            daily summary's `from` or `day`, the `date` of the options open interest and
+            greeks; renamed to `Date`, and required, so a row without it is withheld
+            (`unreadable_keys`). Its column must be a `date` field of the source
+            (`source_columns.rename` refuses the rest). Only `symbol` and `fanout` may come
+            from the request.
     """
 
     symbol: KeySpec | None = None
@@ -391,7 +395,8 @@ class DatasetSpec:
             other class read `fetch_path`.
         symbols_per_request: The most symbols one request carries in a list-valued symbol
             parameter (`ticker.any_of`), such as 250 for the unified snapshot; a longer list is
-            split over several requests. None sends every symbol in one request.
+            split over several requests. Two symbols the wire spells alike (`DJT` and `I:DJT`
+            as `DJT`) count once and share a request. None sends every symbol in one request.
         page_size: The REST page size requested where it is not the path's documented
             maximum `limit` (`Param.maximum`), which every other request asks for: lower
             where the rows are long (article bodies, quoted filing text, financial
@@ -429,12 +434,18 @@ class DatasetSpec:
             taken exactly as Massive writes them (`symbols.is_canonical`), not through the
             asset class's grammar. Only a REST dataset may set it: a stream's topics and a
             flat file's filter follow the class's spellings.
-        underlying_by_root: True for an options REST dataset whose rows name their underlying
-            bare (`SPX`) with nothing that says it is an index, such as the open interest: the
-            REST transport asks Massive's contracts reference once per option root whether its
-            contracts are options on an index, and gives such rows' `Underlying` its `I:`
-            (`option_roots.OptionRootKinds`). Only an options dataset with a REST source may
-            set it.
+        index_prefix: How the REST transport gives a row's index underlying its `I:` where
+            Massive writes it bare (`IndexPrefix`). `NONE`, the default, for a dataset whose
+            rows name no underlying or whose source writes `I:SPX` itself. `FROM_CFI` for an
+            options dataset whose rows carry their contract's CFI code, which marks an option
+            on an index (the contracts list). `BY_ROOT` for an options dataset whose rows name a
+            contract and a bare `Underlying` with no code (the open interest): the transport
+            asks Massive's contracts reference once per option root. `BY_UNDERLYING` for an
+            options dataset whose `Symbol` is the bare underlying itself, with no contract (the
+            open interest by underlying): the transport asks Massive's contracts list once per
+            bare ticker, and the symbols follow the underlyings' grammar (`symbols_class`).
+            Each is for an options dataset with a REST source; `BY_UNDERLYING` also needs
+            every REST source to read its symbol from the rows.
         option_rows: True for a dataset of every class (`ClassFromPrefix.ANY`) whose rows
             include options contracts beside other classes' tickers (the unified snapshot): it
             gets the derived `OptionRoot` column every options dataset has, null on a row
@@ -498,7 +509,7 @@ class DatasetSpec:
     column_notes: Mapping[str, str] = field(default_factory=dict)
     symbols_as_written: bool = False
     option_rows: bool = False
-    underlying_by_root: bool = False
+    index_prefix: IndexPrefix = IndexPrefix.NONE
     serves_current_data: bool = False
     latest_is_current: bool = False
     refused_alternative: str | None = None
@@ -527,7 +538,7 @@ class DatasetSpec:
                 its own columns (and, for futures, its `date` key, the session against which
                 every futures file is checked); a dataset that keeps its symbols as written has
                 channels or flat-file prefixes; a dataset of one class sets `option_rows`; a
-                dataset that is not an options REST dataset sets `underlying_by_root`; a
+                dataset's `index_prefix` does not fit it (`_check_class_requirements`); a
                 dataset without a fetch path, or whose fetch path is a reference endpoint, sets
                 `serves_current_data` or `latest_is_current`, or a dataset sets both; a
                 dataset whose rows name no
@@ -566,13 +577,17 @@ class DatasetSpec:
 
         A stream, a dataset in a kind, and a flat-file dataset are of one class; symbols kept
         as written are for REST datasets only; `option_rows` is for a dataset of every class;
-        `underlying_by_root` is for an options REST dataset.
+        an `index_prefix` other than `NONE` is for an options REST dataset, and one restored by
+        bare underlying for one whose `Symbol` is that underlying, read from every REST
+        source's rows.
 
         Raises:
             ValueError: If a dataset with channels, flat files, or a kind has no `asset_class`
                 (`ClassFromPrefix.ANY`); a dataset that keeps its symbols as written has
-                channels or flat-file prefixes; a dataset of one class sets `option_rows`; or a
-                dataset that is not an options REST dataset sets `underlying_by_root`.
+                channels or flat-file prefixes; a dataset of one class sets `option_rows`; a
+                dataset that is not an options REST dataset sets `index_prefix` to `FROM_CFI`,
+                `BY_ROOT`, or `BY_UNDERLYING`; or one that reads a symbol from a request rather
+                than from the rows sets it to `BY_UNDERLYING`.
         """
         if self.channels and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
@@ -587,11 +602,36 @@ class DatasetSpec:
         if self.option_rows and self.asset_class is not ClassFromPrefix.ANY:
             # A dataset of one class either is the options class or has no options rows.
             raise ValueError(f"{self.name}: option_rows is for a dataset of every class")
-        if self.underlying_by_root and (
-            self.asset_class is not AssetClass.OPTIONS or not self.rest_paths
-        ):
-            # The REST transport classifies the rows' underlyings by their option roots.
-            raise ValueError(f"{self.name}: underlying_by_root is for an options REST dataset")
+        self._check_index_prefix()
+
+    def _check_index_prefix(self) -> None:
+        """Check that `index_prefix` names a way the dataset's rows can tell an index.
+
+        Raises:
+            ValueError: If `FROM_CFI`, `BY_ROOT`, or `BY_UNDERLYING` is set on a dataset that
+                is not an options REST dataset; or `BY_UNDERLYING` on one whose REST source
+                reads no symbol from its rows.
+        """
+        options_rest = self.asset_class is AssetClass.OPTIONS and bool(self.rest_paths)
+        match self.index_prefix:
+            case IndexPrefix.NONE:
+                pass
+            case IndexPrefix.FROM_CFI | IndexPrefix.BY_ROOT:
+                if not options_rest:
+                    # Only an options row carries a CFI code or an option root.
+                    raise ValueError(
+                        f"{self.name}: index_prefix {self.index_prefix.value} is for an options "
+                        "REST dataset"
+                    )
+            case IndexPrefix.BY_UNDERLYING:
+                if not options_rest or not self._rest_symbols_from_rows():
+                    # The rows are options data, read by the bare underlying they carry.
+                    raise ValueError(
+                        f"{self.name}: index_prefix BY_UNDERLYING is for an options REST "
+                        "dataset whose rows carry their symbol"
+                    )
+            case _:
+                assert_never(self.index_prefix)
 
     def _check_current_data_flags(self) -> None:
         """Check the flags that say a dataset serves current or real-time data.
@@ -743,6 +783,40 @@ class DatasetSpec:
         """True when the dataset streams over the WebSocket (the stream verbs work)."""
         return bool(self.channels)
 
+    def _rest_symbols_from_rows(self) -> bool:
+        """Tell whether every REST source declares a symbol key read from its rows.
+
+        Returns:
+            True when each REST source has a `symbol` key that is not filled from the request.
+        """
+        for key in self.rest_paths:
+            symbol = self.keys_for(Transport.REST, key).symbol
+            if symbol is None or symbol.from_request:
+                return False
+        return True
+
+    @property
+    def symbols_are_underlyings(self) -> bool:
+        """True when each symbol is an option's underlying: a stock or index ticker only.
+
+        Such a dataset's `symbols=` and the rows of its symbol table are refused or skipped when
+        they name another class (`symbols.check_symbol`, `watchlist.SymbolRowRule`), as
+        `underlying=` is. It is the dataset whose `Symbol` is the bare underlying itself
+        (`IndexPrefix.BY_UNDERLYING`).
+        """
+        return self.index_prefix is IndexPrefix.BY_UNDERLYING
+
+    @property
+    def symbols_class(self) -> AssetClass | ClassFromPrefix:
+        """The class whose grammar the dataset's symbols follow.
+
+        The dataset's own class, except where its symbols are option underlyings
+        (`symbols_are_underlyings`): the data is the options class, so its requests are charged
+        to the options subscription and its days are New York days, while each symbol is a
+        stock or index ticker, read by its prefix (`ClassFromPrefix.ANY`).
+        """
+        return ClassFromPrefix.ANY if self.symbols_are_underlyings else self.asset_class
+
     @property
     def has_history(self) -> bool:
         """True when `history()` has a source: REST history, grouped-daily bars, or flat files."""
@@ -782,13 +856,14 @@ class DatasetSpec:
         Raises:
             ValueError: If `keys` names a source the dataset does not read; a `time`, `end`, or
                 `date` key is filled from the request; an `end` key is declared outside a bars
-                dataset, or a `date` key on a dataset whose rows have no `Date` (`times` is `NONE`);
-                a daily summary (`DAY`) leaves a source without its `date` key; or a key other than
-                `fanout` is marked as no instrument, a fan-out key that is no instrument is filled
-                from the request (it would have no column to keep), or a key other than a `symbol`
-                or `fanout` key read from a REST path's rows is optional (`KeySpec.required`
-                False). The message names the dataset. A `poll()` keyed on the `Symbol` of an
-                optional symbol key is refused by `_check_poll_keys`.
+                dataset; a daily summary (`DAY`) leaves a source without its `date` key; or a key
+                other than `fanout` is marked as no instrument, a fan-out key that is no
+                instrument is filled from the request (it would have no column to keep), or a key
+                other than a `symbol` or `fanout` key read from a REST path's rows is optional
+                (`KeySpec.required` False). The message names the dataset. A `poll()` keyed on
+                the `Symbol` of an optional symbol key is refused by `_check_poll_keys`, and a
+                `date` key whose column is no `date` field of the source (a list whose rows carry
+                no date) by `source_columns.rename`, which sees the generated fields.
         """
         unused = sorted(f"{t.value} {k}" for t, k in set(self.keys) - set(self.sources))
         if unused:
@@ -806,8 +881,6 @@ class DatasetSpec:
             where = f"{self.name}: {transport.value} {key}"
             if declared.end is not None and times is not RowTimes.BAR:
                 raise ValueError(f"{where}: only a bars dataset declares an end key")
-            if declared.date is not None and times is RowTimes.NONE:
-                raise ValueError(f"{where}: a date key needs a dataset whose rows have a Date")
             for role, spec in declared.declared():
                 spec.check(role, transport, where=where)
 

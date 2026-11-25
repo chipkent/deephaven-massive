@@ -1206,14 +1206,17 @@ def test_adjustment_notes_name_the_price_and_volume_columns() -> None:
     assert notes == {"Close": ADJUSTED_PRICE, "Volume": ADJUSTED_VOLUME}
     assert "never adjusts for cash dividends" in ADJUSTED_PRICE
     # Only stocks and options have an adjustment choice; their bars, previous day's bar, and
-    # open-close carry it. The options open interest and unusual trades note their bare
-    # `UnderlyingTicker`, and the admin messages what their archive's texts leave out.
+    # open-close carry it. The options open interest, greeks, and unusual trades note their bare
+    # `UnderlyingTicker`, the open interest by underlying its bare `Symbol`, and the admin
+    # messages what their archive's texts leave out.
     noted = sorted(name for name, spec in CATALOG.by_name.items() if spec.column_notes)
     assert noted == [
         "options.admin_messages",
         "options.bars",
         "options.daily_open_close",
+        "options.greeks",
         "options.open_interest",
+        "options.open_interest_by_underlying",
         "options.previous_day_bar",
         "options.unusual_trades",
         "stocks.bars",

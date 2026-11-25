@@ -131,7 +131,7 @@ from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar, assert_never
 from urllib.parse import urlsplit
 
 import pyarrow as pa
@@ -144,7 +144,14 @@ from deephaven_massive._datasets.history_source import partition_dates, session_
 from deephaven_massive._datasets.row_times import START, StampRule, time_rule, whole
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
-from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
+from deephaven_massive._enums import (
+    AssetClass,
+    IndexPrefix,
+    OnError,
+    Recency,
+    Subscription,
+    subscription_of,
+)
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     AuthenticationError,
@@ -167,6 +174,7 @@ from deephaven_massive._ingest.crypto_tickers import CryptoTickerList
 from deephaven_massive._ingest.option_roots import (
     OptionRootKinds,
     RootKind,
+    canonical_symbols,
     canonical_underlyings,
 )
 from deephaven_massive._ingest.rate_limits import (
@@ -181,6 +189,7 @@ from deephaven_massive._ingest.rate_limits import (
 from deephaven_massive._ingest.recency_labels import DELAYED as DELAYED_LABEL
 from deephaven_massive._ingest.recency_labels import delayed_refusal, read_labels
 from deephaven_massive._ingest.rest_requests import (
+    BARE_INDEX_LIST_PARAM,
     BARE_INDEX_PARAM,
     Call,
     CryptoSplit,
@@ -191,6 +200,7 @@ from deephaven_massive._ingest.rest_requests import (
     own_symbols,
     plan_calls,
     shared_params,
+    wire_query,
 )
 from deephaven_massive._ingest.rest_rows import (
     CFI,
@@ -341,20 +351,29 @@ def _missing_error(spec: DatasetSpec, missing: Sequence[_Missing]) -> Unavailabl
     )
 
 
-def _bare_index(request: Request, call: Call) -> str | None:
-    """Return the index a call asked for by its bare ticker (`SPX` sent for `I:SPX`).
+def _bare_indices(request: Request) -> dict[str, str]:
+    """Return the indices a call asks for by their bare ticker (`SPX` sent for `I:SPX`).
 
     Args:
-        request: The normalized arguments, which keep the canonical ticker.
-        call: The planned call, whose query holds the ticker as sent.
+        request: The normalized arguments, which keep the canonical tickers; the wire gets
+            an index underlying bare (`rest_requests.wire_query`).
 
     Returns:
-        The canonical index when the call sent it without its `I:`; None for any other call.
+        Each canonical index the call sends without its `I:`, with the parameter that carries
+        it (`BARE_INDEX_PARAM` or `BARE_INDEX_LIST_PARAM`); empty for any other call.
     """
-    asked = dict(request.params).get(BARE_INDEX_PARAM)
-    if isinstance(asked, str) and asked != call.query.get(BARE_INDEX_PARAM, asked):
-        return asked
-    return None
+    params = dict(request.params)
+    found: dict[str, str] = {}
+    asked = params.get(BARE_INDEX_PARAM)
+    if isinstance(asked, str) and contracts_underlying(asked) != asked:
+        found[asked] = BARE_INDEX_PARAM
+    listed = params.get(BARE_INDEX_LIST_PARAM)
+    if isinstance(listed, tuple):
+        for canonical in listed:
+            assert isinstance(canonical, str)  # build_query refused any other element
+            if contracts_underlying(canonical) != canonical:
+                found[canonical] = BARE_INDEX_LIST_PARAM
+    return found
 
 
 def _listed_rows(
@@ -653,8 +672,9 @@ class RestState:
         crypto: Massive's list of crypto tickers with their two currencies
             (`RestReader.crypto_pair`): read on first need, and read again when a ticker it
             does not hold is asked for and it is an hour old or more.
-        option_roots: Whether each option root is an option on an index, from Massive's
-            contracts reference, asked once per root (`RestReader.root_kind`).
+        option_roots: Whether each option root, or each bare underlying, is an index, from
+            Massive's contracts reference, asked once per key (`RestReader.root_kind`,
+            `RestReader.underlying_kind`).
     """
 
     __slots__ = (
@@ -858,15 +878,20 @@ class RestReader:
         patience: Patience,
         where: str,
         tally: ReadTally,
+        indices: Mapping[str, str],
     ) -> list[pa.RecordBatch]:
-        """Give a page's index underlyings their `I:` by option root, where the dataset asks.
+        """Give a page's index underlyings their `I:` the way the dataset's rows allow.
 
-        Only a dataset with `DatasetSpec.underlying_by_root` is changed
-        (`option_roots.canonical_underlyings`); its rows' `Date` is filled by now, which dates
-        each root's lookup. The rows of a root Massive's contracts reference can't classify
-        are withheld as `unreadable_symbols` and reported as `_page_rows` reports its own
-        (`_report_withheld`), and counted in `tally` as withheld, since `_page_rows` counted
-        them among the page's rows already: a read whose every row is withheld fails.
+        `DatasetSpec.index_prefix` says how (`IndexPrefix`). The rows' `Date` is filled by
+        now, which dates each lookup. By option root (`option_roots.canonical_underlyings`) or
+        by bare underlying (`option_roots.canonical_symbols`), the rows Massive's contracts
+        reference can't classify are withheld as `unreadable_symbols` and reported as
+        `_page_rows` reports its own (`_report_withheld`), and counted in `tally` as withheld,
+        since `_page_rows` counted them among the page's rows already: a read whose every row
+        is withheld fails. A call that asked for an index by its bare ticker then has its kept
+        rows checked (`_warn_other_roots` by root, `_check_index_rows` by CFI code); by bare
+        underlying, the lookup itself warns about a ticker that names a stock too
+        (`OptionRootKinds.underlying_kind`), since its row is Massive's total for the ticker.
 
         Args:
             spec: The dataset.
@@ -877,6 +902,8 @@ class RestReader:
                 not know a console caller holds the update graph's lock.
             where: The request template, for the events.
             tally: The read's count of its rows and of those withheld.
+            indices: The canonical indices the call asked for by their bare ticker, each with
+                the parameter that carried it (`_bare_indices`); empty for any other call.
 
         Returns:
             The rows to publish.
@@ -885,19 +912,100 @@ class RestReader:
             RowDataError: If rows are withheld and `unreadable_symbols` is `RAISE` in the
                 read's policy.
 
-        A failed lookup raises the `MassiveError` of `root_kind`.
+        A failed lookup raises the `MassiveError` of `root_kind` or `underlying_kind`.
         """
-        if not spec.underlying_by_root or not rows:
+        if not rows:
             return rows
-        withheld = canonical_underlyings(
-            rows,
-            functools.partial(self.root_kind, patience=patience, cancel=stop),
-            dataset=spec.name,
-        )
+        match spec.index_prefix:
+            case IndexPrefix.NONE:
+                return rows
+            case IndexPrefix.FROM_CFI:
+                for index, param in indices.items():
+                    self._check_index_rows(spec, rows, index, param=param)
+                return rows
+            case IndexPrefix.BY_ROOT:
+                by_root = canonical_underlyings(
+                    rows,
+                    functools.partial(self.root_kind, patience=patience, cancel=stop),
+                    dataset=spec.name,
+                )
+                kept = self._kept_underlyings(spec, by_root, where=where, tally=tally)
+                for index, param in indices.items():
+                    self._warn_other_roots(spec, kept, index, param=param)
+                return kept
+            case IndexPrefix.BY_UNDERLYING:
+                by_underlying = canonical_symbols(
+                    rows,
+                    functools.partial(self.underlying_kind, patience=patience, cancel=stop),
+                    dataset=spec.name,
+                )
+                return self._kept_underlyings(spec, by_underlying, where=where, tally=tally)
+            case _:
+                assert_never(spec.index_prefix)
+
+    def _kept_underlyings(
+        self, spec: DatasetSpec, withheld: Withheld, *, where: str, tally: ReadTally
+    ) -> list[pa.RecordBatch]:
+        """Report and count a lookup's withheld rows, and return the rows to publish.
+
+        Args:
+            spec: The dataset.
+            withheld: The lookup's outcome: the rows to publish and the withheld groups.
+            where: The request template, for the events.
+            tally: The read's count of its rows and of those withheld.
+
+        Returns:
+            The rows to publish.
+
+        Raises:
+            RowDataError: If rows are withheld and `unreadable_symbols` is `RAISE` in the
+                read's policy.
+        """
         if withheld.groups:
             tally.add(0, withheld, source=where)
             self._report_withheld(spec, withheld, where=where)
         return list(withheld.rows.to_batches())
+
+    def _warn_other_roots(
+        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str, *, param: str
+    ) -> None:
+        """Warn about rows of an index's contracts whose option root is not the index's.
+
+        A dataset that reads its underlyings by root takes an index bare (`SPX` for `I:SPX`),
+        as the contracts list does, and a bare ticker can also name a stock (`DJT` is both a
+        stock and the index `I:DJT`), so Massive may answer about the stock's contracts too.
+        Their root is classified as a stock's, so they keep the underlying Massive wrote; one
+        WARNING per dataset and index per session names the request and the rows, as
+        `_check_index_rows` does for the contracts list. A null `Underlying` says nothing about
+        the instrument and is not counted. No row is dropped.
+
+        Args:
+            spec: The dataset.
+            batches: One page's kept rows, their index underlyings prefixed.
+            index: The canonical index the call asked for, such as `I:SPX`.
+            param: The parameter that carried it bare, such as `underlying_ticker`.
+        """
+        if not batches:
+            return
+        underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
+        bare = contracts_underlying(index)
+        other = pc.fill_null(pc.equal(underlyings, bare), fill_value=False)
+        if not pc.any(other).as_py() or not self.state.first("index-other-root", spec.name, index):
+            return
+        symbols = pa.chunked_array([batch.column("Symbol") for batch in batches])
+        first = pc.indices_nonzero(other)[0].as_py()
+        logger.warning(
+            "%s: the contracts of %s were asked for by the bare ticker %s=%s, and the option "
+            "root of %d of them is no index's, so Massive answered about another instrument "
+            "too. They keep the underlying Massive wrote. The first is %s, with Underlying %s.",
+            spec.name,
+            index,
+            param,
+            bare,
+            pc.sum(other).as_py(),
+            symbols[first].as_py(),
+            underlyings[first].as_py(),
+        )
 
     def root_kind(
         self,
@@ -934,6 +1042,41 @@ class RestReader:
             root,
             underlying=underlying,
             contract=contract,
+            day=day,
+            reader=self,
+            patience=self.patience() if patience is None else patience,
+            cancel=cancel,
+        )
+
+    def underlying_kind(
+        self,
+        underlying: str,
+        *,
+        day: str,
+        patience: Patience | None = None,
+        cancel: Cancel | None = None,
+    ) -> RootKind:
+        """Return whether a bare underlying's options are options on an index.
+
+        The session's `OptionRootKinds.underlying_kind` (`_ingest/option_roots.py`), read
+        through this reader: the first call reads Massive's index ticker list, once per
+        session, and the first call for a ticker on it reads the first contract of Massive's
+        contracts list for that underlying as of `day`, blocking the calling thread meanwhile.
+
+        Args:
+            underlying: The bare underlying the row names, such as `"SPX"`.
+            day: The latest trading day among the page's rows that name it, as ISO text.
+            patience: The read's patience; None takes it now, on the calling thread
+                (`patience`).
+            cancel: A background read's stop token, or None.
+
+        Returns:
+            The underlying's kind.
+
+        A failed request raises its public `MassiveError`, naming the underlying.
+        """
+        return self.state.option_roots.underlying_kind(
+            underlying,
             day=day,
             reader=self,
             patience=self.patience() if patience is None else patience,
@@ -1478,12 +1621,12 @@ class RestReader:
         zone_class = day_class(spec, map(symbol_class, own))
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
         bucket = _request_bucket(spec, template, call)
-        bare_index = _bare_index(request, call)
+        bare_indices = _bare_indices(request)
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
                 call.path_params,
-                call.query,
+                wire_query(call.query),
                 bucket=bucket,
                 cancel=stop,
                 patience=patience,
@@ -1522,8 +1665,6 @@ class RestReader:
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
                 if spec.ticker_list is not None:
                     batches = self._listed(spec, batches, own, template=template)
-                if bare_index is not None:
-                    self._check_index_rows(spec, batches, bare_index)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if times.stamps is not None:
@@ -1551,6 +1692,7 @@ class RestReader:
                         patience=patience,
                         where=f"GET {template}",
                         tally=tally,
+                        indices=bare_indices,
                     )
                 )
         except WireError as error:
@@ -1797,7 +1939,7 @@ class RestReader:
         return listed
 
     def _check_index_rows(
-        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str
+        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str, *, param: str
     ) -> None:
         """Warn about rows of an index's contracts that do not read as that index's.
 
@@ -1812,11 +1954,10 @@ class RestReader:
 
         Args:
             spec: The dataset.
-            batches: One page's rows in the dataset's schema.
+            batches: One page's kept rows in the dataset's schema; at least one.
             index: The canonical index the call asked for, such as `I:SPX`.
+            param: The parameter that carried it bare, such as `underlying_ticker`.
         """
-        if not batches:
-            return
         underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
         other = pc.fill_null(pc.not_equal(underlyings, index), fill_value=True)
         if not pc.any(other).as_py():
@@ -1834,7 +1975,7 @@ class RestReader:
                 "wrote. The first is %s, with Underlying %s and Cfi %s.",
                 spec.name,
                 index,
-                BARE_INDEX_PARAM,
+                param,
                 contracts_underlying(index),
                 pc.sum(other_kind).as_py(),
                 symbols[first].as_py(),

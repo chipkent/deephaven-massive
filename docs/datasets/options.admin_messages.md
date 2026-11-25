@@ -27,7 +27,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 How recent the data is on each of Massive's plans, and how far back its history goes, as Massive's pages state them.
 
-| Plan | Admin & FLEX Messages (REST) | Admin & FLEX Options (WebSocket) |
+| Plan | Admin Messages (REST) | Admin & FLEX Options (WebSocket) |
 | --- | --- | --- |
 | Options Basic | Not included | Not included |
 | Options Starter | Not included | Not included |
@@ -70,9 +70,9 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ## Massive's documentation
 
-- [Admin & FLEX Messages (REST)](https://massive.com/docs/rest/options/admin-messages)
+- [Admin Messages (REST)](https://massive.com/docs/rest/options/admin-messages)
 - [Admin & FLEX Options (WebSocket)](https://massive.com/docs/websocket/options/admins)
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-25, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

@@ -1,0 +1,33 @@
+{
+  "request_id": "c1d4a9e07b2f4f6e9a3b5d8e2f1c0a7b",
+  "results": [
+    {
+      "ask": 9.5,
+      "bid": 9.35,
+      "contract_type": "call",
+      "date": "2026-10-29",
+      "delta": 0.5312,
+      "dividend_yield": 0,
+      "exercise_style": "american",
+      "expiration_date": "2026-11-21",
+      "gamma": 0.0218,
+      "implied_volatility": 0.5137,
+      "model": "binomial",
+      "open_interest": 14823,
+      "option_price": 9.425,
+      "quote_timestamp": 1793303099841234000,
+      "rho": 0.0689,
+      "risk_free_rate": 0.0431,
+      "root": "AMD",
+      "strike_price": 220,
+      "theta": -0.3861,
+      "ticker": "O:AMD261121C00220000",
+      "underlying_price": 221.35,
+      "underlying_ticker": "AMD",
+      "underlying_timestamp": 1793303099812004400,
+      "vega": 0.2204,
+      "volume": 6210
+    }
+  ],
+  "status": "OK"
+}

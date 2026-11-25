@@ -674,7 +674,7 @@ class _Transform:
             prefix=prefix,
             times=time_rule(spec, request, asset_class=file_class, warnings=warnings),
             time_name=time_name,
-            symbols=WireSymbols(spec.name, spec.asset_class, spec.symbols_as_written),
+            symbols=WireSymbols(spec.name, spec.symbols_class, spec.symbols_as_written),
             policy=request.on_error,
             call=call,
             bars=window.bars,

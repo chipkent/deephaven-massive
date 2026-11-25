@@ -1,0 +1,21 @@
+{
+  "next_url": "https://api.massive.com/options/v1/open-interest/underlying?cursor=YXA9ZGF0ZT0yMDI2LTAxLTIyJnVuZGVybHlpbmdfdGlja2VyPVFRUSZsaW1pdD0yJnNvcnQ9ZGF0ZS5kZXNj",
+  "request_id": "0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d",
+  "results": [
+    {
+      "date": "2026-01-23",
+      "open_interest": 20987654,
+      "open_interest_calls": 8765432,
+      "open_interest_puts": 12222222,
+      "underlying_ticker": "SPY"
+    },
+    {
+      "date": "2026-01-23",
+      "open_interest": 9876543,
+      "open_interest_calls": 4321098,
+      "open_interest_puts": 5555445,
+      "underlying_ticker": "QQQ"
+    }
+  ],
+  "status": "OK"
+}

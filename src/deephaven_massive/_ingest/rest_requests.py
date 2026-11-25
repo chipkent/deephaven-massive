@@ -10,7 +10,7 @@ arguments (`Request`), and the generated REST paths into `Call`s, one per reques
   bar `multiplier` and `timespan` (`shared_params`); the validated `filters`; the time axis,
   whole days on a calendar-date axis and the instants that start the bounds' days on an
   instant axis, in the day zone of the request's own symbols (`axis_query`); the symbol
-  parameter, at most `DatasetSpec.symbols_per_request` symbols a request; `adjusted`, the
+  parameter, at most `DatasetSpec.symbols_per_request` wire spellings a request; `adjusted`, the
   futures `resolution`, the page size (`page_size`), and for `history()` the ascending
   direction;
 - `history_calls` plans a `history()` call on the history path: futures sessions one session
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RestPath
 
 __all__ = [
+    "BARE_INDEX_LIST_PARAM",
     "BARE_INDEX_PARAM",
     "Call",
     "CryptoSplit",
@@ -70,6 +71,7 @@ __all__ = [
     "page_size",
     "plan_calls",
     "shared_params",
+    "wire_query",
 ]
 
 
@@ -95,7 +97,15 @@ _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 BARE_INDEX_PARAM: Final = "underlying_ticker"
 """The query parameter that takes an index without its `I:`: the options contracts list's
 `underlying_ticker` finds no contract for `I:SPX` and every one of `SPX`, so the request keeps
-the canonical ticker and only the wire gets the bare one (`wire_symbols.contracts_underlying`)."""
+the canonical ticker and only the wire gets the bare one (`wire_symbols.contracts_underlying`,
+applied by `wire_query` as the request is sent). The options greeks take the same parameter,
+and its list form `BARE_INDEX_LIST_PARAM`."""
+
+BARE_INDEX_LIST_PARAM: Final = f"{BARE_INDEX_PARAM}.any_of"
+"""The list form of `BARE_INDEX_PARAM`, each of whose values is sent the same way, once however
+many canonical tickers spell it (`DJT` and `I:DJT`). Where it is a dataset's `symbol_param`, the
+planned call's canonical tickers are what the read attributes rows and charges requests by
+(`own_symbols`)."""
 
 _CRYPTO_PAIR_PLACEHOLDER: Final = "cryptoTicker"
 """The path placeholder Massive names for one crypto pair, as in
@@ -112,7 +122,8 @@ class Call:
 
     Attributes:
         path_params: A value for each placeholder of the path template.
-        query: The query parameters of the first page, by wire name.
+        query: The query parameters of the first page, by wire name, with every ticker
+            canonical (`I:SPX`); `wire_query` gives the form sent.
         symbol: The one symbol of a per-symbol request: it fills the keys the dataset takes
             from the request (`KeySpec.from_request`), and HTTP 404 for it drops the symbol.
             None for a request that is not per symbol.
@@ -355,8 +366,10 @@ def _symbol_parts(
     carry their own symbol), a `per_symbol` dataset, and a symbol parameter that takes one
     value (`ticker`) get one request per symbol. A list parameter
     (`ticker.any_of`, `tickers`) gets up to `DatasetSpec.symbols_per_request` symbols a
-    request (all of them when the dataset sets no limit). `dm.ALL`, no
-    symbols, and a path that takes neither get one request without symbols.
+    request (all of them when the dataset sets no limit), canonical: `wire_query` gives the
+    form sent, and two symbols the wire spells alike (`I:DJT` and `DJT`, both `DJT` in
+    `BARE_INDEX_LIST_PARAM`) go in one request, so no two requests read one ticker's rows.
+    `dm.ALL`, no symbols, and a path that takes neither get one request without symbols.
 
     Args:
         spec: The dataset.
@@ -399,11 +412,15 @@ def _symbol_parts(
     if spread is _Spread.NONE:
         return [(None, {}, {}, None)]
     if spread is _Spread.LIST:
-        size = spec.symbols_per_request or len(explicit)
         listed = required(param, f"{rest_path.template}'s list parameter")
+        spelled: dict[str, list[str]] = {}
+        for symbol in explicit:
+            spelled.setdefault(_wire_symbol(listed, symbol), []).append(symbol)
+        groups = list(spelled.values())
+        size = spec.symbols_per_request or len(groups)
         return [
-            (None, {}, {listed: explicit[i : i + size]}, None)
-            for i in range(0, len(explicit), size)
+            (None, {}, {listed: tuple(s for group in groups[i : i + size] for s in group)}, None)
+            for i in range(0, len(groups), size)
         ]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
     return [
@@ -470,10 +487,10 @@ def _caller_params(
     """Return the path and query parameters the caller set: typed parameters and filters.
 
     Typed parameters go wherever the path takes them: a path segment (`{date}`,
-    `{direction}`) or a query parameter. An index given to `BARE_INDEX_PARAM` goes without its
-    `I:` (`I:SPX` as `SPX`). `order` on a path without an `order` parameter folds
-    into `sort` as its `.asc` or `.desc` suffix (`sort=date.desc`); on a path with one it is
-    sent as is. A filter goes out under the wire name whose `filters` key it is.
+    `{direction}`) or a query parameter, each as the request holds it (an index underlying
+    canonical; `wire_query` sends it bare). `order` on a path without an `order` parameter
+    folds into `sort` as its `.asc` or `.desc` suffix (`sort=date.desc`); on a path with one
+    it is sent as is. A filter goes out under the wire name whose `filters` key it is.
 
     Args:
         spec: The dataset, for messages.
@@ -497,7 +514,7 @@ def _caller_params(
     unknown = [name for name in typed if name not in params and not (folded and name == "order")]
     for name, value in typed.items():
         if name in params:
-            (path if params[name].in_path else query)[name] = _sent_value(name, value)
+            (path if params[name].in_path else query)[name] = value
     if folded and "sort" in query:
         query["sort"] = f"{typed['sort']}.{typed['order']}"
     elif folded:
@@ -561,19 +578,65 @@ def largest_page(rest_path: RestPath) -> int:
     )
 
 
-def _sent_value(name: str, value: object) -> object:
-    """Return a typed parameter's value as sent: an index underlying bare, every other as is.
+def _wire_symbol(name: str, symbol: str) -> str:
+    """Return one symbol as a parameter's wire takes it: an index underlying bare.
 
     Args:
         name: The wire parameter's name.
-        value: Its value.
+        symbol: The canonical symbol.
 
     Returns:
-        `contracts_underlying(value)` for the options contracts' underlying; `value` otherwise.
+        `contracts_underlying(symbol)` for the options underlying, in either form
+        (`BARE_INDEX_PARAM`, `BARE_INDEX_LIST_PARAM`); `symbol` otherwise.
     """
-    if name == BARE_INDEX_PARAM and isinstance(value, str):
-        return contracts_underlying(value)
-    return value
+    if name in (BARE_INDEX_PARAM, BARE_INDEX_LIST_PARAM):
+        return contracts_underlying(symbol)
+    return symbol
+
+
+def _sent_value(name: str, value: object) -> object:
+    """Return an underlying parameter's value as sent: each index bare.
+
+    Args:
+        name: The wire parameter's name, `BARE_INDEX_PARAM` or `BARE_INDEX_LIST_PARAM`.
+        value: Its value: one ticker, or a tuple of them for the list form.
+
+    Returns:
+        `_wire_symbol` of the one ticker, or of each distinct ticker of the list form.
+
+    A value of another type is a defect: the `BrokenGuaranteeError` of `required_instance`.
+    """
+    if name == BARE_INDEX_LIST_PARAM:
+        listed = required_instance(value, tuple, f"the underlyings of {name}")
+        bare: dict[str, None] = {}
+        for underlying in listed:
+            assert isinstance(underlying, str)  # build_query refused any other element
+            bare[_wire_symbol(name, underlying)] = None
+        return tuple(bare)
+    return _wire_symbol(name, required_instance(value, str, f"the underlying of {name}"))
+
+
+def wire_query(query: Mapping[str, object]) -> dict[str, object]:
+    """Return a planned call's query as the wire takes it.
+
+    The planned query holds every ticker canonical, so the read can attribute rows and charge
+    requests by the symbols it names (`own_symbols`) and tell an index asked for from the
+    rows Massive answers with (`I:SPX` against a row's `SPX`). The wire takes an index
+    underlying bare, in `BARE_INDEX_PARAM` and `BARE_INDEX_LIST_PARAM` (`_sent_value`), once
+    however many of the request's tickers spell it (`I:DJT` and `DJT`). Every other parameter
+    is sent as planned.
+
+    Args:
+        query: The planned call's query (`Call.query`).
+
+    Returns:
+        The query to send.
+    """
+    sent = dict(query)
+    for name in (BARE_INDEX_PARAM, BARE_INDEX_LIST_PARAM):
+        if name in sent:
+            sent[name] = _sent_value(name, sent[name])
+    return sent
 
 
 def _takes_crypto_pair(rest_path: RestPath) -> bool:

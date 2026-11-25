@@ -38,6 +38,7 @@ __all__ = [
     "Direction",
     "FuturesVenue",
     "HistorySource",
+    "IndexPrefix",
     "Locale",
     "Market",
     "NotBars",
@@ -632,6 +633,30 @@ class ChannelFamily(StrEnum):
 
     TICK = "TICK"
     FMV = "FMV"
+
+
+class IndexPrefix(StrEnum):
+    """How a REST dataset's rows get an index underlying its `I:` prefix (internal).
+
+    Massive's options endpoints disagree on how they write an index underlying: the chain and
+    the snapshots write `I:SPX`, the contracts list writes `SPX` beside the contract's CFI code,
+    and the open interest and the unusual trades write `SPX` with no code at all (the greeks
+    carry no code either, and are read the same way).
+    The library publishes only the canonical `I:SPX`, so each dataset says which of its rows'
+    columns can tell an index from a stock, and the REST transport restores the prefix that way.
+    """
+
+    NONE = "NONE"
+    """Massive writes an index with its `I:`, or the rows name no underlying."""
+    FROM_CFI = "FROM_CFI"
+    """Each row carries its contract's CFI code (`Cfi`), which marks an option on an index."""
+    BY_ROOT = "BY_ROOT"
+    """`Underlying` is bare beside a contract: one lookup of Massive's contracts reference per
+    option root (`_ingest/option_roots.py`)."""
+    BY_UNDERLYING = "BY_UNDERLYING"
+    """`Symbol` is the bare underlying, with no contract: one lookup of Massive's contracts list
+    per bare ticker (`_ingest/option_roots.py`). The dataset's symbols are stock and index
+    tickers (`DatasetSpec.symbols_class`)."""
 
 
 def _require_enum(value: object, enum_type: type[_E], name: str) -> _E:
