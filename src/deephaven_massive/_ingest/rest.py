@@ -25,9 +25,11 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   an indicator, or the news of one ticker) it caps each symbol's rows instead.
 - **Listed tickers.** A dataset whose rows list their tickers (`DatasetSpec.ticker_list`: news,
   financial statements, insider and 8-K filings) gets its `Symbol` from the request: each
-  ticker the request named that a row lists, the row repeated once per such ticker
-  (`_listed_rows`). The split comes after Massive's cap on a request's rows, so the read then
-  cuts the split rows to `limit`, and a row listed under several tickers may keep only some.
+  ticker the request named that a row lists, the row repeated once per such ticker, however
+  many the request named (`_listed_rows`). A row listing none of them is left out as an
+  `unrequested_symbols` problem of the call (`_report_unlisted`). The split comes after
+  Massive's cap on a request's rows, so the read then cuts the split rows to `limit`, and a
+  row listed under several tickers may keep only some.
 - **History.** `history()` requests the instants its window covers
   (`HistoryWindow.requested`) and keeps the rows the window keeps (`keep_window`). Futures trades
   and quotes named by session dates are requested one session at a time
@@ -378,16 +380,15 @@ def _bare_indices(request: Request) -> dict[str, str]:
 
 def _listed_rows(
     batch: pa.RecordBatch, named: Sequence[str], *, column: str
-) -> tuple[pa.RecordBatch, int]:
+) -> tuple[pa.RecordBatch, list[list[str]]]:
     """Fill a page's `Symbol` from the tickers its request named and each row lists.
 
-    A request that named one ticker gives it to every row. A request that named several gives
-    each row every one of them its list holds, the row repeated once per such ticker, in the
-    order of its list; a row that lists none of them is left out, as a row outside a
-    `history()` window is: it belongs to none of the request's symbols, so it is neither
-    published nor reported as a problem. A marked row whose list is null, which may be a list
-    the decoder could not read, stays once with a null `Symbol`, to be withheld. A request
-    that named none leaves `Symbol` null, the column's documented meaning.
+    A row goes to every named ticker its list holds, repeated once per such ticker, in the
+    order of its list, however many tickers the request named. A row that lists none of them
+    belongs to none of the request's symbols, so it is left out, and the caller reports it. A
+    marked row whose list is null, which may be a list the decoder could not read, stays once
+    with a null `Symbol`, to be withheld. A request that named none leaves `Symbol` null, the
+    column's documented meaning.
 
     Args:
         batch: One page's rows in the dataset's schema, with a null `Symbol` and the mark
@@ -396,31 +397,29 @@ def _listed_rows(
         column: The column of each row's tickers (`DatasetSpec.ticker_list`).
 
     Returns:
-        The rows with their `Symbol`, and how many listed none of several named tickers.
+        The rows with their `Symbol`, and the list of each row left out (empty for a row that
+        lists nothing), in row order.
     """
     if not named:
-        return batch, 0
-    if len(named) == 1:
-        taken = batch
-        symbols: list[str | None] = [named[0]] * batch.num_rows
-        unmatched = 0
-    else:
-        wanted = set(named)
-        rows: list[int] = []
-        symbols = []
-        marked = batch.column(FAULT).is_valid().to_pylist()
-        for index, listed in enumerate(batch.column(column).to_pylist()):
-            hits: list[str | None] = [t for t in dict.fromkeys(listed or ()) if t in wanted]
-            if listed is None and marked[index]:
-                hits = [None]  # its list could not be read: it stays to be withheld
-            rows.extend([index] * len(hits))
-            symbols.extend(hits)
-        taken = batch.take(pa.array(rows, pa.int64()))
-        unmatched = batch.num_rows - len(set(rows))
+        return batch, []
+    wanted = set(named)
+    rows: list[int] = []
+    symbols: list[str | None] = []
+    unlisted: list[list[str]] = []
+    marked = batch.column(FAULT).is_valid().to_pylist()
+    for index, listed in enumerate(batch.column(column).to_pylist()):
+        hits: list[str | None] = [t for t in dict.fromkeys(listed or ()) if t in wanted]
+        if listed is None and marked[index]:
+            hits = [None]  # its list could not be read: it stays to be withheld
+        if not hits:
+            unlisted.append(list(listed or ()))
+        rows.extend([index] * len(hits))
+        symbols.extend(hits)
+    taken = batch.take(pa.array(rows, pa.int64()))
     position = taken.schema.get_field_index(_SYMBOL)
     arrays = list(taken.columns)
     arrays[position] = pa.array(symbols, taken.schema.field(position).type)
-    return pa.RecordBatch.from_arrays(arrays, schema=taken.schema), unmatched
+    return pa.RecordBatch.from_arrays(arrays, schema=taken.schema), unlisted
 
 
 def _per_symbol(name: str, planned: Sequence[tuple[RestPath, list[Call]]]) -> bool:
@@ -1622,6 +1621,7 @@ class RestReader:
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
         bucket = _request_bucket(spec, template, call)
         bare_indices = _bare_indices(request)
+        unlisted: list[list[str]] = []  # a ticker-list dataset's rows that list no named ticker
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
@@ -1664,7 +1664,7 @@ class RestReader:
                     record(drift)
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
                 if spec.ticker_list is not None:
-                    batches = self._listed(spec, batches, own, template=template)
+                    batches = self._listed(spec, batches, own, unlisted=unlisted)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if times.stamps is not None:
@@ -1706,6 +1706,7 @@ class RestReader:
                 kept=kept,
                 requests=requests,
             )
+        self._report_unlisted(spec, unlisted, named=own, template=template)
         return _Outcome(tuple(kept), requests, received=received_rows)
 
     def _not_found(
@@ -1899,44 +1900,85 @@ class RestReader:
         batches: Sequence[pa.RecordBatch],
         named: Sequence[str],
         *,
-        template: str,
+        unlisted: list[list[str]],
     ) -> list[pa.RecordBatch]:
         """Fill the `Symbol` of a dataset whose rows list their tickers (`_listed_rows`).
-
-        Logs one WARNING per dataset a session, then DEBUG, when a row lists none of the
-        request's several named tickers: the row is left out, since it is none of theirs.
 
         Args:
             spec: The dataset, with a `ticker_list`.
             batches: One page's rows in the dataset's schema.
             named: The tickers the request named.
-            template: The path, for the message.
+            unlisted: Receives the list of each row left out, which `_report_unlisted` reports
+                once the call's pages are read.
 
         Returns:
             The rows with their `Symbol`.
         """
+        column = required(spec.ticker_list, f"{spec.name}'s ticker list")
         listed: list[pa.RecordBatch] = []
-        unmatched = 0
         for batch in batches:
-            rows, missed = _listed_rows(
-                batch, named, column=required(spec.ticker_list, f"{spec.name}'s ticker list")
-            )
+            rows, missed = _listed_rows(batch, named, column=column)
             listed.append(rows)
-            unmatched += missed
-        if unmatched:
-            first = self.state.first("unlisted rows", spec.name)
-            logger.log(
-                logging.WARNING if first else logging.DEBUG,
-                "%s: Massive sent %s from %s whose %s lists none of the requested tickers "
-                "%s, so %s left out.",
-                spec.name,
-                counted(unmatched, "row"),
-                template,
-                spec.ticker_list,
-                prose_list(named, "tickers"),
-                "it is" if unmatched == 1 else "they are",
-            )
+            unlisted.extend(missed)
         return listed
+
+    def _report_unlisted(
+        self,
+        spec: DatasetSpec,
+        unlisted: Sequence[Sequence[str]],
+        *,
+        named: Sequence[str],
+        template: str,
+    ) -> None:
+        """Report a call's rows that list none of the tickers its request named.
+
+        One `unrequested_symbols` event per call (`ProblemEvent`), with the rows' count and the
+        tickers they list, handed to the session's reporter, which alarms once per table and
+        lists it in `m.problems()`.
+
+        Args:
+            spec: The dataset, with a `ticker_list`.
+            unlisted: The list of each row left out (`_listed_rows`).
+            named: The tickers the request named.
+            template: The path, for the event.
+
+        Raises:
+            RowDataError: If a row was left out and `unrequested_symbols` is `RAISE` in the
+                read's policy: the call's failure.
+        """
+        if not unlisted:
+            return
+        setting = self.policy.unrequested_symbols
+        asked = prose_list(named, "tickers")
+        tickers = list(dict.fromkeys(t for listed in unlisted for t in listed))
+        only = f", only {prose_list(tickers, 'tickers')}," if tickers else ","
+        self.problems(
+            [
+                ProblemEvent(
+                    cause=ProblemCause.UNREQUESTED_SYMBOLS,
+                    action=ProblemAction.WITHHELD,
+                    dataset=spec.name,
+                    stream_id=self.stream_id,
+                    where=f"{Transport.REST.value} GET {template}",
+                    symbol=None,
+                    field=spec.ticker_list,
+                    rows=len(unlisted),
+                    detail=f"Massive answered the request for {asked} with rows whose "
+                    f"{spec.ticker_list} lists no ticker asked for{only} so they are left out",
+                    at=time.time_ns(),
+                    policy=setting,
+                )
+            ]
+        )
+        if not effect_of(setting).fails:
+            return
+        total = len(unlisted)
+        hint = policy_hint(OnError.LOG, "unrequested_symbols", purpose="To go on without such rows")
+        raise RowDataError(
+            f"{spec.name}: Massive answered the request for {asked} with {counted(total, 'row')} "
+            f"whose {spec.ticker_list} lists no ticker asked for{only} so the library left "
+            f"{'it' if total == 1 else 'them'} out. {hint}"
+        )
 
     def _check_index_rows(
         self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str, *, param: str
@@ -3112,7 +3154,6 @@ class RestEndpoints:
             spec,
             request,
             symbols=symbols,
-            columns=self._core.dataset_schema(spec).column_names,
             cancel=cancel,
         )
         announce(

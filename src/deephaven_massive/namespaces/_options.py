@@ -412,7 +412,9 @@ _UNDERLYING_SYMBOL_NOTE: Final = (
     "can't say whether a ticker is an index, the library leaves its rows out and lists them in "
     "`m.problems()` as `unreadable_symbols`. A ticker that names both a stock and an index "
     "(`DJT`) is classified by the first contract Massive lists for it, and the library can't "
-    "tell whether Massive's row counts the stock's options, the index's, or both."
+    "tell whether Massive's row counts the stock's options, the index's, or both. A watchlist "
+    "gets a row only under the spelling the library gives it: its row under the other "
+    "spelling is left out, as an `unrequested_symbols` problem."
 )
 """The note on `Symbol` of the dataset whose rows name the bare underlying alone."""
 

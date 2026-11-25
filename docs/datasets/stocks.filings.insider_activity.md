@@ -48,7 +48,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A row that lists none of the named tickers is left out, as an `unrequested_symbols` problem. Null when the call named no ticker. |
 | `IssuerCik` | String | SEC Central Index Key of the issuer company (10 digits, zero-padded). |
 | `IssuerName` | String | Name of the issuer company as reported in the filings. |
 | `LastFilingDate` | String | Filing date of the latest filing that reported one of these transactions (formatted as YYYY-MM-DD). Transactions are usually filed within two business days. |

@@ -49,7 +49,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A row that lists none of the named tickers is left out, as an `unrequested_symbols` problem. Null when the call named no ticker. |
 | `AccessionNumber` | String | Unique SEC accession number for the filing (e.g., '0001209191-25-012345'). |
 | `Aff10b5One` | Boolean | Whether the transaction was made pursuant to a Rule 10b5-1 trading plan. |
 | `DateOfOriginalSubmission` | String | Date of the original filing submission for amendment filings (3/A). Null for initial filings (formatted as YYYY-MM-DD). |

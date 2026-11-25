@@ -64,6 +64,20 @@ class ReadTally:
             if withheld.total and not self._first_reason:
                 self._first_reason = withheld.first_reason
 
+    def exclude(self, rows: int) -> None:
+        """Count out rows that were counted as the read's but belong to none of its symbols.
+
+        A page is counted when it is read (`add`), and the rows naming a symbol the read did
+        not ask for are found later, when the page's rows are given to the symbols
+        (`symbol_reads._attribute`). They are no rows of the read's symbols, so a read whose
+        own rows were all withheld fails although it received such rows too.
+
+        Args:
+            rows: How many rows to count out.
+        """
+        with self._lock:
+            self._asked -= rows
+
     @property
     def rows(self) -> int:
         """How many rows of the read's symbols and window were counted so far, withheld included."""

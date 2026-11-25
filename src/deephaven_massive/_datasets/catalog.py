@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, assert_never
 
+from deephaven_massive._datasets.column_descriptions import SYMBOL
 from deephaven_massive._datasets.dates import DAY_ZONES
 from deephaven_massive._datasets.filters import param_base, param_family
 from deephaven_massive._datasets.row_times import DATE, INSERT, RowTimes
@@ -385,9 +386,9 @@ class DatasetSpec:
             news article's `Tickers`, or None for any other dataset. The library then fills a
             `Symbol` column of its own: each ticker the request named that the row lists, one
             row per such ticker, so an article about AAPL and MSFT read for both is listed
-            once under each. A request that named one ticker gives it to every row; a row that
-            lists none of a request's several named tickers keeps a null `Symbol`, with one
-            WARNING per dataset; a call that names no ticker leaves `Symbol` null. Such a
+            once under each. A row that lists none of a request's named tickers, however many
+            it named, is left out as an `unrequested_symbols` problem; a call that names no
+            ticker leaves `Symbol` null. Such a
             dataset has `Symbol` among its `poll_keys` and its `nullable_poll_keys`.
         fetch_paths_by_class: The REST path behind `fetch()` and `poll()` for the symbols of
             one asset class, where it differs from `fetch_path`, such as
@@ -1328,6 +1329,10 @@ class Catalog:
           `nullable_poll_keys`, so no row is identified by nulls alone.
         - **poll keys:** every `poll_keys` and `revision_keys` column of a dataset with
           `poll()` (a fetch path) is a column of the dataset's schema.
+        - **symbol column:** a dataset with a symbol parameter has a `Symbol` column, so a read
+          by symbol can give each row to the symbol it names: a declared symbol key, or the
+          `ticker_list` the library fills `Symbol` from. Every other way of taking symbols
+          already needs a declared symbol key (the declared keys gate).
         - **symbol-free archive:** the history path of a dataset whose rows name no symbol
           (`names_symbols` False) takes no path parameter, such as a ticker: one request
           reads its archive whole, filtered by time alone.
@@ -1378,6 +1383,13 @@ class Catalog:
             lacking = sorted({*spec.poll_keys, *spec.revision_keys} - set(schema.column_names))
             if lacking and spec.has_fetch:  # only `poll()` reads them
                 found.append(f"poll keys: {spec.name}: {lacking} are not columns")
+            if spec.symbol_param is not None and SYMBOL not in schema.column_names:
+                found.append(
+                    f"symbol column: {spec.name}: its symbol parameter {spec.symbol_param!r} "
+                    "names symbols, but the dataset has no Symbol column to give each row to "
+                    "the symbol it names: declare a symbol key, or the ticker_list the library "
+                    "fills Symbol from"
+                )
         return tuple(dict.fromkeys(found))
 
     def _archive_problems(self, spec: DatasetSpec) -> list[str]:

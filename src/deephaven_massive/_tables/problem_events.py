@@ -189,10 +189,11 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_MASSIVE,
             action=ProblemAction.WITHHELD,
             span=False,
-            summary="Massive answered a watchlist read's request with a row of a symbol the "
-            "read didn't ask for. The row is left out.",
+            summary="Massive answered a call's request with a row of a symbol the call "
+            "didn't ask for. The row is left out.",
             fix="Nothing, if the row is Massive's answer about another instrument. To read "
-            "that symbol, add it to the watchlist. Set `unrequested_symbols` to "
+            "that symbol, name it in the call or add it to the watchlist. Set "
+            "`unrequested_symbols` to "
             "`dm.OnError.IGNORE` to quiet it, or to `dm.OnError.RAISE` to fail the table.",
         ),
         _C.UNREADABLE_KEYS: CauseTraits(
@@ -399,8 +400,9 @@ class ProblemEvent:
             None for a problem of no table or read.
         where: The request, the WebSocket URL and channel, or the flat file, as the transport
             names it in its log lines, with no secret; for the log only.
-        symbol: The symbol the problem concerns, exactly as Massive sent it or the caller gave
-            it, or None.
+        symbol: The symbol the problem concerns, or None: exactly as Massive sent it for a row
+            the library could not read, as the table would name it for a row it read whole (an
+            `unrequested_symbols` row), or as the caller gave it.
         field: The column the problem concerns, or None.
         rows: How many rows the event counts; 0 for a problem of no rows.
         detail: Why, in one line: the field, the expected type, and the value's first 200

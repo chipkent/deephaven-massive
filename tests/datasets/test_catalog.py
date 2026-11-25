@@ -713,7 +713,10 @@ def test_a_dataset_takes_symbols_by_its_transports(spec: DatasetSpec, expected: 
     assert Catalog((spec,)).takes_symbols(spec) is expected
 
 
-def test_a_filing_keeps_its_tickers_and_has_no_symbol() -> None:
+def test_a_filing_s_symbol_parameter_needs_a_symbol_column() -> None:
+    # A symbol table can be read by symbol on any dataset with a symbol parameter, and each row
+    # is given to the symbol it names: a dataset whose rows list their tickers must say which
+    # column the library fills Symbol from.
     path = "/stocks/financials/v1/balance-sheets"
     sheets = DatasetSpec(
         name="stocks.balance_sheets",
@@ -724,10 +727,23 @@ def test_a_filing_keeps_its_tickers_and_has_no_symbol() -> None:
         poll_keys=("Cik",),
         page_size=100,
     )
-    assert problems(sheets) == ()
-    columns = Catalog((sheets,)).dataset_schema(sheets).column_names
+    assert problems(sheets) == (
+        (
+            "symbol column: stocks.balance_sheets: its symbol parameter 'tickers.any_of' names "
+            "symbols, but the dataset has no Symbol column to give each row to the symbol it "
+            "names: declare a symbol key, or the ticker_list the library fills Symbol from"
+        ),
+    )
+    listed = dataclasses.replace(
+        sheets,
+        ticker_list="Tickers",
+        poll_keys=("Cik", "Symbol"),
+        nullable_poll_keys={"Symbol": "no ticker named"},
+    )
+    assert problems(listed) == ()
+    columns = Catalog((listed,)).dataset_schema(listed).column_names
     assert "Tickers" in columns
-    assert "Symbol" not in columns
+    assert "Symbol" in columns
     # Its list of tickers can never be the symbol.
     assert problems(dataclasses.replace(sheets, keys={(R, path): keys("Tickers")})) == (
         (

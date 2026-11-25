@@ -1780,7 +1780,7 @@ _CAUSE_COMMENTS: Final[Mapping[str, str]] = {
     "noncanonical_symbols": "A watchlist value that isn't Massive's exact ticker.",
     "unreadable_symbols": "A symbol in Massive's data that the library can't read.",
     "unavailable_symbols": "A symbol Massive has no data for.",
-    "unrequested_symbols": "A row Massive sent a watchlist read for a symbol it didn't ask for.",
+    "unrequested_symbols": "A row Massive sent for a symbol the call didn't ask for.",
     "unreadable_keys": "A row of Massive's data whose key the library can't read.",
     "unconvertible_values": "A row of Massive's data with a value the library can't read.",
     "malformed_rows": "A flat-file line that isn't a readable row.",
