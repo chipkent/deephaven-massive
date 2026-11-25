@@ -608,7 +608,7 @@ def test_a_late_acknowledgement_clears_a_no_ack(caplog: pytest.LogCaptureFixture
     assert loop.subs.counts() == (2, 2, 0, 0)
     # The recovery of the NO_ACK WARNING, at INFO.
     assert [r.getMessage() for r in caplog.records if r.levelno == logging.INFO] == [
-        "generation 1: Massive acknowledged 1 [T.AAPL] after all; they leave NoAckTopics"
+        "generation 1: Massive acknowledged 1 [T.AAPL] after all; they leave UnconfirmedTopics"
     ]
     assert loop.sender.take() == [
         ("subscribe", 1, ("T.AAPL", "T.MSFT")),

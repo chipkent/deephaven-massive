@@ -1039,7 +1039,7 @@ def test_tester_example_10_fails_the_live_minute_bars_where_massive_refuses_them
             connections = table_rows(names["connections"])
             for row in connections:
                 evidence(
-                    f"connection {row['AssetClass']} {row['State']} acked {row['AckedTopics']} "
+                    f"connection {row['AssetClass']} {row['State']} acked {row['ConfirmedTopics']} "
                     f"{row['LastError']!r}"
                 )
             names.clear()
@@ -1052,7 +1052,7 @@ def test_tester_example_10_fails_the_live_minute_bars_where_massive_refuses_them
     unlisted = [line for line in printed if refusals.is_not_listed_text(line)]
     if unlisted:
         pytest.skip(f"{summary.NOT_LISTED}{' '.join(unlisted[0].split())}")
-    acked = sum(int(r["AckedTopics"]) for r in connections if r["AssetClass"] == "stocks")
+    acked = sum(int(r["ConfirmedTopics"]) for r in connections if r["AssetClass"] == "stocks")
     states = [row["State"] for row in rows]
     live = states == ["RUNNING"] and bool(acked or rows[0]["RowsPublished"])
     assert live or states == ["FAILED"], f"stocks.bars settled neither way: {states}"

@@ -44,7 +44,7 @@ A message passes when all seven hold.
    - Never suggest upgrading a plan: the library knows no plans (decision 114). Massive's own
      text, quoted, says what it says.
 5. **The reader's words.** A word the reader can type or see is allowed: a public name,
-   argument, setting, enum member, column (`NoAckTopics`, `LastError`), or diagnostics table.
+   argument, setting, enum member, column (`UnconfirmedTopics`, `LastError`), or diagnostics table.
    Other internal words are not: `generation`, `topic` (say "subscription"), `flush`, `reaper`,
    `patience`, `probe`, `envelope`, `fanout`, `spec`, `upstream`, a session's `#1`, or a REST
    path template with braces. Write a setting as the user does

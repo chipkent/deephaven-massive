@@ -521,8 +521,9 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
               `RECONNECTING`, `FAILED`, or `CLOSED`. `WAITING` means the library hasn't connected,
               because no live table on the connection has a symbol to stream yet. It connects at
               the first symbol.
-            - `Topics`, `AckedTopics`, `PendingTopics`, and `NoAckTopics`: the subscriptions sent,
-              confirmed by Massive, waiting for confirmation, and never confirmed.
+            - `Topics`, `ConfirmedTopics`, `PendingTopics`, and `UnconfirmedTopics`: the
+              subscriptions sent, confirmed by Massive, waiting for confirmation, and never
+              confirmed.
             - `BufferedRows`: rows waiting to reach their tables. Past 1,000,000, a WARNING is
               logged.
             - `Reconnects`, `LastMessageAt`, `NextReconnectAt`, `UpdatedAt`, and `LastError`.

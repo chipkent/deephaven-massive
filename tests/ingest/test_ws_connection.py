@@ -316,7 +316,7 @@ def test_a_reconnect_resends_the_desired_set(
     ws_session.subscribed("T.AAPL")  # on the new connection
     ws_session.wait(lambda s: sum(status.kind is StatusKind.ACK for status in s.statuses) == 2)
     [row] = connections_of(ws_session, dh_to_pylist)
-    assert (row["State"], row["Reconnects"], row["Topics"], row["AckedTopics"]) == (
+    assert (row["State"], row["Reconnects"], row["Topics"], row["ConfirmedTopics"]) == (
         "CONNECTED",
         1,
         1,
@@ -369,7 +369,7 @@ def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
     fake_ws_server.silent.add("T.AAPL")
     quiet = custom_session.query(TRADES, ["AAPL"]).blink()
     custom_session.wait(lambda s: s.opens == 1)
-    wait_for(lambda: connections_of(custom_session, dh_to_pylist)[0]["NoAckTopics"] == 1)
+    wait_for(lambda: connections_of(custom_session, dh_to_pylist)[0]["UnconfirmedTopics"] == 1)
     healthy = custom_session.query(TRADES, ["MSFT"]).blink()
     custom_session.subscribed("T.MSFT")
     # The server records the subscription before it answers: wait for its acknowledgement to
@@ -380,7 +380,7 @@ def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
     params = [json.loads(f)["params"] for f in fake_ws_server.frames(0)]
     assert params == ["T.AAPL", "T.AAPL", "T.MSFT"]
     [row] = connections_of(custom_session, dh_to_pylist)
-    assert (row["State"], row["NoAckTopics"], row["AckedTopics"]) == ("CONNECTED", 1, 1)
+    assert (row["State"], row["UnconfirmedTopics"], row["ConfirmedTopics"]) == ("CONNECTED", 1, 1)
     assert custom_session.opens == 1
     # The quiet stream has a span that says why its rows may be missing, without failing it;
     # the other is clean.
@@ -399,7 +399,7 @@ def test_a_missing_acknowledgement_shows_as_no_ack_and_keeps_the_connection(
     (span,) = problem_rows(custom_session, dh_to_pylist, NO_ACK)
     assert (span["Action"], span["Rows"]) == ("DELAYED", 1)
     [row] = connections_of(custom_session, dh_to_pylist)
-    assert (row["NoAckTopics"], row["AckedTopics"]) == (0, 2)
+    assert (row["UnconfirmedTopics"], row["ConfirmedTopics"]) == (0, 2)
     del quiet, healthy
 
 

@@ -281,9 +281,9 @@ CONNECTIONS: Final = Schema(
             ("Evidence", _S),
             ("State", _S),
             ("Topics", _I),
-            ("AckedTopics", _I),
+            ("ConfirmedTopics", _I),
             ("PendingTopics", _I),
-            ("NoAckTopics", _I),
+            ("UnconfirmedTopics", _I),
             ("BufferedRows", _L),
             ("Reconnects", _I),
             ("LastMessageAt", _T),
@@ -371,9 +371,9 @@ class ConnectionRow:
         evidence: The host decision's evidence string.
         state: The connection state.
         topics: Topics desired on the connection.
-        acked_topics: Topics the server acknowledged.
+        confirmed_topics: Topics the server acknowledged.
         pending_topics: Topics sent and awaiting acknowledgement.
-        no_ack_topics: Topics never acknowledged after one re-send.
+        unconfirmed_topics: Topics never acknowledged after one re-send.
         buffered_rows: Rows the connection received that no flush has taken yet; every family
             row of a WebSocket connection shows the connection's count. Rewritten at least
             once a second while it is above zero.
@@ -393,9 +393,9 @@ class ConnectionRow:
     evidence: str | None = None
     state: ConnectionState = ConnectionState.RESOLVING
     topics: int = 0
-    acked_topics: int = 0
+    confirmed_topics: int = 0
     pending_topics: int = 0
-    no_ack_topics: int = 0
+    unconfirmed_topics: int = 0
     buffered_rows: int = 0
     reconnects: int = 0
     last_message_at: int | None = None
