@@ -204,7 +204,9 @@ class _PairState:
         return self.waits.update({pair: (pair, None, why, 0) for pair in self.waiting})
 
 
-def _weakly(owner_ref: Callable[[], WsConnections | None], method: str, *args: object) -> None:
+def _weakly(
+    owner_ref: Callable[[], WsConnections | None], method: str, *args: object, **kwargs: object
+) -> None:
     """Call a session's `WsConnections` method through a weak reference, if it still exists.
 
     The blink table's shutdown callback and a watchlist's change callback are held from Java
@@ -218,11 +220,12 @@ def _weakly(owner_ref: Callable[[], WsConnections | None], method: str, *args: o
         owner_ref: Returns the session's `WsConnections`, or None once it is freed: a weak
             reference.
         method: The method's name, `"_shut_down"` or `"_symbols_changed"`.
-        *args: Its arguments.
+        *args: Its positional arguments.
+        **kwargs: Its keyword arguments.
     """
     owner = owner_ref()
     if owner is not None:
-        getattr(owner, method)(*args)
+        getattr(owner, method)(*args, **kwargs)
 
 
 def _wanted(
@@ -483,7 +486,7 @@ class WsConnections:
                 # so a finished session is freed without waiting for a JVM collection.
                 on_shutdown=functools.partial(_weakly, weakref.ref(self), "_shut_down", stream_id),
                 on_symbols=functools.partial(
-                    _weakly, weakref.ref(self), "_symbols_changed", stream_id
+                    _weakly, weakref.ref(self), "_symbols_changed", stream_id, dataset=spec.name
                 ),
             )
         except BaseException:
@@ -506,7 +509,13 @@ class WsConnections:
                     self._pair_states[stream_id] = _PairState(spec.name, request.on_error)
             self._attach(stream)
             if pairs:
-                self._submit_change(self._change_pairs, stream_id, added=pairs, removed=frozenset())
+                self._submit_change(
+                    self._change_pairs,
+                    stream_id,
+                    dataset=spec.name,
+                    added=pairs,
+                    removed=frozenset(),
+                )
             if opened.watch is not None:
                 opened.watch.start()
         except BaseException:
@@ -744,7 +753,7 @@ class WsConnections:
             logger.exception("Releasing stream %d failed. %s", stream_id, LIBRARY_BUG)
 
     def _symbols_changed(
-        self, stream_id: int, added: frozenset[str], removed: frozenset[str]
+        self, stream_id: int, added: frozenset[str], removed: frozenset[str], *, dataset: str
     ) -> None:
         """A reactive symbol table changed: post the change to the stream's connection.
 
@@ -762,6 +771,7 @@ class WsConnections:
             stream_id: The stream.
             added: Canonical symbols the table now holds.
             removed: Canonical symbols it no longer holds.
+            dataset: The stream's dataset, such as `"crypto.trades"`.
         """
         with self._lock:
             connection = self.group.streams.get(stream_id)
@@ -769,7 +779,9 @@ class WsConnections:
             return
         asset_class = connection.asset_class
         if asset_class is AssetClass.CRYPTO:
-            self._submit_change(self._change_pairs, stream_id, added=added, removed=removed)
+            self._submit_change(
+                self._change_pairs, stream_id, dataset=dataset, added=added, removed=removed
+            )
             return
         if asset_class is AssetClass.FUTURES and added:
             try:
@@ -785,6 +797,7 @@ class WsConnections:
         change: Callable[[int, frozenset[str], frozenset[str]], None],
         stream_id: int,
         *,
+        dataset: str,
         added: frozenset[str],
         removed: frozenset[str],
     ) -> None:
@@ -795,12 +808,18 @@ class WsConnections:
         Args:
             change: `_change_pairs`, the only change that runs on the worker.
             stream_id: The stream.
+            dataset: The stream's dataset, which starts the message of a failed change.
             added: Canonical symbols to subscribe.
             removed: Canonical symbols to unsubscribe.
         """
         try:
             self._changes.submit(
-                self._run_change, change, stream_id=stream_id, added=added, removed=removed
+                self._run_change,
+                change,
+                stream_id=stream_id,
+                dataset=dataset,
+                added=added,
+                removed=removed,
             )
         except RuntimeError as error:
             self._drop_change(stream_id, added, removed, error=error)
@@ -831,6 +850,7 @@ class WsConnections:
         change: Callable[[int, frozenset[str], frozenset[str]], None],
         *,
         stream_id: int,
+        dataset: str,
         added: frozenset[str],
         removed: frozenset[str],
     ) -> None:
@@ -838,16 +858,18 @@ class WsConnections:
 
         Nothing reads the worker's futures, so an exception that escaped here would vanish.
         Any exception of the change is a defect of the library: it is logged at ERROR with its
-        trace, and it fails the stream (`Flusher.fail`), if the stream still exists. A
-        `MassiveError` that already names itself a defect (`ErrorSource.LIBRARY`) fails the
-        stream with its own message, ended with `LIBRARY_BUG` unless it holds it already; any
-        other exception is wrapped once in a `MassiveError` that names the change and asks for
-        a bug report. Either way the message
-        asks for the report exactly once.
+        trace, and it fails the stream (`Flusher.fail`), if the stream still exists. The
+        message starts with the stream's dataset and number (`crypto.trades stream 3`), as
+        every other failure of a stream names its table. A `MassiveError` that already names
+        itself a defect (`ErrorSource.LIBRARY`) fails the stream with its own message, ended
+        with `LIBRARY_BUG` unless it holds it already; any other exception is wrapped once in
+        a `MassiveError` that names the change and asks for a bug report. Either way the
+        message asks for the report exactly once.
 
         Args:
             change: `_change_pairs`, the only change that runs on the worker.
             stream_id: The stream.
+            dataset: The stream's dataset, such as `"crypto.trades"`.
             added: Canonical symbols the table now holds.
             removed: Canonical symbols it no longer holds.
         """
@@ -856,12 +878,15 @@ class WsConnections:
         except Exception as error:  # a defect: logged with its trace, and it fails the stream
             if isinstance(error, MassiveError) and error.source is ErrorSource.LIBRARY:
                 # Its own message, ended with how to report it unless it already says so.
-                failure = MassiveError(failure_text(error), source=ErrorSource.LIBRARY)
+                failure = MassiveError(
+                    f"{dataset} stream {stream_id}: {failure_text(error)}",
+                    source=ErrorSource.LIBRARY,
+                )
             else:
                 failure = MassiveError(
                     library_bug(
-                        f"Stream {stream_id} could not follow a change of its symbol table, "
-                        f"which added {prose_list(sorted(added), 'symbols')} and removed "
+                        f"{dataset} stream {stream_id} could not follow a change of its symbol "
+                        f"table, which added {prose_list(sorted(added), 'symbols')} and removed "
                         f"{prose_list(sorted(removed), 'symbols')}: {error!r}"
                     ),
                     source=ErrorSource.LIBRARY,
@@ -1238,7 +1263,13 @@ class WsConnections:
             if state is None:
                 return
             state.retry_due = False
-        self._submit_change(self._change_pairs, stream_id, added=frozenset(), removed=frozenset())
+        self._submit_change(
+            self._change_pairs,
+            stream_id,
+            dataset=state.dataset,
+            added=frozenset(),
+            removed=frozenset(),
+        )
 
     def _fail(self, stream_id: int, failure: MassiveError) -> None:
         """Fail a stream from the `symbol changes` worker, if it still exists.

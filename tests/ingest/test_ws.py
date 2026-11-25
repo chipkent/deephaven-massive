@@ -1256,7 +1256,7 @@ def test_late_callbacks_of_an_unknown_stream_are_ignored(
     ws_session.subscribed("T.AAPL")
     ws_session.on_loop(connection, lambda: connection.release_stream(999))
     ws_session.on_loop(connection, lambda: connection.change_symbols(999, frozenset(), frozenset()))
-    ws_session.connections._symbols_changed(999, frozenset({"X"}), frozenset())
+    ws_session.connections._symbols_changed(999, frozenset({"X"}), frozenset(), dataset=TRADES.name)
     ws_session.on_loop(connection, connection._idle_close)  # a stream is open: it stays
     stale = Status(kind=StatusKind.REFUSED, topics=("T.AAPL",), message="not authorized")
     ws_session.on_loop(connection, lambda: connection._on_status(999, stale))  # an older socket's
@@ -2040,7 +2040,9 @@ def test_a_futures_removal_starts_no_lookup(
     looked_up(ws_session, "GCQ6-GCJ7")
     asked = len(ws_session.fetched)
     (stream_id,) = ws_session.connections.group.streams
-    ws_session.connections._symbols_changed(stream_id, frozenset(), frozenset({"GCQ6-GCJ7"}))
+    ws_session.connections._symbols_changed(
+        stream_id, frozenset(), frozenset({"GCQ6-GCJ7"}), dataset=FUTURES.name
+    )
     ws_session.unsubscribed("T.GCQ6-GCJ7")
     assert len(ws_session.fetched) == asked
     ws_session.session.release(result)
@@ -2067,7 +2069,9 @@ def test_a_futures_watchlist_change_during_a_close_is_dropped(
 
     monkeypatch.setattr(ws_session.connections, "futures_calendar", closed)
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.ws"):
-        ws_session.connections._symbols_changed(stream_id, frozenset({"NQZ5"}), frozenset())
+        ws_session.connections._symbols_changed(
+            stream_id, frozenset({"NQZ5"}), frozenset(), dataset=FUTURES.name
+        )
     assert (
         f"stream {stream_id}: a watchlist change (1 added, 0 removed) was dropped; the session "
         f"is closing ({session_closed()})"
@@ -2089,7 +2093,9 @@ def test_a_futures_watchlist_change_that_meets_a_library_bug_raises_it(
     with monkeypatch.context() as patched:
         patched.setattr(ws_session.connections, "futures_calendar", broken)
         with pytest.raises(dm.MassiveError) as raised:
-            ws_session.connections._symbols_changed(stream_id, frozenset({"NQZ5"}), frozenset())
+            ws_session.connections._symbols_changed(
+                stream_id, frozenset({"NQZ5"}), frozenset(), dataset=FUTURES.name
+            )
     assert raised.value is bug
     ws_session.session.release(result)
 
@@ -2784,7 +2790,11 @@ def test_a_change_defect_after_its_stream_ended_fails_nothing(
         raise RuntimeError("the change broke")
 
     ws_session.connections._run_change(
-        broken, stream_id=999, added=frozenset({"X:DOTUSD"}), removed=frozenset()
+        broken,
+        stream_id=999,
+        dataset=CRYPTO.name,
+        added=frozenset({"X:DOTUSD"}),
+        removed=frozenset(),
     )
     # The defect is logged once, with its trace; no stream is left to fail.
     assert [r.levelno for r in caplog.records] == [logging.ERROR]
@@ -2805,7 +2815,7 @@ def test_a_defect_in_a_pair_lookup_fails_the_stream_and_is_never_retried(
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["State"] == "FAILED"
-    assert row["Error"] == f"the split broke. {LIBRARY_BUG}"
+    assert row["Error"] == f"test.crypto stream 1: the split broke. {LIBRARY_BUG}"
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [(row["Error"], True)]
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:BTCUSD", "X:DOTUSD"]
@@ -2833,8 +2843,8 @@ def test_an_unexpected_lookup_failure_fails_the_stream(
     wait_for(lambda: failed_after_flush(ws_session, result))
     (row,) = streams_of(ws_session, dh_to_pylist)
     assert row["Error"] == (
-        "Stream 1 could not follow a change of its symbol table, which added X:DOTUSD and "
-        "removed no symbols: RuntimeError('the lookup broke'). " + LIBRARY_BUG
+        "test.crypto stream 1 could not follow a change of its symbol table, which added "
+        "X:DOTUSD and removed no symbols: RuntimeError('the lookup broke'). " + LIBRARY_BUG
     )
     # A defect of the library: one ERROR, with its trace, for the lookup and the stream it fails.
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
@@ -2863,8 +2873,9 @@ def test_a_defect_after_the_lookup_fails_the_stream(
     assert [(r.getMessage(), r.exc_info is not None) for r in errors] == [
         (
             (
-                f"Stream 1 could not follow a change of its symbol table, which added {symbol} and "
-                f"removed no symbols: RuntimeError('posting broke'). {LIBRARY_BUG}"
+                "test.crypto stream 1 could not follow a change of its symbol table, which "
+                f"added {symbol} and removed no symbols: RuntimeError('posting broke'). "
+                f"{LIBRARY_BUG}"
             ),
             True,
         )
@@ -2878,7 +2889,9 @@ def test_a_watchlist_change_racing_close_is_dropped(ws_session: WsSession) -> No
     ws_session.subscribed("XT.BTC-USD")
     (stream_id,) = ws_session.connections._mine
     ws_session.connections._changes.shutdown()
-    ws_session.connections._symbols_changed(stream_id, frozenset({"X:ETHUSD"}), frozenset())
+    ws_session.connections._symbols_changed(
+        stream_id, frozenset({"X:ETHUSD"}), frozenset(), dataset=CRYPTO.name
+    )
     # The stream's own pair, before it started.
     assert [symbol for symbol, _ in lookups(ws_session)] == ["X:BTCUSD"]
     ws_session.session.release(result)
