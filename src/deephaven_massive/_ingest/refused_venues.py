@@ -164,18 +164,21 @@ class RefusedVenues:
             dataset: The dataset read, such as `"futures.trades"`, which starts the message.
 
         Returns:
-            An `EntitlementError` naming the venues and the first one's refusal, with its status
-            and request id, such as `"futures.trades: Massive refused the flat files of every
-            venue the read asked for, CME and NYMEX. Massive answered ... To read from REST
-            instead, pass source=dm.HistorySource.REST and contract tickers such as 'ESH5'
-            in place of dm.ALL."`.
+            An `EntitlementError` naming the venues and quoting each one's refusal in
+            `FuturesVenue` order, with the first one's status and request id, such as
+            `"futures.trades: Massive refused the flat files of every venue the read asked for,
+            CME and NYMEX. Massive answered the read of s3://...cme... with HTTP 403 (request_id
+            r1): "...". Massive answered the read of s3://...nymex... with HTTP 403 (request_id
+            r2): "...". To read from REST instead, pass source=dm.HistorySource.REST and
+            contract tickers such as 'ESH5' in place of dm.ALL."`.
         """
         refused = self._refused()
         first = refused[0][1]
         names = prose_list((venue.name for venue, _ in refused), "venues", shown=len(refused))
+        answers = " ".join(error.message for _, error in refused)
         return EntitlementError(
             f"{dataset}: Massive refused the flat files of every venue the read asked for, "
-            f"{names}. {first.message} To read from REST instead, pass "
+            f"{names}. {answers} To read from REST instead, pass "
             "source=dm.HistorySource.REST and contract tickers such as 'ESH5' in place of dm.ALL.",
             status=first.status,
             request_id=first.request_id,

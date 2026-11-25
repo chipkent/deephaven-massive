@@ -114,6 +114,7 @@ from deephaven_massive._ingest.ws_connection import (
     Connection,
     ConnectionGroup,
     ConnectionStream,
+    stream_copy,
 )
 from deephaven_massive._log_limits import bounded_list, mark_failure_logged, prose_list
 from deephaven_massive._on_error import effect_of
@@ -674,7 +675,7 @@ class WsConnections:
                 connection.flusher.routes.add(stream.channel, stream.sink)
                 connection.post(connection.add_stream, stream)
         if failure is not None:
-            stream.sink.fail(failure)
+            stream.sink.fail(stream_copy(failure, stream.plan.dataset))
 
     def _abandon(self, connection: Connection, stream_id: int) -> None:
         """Return the lease of a stream whose open failed, and let its connection go idle.

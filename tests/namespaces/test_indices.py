@@ -738,10 +738,10 @@ def test_index_bars_of_a_day_or_longer_start_at_midnight_in_chicago(
     assert not stamp_warnings(caplog)
     # A week bar at the close, or a day bar at 02:00, may be another cut: each is withheld,
     # so a page of no other bar fails the read; each warns once.
-    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
+    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
         week.history(first, last, source=dm.HistorySource.REST, wait=True)
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
-    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
+    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
         q.history(day, day, source=dm.HistorySource.REST, wait=True)
     week_warning, day_warning = stamp_warnings(caplog)
     assert week_warning.startswith(
@@ -935,7 +935,8 @@ def test_a_refused_values_topic_names_the_indices_host_setting(
     wait_for(lambda: error() is not None)
     message = str(error())
     assert message == (
-        'Massive answered the subscription to V.I:SPX on wss://socket.test/indices: "not '
+        "indices.values: Massive answered the subscription to V.I:SPX on "
+        'wss://socket.test/indices: "not '
         'authorized". Massive documents indices.values only on its Business feed, '
         "business.massive.com. Its plans are listed at "
         "https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/indices.values.md. "

@@ -47,10 +47,12 @@ def test_a_venue_keeps_its_first_refusal_and_venues_come_in_enum_order(
         f"skipping venue COMEX (already refused): {_answer('COMEX', 'r3')}",
     ]
     error = refused.every_venue_refused("futures.trades")
+    # Each venue's own answer, in enum order; the status and request id are the first venue's.
     assert str(error) == (
         "futures.trades: Massive refused the flat files of every venue the read asked for, CME "
-        f"and COMEX. {_answer('CME', 'r2')} To read from REST instead, pass "
-        "source=dm.HistorySource.REST and contract tickers such as 'ESH5' in place of dm.ALL."
+        f"and COMEX. {_answer('CME', 'r2')} {_answer('COMEX', 'r1')} To read from REST instead, "
+        "pass source=dm.HistorySource.REST and contract tickers such as 'ESH5' in place of "
+        "dm.ALL."
     )
     assert (error.status, error.request_id) == (403, "r2")
 

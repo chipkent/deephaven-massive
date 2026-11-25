@@ -29,6 +29,7 @@ from deephaven_massive._datasets.symbols import (
     is_canonical,
     is_forex_currency,
     is_futures_contract,
+    is_lower_case,
     option_roots,
     refusal,
     strict_converter,
@@ -728,6 +729,15 @@ def test_the_fix_a_refusal_names_converts(
     convert: Callable[[str], str | None], text: str, expected: str
 ) -> None:
     assert convert(text) == expected
+
+
+def test_is_lower_case_needs_letters_and_all_of_them_lower() -> None:
+    assert is_lower_case("msft")
+    assert is_lower_case("x:btcusd")
+    assert not is_lower_case("MSFT")
+    assert not is_lower_case("KIMpL")  # a lower-case marker in an upper-case ticker
+    assert not is_lower_case("123")  # no letters at all
+    assert not is_lower_case("")
 
 
 @pytest.mark.parametrize("text", ["KIMpL", "KIMr", "KIMw", "AAPL"])

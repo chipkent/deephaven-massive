@@ -26,6 +26,7 @@ from deephaven_massive._errors import EntitlementError, ErrorSource
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
     from deephaven_massive._enums import Subscription
 
@@ -147,7 +148,12 @@ class DelayedDataError(EntitlementError):
 
 
 def delayed_refusal(
-    subscription: Subscription, what: str, evidence: str, *, streams: bool
+    subscription: Subscription,
+    what: str,
+    evidence: str,
+    *,
+    listed: AbstractSet[Subscription],
+    streams: bool,
 ) -> DelayedDataError:
     """Return the error of delayed data for a subscription not listed as delayed.
 
@@ -155,6 +161,8 @@ def delayed_refusal(
         subscription: The subscription, not in `MassiveConfig.delayed_subscriptions`.
         what: What would be delayed, such as `"options streams"` or
             `"stocks.snapshots data"`.
+        listed: The session's `MassiveConfig.delayed_subscriptions`, which the fix repeats
+            with the subscription added.
         evidence: The label that shows it (`RecencyLabels.delayed`).
         streams: True for a stream, whose fix is Massive's delayed feed; False for a REST
             read, whose fix accepts Massive's delayed data and also moves the subscription's
@@ -176,5 +184,6 @@ def delayed_refusal(
     return DelayedDataError(
         f"{what} would be delayed, since Massive reports {evidence}, and "
         f"dm.Subscription.{subscription.name} is not in delayed_subscriptions, so the library "
-        f"serves only real-time {subscription} data. {delayed_fix(subscription, purpose=purpose)}"
+        f"serves only real-time {subscription} data. "
+        f"{delayed_fix(subscription, listed=listed, purpose=purpose)}"
     )

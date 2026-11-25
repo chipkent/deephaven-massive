@@ -56,22 +56,28 @@ def test_a_nested_field_under_a_scalar_is_absent() -> None:
 
 def test_a_stream_refusal_names_the_delayed_feed() -> None:
     error = delayed_refusal(
-        Subscription.OPTIONS, "options streams", "last_trade.timeframe=DELAYED", streams=True
+        Subscription.OPTIONS,
+        "options streams",
+        "last_trade.timeframe=DELAYED",
+        listed={Subscription.STOCKS},
+        streams=True,
     )
     assert isinstance(error, dm.EntitlementError)
     # Massive serves the delayed data; the session's settings refuse it.
     assert (error.source, error.is_bug) == (dm.ErrorSource.USER, False)
+    # The fix keeps the subscription the session already lists.
     assert str(error) == (
         "options streams would be delayed, since Massive reports last_trade.timeframe=DELAYED, "
         "and dm.Subscription.OPTIONS is not in delayed_subscriptions, so the library serves only "
         "real-time options data. To use Massive's delayed options feed, pass "
-        "delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."
+        "delayed_subscriptions={dm.Subscription.STOCKS, dm.Subscription.OPTIONS} to "
+        "dm.MassiveConfig."
     )
 
 
 def test_a_rest_refusal_says_streams_move_too() -> None:
     error = delayed_refusal(
-        Subscription.STOCKS, "stocks.snapshots data", "status=DELAYED", streams=False
+        Subscription.STOCKS, "stocks.snapshots data", "status=DELAYED", listed=set(), streams=False
     )
     assert str(error) == (
         "stocks.snapshots data would be delayed, since Massive reports status=DELAYED, and "
@@ -83,9 +89,13 @@ def test_a_rest_refusal_says_streams_move_too() -> None:
 
 
 def test_the_setting_the_refusal_names_lets_the_delayed_data_through() -> None:
-    # The advice works: a configuration built as the message says lists the subscription.
-    config = dm.MassiveConfig(api_key="test-key", delayed_subscriptions={dm.Subscription.OPTIONS})
-    assert Subscription.OPTIONS in config.delayed_subscriptions
+    # The advice works: a configuration built as the message says lists the subscription,
+    # and keeps the one the session listed before.
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        delayed_subscriptions={dm.Subscription.STOCKS, dm.Subscription.OPTIONS},
+    )
+    assert config.delayed_subscriptions == {Subscription.STOCKS, Subscription.OPTIONS}
 
 
 @pytest.mark.parametrize(

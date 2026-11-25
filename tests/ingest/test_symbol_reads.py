@@ -247,13 +247,13 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
     assert isinstance(nvda.error, EntitlementError)
     assert not nvda.error.is_retryable
     # The row of a symbol no one asked for belongs to no symbol's read.
-    unowned = [r for r in caplog.records if "name none of those symbols" in r.getMessage()]
+    unowned = [r for r in caplog.records if "none of those symbols" in r.getMessage()]
     assert [(r.levelno, r.getMessage()) for r in unowned] == [
         (
             logging.WARNING,
             (
-                "stocks.dividends: 1 of the 3 rows Massive returned for AAPL and MSFT name none "
-                "of those symbols, so no symbol's read owns them and they are left out."
+                "stocks.dividends: 1 row of the 3 Massive returned for AAPL and MSFT names none "
+                "of those symbols, so no symbol's read owns it and it is left out."
             ),
         )
     ]
@@ -274,7 +274,7 @@ def test_a_batch_whose_rows_all_belong_to_its_symbols_warns_nothing(
     with caplog.at_level(logging.DEBUG, LOGGER):
         out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"])
     assert [len(_rows(outcome)) for outcome in out.values()] == [0, 1]
-    assert "name none" not in caplog.text
+    assert "none of those symbols" not in caplog.text
 
 
 def test_an_unowned_row_warns_once_per_dataset_and_path(
@@ -284,7 +284,7 @@ def test_an_unowned_row_warns_once_per_dataset_and_path(
     with caplog.at_level(logging.DEBUG, LOGGER):
         for _ in range(2):
             assert _rows(_fetch(session, DIVIDENDS, ["AAPL", "MSFT"])["AAPL"]) == []
-    unowned = [r.levelno for r in caplog.records if "name none" in r.getMessage()]
+    unowned = [r.levelno for r in caplog.records if "none of those symbols" in r.getMessage()]
     assert unowned == [logging.WARNING, logging.DEBUG]
 
 
@@ -334,8 +334,8 @@ def test_a_row_listing_none_of_the_named_tickers_belongs_to_no_symbol(
         (
             logging.WARNING,
             (
-                "partners.benzinga.news: Massive sent 1 rows from /benzinga/v2/news whose Tickers "
-                "lists none of the requested tickers AAPL and MSFT, so they are left out."
+                "partners.benzinga.news: Massive sent 1 row from /benzinga/v2/news whose Tickers "
+                "lists none of the requested tickers AAPL and MSFT, so it is left out."
             ),
         )
     ]
@@ -350,8 +350,8 @@ def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
     assert _rows(out["AAPL"]) == []
     assert caplog.messages == [
         (
-            "reference.news: 1 of the 1 rows Massive returned for no symbol name none of those "
-            "symbols, so no symbol's read owns them and they are left out."
+            "reference.news: 1 row of the 1 Massive returned for no symbol names none of those "
+            "symbols, so no symbol's read owns it and it is left out."
         )
     ]
 
@@ -591,7 +591,7 @@ def test_a_split_by_symbol_warns_about_rows_no_symbol_owns(
     assert [part.size for part in out.values()] == [0, 2, 1]
     assert caplog.messages == [
         (
-            "stocks.trades: 2 of the 5 rows read from flat files for NVDA, AAPL, and MSFT name "
+            "stocks.trades: 2 rows of the 5 read from flat files for NVDA, AAPL, and MSFT name "
             "none of those symbols, or no symbol, so no symbol's read owns them and they are "
             "left out."
         )

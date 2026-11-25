@@ -22,6 +22,8 @@ from flooding the log:
 - `prose_list` renders a list as prose for a message a user reads (an error, a WARNING, a
   table's `Error`): `X:FOOUSD and X:BARUSD`, or `12 symbols, the first 3: AAPL, MSFT, and
   NVDA`.
+- `counted` renders a count with its noun for such a message, in the singular for one:
+  `1 row`, `12,345 rows`.
 
 All are thread-safe. Each holds a leaf lock only while it updates the keys, values, or failures
 it has seen, never while it logs. The module imports only the standard library and `_errors`,
@@ -46,6 +48,7 @@ __all__ = [
     "BoundedLog",
     "LoggedKeys",
     "bounded_list",
+    "counted",
     "log_failure",
     "log_once",
     "mark_failure_logged",
@@ -170,6 +173,24 @@ def prose_list(items: Iterable[object], noun: str, *, shown: int = 3) -> str:
     if len(listed) > shown:
         return f"{len(listed)} {noun}, the first {shown}: {_joined(listed[:shown])}"
     return _joined(listed)
+
+
+def counted(count: int, noun: str) -> str:
+    """Render a count with its noun for a message a user reads: `1 row`, `12,345 rows`.
+
+    Args:
+        count: The count.
+        noun: What is counted, in the singular, such as `"row"`; its plural adds an `s`.
+
+    Returns:
+        The count with thousands separators and the noun, singular for a count of one.
+
+    Example:
+        ::
+
+            logger.warning("%s withheld", counted(withheld, "row"))
+    """
+    return f"{count:,} {noun}{'' if count == 1 else 's'}"
 
 
 def _joined(items: list[str]) -> str:

@@ -456,12 +456,15 @@ class Admission:
                 cancelled), and with status 429 when the bucket is paused for longer than the
                 read's patience can still wait out (the message quotes the latest refusal,
                 says when the next request goes, gives how long the read waits and has waited,
-                the usual cause, and the remedies).
+                the usual cause, and the remedies; its `path` is the refused request's, when
+                `RequestGovernor.refused` was given one).
         """
         permit = self._governor.admit(self, cancel)
         if isinstance(permit, WireError):
             logger.debug("%s: the wait for a permit ends: %s", self.bucket, permit.message)
-            raise WireError(permit.message, status=permit.status, kind=permit.kind)
+            raise WireError(
+                permit.message, status=permit.status, path=permit.path, kind=permit.kind
+            )
         if permit.probe:
             logger.debug(
                 "%s: the pause is over; this request probes alone, and the bucket's other "
@@ -577,6 +580,7 @@ class _Bucket:
         "label",
         "lanes",
         "last_refusal",
+        "last_refused_path",
         "learned",
         "name",
         "open",
@@ -642,6 +646,8 @@ class _Bucket:
         # belongs to an earlier run, so its refusal never chooses this run's minute.
         self.run_episode = 0
         self.last_refusal: str | None = None
+        # The path of the request that refusal answered, when its caller gave it.
+        self.last_refused_path: str | None = None
         # Set by a pause: the next request to start is its probe, alone (`probe`) until
         # Massive answers it with anything but a 429.
         self.probing = False
@@ -1277,6 +1283,7 @@ class RequestGovernor:
         *,
         retry_after: float | None,
         message: str,
+        path: str | None = None,
     ) -> bool:
         """Report an attempt that Massive refused with HTTP 429, and pause its bucket.
 
@@ -1303,6 +1310,9 @@ class RequestGovernor:
                 length, `math.inf` included), or None when it gave none.
             message: The refusal's text, with its request id, quoted in diagnostics and in the
                 error of a request that stops waiting.
+            path: The path of the request Massive refused, which that error carries so its
+                caller can tell its own refusal from another request's; None (absent) when
+                the caller has none.
 
         Returns:
             Whether the message names the per-minute maximum (`is_rate_limit_refusal`).
@@ -1328,6 +1338,7 @@ class RequestGovernor:
             was_until = state.pause_until
             state.refusals += 1
             state.last_refusal = message
+            state.last_refused_path = path
             if permit.episode == state.episode:
                 if state.run_refusals == 0:
                     state.run_episode = permit.episode  # this refusal starts a run
@@ -1717,13 +1728,17 @@ class RequestGovernor:
 
         Returns:
             None when the patience covers the pause (the part not yet counted is charged), or
-            a `WireError` with status 429 when it does not (nothing is charged).
+            a `WireError` with status 429 when it does not (nothing is charged), whose `path`
+            is the latest refused request's.
         """
         # A pause already over adds nothing to charge, so an unpaused bucket never fails.
         if not patience.charge(now, state.pause_until):
             # Massive refused the bucket with HTTP 429; the read will not wait out the pause.
             return WireError(
-                self._give_up_text(state, patience, now), status=429, kind=WireFailure.REFUSED
+                self._give_up_text(state, patience, now),
+                status=429,
+                path=state.last_refused_path,
+                kind=WireFailure.REFUSED,
             )
         return None
 

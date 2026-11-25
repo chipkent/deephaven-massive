@@ -10,6 +10,7 @@ from deephaven_massive._log_limits import (
     BoundedLog,
     LoggedKeys,
     bounded_list,
+    counted,
     log_failure,
     log_once,
     mark_failure_logged,
@@ -40,6 +41,13 @@ def test_prose_list_counts_a_long_list_and_shows_its_first_items() -> None:
     assert prose_list(symbols, "symbols") == "12 symbols, the first 3: S0, S1, and S2"
     assert prose_list(symbols, "symbols", shown=1) == "12 symbols, the first 1: S0"
     assert prose_list(symbols[:3], "symbols", shown=3) == "S0, S1, and S2"  # exactly the limit
+
+
+def test_counted_gives_the_singular_for_one_and_separates_thousands() -> None:
+    assert counted(0, "row") == "0 rows"
+    assert counted(1, "row") == "1 row"
+    assert counted(3, "row") == "3 rows"
+    assert counted(12345, "ticker") == "12,345 tickers"
 
 
 def test_log_once_logs_each_key_once(

@@ -800,7 +800,7 @@ def _check_delayed_subscriptions(
             raise ValueError(
                 f"websocket_hosts pins {asset_class} to the delayed feed {host!r}, but "
                 f"delayed_subscriptions does not include dm.Subscription.{subscription.name}. "
-                f"{delayed_fix(subscription, purpose=purpose)}"
+                f"{delayed_fix(subscription, listed=delayed, purpose=purpose)}"
             )
         if listed and not pins_delayed:
             raise ValueError(
@@ -811,25 +811,43 @@ def _check_delayed_subscriptions(
             )
 
 
-def delayed_fix(subscription: Subscription, *, purpose: str | None = None) -> str:
+def delayed_fix(
+    subscription: Subscription,
+    *,
+    listed: AbstractSet[Subscription] | None = None,
+    purpose: str | None = None,
+) -> str:
     """Return the sentence that tells the user how to ask for a subscription's delayed data.
 
-    The one place the setting's spelling appears in the library's messages.
+    The one place the setting's spelling appears in the library's messages. With the user's
+    current `delayed_subscriptions`, the advice is the whole set to pass, the subscriptions
+    already listed included, so pasting it loses none of them.
 
     Args:
         subscription: The subscription.
+        listed: The session's `MassiveConfig.delayed_subscriptions`; None (absent) where no
+            one session's set is known, such as a connection shared by sessions.
         purpose: What the setting achieves, as a clause that starts the sentence, such as
             `"To use Massive's delayed options feed"`; None (absent) for a sentence that
             starts with the imperative.
 
     Returns:
-        `"Pass delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."`, or,
-        with a purpose, `"To use Massive's delayed options feed, pass
-        delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."`.
+        `"Pass delayed_subscriptions={dm.Subscription.STOCKS, dm.Subscription.OPTIONS} to
+        dm.MassiveConfig."`, the members in `Subscription` order, or, without `listed`, `"Add
+        dm.Subscription.OPTIONS to delayed_subscriptions in dm.MassiveConfig."`; with a
+        purpose, `"To use Massive's delayed options feed, pass ..."`.
     """
-    advice = (
-        f"pass delayed_subscriptions={{dm.Subscription.{subscription.name}}} to dm.MassiveConfig."
-    )
+    if listed is None:
+        advice = (
+            f"add dm.Subscription.{subscription.name} to delayed_subscriptions in dm.MassiveConfig."
+        )
+    else:
+        members = ", ".join(
+            f"dm.Subscription.{member.name}"
+            for member in Subscription
+            if member is subscription or member in listed
+        )
+        advice = f"pass delayed_subscriptions={{{members}}} to dm.MassiveConfig."
     if purpose is None:
         return f"{advice[:1].upper()}{advice[1:]}"
     return f"{purpose}, {advice}"

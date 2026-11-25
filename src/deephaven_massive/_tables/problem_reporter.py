@@ -26,6 +26,7 @@ import threading
 from typing import TYPE_CHECKING, Final
 
 from deephaven_massive._enums import OnError
+from deephaven_massive._log_limits import counted
 from deephaven_massive._tables.problem_events import ProblemCause, ProblemEvent
 
 if TYPE_CHECKING:
@@ -138,7 +139,7 @@ def _alarm(problem: Problem) -> str | None:
             return None
         symbol = "" if problem.symbol is None else f" of {problem.symbol}"
         if problem.rows:
-            head = f"{problem.rows} {'row' if problem.rows == 1 else 'rows'}{symbol}, "
+            head = f"{counted(problem.rows, 'row')}{symbol}, "
         else:
             head = "" if problem.symbol is None else f"{problem.symbol}: "
         return f"{head}{problem.detail.removesuffix('.')} (at {problem.where})"

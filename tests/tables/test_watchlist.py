@@ -37,6 +37,7 @@ from deephaven_massive._tables.watchlist import (
     SymbolRowRule,
     SymbolWatch,
     _SymbolCounter,
+    invalid_row_detail,
     invalid_row_message,
     latest_rows_since_added,
     read_symbols,
@@ -235,16 +236,66 @@ def test_the_skipped_rows_text_lists_the_values_sorted_and_counts_the_rest() -> 
     )
 
 
+def test_the_detail_of_a_refused_row_is_a_label_with_no_fix() -> None:
+    # The Detail of a `noncanonical_symbols` problem says what the row is and nothing more: the
+    # row's cause leads to the fix, and `refusal()` gives it to a caller reading the row in code.
+    assert invalid_row_detail(AssetClass.STOCKS, "msft") == "'msft' is not Massive's stock ticker."
+    assert invalid_row_detail(ClassFromPrefix.ANY, "X:btc") == (
+        "'X:btc' is not Massive's crypto ticker."
+    )
+    assert invalid_row_detail(AssetClass.FOREX, "EUR/USD") == (
+        "'EUR/USD' is not Massive's forex ticker."
+    )
+    assert invalid_row_detail(AssetClass.FUTURES, " ES", as_written=True) == (
+        "' ES' has surrounding whitespace, and Massive never writes a ticker that way."
+    )
+    rule = SymbolRowRule(
+        "stocks.trades", AssetClass.STOCKS, as_written=False, noncanonical=OnError.LOG
+    )
+    assert rule.detail("msft") == "'msft' is not Massive's stock ticker."
+    assert rule.refusal("msft").startswith("stocks.trades: A symbol table holds 'msft'. ")
+    assert product_codes().detail(" ES") == (
+        "' ES' has surrounding whitespace, and Massive never writes a ticker that way."
+    )
+    # An underlying of another class is named as such; a stock in another spelling by its class.
+    assert underlyings().detail("C:EURUSD") == (
+        "'C:EURUSD' is not a stock or index ticker such as 'AAPL' or 'I:SPX'."
+    )
+    assert underlyings().detail("spx") == "'spx' is not Massive's stock ticker."
+
+
 def test_the_message_of_a_dataset_that_spans_classes_names_each_conversion() -> None:
-    message = invalid_row_message(ClassFromPrefix.ANY, "aapl")
+    message = invalid_row_message(ClassFromPrefix.ANY, "X:btc")
     assert message == (
-        f"A symbol table holds 'aapl'. {refusal(ClassFromPrefix.ANY, 'aapl')} Fix the row, or "
+        f"A symbol table holds 'X:btc'. {refusal(ClassFromPrefix.ANY, 'X:btc')} Fix the row, or "
         "convert each row with dm.canonical_symbol and that row's class, such as "
         "dm.canonical_symbol('EUR/USD', dm.AssetClass.FOREX), or dm.canonical_symbol('BRK-B', "
         "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO) for a stock in Yahoo's "
-        f"spelling. If Massive itself writes 'aapl', report it at {ISSUES_URL}, since the "
+        f"spelling. If Massive itself writes 'X:btc', report it at {ISSUES_URL}, since the "
         "library does not know that form yet."
     )
+
+
+def test_a_lower_case_row_names_its_upper_case_form_and_asks_for_no_report() -> None:
+    # Massive never writes a ticker in lower case only, and the reason already names the
+    # upper-case form, so the message does not ask the user to report a form the library knows.
+    assert invalid_row_message(AssetClass.STOCKS, "msft") == (
+        "A symbol table holds 'msft'. 'msft' is not a Massive stock ticker, because Massive's "
+        "tickers are case-sensitive. If you mean 'MSFT', pass 'MSFT'. Fix the row, or convert "
+        "the table with dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, "
+        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from."
+    )
+    assert invalid_row_message(ClassFromPrefix.ANY, "aapl") == (
+        "A symbol table holds 'aapl'. 'aapl' is not a Massive stock ticker, because Massive's "
+        "tickers are case-sensitive. If you mean 'AAPL', pass 'AAPL'. Fix the row, or convert "
+        "each row with dm.canonical_symbol and that row's class, such as "
+        "dm.canonical_symbol('EUR/USD', dm.AssetClass.FOREX), or dm.canonical_symbol('BRK-B', "
+        "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO) for a stock in Yahoo's "
+        "spelling."
+    )
+    # The advice works, and a ticker Massive writes with a lower-case letter is canonical.
+    assert check_symbol(AssetClass.STOCKS, "MSFT") == "MSFT"
+    assert check_symbol(AssetClass.STOCKS, "KIMpL") == "KIMpL"
 
 
 @pytest.mark.parametrize(

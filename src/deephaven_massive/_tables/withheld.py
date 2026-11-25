@@ -31,7 +31,7 @@ import pyarrow.compute as pc
 
 from deephaven_massive._enums import OnError
 from deephaven_massive._error_policy import ResolvedPolicy, policy_hint
-from deephaven_massive._log_limits import prose_list
+from deephaven_massive._log_limits import counted, prose_list
 from deephaven_massive._massive import DriftReport, RowFault
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.problem_events import (
@@ -531,7 +531,7 @@ def failure_of(
     if not failing:
         return None
     total = sum(count for _, count in failing)
-    rows, them = ("1 row", "it") if total == 1 else (f"{total} rows", "them")
+    rows, them = counted(total, "row"), "it" if total == 1 else "them"
     listed = prose_list((f"{count} under {fault.value}" for fault, count in failing), "causes")
     came = "" if where is None else f", from {where}"
     hint = policy_hint(

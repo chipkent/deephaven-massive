@@ -336,7 +336,7 @@ def test_history_skips_a_symbol_table_row_that_is_not_canonical(
         "SKIPPED",
         "msft",
     )
-    assert skipped["Detail"].startswith("stocks.trades: A symbol table holds 'msft'.")
+    assert skipped["Detail"] == "'msft' is not Massive's stock ticker."
     only_bad = trades(massive_session, new_table([string_col("Symbol", ["msft"])]))
     nothing = (
         "m.stocks.trades(): No row of the symbol table is a ticker this dataset takes, so the "
@@ -930,10 +930,7 @@ def msft_refused(refusal: Callable[..., str]) -> str:
     return (
         f"stocks.trades: A symbol table holds 'msft'. {refusal(AssetClass.STOCKS, 'msft')} Fix "
         "the row, or convert the table with dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, "
-        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from. If "
-        "Massive itself writes 'msft', report it at "
-        "https://github.com/chipkent/deephaven-massive/issues, since the library does not know "
-        "that form yet."
+        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from."
     )
 
 

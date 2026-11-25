@@ -72,7 +72,7 @@ def test_threads_adding_at_once_lose_no_count() -> None:
         thread.start()
     for thread in threads:
         thread.join()
-    with pytest.raises(RowDataError, match="none of the 4000 rows"):
+    with pytest.raises(RowDataError, match="none of the 4,000 rows"):
         tally.check("stocks.trades")
 
 
@@ -98,15 +98,14 @@ def test_judge_fails_only_the_symbols_a_wholly_withheld_read_gave_rows(
     assert isinstance(failed, SymbolFailure)
     assert isinstance(failed.error, RowDataError)
     assert str(failed.error) == (
-        "stocks.trades: the library could read none of the 1 rows of the read's symbols and "
-        "window from GET /v3/trades/AAPL whole, so it withheld them all. First. m.problems() "
-        "counts the withheld rows by cause and symbol."
+        "stocks.trades: the library could not read the 1 row of the read's symbols and window "
+        "from GET /v3/trades/AAPL whole, so it withheld it. First. m.problems() counts the "
+        "withheld rows by cause and symbol."
     )
     assert caplog.messages[-1] == (
-        "stocks.trades by symbol fails each symbol the read gave rows: the library could read "
-        "none of the 1 rows of the read's symbols and window from GET /v3/trades/AAPL whole, "
-        "so it withheld them all. First. m.problems() counts the withheld rows by cause and "
-        "symbol."
+        "stocks.trades by symbol fails each symbol the read gave rows: the library could not "
+        "read the 1 row of the read's symbols and window from GET /v3/trades/AAPL whole, so it "
+        "withheld it. First. m.problems() counts the withheld rows by cause and symbol."
     )
     assert judged["MSFT"] is outcomes["MSFT"]
     assert judged["IBM"] is outcomes["IBM"]
