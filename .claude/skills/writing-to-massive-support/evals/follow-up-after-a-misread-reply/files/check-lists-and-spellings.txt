@@ -1,0 +1,214 @@
+=== 1. The two requests for the email, with their whole response bodies
+
+23:19:28 UTC  GET /futures/v1/snapshot?ticker.any_of=6E:XF:EURUSD:Z6,SR1H7-ZQH7,CLZ7-CLM8
+    HTTP 200, request_id 5285239fa4344124b4f72067c14acd24, 1 rows
+{
+ "status": "OK",
+ "request_id": "5285239fa4344124b4f72067c14acd24",
+ "results": [
+  {
+   "details": {
+    "ticker": "CLZ7-CLM8",
+    "product_code": "CL",
+    "settlement_date": "2027-11-19"
+   },
+   "session": {
+    "open": 2.69,
+    "high": 2.69,
+    "low": 2.68,
+    "close": 2.69,
+    "volume": 5,
+    "settlement_price": 2.69,
+    "previous_settlement": 2.7,
+    "change": -0.01,
+    "change_percent": -0.37037037037
+   },
+   "last_minute": {
+    "timeframe": "REAL-TIME",
+    "open": 2.69,
+    "high": 2.69,
+    "low": 2.69,
+    "close": 2.69,
+    "volume": 2,
+    "last_updated": 1795561980000000000
+   },
+   "last_trade": {
+    "timeframe": "REAL-TIME",
+    "price": 2.69,
+    "size": 2,
+    "last_updated": 1795561975196723555
+   },
+   "last_quote": {
+    "timeframe": "REAL-TIME",
+    "ask": 2.69,
+    "ask_size": 2,
+    "ask_timestamp": 1795562332085475675,
+    "bid": 2.68,
+    "bid_size": 2,
+    "bid_timestamp": 1795562321138868989,
+    "last_updated": 1795562332085475675
+   }
+  }
+ ]
+}
+
+23:19:28 UTC  GET /futures/v1/contracts?ticker.any_of=6E:XF:EURUSD:Z6,SR1H7-ZQH7,CLZ7-CLM8&date.gte=2026-11-16&date.lte=2026-11-20
+    HTTP 200, request_id c87a98438e6043668d152755f72e48c8, 5 rows
+{
+ "status": "OK",
+ "request_id": "c87a98438e6043668d152755f72e48c8",
+ "results": [
+  {
+   "active": true,
+   "date": "2026-11-16",
+   "first_trade_date": "2019-06-10",
+   "last_trade_date": "2027-11-19",
+   "max_order_quantity": 5999,
+   "min_order_quantity": 1,
+   "name": "CLZ7-CLM8",
+   "product_code": "CL",
+   "settlement_date": "2027-11-19",
+   "settlement_tick_size": 0.01,
+   "ticker": "CLZ7-CLM8",
+   "trade_tick_size": 0.01,
+   "trading_venue": "XNYM",
+   "type": "combo",
+   "group_code": "CL",
+   "provider_id": "2HZJJPIJ33G4",
+   "provider_product_id": "GKCAP6BH3LHQ"
+  },
+  {
+   "active": true,
+   "date": "2026-11-17",
+   "first_trade_date": "2019-06-10",
+   "last_trade_date": "2027-11-19",
+   "max_order_quantity": 5999,
+   "min_order_quantity": 1,
+   "name": "CLZ7-CLM8",
+   "product_code": "CL",
+   "settlement_date": "2027-11-19",
+   "settlement_tick_size": 0.01,
+   "ticker": "CLZ7-CLM8",
+   "trade_tick_size": 0.01,
+   "trading_venue": "XNYM",
+   "type": "combo",
+   "group_code": "CL",
+   "provider_id": "2HZJJPIJ33G4",
+   "provider_product_id": "GKCAP6BH3LHQ"
+  },
+  {
+   "active": true,
+   "date": "2026-11-18",
+   "first_trade_date": "2019-06-10",
+   "last_trade_date": "2027-11-19",
+   "max_order_quantity": 5999,
+   "min_order_quantity": 1,
+   "name": "CLZ7-CLM8",
+   "product_code": "CL",
+   "settlement_date": "2027-11-19",
+   "settlement_tick_size": 0.01,
+   "ticker": "CLZ7-CLM8",
+   "trade_tick_size": 0.01,
+   "trading_venue": "XNYM",
+   "type": "combo",
+   "group_code": "CL",
+   "provider_id": "2HZJJPIJ33G4",
+   "provider_product_id": "GKCAP6BH3LHQ"
+  },
+  {
+   "active": true,
+   "date": "2026-11-19",
+   "first_trade_date": "2019-06-10",
+   "last_trade_date": "2027-11-19",
+   "max_order_quantity": 5999,
+   "min_order_quantity": 1,
+   "name": "CLZ7-CLM8",
+   "product_code": "CL",
+   "settlement_date": "2027-11-19",
+   "settlement_tick_size": 0.01,
+   "ticker": "CLZ7-CLM8",
+   "trade_tick_size": 0.01,
+   "trading_venue": "XNYM",
+   "type": "combo",
+   "group_code": "CL",
+   "provider_id": "2HZJJPIJ33G4",
+   "provider_product_id": "GKCAP6BH3LHQ"
+  },
+  {
+   "active": true,
+   "date": "2026-11-20",
+   "first_trade_date": "2019-06-10",
+   "last_trade_date": "2027-11-19",
+   "max_order_quantity": 5999,
+   "min_order_quantity": 1,
+   "name": "CLZ7-CLM8",
+   "product_code": "CL",
+   "settlement_date": "2027-11-19",
+   "settlement_tick_size": 0.01,
+   "ticker": "CLZ7-CLM8",
+   "trade_tick_size": 0.01,
+   "trading_venue": "XNYM",
+   "type": "combo",
+   "group_code": "CL",
+   "provider_id": "2HZJJPIJ33G4",
+   "provider_product_id": "GKCAP6BH3LHQ"
+  }
+ ]
+}
+
+=== 2. Does Massive have trades for the spreads? (REST trades, latest 2)
+
+23:19:28 UTC  GET /futures/v1/trades/6E%3AXF%3AEURUSD%3AZ6?limit=2&sort=timestamp.desc
+    HTTP 200, request_id 553abd8fdfd44771839db054a1c71d2a, 0 rows
+    []
+
+23:19:29 UTC  GET /futures/v1/trades/SR1H7-ZQH7?limit=2&sort=timestamp.desc
+    HTTP 200, request_id ac5618557ac443c4ba1fad8ea61e7fa0, 2 rows
+    [{"ticker": "SR1H7-ZQH7", "timestamp": 1795561766508285373, "sequence_number": 187038105, "report_sequence": 1436, "price": -3.0, "size": 5, "channel": 312, "session_end_date": "2026-11-25"}, {"ticker": "SR1H7-ZQH7", "timestamp": 1795561236486231795, "sequence_number": 185488422, "report_sequence": 178, "price": -3.0, "size": 1, "channel": 312, "session_end_date": "2026-11-25"}]
+
+=== 3. Every combo the lists hold for products 6E and SR1: is the spread there under another spelling?
+
+23:19:29 UTC  GET /futures/v1/contracts?product_code=6E&type=combo&date=2026-11-20&limit=1000
+    HTTP 200, request_id d1db60a9fcff4c4c86e7dbe8985487b3, 67 rows
+    contracts, 6E combos on 2026-11-20: 67; containing ('XF', 'EURUSD', ':'): []
+
+23:19:29 UTC  GET /futures/v1/snapshot?product_code=6E&limit=1000
+    HTTP 200, request_id a5fa76779eba4ad4bf15c96b9c4d5926, 93 rows
+    snapshot, 6E rows: 93; containing ('XF', 'EURUSD', ':'): []
+
+23:19:30 UTC  GET /futures/v1/contracts?product_code=SR1&type=combo&date=2026-11-20&limit=1000
+    HTTP 200, request_id 3c096e932d2a4b99b60ed46febf3903e, 352 rows
+    contracts, SR1 combos on 2026-11-20: 352; containing ('ZQ',): []
+
+23:19:30 UTC  GET /futures/v1/snapshot?product_code=SR1&limit=1000
+    HTTP 200, request_id 2e0f27b5a5ef4a7ea712d52da7478ba6, 347 rows
+    snapshot, SR1 rows: 347; containing ('ZQ',): []
+
+=== 4. Any futures product whose name mentions FX Link or Fed Funds
+
+23:19:30 UTC  GET /futures/v1/products?limit=1000
+    HTTP 200, request_id e7e3200129724d0a8df51ec6f4b59dc0, 1000 rows
+
+23:19:31 UTC  GET /futures/v1/products?cursor=AAUEAAEIAAEEAAESAAEGAAEB--gDAAUBCfsehgEPAlFVAQn7HoYBDwZzaW5nbGUA
+    HTTP 200, request_id 7dcdae90badb4854b4aba8603c81cdf3, 1000 rows
+
+23:19:31 UTC  GET /futures/v1/products?cursor=AAUEAAEIAAEEAAESAAEGAAEB--gDAAUBCfsghgEPA01BQwEJ-yCGAQ8Gc2luZ2xlAA==
+    HTTP 200, request_id 7ca7598a3f2b4ffdbccd895a7ff14d9a, 1000 rows
+
+23:19:32 UTC  GET /futures/v1/products?cursor=AAUEAAEIAAEEAAESAAEGAAEB--gDAAUBCfsihgEPAkVIAQn7IoYBDwZzaW5nbGUA
+    HTTP 200, request_id 22a107995f944b36a28de6de2dbd117c, 1000 rows
+
+23:19:32 UTC  GET /futures/v1/products?cursor=AAUEAAEIAAEEAAESAAEGAAEB--gDAAUBCfskhgEPA0FKUAEJ-ySGAQ8Gc2luZ2xlAA==
+    HTTP 200, request_id 3d37f6c1cfe04521a99fb34929b39413, 1000 rows
+
+23:19:32 UTC  GET /futures/v1/products?cursor=AAUEAAEIAAEEAAESAAEGAAEB--gDAAUBCfskhgEPAlhRAQn7JIYBDwZzaW5nbGUA
+    HTTP 200, request_id 0109904203374fe68978404e24f8079f, 1000 rows
+
+23:19:33 UTC  GET /futures/v1/products?cursor=AAUEAAEIAAEEAAESAAEGAAEB--gDAAUBCfsmhgEPA1BHRwEJ-yaGAQ8Gc2luZ2xlAA==
+    HTTP 200, request_id 13d396234258461eb7cbb0f45cc0d2d3, 1000 rows
+
+23:19:33 UTC  GET /futures/v1/products?cursor=AAUEAAEIAAEEAAESAAEGAAEB--gDAAUBCfsohgEPA0pQUAEJ-yiGAQ8Gc2luZ2xlAA==
+    HTTP 200, request_id 8865dcfac03648389e5ed961c1de7188, 1000 rows
+    8 pages read; matching products: []
+
+16 requests sent

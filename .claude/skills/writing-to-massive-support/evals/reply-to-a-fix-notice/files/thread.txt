@@ -1,0 +1,12 @@
+From: Casey from Massive.com
+Date: Thu, 19 Nov 2026 20:28:27 +0000
+Subject: Re: Index day bars and day files cover the Central day, not the documented Eastern day
+
+Hi there, thanks for reaching out.
+I was able to reproduce both of these. Your reading is correct: the day bar and both flat files cover the Central day rather than the Eastern day our Custom Bars page describes, and it is the same boundary on every index I checked.
+I am confirming with our product team whether that boundary is the intended one before I tell you which side will change, the data or the docs. I shall keep you posted here as soon as I hear back.
+On the 2026-11-16 files, those have been rebuilt and are complete now, so it is worth re-downloading that date.
+Thank you for your patience!
+Casey
+Support Team
+Massive.com
