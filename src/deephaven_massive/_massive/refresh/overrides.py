@@ -1212,13 +1212,21 @@ _OPTION_SNAPSHOTS = ("/v3/snapshot/options/{underlyingAsset}", _UNIFIED_SNAPSHOT
 """The two snapshots that carry an options contract's `greeks` object."""
 
 
-def _greeks_per_dollar(key: str, *, vendor: str, text: str, why: str) -> DescriptionFix:
+def _greeks_per_dollar(key: str, vendor: str, text: str) -> DescriptionFix:
     """Return the fix of a snapshot greek Massive describes per $0.01 of the underlying."""
     return DescriptionFix(
         vendor=vendor,
         text=text,
-        reason=f"{why} The text is Massive's own for the same field of the greeks endpoint "
-        f"(`/options/v1/analytics` `{key}`).",
+        reason='The snapshot\'s own data contradicts the "$0.01": its gamma is per share per $1 '
+        "move, about 100 times a per-$0.01 gamma and within 1% to 3% of Black-Scholes gamma "
+        "per share per $1 on SPY calls near the money. One per-share model gives all four "
+        "greeks, so its delta is per share per $1 too. The snapshot samples' `delta` of 0.552 "
+        "does not show this alone: on a standard contract of 100 shares, the contract's change "
+        "in dollars per $0.01 move equals one share's change per $1 move, since 100 shares "
+        "times $0.01 is $1. The article the `greeks` object links (https://massive.com/blog/"
+        "greeks-and-implied-volatility/) works its examples per $1.00 as well. The text is "
+        f"Massive's own for the same field of the greeks endpoint (`/options/v1/analytics` "
+        f"`{key}`).",
     )
 
 
@@ -1329,13 +1337,6 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
                 vendor="The change in the option's price per $0.01 increment in the price of "
                 "the underlying asset.",
                 text="Change in option price per $1 move in the underlying",
-                why='The snapshot\'s own gamma contradicts the "$0.01": one per-share model '
-                "gives all four greeks, and its gamma is per share per $1 move, about 100 times "
-                "a per-$0.01 gamma and within 1% to 3% of Black-Scholes gamma per share per $1 "
-                "on SPY calls near the money, so its delta is per share per $1 too. The snapshot "
-                "samples' `delta` of 0.552 does not show this alone: on a standard contract of "
-                "100 shares, the contract's change in dollars per $0.01 move equals one share's "
-                "change per $1 move, since 100 shares times $0.01 is $1.",
             ),
         ),
         **_for(
@@ -1345,16 +1346,6 @@ DESCRIPTION_FIXES: Mapping[tuple[str, str], DescriptionFix] = MappingProxyType(
                 "gamma",
                 vendor="The change in delta per $0.01 change in the price of the underlying asset.",
                 text="Change in delta per $1 move in the underlying",
-                why='Massive\'s own documentation of the field contradicts the "$0.01": its '
-                "snapshot samples (`vendor/massive/rest/options/snapshots/option-contract-"
-                "snapshot.md`) show a call with `delta` 0.552, impossible per $0.01 since a "
-                "call's delta per $1 is at most 1, and the article the `greeks` object links "
-                "(https://massive.com/blog/greeks-and-implied-volatility/) works its examples per "
-                '$1.00: delta "with a delta of 0.5 and all else being held equal, a $1.00 change '
-                "in the underlying price approximately nets a $0.50 change in the option's "
-                'premium", gamma "if gamma is 0.01, a $1.00 change in the underlying price would '
-                'approximately net a 0.01 change in delta", under the binomial model the article '
-                "names.",
             ),
         ),
         **_for(("futures/A", "futures/AM"), ("dv",), _FUTURES_WS_DOLLAR_VOLUME),

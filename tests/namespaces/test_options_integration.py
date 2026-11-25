@@ -953,8 +953,8 @@ def test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent(
 ) -> None:
     """Whether `Gamma` of the options snapshot is per $0.01 of the underlying, or per $1.
 
-    Massive's description says per $0.01; the dataset page says per $1, from Massive's own
-    sample and article (the field's `DESCRIPTION_FIXES` entry). Reads SPY's price from its
+    Massive's description says per $0.01; the dataset page says per $1, from this test's
+    evidence (the field's `DESCRIPTION_FIXES` entry). Reads SPY's price from its
     option chain (or its previous close, when the chain carries none), up to five calls near
     the money that expire in 20 to 50 days, their snapshots, and the latest 3-month Treasury
     yield as the risk-free rate, with no dividend yield. For each call it records `Gamma`,
