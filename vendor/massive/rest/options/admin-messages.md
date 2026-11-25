@@ -3,7 +3,7 @@
 # REST
 ## Options
 
-### Admin & FLEX Messages
+### Admin Messages
 
 **Endpoint:** `GET /options/v1/admin-messages`
 
@@ -27,6 +27,7 @@ Use Cases: FLEX trade monitoring, market operations tracking, data auditing.
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
+| `timestamp` | string | No | The SIP timestamp in Unix nanoseconds. Value must be an integer timestamp in nanoseconds, formatted 'yyyy-mm-dd', or ISO 8601/RFC 3339 (e.g. '2024-05-28T20:27:41Z'). |
 | `timestamp.gt` | string | No | Filter greater than the value. Value must be an integer timestamp in nanoseconds, formatted 'yyyy-mm-dd', or ISO 8601/RFC 3339 (e.g. '2024-05-28T20:27:41Z'). |
 | `timestamp.gte` | string | No | Filter greater than or equal to the value. Value must be an integer timestamp in nanoseconds, formatted 'yyyy-mm-dd', or ISO 8601/RFC 3339 (e.g. '2024-05-28T20:27:41Z'). |
 | `timestamp.lt` | string | No | Filter less than the value. Value must be an integer timestamp in nanoseconds, formatted 'yyyy-mm-dd', or ISO 8601/RFC 3339 (e.g. '2024-05-28T20:27:41Z'). |

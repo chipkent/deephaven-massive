@@ -116,9 +116,10 @@ source for good, or defers it with an issue. The module docstring of `refresh/ex
 explains the three choices, and the coverage test in `tests/datasets/test_catalog.py` says what
 it expects when it fails. An exclusion never means "not yet".
 
-Which endpoints the library supports: every documented one, plus a new one the specification
-has before the documentation catches up. A deprecated or sunset endpoint is excluded with its
-reason, and an undocumented one is not supported.
+Which endpoints the library supports: every documented one. A deprecated or sunset endpoint is
+excluded with its reason, and an undocumented one, which the specification has before the
+documentation catches up, is excluded as undocumented (the `docs` gate asks for it) until a
+page names it; the gate then stops on the exclusion, and the next refresh adds the dataset.
 
 A new dataset's columns must not bring a second name for a field another dataset already has.
 The `field-spelling` gate catches the fields Massive documents with the same text; it cannot

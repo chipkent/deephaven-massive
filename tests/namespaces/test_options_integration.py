@@ -1177,6 +1177,51 @@ def test_root_is_the_ticker_s_occ_root(
     assert all(r["OptionRoot"] == _root(r["Symbol"]) for r in library)
 
 
+@pytest.mark.settles("146")
+@pytest.mark.requests(9)
+@pytest.mark.timeout(300)
+def test_greeks_take_and_write_an_index_underlying_bare(
+    live_session: dm.MassiveSession,
+    *,
+    live_rest: RestClient,
+    table_rows: TableRows,
+    evidence: Evidence,
+) -> None:
+    """How the greeks endpoint spells an index underlying, asked for and in its rows.
+
+    Reads one page of five rows of the latest greeks for `underlying_ticker=SPX` and one for
+    `underlying_ticker=I:SPX` through the wire client (2 requests), and records each page's
+    row count and its first row's `ticker`, `root`, and `underlying_ticker`. Then reads
+    `m.options.greeks(underlying="I:SPX", limit=5)` through the library, which sends the index
+    bare (1 request, then Massive's index list in two pages and the Contract Overview of each
+    root met, 2 or so), and records each row's `Symbol`, `OptionRoot`, and `Underlying`. Fails
+    when neither raw page has a row, since the evidence would then rest on nothing. The
+    evidence settles which spelling the endpoint takes and which it writes; a refusal skips the
+    test, quoting Massive.
+    """
+    pages = {
+        spelled: _page(live_rest, option_requests.greeks(underlying=spelled, limit=5))
+        for spelled in ("SPX", "I:SPX")
+    }
+    for spelled, found in pages.items():
+        first = found[0] if found else None
+        wrote = (
+            None
+            if first is None
+            else (first.get("ticker"), first.get("root"), first.get("underlying_ticker"))
+        )
+        evidence(
+            f"GET {option_requests.GREEKS} underlying_ticker={spelled}: {len(found)} rows, "
+            f"first {wrote}"
+        )
+    library = table_rows(live_session.options.greeks(underlying="I:SPX", limit=5).fetch(wait=True))
+    evidence(
+        f"library underlying='I:SPX': "
+        f"{[(r['Symbol'], r['OptionRoot'], r['Underlying']) for r in library]}"
+    )
+    assert any(pages.values()), f"GET {option_requests.GREEKS} sent no row for SPX or I:SPX"
+
+
 _UNDERLYING_ROOTS = ("SPX", "SPXW", "NDX", "VIX", "RUT", "DJT", "AMCR1", "AAPL")
 """Roots whose underlying the two new datasets must name as the contracts reference does: index
 roots and their weeklies, the stock `DJT`, an adjusted root, and a plain stock. `DJT` is also on

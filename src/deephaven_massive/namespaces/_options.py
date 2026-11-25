@@ -5,7 +5,8 @@ Datasets: `trades`, `last_trade` (each contract's latest trade), `quotes`, `bars
 `admin_messages` (OPRA's administrative messages and FLEX trade notices), `chain` (one underlying's
 option chain), `snapshots` (the current state of chosen contracts), `contracts` (the contracts
 list), `contract_details` (named contracts' reference data), `daily_open_close`, `open_interest`
-(each contract's open interest by day), and `unusual_trades` (large trades and sweeps).
+(each contract's open interest by day), `greeks` (each contract's end-of-day greeks and implied
+volatility), and `unusual_trades` (large trades and sweeps).
 
 Each dataset is one factory method on `OptionsNamespace`. The method validates its arguments and
 returns a query; nothing touches the network until a verb is called on the query. This module owns
@@ -18,7 +19,8 @@ Every method that takes contracts takes only that form (`check_symbol` in
 `_datasets/symbols.py`), and `dm.canonical_symbol_option` converts the bare or space-padded OCC
 forms. Every options dataset whose rows name a contract also has `OptionRoot`, the OCC root read
 from the symbol (`SPXW`, `AAPL1`), or Massive's own `root` where the rows carry one (the open
-interest and the unusual trades). The admin messages name none: Massive sends them per exchange,
+interest, the greeks, and the unusual trades). The admin messages name none: Massive sends them
+per exchange,
 so the stream subscribes every exchange (`AD.*`) and `history()` reads every exchange's archive,
 the rows have no `Symbol`, and their text is kept as OPRA sends it. The rows of the
 chain, the snapshots, and the contract reference data carry the instrument Massive links the
@@ -116,6 +118,7 @@ _CONTRACTS: Final = "/v3/reference/options/contracts"
 _CONTRACT: Final = "/v3/reference/options/contracts/{options_ticker}"
 _OPEN_CLOSE: Final = "/v1/open-close/{optionsTicker}/{date}"
 _OPEN_INTEREST: Final = "/options/v1/open-interest"
+_GREEKS: Final = "/options/v1/analytics"
 _UNUSUAL_TRADES: Final = "/options/v1/unusual-trades"
 _ADMIN_MESSAGES: Final = "/options/v1/admin-messages"
 
@@ -390,6 +393,26 @@ OPEN_INTEREST: Final = DatasetSpec(
     column_notes={"Underlying": _ROOT_UNDERLYING_NOTE},
 )
 
+GREEKS: Final = DatasetSpec(
+    name="options.greeks",
+    summary="The end-of-day greeks and implied volatility of each US-listed options contract.",
+    asset_class=AssetClass.OPTIONS,
+    fetch_path=_GREEKS,
+    keys={(_REST, _GREEKS): _list_keys()},
+    time_axis=("date.gte", "date.lte"),
+    symbol_param="ticker.any_of",
+    # One row per contract per day, as the open interest: the same 250 contracts a request.
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
+    poll_keys=("Symbol", "Date"),
+    underlying_by_root=True,
+    column_notes={
+        "Underlying": _ROOT_UNDERLYING_NOTE,
+        "OpenInterest": "Massive publishes it the morning of `Date`, for the prior trading "
+        "day's close, so it is the value `m.options.open_interest()` dates one trading day "
+        "earlier.",
+    },
+)
+
 UNUSUAL_TRADES: Final = DatasetSpec(
     name="options.unusual_trades",
     summary="Large trades and sweeps of US-listed options contracts, flagged by Massive.",
@@ -424,6 +447,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
     CONTRACT_DETAILS,
     DAILY_OPEN_CLOSE,
     OPEN_INTEREST,
+    GREEKS,
     UNUSUAL_TRADES,
 )
 """Every dataset of `m.options`, one `DatasetSpec` each, in the order of the namespace's methods."""
@@ -485,6 +509,38 @@ def _underlying(value: object) -> str:
     return ticker
 
 
+@raises_through(one_or_any_of, _underlying)
+def _underlyings(value: object) -> dict[str, object]:
+    """Check the `underlying` argument of a dataset that filters by one underlying or several.
+
+    Each value passes `_underlying`'s check. One is sent as `underlying_ticker` and several as
+    `underlying_ticker.any_of`; the REST transport sends an index bare in either form
+    (`wire_symbols.contracts_underlying`).
+
+    Args:
+        value: The argument as passed: one ticker, a sequence of them, or None for every
+            underlying.
+
+    Returns:
+        The two wire parameters, the unset one None (`one_or_any_of`).
+
+    Raises:
+        TypeError: If the value is neither None, a `str`, nor a sequence of `str`.
+        ValueError: If the sequence is empty, or a ticker is not canonical or is a currency or
+            crypto pair.
+    """
+    sent = one_or_any_of(
+        "underlying_ticker", value, every="every underlying", argument="underlying"
+    )
+    one, several = sent["underlying_ticker"], sent["underlying_ticker.any_of"]
+    if one is not None:
+        _underlying(one)
+    if several is not None:
+        assert isinstance(several, tuple)  # one_or_any_of's form of a sequence
+        sent["underlying_ticker.any_of"] = tuple(_underlying(ticker) for ticker in several)
+    return sent
+
+
 @raises_through(_require_enum)
 def _contract_type(value: object) -> ContractType | None:
     """Check the optional `contract_type` argument of the chain and the contracts.
@@ -529,7 +585,8 @@ class OptionsNamespace(Namespace):
     - market data: trades, quotes, bars, and fair market value;
     - each contract's last trade, previous day's bar, and daily open and close;
     - option chains, snapshots, and contract reference data;
-    - each contract's open interest by day, and the unusual trades Massive flags;
+    - each contract's open interest and end-of-day greeks by day, and the unusual trades
+      Massive flags;
     - OPRA's administrative messages.
 
     A contract's ticker is `O:` followed by its OCC symbol, such as `O:AAPL250117C00150000`. A
@@ -1283,6 +1340,99 @@ class OptionsNamespace(Namespace):
                 "contract_type": _contract_type(contract_type),
             },
             arguments={"root.any_of": "root"},
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+            on_error=on_error,
+        )
+
+    @raises_through(list_query, _underlyings, _contract_type)
+    def greeks(
+        self,
+        symbols: SymbolsLike | None = None,
+        *,
+        underlying: str | Sequence[str] | None = None,
+        contract_type: ContractType | None = None,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
+    ) -> FetchQuery:
+        """The end-of-day greeks and implied volatility of each US-listed options contract.
+
+        Each row holds one contract's delta, gamma, theta, vega, rho, and implied volatility
+        for one trading day, with the inputs Massive's solver used: the NBBO bid, ask, and
+        midpoint 15 minutes before the close (`OptionPrice`, at `QuoteTimestamp`), the
+        underlying's price then (`UnderlyingPrice`, at `UnderlyingTimestamp`), the dividend
+        yield, the risk-free rate, the pricing model, and the exercise style, beside the day's
+        volume and the open interest published that morning. Massive takes the market's state at
+        15:45 ET (12:45 ET on an early close), so a day's rows arrive after its close, and a
+        contract Massive can't price keeps its row with null greeks. Leave out `symbols` and
+        narrow by `underlying`, `contract_type`, or `filters` to read many contracts.
+
+        `Underlying` is Massive's ticker, with `I:` for an index (`I:SPX`), as in
+        `m.options.contracts()`. To tell which roots are on an index, a session reads Massive's
+        list of index tickers once. A root whose underlying isn't on that list keeps its bare
+        ticker and costs nothing more. A root whose underlying is on it, such as `SPX`, costs one
+        request to Massive's Contract Overview the first time the session meets that root. If
+        Massive can't say, the library leaves the root's rows out and lists them in
+        `m.problems()` as `unreadable_symbols`.
+
+        Args:
+            symbols: Option contracts; leave it out for every contract.
+            underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or
+                several; leave it out for every underlying.
+            contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
+            start: The first trading day.
+            end: The last trading day.
+            sort: Any of Massive's field names, such as `"implied_volatility"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
+            filters: Further endpoint parameters, such as `{"expiration_date": "2026-12-18"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.greeks.md.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker of an option contract;
+                - `underlying` is an empty sequence, isn't Massive's exact ticker, or is a
+                  currency or crypto pair, such as `"C:EURUSD"`;
+                - a bound isn't a date, or `end` is before `start`;
+                - `limit` isn't positive;
+                - `order` is given without `sort`, or with a `sort` that has its own `.asc` or
+                  `.desc`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
+
+        Example:
+            ::
+
+                surface = m.options.greeks(
+                    underlying="AMD", start="2026-10-29", end="2026-10-29"
+                ).fetch()
+        """
+        return list_query(
+            self._core,
+            GREEKS,
+            all_alternative="Leave symbols out to read every contract.",
+            symbols=symbols,
+            start=start,
+            end=end,
+            params={**_underlyings(underlying), "contract_type": _contract_type(contract_type)},
+            arguments={
+                "underlying_ticker": "underlying",
+                "underlying_ticker.any_of": "underlying",
+            },
             sort=sort,
             order=order,
             limit=limit,

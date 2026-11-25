@@ -858,6 +858,7 @@ class RestReader:
         patience: Patience,
         where: str,
         tally: ReadTally,
+        index: str | None,
     ) -> list[pa.RecordBatch]:
         """Give a page's index underlyings their `I:` by option root, where the dataset asks.
 
@@ -866,7 +867,9 @@ class RestReader:
         each root's lookup. The rows of a root Massive's contracts reference can't classify
         are withheld as `unreadable_symbols` and reported as `_page_rows` reports its own
         (`_report_withheld`), and counted in `tally` as withheld, since `_page_rows` counted
-        them among the page's rows already: a read whose every row is withheld fails.
+        them among the page's rows already: a read whose every row is withheld fails. A call
+        that asked for an index by its bare ticker then has its kept rows checked
+        (`_warn_other_roots`).
 
         Args:
             spec: The dataset.
@@ -877,6 +880,8 @@ class RestReader:
                 not know a console caller holds the update graph's lock.
             where: The request template, for the events.
             tally: The read's count of its rows and of those withheld.
+            index: The canonical index the call asked for by its bare ticker (`_bare_index`),
+                or None for any other call.
 
         Returns:
             The rows to publish.
@@ -897,7 +902,49 @@ class RestReader:
         if withheld.groups:
             tally.add(0, withheld, source=where)
             self._report_withheld(spec, withheld, where=where)
-        return list(withheld.rows.to_batches())
+        kept = list(withheld.rows.to_batches())
+        if index is not None:
+            self._warn_other_roots(spec, kept, index)
+        return kept
+
+    def _warn_other_roots(
+        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str
+    ) -> None:
+        """Warn about rows of an index's contracts whose option root is not the index's.
+
+        A dataset that reads its underlyings by root takes an index bare (`SPX` for `I:SPX`),
+        as the contracts list does, and a bare ticker can also name a stock (`DJT` is both a
+        stock and the index `I:DJT`), so Massive may answer about the stock's contracts too.
+        Their root is classified as a stock's, so they keep the underlying Massive wrote; one
+        WARNING per dataset and index per session names the request and the rows, as
+        `_check_index_rows` does for the contracts list. A null `Underlying` says nothing about
+        the instrument and is not counted. No row is dropped.
+
+        Args:
+            spec: The dataset.
+            batches: One page's kept rows, their index underlyings prefixed.
+            index: The canonical index the call asked for, such as `I:SPX`.
+        """
+        if not batches:
+            return
+        underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
+        other = pc.fill_null(pc.not_equal(underlyings, index), fill_value=False)
+        if not pc.any(other).as_py() or not self.state.first("index-other-root", spec.name, index):
+            return
+        symbols = pa.chunked_array([batch.column("Symbol") for batch in batches])
+        first = pc.indices_nonzero(other)[0].as_py()
+        logger.warning(
+            "%s: the contracts of %s were asked for by the bare ticker %s=%s, and the option "
+            "root of %d of them is no index's, so Massive answered about another instrument "
+            "too. They keep the underlying Massive wrote. The first is %s, with Underlying %s.",
+            spec.name,
+            index,
+            BARE_INDEX_PARAM,
+            contracts_underlying(index),
+            pc.sum(other).as_py(),
+            symbols[first].as_py(),
+            underlyings[first].as_py(),
+        )
 
     def root_kind(
         self,
@@ -1522,7 +1569,9 @@ class RestReader:
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
                 if spec.ticker_list is not None:
                     batches = self._listed(spec, batches, own, template=template)
-                if bare_index is not None:
+                # The rows of a dataset that reads its underlyings by option root carry no CFI
+                # code: `_underlyings` checks them once their roots are classified.
+                if bare_index is not None and not spec.underlying_by_root:
                     self._check_index_rows(spec, batches, bare_index)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
@@ -1551,6 +1600,7 @@ class RestReader:
                         patience=patience,
                         where=f"GET {template}",
                         tally=tally,
+                        index=bare_index,
                     )
                 )
         except WireError as error:

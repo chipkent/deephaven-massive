@@ -167,14 +167,18 @@ REST endpoints for market data, reference data and other financial data sets.
 - [Simple Moving Average (SMA)](https://massive.com/docs/rest/indices/technical-indicators/simple-moving-average.md): Retrieve the Simple Moving Average (SMA) for a specified ticker over a defined time range
 - [All Tickers](https://massive.com/docs/rest/indices/tickers/all-tickers.md): Retrieve a comprehensive list of ticker symbols supported by Massive across various asset classes (e.g., stocks, indices, forex, crypto)
 - [Ticker Overview](https://massive.com/docs/rest/indices/tickers/ticker-overview.md): Retrieve comprehensive details for a single ticker supported by Massive that is active as-of a given date
-- [Admin & FLEX Messages](https://massive.com/docs/rest/options/admin-messages.md): Retrieve OPRA administrative messages for US options: the free-text channel of the
+- [Admin Messages](https://massive.com/docs/rest/options/admin-messages.md): Retrieve OPRA administrative messages for US options: the free-text channel of the
 OPRA feed, carrying FLEX option prints and quotes, operational notices, and other
 messages that don't fit a fixed format
 - [Custom Bars (OHLC)](https://massive.com/docs/rest/options/aggregates/custom-bars.md): Retrieve aggregated historical OHLC (Open, High, Low, Close) and volume data for a specified options contract over a custom date range and time interval in Eastern Time (ET)
 - [Daily Ticker Summary (OHLC)](https://massive.com/docs/rest/options/aggregates/daily-ticker-summary.md): Retrieve the opening and closing prices for a specific options contract on a given date, along with any pre-market and after-hours trade prices
 - [Previous Day Bar (OHLC)](https://massive.com/docs/rest/options/aggregates/previous-day-bar.md): Retrieve the previous trading day's open, high, low, and close (OHLC) data for a specified option contract
+- [Historical Greeks & IV](https://massive.com/docs/rest/options/analytics/greeks-iv.md): Retrieve daily end-of-day greeks and implied volatility for US options
+contracts, one row per listed contract per trading day
 - [Open Interest by Contract](https://massive.com/docs/rest/options/analytics/open-interest-by-contract.md): Retrieve daily open interest for US options contracts as reported by OPRA, one row
 per contract per trading day
+- [Open Interest by Underlying](https://massive.com/docs/rest/options/analytics/open-interest-by-underlying.md): Retrieve daily open interest for US options rolled up across each underlying's full
+chain, as reported by OPRA, with calls and puts split out
 - [All Contracts](https://massive.com/docs/rest/options/contracts/all-contracts.md): Retrieve a comprehensive index of options contracts, encompassing both active and expired listings
 - [Contract Overview](https://massive.com/docs/rest/options/contracts/contract-overview.md): Retrieve detailed information about a specific options contract, including its contract type (call or put), exercise style, expiration date, strike price, shares per contract, underlying ticker, and primary exchange
 - [Condition Codes](https://massive.com/docs/rest/options/market-operations/condition-codes.md): Retrieve a unified and comprehensive list of trade and quote conditions from various upstream market data providers (e.g., CTA, UTP, OPRA, FINRA)

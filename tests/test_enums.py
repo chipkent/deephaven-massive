@@ -461,6 +461,8 @@ ENUM_PARAMETERS = {
             "OptionsNamespace.contracts.order",
             "OptionsNamespace.open_interest.contract_type",
             "OptionsNamespace.open_interest.order",
+            "OptionsNamespace.greeks.contract_type",
+            "OptionsNamespace.greeks.order",
             "OptionsNamespace.unusual_trades.order",
         ),
         "namespaces/test_options.py::test_enum_arguments_reject_plain_strings",

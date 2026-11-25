@@ -1464,6 +1464,7 @@
    "key": "/options/v1/admin-messages",
    "result_key": "results",
    "params": [
+    {"default": null, "in_path": false, "kind": "timestamp", "maximum": null, "name": "timestamp", "unit": "ns", "values": []},
     {"default": null, "in_path": false, "kind": "timestamp", "maximum": null, "name": "timestamp.gt", "unit": "ns", "values": []},
     {"default": null, "in_path": false, "kind": "timestamp", "maximum": null, "name": "timestamp.gte", "unit": "ns", "values": []},
     {"default": null, "in_path": false, "kind": "timestamp", "maximum": null, "name": "timestamp.lt", "unit": "ns", "values": []},
@@ -1483,6 +1484,54 @@
    "memberships": [
     {"group": "options", "kind": "admin_messages", "position": 0, "projection": null}
    ]
+  },
+  {
+   "key": "/options/v1/analytics",
+   "result_key": "results",
+   "params": [
+    {"default": null, "in_path": false, "kind": "string", "maximum": null, "name": "ticker", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "list", "maximum": null, "name": "ticker.any_of", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "string", "maximum": null, "name": "underlying_ticker", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "list", "maximum": null, "name": "underlying_ticker.any_of", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "expiration_date", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "enum", "maximum": null, "name": "contract_type", "unit": null, "values": ["call", "put"]},
+    {"default": null, "in_path": false, "kind": "list", "maximum": null, "name": "contract_type.any_of", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date.gt", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date.gte", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date.lt", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date.lte", "unit": null, "values": []},
+    {"default": 1000, "in_path": false, "kind": "integer", "maximum": 50000, "name": "limit", "unit": null, "values": []},
+    {"default": "date.desc", "in_path": false, "kind": "string", "maximum": null, "name": "sort", "unit": null, "values": []}
+   ],
+   "fields": [
+    {"column": "Bid", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bid"},
+    {"column": "Ask", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "ask"},
+    {"column": "Volume", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "volume"},
+    {"column": "Date", "conversion": null, "required": true, "type": "date", "unit": null, "wire_key": "date"},
+    {"column": "ContractType", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "contract_type"},
+    {"column": "Delta", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "delta"},
+    {"column": "DividendYield", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "dividend_yield"},
+    {"column": "ExerciseStyle", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "exercise_style"},
+    {"column": "ExpirationDate", "conversion": null, "required": true, "type": "date", "unit": null, "wire_key": "expiration_date"},
+    {"column": "Gamma", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "gamma"},
+    {"column": "ImpliedVolatility", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "implied_volatility"},
+    {"column": "Model", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "model"},
+    {"column": "OpenInterest", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "open_interest"},
+    {"column": "OptionPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "option_price"},
+    {"column": "QuoteTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "quote_timestamp"},
+    {"column": "Rho", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "rho"},
+    {"column": "RiskFreeRate", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "risk_free_rate"},
+    {"column": "OptionRoot", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "root"},
+    {"column": "StrikePrice", "conversion": null, "required": true, "type": "double", "unit": null, "wire_key": "strike_price"},
+    {"column": "Theta", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "theta"},
+    {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
+    {"column": "UnderlyingPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "underlying_price"},
+    {"column": "UnderlyingTicker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "underlying_ticker"},
+    {"column": "UnderlyingTimestamp", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "underlying_timestamp"},
+    {"column": "Vega", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "vega"}
+   ],
+   "memberships": []
   },
   {
    "key": "/options/v1/open-interest",
@@ -1523,6 +1572,33 @@
     {"column": "OptionRoot", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "root"},
     {"column": "StrikePrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "strike_price"},
     {"column": "Ticker", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "ticker"},
+    {"column": "UnderlyingTicker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "underlying_ticker"}
+   ],
+   "memberships": []
+  },
+  {
+   "key": "/options/v1/open-interest/underlying",
+   "result_key": "results",
+   "params": [
+    {"default": null, "in_path": false, "kind": "string", "maximum": null, "name": "underlying_ticker", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "list", "maximum": null, "name": "underlying_ticker.any_of", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "string", "maximum": null, "name": "underlying_ticker.gt", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "string", "maximum": null, "name": "underlying_ticker.gte", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "string", "maximum": null, "name": "underlying_ticker.lt", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "string", "maximum": null, "name": "underlying_ticker.lte", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date.gt", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date.gte", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date.lt", "unit": null, "values": []},
+    {"default": null, "in_path": false, "kind": "date", "maximum": null, "name": "date.lte", "unit": null, "values": []},
+    {"default": 100, "in_path": false, "kind": "integer", "maximum": 50000, "name": "limit", "unit": null, "values": []},
+    {"default": "date.desc", "in_path": false, "kind": "string", "maximum": null, "name": "sort", "unit": null, "values": []}
+   ],
+   "fields": [
+    {"column": "Date", "conversion": null, "required": true, "type": "date", "unit": null, "wire_key": "date"},
+    {"column": "OpenInterest", "conversion": null, "required": false, "type": "long", "unit": null, "wire_key": "open_interest"},
+    {"column": "OpenInterestCalls", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "open_interest_calls"},
+    {"column": "OpenInterestPuts", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "open_interest_puts"},
     {"column": "UnderlyingTicker", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "underlying_ticker"}
    ],
    "memberships": []
@@ -1693,6 +1769,7 @@
     {"column": "Cusip", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "cusip"},
     {"column": "FileNumber", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "file_number"},
     {"column": "FilerCik", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "filer_cik"},
+    {"column": "FilerName", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "filer_name"},
     {"column": "FilingDate", "conversion": null, "required": false, "type": "date", "unit": null, "wire_key": "filing_date"},
     {"column": "FilingUrl", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "filing_url"},
     {"column": "FilmNumber", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "film_number"},
@@ -2982,6 +3059,7 @@
     {"column": "IndicesGroupsSAndP", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "indicesGroups.s_and_p"},
     {"column": "IndicesGroupsSocieteGenerale", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "indicesGroups.societe_generale"},
     {"column": "Market", "conversion": null, "required": false, "type": "string", "unit": null, "wire_key": "market"},
+    {"column": "Overnight", "conversion": null, "required": false, "type": "bool", "unit": null, "wire_key": "overnight"},
     {"column": "ServerTime", "conversion": "iso-text-instant", "required": false, "type": "iso-instant", "unit": null, "wire_key": "serverTime"}
    ],
    "memberships": []
@@ -4182,6 +4260,8 @@
     {"column": "SessionLastUpdated", "conversion": null, "required": false, "type": "epoch", "unit": "ns", "wire_key": "session.last_updated"},
     {"column": "SessionLateTradingChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.late_trading_change"},
     {"column": "SessionLateTradingChangePercent", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.late_trading_change_percent"},
+    {"column": "SessionOvernightTradingChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.overnight_trading_change"},
+    {"column": "SessionOvernightTradingChangePercent", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.overnight_trading_change_percent"},
     {"column": "SessionPreviousClose", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.previous_close"},
     {"column": "SessionRegularTradingChange", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.regular_trading_change"},
     {"column": "SessionRegularTradingChangePercent", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "session.regular_trading_change_percent"},

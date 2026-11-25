@@ -18,11 +18,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CONTRACTS",
+    "GREEKS",
     "OPEN_INTEREST",
     "TICKERS",
     "UNUSUAL_TRADES",
     "Request",
     "contracts",
+    "greeks",
     "index_list",
     "open_interest",
     "stock_list",
@@ -30,6 +32,7 @@ __all__ = [
 ]
 
 OPEN_INTEREST = "/options/v1/open-interest"
+GREEKS = "/options/v1/analytics"
 UNUSUAL_TRADES = "/options/v1/unusual-trades"
 TICKERS = "/v3/reference/tickers"
 CONTRACTS = "/v3/reference/options/contracts"
@@ -50,6 +53,20 @@ def open_interest(*, limit: int, root: str | None = None, through: date | None =
         The path and query.
     """
     return OPEN_INTEREST, {"root": root, "date.lte": through, "limit": limit}
+
+
+def greeks(*, limit: int, underlying: str | None = None) -> Request:
+    """Return a request of one page of the latest greeks.
+
+    Args:
+        limit: The most rows on the page.
+        underlying: The underlying as sent (`underlying_ticker`), such as `"SPX"` or `"I:SPX"`,
+            to see which spelling Massive answers; None for every underlying.
+
+    Returns:
+        The path and query.
+    """
+    return GREEKS, {"underlying_ticker": underlying, "limit": limit}
 
 
 def unusual_trades(*, limit: int) -> Request:

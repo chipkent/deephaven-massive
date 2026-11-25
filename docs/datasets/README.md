@@ -92,6 +92,7 @@ Create a session with `m = dm.MassiveSession()`. A dataset method, such as `m.st
 | [`m.options.contract_details`](options.contract_details.md) | The options contracts you name: call or put, exercise style, expiration, and strike. | `fetch()`, `poll()` |
 | [`m.options.daily_open_close`](options.daily_open_close.md) | The open, high, low, close, and volume of each options contract on one day. | `fetch()`, `poll()` |
 | [`m.options.open_interest`](options.open_interest.md) | The open interest of each US-listed options contract at the end of each trading day. | `fetch()`, `poll()` |
+| [`m.options.greeks`](options.greeks.md) | The end-of-day greeks and implied volatility of each US-listed options contract. | `fetch()`, `poll()` |
 | [`m.options.unusual_trades`](options.unusual_trades.md) | Large trades and sweeps of US-listed options contracts, flagged by Massive. | `fetch()`, `poll()` |
 
 ## Futures

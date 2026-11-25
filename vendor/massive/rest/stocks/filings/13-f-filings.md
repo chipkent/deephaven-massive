@@ -43,6 +43,7 @@ This endpoint returns JSON by default, and Apache Arrow when the request sends `
 | `results[].cusip` | string | The CUSIP identifier for the held security. |
 | `results[].file_number` | string | The 13F-specific file number assigned to the filer. |
 | `results[].filer_cik` | string | SEC Central Index Key (10 digits, zero-padded) of the filing entity. |
+| `results[].filer_name` | string | Name of the institutional investment manager filing the report, as reported on the filing's cover page. Null for older text-format filings (before mid-2013), which do not report it in a structured field. |
 | `results[].filing_date` | string | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). |
 | `results[].filing_url` | string | Direct URL to the filing on the SEC EDGAR website. |
 | `results[].film_number` | string | SEC EDGAR film number for the filing. |
@@ -73,6 +74,7 @@ This endpoint returns JSON by default, and Apache Arrow when the request sends `
       "cusip": "023135106",
       "file_number": "028-04545",
       "filer_cik": "0001067983",
+      "filer_name": "Berkshire Hathaway Inc",
       "filing_date": "2024-11-14",
       "filing_url": "https://www.sec.gov/Archives/edgar/data/1067983/0000950123-24-011775.txt",
       "film_number": "241461756",
@@ -97,6 +99,7 @@ This endpoint returns JSON by default, and Apache Arrow when the request sends `
       "cusip": "025816109",
       "file_number": "028-04545",
       "filer_cik": "0001067983",
+      "filer_name": "Berkshire Hathaway Inc",
       "filing_date": "2024-11-14",
       "filing_url": "https://www.sec.gov/Archives/edgar/data/1067983/0000950123-24-011775.txt",
       "film_number": "241461756",

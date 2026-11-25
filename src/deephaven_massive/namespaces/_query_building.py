@@ -339,7 +339,9 @@ def _rename_advice(table: Table, column: str, what: str) -> str:
     return f'Name the column of {what} {column}, as in t.rename_columns("{column} = {text[0]}").'
 
 
-def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
+def one_or_any_of(
+    name: str, value: object, *, every: str, argument: str | None = None
+) -> dict[str, object]:
     """Return the wire parameter that carries an argument taking one value or several.
 
     Many list endpoints take a parameter both as `name` (one value) and as `name.any_of` (a
@@ -349,10 +351,12 @@ def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
     reserves every form of the parameter from `filters` even when the argument is not given.
 
     Args:
-        name: The wire name of the single-value form, which is also the argument's name.
+        name: The wire name of the single-value form.
         value: The argument as passed: one `str`, a sequence of `str`, or None.
         every: What None selects, for the message that refuses an empty sequence, such as
             `"every product"`.
+        argument: The factory's argument name, for the messages, where it is not `name`
+            (the options `underlying`, sent as `underlying_ticker`); None for `name`.
 
     Returns:
         `{name: value, f"{name}.any_of": None}` for one value or None, and
@@ -365,15 +369,17 @@ def one_or_any_of(name: str, value: object, *, every: str) -> dict[str, object]:
     An element that is not a `str` raises the `TypeError` of `build_query`.
     """
     plural = f"{name}.any_of"
+    argument = name if argument is None else argument
     if value is None or isinstance(value, str):
         return {name: value, plural: None}
     if not isinstance(value, Sequence):
         raise TypeError(
-            f"{name} must be a str, a sequence of str, or None, not {type(value).__name__}"
+            f"{argument} must be a str, a sequence of str, or None, not {type(value).__name__}"
         )
     if not value:
         raise ValueError(
-            f"{name}={value!r} is empty, so it would select nothing. Leave {name} out for {every}."
+            f"{argument}={value!r} is empty, so it would select nothing. Leave {argument} out "
+            f"for {every}."
         )
     return {name: None, plural: tuple(value)}
 

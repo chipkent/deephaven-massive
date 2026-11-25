@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import RestPath
 
 __all__ = [
+    "BARE_INDEX_LIST_PARAM",
     "BARE_INDEX_PARAM",
     "Call",
     "CryptoSplit",
@@ -95,7 +96,11 @@ _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 BARE_INDEX_PARAM: Final = "underlying_ticker"
 """The query parameter that takes an index without its `I:`: the options contracts list's
 `underlying_ticker` finds no contract for `I:SPX` and every one of `SPX`, so the request keeps
-the canonical ticker and only the wire gets the bare one (`wire_symbols.contracts_underlying`)."""
+the canonical ticker and only the wire gets the bare one (`wire_symbols.contracts_underlying`).
+The options greeks take the same parameter, and its list form `BARE_INDEX_LIST_PARAM`."""
+
+BARE_INDEX_LIST_PARAM: Final = f"{BARE_INDEX_PARAM}.any_of"
+"""The list form of `BARE_INDEX_PARAM`, each of whose values is sent the same way."""
 
 _CRYPTO_PAIR_PLACEHOLDER: Final = "cryptoTicker"
 """The path placeholder Massive names for one crypto pair, as in
@@ -470,8 +475,9 @@ def _caller_params(
     """Return the path and query parameters the caller set: typed parameters and filters.
 
     Typed parameters go wherever the path takes them: a path segment (`{date}`,
-    `{direction}`) or a query parameter. An index given to `BARE_INDEX_PARAM` goes without its
-    `I:` (`I:SPX` as `SPX`). `order` on a path without an `order` parameter folds
+    `{direction}`) or a query parameter. An index given to `BARE_INDEX_PARAM`, or listed in
+    `BARE_INDEX_LIST_PARAM`, goes without its `I:` (`I:SPX` as `SPX`). `order` on a path
+    without an `order` parameter folds
     into `sort` as its `.asc` or `.desc` suffix (`sort=date.desc`); on a path with one it is
     sent as is. A filter goes out under the wire name whose `filters` key it is.
 
@@ -569,10 +575,17 @@ def _sent_value(name: str, value: object) -> object:
         value: Its value.
 
     Returns:
-        `contracts_underlying(value)` for the options contracts' underlying; `value` otherwise.
+        `contracts_underlying(value)` for the options underlying, over each value of its list
+        form; `value` otherwise.
     """
     if name == BARE_INDEX_PARAM and isinstance(value, str):
         return contracts_underlying(value)
+    if name == BARE_INDEX_LIST_PARAM and isinstance(value, tuple):
+        bare: list[str] = []
+        for underlying in value:
+            assert isinstance(underlying, str)  # build_query refused any other element
+            bare.append(contracts_underlying(underlying))
+        return tuple(bare)
     return value
 
 

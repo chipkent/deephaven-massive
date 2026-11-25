@@ -51,6 +51,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `Cusip` | String | The CUSIP identifier for the held security. |
 | `FileNumber` | String | The 13F-specific file number assigned to the filer. |
 | `FilerCik` | String | SEC Central Index Key (10 digits, zero-padded) of the filing entity. |
+| `FilerName` | String | Name of the institutional investment manager filing the report, as reported on the filing's cover page. Null for older text-format filings (before mid-2013), which do not report it in a structured field. |
 | `FilingDate` | String | Date when the filing was submitted to the SEC (formatted as YYYY-MM-DD). |
 | `FilingUrl` | String | Direct URL to the filing on the SEC EDGAR website. |
 | `FilmNumber` | String | SEC EDGAR film number for the filing. |
@@ -81,6 +82,7 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `Cusip` | `cusip` |
 | `FileNumber` | `file_number` |
 | `FilerCik` | `filer_cik` |
+| `FilerName` | `filer_name` |
 | `FilingDate` | `filing_date` |
 | `FilingUrl` | `filing_url` |
 | `FilmNumber` | `film_number` |
@@ -107,4 +109,4 @@ The Massive field behind each column, by source. An empty cell means the source 
 
 ---
 
-The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-16, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.
+The plan tables and most column descriptions are Massive's, from its documentation as fetched on 2026-11-25, with a few corrected where Massive's are wrong. The library writes its own descriptions of the columns it names or computes, such as `Symbol` and `TimestampInsert`.

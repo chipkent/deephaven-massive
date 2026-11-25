@@ -43,6 +43,11 @@ def client(fake_rest: FakeRestServer) -> Iterator[RestClient]:
             {"root": "SPXW", "date.lte": "2025-11-17", "limit": "2"},
         ),
         (option_requests.open_interest(limit=50000), {"limit": "50000"}),
+        (
+            option_requests.greeks(underlying="I:SPX", limit=5),
+            {"underlying_ticker": "I:SPX", "limit": "5"},
+        ),
+        (option_requests.greeks(limit=5), {"limit": "5"}),
         (option_requests.unusual_trades(limit=300), {"limit": "300"}),
         (
             option_requests.index_list(active=True),

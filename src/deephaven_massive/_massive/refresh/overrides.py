@@ -598,6 +598,7 @@ _FILE_TIMES: tuple[tuple[str, tuple[str, ...]], ...] = (
 UNITS: Mapping[tuple[str, str], Unit] = MappingProxyType(
     {
         **_for(("/options/v1/admin-messages",), ("timestamp",), _NS_TICKS),
+        **_for(("/options/v1/analytics",), ("quote_timestamp", "underlying_timestamp"), _NS_TICKS),
         **_for(("/options/v1/unusual-trades",), ("sip_timestamp",), _NS_TICKS),
         **_for(BAR_PATHS, ("t",), _MS_BARS),
         **_for(
@@ -2018,13 +2019,18 @@ SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
                 source="every options dataset's `OptionRoot`, read from the contract's ticker",
                 reason='Massive describes `root` as "The OCC root symbol of the contract (e.g., '
                 "SPXW). Differs from the underlying for weekly roots and for contracts adjusted "
-                'after a corporate action (e.g., AMCR1)." That is the root every other options '
-                "dataset carries as `OptionRoot`, the OCC symbol's root read from the ticker "
-                "(`SPXW` for `O:SPXW251219C06000000`, `AMCR1` for an adjusted contract), so "
-                "Massive's value takes that column and the library derives none beside it.",
+                'after a corporate action (e.g., AMCR1)." (the greeks say "Option root symbol"). '
+                "That is the root every other options dataset carries as `OptionRoot`, the OCC "
+                "symbol's root read from the ticker (`SPXW` for `O:SPXW251219C06000000`, `AMCR1` "
+                "for an adjusted contract), so Massive's value takes that column and the library "
+                "derives none beside it.",
                 whole_key=True,
             )
-            for path in ("/options/v1/open-interest", "/options/v1/unusual-trades")
+            for path in (
+                "/options/v1/open-interest",
+                "/options/v1/unusual-trades",
+                "/options/v1/analytics",
+            )
         },
     }
 )

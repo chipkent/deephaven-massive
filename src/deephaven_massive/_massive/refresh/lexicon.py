@@ -354,6 +354,8 @@ IDENTITY: Mapping[str, str] = MappingProxyType(
         "day": "An English word: the session day's bar, or the requested date.",
         "fmv": "Fair market value, spelled `fmv` in Massive's `fmv_last_updated`.",
         "otc": "Over the counter, spelled `otc` throughout Massive's documentation.",
+        "rho": "The Greek letter's name: an option's rate sensitivity, spelled as Massive "
+        "spells its `delta`, `gamma`, `theta`, and `vega`.",
         "nav": "Net asset value, ETF Global's own name for the field.",
         "aum": "Assets under management, ETF Global's own name for the field.",
         "esg": "Environmental, social, and governance, ETF Global's own name for the field.",
