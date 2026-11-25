@@ -259,11 +259,13 @@ def test_a_rejected_key_fails_every_stream(
     del result, other, again
 
 
-def test_a_streams_copy_of_a_connection_error_names_its_dataset_and_logs_once(
+def test_a_streams_copy_of_a_connection_error_names_its_dataset_and_is_a_logged_repeat(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Each dataset's streams get their own copy, prefixed, with the error's class and
-    # attributes; the log stays at one WARNING per failure, whichever copy is logged first.
+    # attributes. Every copy logs at DEBUG only, whether or not the connection has logged the
+    # error yet, and the connection's own log of it stays at WARNING: the alarm never depends
+    # on which stream fails first, or on whether that stream's session is still open.
     error = dm.EntitlementError("Massive answered no.", status=403, request_id="r1")
     log = logging.getLogger("test.stream_copy")
     with caplog.at_level(logging.DEBUG, logger=log.name):
@@ -273,17 +275,15 @@ def test_a_streams_copy_of_a_connection_error_names_its_dataset_and_logs_once(
         assert str(second) == "test.quotes: Massive answered no."
         assert type(first) is dm.EntitlementError
         assert (first.status, first.request_id, first.source) == (403, "r1", error.source)
-        assert log_failure(log, first, "%s")  # the first copy logs at WARNING
-        assert not log_failure(log, second, "%s")  # the second is a repeat
-        # A copy of an error the connection logged itself is a repeat too.
-        logged = dm.MassiveError("The connection failed.")
-        assert log_failure(log, logged, "%s")
-        assert not log_failure(log, ws_connection.stream_copy(logged, "test.trades"), "%s")
-    assert [r.levelno for r in caplog.records] == [
-        logging.WARNING,
-        logging.DEBUG,
-        logging.WARNING,
-        logging.DEBUG,
+        assert not log_failure(log, first, "%s")  # a repeat, though nobody logged the error
+        assert not log_failure(log, second, "%s")
+        assert log_failure(log, error, "%s")  # the connection's own log is the WARNING
+        assert not log_failure(log, ws_connection.stream_copy(error, "test.trades"), "%s")
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.DEBUG, "test.trades: Massive answered no."),
+        (logging.DEBUG, "test.quotes: Massive answered no."),
+        (logging.WARNING, "Massive answered no."),
+        (logging.DEBUG, "test.trades: Massive answered no."),
     ]
 
 
@@ -2218,7 +2218,8 @@ def test_a_refusal_of_two_datasets_gives_each_its_own_copy_and_warns_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # One status refuses the topics of two datasets that share one message: each table's
-    # Error starts with its own dataset, and the log carries the refusal once.
+    # Error starts with its own dataset, and the log carries the refusal once, at WARNING from
+    # the connection, before either stream fails: each stream's copy is a DEBUG repeat.
     m = ws_session.session
     trades = m.options.trades(dm.ALL).blink()
     quotes = m.options.quotes(dm.ALL).blink()
@@ -2227,7 +2228,9 @@ def test_a_refusal_of_two_datasets_gives_each_its_own_copy_and_warns_once(
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
         ws_session.on_loop(connection, lambda: connection._refused(("Q.*", "T.*"), "no"))
         ws_session.flush()
-        errors = {r["Dataset"]: r["Error"] for r in streams_of(ws_session, dh_to_pylist)}
+        rows = streams_of(ws_session, dh_to_pylist)
+    errors = {r["Dataset"]: r["Error"] for r in rows}
+    ids = {r["Dataset"]: r["StreamId"] for r in rows}
     answered = (
         'Massive answered the subscription to Q.* and T.* on wss://socket.test/options: "no". '
         'To stream from another host, pass websocket_hosts={dm.AssetClass.OPTIONS: "<host>"} '
@@ -2237,12 +2240,25 @@ def test_a_refusal_of_two_datasets_gives_each_its_own_copy_and_warns_once(
         "options.trades": f"options.trades: {answered}",
         "options.quotes": f"options.quotes: {answered}",
     }
-    failed = [
-        r
+    loggers = (ws_connection.__name__, "deephaven_massive._tables.stream")
+    logged = [
+        (r.name, r.levelno, r.getMessage())
         for r in caplog.records
-        if r.name == "deephaven_massive._tables.stream" and answered in r.getMessage()
+        if r.name in loggers and answered in r.getMessage()
     ]
-    assert sorted(r.levelno for r in failed) == [logging.DEBUG, logging.WARNING]
+    assert logged[0] == (ws_connection.__name__, logging.WARNING, answered)
+    assert sorted(logged[1:]) == [
+        (
+            "deephaven_massive._tables.stream",
+            logging.DEBUG,
+            f"options.quotes stream {ids['options.quotes']} failed: {answered}",
+        ),
+        (
+            "deephaven_massive._tables.stream",
+            logging.DEBUG,
+            f"options.trades stream {ids['options.trades']} failed: {answered}",
+        ),
+    ]
     m.release(trades)
     m.release(quotes)
 
@@ -2286,8 +2302,8 @@ def test_a_taken_connection_fails_its_tables_and_closes_by_default(
     match = re.fullmatch(_STREAM_TAKEN_ERROR, stream["Error"])
     assert match is not None
     assert result.j_table.isFailed()
-    warnings = [r for r in caplog.records if "took this one at" in r.getMessage()]
-    assert [(r.levelno, r.getMessage()) for r in warnings] == [
+    # The connection's own WARNING is the one alarm; the stream's failure is a DEBUG repeat.
+    assert [(r.levelno, r.getMessage()) for r in caplog.records if "took th" in r.getMessage()] == [
         (
             logging.WARNING,
             (

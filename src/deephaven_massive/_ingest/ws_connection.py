@@ -156,21 +156,21 @@ def stream_copy(error: MassiveError, dataset: str) -> MassiveError:
     """Return a stream's own copy of a connection-wide error, prefixed with the stream's dataset.
 
     A table's `Error` then says which stream it belongs to, as every other stream failure
-    does, while the connection keeps the error itself for `LastError` and the log. The log
-    stays at one WARNING per failure: the first copy of an error nobody has logged logs at
-    WARNING when its stream fails, and every later copy, and every copy of an error the
-    connection logged itself, logs at DEBUG only (`mark_failure_logged`).
+    does, while the connection keeps the error itself for `LastError` and the log. The
+    connection reports each connection-wide failure once itself, at WARNING, before its
+    streams fail (`log_failure` on the error, or its own record of the taking), so the alarm
+    never depends on which stream fails first or whether its session is still open; every
+    copy is a repeat, logged at DEBUG only when its stream fails (`mark_failure_logged`).
 
     Args:
-        error: The connection's error.
+        error: The connection's error, which the connection has reported itself.
         dataset: The stream's dataset, such as `"stocks.trades"`.
 
     Returns:
         A new error of the same class and attributes, with the message `"<dataset>: <error>"`.
     """
     copy = copy_error(error, f"{dataset}: {error}")
-    if not mark_failure_logged(error):  # logged already: the copy is only a repeat
-        mark_failure_logged(copy)
+    mark_failure_logged(copy)
     return copy
 
 
@@ -1324,8 +1324,8 @@ class Connection:
         )
         hint = self._refusal_hint(refused)
         self._last_error = f"{answered} {hint}"
-        # One error per note, so a note reaches only the streams that carry it, and each
-        # dataset's streams get their own copy of it.
+        # One error per note, so a note reaches only the streams that carry it, logged once
+        # here, and each dataset's streams get their own copy of it.
         by_note: dict[tuple[str, str], list[int]] = {}
         for stream in self._streams.values():
             if stream.topics & refused:
@@ -1337,6 +1337,7 @@ class Connection:
                 # The note says where Massive documents the dataset: a why, before the fix.
                 text = f"{answered} {note.removesuffix('.')}. {hint}" if note else self._last_error
                 errors[note] = EntitlementError(text)
+                log_failure(logger, errors[note], "%s")
             self.flusher.fail(ids, stream_copy(errors[note], dataset))
 
     def _refusal_hint(self, refused: set[str]) -> str:
