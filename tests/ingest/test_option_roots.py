@@ -626,12 +626,12 @@ def test_a_listed_index_ticker_whose_first_contract_is_a_stock_s_warns_once(
     ]
 
 
-def symbol_page(symbols: list[str], days: list[str] | None = None) -> pa.RecordBatch:
-    # A page of rows in the shape of the open interest by underlying.
+def symbol_page(symbols: list[str], days: list[str | None] | None = None) -> pa.RecordBatch:
+    # A page of rows in the shape of the open interest by underlying; a None day is a null.
     return pa.RecordBatch.from_pydict(
         {
             "Symbol": symbols,
-            "Date": days or ["2026-11-13"] * len(symbols),
+            "Date": pa.array(days or ["2026-11-13"] * len(symbols), pa.string()),
             "OpenInterest": [300] * len(symbols),
         }
     )
@@ -662,6 +662,72 @@ def test_symbols_of_an_index_get_the_prefix_and_each_ticker_is_asked_once_with_i
     ]
     # A ticker already prefixed asks nothing; each bare one is asked once, as of its first row.
     assert asked == [("SPX", "2026-11-13"), ("DJT", "2026-11-13"), ("NDX", "2026-11-11")]
+
+
+def test_a_symbol_row_without_a_date_dates_no_lookup_and_a_ticker_with_none_is_withheld() -> None:
+    asked: list[tuple[str, str]] = []
+
+    def kind(underlying: str, *, day: str) -> RootKind:
+        asked.append((underlying, day))
+        return RootKind.INDEX
+
+    # SPX's undated row cannot date its lookup, so the dated one does; NDX has no dated row.
+    batch = symbol_page(["SPX", "SPX", "NDX", "AAPL"], [None, "2026-11-12", None, None])
+    found = canonical_symbols([batch], kind, dataset="options.open_interest_by_underlying")
+    assert asked == [("SPX", "2026-11-12")]
+    assert found.rows.column("Symbol").to_pylist() == ["I:SPX", "I:SPX"]
+    assert found.groups == (
+        WithheldGroup(
+            RowFault.UNREADABLE_SYMBOLS,
+            None,
+            "NDX",
+            "Symbol",
+            1,
+            "no row of NDX carries a Date, so the library can't ask Massive's contracts list as "
+            "of a day whether NDX is an index (I:NDX) or not",
+        ),
+        WithheldGroup(
+            RowFault.UNREADABLE_SYMBOLS,
+            None,
+            "AAPL",
+            "Symbol",
+            1,
+            "no row of AAPL carries a Date, so the library can't ask Massive's contracts list as "
+            "of a day whether AAPL is an index (I:AAPL) or not",
+        ),
+    )
+
+
+def test_a_contract_row_without_a_date_dates_no_lookup_and_a_root_with_none_is_withheld() -> None:
+    asked: list[tuple[str, str, str]] = []
+
+    def kind(root: str, *, underlying: str, contract: str, day: str) -> RootKind:
+        del underlying
+        asked.append((root, contract, day))
+        return RootKind.INDEX
+
+    batch = pa.RecordBatch.from_pydict(
+        {
+            "Symbol": [SPXW, "O:SPXW261218P06000000", "O:NDX261218C20000000"],
+            "OptionRoot": ["SPXW", "SPXW", "NDX"],
+            "Date": pa.array([None, "2026-11-12", None], pa.string()),
+            "Underlying": ["SPX", "SPX", "NDX"],
+        }
+    )
+    found = canonical_underlyings([batch], kind, dataset="options.open_interest")
+    assert asked == [("SPXW", "O:SPXW261218P06000000", "2026-11-12")]
+    assert found.rows.column("Underlying").to_pylist() == ["I:SPX", "I:SPX"]
+    assert found.groups == (
+        WithheldGroup(
+            RowFault.UNREADABLE_SYMBOLS,
+            None,
+            "NDX",
+            "Underlying",
+            1,
+            "no row of option root NDX carries a Date, so the library can't ask Massive's "
+            "Contract Overview as of a day whether its underlying is an index",
+        ),
+    )
 
 
 def test_a_symbol_page_already_canonical_is_unchanged() -> None:

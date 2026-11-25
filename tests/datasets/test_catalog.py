@@ -1847,6 +1847,7 @@ BY_UNDERLYING_PATH = "/options/v1/open-interest/underlying"
 BY_UNDERLYING = DatasetSpec(
     name="options.by_underlying",
     summary="A dataset for the tests.",
+    asset_class=AssetClass.OPTIONS,
     fetch_path=BY_UNDERLYING_PATH,
     keys={(R, BY_UNDERLYING_PATH): SourceKeys(symbol=KeySpec("UnderlyingTicker"))},
     symbol_param="underlying_ticker.any_of",
@@ -1859,7 +1860,7 @@ def test_each_index_prefix_fits_only_the_datasets_whose_rows_can_tell_an_index(
     prefix: IndexPrefix,
 ) -> None:
     options_only = "is for an options REST dataset"
-    every_class = "BY_UNDERLYING is for a REST dataset of every class whose rows carry their symbol"
+    from_rows = "BY_UNDERLYING is for an options REST dataset whose rows carry their symbol"
     stream = dataclasses.replace(
         ADMIN,
         history_path=None,
@@ -1880,15 +1881,21 @@ def test_each_index_prefix_fits_only_the_datasets_whose_rows_can_tell_an_index(
             for spec in (CONTRACTS, EXCHANGES, stream, from_request, BY_UNDERLYING):
                 assert dataclasses.replace(spec, index_prefix=prefix).index_prefix is prefix
         case IndexPrefix.FROM_CFI | IndexPrefix.BY_ROOT:
-            assert dataclasses.replace(CONTRACTS, index_prefix=prefix).index_prefix is prefix
-            for spec in (EXCHANGES, stream, BY_UNDERLYING):
+            for spec in (CONTRACTS, BY_UNDERLYING):
+                assert dataclasses.replace(spec, index_prefix=prefix).index_prefix is prefix
+            for spec in (EXCHANGES, stream):
                 with pytest.raises(ValueError, match=f"{prefix.value} {options_only}"):
                     dataclasses.replace(spec, index_prefix=prefix)
         case IndexPrefix.BY_UNDERLYING:
+            # The data is options data; the symbols are the underlyings, read by prefix.
             assert BY_UNDERLYING.symbols_are_underlyings
+            assert BY_UNDERLYING.symbols_class is ClassFromPrefix.ANY
             assert not CONTRACTS.symbols_are_underlyings
-            for spec in (CONTRACTS, EXCHANGES, stream, from_request):
-                with pytest.raises(ValueError, match=every_class):
+            assert CONTRACTS.symbols_class is AssetClass.OPTIONS
+            assert dataclasses.replace(CONTRACTS, index_prefix=prefix).index_prefix is prefix
+            options_from_request = dataclasses.replace(from_request, asset_class=AssetClass.OPTIONS)
+            for spec in (EXCHANGES, stream, from_request, options_from_request):
+                with pytest.raises(ValueError, match=from_rows):
                     dataclasses.replace(spec, index_prefix=prefix)
         case _:
             assert_never(prefix)

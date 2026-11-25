@@ -417,6 +417,9 @@ OPEN_INTEREST_BY_UNDERLYING: Final = DatasetSpec(
     name="options.open_interest_by_underlying",
     summary="Each underlying's open interest at the end of each trading day, calls and puts split "
     "out.",
+    # Options data, charged to the options subscription; the symbols are the underlyings,
+    # stocks and indices, whose grammar `index_prefix` selects (`DatasetSpec.symbols_class`).
+    asset_class=AssetClass.OPTIONS,
     fetch_path=_OPEN_INTEREST_BY_UNDERLYING,
     # The row's symbol is the underlying itself: Massive totals every root on it.
     keys={(_REST, _OPEN_INTEREST_BY_UNDERLYING): SourceKeys(symbol=KeySpec("UnderlyingTicker"))},

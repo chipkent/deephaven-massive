@@ -376,7 +376,7 @@ class SymbolRowRule:
         """
         return cls(
             spec.name,
-            spec.asset_class,
+            spec.symbols_class,
             spec.symbols_as_written,
             noncanonical,
             underlying=spec.symbols_are_underlyings,

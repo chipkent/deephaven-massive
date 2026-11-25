@@ -655,7 +655,8 @@ class IndexPrefix(StrEnum):
     option root (`_ingest/option_roots.py`)."""
     BY_UNDERLYING = "BY_UNDERLYING"
     """`Symbol` is the bare underlying, with no contract: one lookup of Massive's contracts list
-    per bare ticker (`_ingest/option_roots.py`)."""
+    per bare ticker (`_ingest/option_roots.py`). The dataset's symbols are stock and index
+    tickers (`DatasetSpec.symbols_class`)."""
 
 
 def _require_enum(value: object, enum_type: type[_E], name: str) -> _E:

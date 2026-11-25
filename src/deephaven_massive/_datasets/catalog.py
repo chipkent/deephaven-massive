@@ -392,7 +392,8 @@ class DatasetSpec:
             other class read `fetch_path`.
         symbols_per_request: The most symbols one request carries in a list-valued symbol
             parameter (`ticker.any_of`), such as 250 for the unified snapshot; a longer list is
-            split over several requests. None sends every symbol in one request.
+            split over several requests. Two symbols the wire spells alike (`DJT` and `I:DJT`
+            as `DJT`) count once and share a request. None sends every symbol in one request.
         page_size: The REST page size requested where it is not the path's documented
             maximum `limit` (`Param.maximum`), which every other request asks for: lower
             where the rows are long (article bodies, quoted filing text, financial
@@ -436,12 +437,12 @@ class DatasetSpec:
             options dataset whose rows carry their contract's CFI code, which marks an option
             on an index (the contracts list). `BY_ROOT` for an options dataset whose rows name a
             contract and a bare `Underlying` with no code (the open interest): the transport
-            asks Massive's contracts reference once per option root. `BY_UNDERLYING` for a
-            dataset of every class whose `Symbol` is the bare underlying itself, with no
-            contract (the open interest by underlying): the transport asks Massive's contracts
-            list once per bare ticker. `FROM_CFI` and `BY_ROOT` are for an options dataset with a
-            REST source; `BY_UNDERLYING` for a REST dataset of every class
-            (`ClassFromPrefix.ANY`) whose every REST source reads its symbol from the rows.
+            asks Massive's contracts reference once per option root. `BY_UNDERLYING` for an
+            options dataset whose `Symbol` is the bare underlying itself, with no contract (the
+            open interest by underlying): the transport asks Massive's contracts list once per
+            bare ticker, and the symbols follow the underlyings' grammar (`symbols_class`).
+            Each is for an options dataset with a REST source; `BY_UNDERLYING` also needs
+            every REST source to read its symbol from the rows.
         option_rows: True for a dataset of every class (`ClassFromPrefix.ANY`) whose rows
             include options contracts beside other classes' tickers (the unified snapshot): it
             gets the derived `OptionRoot` column every options dataset has, null on a row
@@ -573,17 +574,17 @@ class DatasetSpec:
 
         A stream, a dataset in a kind, and a flat-file dataset are of one class; symbols kept
         as written are for REST datasets only; `option_rows` is for a dataset of every class;
-        an `index_prefix` restored from the rows' CFI codes or by option root is for an options
-        REST dataset, and one restored by bare underlying for a REST dataset of every class
-        whose `Symbol` is that underlying, read from every REST source's rows.
+        an `index_prefix` other than `NONE` is for an options REST dataset, and one restored by
+        bare underlying for one whose `Symbol` is that underlying, read from every REST
+        source's rows.
 
         Raises:
             ValueError: If a dataset with channels, flat files, or a kind has no `asset_class`
                 (`ClassFromPrefix.ANY`); a dataset that keeps its symbols as written has
                 channels or flat-file prefixes; a dataset of one class sets `option_rows`; a
-                dataset that is not an options REST dataset sets `index_prefix` to `FROM_CFI` or
-                `BY_ROOT`; or a dataset that is not a REST dataset of every class, or that reads
-                a symbol from a request rather than from the rows, sets it to `BY_UNDERLYING`.
+                dataset that is not an options REST dataset sets `index_prefix` to `FROM_CFI`,
+                `BY_ROOT`, or `BY_UNDERLYING`; or one that reads a symbol from a request rather
+                than from the rows sets it to `BY_UNDERLYING`.
         """
         if self.channels and self.asset_class is ClassFromPrefix.ANY:
             raise ValueError(f"{self.name}: a WebSocket dataset (with channels) needs a class")
@@ -604,9 +605,9 @@ class DatasetSpec:
         """Check that `index_prefix` names a way the dataset's rows can tell an index.
 
         Raises:
-            ValueError: If `FROM_CFI` or `BY_ROOT` is set on a dataset that is not an options
-                REST dataset; or `BY_UNDERLYING` on one that is not a REST dataset of every
-                class, or whose REST source reads no symbol from its rows.
+            ValueError: If `FROM_CFI`, `BY_ROOT`, or `BY_UNDERLYING` is set on a dataset that
+                is not an options REST dataset; or `BY_UNDERLYING` on one whose REST source
+                reads no symbol from its rows.
         """
         options_rest = self.asset_class is AssetClass.OPTIONS and bool(self.rest_paths)
         match self.index_prefix:
@@ -620,15 +621,11 @@ class DatasetSpec:
                         "REST dataset"
                     )
             case IndexPrefix.BY_UNDERLYING:
-                if (
-                    self.asset_class is not ClassFromPrefix.ANY
-                    or not self.rest_paths
-                    or not self._rest_symbols_from_rows()
-                ):
-                    # The lookup classifies the rows' own symbols, stocks and indices alike.
+                if not options_rest or not self._rest_symbols_from_rows():
+                    # The rows are options data, read by the bare underlying they carry.
                     raise ValueError(
-                        f"{self.name}: index_prefix BY_UNDERLYING is for a REST dataset of every "
-                        "class whose rows carry their symbol"
+                        f"{self.name}: index_prefix BY_UNDERLYING is for an options REST "
+                        "dataset whose rows carry their symbol"
                     )
             case _:
                 assert_never(self.index_prefix)
@@ -805,6 +802,17 @@ class DatasetSpec:
         (`IndexPrefix.BY_UNDERLYING`).
         """
         return self.index_prefix is IndexPrefix.BY_UNDERLYING
+
+    @property
+    def symbols_class(self) -> AssetClass | ClassFromPrefix:
+        """The class whose grammar the dataset's symbols follow.
+
+        The dataset's own class, except where its symbols are option underlyings
+        (`symbols_are_underlyings`): the data is the options class, so its requests are charged
+        to the options subscription and its days are New York days, while each symbol is a
+        stock or index ticker, read by its prefix (`ClassFromPrefix.ANY`).
+        """
+        return ClassFromPrefix.ANY if self.symbols_are_underlyings else self.asset_class
 
     @property
     def has_history(self) -> bool:

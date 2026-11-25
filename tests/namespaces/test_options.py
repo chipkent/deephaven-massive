@@ -23,12 +23,12 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
-from deephaven import new_table
+from deephaven import dtypes, new_table
 from deephaven.column import string_col
 from deephaven.stream import blink_to_append_only
 
 import deephaven_massive as dm
-from deephaven_massive import _massive
+from deephaven_massive import _log_limits, _massive
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._datasets.filters import filter_keys
@@ -44,6 +44,7 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._ingest.recency_labels import delayed_refusal
 from deephaven_massive._ingest.rest_requests import page_size
+from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import RowFault, Transport, to_batch
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
     from deephaven.table import Table
+    from deephaven.table_factory import InputTable
 
     from deephaven_massive._tables.problem_events import ProblemEvent
     from tests._fakes.rest import FakeRestServer
@@ -126,11 +128,12 @@ def test_namespace_is_reached_from_the_session(massive_session: dm.MassiveSessio
 def test_every_dataset_is_declared_in_method_order() -> None:
     assert tuple(spec.name for spec in options.DATASETS) == tuple(f"options.{n}" for n in NAMES)
     assert all(CATALOG.by_name[spec.name] is spec for spec in options.DATASETS)
-    # Every dataset is of the options class but the open interest by underlying, whose
-    # symbols are the underlyings themselves, stocks and indices.
-    classes = {spec.name: spec.asset_class for spec in options.DATASETS}
-    assert classes.pop("options.open_interest_by_underlying") is ClassFromPrefix.ANY
-    assert set(classes.values()) == {dm.AssetClass.OPTIONS}
+    # Every dataset is options data, charged to the options subscription. The symbols of the
+    # open interest by underlying are the underlyings themselves, stocks and indices.
+    assert {spec.asset_class for spec in options.DATASETS} == {dm.AssetClass.OPTIONS}
+    grammars = {spec.name: spec.symbols_class for spec in options.DATASETS}
+    assert grammars.pop("options.open_interest_by_underlying") is ClassFromPrefix.ANY
+    assert set(grammars.values()) == {dm.AssetClass.OPTIONS}
 
 
 def test_the_options_datasets_pass_every_catalog_gate() -> None:
@@ -1594,8 +1597,8 @@ def test_open_interest_by_underlying_asks_the_contracts_list_once_per_ticker(
 ) -> None:
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
     page = [
-        by_underlying_row("SPX", "2026-01-23"),
         by_underlying_row("SPX", "2026-01-22"),
+        by_underlying_row("SPX", "2026-01-23"),
         by_underlying_row("DJT", "2026-01-23"),
         by_underlying_row("AAPL", "2026-01-23"),
     ]
@@ -1607,11 +1610,12 @@ def test_open_interest_by_underlying_asks_the_contracts_list_once_per_ticker(
     for _ in range(2):
         out = rows(rest_session.options.open_interest_by_underlying().fetch(wait=True))
         assert [(r["Symbol"], r["Date"]) for r in out] == [
-            ("I:SPX", "2026-01-23"),
             ("I:SPX", "2026-01-22"),
+            ("I:SPX", "2026-01-23"),
             ("DJT", "2026-01-23"),
             ("AAPL", "2026-01-23"),
         ]
+    # Each ticker is asked about as of its latest day on the page, not its first row's.
     lookups = [q for q in fake_rest.get_queries(one_value=True) if q[0] == CONTRACTS_LIST]
     assert lookups == [
         (CONTRACTS_LIST, {"underlying_ticker": "SPX", "limit": "1", "as_of": "2026-01-23"}),
@@ -1804,6 +1808,63 @@ def test_open_interest_by_underlying_skips_a_watchlist_row_that_is_no_underlying
     ) in events[0].detail
 
 
+def test_open_interest_by_underlying_follows_a_watchlist_that_names_an_index(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # A refreshing watchlist is read symbol by symbol, and each request's rows are given to
+    # the symbols it names: the index as the watchlist spells it, I:SPX, although the wire
+    # got SPX.
+    fake_rest.reply(
+        BY_UNDERLYING,
+        Reply({"status": "OK", "results": [by_underlying_row("SPX"), by_underlying_row("SPY")]}),
+    )
+    serve_indices(fake_rest, "SPX")
+    fake_rest.reply(CONTRACTS_LIST, first_contract("OCEICS"))
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watchlist.add(new_table([string_col("Symbol", ["I:SPX", "SPY"])]))
+    table = rest_session.options.open_interest_by_underlying(watchlist).fetch(wait=True)
+    try:
+        assert sorted((r["Symbol"], r["Date"]) for r in rows(table)) == [
+            ("I:SPX", "2026-01-23"),
+            ("SPY", "2026-01-23"),
+        ]
+    finally:
+        rest_session.release(table)
+    assert fake_rest.get_queries(one_value=True)[0] == (
+        BY_UNDERLYING,
+        {"underlying_ticker.any_of": "SPX,SPY", "limit": "50000"},
+    )
+    assert rows(rest_session.problems()) == []
+
+
+def test_open_interest_by_underlying_is_charged_to_the_options_subscription(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The rows are options data, so `rest_requests_per_minute={dm.Subscription.OPTIONS: n}`
+    # paces these requests with the other options datasets', although the symbols are stock
+    # and index tickers.
+    monkeypatch.setattr(_log_limits, "_logged", LoggedKeys())  # as in a fresh process
+    fake_rest.reply(BY_UNDERLYING, Reply({"status": "OK", "results": [by_underlying_row("SPY")]}))
+    serve_indices(fake_rest)
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive._ingest.rest"):
+        rest_session.options.open_interest_by_underlying(["SPY", "I:SPX"]).fetch(wait=True)
+    charged = [m for m in caplog.messages if " is charged to the " in m]
+    assert charged == [
+        (
+            f"options.open_interest_by_underlying {BY_UNDERLYING}, symbols I:SPX, SPY, is "
+            "charged to the options bucket as its data's class. Later requests of this path "
+            "charged to it are not logged."
+        )
+    ]
+
+
 def test_open_interest_by_underlying_sends_250_underlyings_a_request(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
@@ -1902,6 +1963,30 @@ def test_greeks_send_one_underlying_bare_and_keep_the_canonical_one(
     query.fetch(wait=True)
     assert fake_rest.get_queries(one_value=True) == [
         ("/options/v1/analytics", {"underlying_ticker": "SPX", "limit": "50000"})
+    ]
+
+
+def test_greeks_send_two_spellings_of_one_underlying_once(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The stock DJT and the index I:DJT are both `DJT` to Massive: one value on the wire, and
+    # the request keeps both. The rows' root is a stock's, so they keep the bare ticker.
+    contract = "O:DJT261218C00050000"
+    page = [{"ticker": contract, "root": "DJT", "date": "2026-11-13", "underlying_ticker": "DJT"}]
+    fake_rest.reply("/options/v1/analytics", Reply({"status": "OK", "results": page}))
+    serve_indices(fake_rest, "DJT")
+    fake_rest.reply(
+        wire(f"/v3/reference/options/contracts/{contract}"), contract_reference("OCASPS")
+    )
+    query = rest_session.options.greeks(underlying=["DJT", "I:DJT"])
+    assert request_of(query)["params"] == {"underlying_ticker.any_of": ("DJT", "I:DJT")}
+    out = rows(query.fetch(wait=True))
+    assert fake_rest.get_queries(one_value=True)[0] == (
+        "/options/v1/analytics",
+        {"underlying_ticker.any_of": "DJT", "limit": "50000"},
+    )
+    assert [(r["Symbol"], r["OptionRoot"], r["Underlying"]) for r in out] == [
+        (contract, "DJT", "DJT")
     ]
 
 

@@ -247,7 +247,8 @@ class OptionRootKinds:
 
         Args:
             underlying: The bare underlying Massive's row names, such as `"SPX"`.
-            day: The trading day of the row, as ISO text, sent as `as_of`.
+            day: The latest trading day among the page's rows that name it, as ISO text, sent
+                as `as_of` (`canonical_symbols`).
             reader: The read the lookup serves, whose error conversion it uses.
             patience: The patience of the read, taken on its own thread (`RestReader.patience`),
                 which the lookup's pauses are charged to.
@@ -752,7 +753,10 @@ def _canonical(batch: pa.RecordBatch, kind: KindOf, *, dataset: str) -> pa.Recor
         return with_marks(batch, {}, sent=underlyings)
     symbols = batch.column(_SYMBOL)
     roots = pc.coalesce(batch.column(_ROOT), option_roots(symbols))
-    firsts: dict[str, tuple[str, str, str]] = {}
+    # Each bare root's first row that carries a `Date`, which dates its lookup. `Symbol` is a
+    # required key of every dataset that asks, so it is text, and a bare `Underlying` is never
+    # null; `Date` is not required, so a row Massive sends without one can't date a lookup.
+    firsts: dict[str, tuple[str, str, str] | None] = {}
     for root, underlying, symbol, day, wanted in zip(
         roots.to_pylist(),
         underlyings.to_pylist(),
@@ -761,13 +765,18 @@ def _canonical(batch: pa.RecordBatch, kind: KindOf, *, dataset: str) -> pa.Recor
         bare.to_pylist(),
         strict=True,
     ):
-        # `Symbol` and `Date` are required keys of every dataset that asks, so both are text,
-        # and a bare `Underlying` is never null.
-        if wanted and isinstance(root, str) and root not in firsts:
-            firsts[root] = (str(underlying), str(symbol), str(day))
+        if wanted and isinstance(root, str) and firsts.get(root) is None:
+            firsts[root] = None if day is None else (str(underlying), str(symbol), str(day))
     index_roots: list[str] = []
     unknown: dict[str, str] = {}
-    for root, (underlying, contract, day) in firsts.items():
+    for root, first in firsts.items():
+        if first is None:
+            unknown[root] = (
+                f"no row of option root {root} carries a Date, so the library can't ask "
+                f"Massive's Contract Overview as of a day whether its underlying is an index"
+            )
+            continue
+        underlying, contract, day = first
         found = kind(root, underlying=underlying, contract=contract, day=day)
         match found:
             case RootKind.INDEX:
@@ -868,8 +877,8 @@ def canonical_symbols(
     """Give the `Symbol` of each row on an index its `I:`, and withhold the rows it can't.
 
     For a dataset whose `Symbol` is the bare underlying itself, with no contract beside it. For
-    each bare `Symbol` among a page's rows, `kind` is asked once, with the first such row's
-    trading day; the rows of an `INDEX` ticker get `I:`. The rows of a ticker Massive's
+    each bare `Symbol` among a page's rows, `kind` is asked once, with the latest trading day
+    among its rows; the rows of an `INDEX` ticker get `I:`. The rows of a ticker Massive's
     contracts list could not classify (`UNKNOWN`) are withheld as `unreadable_symbols`, since
     the ticker may be an index's without its `I:`, and the library publishes only canonical
     tickers.
@@ -908,15 +917,30 @@ def _canonical_symbol(
     bare = pc.invert(pc.starts_with(symbols, _INDEX_PREFIX))
     if not pc.any(bare).as_py():
         return with_marks(batch, {}, sent=symbols)
-    firsts: dict[str, str] = {}
+    # Each ticker's latest day on the page: the contracts list as of that day is the likeliest
+    # to hold a contract, since a live index lists more as time passes and a retired one
+    # listed its last on its last day. `Date` is not a required key, so a row Massive sends
+    # without one dates nothing; a ticker with no dated row can't be asked about.
+    latest: dict[str, str | None] = {}
     for symbol, day, wanted in zip(
         symbols.to_pylist(), batch.column(_DATE).to_pylist(), bare.to_pylist(), strict=True
     ):
-        if wanted and symbol not in firsts:
-            firsts[symbol] = str(day)
+        if not wanted:
+            continue
+        dated = None if day is None else str(day)
+        known = latest.get(symbol)
+        if known is None or (dated is not None and dated > known):
+            latest[symbol] = dated
     indices: list[str] = []
     unknown: dict[str, str] = {}
-    for symbol, day in firsts.items():
+    for symbol, day in latest.items():
+        if day is None:
+            unknown[symbol] = (
+                f"no row of {symbol} carries a Date, so the library can't ask Massive's "
+                f"contracts list as of a day whether {symbol} is an index "
+                f"({_INDEX_PREFIX}{symbol}) or not"
+            )
+            continue
         found = kind(symbol, day=day)
         match found:
             case RootKind.INDEX:

@@ -747,7 +747,7 @@ def _normalized_symbols(
         normalized = SymbolTable(symbols)
     elif symbols is not None:
         normalized = check_symbols(
-            spec.asset_class,
+            spec.symbols_class,
             symbols,
             as_written=spec.symbols_as_written,
             underlying=spec.symbols_are_underlyings,

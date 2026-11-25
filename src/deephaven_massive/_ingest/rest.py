@@ -200,6 +200,7 @@ from deephaven_massive._ingest.rest_requests import (
     own_symbols,
     plan_calls,
     shared_params,
+    wire_query,
 )
 from deephaven_massive._ingest.rest_rows import (
     CFI,
@@ -350,28 +351,27 @@ def _missing_error(spec: DatasetSpec, missing: Sequence[_Missing]) -> Unavailabl
     )
 
 
-def _bare_indices(request: Request, call: Call) -> dict[str, str]:
-    """Return the indices a call asked for by their bare ticker (`SPX` sent for `I:SPX`).
+def _bare_indices(request: Request) -> dict[str, str]:
+    """Return the indices a call asks for by their bare ticker (`SPX` sent for `I:SPX`).
 
     Args:
-        request: The normalized arguments, which keep the canonical tickers.
-        call: The planned call, whose query holds the tickers as sent.
+        request: The normalized arguments, which keep the canonical tickers; the wire gets
+            an index underlying bare (`rest_requests.wire_query`).
 
     Returns:
-        Each canonical index the call sent without its `I:`, with the parameter that carried
+        Each canonical index the call sends without its `I:`, with the parameter that carries
         it (`BARE_INDEX_PARAM` or `BARE_INDEX_LIST_PARAM`); empty for any other call.
     """
     params = dict(request.params)
     found: dict[str, str] = {}
     asked = params.get(BARE_INDEX_PARAM)
-    if isinstance(asked, str) and asked != call.query.get(BARE_INDEX_PARAM, asked):
+    if isinstance(asked, str) and contracts_underlying(asked) != asked:
         found[asked] = BARE_INDEX_PARAM
     listed = params.get(BARE_INDEX_LIST_PARAM)
-    sent = call.query.get(BARE_INDEX_LIST_PARAM)
-    if isinstance(listed, tuple) and isinstance(sent, tuple):
-        for canonical, wire in zip(listed, sent, strict=True):
+    if isinstance(listed, tuple):
+        for canonical in listed:
             assert isinstance(canonical, str)  # build_query refused any other element
-            if canonical != wire:
+            if contracts_underlying(canonical) != canonical:
                 found[canonical] = BARE_INDEX_LIST_PARAM
     return found
 
@@ -1065,7 +1065,7 @@ class RestReader:
 
         Args:
             underlying: The bare underlying the row names, such as `"SPX"`.
-            day: The trading day of the row that names it, as ISO text.
+            day: The latest trading day among the page's rows that name it, as ISO text.
             patience: The read's patience; None takes it now, on the calling thread
                 (`patience`).
             cancel: A background read's stop token, or None.
@@ -1617,18 +1617,16 @@ class RestReader:
         template = converter.rest_path.template
         # The path as sent, with the call's values in place of the template's placeholders.
         requested = f"GET {request_target(converter.rest_path, call.path_params, {})}"
-        # The query holds the symbols as sent, an index bare: `day_class` reads a class only
-        # where a dataset has one, and no dataset that sends an index bare does.
         own = own_symbols(spec, call.symbol, call.query)
         zone_class = day_class(spec, map(symbol_class, own))
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
         bucket = _request_bucket(spec, template, call)
-        bare_indices = _bare_indices(request, call)
+        bare_indices = _bare_indices(request)
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
                 call.path_params,
-                call.query,
+                wire_query(call.query),
                 bucket=bucket,
                 cancel=stop,
                 patience=patience,
