@@ -506,12 +506,42 @@ def test_currencies_cannot_be_delayed(base: MassiveConfig) -> None:
 
 
 def test_the_delayed_fix_is_a_sentence_naming_the_setting() -> None:
-    assert delayed_fix(Subscription.OPTIONS) == (
+    assert delayed_fix(Subscription.OPTIONS, listed=set()) == (
         "Pass delayed_subscriptions={dm.Subscription.OPTIONS} to dm.MassiveConfig."
     )
-    assert delayed_fix(Subscription.OPTIONS, purpose="To use Massive's delayed options feed") == (
+    assert delayed_fix(
+        Subscription.OPTIONS, listed=set(), purpose="To use Massive's delayed options feed"
+    ) == (
         "To use Massive's delayed options feed, pass delayed_subscriptions="
         "{dm.Subscription.OPTIONS} to dm.MassiveConfig."
+    )
+
+
+def test_the_delayed_fix_keeps_the_subscriptions_already_listed() -> None:
+    # The set to pass holds what the user listed and the new member, in the enum's order, so
+    # pasting it loses nothing; the member already listed is not repeated.
+    listed = {Subscription.INDICES, Subscription.STOCKS}
+    assert delayed_fix(Subscription.OPTIONS, listed=listed) == (
+        "Pass delayed_subscriptions={dm.Subscription.STOCKS, dm.Subscription.OPTIONS, "
+        "dm.Subscription.INDICES} to dm.MassiveConfig."
+    )
+    assert delayed_fix(Subscription.STOCKS, listed=listed) == (
+        "Pass delayed_subscriptions={dm.Subscription.STOCKS, dm.Subscription.INDICES} to "
+        "dm.MassiveConfig."
+    )
+    # The advice works: the set it names is a valid setting that keeps every member.
+    both = {Subscription.STOCKS, Subscription.OPTIONS, Subscription.INDICES}
+    assert MassiveConfig(api_key="k", delayed_subscriptions=both).delayed_subscriptions == both
+
+
+def test_the_delayed_fix_without_a_known_set_says_what_to_add() -> None:
+    # A connection shared by sessions knows no one session's set, so it names the member to add.
+    assert delayed_fix(Subscription.FUTURES) == (
+        "Add dm.Subscription.FUTURES to delayed_subscriptions in dm.MassiveConfig."
+    )
+    assert delayed_fix(Subscription.FUTURES, purpose="To use Massive's delayed futures feed") == (
+        "To use Massive's delayed futures feed, add dm.Subscription.FUTURES to "
+        "delayed_subscriptions in dm.MassiveConfig."
     )
 
 

@@ -1030,10 +1030,15 @@ def test_a_pause_past_the_calls_patience_fails_it_with_status_429_naming_the_req
     )
     assert caught.value.status == 429
     assert (caught.value.host, caught.value.path) == ("127.0.0.1", "/v3/trades/AAPL")
-    # Another call with the same patience fails at once, without being sent.
+    # Another call with the same patience fails at once, without being sent. The pause is the
+    # bucket's, so its message quotes the refusal of the request that caused it, after naming
+    # the request that waited.
     fake_rest.reply("/v3/trades/MSFT", _ok())
-    # The pause, and so the message, is the bucket's: the same text, whatever the request.
-    with pytest.raises(WireError, match=rf"^{re.escape(str(caught.value))}$") as again:
+    waited = (
+        "GET /v3/trades/MSFT on 127.0.0.1 waited for a pause Massive asked of the requests that "
+        f"share its limit. {caught.value}"
+    )
+    with pytest.raises(WireError, match=rf"^{re.escape(waited)}$") as again:
         client.get(_TRADES, {"stockTicker": "MSFT"}, {}, bucket="stocks", patience=Patience(300.0))
     assert (again.value.status, again.value.path) == (429, "/v3/trades/MSFT")
     assert len(fake_rest.requests) == 1

@@ -350,8 +350,8 @@ def test_a_refused_topic_fails_only_its_streams(
     rows = streams_of(ws_session, dh_to_pylist)
     assert [r["State"] for r in rows] == ["RUNNING", "FAILED"]
     assert rows[1]["Error"] == (
-        'Massive answered the subscription to Q.AAPL on wss://socket.test/stocks: "not '
-        'authorized to access Q.AAPL". To stream from another host, pass '
+        "test.quotes: Massive answered the subscription to Q.AAPL on wss://socket.test/stocks: "
+        '"not authorized to access Q.AAPL". To stream from another host, pass '
         'websocket_hosts={dm.AssetClass.STOCKS: "<host>"} to dm.MassiveConfig.'
     )
     ws_session.send(trade("AAPL"))

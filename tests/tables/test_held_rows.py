@@ -377,8 +377,8 @@ def test_keep_and_drop_forget_the_rows_of_datasets_no_stream_reads(
         assert held.holding() == ()
         held.drop("trades", why="again")  # nothing held: nothing logged
     assert caplog.messages == [
-        "2 held futures rows of 2 tickers are dropped: no stream reads them any more",
-        "1 held futures rows of 1 tickers are dropped: its streams failed",
+        "dropping 2 held futures rows of 2 tickers: no stream reads them any more",
+        "dropping 1 held futures row of 1 ticker: its streams failed",
     ]
 
 
@@ -614,5 +614,5 @@ def test_a_ticker_no_stream_receives_drops_its_held_rows(
         held.prune("trades", lambda ticker: ticker == "NQZ6")
     assert held.rows_of("trades") == 1
     assert caplog.messages == [
-        "1 held futures rows of ESZ6 are dropped: no stream receives it any more"
+        "dropping 1 held futures row of ESZ6: no stream receives it any more"
     ]

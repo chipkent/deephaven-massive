@@ -1106,7 +1106,7 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_warns(
     ]
     assert not stamp_warnings(caplog)
     # 14:30 is withheld, so a page of no other bar fails the read, with one WARNING.
-    with pytest.raises(dm.MassiveError, match="could read none of the 1 rows"):
+    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
         rest_session.options.previous_day_bar(TSLA).fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
@@ -2739,7 +2739,8 @@ def test_a_refused_admin_subscription_fails_its_table_and_links_its_page(
     refused, running = rows_by["options.admin_messages"], rows_by["options.trades"]
     assert refused["State"] == "FAILED"
     assert refused["Error"] == (
-        'Massive answered the subscription to AD.* on wss://socket.test/options: "not authorized '
+        "options.admin_messages: Massive answered the subscription to AD.* on "
+        'wss://socket.test/options: "not authorized '
         'to access AD.*". options.admin_messages streams only in real time. Its plans are listed '
         "at https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
         "options.admin_messages.md. Massive documents the options AD channel only on "
@@ -2777,7 +2778,8 @@ def test_admin_messages_on_the_delayed_feed_fail_on_massives_refusal(
     (row,) = shown_streams(session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert row["Error"] == (
-        'Massive answered the subscription to AD.* on wss://delayed.test/options: "not '
+        "options.admin_messages: Massive answered the subscription to AD.* on "
+        'wss://delayed.test/options: "not '
         'authorized to access AD.*". options.admin_messages streams only in real time. Its '
         "plans are listed at https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/"
         "options.admin_messages.md. Massive documents the options AD channel only on "
@@ -2798,6 +2800,7 @@ def test_admin_messages_on_delayed_options_data_raise_the_delayed_data_error(
             dm.Subscription.OPTIONS,
             "options streams",
             "last_trade.timeframe=DELAYED",
+            listed=set(),
             streams=True,
         )
 
@@ -2924,7 +2927,7 @@ def test_an_archive_read_with_no_readable_message_fails_as_a_format_change(
     # Under the default LOG, a read with rows but none whole fails rather than read empty.
     page = [{"id": "1-1", "exchange": 300, "message": "OPRA SYSTEM NORMAL", "sequence_number": 1}]
     fake_rest.reply(ADMIN_ARCHIVE, Reply({"status": "OK", "results": page}))
-    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+    with pytest.raises(RowDataError, match="could not read the 1 row"):
         rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
 
 

@@ -1159,9 +1159,9 @@ def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000)))
     with pytest.raises(
         RowDataError,
-        match=r"^stocks\.trades: the library could read none of the 1 rows of the read's "
+        match=r"^stocks\.trades: the library could not read the 1 row of the read's "
         r"symbols and window from the flat files of us_stocks_sip/trades_v1 whole, so it withheld "
-        r"them all\. Timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
+        r"it\. Timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
         r"outside 1990 to 2100\. m\.problems\(\) counts the withheld rows by cause and symbol\."
         "$",
     ) as info:
@@ -1195,7 +1195,8 @@ def test_a_file_whose_rows_in_the_window_are_all_unreadable_fails_the_read(
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
     with pytest.raises(
         RowDataError,
-        match=r"the library could read none of the \d rows of the read's symbols and window",
+        match=r"the library could (read none of the \d rows|not read the 1 row) of the read's "
+        r"symbols and window",
     ):
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
 
@@ -3126,6 +3127,9 @@ def test_a_call_whose_every_venue_is_refused_raises_whatever_the_setting(
                 r"^futures\.trades: Massive refused the flat files of every venue the read "
                 r"asked for, CME and NYMEX\. Massive answered the read of "
                 r"s3://flatfiles/us_futures_cme/trades_v1/2025/03/2025-03-04\.csv\.gz at "
+                rf"https://files\.massive\.com with HTTP 403 \(request_id {REQUEST_ID}\): "
+                r'"AccessDenied: No"\. Massive answered the read of '
+                r"s3://flatfiles/us_futures_nymex/trades_v1/2025/03/2025-03-04\.csv\.gz at "
                 rf"https://files\.massive\.com with HTTP 403 \(request_id {REQUEST_ID}\): "
                 r'"AccessDenied: No"\. To read from REST instead, pass '
                 r"source=dm\.HistorySource\.REST and contract tickers such as 'ESH5' in place of "

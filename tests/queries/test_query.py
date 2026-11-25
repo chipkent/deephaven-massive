@@ -401,7 +401,7 @@ def test_columns_lists_the_schema_without_any_request(
     assert (rest.calls, flat.calls, fake_streams.opened) == ([], [], [])
     # Not a result: the session tracks nothing and rejects it.
     assert massive_session._core.results.held() == 0
-    with pytest.raises(ValueError, match="not"):
+    with pytest.raises(ValueError, match="this table is static"):
         massive_session.release(table)
 
 

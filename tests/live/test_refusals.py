@@ -91,7 +91,11 @@ def test_only_massives_own_refusal_counts_as_massives(error: Exception, *, massi
 def test_the_settings_refusal_of_delayed_data_is_matched_by_its_text(*, streams: bool) -> None:
     # A background read reports the library's refusal only as its streams row's text.
     error = delayed_refusal(
-        Subscription.STOCKS, "stocks.snapshots data", "timeframe=DELAYED", streams=streams
+        Subscription.STOCKS,
+        "stocks.snapshots data",
+        "timeframe=DELAYED",
+        listed=set(),
+        streams=streams,
     )
     assert refusals.is_not_listed_text(f"read failed: {error}")
     assert not refusals.is_not_listed_text(

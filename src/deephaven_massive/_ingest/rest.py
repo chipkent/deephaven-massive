@@ -217,7 +217,7 @@ from deephaven_massive._ingest.symbol_reads import (
     read_rest_by_symbol,
     read_rest_by_value,
 )
-from deephaven_massive._log_limits import bounded_list, log_once, prose_list
+from deephaven_massive._log_limits import bounded_list, counted, log_once, prose_list
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -1927,13 +1927,14 @@ class RestReader:
             first = self.state.first("unlisted rows", spec.name)
             logger.log(
                 logging.WARNING if first else logging.DEBUG,
-                "%s: Massive sent %d rows from %s whose %s lists none of the requested tickers "
-                "%s, so they are left out.",
+                "%s: Massive sent %s from %s whose %s lists none of the requested tickers "
+                "%s, so %s left out.",
                 spec.name,
-                unmatched,
+                counted(unmatched, "row"),
                 template,
                 spec.ticker_list,
                 prose_list(named, "tickers"),
+                "it is" if unmatched == 1 else "they are",
             )
         return listed
 
@@ -2050,6 +2051,7 @@ class RestReader:
                     unlisted[0],
                     _delayed_what(spec, own),
                     f"status={DELAYED_LABEL}",
+                    listed=listed,
                     streams=False,
                 )
                 raise refusal
@@ -2062,7 +2064,11 @@ class RestReader:
             subscription = min(recency.refused)
             tickers, evidence = recency.refused[subscription]
             refusal = delayed_refusal(
-                subscription, _delayed_what(spec, list(tickers)), evidence, streams=False
+                subscription,
+                _delayed_what(spec, list(tickers)),
+                evidence,
+                listed=listed,
+                streams=False,
             )
             raise refusal
         delayed = recency.delayed or (page.status == DELAYED_LABEL and bool(named))

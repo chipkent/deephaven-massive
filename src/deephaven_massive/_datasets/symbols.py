@@ -137,6 +137,7 @@ __all__ = [
     "is_canonical",
     "is_forex_currency",
     "is_futures_contract",
+    "is_lower_case",
     "option_roots",
     "read_crypto_pair",
     "read_forex_pair",
@@ -445,6 +446,23 @@ def is_canonical(
     return CANONICAL_GRAMMARS[resolved](text)
 
 
+def is_lower_case(text: str) -> bool:
+    """Tell whether text has letters and all of them are lower case.
+
+    Massive never writes a ticker that way (every grammar of `CANONICAL_GRAMMARS` starts with
+    an upper-case letter or a digit), so such text is the caller's spelling, with the
+    upper-case form as its likely fix. Text with no letters, such as `'123'`, is not lower
+    case; `'0p'`, with one, is.
+
+    Args:
+        text: The text.
+
+    Returns:
+        True when `text.lower()` is the text and differs from `text.upper()`.
+    """
+    return text == text.lower() != text.upper()
+
+
 def as_written_fault(text: str) -> str:
     """Say which rule of `AS_WRITTEN` text breaks, for the message that refuses it.
 
@@ -584,7 +602,7 @@ def _convert_stock(text: str) -> str:
             "convention=dm.SymbolConvention.YAHOO), or name dm.SymbolConvention.NASDAQ or "
             "dm.SymbolConvention.CMS for those spellings."
         )
-    if text == text.lower() != text.upper():
+    if is_lower_case(text):
         raise ValueError(
             f"{text!r} is not a Massive stock ticker, because Massive's tickers are "
             f"case-sensitive. If you mean {text.upper()!r}, pass {text.upper()!r}."
@@ -928,7 +946,7 @@ def _convert_stock_from(text: str, convention: SymbolConvention) -> str:
     if not text.strip():
         raise ValueError(f"{text!r} is {'only whitespace' if text else 'empty'}, not a ticker.")
     _refuse_other_prefix(AssetClass.STOCKS, text)
-    if text == text.lower() != text.upper():
+    if is_lower_case(text):
         raise ValueError(
             f"{text!r} is not a {convention.name} ticker. The {convention.name} convention "
             f"writes tickers in upper case. If you mean {text.upper()!r}, pass {text.upper()!r}."

@@ -152,7 +152,7 @@ from deephaven_massive._errors import (
     source_of,
     unmatched_form,
 )
-from deephaven_massive._log_limits import bounded_list, log_failure
+from deephaven_massive._log_limits import bounded_list, counted, log_failure
 from deephaven_massive._massive import RowFault, Transport
 from deephaven_massive._tables.columns import col_defs, dataset_table, describe
 from deephaven_massive._tables.diagnostics import (
@@ -1414,10 +1414,15 @@ class Poller:
         if failure is not None:
             raise RowDataError(failure)
         if not withheld.rows.num_rows:
+            sent = (
+                "the 1 row Massive sent this cycle has a null key column, so the library "
+                "withheld it"
+                if table.num_rows == 1
+                else f"every one of the {counted(table.num_rows, 'row')} Massive sent this cycle "
+                "has a null key column, so the library withheld them all"
+            )
             raise RowDataError(
-                f"{dataset}: every one of the {table.num_rows} rows Massive sent this cycle has "
-                "a null key column, so the library withheld them all. "
-                f"{reason_sentence(withheld.first_reason)} {WITHHELD_LISTED}"
+                f"{dataset}: {sent}. {reason_sentence(withheld.first_reason)} {WITHHELD_LISTED}"
             )
         return withheld.rows
 

@@ -80,7 +80,7 @@ from deephaven_massive._ingest.rest_requests import (
     own_symbols,
     plan_calls,
 )
-from deephaven_massive._log_limits import bounded_list, log_failure, prose_list
+from deephaven_massive._log_limits import bounded_list, counted, log_failure, prose_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
@@ -559,12 +559,14 @@ def _attribute(
     level = logging.WARNING if reader.state.first("unowned", spec.name, template) else logging.DEBUG
     logger.log(
         level,
-        "%s: %d of the %d rows Massive returned for %s name none of those symbols, so no "
-        "symbol's read owns them and they are left out.",
+        "%s: %s of the %d Massive returned for %s %s none of those symbols, so no symbol's "
+        "read owns %s left out.",
         spec.name,
-        left,
+        counted(left, "row"),
         rows.num_rows,
         prose_list(own, "symbols") if own else "no symbol",
+        "names" if left == 1 else "name",
+        "it and it is" if left == 1 else "them and they are",
     )
 
 
@@ -597,13 +599,15 @@ def split_by_symbol(
         kept = sum(part.size for part in tables.values())
     if kept != total:
         logger.warning(
-            "%s: %d of the %d rows read from %s for %s name none of those symbols, or no "
-            "symbol, so no symbol's read owns them and they are left out.",
+            "%s: %s of the %d read from %s for %s %s none of those symbols, or no symbol, so "
+            "no symbol's read owns %s left out.",
             spec.name,
-            total - kept,
+            counted(total - kept, "row"),
             total,
             source,
             prose_list(symbols, "symbols"),
+            "names" if total - kept == 1 else "name",
+            "it and it is" if total - kept == 1 else "them and they are",
         )
     return tables
 

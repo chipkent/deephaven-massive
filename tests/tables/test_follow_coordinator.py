@@ -1526,9 +1526,7 @@ def test_two_bad_rows_fail_the_table_once(
             "Massive's tickers are case-sensitive. If you mean 'MSFT', pass 'MSFT'. Fix the "
             "row, or convert the table with dm.canonicalize_symbols(table, "
             "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), naming the "
-            "convention your tickers come from. If Massive itself writes 'msft', report it at "
-            "https://github.com/chipkent/deephaven-massive/issues, since the library does not "
-            "know that form yet."
+            "convention your tickers come from."
         ),
         record.getMessage(),
     )

@@ -746,16 +746,24 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
 
         Raises:
             TypeError: If `table` isn't a Deephaven `Table`.
-            ValueError: If `table` isn't a live table of this session.
+            ValueError: If `table` isn't a live table of this session: a static table, or a
+                refreshing table that is derived from a live table or belongs to another
+                session.
         """
         if not isinstance(table, Table):
             raise TypeError(f"table must be a Deephaven Table, not {type(table).__name__}")
-        if not self._core.results.release(table):
+        if self._core.results.release(table):
+            return
+        if not table.is_refreshing:
             raise ValueError(
                 "release() takes only a live table this session returned, and this table is "
-                "not one. Release the live table a derived table came from, call release() on "
-                "the session that returned the table, or leave a static table as it is."
+                "static. A static table needs no release, so leave it as it is."
             )
+        raise ValueError(
+            "release() takes only a live table this session returned, and this table is not "
+            "one. Release the live table a derived table came from, or call release() on the "
+            "session that returned the table."
+        )
 
     @raises_through(SessionCore.close, refuse_update_graph_thread)
     def close(self) -> None:

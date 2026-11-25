@@ -30,7 +30,6 @@ import deephaven_massive as dm
 from deephaven_massive import _session
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.request import Request, ValueTable
-from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import AllSymbols, NormalizedSymbols, SymbolTable
 from deephaven_massive._enums import AssetClass, PollMode, Recency
 from deephaven_massive._error_policy import resolve_policy
@@ -1335,10 +1334,9 @@ def test_a_table_of_values_is_read_each_cycle_and_a_bad_value_is_skipped(
         "ProductCode",
         "SKIPPED",
     )
+    # A label: the row's fault and the value, with no fix.
     assert skipped["Detail"] == (
-        "stocks.dividends: A symbol table holds ' CL', which has surrounding whitespace, and "
-        "Massive never writes a ticker that way. Fix the row to the value Massive lists, or "
-        "delete it."
+        "' CL' has surrounding whitespace, and Massive never writes a ticker that way."
     )
     assert skipped["EndedAt"] is None
     codes.add(new_table([string_col("ProductCode", ["6E"])]))
@@ -1479,13 +1477,7 @@ def test_a_symbol_table_row_that_is_not_canonical_is_skipped_and_shown(
         "SKIPPED",
         "log",
     )
-    assert skipped["Detail"].startswith(
-        "stocks.dividends: A symbol table holds 'msft'. 'msft' is not a Massive stock ticker, "
-    )
-    assert skipped["Detail"].endswith(
-        f"If Massive itself writes 'msft', report it at {ISSUES_URL}, since the library does not "
-        "know that form yet."
-    )
+    assert skipped["Detail"] == "'msft' is not Massive's stock ticker."
     assert skipped["EndedAt"] is None
     watch.delete(new_table([string_col("Symbol", ["msft"])]))  # deleting it ends the span
     watch.add(new_table([string_col("Symbol", ["MSFT"])]))  # and the fixed row is requested

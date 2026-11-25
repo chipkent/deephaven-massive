@@ -29,6 +29,7 @@ from deephaven_massive._datasets.feeds import channel_only_host
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
 from deephaven_massive._ingest import futures_calendar, ws, ws_connection, ws_silence
 from deephaven_massive._ingest.clients import SessionClients
+from deephaven_massive._log_limits import log_failure
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, utc_text
 from deephaven_massive._tables.problem_events import Problem, ProblemCause, ProblemSpans
@@ -258,6 +259,34 @@ def test_a_rejected_key_fails_every_stream(
     del result, other, again
 
 
+def test_a_streams_copy_of_a_connection_error_names_its_dataset_and_is_a_logged_repeat(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Each dataset's streams get their own copy, prefixed, with the error's class and
+    # attributes. Every copy logs at DEBUG only, whether or not the connection has logged the
+    # error yet, and the connection's own log of it stays at WARNING: the alarm never depends
+    # on which stream fails first, or on whether that stream's session is still open.
+    error = dm.EntitlementError("Massive answered no.", status=403, request_id="r1")
+    log = logging.getLogger("test.stream_copy")
+    with caplog.at_level(logging.DEBUG, logger=log.name):
+        first = ws_connection.stream_copy(error, "test.trades")
+        second = ws_connection.stream_copy(error, "test.quotes")
+        assert str(first) == "test.trades: Massive answered no."
+        assert str(second) == "test.quotes: Massive answered no."
+        assert type(first) is dm.EntitlementError
+        assert (first.status, first.request_id, first.source) == (403, "r1", error.source)
+        assert not log_failure(log, first, "%s")  # a repeat, though nobody logged the error
+        assert not log_failure(log, second, "%s")
+        assert log_failure(log, error, "%s")  # the connection's own log is the WARNING
+        assert not log_failure(log, ws_connection.stream_copy(error, "test.trades"), "%s")
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.DEBUG, "test.trades: Massive answered no."),
+        (logging.DEBUG, "test.quotes: Massive answered no."),
+        (logging.WARNING, "Massive answered no."),
+        (logging.DEBUG, "test.trades: Massive answered no."),
+    ]
+
+
 def test_a_fatal_handshake_names_the_status_and_host(
     ws_session: WsSession,
     fake_ws_server: FakeMassiveServer,
@@ -386,7 +415,7 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
             on_host(REALTIME_HOST),
             (
                 "The usual cause is a key without real-time futures data. To use Massive's "
-                "delayed futures feed, pass delayed_subscriptions={dm.Subscription.FUTURES} to "
+                "delayed futures feed, add dm.Subscription.FUTURES to delayed_subscriptions in "
                 "dm.MassiveConfig."
             ),
         ),
@@ -399,8 +428,8 @@ def on_host(host: str, evidence: str = "test evidence") -> Callable[..., HostDec
                 "delayed, so the library chose the real-time host. To stream from another host, "
                 "pass "
                 'websocket_hosts={dm.AssetClass.FUTURES: "<host>"} to dm.MassiveConfig. To use '
-                "Massive's delayed futures feed, pass "
-                "delayed_subscriptions={dm.Subscription.FUTURES} to dm.MassiveConfig."
+                "Massive's delayed futures feed, add dm.Subscription.FUTURES to "
+                "delayed_subscriptions in dm.MassiveConfig."
             ),
         ),
         (
@@ -476,8 +505,8 @@ def test_a_refused_step_fails_its_streams_and_names_the_feeds_fix(
     assert len(custom_session.urls) == 1
     [_, failed] = streams_of(custom_session, dh_to_pylist)
     assert failed["Error"] == (
-        f'Massive answered the subscription to T.NQZ5 on {custom_session.urls[0]}: "Real-time '
-        f'data requires an upgrade". {hint}'
+        f"test.futures: Massive answered the subscription to T.NQZ5 on {custom_session.urls[0]}: "
+        f'"Real-time data requires an upgrade". {hint}'
     )
     del first, second
 
@@ -1431,11 +1460,12 @@ never acknowledged."""
 
 
 def _outage_failure(since: str, limit: str) -> str:
-    # The message a stream fails with once the outage held it down for `max_outage`.
+    # The message a stream fails with once the outage held it down for `max_outage`, prefixed
+    # with its dataset, as every stream's failure is.
     return (
-        f"The WebSocket connection to socket.test/stocks has been down since {since}, longer "
-        f"than max_outage={limit} s, so this table stopped and the rows from then on are "
-        "missing. Call m.test.trades again for a new live table."
+        f"test.trades: The WebSocket connection to socket.test/stocks has been down since "
+        f"{since}, longer than max_outage={limit} s, so this table stopped and the rows from "
+        "then on are missing. Call m.test.trades again for a new live table."
     )
 
 
@@ -2171,7 +2201,8 @@ def test_a_refusal_adds_a_real_time_note_only_to_the_streams_that_carry_one(
     note = "options.admin_messages streams only in real time. Its plans are listed at "
     assert note in errors["options.admin_messages"]
     assert errors["options.trades"] == (
-        'Massive answered the subscription to AD.* and T.* on wss://socket.test/options: "no". '
+        "options.trades: Massive answered the subscription to AD.* and T.* on "
+        'wss://socket.test/options: "no". '
         "Massive documents the options AD channel only on socket.massive.com. To stream from "
         'another host, pass websocket_hosts={dm.AssetClass.OPTIONS: "<host>"} to '
         "dm.MassiveConfig."
@@ -2179,6 +2210,57 @@ def test_a_refusal_adds_a_real_time_note_only_to_the_streams_that_carry_one(
     assert "streams only in real time" not in errors["options.trades"]
     m.release(notices)
     m.release(trades)
+
+
+def test_a_refusal_of_two_datasets_gives_each_its_own_copy_and_warns_once(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # One status refuses the topics of two datasets that share one message: each table's
+    # Error starts with its own dataset, and the log carries the refusal once, at WARNING from
+    # the connection, before either stream fails: each stream's copy is a DEBUG repeat.
+    m = ws_session.session
+    trades = m.options.trades(dm.ALL).blink()
+    quotes = m.options.quotes(dm.ALL).blink()
+    ws_session.subscribed("T.*", "Q.*")
+    connection = ws_session.connection("wss://socket.test/options")
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
+        ws_session.on_loop(connection, lambda: connection._refused(("Q.*", "T.*"), "no"))
+        ws_session.flush()
+        rows = streams_of(ws_session, dh_to_pylist)
+    errors = {r["Dataset"]: r["Error"] for r in rows}
+    ids = {r["Dataset"]: r["StreamId"] for r in rows}
+    answered = (
+        'Massive answered the subscription to Q.* and T.* on wss://socket.test/options: "no". '
+        'To stream from another host, pass websocket_hosts={dm.AssetClass.OPTIONS: "<host>"} '
+        "to dm.MassiveConfig."
+    )
+    assert errors == {
+        "options.trades": f"options.trades: {answered}",
+        "options.quotes": f"options.quotes: {answered}",
+    }
+    loggers = (ws_connection.__name__, "deephaven_massive._tables.stream")
+    logged = [
+        (r.name, r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.name in loggers and answered in r.getMessage()
+    ]
+    assert logged[0] == (ws_connection.__name__, logging.WARNING, answered)
+    assert sorted(logged[1:]) == [
+        (
+            "deephaven_massive._tables.stream",
+            logging.DEBUG,
+            f"options.quotes stream {ids['options.quotes']} failed: {answered}",
+        ),
+        (
+            "deephaven_massive._tables.stream",
+            logging.DEBUG,
+            f"options.trades stream {ids['options.trades']} failed: {answered}",
+        ),
+    ]
+    m.release(trades)
+    m.release(quotes)
 
 
 _TIME = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"
@@ -2189,6 +2271,8 @@ _TAKEN_ERROR = (
     r"and call the method again, or pass connection_taken=dm\.ConnectionTaken\.RECONNECT to "
     r"dm\.MassiveConfig to take the connection back\."
 )
+_STREAM_TAKEN_ERROR = r"test\.trades: " + _TAKEN_ERROR
+"""The same failure as a stream's `Error`: the stream's own copy, prefixed with its dataset."""
 
 
 def test_a_taken_connection_fails_its_tables_and_closes_by_default(
@@ -2214,11 +2298,12 @@ def test_a_taken_connection_fails_its_tables_and_closes_by_default(
     assert re.fullmatch(_TAKEN_ERROR, row["LastError"])
     [stream] = streams_of(ws_session, dh_to_pylist)
     assert stream["State"] == "FAILED"
-    match = re.fullmatch(_TAKEN_ERROR, stream["Error"])
+    # The stream's copy names its dataset; the connection's `LastError` above does not.
+    match = re.fullmatch(_STREAM_TAKEN_ERROR, stream["Error"])
     assert match is not None
     assert result.j_table.isFailed()
-    warnings = [r for r in caplog.records if "took this one at" in r.getMessage()]
-    assert [(r.levelno, r.getMessage()) for r in warnings] == [
+    # The connection's own WARNING is the one alarm; the stream's failure is a DEBUG repeat.
+    assert [(r.levelno, r.getMessage()) for r in caplog.records if "took th" in r.getMessage()] == [
         (
             logging.WARNING,
             (
@@ -2385,7 +2470,7 @@ def test_a_fail_sessions_stream_opening_when_the_connection_is_taken_fails_as_it
             with pytest.raises(dm.MassiveError, match=r"stream \d+ failed: Another connection"):
                 opening.result(TIMEOUT)
             [stream] = streams_of(ws_session, dh_to_pylist)
-            assert re.fullmatch(_TAKEN_ERROR, stream["Error"])
+            assert re.fullmatch(_STREAM_TAKEN_ERROR, stream["Error"])
             assert not theirs.j_table.isFailed()
             other.release(theirs)
         finally:
