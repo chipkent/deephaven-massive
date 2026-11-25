@@ -388,7 +388,7 @@ class Withheld:
                 policy=setting_of(policy, fault),
             )
 
-        groups = self._groups_for(holds)
+        groups = _by_sent(self._groups_for(holds))
         shown = [
             event(g, g.fault, rows=g.rows, reason=g.reason) for g in groups[:EVENTS_PER_PAYLOAD]
         ]
@@ -415,6 +415,29 @@ class Withheld:
             for group in self.groups
             if holds is None or group.symbol is None or holds(group.symbol)
         ]
+
+
+def _by_sent(groups: Sequence[WithheldGroup]) -> list[WithheldGroup]:
+    """Merge the groups that share a fault, a symbol as Massive sent it, and a field.
+
+    `m.problems()` lists withheld rows by the symbol as Massive sent it, so groups split only
+    by the symbol their consumer gives rows to (two contracts of one bare underlying) are one
+    event, with the first one's reason.
+
+    Args:
+        groups: The groups, in the order of their first row.
+
+    Returns:
+        One group per fault, symbol as sent, and field, in the order of its first row.
+    """
+    merged: dict[tuple[RowFault, str | None, str], WithheldGroup] = {}
+    for group in groups:
+        key = (group.fault, group.sent, group.field)
+        if key in merged:
+            merged[key] = replace(merged[key], rows=merged[key].rows + group.rows)
+        else:
+            merged[key] = group
+    return list(merged.values())
 
 
 def withhold_rows(rows: _Rows, *, symbol: str | None) -> Withheld:

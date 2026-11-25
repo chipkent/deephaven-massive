@@ -224,6 +224,26 @@ def test_withheld_rows_are_taken_out_and_grouped() -> None:
     assert nameless.total == 3
 
 
+def test_events_list_the_rows_by_the_symbol_as_massive_sent_it() -> None:
+    # Two contracts of the bare SPX are one event of SPX, with the first group's reason.
+    groups = (
+        WithheldGroup(SYMBOLS, "O:SPX1", "SPX", "Underlying", 1, "first"),
+        WithheldGroup(SYMBOLS, "O:SPX2", "SPX", "Underlying", 2, "second"),
+        WithheldGroup(VALUES, "O:SPX2", "SPX", "Price", 1, "price"),
+    )
+    found = Withheld(pa.table({}), groups, "first").events(
+        dataset="options.open_interest",
+        transport=Transport.REST,
+        where="GET /options/v1/open-interest",
+        stream_id=7,
+        policy=DEFAULT_POLICY,
+    )
+    assert [(e.symbol, e.field, e.rows, e.detail) for e in found] == [
+        ("SPX", "Underlying", 3, "first"),
+        ("SPX", "Price", 1, "price"),
+    ]
+
+
 def test_counts_give_a_symbol_stream_its_own_rows_and_every_unread_symbol() -> None:
     withheld = Withheld(
         pa.table({}),
