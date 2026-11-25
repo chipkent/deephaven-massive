@@ -382,24 +382,24 @@ def test_an_unplanned_error_source_is_refused() -> None:
         run_pinned(INDICES, raising(error)(), FMV_HOST)
 
 
+@pytest.mark.parametrize(
+    ("label", "recency"), [("REAL-TIME", Recency.REALTIME), ("DELAYED", Recency.DELAYED)]
+)
+@pytest.mark.parametrize("host", [FMV_HOST, "delayed.example.com"])
 @pytest.mark.parametrize("asset_class", DELAYABLE)
-def test_a_listed_subscription_s_pinned_host_is_delayed_with_no_request(
-    asset_class: AssetClass,
+def test_a_listed_subscription_s_pinned_host_reads_massive_s_label(
+    *, asset_class: AssetClass, host: str, label: str, recency: Recency
 ) -> None:
-    # The user asked for Massive's delayed data; the configuration made the pin a delayed. host.
-    fetch = Snapshot([{"timeframe": "REAL-TIME"}])
+    # The listing picks the delayed feed only when no host is pinned. A pinned host is used
+    # as given, and its recency is Massive's label on the key's data, read from the snapshot:
+    # index values pinned to business.massive.com on a real-time key are REALTIME, even
+    # though the user listed indices, and a pin of a delayed. host to the same key is too.
+    fetch = Snapshot([{"timeframe": label}])
     decision = run_pinned(
-        asset_class,
-        fetch,
-        "delayed.example.com",
-        delayed=frozenset({subscription_of(asset_class)}),
+        asset_class, fetch, host, delayed=frozenset({subscription_of(asset_class)})
     )
-    assert decision == HostDecision(
-        "delayed.example.com",
-        Recency.DELAYED,
-        "websocket_hosts, MassiveConfig.delayed_subscriptions",
-    )
-    assert fetch.probes == []
+    assert decision == HostDecision(host, recency, f"websocket_hosts, timeframe={label}")
+    assert fetch.probes == [SNAPSHOT_PROBES[asset_class]]
 
 
 def test_every_class_has_a_snapshot_to_label_a_pinned_host() -> None:

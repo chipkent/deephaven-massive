@@ -29,9 +29,6 @@ settings from it and leaves every other setting at its default:
 | `rest_requests_per_minute` | Each subscription Massive limits by the minute, and its limit | The rate-limit tests skip, and other tests run slower |
 | `websocket_hosts` | `indices: business.massive.com`, when Massive serves your index values from that host | The library picks the host, which may not serve your index values |
 
-Leave `websocket_hosts` out when you list `indices` in `delayed_subscriptions`. The library
-refuses that pair ([`websocket_hosts`](configuration.md#setting-details)).
-
 Keep only the settings your key needs. A file that sets all three looks like this:
 
 ```yaml
@@ -258,7 +255,7 @@ contradicts:
 
 | Where | What to record |
 |---|---|
-| [`m.indices.bars`](datasets/indices.bars.md) and [`m.indices.values`](datasets/indices.values.md) of `I:SPX`: `m.indices.bars("I:SPX", dm.Timespan.MINUTE).last_by()` and `m.indices.values("I:SPX").last_by()` | Massive documents `delayed.massive.com` and `socket.massive.com` for index bars, but only `business.massive.com` for index values, and the library allows that host only for real-time streams. On a key Massive serves index data delayed, set `delayed_subscriptions={dm.Subscription.INDICES}`, and expect a bar each minute in market hours. Then add `websocket_hosts={dm.AssetClass.INDICES: "business.massive.com"}`, and record whether the library refuses it, with the exact message. Expect a refusal; open an issue with the message, since such a key then has no documented host for index values. On a key Massive serves index data in real time, set nothing for indices and expect bars; then set that host and expect values. Open an issue for any table that stays empty in market hours. |
+| [`m.indices.bars`](datasets/indices.bars.md) and [`m.indices.values`](datasets/indices.values.md) of `I:SPX`: `m.indices.bars("I:SPX", dm.Timespan.MINUTE).last_by()` and `m.indices.values("I:SPX").last_by()` | Massive documents `delayed.massive.com` and `socket.massive.com` for index bars, but only `business.massive.com` for index values, and a host set in `websocket_hosts` is used as given, whatever `delayed_subscriptions` lists. On a key Massive serves index data delayed, set `delayed_subscriptions={dm.Subscription.INDICES}`, and expect a bar each minute in market hours. Then add `websocket_hosts={dm.AssetClass.INDICES: "business.massive.com"}`: expect the session to open, and both tables to stream from that host. Record the `indices` rows of `m.connections()` (their `Host`, `Recency`, and `LastError`), the rows each table gets, and any error with Massive's text. On a key Massive serves index data in real time, set nothing for indices and expect bars; then set that host and expect values. Open an issue for any table that stays empty in market hours. |
 
 <a id="live-run-program"></a>
 

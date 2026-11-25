@@ -254,10 +254,10 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 | `on_error.unlisted_contracts` | Decides what happens to the rows of a futures ticker Massive streams that neither its futures snapshot nor its contracts list has held for 30 minutes. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unscheduled_products` | Decides what happens to the rows of a futures product that Massive's schedules give no session for: none at all, or none that holds the row's time. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.refused_venues` | Decides what a futures `history()` does when Massive refuses the flat files of an exchange the call names in `venues`, as it does for an exchange the plan doesn't include. | `log`, `ignore`, or `raise` | `raise` |
-| `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
-| `websocket_hosts.options` | Sets the WebSocket host options streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `options` | `delayed.massive.com` when `delayed_subscriptions` lists `options`, else `socket.massive.com` |
-| `websocket_hosts.futures` | Sets the WebSocket host futures streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `futures` | `delayed.massive.com` when `delayed_subscriptions` lists `futures`, else `socket.massive.com` |
-| `websocket_hosts.indices` | Sets the WebSocket host indices streams come from. | A lower-case hostname, such as `business.massive.com`; a `delayed.` host exactly when `delayed_subscriptions` lists `indices` | `delayed.massive.com` when `delayed_subscriptions` lists `indices`, else `socket.massive.com` |
+| `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host only when `delayed_subscriptions` lists `stocks` | `delayed.massive.com` when `delayed_subscriptions` lists `stocks`, else `socket.massive.com` |
+| `websocket_hosts.options` | Sets the WebSocket host options streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host only when `delayed_subscriptions` lists `options` | `delayed.massive.com` when `delayed_subscriptions` lists `options`, else `socket.massive.com` |
+| `websocket_hosts.futures` | Sets the WebSocket host futures streams come from. | A lower-case hostname, such as `socket.massive.com`; a `delayed.` host only when `delayed_subscriptions` lists `futures` | `delayed.massive.com` when `delayed_subscriptions` lists `futures`, else `socket.massive.com` |
+| `websocket_hosts.indices` | Sets the WebSocket host indices streams come from. | A lower-case hostname, such as `business.massive.com`; a `delayed.` host only when `delayed_subscriptions` lists `indices` | `delayed.massive.com` when `delayed_subscriptions` lists `indices`, else `socket.massive.com` |
 | `websocket_hosts.forex` | Sets the WebSocket host forex streams come from. | A lower-case hostname, such as `socket.massive.com`; never a `delayed.` host | `socket.massive.com` |
 | `websocket_hosts.crypto` | Sets the WebSocket host crypto streams come from. | A lower-case hostname, such as `socket.massive.com`; never a `delayed.` host | `socket.massive.com` |
 | `subscription_confirmation_timeout` | Sets how many seconds Massive has to confirm a stream's channel before the library asks again. | A positive number of seconds below 60, such as `10` | `5` |
@@ -277,8 +277,7 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 #### delayed_subscriptions
 
 Massive labels such data `DELAYED` in its answers, and its delayed feed runs 15
-minutes late, or 10 for futures. Fair market value (FMV) streams always use
-`business.massive.com`, the one host Massive documents for them. Never list
+minutes late, or 10 for futures. Never list
 `currencies`, the one subscription for forex and crypto: Massive has
 no delayed feed for it.
 
@@ -483,31 +482,26 @@ raises `EntitlementError`.
 
 #### websocket_hosts
 
-Set `indices` to `business.massive.com` to stream index values when Massive serves
-your index values there. Massive's documentation lists no other host for them,
-delayed or real-time. Set
-nothing else unless Massive tells you to.
+Set `indices` to `business.massive.com` to stream index values. Massive's
+documentation lists no other host for them, delayed or real-time. Set nothing
+else unless Massive tells you to.
 
-Without an entry, a subscription listed in `delayed_subscriptions` streams from
-`delayed.massive.com`, and every other from `socket.massive.com`. Massive documents
-those two hosts for every other stream. An entry moves every stream of its asset
-class, except Fair Market Value (FMV) streams, which always use
-`business.massive.com`.
+A host you set moves every stream of its asset class. Fair market value streams
+are the exception: they always use `business.massive.com`.
 
-An entry must agree with `delayed_subscriptions`. Give a class a host whose name
-starts with `delayed.` exactly when its subscription is listed there, and never give
-one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
+The host you set is used as given, whatever Massive's label says. When Massive
+doesn't serve your key there, the stream fails with Massive's refusal.
 
-The library opens a stream from a host set here whatever Massive's label says. Its
-`Recency` in `m.connections()` shows the label:
+`Recency` in `m.connections()` shows how Massive labels the data it serves you
+there:
 
-- `DELAYED`: Massive labels the data `DELAYED`, or `delayed_subscriptions` lists its
-  subscription.
+- `DELAYED`: Massive labels the data `DELAYED`.
 - `REALTIME`: Massive labels the data `REAL-TIME`.
 - `UNKNOWN`: Massive gave no label the library knows.
 
-Reading the label costs one REST request, when the first stream of a class set here
-opens in a session. A subscription listed in `delayed_subscriptions` costs none.
+Write the lower-case hostname alone: `business.massive.com`, not
+`wss://business.massive.com/indices` or `Business.massive.com`. The table above
+says when a class may take a `delayed.` host.
 
 #### subscription_confirmation_timeout
 

@@ -224,8 +224,7 @@ class MassiveConfig:
             label. Defaults to an empty set.
 
             Massive labels such data `DELAYED` in its answers, and its delayed feed runs 15
-            minutes late, or 10 for futures. Fair market value (FMV) streams always use
-            `business.massive.com`, the one host Massive documents for them. Never list
+            minutes late, or 10 for futures. Never list
             `dm.Subscription.CURRENCIES`, the one subscription for forex and crypto: Massive has
             no delayed feed for it.
 
@@ -255,31 +254,26 @@ class MassiveConfig:
             the library picks, such as `business.massive.com` for index values. Defaults to an empty
             mapping.
 
-            Set `indices` to `business.massive.com` to stream index values when Massive serves
-            your index values there. Massive's documentation lists no other host for them,
-            delayed or real-time. Set
-            nothing else unless Massive tells you to.
+            Set `indices` to `business.massive.com` to stream index values. Massive's
+            documentation lists no other host for them, delayed or real-time. Set nothing
+            else unless Massive tells you to.
 
-            Without an entry, a subscription listed in `delayed_subscriptions` streams from
-            `delayed.massive.com`, and every other from `socket.massive.com`. Massive documents
-            those two hosts for every other stream. An entry moves every stream of its asset
-            class, except Fair Market Value (FMV) streams, which always use
-            `business.massive.com`.
+            A host you set moves every stream of its asset class. Fair market value streams
+            are the exception: they always use `business.massive.com`.
 
-            An entry must agree with `delayed_subscriptions`. Give a class a host whose name
-            starts with `delayed.` exactly when its subscription is listed there, and never give
-            one to forex or crypto. Write a hostname alone, with no scheme, port, or path.
+            The host you set is used as given, whatever Massive's label says. When Massive
+            doesn't serve your key there, the stream fails with Massive's refusal.
 
-            The library opens a stream from a host set here whatever Massive's label says. Its
-            `Recency` in `m.connections()` shows the label:
+            `Recency` in `m.connections()` shows how Massive labels the data it serves you
+            there:
 
-            - `DELAYED`: Massive labels the data `DELAYED`, or `delayed_subscriptions` lists its
-              subscription.
+            - `DELAYED`: Massive labels the data `DELAYED`.
             - `REALTIME`: Massive labels the data `REAL-TIME`.
             - `UNKNOWN`: Massive gave no label the library knows.
 
-            Reading the label costs one REST request, when the first stream of a class set here
-            opens in a session. A subscription listed in `delayed_subscriptions` costs none.
+            Write the lower-case hostname alone: `business.massive.com`, not
+            `wss://business.massive.com/indices` or `Business.massive.com`. The table above
+            says when a class may take a `delayed.` host.
         subscription_confirmation_timeout: Sets how many seconds Massive has to confirm a stream's
             channel before the library asks again. Defaults to 5 seconds.
 
@@ -764,11 +758,13 @@ DELAYED_PREFIX: Final = "delayed."
 def _check_delayed_subscriptions(
     delayed: frozenset[Subscription], websocket_hosts: Mapping[AssetClass, str]
 ) -> None:
-    """Refuse a `delayed_subscriptions` Massive cannot serve, or one a host pin contradicts.
+    """Refuse a `delayed_subscriptions` Massive cannot serve, or a `delayed.` pin it doesn't cover.
 
     A host whose name starts with `delayed.` is a delayed feed: pinning one is asking for
-    delayed data, which only a listed subscription may do, and a listed subscription may pin
-    nothing else.
+    delayed data, which only a listed subscription may do, so the `DELAYED` label the library
+    shows for a listed subscription stays honest. Any other pinned host is used as given,
+    listed or not: whether Massive serves the key there is Massive's answer, given when the
+    stream opens.
 
     Args:
         delayed: The validated `delayed_subscriptions`.
@@ -777,8 +773,8 @@ def _check_delayed_subscriptions(
     Raises:
         ValueError: If `delayed` holds `dm.Subscription.CURRENCIES` (Massive has no delayed
             forex or crypto feed), or `websocket_hosts` pins a `delayed.` host for forex or crypto,
-            or for a class whose subscription is not listed, or pins any other host for one
-            that is. Each message names both settings and what to change.
+            or for a class whose subscription is not listed. Each message names both settings
+            and what to change.
     """
     if Subscription.CURRENCIES in delayed:
         raise ValueError(
@@ -787,27 +783,20 @@ def _check_delayed_subscriptions(
             "dm.Subscription.CURRENCIES from delayed_subscriptions."
         )
     for asset_class, host in websocket_hosts.items():
+        if not host.startswith(DELAYED_PREFIX):
+            continue
         subscription = subscription_of(asset_class)
-        listed = subscription in delayed
-        pins_delayed = host.startswith(DELAYED_PREFIX)
-        if pins_delayed and subscription is Subscription.CURRENCIES:
+        if subscription is Subscription.CURRENCIES:
             raise ValueError(
                 f"websocket_hosts pins {asset_class} to {host!r}, but Massive has no delayed "
                 f"forex or crypto feed. Remove the {asset_class} pin from websocket_hosts."
             )
-        if pins_delayed and not listed:
+        if subscription not in delayed:
             purpose = f"To stream delayed {asset_class} data"
             raise ValueError(
                 f"websocket_hosts pins {asset_class} to the delayed feed {host!r}, but "
                 f"delayed_subscriptions does not include dm.Subscription.{subscription.name}. "
                 f"{delayed_fix(subscription, listed=delayed, purpose=purpose)}"
-            )
-        if listed and not pins_delayed:
-            raise ValueError(
-                f"delayed_subscriptions includes dm.Subscription.{subscription.name}, whose "
-                f"streams use Massive's delayed feed {DELAYED_HOST!r}, but websocket_hosts pins "
-                f"{asset_class} to {host!r}. Remove dm.Subscription.{subscription.name} from "
-                f"delayed_subscriptions, or remove the {asset_class} pin from websocket_hosts."
             )
 
 
@@ -1995,8 +1984,7 @@ def _value_forms() -> dict[str, str]:
         rule = (
             "never a `delayed.` host"
             if subscription is Subscription.CURRENCIES
-            else "a `delayed.` host exactly when `delayed_subscriptions` lists "
-            f"`{subscription.value}`"
+            else f"a `delayed.` host only when `delayed_subscriptions` lists `{subscription.value}`"
         )
         forms[_host_path(asset_class)] = f"A lower-case hostname, such as `{example}`; {rule}"
     return forms

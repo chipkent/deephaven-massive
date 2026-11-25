@@ -3,10 +3,10 @@
 A few live tests stream from a feed the owner's settings do not choose: the admin messages,
 which Massive serves only in real time, from a session whose `delayed_subscriptions` leaves
 options out, the delayed-feed test from one that lists stocks, and the checks of a key whose
-stocks data Massive labels delayed from one that leaves stocks out. `MassiveConfig` refuses a
-`websocket_hosts` pin that contradicts `delayed_subscriptions` (a `delayed.` host for a
-subscription not listed, or any other host for one that is), so such a test drops the owner's
-pins its listing contradicts and keeps the others.
+stocks data Massive labels delayed from one that leaves stocks out. Such a test drops the
+owner's `websocket_hosts` pins its listing contradicts and keeps the others: a `delayed.` host
+for a subscription it leaves out, which `MassiveConfig` refuses, and any other host for one it
+lists, which would move the stream off the delayed feed the test is about.
 """
 
 from __future__ import annotations
@@ -31,9 +31,9 @@ def with_delayed(config: MassiveConfig, delayed: AbstractSet[Subscription]) -> M
         delayed: The subscriptions to list in `delayed_subscriptions`.
 
     Returns:
-        The configuration with `delayed` listed and only the `websocket_hosts` pins it allows:
-        a `delayed.` host for a listed subscription's class, any other host for an unlisted
-        one's.
+        The configuration with `delayed` listed and only the `websocket_hosts` pins that keep
+        each class on the feed the listing means: a `delayed.` host for a listed subscription's
+        class, any other host for an unlisted one's.
     """
     hosts = {
         asset_class: host
