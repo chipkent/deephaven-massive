@@ -202,7 +202,7 @@ def test_the_option_chain_day_bar_and_break_even_may_be_absent() -> None:
     # The live run of 2026-11-03 received chain rows without them, for contracts that had not
     # traded that day, though the specification marks them required.
     chain = spec.source(Transport.REST, "/v3/snapshot/options/{underlyingAsset}")
-    for column in ("DayClose", "DayVolume", "BreakEvenPrice", "UnderlyingAssetChangeToBreakEven"):
+    for column in ("DayClose", "DayVolume", "BreakEvenPrice", "UnderlyingChangeToBreakEven"):
         assert not chain.field(column).required, column
 
 
@@ -340,6 +340,39 @@ def test_the_option_chain_takes_the_contracts_names_for_its_details() -> None:
         assert contracts.field(column).wire_type == chain.field(column).wire_type
     assert chain.field("LastQuoteBidPrice").wire_key == "last_quote.bid"
     assert not any(field.column.startswith("Details") for field in chain.fields)
+
+
+@pytest.mark.parametrize("source", [_CHAIN, "/v3/snapshot"])
+def test_the_option_snapshots_take_the_greeks_endpoint_s_bare_names(source: str) -> None:
+    snapshot = spec.source(Transport.REST, source)
+    greeks = spec.source(Transport.REST, "/options/v1/analytics")
+    for column in ("Delta", "Gamma", "Theta", "Vega"):
+        assert snapshot.field(column).wire_key == f"greeks.{column.lower()}"
+        assert greeks.field(column).wire_type == snapshot.field(column).wire_type
+    assert not any(field.column.startswith("Greeks") for field in snapshot.fields)
+    # Massive's "$0.01" delta and gamma texts are replaced by the greeks endpoint's "$1".
+    for column in ("Delta", "Gamma"):
+        assert snapshot.field(column).description.startswith(greeks.field(column).description)
+        assert "$0.01" not in snapshot.field(column).description
+
+
+@pytest.mark.parametrize("source", [_CHAIN, "/v3/snapshot"])
+def test_the_option_snapshots_take_the_underlying_prefix_for_the_underlying_asset(
+    source: str,
+) -> None:
+    snapshot = spec.source(Transport.REST, source)
+    contracts = spec.source(Transport.REST, "/v3/reference/options/contracts")
+    greeks = spec.source(Transport.REST, "/options/v1/analytics")
+    assert snapshot.field("UnderlyingTicker").wire_key == "underlying_asset.ticker"
+    assert (
+        snapshot.field("UnderlyingTicker").wire_type
+        == contracts.field("UnderlyingTicker").wire_type
+    )
+    assert snapshot.field("UnderlyingPrice").wire_key == "underlying_asset.price"
+    assert snapshot.field("UnderlyingPrice").wire_type == greeks.field("UnderlyingPrice").wire_type
+    for column in ("Value", "ChangeToBreakEven", "LastUpdated", "Timeframe"):
+        assert snapshot.field(f"Underlying{column}").wire_key.startswith("underlying_asset.")
+    assert not any(field.column.startswith("UnderlyingAsset") for field in snapshot.fields)
 
 
 def test_the_futures_snapshot_takes_the_quote_and_trade_names() -> None:

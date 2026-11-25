@@ -51,7 +51,7 @@ def test_the_schema_has_the_options_columns_of_the_options_snapshot() -> None:
     assert schema.column_names[:2] == ("Symbol", "OptionRoot")
     # The underlying is `Underlying`, as on `m.options.snapshots`; no other name holds it.
     assert types["Underlying"] is ColumnType.STRING
-    assert "UnderlyingAssetTicker" not in types
+    assert "UnderlyingTicker" not in types
     root = next(c for c in schema.columns if c.name == "OptionRoot")
     assert root.description.endswith("Null on a row of any other class.")
     assert types["LastTradeConditions"] is ColumnType.LONG_ARRAY
@@ -79,7 +79,7 @@ def test_the_vendor_sample_decodes(load_fixture: Fixture) -> None:
     assert not report.missing
     first = batch.to_pylist()[0]
     assert first["Ticker"] == "O:NCLH221014C00005000"
-    assert first["UnderlyingAssetTicker"] == "AAPL"
+    assert first["UnderlyingTicker"] == "AAPL"
     assert first["LastTradeConditions"] == [209]
 
 

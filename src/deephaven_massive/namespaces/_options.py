@@ -324,7 +324,7 @@ CHAIN: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CHAIN,
     serves_current_data=True,
-    keys={(_REST, _CHAIN): _keys("Ticker", fanout="UnderlyingAssetTicker")},
+    keys={(_REST, _CHAIN): _keys("Ticker", fanout="UnderlyingTicker")},
     revision_keys=_SNAPSHOT_REVISION,
 )
 
@@ -334,7 +334,7 @@ SNAPSHOTS: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     fetch_path=_SNAPSHOT,
     serves_current_data=True,
-    keys={(_REST, _SNAPSHOT): _keys("Ticker", fanout="UnderlyingAssetTicker")},
+    keys={(_REST, _SNAPSHOT): _keys("Ticker", fanout="UnderlyingTicker")},
     symbol_param="ticker.any_of",
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     # Massive refuses `type` beside tickers, so the library sends it for `dm.ALL` only.
