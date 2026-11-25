@@ -224,6 +224,24 @@ def test_withheld_rows_are_taken_out_and_grouped() -> None:
     assert nameless.total == 3
 
 
+def test_for_symbols_keeps_a_requests_own_rows_and_every_unread_symbol_with_their_reason() -> None:
+    groups = (
+        WithheldGroup(VALUES, "A", "A", "Price", 2, "price a"),
+        WithheldGroup(VALUES, "B", "B", "Price", 1, "price b"),
+        WithheldGroup(SYMBOLS, None, "a b", "Symbol", 4, "spelling"),
+    )
+    withheld = Withheld(pa.table({}), groups, "price a")
+    # A request for B gets its row and the unread symbol's, which could have been any
+    # symbol's; its first reason is the first of those rows', not A's.
+    mine = withheld.for_symbols({"B"}.__contains__)
+    assert (mine.groups, mine.total, mine.first_reason) == (groups[1:], 5, "price b")
+    assert mine.rows.num_rows == 0
+    none = withheld.for_symbols({"C"}.__contains__)
+    assert (none.groups, none.total, none.first_reason) == (groups[2:], 4, "spelling")
+    nothing = Withheld(pa.table({})).for_symbols({"A"}.__contains__)
+    assert (nothing.groups, nothing.total, nothing.first_reason) == ((), 0, "")
+
+
 def test_counts_give_a_symbol_stream_its_own_rows_and_every_unread_symbol() -> None:
     withheld = Withheld(
         pa.table({}),
