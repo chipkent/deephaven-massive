@@ -26,7 +26,7 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._massive import RestClient, Transport, WireError, source
-from tests._live import streams
+from tests._live import recency, recorded_requests, streams
 from tests._live.calendar import is_trading_day, trading_day_after, trading_day_before
 from tests._live.feeds import with_delayed
 from tests._live.massive_problems import expect_fixed
@@ -1431,3 +1431,49 @@ def test_overnight_stock_trades_stream(
         evidence(f"{row['Symbol']} at {stamp}: Date {row['Date']}, trade date {counted}")
     if not rows:
         pytest.skip(f"no trade in {_STREAM_WAIT:.0f} s of the overnight session")
+
+
+_MIXED_CLASSES = ("AAPL", "I:SPX")
+"""A stock and an index, which the unified snapshot answers in one request."""
+
+
+@pytest.mark.settles("149")
+@pytest.mark.requests(1)
+@pytest.mark.timeout(60)
+def test_a_mixed_class_snapshot_labels_rows_not_the_envelope(
+    live_rest: RestClient, *, evidence: Evidence
+) -> None:
+    """Whether the unified snapshot of a stock and an index labels the envelope `DELAYED`.
+
+    Requests `/v3/snapshot` with `AAPL` and `I:SPX` in one `ticker.any_of`, one request, and
+    records the envelope's `status`, each row's ticker, `type`, `market_status`, `error`, and
+    recency labels (`timeframe` and its dotted forms), and the labels read as the library reads
+    them (`read_labels`) for the whole answer and for each row alone. A request Massive refuses
+    skips, quoting Massive, and its text is the evidence of what a mixed request does when the
+    key lacks one class. Skips, quoting the labels, when no label of the answer says `DELAYED`:
+    every label is real-time, so the question about a delayed label has no subject. Passes when
+    some label says `DELAYED` and the answer has a row. The evidence says whether the envelope
+    carries the label (`status=DELAYED`), or only some rows do; an envelope
+    that is `OK` beside a delayed row means a mixed request is labelled by row only.
+    """
+    page = recorded_requests.get(
+        live_rest,
+        source(Transport.REST, "/v3/snapshot"),
+        path_params={},
+        query={"ticker.any_of": list(_MIXED_CLASSES)},
+        bucket="stocks",
+        evidence=evidence,
+    )
+    evidence(f"envelope status {page.status!r}; {len(page.rows)} rows")
+    for row in page.rows:
+        fields = {
+            key: row.get(key) for key in ("ticker", "type", "market_status", "error", "message")
+        }
+        label = recency.answered("row", "", [row]).text()
+        evidence(f"row {fields}; {label}")
+    whole = recency.answered("answer", page.status, page.rows)
+    evidence(whole.text())
+    if not whole.delayed:
+        pytest.skip(f"no label says DELAYED, so nothing to place: {whole.text()}")
+    assert page.rows, "Massive labelled the answer delayed and sent no row"
+    evidence(f"the envelope says DELAYED: {page.status == 'DELAYED'}")
