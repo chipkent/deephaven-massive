@@ -381,6 +381,7 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     assert _at_day_edge(int(stamp) // _MS, recent_monday), f"file row stamped {stamp}"
     values = tuple(float(str(row[k])) for k in ("open", "high", "low", "close", "volume"))
     same_day = [b for b in ranged if _utc_day(int(b["t"])) == recent_monday]
+    assert same_day, f"REST sent no {_PAIR} range bar of {recent_monday}: {ranged}"
     expect_fixed(
         evidence=evidence,
         fixed=any(_same(values, _ohlcv(b)) for b in same_day),
@@ -567,6 +568,7 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     evidence(f"only in grouped daily: {sorted(grouped - filed)}")
     evidence(f"only in the flat file: {sorted(filed - grouped)}")
     assert grouped
+    assert filed, f"{_DAY_FILE} of {recent_monday} lists no pair"
     expect_fixed(
         evidence=evidence,
         fixed=grouped == filed,
