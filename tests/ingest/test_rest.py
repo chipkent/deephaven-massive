@@ -2330,8 +2330,8 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
     with pytest.raises(RowDataError) as info:
         fetch(session, SMA, symbols=["AAPL"])
     assert str(info.value) == (
-        "indicators.sma: the library could read none of the 1 rows of the read's symbols and "
-        "window from GET /v1/indicators/sma/AAPL whole, so it withheld them all. "
+        "indicators.sma: the library could not read the 1 row of the read's symbols and "
+        "window from GET /v1/indicators/sma/AAPL whole, so it withheld it. "
         "Timestamp unit mismatch for indicators.sma.TimestampStart: 1704310200000000000 ms "
         "overflows 64-bit nanoseconds. m.problems() counts the withheld rows by cause and symbol."
     )
@@ -2557,8 +2557,8 @@ def test_a_read_whose_rows_in_the_window_are_all_unreadable_fails(
     fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope(page)))
     with pytest.raises(
         RowDataError,
-        match=r"^stocks\.trades: the library could read none of the \d rows of the read's symbols "
-        r"and window from GET /v3/trades/AAPL whole",
+        match=r"^stocks\.trades: the library could (read none of the \d rows|not read the 1 row) "
+        r"of the read's symbols and window from GET /v3/trades/AAPL whole",
     ):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
 
@@ -3741,7 +3741,7 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     two_days = f"/v2/aggs/ticker/X:BTCUSD/range/2/day/{start}/{end}".replace(":", "%3A")
     new_york = ny_ms(date(2025, 3, 3))
     fake_rest.reply(two_days, Reply(envelope([{"t": new_york, "c": 1.0}])))
-    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+    with pytest.raises(RowDataError, match="could not read the 1 row"):
         crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
     [warning] = unexpected_stamps(caplog)
     assert warning == (
@@ -3768,7 +3768,7 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     assert not unexpected_stamps(caplog)
     # A week bar stamped on another day may cover another week: it is withheld, and its form
     # warns.
-    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+    with pytest.raises(RowDataError, match="could not read the 1 row"):
         crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
     [warning] = unexpected_stamps(caplog)
     assert warning == (
@@ -3795,7 +3795,7 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     ]
     assert not unexpected_stamps(caplog)
     # A month bar stamped on the 2nd is withheld.
-    with pytest.raises(RowDataError, match="could read none of the 1 rows"):
+    with pytest.raises(RowDataError, match="could not read the 1 row"):
         crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
     [warning] = unexpected_stamps(caplog)
     assert warning == (
@@ -5207,7 +5207,7 @@ def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
             "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
             "dm.MassiveConfig."
         )
-        with pytest.raises(dm.MassiveError, match=r"could read none of the 1 rows"):
+        with pytest.raises(dm.MassiveError, match=r"could not read the 1 row"):
             fetch(m, CONVERSION, params=params)
 
 
@@ -5356,8 +5356,8 @@ def test_a_row_is_listed_under_each_named_ticker_it_lists(
     assert [q["tickers.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]] * 2
     assert [m for m in caplog.messages if "lists none" in m] == [
         (
-            "partners.benzinga.news: Massive sent 1 rows from /benzinga/v2/news whose Tickers "
-            "lists none of the requested tickers AAPL and MSFT, so they are left out."
+            "partners.benzinga.news: Massive sent 1 row from /benzinga/v2/news whose Tickers "
+            "lists none of the requested tickers AAPL and MSFT, so it is left out."
         )
     ]
     assert events == []

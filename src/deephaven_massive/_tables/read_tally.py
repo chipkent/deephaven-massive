@@ -16,7 +16,7 @@ import threading
 from typing import TYPE_CHECKING
 
 from deephaven_massive._errors import RowDataError
-from deephaven_massive._log_limits import log_failure
+from deephaven_massive._log_limits import counted, log_failure
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive._tables.withheld import WITHHELD_LISTED, Withheld, reason_sentence
 
@@ -95,10 +95,15 @@ class ReadTally:
         )
         if not asked or withheld < asked:
             return None
+        read = (
+            f"could not read the 1 row of the read's symbols and window from {sources} whole, "
+            "so it withheld it"
+            if asked == 1
+            else f"could read none of the {counted(asked, 'row')} of the read's symbols and "
+            f"window from {sources} whole, so it withheld them all"
+        )
         return RowDataError(
-            f"{dataset}: the library could read none of the {asked} rows of the read's "
-            f"symbols and window from {sources} whole, so it withheld them all. "
-            f"{reason_sentence(first)} {WITHHELD_LISTED}"
+            f"{dataset}: the library {read}. {reason_sentence(first)} {WITHHELD_LISTED}"
         )
 
     def check(self, dataset: str) -> None:

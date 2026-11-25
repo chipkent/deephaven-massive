@@ -272,7 +272,7 @@ def test_a_static_symbol_tables_skipped_and_refused_values_are_problems_of_the_s
         for r in problem_rows()
     ]
     assert rows == [
-        ("noncanonical_symbols", "msft", None, None, "stocks.trades: A symb"),
+        ("noncanonical_symbols", "msft", None, None, "'msft' is not Massive"),
         ("noncanonical_symbols", "no pe!", None, None, "canonicalize_symbols "),
     ]
     stream_ids = {r["StreamId"] for r in problem_rows()}
@@ -296,10 +296,7 @@ def msft_refused(refusal: Callable[..., str]) -> str:
     return (
         f"stocks.trades: A symbol table holds 'msft'. {refusal(AssetClass.STOCKS, 'msft')} Fix "
         "the row, or convert the table with dm.canonicalize_symbols(table, dm.AssetClass.STOCKS, "
-        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from. If "
-        "Massive itself writes 'msft', report it at "
-        "https://github.com/chipkent/deephaven-massive/issues, since the library does not know "
-        "that form yet."
+        "convention=dm.SymbolConvention.YAHOO), naming the convention your tickers come from."
     )
 
 

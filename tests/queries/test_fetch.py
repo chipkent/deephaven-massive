@@ -771,9 +771,7 @@ def test_fetch_and_poll_refuse_a_bad_symbol_row_when_the_call_raises_and_the_ses
             f"stocks.last_trade: A symbol table holds 'msft'. {refusal(AssetClass.STOCKS, 'msft')} "
             "Fix the row, or convert the table with dm.canonicalize_symbols(table, "
             "dm.AssetClass.STOCKS, convention=dm.SymbolConvention.YAHOO), naming the convention "
-            "your tickers come from. If Massive itself writes 'msft', report it at "
-            "https://github.com/chipkent/deephaven-massive/issues, since the library does not know "
-            "that form yet."
+            "your tickers come from."
         )
         + "$"
     )

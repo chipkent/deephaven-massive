@@ -909,7 +909,8 @@ class RestClient:
                 closed or the read was cancelled (`_attempt` releases a permit granted just as
                 `stop` was set). With status 429 when the bucket is
                 paused for longer than the call's patience still covers, quoting the latest
-                refusal.
+                refusal; when that refusal answered another request, the message first names
+                this one, which waited for the pause.
         """
         if stop.is_set():
             raise self._stopped(request)
@@ -918,8 +919,14 @@ class RestClient:
         except WireError as error:
             if error.kind is WireFailure.STOPPED:  # the wait was cancelled
                 raise self._stopped(request) from None
+            message = error.message
+            if error.path is not None and error.path != request.target:
+                message = (
+                    f"GET {request.target} on {self._host} waited for a pause Massive asked of "
+                    f"the requests that share its limit. {message}"
+                )
             raise WireError(
-                error.message,
+                message,
                 status=error.status,
                 host=self._host,
                 path=request.target,
@@ -1029,7 +1036,9 @@ class RestClient:
         asked = retry_after_seconds(
             response.headers.get("Retry-After"), self._clock.time() if now is None else now
         )
-        self._governor.refused(permit, retry_after=asked, message=failure.message)
+        self._governor.refused(
+            permit, retry_after=asked, message=failure.message, path=failure.path
+        )
 
 
 _UNSENT: Final = (urllib3.exceptions.ConnectTimeoutError, urllib3.exceptions.ProxyError)

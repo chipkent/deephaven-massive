@@ -76,6 +76,7 @@ from deephaven_massive._errors import (
     ErrorSource,
     MassiveError,
     SessionClosedError,
+    copy_error,
     from_wire,
     new_live_table,
     required,
@@ -94,7 +95,12 @@ from deephaven_massive._ingest.subscriptions import (
     wildcard,
 )
 from deephaven_massive._ingest.ws_silence import SilenceCheck
-from deephaven_massive._log_limits import bounded_list, log_failure, prose_list
+from deephaven_massive._log_limits import (
+    bounded_list,
+    log_failure,
+    mark_failure_logged,
+    prose_list,
+)
 from deephaven_massive._massive import (
     Cancel,
     DriftReport,
@@ -140,9 +146,32 @@ __all__ = [
     "ConnectionGroup",
     "ConnectionStream",
     "GroupSession",
+    "stream_copy",
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def stream_copy(error: MassiveError, dataset: str) -> MassiveError:
+    """Return a stream's own copy of a connection-wide error, prefixed with the stream's dataset.
+
+    A table's `Error` then says which stream it belongs to, as every other stream failure
+    does, while the connection keeps the error itself for `LastError` and the log. The log
+    stays at one WARNING per failure: the first copy of an error nobody has logged logs at
+    WARNING when its stream fails, and every later copy, and every copy of an error the
+    connection logged itself, logs at DEBUG only (`mark_failure_logged`).
+
+    Args:
+        error: The connection's error.
+        dataset: The stream's dataset, such as `"stocks.trades"`.
+
+    Returns:
+        A new error of the same class and attributes, with the message `"<dataset>: <error>"`.
+    """
+    copy = copy_error(error, f"{dataset}: {error}")
+    if not mark_failure_logged(error):  # logged already: the copy is only a repeat
+        mark_failure_logged(copy)
+    return copy
 
 
 IDLE_GRACE: Final = 30.0
@@ -1149,15 +1178,15 @@ class Connection:
                 for sid in leased
                 if group.owners[sid].connection_taken is ConnectionTaken.RECONNECT
             }
-            routed = {sink.stream_id for sink in self.flusher.routes.sinks()}
+            routed = {sink.stream_id: sink.plan.dataset for sink in self.flusher.routes.sinks()}
             if keepers:
-                failing = [sid for sid in leased if sid not in keepers]
+                taken = [sid for sid in leased if sid not in keepers]
                 if next_at is not None:  # only a stream leased before the eviction was taken
-                    opening = {sid: error for sid in failing if sid not in routed}
+                    opening = {sid: error for sid in taken if sid not in routed}
                     self.pending_failures.update(opening)
-                failing = [sid for sid in failing if sid in routed]
+                failing = {sid: routed[sid] for sid in taken if sid in routed}
             else:  # one section: no verb leases the connection once it has failed
-                failing = sorted(routed)
+                failing = routed
                 self.failure = error
                 group.retire(self, idle=False)
         if keepers:
@@ -1174,12 +1203,31 @@ class Connection:
         )
         self._taken_at = None  # the close is decided: a later change must not decide it again
         self._last_error = str(error)
-        self.flusher.fail(failing, error)
+        self._fail_each(failing, error)
         self.close(final_flush=True)  # the client reports CLOSED; the failures go first
         return True
 
+    def _fail_each(self, streams: Mapping[int, str], error: MassiveError) -> None:
+        """Fail routed streams with a connection-wide error, each dataset's with its own copy.
+
+        Args:
+            streams: The streams to fail, each with its dataset (`StreamSink.plan.dataset`).
+            error: The connection's error, which `stream_copy` prefixes for each dataset.
+        """
+        by_dataset: dict[str, list[int]] = {}
+        for stream_id, dataset in streams.items():
+            by_dataset.setdefault(dataset, []).append(stream_id)
+        for dataset, ids in by_dataset.items():
+            self.flusher.fail(ids, stream_copy(error, dataset))
+
     def _ride_taken(
-        self, at: float, next_at: float, *, keepers: int, failing: list[int], error: MassiveError
+        self,
+        at: float,
+        next_at: float,
+        *,
+        keepers: int,
+        failing: Mapping[int, str],
+        error: MassiveError,
     ) -> None:
         """Fail the routed streams of `FAIL` sessions and hold the rest down until the reconnect.
 
@@ -1187,7 +1235,7 @@ class Connection:
             at: When the connection was taken, seconds since the epoch.
             next_at: When the client's next attempt is due, seconds since the epoch.
             keepers: How many streams of `RECONNECT` sessions remain.
-            failing: The routed streams of `FAIL` sessions.
+            failing: The routed streams of `FAIL` sessions, each with its dataset.
             error: The error they fail with.
         """
         logger.warning(
@@ -1210,8 +1258,7 @@ class Connection:
             f"The library takes it back at {utc_text(next_at)}."
         )
         self._episodes.expired.update(failing)  # no outage holds a failing stream down
-        if failing:
-            self.flusher.fail(failing, error)
+        self._fail_each(failing, error)
         self._next_reconnect_at = int(next_at * 1e9)
         self._outage(
             detail=f"Another connection with this API key took it at {utc_text(at)}, and the "
@@ -1253,9 +1300,9 @@ class Connection:
         log_failure(logger, public, "%s")
         with self._lock:  # one section: no verb leases the connection once it has failed
             self.failure = public
-            routed = {sink.stream_id for sink in self.flusher.routes.sinks()}
+            routed = {sink.stream_id: sink.plan.dataset for sink in self.flusher.routes.sinks()}
             self._group.retire(self, idle=False)
-        self.flusher.fail(routed, public)
+        self._fail_each(routed, public)
         self.flusher.stop(final=True)  # the failures above are applied before it ends
 
     # --- loop thread: failures and drift -------------------------------------------------------
@@ -1277,15 +1324,20 @@ class Connection:
         )
         hint = self._refusal_hint(refused)
         self._last_error = f"{answered} {hint}"
-        # One error per note, so a note reaches only the streams that carry it.
-        by_note: dict[str, list[int]] = {}
+        # One error per note, so a note reaches only the streams that carry it, and each
+        # dataset's streams get their own copy of it.
+        by_note: dict[tuple[str, str], list[int]] = {}
         for stream in self._streams.values():
             if stream.topics & refused:
-                by_note.setdefault(stream.refusal_note, []).append(stream.stream_id)
-        for note, ids in by_note.items():
-            # The note says where Massive documents the dataset: a why, before the fix.
-            text = f"{answered} {note.removesuffix('.')}. {hint}" if note else self._last_error
-            self.flusher.fail(ids, EntitlementError(text))
+                key = (stream.refusal_note, stream.plan.dataset)
+                by_note.setdefault(key, []).append(stream.stream_id)
+        errors: dict[str, EntitlementError] = {}
+        for (note, dataset), ids in by_note.items():
+            if note not in errors:
+                # The note says where Massive documents the dataset: a why, before the fix.
+                text = f"{answered} {note.removesuffix('.')}. {hint}" if note else self._last_error
+                errors[note] = EntitlementError(text)
+            self.flusher.fail(ids, stream_copy(errors[note], dataset))
 
     def _refusal_hint(self, refused: set[str]) -> str:
         """Return what a refusal's message adds after Massive's answer, by the connection's feed.
@@ -1484,9 +1536,10 @@ class Connection:
         if dataset not in episodes.failures:
             since = utc_text(required(episodes.down_since, "the outage's start"))
             episodes.failures[dataset] = MassiveError(
-                f"The WebSocket connection to {self.decision.host}{self.path} has been down "
-                f"since {since}, longer than max_outage={self._group.max_outage:g} s, so this "
-                f"table stopped and the rows from then on are missing. {new_live_table(dataset)}",
+                f"{dataset}: The WebSocket connection to {self.decision.host}{self.path} has "
+                f"been down since {since}, longer than max_outage={self._group.max_outage:g} s, "
+                f"so this table stopped and the rows from then on are missing. "
+                f"{new_live_table(dataset)}",
                 source=ErrorSource.NETWORK,
             )
         self.flusher.fail([stream_id], episodes.failures[dataset])

@@ -224,12 +224,16 @@ def _real_time(asset_class: AssetClass, evidence: str) -> HostDecision:
     return HostDecision(REALTIME_HOST, Recency.REALTIME, evidence)
 
 
-def _unconfirmed_real_time(asset_class: AssetClass, evidence: str) -> HostDecision:
+def _unconfirmed_real_time(
+    asset_class: AssetClass, evidence: str, *, listed: AbstractSet[Subscription]
+) -> HostDecision:
     """Return the real-time host's decision when the snapshot gave no usable answer, with a WARNING.
 
     Args:
         asset_class: The class.
         evidence: What the snapshot showed, for the log and the `m.connections()` row.
+        listed: `MassiveConfig.delayed_subscriptions`, which the WARNING's fix repeats with
+            the class's subscription added.
 
     Returns:
         `socket.massive.com`, `REALTIME`, with the evidence.
@@ -243,13 +247,19 @@ def _unconfirmed_real_time(asset_class: AssetClass, evidence: str) -> HostDecisi
         subscription,
         REALTIME_HOST,
         evidence if evidence.endswith(".") else f"{evidence}.",
-        delayed_fix(subscription, purpose="To connect to Massive's delayed feed instead"),
+        delayed_fix(
+            subscription, listed=listed, purpose="To connect to Massive's delayed feed instead"
+        ),
     )
     return HostDecision(REALTIME_HOST, Recency.REALTIME, evidence)
 
 
 def _from_labels(
-    asset_class: AssetClass, *, subscription: Subscription, labels: RecencyLabels
+    asset_class: AssetClass,
+    *,
+    subscription: Subscription,
+    labels: RecencyLabels,
+    listed: AbstractSet[Subscription],
 ) -> HostDecision:
     """Decide the real-time feed of a subscription not listed as delayed, from its snapshot.
 
@@ -258,6 +268,8 @@ def _from_labels(
         subscription: Its subscription.
         labels: The snapshot's recency labels, read from its rows without the per-ticker error
             rows.
+        listed: `MassiveConfig.delayed_subscriptions`, which each message's fix repeats with
+            the subscription added.
 
     Returns:
         The real-time host, `REALTIME`, with the label as evidence; a WARNING when the label
@@ -268,19 +280,21 @@ def _from_labels(
     """
     if labels.delayed is not None:
         refusal = delayed_refusal(
-            subscription, f"{asset_class} streams", labels.delayed, streams=True
+            subscription, f"{asset_class} streams", labels.delayed, listed=listed, streams=True
         )
         raise refusal
     if labels.unknown is not None:
         field, value = labels.unknown
         return _unconfirmed_real_time(
-            asset_class, f"{field}={value!r}, neither DELAYED nor REAL-TIME, in the snapshot"
+            asset_class,
+            f"{field}={value!r}, neither DELAYED nor REAL-TIME, in the snapshot",
+            listed=listed,
         )
     if labels.real_time is not None:
         return _real_time(asset_class, labels.real_time)
     evidence = _NO_TIMEFRAME.format(asset_class)
     if asset_class is AssetClass.INDICES:  # the field is documented: its absence is anomalous
-        return _unconfirmed_real_time(asset_class, evidence)
+        return _unconfirmed_real_time(asset_class, evidence, listed=listed)
     return _real_time(asset_class, evidence)
 
 
@@ -348,13 +362,17 @@ def decide(
             DELAYED_HOST,
         )
         return HostDecision(DELAYED_HOST, Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
-    return _from_snapshot(asset_class, SNAPSHOT_PROBES[asset_class], fetch)
+    return _from_snapshot(
+        asset_class, SNAPSHOT_PROBES[asset_class], fetch, listed=delayed_subscriptions
+    )
 
 
 def _from_snapshot(
     asset_class: AssetClass,
     probe: SnapshotProbe,
     fetch: Callable[[SnapshotProbe], SnapshotAnswer],
+    *,
+    listed: AbstractSet[Subscription],
 ) -> HostDecision:
     """Decide a class's host from its snapshot: the last rule of `decide`.
 
@@ -362,6 +380,7 @@ def _from_snapshot(
         asset_class: The class of the stream.
         probe: The class's snapshot request (`SNAPSHOT_PROBES`).
         fetch: Sends the request, as `decide` takes it.
+        listed: `MassiveConfig.delayed_subscriptions`, for each message's fix.
 
     Returns:
         The real-time host with the refusal as its evidence when Massive refuses the snapshot
@@ -375,11 +394,15 @@ def _from_snapshot(
     try:
         answer = fetch(probe)
     except EntitlementError as error:
-        return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, error))
+        return _unconfirmed_real_time(
+            asset_class, _REFUSED_SNAPSHOT.format(probe.path, error), listed=listed
+        )
     labels = _labels(answer)
     if isinstance(labels, str):
-        return _unconfirmed_real_time(asset_class, _REFUSED_SNAPSHOT.format(probe.path, labels))
-    return _from_labels(asset_class, subscription=subscription, labels=labels)
+        return _unconfirmed_real_time(
+            asset_class, _REFUSED_SNAPSHOT.format(probe.path, labels), listed=listed
+        )
+    return _from_labels(asset_class, subscription=subscription, labels=labels, listed=listed)
 
 
 def _labels(answer: SnapshotAnswer) -> RecencyLabels | str:

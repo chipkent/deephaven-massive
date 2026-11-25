@@ -521,6 +521,7 @@ def test_stream_verdict_tells_a_refused_read_from_an_unlisted_delay() -> None:
             dm.Subscription.STOCKS,
             "stocks.bars data",
             "timeframe=DELAYED",
+            listed=set(),
             streams=False,
         )
     )

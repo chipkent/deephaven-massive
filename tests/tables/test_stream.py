@@ -2565,7 +2565,7 @@ def test_skipped_watchlist_rows_are_spans_of_the_streams_problems(
         (ProblemCause.NONCANONICAL_SYMBOLS, sink.stream_id, ["skipped None 'msft'"]),
         (ProblemCause.NONCANONICAL_SYMBOLS, sink.stream_id, []),
     ]
-    assert spans[0].spans["skipped None 'msft'"].detail == rule.refusal("msft")
+    assert spans[0].spans["skipped None 'msft'"].detail == "'msft' is not Massive's stock ticker."
     assert spans[0].policy is dm.OnError.LOG
 
 

@@ -60,11 +60,13 @@ from typing_extensions import override
 
 from deephaven_massive._datasets.row_times import ISSUES_URL
 from deephaven_massive._datasets.symbols import (
+    CLASS_NOUNS,
     UNDERLYING_CLASSES,
     as_written_fault,
     canonical_symbol,
     check_symbol,
     is_canonical,
+    is_lower_case,
     symbol_class,
 )
 from deephaven_massive._enums import AssetClass, ClassFromPrefix, OnError, SymbolConvention
@@ -99,6 +101,7 @@ __all__ = [
     "SymbolRowRule",
     "SymbolWatch",
     "failed_table_message",
+    "invalid_row_detail",
     "invalid_row_message",
     "latest_rows_since_added",
     "read_symbols",
@@ -147,8 +150,10 @@ def invalid_row_message(
     Returns:
         The reason (with the canonical form when the class's converter gives one) and the
         remedy: fix the row, or convert the table; and, unless the class's converter turns the
-        row into a ticker, where to report it, since the value can also be a ticker Massive
-        writes in a form the library does not know yet. For a
+        row into a ticker or the row is lower case, where to report it, since the value can
+        also be a ticker Massive writes in a form the library does not know yet. A lower-case
+        row is never one: Massive writes no ticker that way, and the reason already names the
+        upper-case form. For a
         dataset of one class the remedy is `dm.canonicalize_symbols`, which by default nulls
         the rows it cannot convert and, with `on_error=dm.OnError.RAISE`, fails on them, so a
         caller who chose to fail on a bad row keeps failing; for a dataset that spans classes,
@@ -191,12 +196,37 @@ def invalid_row_message(
             f"Fix the row, or convert the table with dm.canonicalize_symbols(table, "
             f"dm.AssetClass.{asset_class.name})."
         )
-    if _converts(asset_class, symbol):
+    if _converts(asset_class, symbol) or is_lower_case(symbol):
         return f"{held} {remedy}"
     return (
         f"{held} {remedy} If Massive itself writes {symbol!r}, report it at {ISSUES_URL}, since "
         "the library does not know that form yet."
     )
+
+
+def invalid_row_detail(
+    asset_class: AssetClass | ClassFromPrefix, symbol: str, *, as_written: bool = False
+) -> str:
+    """Label a symbol table's refused row for `m.problems()`: what it is, with no fix.
+
+    The row's `noncanonical_symbols` cause leads to the fix in the troubleshooting page, and
+    `invalid_row_message` gives the fix to a caller who reads the row in code.
+
+    Args:
+        asset_class: The dataset's class, or `ClassFromPrefix.ANY` for a dataset that spans
+            classes, where the row's prefix selects its class.
+        symbol: The row's symbol, which `check_symbol` refuses.
+        as_written: True for a dataset whose symbols are kept as Massive writes them.
+
+    Returns:
+        For values kept as written, the rule the row breaks: `"' ES' has surrounding
+        whitespace, and Massive never writes a ticker that way."`; otherwise the class the row
+        is not a ticker of: `"'msft' is not Massive's stock ticker."`.
+    """
+    if as_written:
+        return f"{symbol!r} {as_written_fault(symbol)}, and Massive never writes a ticker that way."
+    resolved = symbol_class(symbol) if asset_class is ClassFromPrefix.ANY else asset_class
+    return f"{symbol!r} is not Massive's {CLASS_NOUNS[resolved]} ticker."
 
 
 def _converts(asset_class: AssetClass | ClassFromPrefix, symbol: str) -> bool:
@@ -436,6 +466,21 @@ class SymbolRowRule:
         """
         return f"{self.dataset}: {self._reason(symbol)}"
 
+    def detail(self, symbol: str) -> str:
+        """Label a refused row for `m.problems()`: what it is, with no fix (`invalid_row_detail`).
+
+        Args:
+            symbol: The row's value, which `accepts` refuses.
+
+        Returns:
+            For a rule of underlyings, a value of another class: `"'C:EURUSD' is not a stock
+            or index ticker such as 'AAPL' or 'I:SPX'."`; otherwise the label of
+            `invalid_row_detail`.
+        """
+        if self.underlying and symbol_class(symbol) not in UNDERLYING_CLASSES:
+            return f"{symbol!r} is not a stock or index ticker such as 'AAPL' or 'I:SPX'."
+        return invalid_row_detail(self.asset_class, symbol, as_written=self.as_written)
+
     def skipped_events(
         self, values: Iterable[str], *, stream_id: int, where: str, field: str | None
     ) -> list[ProblemEvent]:
@@ -451,7 +496,7 @@ class SymbolRowRule:
             field: None for the call's symbols; the column of a table of values.
 
         Returns:
-            One `SKIPPED` event per value, with its reason and the call's setting.
+            One `SKIPPED` event per value, with its label (`detail`) and the call's setting.
         """
         at = time.time_ns()
         return [
@@ -464,7 +509,7 @@ class SymbolRowRule:
                 symbol=value,
                 field=field,
                 rows=0,
-                detail=self.refusal(value),
+                detail=self.detail(value),
                 at=at,
                 policy=self.noncanonical,
             )
@@ -597,7 +642,7 @@ class SkippedValues:
         # Named by the source and the value, quoted, as `refused_changed` names its spans, so
         # one text skipped in both tables is two spans.
         own: dict[str, tuple[str | None, str | None, str, int]] = {
-            f"skipped {None!r} {value!r}": (value, None, self._rule.refusal(value), 0)
+            f"skipped {None!r} {value!r}": (value, None, self._rule.detail(value), 0)
             for value in symbols
         }
         if self._values is not None:
@@ -607,7 +652,7 @@ class SkippedValues:
                     f"skipped {rule.column!r} {value!r}": (
                         value,
                         rule.column,
-                        rule.refusal(value),
+                        rule.detail(value),
                         0,
                     )
                     for value in values

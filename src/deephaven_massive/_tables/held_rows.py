@@ -49,6 +49,7 @@ import pyarrow.compute as pc
 
 from deephaven_massive._datasets.row_times import DATE, INSERT, time_column
 from deephaven_massive._errors import BrokenGuaranteeError, MassiveError, failure_text, library_bug
+from deephaven_massive._log_limits import counted
 from deephaven_massive._tables.futures_dates import LookupState, Readiness
 from deephaven_massive._tables.row_memory import HELD_BYTES_LIMIT
 
@@ -300,8 +301,8 @@ class HeldRows(Generic[_K]):
         gone = [ticker for ticker in held if not wanted(ticker)]
         for ticker in gone:
             logger.info(
-                "%d held futures rows of %s are dropped: no stream receives it any more",
-                held.pop(ticker).rows,
+                "dropping %s of %s: no stream receives it any more",
+                counted(held.pop(ticker).rows, "held futures row"),
                 ticker,
             )
 
@@ -316,9 +317,9 @@ class HeldRows(Generic[_K]):
         self._checked.pop(key, None)
         if held:
             logger.info(
-                "%d held futures rows of %d tickers are dropped: %s",
-                sum(w.rows for w in held.values()),
-                len(held),
+                "dropping %s of %s: %s",
+                counted(sum(w.rows for w in held.values()), "held futures row"),
+                counted(len(held), "ticker"),
                 why,
             )
 
