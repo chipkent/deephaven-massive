@@ -1240,9 +1240,9 @@ _EMPTY = "the value is empty. Write a value, or leave the setting out to keep it
             "on_error: {malformed_row: raise}\n",
             (
                 ", line 1, column 12: In on_error, 'malformed_row' is not a cause. Write "
-                "noncanonical_symbols, unreadable_symbols, unavailable_symbols, unreadable_keys, "
-                "unconvertible_values, malformed_rows, unlisted_contracts, unscheduled_products, "
-                "or refused_venues."
+                "noncanonical_symbols, unreadable_symbols, unavailable_symbols, "
+                "unrequested_symbols, unreadable_keys, unconvertible_values, malformed_rows, "
+                "unlisted_contracts, unscheduled_products, or refused_venues."
             ),
         ),
         (

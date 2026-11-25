@@ -192,6 +192,8 @@ on_error:
   unreadable_symbols: log  # the default
   # A symbol Massive has no data for.
   unavailable_symbols: log  # the default
+  # A row Massive sent a watchlist read for a symbol it didn't ask for.
+  unrequested_symbols: log  # the default
   # A row of Massive's data whose key the library can't read.
   unreadable_keys: log  # the default
   # A row of Massive's data with a value the library can't read.
@@ -248,6 +250,7 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 | `on_error.noncanonical_symbols` | Decides what happens to a row of a watchlist or other table you pass whose value isn't Massive's exact ticker or futures product code, such as `SPX` for `I:SPX`. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unreadable_symbols` | Decides whether a row of Massive's data whose symbol the library can't read as Massive's ticker fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unavailable_symbols` | Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its crypto ticker list doesn't hold the pair. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.unrequested_symbols` | Decides whether a row Massive returns to a watchlist read for a symbol the read didn't ask for fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unreadable_keys` | Decides whether a row of Massive's data whose key the library can't read fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unconvertible_values` | Decides whether a row of Massive's data holding a value the library can't read as its column's type fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.malformed_rows` | Decides what happens to a line of a Massive flat file that isn't a readable row: it doesn't split into the header's fields, or it isn't UTF-8 text. | `log`, `ignore`, or `raise` | `log` |
@@ -389,6 +392,19 @@ others, and `m.problems()` lists it.
 
 A symbol Massive answers with no rows and no error has no rows, whatever this
 setting says.
+
+#### on_error.unrequested_symbols
+
+A watchlist read by `fetch()` or `history()` asks Massive for its symbols, and
+Massive can answer with a row of another symbol: an index asked for by its bare
+ticker, such as `SPX`, can answer with rows of `I:SPX`. Such a row belongs to no
+symbol of the watchlist, so it is left out, and `m.problems()` lists it with its
+symbol and count. Set `raise` to fail the symbols whose request got
+such a row.
+
+A request for one symbol by its own path, such as
+`m.reference.related_companies()` makes, is Massive's answer about that symbol,
+so every row it returns is kept.
 
 #### on_error.unreadable_keys
 

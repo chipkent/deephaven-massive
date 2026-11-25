@@ -110,6 +110,20 @@ class ErrorPolicy:
 
             A symbol Massive answers with no rows and no error has no rows, whatever this
             setting says.
+        unrequested_symbols: Decides whether a row Massive returns to a watchlist read for a
+            symbol the read didn't ask for fails the table; the row is left out either way.
+            Defaults to `LOG`.
+
+            A watchlist read by `fetch()` or `history()` asks Massive for its symbols, and
+            Massive can answer with a row of another symbol: an index asked for by its bare
+            ticker, such as `SPX`, can answer with rows of `I:SPX`. Such a row belongs to no
+            symbol of the watchlist, so it is left out, and `m.problems()` lists it with its
+            symbol and count. Set `dm.OnError.RAISE` to fail the symbols whose request got
+            such a row.
+
+            A request for one symbol by its own path, such as
+            `m.reference.related_companies()` makes, is Massive's answer about that symbol,
+            so every row it returns is kept.
         unreadable_keys: Decides whether a row of Massive's data whose key the library can't
             read fails the table; the row is left out either way. Defaults to `LOG`.
 
@@ -214,6 +228,7 @@ class ErrorPolicy:
     noncanonical_symbols: OnError | None
     unreadable_symbols: OnError | None
     unavailable_symbols: OnError | None
+    unrequested_symbols: OnError | None
     unreadable_keys: OnError | None
     unconvertible_values: OnError | None
     malformed_rows: OnError | None
@@ -229,6 +244,7 @@ class ErrorPolicy:
         noncanonical_symbols: OnError | None = None,
         unreadable_symbols: OnError | None = None,
         unavailable_symbols: OnError | None = None,
+        unrequested_symbols: OnError | None = None,
         unreadable_keys: OnError | None = None,
         unconvertible_values: OnError | None = None,
         malformed_rows: OnError | None = None,
@@ -244,6 +260,8 @@ class ErrorPolicy:
             noncanonical_symbols: A watchlist row that isn't Massive's exact ticker.
             unreadable_symbols: A symbol in Massive's data that the library can't read.
             unavailable_symbols: A symbol Massive has no data for.
+            unrequested_symbols: A row Massive returns to a watchlist read for a symbol it
+                didn't ask for.
             unreadable_keys: A row of Massive's data whose key the library can't read.
             unconvertible_values: A row of Massive's data with a value the library can't read.
             malformed_rows: A flat-file line that isn't a readable row.
@@ -260,6 +278,7 @@ class ErrorPolicy:
             "noncanonical_symbols": noncanonical_symbols,
             "unreadable_symbols": unreadable_symbols,
             "unavailable_symbols": unavailable_symbols,
+            "unrequested_symbols": unrequested_symbols,
             "unreadable_keys": unreadable_keys,
             "unconvertible_values": unconvertible_values,
             "malformed_rows": malformed_rows,
@@ -305,6 +324,7 @@ class ResolvedPolicy:
     noncanonical_symbols: OnError
     unreadable_symbols: OnError
     unavailable_symbols: OnError
+    unrequested_symbols: OnError
     unreadable_keys: OnError
     unconvertible_values: OnError
     malformed_rows: OnError
@@ -351,6 +371,9 @@ def resolve_policy(call: ErrorPolicy | None, session: ErrorPolicy) -> ResolvedPo
         ),
         unavailable_symbols=_first(
             given.unavailable_symbols, session.unavailable_symbols, default.unavailable_symbols
+        ),
+        unrequested_symbols=_first(
+            given.unrequested_symbols, session.unrequested_symbols, default.unrequested_symbols
         ),
         unreadable_keys=_first(
             given.unreadable_keys, session.unreadable_keys, default.unreadable_keys

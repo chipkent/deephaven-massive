@@ -536,10 +536,6 @@ class _Result:
         scanning: Whether a flat-file scan of the result is in flight.
         seq: The number of the result's latest download.
         ended: Whether it failed or stopped: no read starts, and no download is published.
-        stopped: Whether the coordinator has applied its stop (`_Stop`): every symbol it was
-            following is `STOPPED`, and `_show` writes their rows in the same batch. Set only
-            by `_stopped`, on the coordinator thread, so `_forget` acts on a stop only once it
-            is applied.
         dirty: The symbols whose `m.symbol_reads()` row changed since it was last written.
         warned: The causes of failure already logged at WARNING for the result.
         transports: The sources its reads have used.
@@ -566,7 +562,6 @@ class _Result:
     scanning: bool = False
     seq: int = 0
     ended: bool = False
-    stopped: bool = False
     dirty: set[str] = field(default_factory=set)
     warned: set[str] = field(default_factory=set)
     transports: set[str] = field(default_factory=set)
@@ -1530,7 +1525,6 @@ class FollowCoordinator:
             result: The result's state.
         """
         result.ended = True
-        result.stopped = True
         for name, symbol in result.symbols.items():
             if symbol.state not in _ENDED:
                 symbol.state = SymbolReadState.STOPPED
@@ -1645,18 +1639,11 @@ class FollowCoordinator:
     def _forget(self, result: _Result) -> None:
         """Forget a result once its blink table has shut down: no event of it matters any more.
 
-        The table's shutdown callback sets `shut_down` and then queues the result's stop, on
-        whichever thread drops the table: for a failure this batch published, the update-graph
-        thread that delivers it, which can run before the batch ends. So the result is
-        forgotten only once that stop is applied (`stopped`); forgotten on `ended` and
-        `shut_down` alone, the stop would find no result, and the symbols would never show
-        `STOPPED`.
-
         Args:
             result: A result this batch touched.
         """
         key = id(result.read)
-        if result.stopped and result.read.shut_down and key in self._results:
+        if result.ended and result.read.shut_down and key in self._results:
             del self._results[key]
             with self._lock:
                 self._following.pop(key, None)

@@ -355,6 +355,7 @@ ENUM_PARAMETERS = {
     "ErrorPolicy.__init__.noncanonical_symbols": _POLICY_CAUSES,
     "ErrorPolicy.__init__.unreadable_symbols": _POLICY_CAUSES,
     "ErrorPolicy.__init__.unavailable_symbols": _POLICY_CAUSES,
+    "ErrorPolicy.__init__.unrequested_symbols": _POLICY_CAUSES,
     "ErrorPolicy.__init__.unreadable_keys": _POLICY_CAUSES,
     "ErrorPolicy.__init__.unconvertible_values": _POLICY_CAUSES,
     "ErrorPolicy.__init__.malformed_rows": _POLICY_CAUSES,

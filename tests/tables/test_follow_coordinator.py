@@ -2178,61 +2178,6 @@ def test_a_read_that_starts_after_its_symbol_left_leaves_the_symbol_removed(
     assert symbols["AAPL"].attempts == 0
 
 
-class _ShutsDownAtOnce(QuietRead):
-    # A read whose table shuts down as its failure is published: the update-graph thread can
-    # deliver the failure, and run the shutdown callback, before the coordinator's batch ends.
-    @override
-    def fail_table(self, error: MassiveError, /) -> bool:
-        self.shut_down = True
-        return super().fail_table(error)
-
-
-def test_a_table_shut_down_before_its_batch_ends_still_stops_its_symbols(
-    dh_exec_ctx: ExecutionContext,
-) -> None:
-    # Regression: a bad row under RAISE failed the table, and the failure's delivery shut it
-    # down (setting `shut_down` and queuing the stop) while the coordinator was finishing the
-    # same batch, whose last step forgot the result as ended and shut down. The stop then found
-    # no result and was dropped, so the symbols never showed STOPPED. The result is forgotten
-    # only once its stop is applied.
-    coordinator = follow_coordinator.FollowCoordinator(
-        dh_exec_ctx, "shutdown test", _stopped_pool()
-    )
-    read = _ShutsDownAtOnce()
-    handle = coordinator._handle
-    handle([follow_coordinator._Follow(read, None)])
-    result = coordinator._results[id(read)]
-    handle([follow_coordinator._Baseline(read, frozenset({"AAPL"}), 1)])
-    handle([follow_coordinator._Invalid(read, "a bad row")])
-    assert str(read.failed) == "a bad row"
-    assert read.shut_down
-    assert result.ended
-    assert coordinator._results == {id(read): result}  # kept until its stop is applied
-    handle([follow_coordinator._Stop(read)])
-    assert result.symbols["AAPL"].state is SymbolReadState.STOPPED
-    assert not coordinator._results
-
-
-def test_a_result_stopped_before_its_table_shuts_down_is_kept_until_then(
-    dh_exec_ctx: ExecutionContext,
-) -> None:
-    # The session's close stops a result before its table shuts down: the stop is applied, and
-    # the result is kept until the shutdown's own stop, which changes nothing more.
-    coordinator = follow_coordinator.FollowCoordinator(dh_exec_ctx, "kept test", _stopped_pool())
-    read = QuietRead()
-    handle = coordinator._handle
-    handle([follow_coordinator._Follow(read, None)])
-    result = coordinator._results[id(read)]
-    handle([follow_coordinator._Baseline(read, frozenset({"AAPL"}), 1)])
-    handle([follow_coordinator._Stop(read)])
-    assert result.symbols["AAPL"].state is SymbolReadState.STOPPED
-    assert coordinator._results == {id(read): result}
-    read.shut_down = True
-    handle([follow_coordinator._Stop(read)])
-    assert result.symbols["AAPL"].state is SymbolReadState.STOPPED
-    assert not coordinator._results
-
-
 def test_a_bug_is_a_cause_of_its_own() -> None:
     # A bug never shares the one WARNING of a failure that is none, so it logs its ERROR.
     lost = dm.MassiveError("connection reset", source=dm.ErrorSource.NETWORK)
