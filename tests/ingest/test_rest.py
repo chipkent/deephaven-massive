@@ -3051,6 +3051,9 @@ def test_a_listed_subscription_decides_the_delayed_feed(
     ],
     ids=["no label", "delayed", "real-time", "failed"],
 )
+@pytest.mark.parametrize(
+    "listed", [frozenset(), frozenset({Subscription.INDICES})], ids=["unlisted", "listed"]
+)
 def test_a_pinned_host_s_row_shows_massive_s_label(
     *,
     fake_rest: FakeRestServer,
@@ -3058,13 +3061,17 @@ def test_a_pinned_host_s_row_shows_massive_s_label(
     reply: Reply,
     recency: str,
     evidence: str,
+    listed: frozenset[Subscription],
 ) -> None:
-    # A pinned business.massive.com never shows real-time by its name; a failed read leaves
-    # it UNKNOWN, decided and connected, never a failed decision.
+    # A pinned business.massive.com never shows real-time by its name, and never shows delayed
+    # by the listing of indices in delayed_subscriptions: the label is read from Massive's
+    # snapshot either way. A failed read leaves it UNKNOWN, decided and connected, never a
+    # failed decision.
     m = dm.MassiveSession(
         dm.MassiveConfig(
             api_key="test-key",
             rest_base_url=fake_rest.url,
+            delayed_subscriptions=listed,
             websocket_hosts={AssetClass.INDICES: "business.massive.com"},
         )
     )

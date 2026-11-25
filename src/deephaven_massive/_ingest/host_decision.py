@@ -10,8 +10,8 @@ per (asset class, channel family), before the first connection, and never by ope
 connection to try:
 
 - the FMV family always uses the one host its class's FMV page lists (`feeds.fmv_host`);
-- a TICK host pinned in `MassiveConfig.websocket_hosts` is used as is (the configuration has checked
-  it against `delayed_subscriptions`), and its recency is what Massive says (`_pinned`);
+- a TICK host pinned in `MassiveConfig.websocket_hosts` is used as given, whether or not its
+  subscription is listed, and its recency is what Massive says (`_pinned`);
 - a listed subscription uses `delayed.massive.com`, with no request: the user asked for the
   delayed feed, so no answer from Massive changes the host;
 - forex and crypto have one documented host, `socket.massive.com`, so no request is made;
@@ -344,18 +344,16 @@ def decide(
         MassiveError: If `fetch` fails otherwise (a transport failure, a server error) and no
             host is pinned; for a pinned host, only a library defect (`_pinned_recency`).
     """
-    subscription = subscription_of(asset_class)
-    listed = subscription in delayed_subscriptions
     if family is ChannelFamily.FMV:
         return HostDecision(
             fmv_host(asset_class), Recency.REALTIME, "FMV channel's documented host"
         )
     host = websocket_hosts.get(asset_class)
     if host is not None:
-        return _pinned(asset_class, host, listed=listed, fetch=fetch)
+        return _pinned(asset_class, host, fetch=fetch)
     if asset_class in (AssetClass.FOREX, AssetClass.CRYPTO):
         return HostDecision(REALTIME_HOST, Recency.REALTIME, "single documented host")
-    if listed:
+    if subscription_of(asset_class) in delayed_subscriptions:
         logger.info(
             "%s WebSocket host: %s (MassiveConfig.delayed_subscriptions)",
             asset_class.value,
@@ -446,11 +444,7 @@ class _PinnedRecency:
 
 
 def _pinned(
-    asset_class: AssetClass,
-    host: str,
-    *,
-    listed: bool,
-    fetch: Callable[[SnapshotProbe], SnapshotAnswer],
+    asset_class: AssetClass, host: str, *, fetch: Callable[[SnapshotProbe], SnapshotAnswer]
 ) -> HostDecision:
     """Decide a TICK host pinned in `websocket_hosts`: the pinned host, with Massive's recency.
 
@@ -458,12 +452,13 @@ def _pinned(
     raises: a snapshot labelled delayed shows the stream `DELAYED` (no other host serves the
     data the user pinned, such as index values), and a snapshot Massive refuses, or whose
     read fails, leaves the recency `UNKNOWN`, as a refusal of the stream itself says what
-    Massive serves there. The recency never comes from the host's name.
+    Massive serves there. The recency never comes from the host's name, nor from
+    `delayed_subscriptions`: a listed subscription pinned to a real-time host on a key Massive
+    serves in real time is `REALTIME`, as Massive labels it.
 
     Args:
         asset_class: The class of the stream.
         host: The pinned host.
-        listed: Whether the class's subscription is in `delayed_subscriptions`.
         fetch: Sends the class's snapshot request, as `decide` takes it.
 
     Returns:
@@ -475,7 +470,7 @@ def _pinned(
         MassiveError: If the snapshot's read fails with a library defect
             (`_pinned_recency`).
     """
-    found = _pinned_recency(asset_class, listed=listed, fetch=fetch)
+    found = _pinned_recency(asset_class, fetch=fetch)
     evidence = f"{_PINNED}, {found.why}"
     if found.warn:
         logger.warning(
@@ -495,27 +490,21 @@ def _pinned(
 
 
 def _pinned_recency(
-    asset_class: AssetClass, *, listed: bool, fetch: Callable[[SnapshotProbe], SnapshotAnswer]
+    asset_class: AssetClass, *, fetch: Callable[[SnapshotProbe], SnapshotAnswer]
 ) -> _PinnedRecency:
-    """Return a pinned host's recency, from the settings or from Massive's snapshot.
+    """Return a pinned host's recency, from Massive's snapshot.
 
     Args:
         asset_class: The class of the stream.
-        listed: Whether the class's subscription is in `delayed_subscriptions`, so the user
-            asked for Massive's delayed data (the configuration has checked that the pin is a
-            `delayed.` host).
         fetch: Sends the class's snapshot request.
 
     Returns:
-        `DELAYED` for a listed subscription, with no request; otherwise what the class's
-        snapshot (`SNAPSHOT_PROBES`) shows (`_pinned_labels`), or `UNKNOWN` when Massive
-        refuses it or its read fails other than with a library defect.
+        What the class's snapshot (`SNAPSHOT_PROBES`) shows (`_pinned_labels`), or `UNKNOWN`
+        when Massive refuses it or its read fails other than with a library defect.
 
     Raises:
         MassiveError: If the read fails with a library defect (`_leaves_recency_unknown`).
     """
-    if listed:
-        return _PinnedRecency(Recency.DELAYED, "MassiveConfig.delayed_subscriptions")
     probe = SNAPSHOT_PROBES[asset_class]
     try:
         answer = fetch(probe)

@@ -578,32 +578,30 @@ def test_forex_and_crypto_cannot_pin_a_delayed_feed(
         dataclasses.replace(base, websocket_hosts={asset_class: "delayed.massive.com"})
 
 
-def test_a_listed_subscription_cannot_pin_another_host(base: MassiveConfig) -> None:
-    listed = {Subscription.STOCKS}
-    pinned = {AssetClass.STOCKS: "socket.massive.com"}
-    refusal = (
-        "delayed_subscriptions includes dm.Subscription.STOCKS, whose streams use Massive's "
-        "delayed feed 'delayed.massive.com', but websocket_hosts pins stocks to "
-        "'socket.massive.com'. Remove dm.Subscription.STOCKS from delayed_subscriptions, or "
-        "remove the stocks pin from websocket_hosts."
-    )
-    with pytest.raises(ValueError, match=rf"^{re.escape(refusal)}$"):
-        dataclasses.replace(base, delayed_subscriptions=listed, websocket_hosts=pinned)
-    # The message's two fixes.
-    assert dataclasses.replace(base, websocket_hosts=pinned).websocket_hosts == pinned
-    assert dataclasses.replace(base, delayed_subscriptions=listed).delayed_subscriptions == listed
-
-
-def test_a_pin_that_agrees_is_accepted(base: MassiveConfig) -> None:
-    cfg = dataclasses.replace(
-        base,
-        delayed_subscriptions={Subscription.STOCKS},
-        websocket_hosts={
-            AssetClass.STOCKS: "delayed.massive.com",
-            AssetClass.OPTIONS: "o.example.com",
-        },
-    )
-    assert cfg.websocket_hosts[AssetClass.STOCKS] == "delayed.massive.com"
+@pytest.mark.parametrize(
+    ("listed", "pinned"),
+    [
+        # A key Massive serves index data delayed: index values have one documented host,
+        # business.massive.com, and the key's snapshots need the listing.
+        ({Subscription.INDICES}, {AssetClass.INDICES: "business.massive.com"}),
+        # The delayed-data refusal's advice, "pass delayed_subscriptions={dm.Subscription.STOCKS}
+        # to dm.MassiveConfig", followed with stocks pinned to the real-time host.
+        ({Subscription.STOCKS}, {AssetClass.STOCKS: "socket.massive.com"}),
+        (
+            {Subscription.STOCKS, Subscription.OPTIONS},
+            {AssetClass.STOCKS: "delayed.massive.com", AssetClass.OPTIONS: "o.example.com"},
+        ),
+    ],
+    ids=["index values", "the real-time host", "a delayed pin beside another"],
+)
+def test_a_listed_subscription_may_pin_any_host(
+    base: MassiveConfig, listed: set[Subscription], pinned: dict[AssetClass, str]
+) -> None:
+    # The pin is used as given, and whether Massive serves the key there is Massive's answer
+    # when the stream opens; the library never refuses the pair.
+    cfg = dataclasses.replace(base, delayed_subscriptions=listed, websocket_hosts=pinned)
+    assert cfg.delayed_subscriptions == listed
+    assert dict(cfg.websocket_hosts) == pinned
 
 
 def test_on_error_is_a_policy(base: MassiveConfig) -> None:
@@ -1603,7 +1601,7 @@ def test_each_websocket_hosts_row_gives_its_rule_and_the_host_used_without_a_pin
     ) in reference
     assert (
         "| `websocket_hosts.stocks` | Sets the WebSocket host stocks streams come from. | A "
-        "lower-case hostname, such as `socket.massive.com`; a `delayed.` host exactly when "
+        "lower-case hostname, such as `socket.massive.com`; a `delayed.` host only when "
         "`delayed_subscriptions` lists `stocks` | `delayed.massive.com` when "
         "`delayed_subscriptions` lists `stocks`, else `socket.massive.com` |"
     ) in reference
@@ -1773,7 +1771,9 @@ def test_the_hosts_the_settings_name_are_the_ones_massive_s_pages_document() -> 
     # pages reaches the generated channels with the next refresh, and this then fails until
     # the prose follows.
     doc = re.sub(r"\s+", " ", inspect.getdoc(MassiveConfig) or "")
-    fmv = re.search(r"Fair market value \(FMV\) streams always use `([a-z.]+)`", doc)
+    fmv = re.search(
+        r"Fair market value streams are the exception: they always use `([a-z.]+)`", doc
+    )
     index_values = re.search(r"Set `indices` to `([a-z.]+)` to stream index values", doc)
     assert fmv is not None
     assert index_values is not None
