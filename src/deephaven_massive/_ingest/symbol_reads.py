@@ -13,7 +13,7 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   crypto pair the list gives no split for is planned as a call never sent. A pair the list
   doesn't hold has no data, as an HTTP 404 means. A pair whose currencies can't make up its
   ticker is skipped, and its `m.symbol_reads()` row says why (`_with_skipped`).
-- **Attribution** (`read_rest_by_symbol`, `_attribute`): one rule for every request, whatever
+- **Attribution** (`attribute_units`, `_attribute`): one rule for every request, whatever
   its form (a symbol's own path, a one-value parameter, a list parameter) or how many symbols
   it names. Each row goes to the asked symbol that its asked-symbol column names
   (`asked_column`): `Symbol`, or `Underlying` where the path fills its fan-out key from the
@@ -43,8 +43,9 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   does not take; any other HTTP 404, such as a path Massive retired; a defect of the library).
   HTTP 404 on a symbol's first request is no failure: the symbol has no data, and its table is
   empty.
-- **Whole-read failures**: a rejected API key (`AuthenticationError`) and a session closed
-  during the read would fail every symbol alike, so they raise.
+- **Whole-read failures** (`fails_followed_read`): a rejected API key
+  (`AuthenticationError`) and a session closed during the read would fail every symbol alike,
+  so they raise, and the reader cancels the requests not yet made (`RestReader.read_each`).
 - **Columns**: each symbol's table must have exactly the dataset's columns
   (`SessionCore.dataset_schema`), so tables of different symbols, and of reads made at
   different times, can be merged. A table that does not is a defect of the library: the symbol
@@ -118,10 +119,13 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = [
+    "AttributedRows",
     "RequestRows",
     "RestUnit",
     "UnsupportedParameterError",
     "asked_column",
+    "attribute_units",
+    "fails_followed_read",
     "fetch_units",
     "history_units",
     "read_rest_by_symbol",
@@ -153,6 +157,28 @@ class RequestRows:
     rows: pa.Table
     withheld: Withheld
     source: str
+
+
+@dataclass(frozen=True, slots=True)
+class AttributedRows:
+    """What a read by symbol's requests gave each symbol, before any Deephaven table is built.
+
+    The outcome of `attribute_units`, at the Arrow level, so that a caller can build what it
+    needs from it: one static table per symbol, or one table of every symbol's rows.
+
+    Attributes:
+        pieces: Each asked symbol's rows: one Arrow table, perhaps empty, per answered
+            request that named it, in plan order, without `SYMBOL_SENT`; no table for a
+            symbol no request answered.
+        failures: Each failed symbol's error: its request's failure, which is every symbol's
+            the request named, or the read's `unrequested_symbols` failure under `RAISE`.
+        no_data: The symbols whose every request Massive had no data for, and that no
+            request answered.
+    """
+
+    pieces: Mapping[str, Sequence[pa.Table]]
+    failures: Mapping[str, MassiveError]
+    no_data: frozenset[str]
 
 
 class UnsupportedParameterError(PermanentError):
@@ -220,6 +246,23 @@ def _refused(symbols: Sequence[str], error: ValueError) -> dict[str, MassiveErro
         f"{error} Leave that argument out, or read these symbols in a call without it."
     )
     return dict.fromkeys(symbols, refusal)
+
+
+def fails_followed_read(error: MassiveError) -> bool:
+    """Tell whether a request's failure fails a read that follows a symbol table whole.
+
+    The read's failures are those that would fail every symbol alike: Massive rejecting the
+    API key, and the session closing during the read. Any other failure is the failed
+    request's symbols' own, and the read goes on with the others; a failure that may pass is
+    read again later (`_tables/follow_coordinator.py`).
+
+    Args:
+        error: A request's failure (`RestReader.read_each`).
+
+    Returns:
+        True for a failure of the whole read.
+    """
+    return isinstance(error, (AuthenticationError, SessionClosedError))
 
 
 def fetch_units(
@@ -353,11 +396,11 @@ def read_rest_by_symbol(
 ) -> dict[str, SymbolOutcome]:
     """Make a read by symbol's planned REST requests and return each symbol's outcome.
 
-    Each request's rows go to the symbols it names (see the module docstring), and each
-    symbol's rows become one static table, in plan order. A symbol whose every request Massive
-    had no data for is marked so (`SymbolRows.no_data`). Each answered request's rows of its
-    symbols count in `tally` (`_attribute`), which the read's entry point judges
-    (`ReadTally.judge`); this read never does.
+    Each request's rows go to the symbols it names (`attribute_units`), and each symbol's
+    rows become one static table, in plan order. A symbol whose every request Massive had no
+    data for is marked so (`SymbolRows.no_data`). Each answered request's rows of its symbols
+    count in `tally` (`_attribute`), which the read's entry point judges (`ReadTally.judge`);
+    this read never does. A failure of the whole read (`fails_followed_read`) raises.
 
     Args:
         reader: The reader of the session's paths.
@@ -379,8 +422,8 @@ def read_rest_by_symbol(
     Returns:
         Each symbol, in the order given, with its outcome.
 
-    Errors are those of `symbol_outcomes`, and the `AuthenticationError` of
-    `RestReader.read_each`.
+    Errors are those of `symbol_outcomes`, and those of `RestReader.read_each` under
+    `fails_followed_read`.
     """
     ordered = _ordered(symbols)
     patience = reader.patience()  # once for every request, on this thread, before any fan-out
@@ -393,6 +436,7 @@ def read_rest_by_symbol(
         current=current,
         cancel=cancel,
         patience=patience,
+        fails_read=fails_followed_read,
     )
     logger.debug(
         "call %d %s by symbol: %d of %d requests answered, waiting out at most %.0f s of pauses",
@@ -402,8 +446,66 @@ def read_rest_by_symbol(
         len(units),
         patience.seconds,
     )
-    pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in ordered}
-    failures = dict(failed)
+    attributed = attribute_units(reader, spec, units, results=results, symbols=ordered, tally=tally)
+    failures = {**attributed.failures, **failed}  # a planning failure comes first
+    empty = core.dataset_schema(spec).arrow_schema().empty_table()
+    tables = {
+        symbol: to_table(pa.concat_tables(rows) if rows else empty)
+        for symbol, rows in attributed.pieces.items()
+        if symbol not in failures
+    }
+    outcomes = symbol_outcomes(
+        core,
+        spec,
+        symbols=ordered,
+        tables=tables,
+        failures=failures,
+        call=call,
+        source=TRANSPORT_LABELS[Transport.REST],
+    )
+    # A symbol with no data from every request that named it; one that failed keeps its failure.
+    outcomes = {
+        symbol: replace(outcome, no_data=True)
+        if symbol in attributed.no_data and isinstance(outcome, SymbolRows)
+        else outcome
+        for symbol, outcome in outcomes.items()
+    }
+    return _with_skipped(outcomes, units)
+
+
+def attribute_units(
+    reader: RestReader,
+    spec: DatasetSpec,
+    units: Sequence[RestUnit],
+    *,
+    results: Sequence[RequestRows | MassiveError | None],
+    symbols: Sequence[str],
+    tally: ReadTally,
+) -> AttributedRows:
+    """Give each answered request's rows to the symbols it named, and each failure to its symbols.
+
+    Each request's rows go to the asked symbols they name, and the rows of any other symbol
+    are reported (`_attribute`, the module docstring); a request's failure is the failure of
+    each symbol it named, and a symbol fails with the first failure that names it, in plan
+    order. A symbol Massive had no data for on every request that named it, and that no
+    request answered, has no data. Each answered request's rows of its symbols count in
+    `tally`.
+
+    Args:
+        reader: The reader, whose policy and problem sink the read uses.
+        spec: The dataset.
+        units: The planned requests, each with its path.
+        results: Each request's rows, failure, or None for no data, in plan order
+            (`RestReader.read_each`).
+        symbols: The asked symbols, which the pieces are keyed by; every symbol a request
+            names is one of them.
+        tally: The whole read's count of its rows and of those withheld.
+
+    Returns:
+        Each symbol's rows, each failed symbol's error, and the symbols with no data.
+    """
+    pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in symbols}
+    failures: dict[str, MassiveError] = {}
     absent: set[str] = set()
     answered: set[str] = set()
     for (rest_path, planned), result in zip(units, results, strict=True):
@@ -429,30 +531,7 @@ def read_rest_by_symbol(
                     failures.setdefault(symbol, unrequested)
         else:
             assert_never(result)
-    empty = core.dataset_schema(spec).arrow_schema().empty_table()
-    tables = {
-        symbol: to_table(pa.concat_tables(rows) if rows else empty)
-        for symbol, rows in pieces.items()
-        if symbol not in failures
-    }
-    outcomes = symbol_outcomes(
-        core,
-        spec,
-        symbols=ordered,
-        tables=tables,
-        failures=failures,
-        call=call,
-        source=TRANSPORT_LABELS[Transport.REST],
-    )
-    # A symbol with no data from every request that named it; one that failed keeps its failure.
-    no_data = absent - answered
-    outcomes = {
-        symbol: replace(outcome, no_data=True)
-        if symbol in no_data and isinstance(outcome, SymbolRows)
-        else outcome
-        for symbol, outcome in outcomes.items()
-    }
-    return _with_skipped(outcomes, units)
+    return AttributedRows(pieces, failures, frozenset(absent - answered))
 
 
 def _with_skipped(

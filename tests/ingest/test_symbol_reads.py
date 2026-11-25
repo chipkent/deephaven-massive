@@ -28,18 +28,26 @@ from deephaven_massive._enums import AssetClass
 from deephaven_massive._error_policy import resolve_policy
 from deephaven_massive._errors import (
     LIBRARY_BUG,
+    AuthenticationError,
     CutShortError,
     EntitlementError,
     ErrorSource,
+    FeedRefusalError,
     MassiveError,
     RowDataError,
+    SessionClosedError,
     UnavailableSymbolError,
     session_closed,
 )
 from deephaven_massive._ingest import rate_limits, rest
 from deephaven_massive._ingest.symbol_reads import (
+    AttributedRows,
+    RequestRows,
     UnsupportedParameterError,
     asked_column,
+    attribute_units,
+    fails_followed_read,
+    fetch_units,
     split_by_symbol,
     symbol_outcomes,
 )
@@ -50,6 +58,7 @@ from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
+from deephaven_massive._tables.withheld import SYMBOL_SENT, Withheld
 from deephaven_massive.namespaces import _futures as futures
 from deephaven_massive.namespaces import _options as options
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -365,6 +374,78 @@ def test_a_failure_is_retryable_only_when_its_cause_may_pass(
     error: MassiveError, *, retryable: bool
 ) -> None:
     assert error.is_retryable is retryable
+
+
+@pytest.mark.parametrize(
+    ("error", "whole"),
+    [
+        (AuthenticationError("the key is refused", status=401), True),
+        (SessionClosedError(session_closed()), True),
+        (EntitlementError("refused", status=403), False),
+        (FeedRefusalError("delayed", source=ErrorSource.USER), False),
+        (MassiveError("HTTP 503", status=503), False),
+        (MassiveError("connection reset", source=ErrorSource.NETWORK), False),
+        (CutShortError("cut short", status=404), False),
+        (RowDataError("a row the library cannot read"), False),
+        (UnavailableSymbolError("no data"), False),
+        (MassiveError("a defect", source=ErrorSource.LIBRARY), False),
+    ],
+    ids=[
+        "a rejected key",
+        "a closed session",
+        "a refusal",
+        "a feed's refusal",
+        "a server error",
+        "a network failure",
+        "a symbol's data cut short",
+        "a row the library cannot read",
+        "a symbol with no data under RAISE",
+        "a defect",
+    ],
+)
+def test_a_followed_read_fails_whole_only_for_what_fails_every_symbol_alike(
+    error: MassiveError, *, whole: bool
+) -> None:
+    assert fails_followed_read(error) is whole
+
+
+def test_attribution_gives_each_request_s_rows_failure_or_no_data_to_its_symbols(
+    session: dm.MassiveSession,
+) -> None:
+    transport = session._core.rest_transport()
+    assert isinstance(transport, rest.RestEndpoints)
+    reader = transport._reader("call-7", session._core.policy, waiter=rate_limits.Waiter.CALL)
+    symbols = ["AAPL", "MSFT", "NVDA"]
+    units, _ = fetch_units(reader, DIVIDENDS, Request(), symbols=symbols, cancel=None)
+    assert [call.symbols for _, call in units] == [("AAPL", "MSFT"), ("NVDA",)]
+    schema = session._core.dataset_schema(DIVIDENDS).arrow_schema()
+    sent = pa.Table.from_pylist(
+        [{"Symbol": "AAPL", "CashAmount": 0.25, SYMBOL_SENT: "AAPL"}],
+        schema=schema.append(pa.field(SYMBOL_SENT, pa.string())),
+    )
+    answered = RequestRows(sent, Withheld(pa.table({})), "GET /stocks/v1/dividends")
+    error = MassiveError("HTTP 503", status=503)
+    tally = ReadTally()
+    # The first request answered with AAPL's row; NVDA's had no data.
+    out = attribute_units(
+        reader, DIVIDENDS, units, results=[answered, None], symbols=symbols, tally=tally
+    )
+    assert (out.failures, out.no_data) == ({}, frozenset({"NVDA"}))
+    assert list(out.pieces) == symbols
+    [aapl] = out.pieces["AAPL"]
+    assert aapl.equals(sent.drop_columns([SYMBOL_SENT]))
+    [msft] = out.pieces["MSFT"]  # named by the answered request, which gave it no row
+    assert msft.num_rows == 0
+    assert out.pieces["NVDA"] == []  # named only by the request with no data
+    assert tally.rows == 1
+    # The first request failed: its failure is both its symbols'.
+    out = attribute_units(
+        reader, DIVIDENDS, units, results=[error, None], symbols=symbols, tally=ReadTally()
+    )
+    assert out == AttributedRows(
+        {"AAPL": [], "MSFT": [], "NVDA": []}, {"AAPL": error, "MSFT": error}, frozenset({"NVDA"})
+    )
+    assert out.failures["AAPL"] is error  # the one error object, shared by the request's symbols
 
 
 # --- fetch by symbol ----------------------------------------------------------------------------
@@ -1017,10 +1098,23 @@ def test_a_rejected_key_while_splitting_a_pair_fails_the_whole_read(
 
 
 def test_a_session_closed_during_the_read_fails_it(session: dm.MassiveSession) -> None:
+    # The REST read raises at the first request the closed session refuses.
     rest = session._core.rest_transport()
     session.close()
     with pytest.raises(dm.MassiveError, match="^" + re.escape(session_closed()) + "$"):
         rest.fetch_by_symbol(DIVIDENDS, Request(), symbols=["AAPL"], call=7)
+
+
+def test_a_session_closed_before_the_outcomes_are_built_fails_the_read(
+    session: dm.MassiveSession,
+) -> None:
+    # A flat-file scan builds its outcomes after reading: a session closed meanwhile fails the
+    # read the same way.
+    session.close()
+    with pytest.raises(dm.SessionClosedError, match="^" + re.escape(session_closed()) + "$"):
+        symbol_outcomes(
+            session._core, DIVIDENDS, symbols=["AAPL"], tables={}, failures={}, call=7, source="x"
+        )
 
 
 # --- history by symbol --------------------------------------------------------------------------

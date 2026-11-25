@@ -10,7 +10,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, TypeAlias
@@ -27,10 +27,12 @@ from deephaven_massive._config import DELAYED_HOST, REALTIME_HOST
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._datasets.feeds import channel_only_host
 from deephaven_massive._enums import AssetClass, ChannelFamily, NotBars, Recency
+from deephaven_massive._errors import EntitlementError, FeedRefusalError, MassiveError
 from deephaven_massive._ingest import futures_calendar, ws, ws_connection, ws_silence
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._log_limits import log_failure
 from deephaven_massive._massive import Cancel, StatusKind, Transport, WsState
+from deephaven_massive._tables import stream
 from deephaven_massive._tables.diagnostics import ConnectionState, Diagnostics, utc_text
 from deephaven_massive._tables.problem_events import Problem, ProblemCause, ProblemSpans
 from deephaven_massive._tables.session_core import SessionCore
@@ -2210,6 +2212,47 @@ def test_a_refusal_adds_a_real_time_note_only_to_the_streams_that_carry_one(
     assert "streams only in real time" not in errors["options.trades"]
     m.release(notices)
     m.release(trades)
+
+
+def test_a_refused_wildcard_is_the_feed_s_refusal_and_a_refused_symbol_its_own(
+    ws_session: WsSession,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # One status refuses a channel's wildcard and another channel's one symbol: the stream
+    # that asked for every symbol gets the feed's refusal, and the other its symbol's. The
+    # refusal is one error of the connection, so it is alarmed once, whatever the kinds.
+    m = ws_session.session
+    every = m.stocks.trades(dm.ALL).blink()
+    one = m.stocks.quotes(["AAPL"]).blink()
+    ws_session.subscribed("T.*", "Q.AAPL")
+    connection = ws_session.connection()
+    failed: dict[int, MassiveError] = {}
+    fail = stream.Flusher.fail
+
+    def recording(self: stream.Flusher, ids: Iterable[int], error: MassiveError) -> None:
+        for stream_id in ids:
+            failed[stream_id] = error
+        fail(self, ids, error)
+
+    monkeypatch.setattr(stream.Flusher, "fail", recording)
+    with caplog.at_level(logging.WARNING, logger=ws_connection.__name__):
+        ws_session.on_loop(connection, lambda: connection._refused(("T.*", "Q.AAPL"), "no"))
+        ws_session.flush()
+    ids = {r["Dataset"]: r["StreamId"] for r in streams_of(ws_session, dh_to_pylist)}
+    assert type(failed[ids["stocks.trades"]]) is FeedRefusalError
+    assert type(failed[ids["stocks.quotes"]]) is EntitlementError
+    assert str(failed[ids["stocks.trades"]]).removeprefix("stocks.trades: ") == str(
+        failed[ids["stocks.quotes"]]
+    ).removeprefix("stocks.quotes: ")
+    warned = [
+        r for r in caplog.records if r.levelno == logging.WARNING and '"no"' in r.getMessage()
+    ]
+    assert len(warned) == 1
+    m.release(every)
+    m.release(one)
 
 
 def test_a_refusal_of_two_datasets_gives_each_its_own_copy_and_warns_once(

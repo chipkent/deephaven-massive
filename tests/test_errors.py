@@ -24,6 +24,7 @@ from deephaven_massive._errors import (
     BrokenGuaranteeError,
     EntitlementError,
     ErrorSource,
+    FeedRefusalError,
     MassiveError,
     PermanentError,
     RowDataError,
@@ -137,6 +138,15 @@ def test_errors_are_distinct() -> None:
     assert not issubclass(EntitlementError, AuthenticationError)
     # A permanent failure is neither: a poll() fails on it as on them, for its own reason.
     assert not issubclass(PermanentError, (AuthenticationError, EntitlementError))
+
+
+def test_a_feed_s_refusal_is_an_entitlement_error_a_user_catches_as_one() -> None:
+    # The subclass only says whose the refusal is; a user sees the EntitlementError it is.
+    error = FeedRefusalError("the feed", source=ErrorSource.USER)
+    assert isinstance(error, EntitlementError)
+    assert (error.is_retryable, error.is_bug, error.source) == (False, False, ErrorSource.USER)
+    assert "FeedRefusalError" not in dm.__all__
+    assert type(copy_error(error, "copied")) is FeedRefusalError
 
 
 @pytest.mark.parametrize("error", [MassiveError, AuthenticationError, EntitlementError])
