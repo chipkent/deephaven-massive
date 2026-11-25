@@ -589,14 +589,41 @@ def test_a_failed_index_list_names_the_underlying_asked_about(
         spx(reader_of(session))
 
 
-def test_a_not_found_contracts_list_is_a_library_bug_rather_than_unknown(
+def test_a_not_found_contracts_list_is_massive_s_error_and_the_next_call_asks_again(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # The list answers an unknown underlying with no rows; an HTTP 404 means the path is gone.
+    # The list answers an unknown underlying with no rows, so an HTTP 404 is Massive's error,
+    # which ends the claim: the next call asks again instead of waiting on it.
     fake_rest.reply(TICKERS, indices("SPX"))
-    fake_rest.reply(CONTRACTS, Reply({"status": "NOT_FOUND"}, status=404))
-    with pytest.raises(AssertionError):
-        spx(reader_of(session))
+    fake_rest.reply(CONTRACTS, Reply({"status": "NOT_FOUND"}, status=404), first_contract("OCEICS"))
+    reader = reader_of(session)
+    with pytest.raises(
+        dm.MassiveError,
+        match=r"^The library cannot tell whether the underlying 'SPX' is an index, since "
+        r"reading Massive's contracts list for SPX failed\. Massive answered .* with HTTP 404",
+    ):
+        spx(reader)
+    assert spx(reader) is RootKind.INDEX
+    assert fake_rest.get_queries() == [*LIST_QUERIES, SPX_QUERY, SPX_QUERY]
+
+
+def test_a_listed_index_ticker_whose_first_contract_is_a_stock_s_warns_once(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_rest.reply(TICKERS, indices("DJT"))
+    fake_rest.reply(CONTRACTS, first_contract("OCASPS"))
+    reader = reader_of(session)
+    with caplog.at_level(logging.WARNING, LOGGER):
+        for _ in range(2):
+            assert reader.underlying_kind("DJT", day="2026-11-13") is RootKind.OTHER
+    assert [r.getMessage() for r in caplog.records] == [
+        (
+            "DJT is on Massive's index list, and the first contract Massive lists for it is on "
+            "a stock, so its rows keep the bare ticker DJT. Massive's row may also count the "
+            "options on I:DJT, and the library can't separate them. Nothing to do: the row is "
+            "Massive's total for the ticker."
+        )
+    ]
 
 
 def symbol_page(symbols: list[str], days: list[str] | None = None) -> pa.RecordBatch:
@@ -667,8 +694,8 @@ def test_the_rows_of_an_unclassified_ticker_are_withheld_as_unreadable_symbols(
             "SPX",
             "Symbol",
             2,
-            "Massive's contracts list gives no CFI code for a contract on SPX (asked as of "
-            "2026-11-13), so the library can't tell whether SPX is an index (I:SPX) or not",
+            "Massive's contracts list has no contract with a CFI code for SPX as of 2026-11-13, "
+            "so the library can't tell whether SPX is an index (I:SPX) or not",
         ),
     )
     assert caplog.records == []

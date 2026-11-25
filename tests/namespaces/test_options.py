@@ -1587,8 +1587,12 @@ def test_open_interest_by_underlying_sends_each_index_bare_and_names_it_canonica
 
 
 def test_open_interest_by_underlying_asks_the_contracts_list_once_per_ticker(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
     page = [
         by_underlying_row("SPX", "2026-01-23"),
         by_underlying_row("SPX", "2026-01-22"),
@@ -1612,6 +1616,40 @@ def test_open_interest_by_underlying_asks_the_contracts_list_once_per_ticker(
     assert lookups == [
         (CONTRACTS_LIST, {"underlying_ticker": "SPX", "limit": "1", "as_of": "2026-01-23"}),
         (CONTRACTS_LIST, {"underlying_ticker": "DJT", "limit": "1", "as_of": "2026-01-23"}),
+    ]
+    # The ticker that names a stock too is warned about once, when it is classified.
+    assert warnings_of(caplog) == [
+        (
+            "DJT is on Massive's index list, and the first contract Massive lists for it is on "
+            "a stock, so its rows keep the bare ticker DJT. Massive's row may also count the "
+            "options on I:DJT, and the library can't separate them. Nothing to do: the row is "
+            "Massive's total for the ticker."
+        )
+    ]
+
+
+def test_open_interest_by_underlying_polls_with_the_index_prefix_from_its_first_cycle(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(BY_UNDERLYING, Reply({"status": "OK", "results": [by_underlying_row("SPX")]}))
+    serve_indices(fake_rest, "SPX")
+    fake_rest.reply(CONTRACTS_LIST, first_contract("OCEICS"))
+    watchlist = new_table([string_col("Symbol", ["I:SPX"])])
+    table = rest_session.options.open_interest_by_underlying(watchlist).poll(60)
+    pace = threading.Event()  # never set; only paces the bounded wait for the first cycle
+    found: list[dict[str, Any]] = []
+    for _ in range(500):
+        found = rows(table)
+        if found:
+            break
+        pace.wait(0.02)
+    rest_session.release(table)
+    # The keyed row carries the watchlist's spelling, so a join on it works.
+    assert [(r["Symbol"], r["Date"], r["OpenInterest"]) for r in found] == [
+        ("I:SPX", "2026-01-23", 300)
+    ]
+    assert [q for q in fake_rest.get_queries(one_value=True) if q[0] == CONTRACTS_LIST] == [
+        (CONTRACTS_LIST, {"underlying_ticker": "SPX", "limit": "1", "as_of": "2026-01-23"})
     ]
 
 
@@ -1639,14 +1677,14 @@ def test_open_interest_by_underlying_withholds_a_ticker_the_contracts_list_canno
     )
     assert event.policy is dm.OnError.LOG
     assert event.detail.startswith(
-        "Massive's contracts list gives no CFI code for a contract on SPX (asked as of "
-        "2026-01-23), so the library can't tell whether SPX is an index (I:SPX) or not"
+        "Massive's contracts list has no contract with a CFI code for SPX as of 2026-01-23, so "
+        "the library can't tell whether SPX is an index (I:SPX) or not"
     )
     strict = dm.ErrorPolicy(unreadable_symbols=dm.OnError.RAISE)
-    with pytest.raises(RowDataError, match=r"2 under unreadable_symbols.*contract on SPX"):
+    with pytest.raises(RowDataError, match=r"2 under unreadable_symbols.*code for SPX"):
         rest_session.options.open_interest_by_underlying(on_error=strict).fetch(wait=True)
     # Every row the read would return is withheld, so it fails under the default LOG too.
-    with pytest.raises(RowDataError, match=r"none of the 2 rows.*contract on SPX"):
+    with pytest.raises(RowDataError, match=r"none of the 2 rows.*code for SPX"):
         rest_session.options.open_interest_by_underlying("I:SPX").fetch(wait=True)
 
 
@@ -1913,6 +1951,32 @@ def test_greeks_of_another_instrument_keep_their_underlying_and_warn_once(
             "underlying_ticker=DJT, and the option root of 1 of them is no index's, so Massive "
             "answered about another instrument too. They keep the underlying Massive wrote. The "
             "first is O:DJT261218C00030000, with Underlying DJT."
+        )
+    ]
+
+
+def test_greeks_of_several_underlyings_warn_about_another_instrument_s_contracts(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The list form sends `DJT` bare too, so the stock's contracts are warned about the same.
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    stock = "O:DJT261218C00030000"
+    page = [{"ticker": stock, "root": "DJT", "date": "2026-11-13", "underlying_ticker": "DJT"}]
+    fake_rest.reply("/options/v1/analytics", Reply({"status": "OK", "results": page}))
+    serve_indices(fake_rest, "DJT")
+    fake_rest.reply(wire(f"/v3/reference/options/contracts/{stock}"), contract_reference("OCASPS"))
+    out = rows(rest_session.options.greeks(underlying=["AMD", "I:DJT"]).fetch(wait=True))
+    assert [(r["Symbol"], r["Underlying"]) for r in out] == [(stock, "DJT")]
+    assert fake_rest.get_queries()[0][1]["underlying_ticker.any_of"] == ["AMD,DJT"]
+    assert warnings_of(caplog) == [
+        (
+            "options.greeks: the contracts of I:DJT were asked for by the bare ticker "
+            "underlying_ticker.any_of=DJT, and the option root of 1 of them is no index's, so "
+            "Massive answered about another instrument too. They keep the underlying Massive "
+            "wrote. The first is O:DJT261218C00030000, with Underlying DJT."
         )
     ]
 

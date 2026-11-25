@@ -34,7 +34,7 @@ import enum
 import logging
 from datetime import date
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, Protocol, assert_never
+from typing import TYPE_CHECKING, Final, Protocol, assert_never, overload
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -123,6 +123,7 @@ def _kind_of(cfi: object) -> RootKind:
         `INDEX` for an option on an index (`wire_symbols.is_index_option`), `OTHER` for any
         other code, `UNKNOWN` for no code.
     """
+    # A code that is not text is no code the library can read, so it counts as absent.
     if not isinstance(cfi, str):
         return RootKind.UNKNOWN
     return RootKind.INDEX if is_index_option(cfi) else RootKind.OTHER
@@ -492,6 +493,7 @@ class OptionRootKinds:
             cancel=cancel,
             failed=f"Reading Massive's Contract Overview of {contract} failed",
             about=f"option root {root}",
+            not_found=RootKind.UNKNOWN,
             request=lambda: self._client.get(
                 reader.rest_path(_CONTRACT_PATH),
                 {"options_ticker": contract},
@@ -501,15 +503,14 @@ class OptionRootKinds:
                 patience=patience,
             ),
         )
-        if page is None:
+        if isinstance(page, RootKind):
             logger.debug(
                 "%s: Massive's Contract Overview has no %s as of %s (HTTP 404)",
                 self._label,
                 contract,
                 day,
             )
-            self._lookup.complete(claim, RootKind.UNKNOWN)
-            return RootKind.UNKNOWN
+            return page
         cfi = next((row.get("cfi") for row in page.rows), None)
         kind = _kind_of(cfi)
         logger.debug(
@@ -563,6 +564,7 @@ class OptionRootKinds:
         )
         if not isinstance(claim, Claim):
             return claim
+        # The list answers an unknown underlying with no rows, so an HTTP 404 is a failure.
         page = self._read(
             self._underlyings,
             claim,
@@ -570,6 +572,7 @@ class OptionRootKinds:
             cancel=cancel,
             failed=f"Reading Massive's contracts list for {underlying} failed",
             about=f"the underlying {underlying}",
+            not_found=None,
             request=lambda: self._client.get(
                 reader.rest_path(_CONTRACTS_PATH),
                 {},
@@ -579,8 +582,6 @@ class OptionRootKinds:
                 patience=patience,
             ),
         )
-        # The list answers an unknown underlying with no rows, never with HTTP 404.
-        assert page is not None
         first = next((row for row in page.rows), None)
         cfi = None if first is None else first.get("cfi")
         kind = _kind_of(cfi)
@@ -594,8 +595,49 @@ class OptionRootKinds:
             None if first is None else first.get("ticker"),
             day,
         )
+        if kind is RootKind.OTHER:
+            # Only a ticker on Massive's index list is asked about, so a stock's answer means
+            # the ticker names both, and Massive's row for it cannot be told apart.
+            logger.warning(
+                "%s is on Massive's index list, and the first contract Massive lists for it "
+                "is on a stock, so its rows keep the bare ticker %s. Massive's row may also "
+                "count the options on %s%s, and the library can't separate them. Nothing to "
+                "do: the row is Massive's total for the ticker.",
+                underlying,
+                underlying,
+                _INDEX_PREFIX,
+                underlying,
+            )
         self._underlyings.complete(claim, kind)
         return kind
+
+    @overload
+    def _read(
+        self,
+        lookup: SharedLookup[str, RootKind],
+        claim: Claim[str, RootKind],
+        *,
+        reader: TickerListReader,
+        cancel: Cancel | None,
+        failed: str,
+        about: str,
+        not_found: None,
+        request: Callable[[], Page],
+    ) -> Page: ...
+
+    @overload
+    def _read(
+        self,
+        lookup: SharedLookup[str, RootKind],
+        claim: Claim[str, RootKind],
+        *,
+        reader: TickerListReader,
+        cancel: Cancel | None,
+        failed: str,
+        about: str,
+        not_found: RootKind,
+        request: Callable[[], Page],
+    ) -> Page | RootKind: ...
 
     def _read(
         self,
@@ -606,9 +648,10 @@ class OptionRootKinds:
         cancel: Cancel | None,
         failed: str,
         about: str,
+        not_found: RootKind | None,
         request: Callable[[], Page],
-    ) -> Page | None:
-        """Make one lookup's request under its claim, ending the claim on any failure.
+    ) -> Page | RootKind:
+        """Make one lookup's request under its claim, which ends on any outcome but a page.
 
         Args:
             lookup: The lookup the claim is on.
@@ -617,10 +660,13 @@ class OptionRootKinds:
             cancel: The caller's stop token, or None.
             failed: What failed, for the waiters' messages and the defect log.
             about: What was asked about, for the log.
+            not_found: What an HTTP 404 means, kept as the claim's answer: `UNKNOWN` for a
+                reference that answers a missing item that way. None where the path never
+                answers 404 for a missing item, so a 404 is a failure like any other.
             request: Sends the request.
 
         Returns:
-            The page, or None for HTTP 404: the caller decides what no answer means.
+            The page, or `not_found` for HTTP 404 where it is a kind.
 
         A failed request raises its public `MassiveError` after failing the claim, and an
         unexpected error of the reader, a defect, is logged at ERROR and propagates.
@@ -628,8 +674,9 @@ class OptionRootKinds:
         try:
             return request()
         except WireError as error:
-            if error.status == HTTPStatus.NOT_FOUND:
-                return None
+            if error.status == HTTPStatus.NOT_FOUND and not_found is not None:
+                lookup.complete(claim, not_found)
+                return not_found
             public = reader.public_error(error)
             stopped = cancel is not None and cancel.is_set() and error.status is None
             logger.debug(
@@ -736,36 +783,78 @@ def _canonical(batch: pa.RecordBatch, kind: KindOf, *, dataset: str) -> pa.Recor
                 )
             case _:
                 assert_never(found)
-    on_index = pc.and_(bare, pc.is_in(roots, value_set=pa.array(index_roots, pa.string())))
-    if index_roots:
-        prefixed = pc.binary_join_element_wise(_INDEX_PREFIX, underlyings, "")
+    return _prefix_and_mark(
+        batch,
+        column=_UNDERLYING,
+        keys=roots,
+        bare=bare,
+        index_keys=index_roots,
+        unknown=unknown,
+        dataset=dataset,
+        what="option roots",
+    )
+
+
+def _prefix_and_mark(
+    batch: pa.RecordBatch,
+    *,
+    column: str,
+    keys: pa.Array,
+    bare: pa.Array,
+    index_keys: list[str],
+    unknown: dict[str, str],
+    dataset: str,
+    what: str,
+) -> pa.RecordBatch:
+    """Prefix a column's index values and mark the rows whose key could not be classified.
+
+    Args:
+        batch: The rows.
+        column: The column to prefix: `Underlying`, or `Symbol` where it is the underlying.
+        keys: Each row's lookup key, an option root or the bare underlying itself.
+        bare: Which rows' `column` lacks the `I:` prefix.
+        index_keys: The keys whose rows are an index's.
+        unknown: The keys the reference could not classify, each with the reason.
+        dataset: The dataset's name, for the log.
+        what: What the keys are, for the log, such as `"option roots"`.
+
+    Returns:
+        The rows with the mark columns, each index value prefixed and each row of an
+        unclassified key marked `UNREADABLE_SYMBOLS`.
+    """
+    values = batch.column(column)
+    if index_keys:
+        on_index = pc.and_(bare, pc.is_in(keys, value_set=pa.array(index_keys, pa.string())))
+        prefixed = pc.binary_join_element_wise(_INDEX_PREFIX, values, "")
         logger.debug(
-            "%s: %d rows of the index option roots %s get the I: prefix",
+            "%s: %d rows of the index %s %s get the I: prefix",
             dataset,
             pc.sum(on_index).as_py() or 0,
-            index_roots,
+            what,
+            index_keys,
         )
-        position = batch.schema.get_field_index(_UNDERLYING)
+        position = batch.schema.get_field_index(column)
         batch = batch.set_column(
-            position, batch.schema.field(position), pc.if_else(on_index, prefixed, underlyings)
+            position, batch.schema.field(position), pc.if_else(on_index, prefixed, values)
         )
-    marked = with_marks(batch, {}, sent=underlyings)
+    marked = with_marks(batch, {}, sent=values)
     if not unknown:
         return marked
-    of_unknown = pc.and_(bare, pc.is_in(roots, value_set=pa.array(list(unknown), pa.string())))
+    of_unknown = pc.and_(bare, pc.is_in(keys, value_set=pa.array(list(unknown), pa.string())))
     logger.debug(
-        "%s: %d rows of the option roots %s, which Massive's Contract Overview could not "
-        "classify, are withheld",
+        "%s: %d rows of the %s %s, which Massive's contracts reference could not classify, "
+        "are withheld",
         dataset,
         pc.sum(of_unknown).as_py() or 0,
+        what,
         list(unknown),
     )
-    names = roots.to_pylist()
+    names = keys.to_pylist()
     return mark(
         marked,
         RowFault.UNREADABLE_SYMBOLS,
         of_unknown,
-        field=_UNDERLYING,
+        field=column,
         reason=lambda row: unknown[names[row]],
     )
 
@@ -836,41 +925,19 @@ def _canonical_symbol(
                 pass
             case RootKind.UNKNOWN:
                 unknown[symbol] = (
-                    f"Massive's contracts list gives no CFI code for a contract on {symbol} "
-                    f"(asked as of {day}), so the library can't tell whether {symbol} is an "
-                    f"index ({_INDEX_PREFIX}{symbol}) or not"
+                    f"Massive's contracts list has no contract with a CFI code for {symbol} as "
+                    f"of {day}, so the library can't tell whether {symbol} is an index "
+                    f"({_INDEX_PREFIX}{symbol}) or not"
                 )
             case _:
                 assert_never(found)
-    if indices:
-        on_index = pc.is_in(symbols, value_set=pa.array(indices, pa.string()))
-        prefixed = pc.binary_join_element_wise(_INDEX_PREFIX, symbols, "")
-        logger.debug(
-            "%s: %d rows of the indices %s get the I: prefix",
-            dataset,
-            pc.sum(on_index).as_py() or 0,
-            indices,
-        )
-        position = batch.schema.get_field_index(_SYMBOL)
-        batch = batch.set_column(
-            position, batch.schema.field(position), pc.if_else(on_index, prefixed, symbols)
-        )
-    marked = with_marks(batch, {}, sent=symbols)
-    if not unknown:
-        return marked
-    of_unknown = pc.is_in(symbols, value_set=pa.array(list(unknown), pa.string()))
-    logger.debug(
-        "%s: %d rows of the tickers %s, which Massive's contracts list could not classify, "
-        "are withheld",
-        dataset,
-        pc.sum(of_unknown).as_py() or 0,
-        list(unknown),
-    )
-    names = symbols.to_pylist()
-    return mark(
-        marked,
-        RowFault.UNREADABLE_SYMBOLS,
-        of_unknown,
-        field=_SYMBOL,
-        reason=lambda row: unknown[names[row]],
+    return _prefix_and_mark(
+        batch,
+        column=_SYMBOL,
+        keys=symbols,
+        bare=bare,
+        index_keys=indices,
+        unknown=unknown,
+        dataset=dataset,
+        what="tickers",
     )

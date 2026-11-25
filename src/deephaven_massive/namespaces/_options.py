@@ -1400,14 +1400,13 @@ class OptionsNamespace(Namespace):
     ) -> FetchQuery:
         """Each underlying's open interest at the end of each trading day, calls and puts split out.
 
-        Each row holds one underlying's open interest on one trading day, with calls and puts
-        split out. The total covers every root on the underlying, so `SPX` includes `SPXW`.
-        Massive publishes a day's figures the next morning, so the latest `Date` is the
-        previous trading day.
+        Each row holds one underlying's open interest on one trading day. The total covers
+        every root on the underlying, so `SPX` includes `SPXW`. Massive publishes a day's
+        figures the next morning, so the latest `Date` is the previous trading day.
 
-        `Symbol` is the underlying, with `I:` for an index (`I:SPX`), as in
-        `m.options.contracts()`. A ticker the library can't tell is a stock's or an index's has
-        its rows left out and listed in `m.problems()` as `unreadable_symbols`.
+        `Symbol` is the underlying's ticker, with `I:` for an index, such as `I:SPX`. If the
+        library can't tell whether a ticker is a stock's or an index's, it leaves that ticker's
+        rows out and lists them in `m.problems()` as `unreadable_symbols`.
 
         Args:
             symbols: Stock, ETF, or index tickers, such as `"AAPL"` or `"I:SPX"`; leave it

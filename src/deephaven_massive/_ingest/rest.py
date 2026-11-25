@@ -189,6 +189,7 @@ from deephaven_massive._ingest.rate_limits import (
 from deephaven_massive._ingest.recency_labels import DELAYED as DELAYED_LABEL
 from deephaven_massive._ingest.recency_labels import delayed_refusal, read_labels
 from deephaven_massive._ingest.rest_requests import (
+    BARE_INDEX_LIST_PARAM,
     BARE_INDEX_PARAM,
     Call,
     CryptoSplit,
@@ -349,20 +350,30 @@ def _missing_error(spec: DatasetSpec, missing: Sequence[_Missing]) -> Unavailabl
     )
 
 
-def _bare_index(request: Request, call: Call) -> str | None:
-    """Return the index a call asked for by its bare ticker (`SPX` sent for `I:SPX`).
+def _bare_indices(request: Request, call: Call) -> dict[str, str]:
+    """Return the indices a call asked for by their bare ticker (`SPX` sent for `I:SPX`).
 
     Args:
-        request: The normalized arguments, which keep the canonical ticker.
-        call: The planned call, whose query holds the ticker as sent.
+        request: The normalized arguments, which keep the canonical tickers.
+        call: The planned call, whose query holds the tickers as sent.
 
     Returns:
-        The canonical index when the call sent it without its `I:`; None for any other call.
+        Each canonical index the call sent without its `I:`, with the parameter that carried
+        it (`BARE_INDEX_PARAM` or `BARE_INDEX_LIST_PARAM`); empty for any other call.
     """
-    asked = dict(request.params).get(BARE_INDEX_PARAM)
+    params = dict(request.params)
+    found: dict[str, str] = {}
+    asked = params.get(BARE_INDEX_PARAM)
     if isinstance(asked, str) and asked != call.query.get(BARE_INDEX_PARAM, asked):
-        return asked
-    return None
+        found[asked] = BARE_INDEX_PARAM
+    listed = params.get(BARE_INDEX_LIST_PARAM)
+    sent = call.query.get(BARE_INDEX_LIST_PARAM)
+    if isinstance(listed, tuple) and isinstance(sent, tuple):
+        for canonical, wire in zip(listed, sent, strict=True):
+            assert isinstance(canonical, str)  # build_query refused any other element
+            if canonical != wire:
+                found[canonical] = BARE_INDEX_LIST_PARAM
+    return found
 
 
 def _listed_rows(
@@ -867,7 +878,7 @@ class RestReader:
         patience: Patience,
         where: str,
         tally: ReadTally,
-        index: str | None,
+        indices: Mapping[str, str],
     ) -> list[pa.RecordBatch]:
         """Give a page's index underlyings their `I:` the way the dataset's rows allow.
 
@@ -878,7 +889,9 @@ class RestReader:
         `_page_rows` reports its own (`_report_withheld`), and counted in `tally` as withheld,
         since `_page_rows` counted them among the page's rows already: a read whose every row
         is withheld fails. A call that asked for an index by its bare ticker then has its kept
-        rows checked (`_warn_other_roots` by root, `_check_index_rows` by CFI code).
+        rows checked (`_warn_other_roots` by root, `_check_index_rows` by CFI code); by bare
+        underlying, the lookup itself warns about a ticker that names a stock too
+        (`OptionRootKinds.underlying_kind`), since its row is Massive's total for the ticker.
 
         Args:
             spec: The dataset.
@@ -889,8 +902,8 @@ class RestReader:
                 not know a console caller holds the update graph's lock.
             where: The request template, for the events.
             tally: The read's count of its rows and of those withheld.
-            index: The canonical index the call asked for by its bare ticker (`_bare_index`),
-                or None for any other call.
+            indices: The canonical indices the call asked for by their bare ticker, each with
+                the parameter that carried it (`_bare_indices`); empty for any other call.
 
         Returns:
             The rows to publish.
@@ -907,8 +920,8 @@ class RestReader:
             case IndexPrefix.NONE:
                 return rows
             case IndexPrefix.FROM_CFI:
-                if index is not None:
-                    self._check_index_rows(spec, rows, index)
+                for index, param in indices.items():
+                    self._check_index_rows(spec, rows, index, param=param)
                 return rows
             case IndexPrefix.BY_ROOT:
                 by_root = canonical_underlyings(
@@ -917,8 +930,8 @@ class RestReader:
                     dataset=spec.name,
                 )
                 kept = self._kept_underlyings(spec, by_root, where=where, tally=tally)
-                if index is not None:
-                    self._warn_other_roots(spec, kept, index)
+                for index, param in indices.items():
+                    self._warn_other_roots(spec, kept, index, param=param)
                 return kept
             case IndexPrefix.BY_UNDERLYING:
                 by_underlying = canonical_symbols(
@@ -954,7 +967,7 @@ class RestReader:
         return list(withheld.rows.to_batches())
 
     def _warn_other_roots(
-        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str
+        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str, *, param: str
     ) -> None:
         """Warn about rows of an index's contracts whose option root is not the index's.
 
@@ -970,11 +983,13 @@ class RestReader:
             spec: The dataset.
             batches: One page's kept rows, their index underlyings prefixed.
             index: The canonical index the call asked for, such as `I:SPX`.
+            param: The parameter that carried it bare, such as `underlying_ticker`.
         """
         if not batches:
             return
         underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
-        other = pc.fill_null(pc.not_equal(underlyings, index), fill_value=False)
+        bare = contracts_underlying(index)
+        other = pc.fill_null(pc.equal(underlyings, bare), fill_value=False)
         if not pc.any(other).as_py() or not self.state.first("index-other-root", spec.name, index):
             return
         symbols = pa.chunked_array([batch.column("Symbol") for batch in batches])
@@ -985,8 +1000,8 @@ class RestReader:
             "too. They keep the underlying Massive wrote. The first is %s, with Underlying %s.",
             spec.name,
             index,
-            BARE_INDEX_PARAM,
-            contracts_underlying(index),
+            param,
+            bare,
             pc.sum(other).as_py(),
             symbols[first].as_py(),
             underlyings[first].as_py(),
@@ -1602,11 +1617,13 @@ class RestReader:
         template = converter.rest_path.template
         # The path as sent, with the call's values in place of the template's placeholders.
         requested = f"GET {request_target(converter.rest_path, call.path_params, {})}"
+        # The query holds the symbols as sent, an index bare: `day_class` reads a class only
+        # where a dataset has one, and no dataset that sends an index bare does.
         own = own_symbols(spec, call.symbol, call.query)
         zone_class = day_class(spec, map(symbol_class, own))
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
         bucket = _request_bucket(spec, template, call)
-        bare_index = _bare_index(request, call)
+        bare_indices = _bare_indices(request, call)
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
@@ -1677,7 +1694,7 @@ class RestReader:
                         patience=patience,
                         where=f"GET {template}",
                         tally=tally,
-                        index=bare_index,
+                        indices=bare_indices,
                     )
                 )
         except WireError as error:
@@ -1923,7 +1940,7 @@ class RestReader:
         return listed
 
     def _check_index_rows(
-        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str
+        self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str, *, param: str
     ) -> None:
         """Warn about rows of an index's contracts that do not read as that index's.
 
@@ -1940,6 +1957,7 @@ class RestReader:
             spec: The dataset.
             batches: One page's kept rows in the dataset's schema; at least one.
             index: The canonical index the call asked for, such as `I:SPX`.
+            param: The parameter that carried it bare, such as `underlying_ticker`.
         """
         underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
         other = pc.fill_null(pc.not_equal(underlyings, index), fill_value=True)
@@ -1958,7 +1976,7 @@ class RestReader:
                 "wrote. The first is %s, with Underlying %s and Cfi %s.",
                 spec.name,
                 index,
-                BARE_INDEX_PARAM,
+                param,
                 contracts_underlying(index),
                 pc.sum(other_kind).as_py(),
                 symbols[first].as_py(),

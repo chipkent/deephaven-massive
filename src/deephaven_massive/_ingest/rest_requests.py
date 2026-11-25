@@ -581,7 +581,8 @@ def _sent_value(name: str, value: object) -> object:
     """
     if name == BARE_INDEX_PARAM and isinstance(value, str):
         return contracts_underlying(value)
-    if name == BARE_INDEX_LIST_PARAM and isinstance(value, tuple):
+    if name == BARE_INDEX_LIST_PARAM:
+        assert isinstance(value, tuple)  # one_or_any_of and _symbol_parts build tuples
         bare: list[str] = []
         for underlying in value:
             assert isinstance(underlying, str)  # build_query refused any other element
