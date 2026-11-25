@@ -26,7 +26,7 @@ plans.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Final, TypeAlias, assert_never
@@ -67,7 +67,6 @@ __all__ = [
     "fetch_paths",
     "history_calls",
     "largest_page",
-    "own_symbols",
     "page_size",
     "plan_calls",
     "shared_params",
@@ -105,7 +104,7 @@ BARE_INDEX_LIST_PARAM: Final = f"{BARE_INDEX_PARAM}.any_of"
 """The list form of `BARE_INDEX_PARAM`, each of whose values is sent the same way, once however
 many canonical tickers spell it (`DJT` and `I:DJT`). Where it is a dataset's `symbol_param`, the
 planned call's canonical tickers are what the read attributes rows and charges requests by
-(`own_symbols`)."""
+(`Call.symbols`)."""
 
 _CRYPTO_PAIR_PLACEHOLDER: Final = "cryptoTicker"
 """The path placeholder Massive names for one crypto pair, as in
@@ -114,6 +113,12 @@ _CRYPTO_PAIR_PLACEHOLDER: Final = "cryptoTicker"
 CryptoSplit: TypeAlias = "Callable[[str], tuple[str, str] | Unsplit]"
 """Splits a crypto ticker into its base and quote currencies, or says why Massive has no data for
 it (`RestReader.crypto_pair`)."""
+
+_Part: TypeAlias = (
+    "tuple[str | None, tuple[str, ...], dict[str, object], dict[str, object], Unsplit | None]"
+)
+"""One planned request's share of the symbols (`_symbol_parts`): its one symbol or None, the
+symbols it names, its path and query parameters, and why its crypto pair has no split."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +132,10 @@ class Call:
         symbol: The one symbol of a per-symbol request: it fills the keys the dataset takes
             from the request (`KeySpec.from_request`), and HTTP 404 for it drops the symbol.
             None for a request that is not per symbol.
+        symbols: The canonical tickers the request names, which the read attributes its rows
+            and failures to and charges the request by: the one symbol of a per-symbol
+            request, the chunk in the symbol parameter of a listed request, or none for a
+            request without symbols (`dm.ALL`, or a path that takes none).
         unsplit: Why the call's crypto pair has no split, known before any request; the call
             is then never sent. A pair Massive has no data for is reported as Massive's HTTP
             404 would be; one whose currencies cannot be read is only left out, as the lookup
@@ -137,6 +146,7 @@ class Call:
     query: Mapping[str, object]
     symbol: str | None = None
     unsplit: Unsplit | None = None
+    symbols: tuple[str, ...] = field(kw_only=True)
 
 
 def _date_bound(name: str, value: date, *, upper: bool) -> date:
@@ -288,29 +298,6 @@ def _pair(spec: DatasetSpec, symbol: str, split: CryptoSplit) -> tuple[str, str]
     return forex_codes(symbol)
 
 
-def own_symbols(
-    spec: DatasetSpec, symbol: str | None, own_query: Mapping[str, object]
-) -> tuple[str, ...]:
-    """Return the symbols one planned request carries.
-
-    Args:
-        spec: The dataset, whose `symbol_param` holds a chunk of symbols.
-        symbol: The one symbol of a per-symbol request, or None.
-        own_query: The request's own query parameters (`_symbol_parts`).
-
-    Returns:
-        The symbol of a per-symbol request, the chunk in the symbol parameter of a listed
-        request, or nothing for a request without symbols.
-    """
-    if symbol is not None:
-        return (symbol,)
-    chunk = own_query.get(spec.symbol_param) if spec.symbol_param is not None else None
-    if chunk is None:
-        return ()
-    # `_symbol_parts` puts a chunk in the query as a tuple; any other form is a defect.
-    return required_instance(chunk, tuple, f"{spec.name}'s chunk of symbols")
-
-
 def _symbol_targets(keys: list[str], *, slot: str | None, pair: bool) -> list[str]:
     """Return where each per-symbol request puts its symbol.
 
@@ -356,7 +343,7 @@ def _symbol_parts(
     slot: str | None,
     pair: bool = False,
     split: CryptoSplit,
-) -> list[tuple[str | None, dict[str, object], dict[str, object], Unsplit | None]]:
+) -> list[_Part]:
     """Return how a request's symbols spread over requests of one path.
 
     A path that takes the symbol itself (a key the dataset fills from the request, such as
@@ -381,8 +368,9 @@ def _symbol_parts(
         split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
-        `(symbol, path parameters, query parameters, unsplit)` per request: `symbol` is set
-        for a per-symbol request, and `unsplit` says why a pair `split` gives no currencies for
+        `(symbol, symbols, path parameters, query parameters, unsplit)` per request: `symbol`
+        is set for a per-symbol request, `symbols` holds the canonical tickers the request
+        names (`Call.symbols`), and `unsplit` says why a pair `split` gives no currencies for
         has none (`Call.unsplit`). Empty for an empty symbol tuple (a reactive table with no
         valid row).
 
@@ -405,12 +393,12 @@ def _symbol_parts(
     if symbols is None or isinstance(symbols, AllSymbols):
         if spread is _Spread.PATH:
             raise ValueError(f"{spec.name} needs the symbols named. Pass them in place of dm.ALL.")
-        return [(None, {}, {}, None)]
+        return [(None, (), {}, {}, None)]
     explicit = symbols
     if not explicit:
         return []
     if spread is _Spread.NONE:
-        return [(None, {}, {}, None)]
+        return [(None, (), {}, {}, None)]
     if spread is _Spread.LIST:
         listed = required(param, f"{rest_path.template}'s list parameter")
         spelled: dict[str, list[str]] = {}
@@ -418,10 +406,11 @@ def _symbol_parts(
             spelled.setdefault(_wire_symbol(listed, symbol), []).append(symbol)
         groups = list(spelled.values())
         size = spec.symbols_per_request or len(groups)
-        return [
-            (None, {}, {listed: tuple(s for group in groups[i : i + size] for s in group)}, None)
+        chunks = [
+            tuple(s for group in groups[i : i + size] for s in group)
             for i in range(0, len(groups), size)
         ]
+        return [(None, chunk, {}, {listed: chunk}, None) for chunk in chunks]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)
     return [
         _symbol_request(spec, symbol, rest_path, targets=targets, param=param, split=split)
@@ -437,7 +426,7 @@ def _symbol_request(
     targets: Sequence[str],
     param: str | None,
     split: CryptoSplit,
-) -> tuple[str, dict[str, object], dict[str, object], Unsplit | None]:
+) -> _Part:
     """Return the parameters of one symbol's request.
 
     The symbol fills each target: a `{from}/{to}` pair takes its two currencies (`_pair`), a
@@ -456,8 +445,8 @@ def _symbol_request(
         split: Splits a crypto symbol into its two currencies (`_pair`).
 
     Returns:
-        `(symbol, path parameters, query parameters, unsplit)`, with why the pair has no
-        split, or None.
+        `(symbol, (symbol,), path parameters, query parameters, unsplit)`, with why the pair
+        has no split, or None.
     """
     params = {p.name: p for p in rest_path.params}
     path: dict[str, object] = {}
@@ -478,7 +467,7 @@ def _symbol_request(
             query[name] = symbol
     if param is not None:
         query[param] = (symbol,) if params[param].kind is ParamKind.LIST else symbol
-    return symbol, path, query, unsplit
+    return symbol, (symbol,), path, query, unsplit
 
 
 def _caller_params(
@@ -620,7 +609,7 @@ def wire_query(query: Mapping[str, object]) -> dict[str, object]:
     """Return a planned call's query as the wire takes it.
 
     The planned query holds every ticker canonical, so the read can attribute rows and charge
-    requests by the symbols it names (`own_symbols`) and tell an index asked for from the
+    requests by the symbols it names (`Call.symbols`) and tell an index asked for from the
     rows Massive answers with (`I:SPX` against a row's `SPX`). The wire takes an index
     underlying bare, in `BARE_INDEX_PARAM` and `BARE_INDEX_LIST_PARAM` (`_sent_value`), once
     however many of the request's tickers spell it (`I:DJT` and `DJT`). Every other parameter
@@ -836,12 +825,12 @@ def plan_calls(
     slot = empty[0] if len(empty) == 1 else None
     calls = []
     parts = _symbol_parts(spec, rest_path, symbols, slot=slot, pair=pair, split=split)
-    for symbol, own_path, own_query, unsplit in parts:
-        zone_class = day_class(spec, map(symbol_class, own_symbols(spec, symbol, own_query)))
+    for symbol, own, own_path, own_query, unsplit in parts:
+        zone_class = day_class(spec, map(symbol_class, own))
         axis = axis_query(spec, rest_path, dates=dates, asset_class=zone_class)
         sent = _filter_days(rest_path, {**query, **axis}, zone_class)
         sent_query = {**sent, **(extra or {}), **own_query}
-        calls.append(Call({**path, **own_path}, sent_query, symbol, unsplit))
+        calls.append(Call({**path, **own_path}, sent_query, symbol, unsplit, symbols=own))
     return calls
 
 

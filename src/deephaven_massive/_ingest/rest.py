@@ -199,7 +199,6 @@ from deephaven_massive._ingest.rest_requests import (
     capped_call,
     fetch_paths,
     history_calls,
-    own_symbols,
     plan_calls,
     shared_params,
     wire_query,
@@ -442,7 +441,7 @@ def _listed_rows(
     Args:
         batch: One page's rows in the dataset's schema, with a null `Symbol` and the mark
             columns.
-        named: The tickers the request named (`own_symbols`).
+        named: The tickers the request named (`Call.symbols`).
         column: The column of each row's tickers (`DatasetSpec.ticker_list`).
 
     Returns:
@@ -1417,7 +1416,7 @@ class RestReader:
                 "%s: the request of %s for %s failed, and fails only its own symbols: %s",
                 spec.name,
                 rest_path.template,
-                ", ".join(own_symbols(spec, call.symbol, call.query)) or "no symbol",
+                ", ".join(call.symbols) or "no symbol",
                 error,
             )
             return error
@@ -1686,7 +1685,7 @@ class RestReader:
         template = converter.rest_path.template
         # The path as sent, with the call's values in place of the template's placeholders.
         requested = f"GET {request_target(converter.rest_path, call.path_params, {})}"
-        own = own_symbols(spec, call.symbol, call.query)
+        own = call.symbols
         zone_class = day_class(spec, map(symbol_class, own))
         times = time_rule(spec, request, asset_class=zone_class, warnings=self.warnings)
         bucket = _request_bucket(spec, template, call)
@@ -2161,7 +2160,7 @@ class RestReader:
             spec: The dataset, for the message.
             page: The page.
             bucket: The page's rate-limit bucket.
-            own: The symbols the request names (`own_symbols`).
+            own: The symbols the request names (`Call.symbols`).
             call: The request, whose one symbol stands for its rows when they carry none.
             symbol_key: The wire key of the rows' ticker, or None.
             on_recency: Given what a checked page shows, when it carries a label: `DELAYED`
@@ -3649,7 +3648,7 @@ def _request_bucket(spec: DatasetSpec, template: str, call: Call) -> str:
         "charged to it are not logged.",
         spec.name,
         template,
-        ", ".join(own_symbols(spec, call.symbol, call.query)) or "none",
+        ", ".join(call.symbols) or "none",
         bucket,
         reason,
         level=logging.DEBUG,
@@ -3671,7 +3670,7 @@ def _charge(spec: DatasetSpec, template: str, call: Call) -> tuple[str, str]:
     """
     if REFERENCE_PATH.match(template):
         return OTHER, "a reference endpoint"
-    classes = map(symbol_class, own_symbols(spec, call.symbol, call.query))
+    classes = map(symbol_class, call.symbols)
     return bucket_of(subscription_of(day_class(spec, classes))), "its data's class"
 
 
@@ -3750,7 +3749,9 @@ def _history_plan(
             for day in partition_dates(spec, window)
             if is_trading_day(spec.asset_class, day) and (wanted is None or day in wanted)
         ]
-        return rest_path, [Call({**path, "date": day}, query) for day in planned], ReadShape.PER_DAY
+        # A grouped day names no symbol: it reads every ticker of the day.
+        calls = [Call({**path, "date": day}, query, symbols=()) for day in planned]
+        return rest_path, calls, ReadShape.PER_DAY
     rest_path = reader.rest_path(required(spec.history_path, f"{spec.name}'s history path"))
     calls = history_calls(spec, rest_path, request, window=window, split=split)
     shape = ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED

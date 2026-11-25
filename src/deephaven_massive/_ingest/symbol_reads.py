@@ -87,7 +87,6 @@ from deephaven_massive._ingest.crypto_tickers import recording_split
 from deephaven_massive._ingest.rest_requests import (
     fetch_paths,
     history_calls,
-    own_symbols,
     plan_calls,
 )
 from deephaven_massive._log_limits import bounded_list, counted, log_failure, prose_list
@@ -385,7 +384,7 @@ def read_rest_by_symbol(
     absent: set[str] = set()
     answered: set[str] = set()
     for (rest_path, planned), result in zip(units, results, strict=True):
-        own = own_symbols(spec, planned.symbol, planned.query)
+        own = planned.symbols
         if isinstance(result, MassiveError):
             for symbol in own:
                 failures.setdefault(symbol, result)
@@ -589,7 +588,7 @@ def _attribute(
         rows: The request's rows, with `SYMBOL_SENT` after the dataset's columns
             (`RestReader.read_each`); the symbols get them without it.
         template: The request's path, for the events.
-        planned: The request, whose symbols are those it named (`own_symbols`).
+        planned: The request, whose symbols are those it named (`Call.symbols`).
         pieces: Each symbol's rows so far, which receive the request's.
         tally: The read's count of its rows, which the rows left out are counted out of.
 
@@ -597,7 +596,7 @@ def _attribute(
         The failure of the request's symbols when a row was left out under
         `unrequested_symbols=RAISE`; None otherwise.
     """
-    own = own_symbols(spec, planned.symbol, planned.query)
+    own = planned.symbols
     column = asked_column(spec, template)
     sent = rows[SYMBOL_SENT]
     rows = rows.drop_columns([SYMBOL_SENT])

@@ -198,9 +198,9 @@ def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
     calls = rest_requests.plan_calls(
         news, path, Request(), symbols=("AAPL", "MSFT"), split=split_pair
     )
-    assert [(c.symbol, dict(c.query)) for c in calls] == [
-        ("AAPL", {"limit": 1000, "ticker": "AAPL"}),
-        ("MSFT", {"limit": 1000, "ticker": "MSFT"}),
+    assert [(c.symbol, c.symbols, dict(c.query)) for c in calls] == [
+        ("AAPL", ("AAPL",), {"limit": 1000, "ticker": "AAPL"}),
+        ("MSFT", ("MSFT",), {"limit": 1000, "ticker": "MSFT"}),
     ]
     assert rest_requests.plan_calls(news, path, Request(), symbols=(), split=split_pair) == []
     # A path that takes no symbols ignores them: one request.
@@ -209,15 +209,16 @@ def test_a_symbol_query_parameter_of_one_value_fans_out() -> None:
     (call,) = rest_requests.plan_calls(
         MOVERS, movers, request, symbols=("AAPL", "MSFT"), split=split_pair
     )
-    assert (call.symbol, dict(call.path_params), dict(call.query)) == (
+    assert (call.symbol, call.symbols, dict(call.path_params), dict(call.query)) == (
         None,
+        (),
         {"direction": Direction.LOSERS},
         {},
     )
     assert [
-        c.symbol
+        (c.symbol, c.symbols)
         for c in rest_requests.plan_calls(news, path, Request(), symbols=None, split=split_pair)
-    ] == [None]
+    ] == [(None, ())]
 
 
 def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None:
@@ -232,17 +233,18 @@ def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None
     )
     path = _rest_path(DIVIDENDS_PATH)
     calls = rest_requests.plan_calls(spec, path, Request(), symbols=("A", "B"), split=split_pair)
-    assert [dict(c.query) for c in calls] == [
-        {"limit": 5000, "ticker.any_of": ("A",)},
-        {"limit": 5000, "ticker.any_of": ("B",)},
+    assert [(c.symbols, dict(c.query)) for c in calls] == [
+        (("A",), {"limit": 5000, "ticker.any_of": ("A",)}),
+        (("B",), {"limit": 5000, "ticker.any_of": ("B",)}),
     ]
 
 
 def test_a_list_of_underlyings_keeps_each_index_canonical_and_sends_it_bare() -> None:
     # The open interest by underlying takes its symbols in `underlying_ticker.any_of`, which
     # finds an index only by its bare ticker. The planned call keeps the canonical tickers,
-    # which the read attributes rows by; the wire gets each one bare, once. Two tickers the
-    # wire spells alike (DJT and I:DJT) share a request, so no two requests read DJT's rows.
+    # which the read attributes rows by (`Call.symbols`); the wire gets each one bare, once.
+    # Two tickers the wire spells alike (DJT and I:DJT) share a request, so no two requests
+    # read DJT's rows.
     path_name = "/options/v1/open-interest/underlying"
     spec = DatasetSpec(
         summary="A dataset for the tests.",
@@ -259,6 +261,7 @@ def test_a_list_of_underlyings_keeps_each_index_canonical_and_sends_it_bare() ->
         {"limit": 50000, "underlying_ticker.any_of": ("AAPL", "DJT", "I:DJT")},
         {"limit": 50000, "underlying_ticker.any_of": ("I:NDX", "I:SPX")},
     ]
+    assert [c.symbols for c in calls] == [("AAPL", "DJT", "I:DJT"), ("I:NDX", "I:SPX")]
     assert [rest_requests.wire_query(c.query) for c in calls] == [
         {"limit": 50000, "underlying_ticker.any_of": ("AAPL", "DJT")},
         {"limit": 50000, "underlying_ticker.any_of": ("NDX", "SPX")},
@@ -287,6 +290,7 @@ def test_any_other_list_parameter_is_sent_as_planned() -> None:
     (call,) = rest_requests.plan_calls(
         spec, path, Request(), symbols=("A", "B", "B"), split=split_pair
     )
+    assert call.symbols == ("A", "B", "B")
     assert dict(call.query) == {"limit": 5000, "ticker.any_of": ("A", "B", "B")}
     assert rest_requests.wire_query(call.query) == dict(call.query)
     # A query without an underlying parameter, such as a per-symbol request's, is sent as is.
@@ -571,7 +575,7 @@ def test_symbol_request_fills_a_pair_with_its_two_currencies() -> None:
     path = _rest_path(CRYPTO_LAST_PATH)
     assert rest_requests._symbol_request(
         CRYPTO_LAST, "X:BTCUSD", path, targets=["from"], param=None, split=split_pair
-    ) == ("X:BTCUSD", {"from": "BTC", "to": "USD"}, {}, None)
+    ) == ("X:BTCUSD", ("X:BTCUSD",), {"from": "BTC", "to": "USD"}, {}, None)
 
 
 def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
@@ -585,7 +589,7 @@ def test_symbol_request_sends_the_symbol_in_its_parameter() -> None:
     path = _rest_path("/v2/reference/news")
     assert rest_requests._symbol_request(
         news, "AAPL", path, targets=[], param="ticker", split=split_pair
-    ) == ("AAPL", {}, {"ticker": "AAPL"}, None)
+    ) == ("AAPL", ("AAPL",), {}, {"ticker": "AAPL"}, None)
 
 
 def test_a_pair_with_no_split_is_a_call_that_is_never_sent() -> None:
@@ -620,7 +624,9 @@ def test_fetch_paths_raise_a_library_defect_for_a_symbols_form_with_no_rule() ->
 def test_a_capped_call_asks_only_for_the_rows_still_wanted() -> None:
     path = _rest_path(INDEX_SNAPSHOT_PATH)
     largest = rest_requests.page_size(INDEX_SNAPSHOTS, path)
-    call = rest_requests.Call({}, {"ticker.any_of": ("I:SPX",), "limit": largest})
+    call = rest_requests.Call(
+        {}, {"ticker.any_of": ("I:SPX",), "limit": largest}, symbols=("I:SPX",)
+    )
     capped = rest_requests.capped_call(INDEX_SNAPSHOTS, path, call, cap=3)
     assert capped.query == {"ticker.any_of": ("I:SPX",), "limit": 3}
     # A cap above the page size keeps the page size.
@@ -628,5 +634,5 @@ def test_a_capped_call_asks_only_for_the_rows_still_wanted() -> None:
     wide = rest_requests.capped_call(INDEX_SNAPSHOTS, path, call, cap=largest + 1)
     assert wide.query["limit"] == largest
     # A path without a page size sends the call as planned.
-    last = rest_requests.Call({"from": "BTC", "to": "USD"}, {})
+    last = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, symbols=())
     assert rest_requests.capped_call(CRYPTO_LAST, _rest_path(CRYPTO_LAST_PATH), last, cap=3) is last
