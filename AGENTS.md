@@ -314,7 +314,8 @@ These protect the owner's repository, money, and secrets.
 - **Keep context small.** Hand over to a fresh agent, with a written handover (the branch state,
   what is done, what remains, any traps), at about 150,000 tokens of context or after a PR's
   first push (decision 130). Batch reads: one script over many files, not many single greps,
-  and send a wide search to a search agent that returns only its conclusion.
+  and send a wide search to a search agent that returns only its conclusion. Choose each
+  agent's model by the task (`plan-parallel-prs` §7).
 - **One PR per change that can merge on its own.** A PR holds one change with everything it
   needs to be correct: the code, its tests, and its docs together (a new column lands with its
   docs page and tests in one PR). A mechanical step the change needs (a rename, a file move, a
