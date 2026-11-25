@@ -386,9 +386,9 @@ def _library_sentence(spec: DatasetSpec, name: str) -> str:
         return (
             f"The ticker the request named that the row lists in `{spec.ticker_list}`: a row "
             "that lists several of the named tickers appears once for each, so an article "
-            "about AAPL and MSFT read for both is listed under each. A request that named one "
-            "ticker gives it to every row. Null when the call named no ticker, and on a row "
-            "that lists none of a request's named tickers."
+            "about AAPL and MSFT read for both is listed under each. A row that lists none of "
+            "the named tickers is left out, as an `unrequested_symbols` problem. Null when the "
+            "call named no ticker."
         )
     return KEY_SENTENCES[name]
 

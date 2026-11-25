@@ -99,6 +99,7 @@ class ProblemCause(StrEnum):
     NONCANONICAL_SYMBOLS = "noncanonical_symbols"
     UNREADABLE_SYMBOLS = "unreadable_symbols"
     UNAVAILABLE_SYMBOLS = "unavailable_symbols"
+    UNREQUESTED_SYMBOLS = "unrequested_symbols"
     UNREADABLE_KEYS = "unreadable_keys"
     UNCONVERTIBLE_VALUES = "unconvertible_values"
     MALFORMED_ROWS = "malformed_rows"
@@ -182,6 +183,18 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             summary="Massive has no data for the symbol. It answered HTTP 404, or the pair isn't "
             "on its crypto ticker list.",
             fix="Look the symbol up in Massive's lists, such as `m.reference.tickers()`.",
+        ),
+        _C.UNREQUESTED_SYMBOLS: CauseTraits(
+            policy="unrequested_symbols",
+            source=_MASSIVE,
+            action=ProblemAction.WITHHELD,
+            span=False,
+            summary="Massive answered a call's request with a row of a symbol the call "
+            "didn't ask for. The row is left out.",
+            fix="Nothing, if the row is Massive's answer about another instrument. To read "
+            "that symbol, name it in the call or add it to the watchlist. Set "
+            "`unrequested_symbols` to "
+            "`dm.OnError.IGNORE` to quiet it, or to `dm.OnError.RAISE` to fail the table.",
         ),
         _C.UNREADABLE_KEYS: CauseTraits(
             policy="unreadable_keys",

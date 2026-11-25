@@ -7,24 +7,27 @@ to one symbol must fail only that symbol, never the table. The transports' reads
 failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they share:
 
 - **Planning** (`fetch_units`, `history_units`): the requests `fetch()` or `history()` makes
-  for the symbols, each with its path. A dataset whose rows carry no `Symbol` column reads
-  each symbol in a request of its own, so every row belongs to the one request that returned
-  it; a dataset whose rows list their tickers gets its `Symbol` from them, so its requests are
-  grouped as `fetch()` groups them. A crypto ticker list that can't be read, and, for
-  `history()`, a parameter its path does not take, fail their own symbols here, before any
-  request; a `fetch()` refused every such parameter at the call. A crypto pair the list
-  gives no split for is planned as a call never sent. A pair the list doesn't hold has no
-  data, as an HTTP 404 means. A pair whose currencies can't make up its ticker is skipped, and
-  its `m.symbol_reads()` row says why (`_with_skipped`).
-- **Attribution** (`read_rest_by_symbol`): a request of one symbol gives all its rows to that
-  symbol; a request of several (`ticker.any_of`) gives each its rows by their `Symbol`, and its
-  failure is the failure of each of them. A row of such a request with a null `Symbol` (a row
-  that lists none of the request's tickers) keeps it and goes with the request's first symbol,
-  as a static read keeps it. A row whose `Symbol` names another symbol belongs to no symbol: it
-  is left out, with one WARNING per dataset and path a session.
-  A flat-file scan reads every symbol at once (`history_reads.read_history_by_symbol`): its
-  rows are split by `Symbol` (`split_by_symbol`), and its failure is every symbol's; the days
-  its files lack are read from REST symbol by symbol.
+  for the symbols, each with its path, grouped as the verb groups them. A crypto ticker list
+  that can't be read, and, for `history()`, a parameter its path does not take, fail their own
+  symbols here, before any request; a `fetch()` refused every such parameter at the call. A
+  crypto pair the list gives no split for is planned as a call never sent. A pair the list
+  doesn't hold has no data, as an HTTP 404 means. A pair whose currencies can't make up its
+  ticker is skipped, and its `m.symbol_reads()` row says why (`_with_skipped`).
+- **Attribution** (`read_rest_by_symbol`, `_attribute`): one rule for every request, whatever
+  its form (a symbol's own path, a one-value parameter, a list parameter) or how many symbols
+  it names. Each row goes to the asked symbol that its asked-symbol column names
+  (`asked_column`): `Symbol`, or `Underlying` where the path fills its fan-out key from the
+  request (`reference.related_companies`, whose `Symbol` is the peer). A row naming no asked
+  symbol, another symbol or a null, belongs to no symbol: it is left out as an
+  `unrequested_symbols` problem, one event per symbol such rows name, by the symbol as
+  Massive sent it (`ProblemEvent`; `SPX` for a row the table would name `I:SPX`), which
+  `m.problems()` lists and the session's reporter alarms once per table; under `RAISE` the
+  request's symbols fail (`RowDataError`). A request's failure is the failure of each symbol
+  it names. A dataset whose rows list their tickers fills `Symbol` with the asked ticker each
+  row lists before this step (`rest._listed_rows`), so its rows follow the same rule. A
+  flat-file scan reads every symbol at once (`history_reads.read_history_by_symbol`): its rows
+  are split by `Symbol` (`split_by_symbol`) under the same rule, and its failure is every
+  symbol's; the days its files lack are read from REST symbol by symbol.
 - **Reads by value** (`read_rest_by_value`): a table passed where a dataset takes one value (an
   option chain's underlying, a futures product code) is read value by value, each with the
   requests `fetch()` makes for that value alone, so every row belongs to the value whose
@@ -55,18 +58,25 @@ from __future__ import annotations
 
 import functools
 import logging
+import time
+from collections import Counter
 from dataclasses import replace
 from typing import TYPE_CHECKING, TypeAlias
 
 import pyarrow as pa
 import pyarrow.compute as pc
+from deephaven import arrow as dh_arrow
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
+from deephaven_massive._datasets.source_columns import key_column
+from deephaven_massive._enums import OnError
+from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     AuthenticationError,
     ErrorSource,
     MassiveError,
     PermanentError,
+    RowDataError,
     SessionClosedError,
     library_bug,
     required,
@@ -82,13 +92,16 @@ from deephaven_massive._ingest.rest_requests import (
 )
 from deephaven_massive._log_limits import bounded_list, counted, log_failure, prose_list
 from deephaven_massive._massive import Transport
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
+from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
+from deephaven_massive._tables.withheld import SYMBOL_SENT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from deephaven import dtypes
     from deephaven.table import Table
@@ -105,6 +118,7 @@ if TYPE_CHECKING:
 __all__ = [
     "RestUnit",
     "UnsupportedParameterError",
+    "asked_column",
     "fetch_units",
     "history_units",
     "read_rest_by_symbol",
@@ -192,22 +206,19 @@ def fetch_units(
     request: Request,
     *,
     symbols: Sequence[str],
-    columns: Sequence[str],
     cancel: Cancel | None,
 ) -> tuple[list[RestUnit], dict[str, MassiveError]]:
     """Plan the requests of `fetch()` for the symbols, path by path, for a read by symbol.
 
     The paths are those `fetch()` reads (`fetch_paths`), and their requests those it makes
-    (`plan_calls`), except that a dataset whose rows carry no `Symbol` column plans each
-    symbol alone. Makes no request, except that the first crypto
-    pair a path takes as two currencies reads the session's crypto ticker list.
+    (`plan_calls`). Makes no request, except that the first crypto pair a path takes as two
+    currencies reads the session's crypto ticker list.
 
     Args:
         reader: The reader of the session's paths.
         spec: The dataset, with a fetch path.
         request: The normalized arguments; its symbols are ignored.
         symbols: The canonical symbols.
-        columns: The dataset's columns in this session (`SessionCore.dataset_schema`).
         cancel: The read's stop token, which the crypto ticker list's read listens to.
 
     Returns:
@@ -217,13 +228,10 @@ def fetch_units(
         already checked for (`RestEndpoints.check_fetch`).
     """
     asked = tuple(sorted(_ordered(symbols)))
-    alone = _SYMBOL not in columns
     groups = [
         (path, required_instance(own, tuple, f"the symbols of {path}"))
         for path, own in fetch_paths(spec, asked)
     ]
-    if alone:
-        groups = [(template, (symbol,)) for template, own in groups for symbol in own]
     failed: dict[str, MassiveError] = {}
     split = _failure_recorder(reader, failed, cancel)
     units: list[RestUnit] = []
@@ -239,11 +247,10 @@ def fetch_units(
         )
         units.extend((rest_path, call) for call in calls if call.symbol not in failed)
     logger.debug(
-        "%s fetch by symbol: %d symbols in %d requests (%s); failed before any request: %s",
+        "%s fetch by symbol: %d symbols in %d requests; failed before any request: %s",
         spec.name,
         len(asked),
         len(units),
-        "one symbol a request" if alone else "as fetch() groups them",
         bounded_list(failed) if failed else "none",
     )
     return units, failed
@@ -386,7 +393,18 @@ def read_rest_by_symbol(
             absent.update(own)
         else:
             answered.update(own)
-            _attribute(reader, spec, result, template=rest_path.template, own=own, pieces=pieces)
+            unrequested = _attribute(
+                reader,
+                spec,
+                result,
+                template=rest_path.template,
+                planned=planned,
+                pieces=pieces,
+                tally=tally,
+            )
+            if unrequested is not None:
+                for symbol in own:
+                    failures.setdefault(symbol, unrequested)
     empty = core.dataset_schema(spec).arrow_schema().empty_table()
     tables = {
         symbol: to_table(pa.concat_tables(rows) if rows else empty)
@@ -520,96 +538,243 @@ def read_rest_by_value(
     return tally.judge(spec.name, outcomes)
 
 
+def asked_column(spec: DatasetSpec, template: str) -> str:
+    """Return the column of a path's rows that names the symbol each row was asked for.
+
+    Each row of a request belongs to the asked symbol this column names. It is `Symbol`, the
+    row's instrument, unless the path fills its fan-out key from the request
+    (`KeySpec.from_request`): then that key's column, `Underlying`, holds the asked symbol and
+    `Symbol` holds what the row is about, as on `reference.related_companies`, whose rows
+    name the related company. Declared on the dataset's keys, so it depends on the path alone,
+    never on the form or size of the request.
+
+    Args:
+        spec: The dataset.
+        template: The path, as `DatasetSpec.keys` names it.
+
+    Returns:
+        The column.
+    """
+    fanout = spec.keys_for(Transport.REST, template).fanout
+    if fanout is not None and fanout.from_request:
+        return key_column(spec, "fanout", fanout)
+    return _SYMBOL
+
+
 def _attribute(
     reader: RestReader,
     spec: DatasetSpec,
     rows: pa.Table,
     *,
     template: str,
-    own: Sequence[str],
+    planned: Call,
     pieces: dict[str, list[pa.Table]],
-) -> None:
-    """Give one request's rows to the symbols it names.
+    tally: ReadTally,
+) -> RowDataError | None:
+    """Give one request's rows to the symbols it named, and report the rows of any other.
 
-    A request of one symbol gives that symbol all its rows. A request of several gives each its
-    rows by their `Symbol` (a row that lists none of the request's tickers never reaches here:
-    `RestReader._listed` leaves it out). A row whose `Symbol` names another symbol (or any row
-    of a request that names no symbol) belongs to no symbol and is left out, with one WARNING
-    per dataset and path a session.
+    Each row goes to the asked symbol its asked-symbol column names (`asked_column`), whatever
+    the request's form or how many symbols it named. A row naming a symbol the request did
+    not, or no symbol, is left out: the read's `unrequested_symbols` problem, one event per
+    symbol such rows name, by the symbol as Massive sent it (`SYMBOL_SENT`; `ProblemEvent`),
+    with the table's spelling in the detail where it differs, handed to the session's
+    reporter, which alarms once per table and lists each in `m.problems()`. Its page counted
+    it among the read's rows (`ReadTally.add`), so it is counted out again, as no row of the
+    read's symbols. A request that failed has no rows to give, so none of its rows is left
+    out: its failure is its symbols' outcome.
 
     Args:
-        reader: The reader, whose session remembers the warnings already given.
+        reader: The reader, whose policy and problem sink the read uses.
         spec: The dataset.
-        template: The request's path.
-        own: The symbols the request names (`own_symbols`).
-        rows: The request's rows.
+        rows: The request's rows, with `SYMBOL_SENT` after the dataset's columns
+            (`RestReader.read_each`); the symbols get them without it.
+        template: The request's path, for the events.
+        planned: The request, whose symbols are those it named (`own_symbols`).
         pieces: Each symbol's rows so far, which receive the request's.
+        tally: The read's count of its rows, which the rows left out are counted out of.
+
+    Returns:
+        The failure of the request's symbols when a row was left out under
+        `unrequested_symbols=RAISE`; None otherwise.
     """
-    if len(own) == 1:
-        pieces[own[0]].append(rows)
-        return
-    kept = 0
+    own = own_symbols(spec, planned.symbol, planned.query)
+    column = asked_column(spec, template)
+    sent = rows[SYMBOL_SENT]
+    rows = rows.drop_columns([SYMBOL_SENT])
+    symbols = rows[column]
     for symbol in own:
-        mine = rows.filter(pc.equal(rows[_SYMBOL], symbol))
-        pieces[symbol].append(mine)
-        kept += mine.num_rows
-    left = rows.num_rows - kept
-    if not left:
-        return
-    level = logging.WARNING if reader.state.first("unowned", spec.name, template) else logging.DEBUG
-    logger.log(
-        level,
-        "%s: %s of the %d Massive returned for %s %s none of those symbols, so no symbol's "
-        "read owns %s left out.",
-        spec.name,
-        counted(left, "row"),
-        rows.num_rows,
-        prose_list(own, "symbols") if own else "no symbol",
-        "names" if left == 1 else "name",
-        "it and it is" if left == 1 else "them and they are",
+        mine = pc.equal(symbols, symbol)
+        # The rows are filtered only when some are another symbol's: a copy of a large read
+        # whose every row is the symbol's would double its memory for nothing.
+        every = pc.all(mine, skip_nulls=False).as_py()
+        pieces[symbol].append(rows if every else rows.filter(mine))
+    asked = pc.fill_null(pc.is_in(symbols, value_set=pa.array(own, pa.string())), fill_value=False)
+    left = pc.invert(asked)
+    others = Counter(
+        zip(pc.filter(sent, left).to_pylist(), pc.filter(symbols, left).to_pylist(), strict=True)
+    )
+    if not others:
+        return None
+    tally.exclude(sum(others.values()))
+    return _report_unrequested(reader, spec, others, own=own, column=column, template=template)
+
+
+def _report_unrequested(
+    reader: RestReader,
+    spec: DatasetSpec,
+    others: Mapping[tuple[str | None, str | None], int],
+    *,
+    own: Sequence[str],
+    column: str,
+    template: str,
+) -> RowDataError | None:
+    """Report the rows a request left out, and return its symbols' failure under `RAISE`.
+
+    Args:
+        reader: The reader, whose policy and problem sink the read uses.
+        spec: The dataset.
+        others: The rows left out, counted by their symbol as Massive sent it and the
+            spelling the table gives it.
+        own: The symbols the request named.
+        column: The asked-symbol column (`asked_column`), the events' field.
+        template: The request's path, for the events.
+
+    Returns:
+        The failure of the request's symbols when `unrequested_symbols` is `RAISE` in the
+        read's policy; None otherwise.
+    """
+    setting = reader.policy.unrequested_symbols
+    at = time.time_ns()
+    asked_for = prose_list(own, "symbols")
+    events: list[ProblemEvent] = []
+    for (spelling, symbol), count in others.items():
+        spelled = _spellings([(spelling, symbol)])
+        events.append(
+            ProblemEvent(
+                cause=ProblemCause.UNREQUESTED_SYMBOLS,
+                action=ProblemAction.WITHHELD,
+                dataset=spec.name,
+                stream_id=reader.stream_id,
+                where=f"{Transport.REST.value} GET {template}",
+                symbol=spelling,
+                field=column,
+                rows=count,
+                detail=f"Massive answered the request for {asked_for} with rows of "
+                f"{_no_symbol(spelling)}, which the read did not ask for, so they are left out"
+                f"{f'. {spelled}' if spelled else ''}",
+                at=at,
+                policy=setting,
+            )
+        )
+    reader.problems(events)
+    if not effect_of(setting).fails:
+        return None
+    total = sum(others.values())
+    named = prose_list([_no_symbol(spelling) for spelling, _ in others], "symbols")
+    spelled = _spellings(others)
+    return RowDataError(
+        f"{spec.name}: Massive answered the request for {asked_for} with "
+        f"{counted(total, 'row')} of {named}, which the read did not ask for, so the library "
+        f"left {'it' if total == 1 else 'them'} out. {f'{spelled} ' if spelled else ''}"
+        f"{policy_hint(OnError.LOG, 'unrequested_symbols', purpose='To go on without such rows')}"
     )
 
 
+def _no_symbol(symbol: str | None) -> str:
+    """Return a symbol for a message, or `"no symbol"` for None."""
+    return "no symbol" if symbol is None else symbol
+
+
+def _spellings(pairs: Iterable[tuple[str | None, str | None]]) -> str:
+    """Return the sentence naming the table's spelling of each symbol Massive spelled otherwise.
+
+    Args:
+        pairs: Each symbol as Massive sent it with the spelling the table gives it.
+
+    Returns:
+        `"The table spells SPX as I:SPX and ETH-USD as X:ETHUSD."`, or `""` when the table
+        spells each symbol as Massive sent it.
+    """
+    differ = [f"{sent} as {symbol}" for sent, symbol in pairs if sent != symbol]
+    return f"The table spells {prose_list(differ, 'symbols')}." if differ else ""
+
+
 def split_by_symbol(
-    core: SessionCore, spec: DatasetSpec, table: Table, *, symbols: Sequence[str], source: str
+    core: SessionCore,
+    spec: DatasetSpec,
+    table: Table,
+    *,
+    symbols: Sequence[str],
+    source: str,
+    policy: OnError,
+    call: int,
 ) -> dict[str, Table]:
     """Split one read's static rows of several symbols into each symbol's table.
 
-    A row whose `Symbol` names none of the symbols, or is null, belongs to no symbol: the rows
-    the split leaves out are counted against the table's size and logged at WARNING, so no row
-    Massive sent disappears without a trace.
+    Each row goes to the asked symbol its `Symbol` names, as `_attribute` gives a request's
+    rows. A row naming none of the symbols, or null, belongs to no symbol: it is left out as
+    an `unrequested_symbols` problem, one event per symbol such rows name, handed to the
+    session's reporter, which alarms once per table and lists each in `m.problems()`. The
+    scan counted only the asked symbols' rows (`ReadTally.add`), so none is counted out.
 
     Args:
-        core: The session's core, whose execution context the split runs in.
+        core: The session's core, whose execution context the split runs in and whose
+            reporter takes the problems.
         spec: The dataset.
         table: The rows, a static table with a `Symbol` column.
         symbols: The symbols, in the order the result follows.
-        source: Where the rows came from, for the log line, such as `"flat files"`.
+        source: Where the rows came from, for the events and the log, such as `"flat files"`.
+        policy: The read's `unrequested_symbols` setting.
+        call: The read's call id, which its problems carry as their `StreamId`.
 
     Returns:
         Each symbol with its rows; a symbol without rows has an empty table with the same
         columns.
+
+    Raises:
+        RowDataError: If a row was left out and `policy` is `RAISE`: the read's failure, which
+            is every symbol's.
     """
     with entered(core.exec_ctx):
         parts = table.partition_by(_SYMBOL)
         none = table.head(0)
         found = {symbol: parts.get_constituent(symbol) for symbol in symbols}
         tables = {symbol: none if part is None else part for symbol, part in found.items()}
-        total = table.size
-        kept = sum(part.size for part in tables.values())
-    if kept != total:
-        logger.warning(
-            "%s: %s of the %d read from %s for %s %s none of those symbols, or no symbol, so "
-            "no symbol's read owns %s left out.",
-            spec.name,
-            counted(total - kept, "row"),
-            total,
-            source,
-            prose_list(symbols, "symbols"),
-            "names" if total - kept == 1 else "name",
-            "it and it is" if total - kept == 1 else "them and they are",
-        )
-    return tables
+        counts = dh_arrow.to_arrow(table.count_by("Rows", by=_SYMBOL)).to_pylist()
+    others = {row[_SYMBOL]: row["Rows"] for row in counts if row[_SYMBOL] not in tables}
+    if not others:
+        return tables
+    total = sum(others.values())
+    at = time.time_ns()
+    core.problems(
+        [
+            ProblemEvent(
+                cause=ProblemCause.UNREQUESTED_SYMBOLS,
+                action=ProblemAction.WITHHELD,
+                dataset=spec.name,
+                stream_id=call,
+                where=source,
+                symbol=symbol,
+                field=_SYMBOL,
+                rows=count,
+                detail=f"The read of {source} for {prose_list(symbols, 'symbols')} returned "
+                f"rows of {'no symbol' if symbol is None else symbol}, which the read did not "
+                "ask for, so they are left out",
+                at=at,
+                policy=policy,
+            )
+            for symbol, count in others.items()
+        ]
+    )
+    if not effect_of(policy).fails:
+        return tables
+    named = prose_list(["no symbol" if s is None else s for s in others], "symbols")
+    raise RowDataError(
+        f"{spec.name}: the read of {source} for {prose_list(symbols, 'symbols')} returned "
+        f"{counted(total, 'row')} of {named}, which the read did not ask for, so the library "
+        f"left {'it' if total == 1 else 'them'} out. "
+        f"{policy_hint(OnError.LOG, 'unrequested_symbols', purpose='To go on without such rows')}"
+    )
 
 
 def symbol_outcomes(

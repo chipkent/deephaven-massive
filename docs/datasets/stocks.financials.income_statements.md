@@ -50,7 +50,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A row that lists none of the named tickers is left out, as an `unrequested_symbols` problem. Null when the call named no ticker. |
 | `BasicEarningsPerShare` | double | Earnings per share calculated using the weighted average number of basic shares outstanding. For TTM records, recalculated as TTM net income divided by average basic shares outstanding over the four quarters. |
 | `BasicSharesOutstanding` | double | Weighted average number of common shares outstanding during the period, used in basic EPS calculation. For TTM records, represents the average over the four most recent quarters. |
 | `Cik` | String | The company's Central Index Key (CIK), a unique identifier assigned by the U.S. Securities and Exchange Commission (SEC). You can look up a company’s CIK using the SEC CIK Lookup tool (https://www.sec.gov/search-filings/cik-lookup). |

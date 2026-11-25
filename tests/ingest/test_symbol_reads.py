@@ -25,6 +25,7 @@ from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, S
 from deephaven_massive._datasets.history_source import history_window
 from deephaven_massive._datasets.request import Request, ValueTable
 from deephaven_massive._enums import AssetClass
+from deephaven_massive._error_policy import resolve_policy
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     CutShortError,
@@ -38,6 +39,7 @@ from deephaven_massive._errors import (
 from deephaven_massive._ingest import rate_limits
 from deephaven_massive._ingest.symbol_reads import (
     UnsupportedParameterError,
+    asked_column,
     split_by_symbol,
     symbol_outcomes,
 )
@@ -45,13 +47,14 @@ from deephaven_massive._massive import Transport
 from deephaven_massive._tables import problem_reporter
 from deephaven_massive._tables.columns import dataset_table
 from deephaven_massive._tables.execution_context import entered
+from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive.namespaces import _futures as futures
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator, Mapping, Sequence
 
     from deephaven.table import Table
 
@@ -104,13 +107,15 @@ CRYPTO_LAST = DatasetSpec(
     serves_current_data=True,
     keys={(R, CRYPTO_LAST_PATH): SourceKeys(symbol=KeySpec("from", from_request=True))},
 )
-NEWS_PATH = "/v2/reference/news"
-# A list whose rows name no symbol and whose path takes none: no request names a symbol.
-NEWS = DatasetSpec(
+PREV_PATH = "/v2/aggs/ticker/{stocksTicker}/prev"
+# A request for one symbol by its own path whose rows echo the ticker: Symbol comes from the row.
+PREV = DatasetSpec(
     summary="A dataset for the tests.",
-    name="reference.news",
-    fetch_path=NEWS_PATH,
-    keys={(R, NEWS_PATH): SourceKeys()},
+    name="stocks.previous_day_bar",
+    asset_class=AssetClass.STOCKS,
+    fetch_path=PREV_PATH,
+    per_symbol=True,
+    keys={(R, PREV_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
 )
 TRADES_PATH = "/v3/trades/{stockTicker}"
 TRADES = DatasetSpec(
@@ -125,7 +130,41 @@ TRADES = DatasetSpec(
         )
     },
 )
-SPECS = (DIVIDENDS, LISTED, CRYPTO_LAST, NEWS, TRADES)
+RELATED_PATH = "/v1/related-companies/{ticker}"
+# A request for one symbol by its own path, whose rows name the related company, not the
+# company asked about.
+RELATED = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="reference.related_companies",
+    asset_class=AssetClass.STOCKS,
+    fetch_path=RELATED_PATH,
+    keys={
+        (R, RELATED_PATH): SourceKeys(
+            symbol=KeySpec("Ticker"), fanout=KeySpec("ticker", from_request=True)
+        )
+    },
+)
+RATINGS_PATH = "/benzinga/v1/ratings"
+# A list parameter whose rows may name no ticker: such a row keeps a null Symbol.
+RATINGS = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="partners.benzinga.ratings",
+    fetch_path=RATINGS_PATH,
+    symbol_param="ticker.any_of",
+    keys={(R, RATINGS_PATH): SourceKeys(symbol=KeySpec("Ticker", required=False))},
+    poll_keys=("BenzingaId",),
+)
+INDEX_PATH = "/v3/snapshot/indices"
+# A list parameter on indices, which Massive may write bare (`NDX`) and the table names `I:NDX`.
+INDEX = DatasetSpec(
+    summary="A dataset for the tests.",
+    name="indices.snapshots",
+    asset_class=AssetClass.INDICES,
+    fetch_path=INDEX_PATH,
+    symbol_param="ticker.any_of",
+    keys={(R, INDEX_PATH): SourceKeys(symbol=KeySpec("Ticker"))},
+)
+SPECS = (DIVIDENDS, LISTED, CRYPTO_LAST, PREV, TRADES, RELATED, RATINGS, INDEX)
 
 TICKERS_PATH = "/v3/reference/tickers"
 MONDAY = date(2025, 3, 3)
@@ -167,11 +206,68 @@ def _trade(nanos: int) -> dict[str, object]:
 
 
 def _fetch(
-    m: dm.MassiveSession, spec: DatasetSpec, symbols: list[str], *, adjusted: bool | None = None
+    m: dm.MassiveSession,
+    spec: DatasetSpec,
+    symbols: list[str],
+    *,
+    adjusted: bool | None = None,
+    unrequested: dm.OnError | None = None,
 ) -> Mapping[str, SymbolOutcome]:
     rest = m._core.rest_transport()
-    asked = Request(adjusted=adjusted, on_error=m._core.policy)
+    policy = resolve_policy(
+        dm.ErrorPolicy(unrequested_symbols=unrequested), m._core.config.on_error
+    )
+    asked = Request(adjusted=adjusted, on_error=policy)
     return rest.fetch_by_symbol(spec, asked, symbols=symbols, call=7)
+
+
+def _problems(m: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> list[ProblemEvent]:
+    # The problems the session's reads report, in order; they still reach its reporter, which
+    # logs the alarm, and m.problems().
+    events: list[ProblemEvent] = []
+    report = m._core.problems
+
+    def recorded(found: Sequence[ProblemEvent]) -> None:
+        events.extend(found)
+        report(found)
+
+    monkeypatch.setattr(m._core, "problems", recorded)
+    return events
+
+
+def _unrequested(
+    symbol: str | None,
+    rows: int,
+    *,
+    asked: str,
+    setting: dm.OnError = dm.OnError.LOG,
+    spec: DatasetSpec = DIVIDENDS,
+    where: str = "REST GET /stocks/v1/dividends",
+    field: str = "Symbol",
+    detail: str | None = None,
+) -> ProblemEvent:
+    # The event of a request's rows of a symbol it did not ask for, with `at` zeroed.
+    named = "no symbol" if symbol is None else symbol
+    return ProblemEvent(
+        cause=ProblemCause.UNREQUESTED_SYMBOLS,
+        action=ProblemAction.WITHHELD,
+        dataset=spec.name,
+        stream_id=7,
+        where=where,
+        symbol=symbol,
+        field=field,
+        rows=rows,
+        detail=f"Massive answered the request for {asked} with rows of {named}, which the "
+        "read did not ask for, so they are left out"
+        if detail is None
+        else detail,
+        at=0,
+        policy=setting,
+    )
+
+
+def _zeroed(events: Sequence[ProblemEvent]) -> list[ProblemEvent]:
+    return [dataclasses.replace(e, at=0) for e in events]
 
 
 def _history(
@@ -229,8 +325,13 @@ def test_a_failure_is_retryable_only_when_its_cause_may_pass(
 
 
 def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events = _problems(session, monkeypatch)
     # Two symbols a request: AAPL and MSFT share the first, NVDA and TSLA the second.
     first = [_dividend("AAPL", 0.25), _dividend("MSFT", 0.83), _dividend("IBM", 1.67)]
     refusal = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
@@ -246,15 +347,16 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
     assert nvda.error is tsla.error
     assert isinstance(nvda.error, EntitlementError)
     assert not nvda.error.is_retryable
-    # The row of a symbol no one asked for belongs to no symbol's read.
-    unowned = [r for r in caplog.records if "none of those symbols" in r.getMessage()]
-    assert [(r.levelno, r.getMessage()) for r in unowned] == [
+    # The row of a symbol no one asked for belongs to no symbol's read: it is the read's
+    # problem, alarmed once.
+    assert _zeroed(events) == [_unrequested("IBM", 1, asked="AAPL and MSFT")]
+    assert alarms(caplog) == [
         (
-            logging.WARNING,
-            (
-                "stocks.dividends: 1 row of the 3 Massive returned for AAPL and MSFT names none "
-                "of those symbols, so no symbol's read owns it and it is left out."
-            ),
+            "stocks.dividends table 7: unrequested_symbols: 1 row of IBM, Massive answered the "
+            "request for AAPL and MSFT with rows of IBM, which the read did not ask for, so "
+            "they are left out (at REST GET /stocks/v1/dividends). m.problems() lists it and "
+            "every later unrequested_symbols problem of this table, which the log shows at "
+            "DEBUG only."
         )
     ]
     # The shared failure is logged once, at DEBUG: it is expected, and the caller reports it.
@@ -267,25 +369,251 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
     )
 
 
-def test_a_batch_whose_rows_all_belong_to_its_symbols_warns_nothing(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_a_batch_whose_rows_all_belong_to_its_symbols_reports_no_problem(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events = _problems(session, monkeypatch)
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([_dividend("MSFT", 0.83)])))
-    with caplog.at_level(logging.DEBUG, LOGGER):
+    with caplog.at_level(logging.DEBUG):
         out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"])
     assert [len(_rows(outcome)) for outcome in out.values()] == [0, 1]
-    assert "none of those symbols" not in caplog.text
+    assert events == []
+    assert alarms(caplog) == []
 
 
-def test_an_unowned_row_warns_once_per_dataset_and_path(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+def test_an_unrequested_row_alarms_once_per_table(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events = _problems(session, monkeypatch)
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([_dividend("IBM", 1.67)])))
-    with caplog.at_level(logging.DEBUG, LOGGER):
+    with caplog.at_level(logging.DEBUG):
         for _ in range(2):
             assert _rows(_fetch(session, DIVIDENDS, ["AAPL", "MSFT"])["AAPL"]) == []
-    unowned = [r.levelno for r in caplog.records if "none of those symbols" in r.getMessage()]
-    assert unowned == [logging.WARNING, logging.DEBUG]
+    assert [e.symbol for e in events] == ["IBM", "IBM"]
+    assert len(alarms(caplog)) == 1
+
+
+def test_a_row_of_another_symbol_is_no_row_of_the_read_s_symbols(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The read's one row of AAPL is withheld, and the IBM row beside it is nobody's: the read
+    # could read none of its own rows whole, so AAPL fails as it would with the IBM row absent.
+    events = _problems(session, monkeypatch)
+    rows = [{**_dividend("AAPL", 0.25), "cash_amount": "a lot"}, _dividend("IBM", 1.67)]
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(rows)))
+    out = _fetch(session, DIVIDENDS, ["AAPL"])
+    failed = _failure(out["AAPL"])
+    assert isinstance(failed.error, RowDataError)
+    assert str(failed.error) == (
+        "stocks.dividends: the library could not read the 1 row of the read's symbols and window "
+        "from GET /stocks/v1/dividends whole, so it withheld it. /stocks/v1/dividends: row 0: "
+        "CashAmount (wire key 'cash_amount') expects double, got \"a lot\". m.problems() counts "
+        "the withheld rows by cause and symbol."
+    )
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "AAPL", 1),
+        (ProblemCause.UNREQUESTED_SYMBOLS, "IBM", 1),
+    ]
+
+
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_a_request_that_lists_one_symbol_keeps_only_its_rows(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
+) -> None:
+    # A list of one symbol follows the rule of a list of several: a row of another symbol is
+    # left out and is the read's problem. Under RAISE the request's symbol fails instead.
+    events = _problems(session, monkeypatch)
+    rows = [_dividend("AAPL", 0.25), _dividend("IBM", 1.67), _dividend("IBM", 1.68)]
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(rows)))
+    with caplog.at_level(logging.DEBUG):
+        out = _fetch(session, DIVIDENDS, ["AAPL"], unrequested=setting)
+    assert [query["ticker.any_of"] for _, query in fake_rest.get_queries()] == [["AAPL"]]
+    assert _zeroed(events) == [_unrequested("IBM", 2, asked="AAPL", setting=setting)]
+    assert len(alarms(caplog)) == (1 if setting is dm.OnError.LOG else 0)
+    if setting is dm.OnError.RAISE:
+        failed = _failure(out["AAPL"])
+        assert isinstance(failed.error, RowDataError)
+        assert not failed.error.is_retryable
+        assert str(failed.error) == (
+            "stocks.dividends: Massive answered the request for AAPL with 2 rows of IBM, "
+            "which the read did not ask for, so the library left them out. To go on without "
+            "such rows, pass on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) to the "
+            "call or to dm.MassiveConfig."
+        )
+    else:
+        assert [(r["Symbol"], r["CashAmount"]) for r in _rows(out["AAPL"])] == [("AAPL", 0.25)]
+
+
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.RAISE])
+def test_a_row_left_out_is_named_as_massive_sent_it(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
+) -> None:
+    # Massive writes the index bare, `NDX`, and the table would name it `I:NDX`: the problem
+    # names the row as Massive sent it, and its detail and the failure give the table's
+    # spelling. The symbol's own table has the dataset's columns and nothing else.
+    events = _problems(session, monkeypatch)
+    page = [{"ticker": "I:SPX", "value": 1.0}, {"ticker": "NDX", "value": 2.0}]
+    fake_rest.reply(INDEX_PATH, Reply(envelope(page)))
+    out = _fetch(session, INDEX, ["I:SPX"], unrequested=setting)
+    assert _zeroed(events) == [
+        _unrequested(
+            "NDX",
+            1,
+            asked="I:SPX",
+            setting=setting,
+            spec=INDEX,
+            where=f"REST GET {INDEX_PATH}",
+            detail=(
+                "Massive answered the request for I:SPX with rows of NDX, which the read did "
+                "not ask for, so they are left out. The table spells NDX as I:NDX."
+            ),
+        )
+    ]
+    if setting is dm.OnError.RAISE:
+        failed = _failure(out["I:SPX"])
+        assert isinstance(failed.error, RowDataError)
+        assert str(failed.error) == (
+            "indices.snapshots: Massive answered the request for I:SPX with 1 row of NDX, "
+            "which the read did not ask for, so the library left it out. The table spells NDX "
+            "as I:NDX. To go on without such rows, pass on_error=dm.ErrorPolicy("
+            "unrequested_symbols=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+        )
+    else:
+        rows = _rows(out["I:SPX"])
+        assert [(r["Symbol"], r["Value"]) for r in rows] == [("I:SPX", 1.0)]
+        assert list(rows[0]) == session._core.dataset_schema(INDEX).arrow_schema().names
+
+
+@pytest.mark.parametrize(
+    ("spec", "template", "expected"),
+    [
+        (RELATED, RELATED_PATH, "Underlying"),
+        (DIVIDENDS, DIVIDENDS_PATH, "Symbol"),
+        (TRADES, TRADES_PATH, "Symbol"),
+        (PREV, PREV_PATH, "Symbol"),
+    ],
+)
+def test_the_asked_column_is_the_fan_out_key_filled_from_the_request_else_symbol(
+    spec: DatasetSpec, template: str, expected: str
+) -> None:
+    assert asked_column(spec, template) == expected
+
+
+def test_a_path_that_fills_its_fan_out_key_from_the_request_is_attributed_by_it(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The related companies of AAPL name the related company in Symbol; the asked symbol is
+    # Underlying, filled from the request, so every row is AAPL's and none is unrequested.
+    events = _problems(session, monkeypatch)
+    related = [{"ticker": "MSFT"}, {"ticker": "GOOG"}]
+    fake_rest.reply("/v1/related-companies/AAPL", Reply(envelope(related)))
+    with caplog.at_level(logging.DEBUG):
+        out = _fetch(session, RELATED, ["AAPL"], unrequested=dm.OnError.RAISE)
+    assert [(r["Underlying"], r["Symbol"]) for r in _rows(out["AAPL"])] == [
+        ("AAPL", "MSFT"),
+        ("AAPL", "GOOG"),
+    ]
+    assert events == []
+    assert alarms(caplog) == []
+
+
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_a_request_by_a_symbol_s_own_path_keeps_only_the_rows_that_name_it(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
+) -> None:
+    # A request for one symbol by its own path follows the rule of a request that lists
+    # several: a row whose echoed ticker names another symbol is left out and is the read's
+    # problem, and under RAISE the request's symbol fails.
+    events = _problems(session, monkeypatch)
+    rows = [{"T": "AAPL", "c": 1.0}, {"T": "MSFT", "c": 2.0}]
+    fake_rest.reply("/v2/aggs/ticker/AAPL/prev", Reply(envelope(rows)))
+    with caplog.at_level(logging.DEBUG):
+        out = _fetch(session, PREV, ["AAPL"], unrequested=setting)
+    assert [path for path, _ in fake_rest.get_queries()] == ["/v2/aggs/ticker/AAPL/prev"]
+    assert _zeroed(events) == [
+        _unrequested(
+            "MSFT",
+            1,
+            asked="AAPL",
+            setting=setting,
+            spec=PREV,
+            where="REST GET /v2/aggs/ticker/{stocksTicker}/prev",
+        )
+    ]
+    assert len(alarms(caplog)) == (1 if setting is dm.OnError.LOG else 0)
+    if setting is dm.OnError.RAISE:
+        failed = _failure(out["AAPL"])
+        assert isinstance(failed.error, RowDataError)
+        assert str(failed.error) == (
+            "stocks.previous_day_bar: Massive answered the request for AAPL with 1 row of "
+            "MSFT, which the read did not ask for, so the library left it out. To go on without "
+            "such rows, pass on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) to the "
+            "call or to dm.MassiveConfig."
+        )
+    else:
+        assert [(r["Symbol"], r["Close"]) for r in _rows(out["AAPL"])] == [("AAPL", 1.0)]
+
+
+def test_a_listed_request_s_row_naming_no_symbol_belongs_to_none(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A dataset with an optional ticker keeps a null Symbol on a row without one; such a row of
+    # a list request names no symbol of the list, at any length of the list.
+    events = _problems(session, monkeypatch)
+    rows = [{"ticker": "AAPL", "rating": "Buy"}, {"rating": "Hold"}]
+    fake_rest.reply(RATINGS_PATH, Reply(envelope(rows)))
+    with caplog.at_level(logging.DEBUG):
+        out = _fetch(session, RATINGS, ["AAPL"])
+    assert [r["Symbol"] for r in _rows(out["AAPL"])] == ["AAPL"]
+    assert [(e.symbol, e.rows, e.detail) for e in events] == [
+        (
+            None,
+            1,
+            (
+                "Massive answered the request for AAPL with rows of no symbol, which the "
+                "read did not ask for, so they are left out"
+            ),
+        )
+    ]
+    assert alarms(caplog) == [
+        (
+            "partners.benzinga.ratings table 7: unrequested_symbols: 1 row, Massive answered the "
+            "request for AAPL with rows of no symbol, which the read did not ask for, so "
+            "they are left out (at REST GET /benzinga/v1/ratings). m.problems() lists it and "
+            "every later unrequested_symbols problem of this table, which the log shows at "
+            "DEBUG only."
+        )
+    ]
 
 
 def test_a_row_listing_two_named_tickers_goes_to_each(
@@ -309,18 +637,41 @@ def test_a_row_listing_two_named_tickers_goes_to_each(
     assert [r["BenzingaId"] for r in _rows(out["MSFT"])] == [1, 2]
 
 
+def _unlisted(
+    rows: int, *, asked: str, only: str, setting: dm.OnError = dm.OnError.LOG
+) -> ProblemEvent:
+    # The event of a ticker-list request's rows that list no ticker it asked for.
+    return _unrequested(
+        None,
+        rows,
+        asked=asked,
+        setting=setting,
+        spec=LISTED,
+        where="REST GET /benzinga/v2/news",
+        field="Tickers",
+        detail=f"Massive answered the request for {asked} with rows whose Tickers lists no "
+        f"ticker asked for{only} so they are left out",
+    )
+
+
 def test_a_row_listing_none_of_the_named_tickers_belongs_to_no_symbol(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The row is about none of the request's symbols, so it is left out, as a row outside the
-    # window is, and the listing step logs its WARNING.
+    # The row is about none of the request's symbols, so it is left out and is the read's
+    # problem, alarmed once; a row listing nothing counts too.
+    events = _problems(session, monkeypatch)
     fake_rest.reply(
         BENZINGA_NEWS_PATH,
         Reply(
             envelope(
                 [
                     {"benzinga_id": 1, "tickers": ["MSFT"]},
-                    {"benzinga_id": 2, "tickers": ["IBM"]},
+                    {"benzinga_id": 2, "tickers": ["IBM", "TSLA"]},
+                    {"benzinga_id": 3, "tickers": []},
                 ]
             )
         ),
@@ -329,31 +680,49 @@ def test_a_row_listing_none_of_the_named_tickers_belongs_to_no_symbol(
         out = _fetch(session, LISTED, ["MSFT", "AAPL"])
     assert _rows(out["AAPL"]) == []
     assert [(r["BenzingaId"], r["Symbol"]) for r in _rows(out["MSFT"])] == [(1, "MSFT")]
-    listing = [r for r in caplog.records if "lists none of the requested" in r.getMessage()]
-    assert [(r.levelno, r.getMessage()) for r in listing] == [
+    assert _zeroed(events) == [_unlisted(2, asked="AAPL and MSFT", only=", only IBM and TSLA,")]
+    assert alarms(caplog) == [
         (
-            logging.WARNING,
-            (
-                "partners.benzinga.news: Massive sent 1 row from /benzinga/v2/news whose Tickers "
-                "lists none of the requested tickers AAPL and MSFT, so it is left out."
-            ),
+            "partners.benzinga.news table 7: unrequested_symbols: 2 rows, Massive answered the "
+            "request for AAPL and MSFT with rows whose Tickers lists no ticker asked for, only "
+            "IBM and TSLA, so they are left out (at REST GET /benzinga/v2/news). m.problems() "
+            "lists it and every later unrequested_symbols problem of this table, which the log "
+            "shows at DEBUG only."
         )
     ]
 
 
-def test_rows_of_a_request_that_names_no_symbol_belong_to_none(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_a_request_that_names_one_ticker_keeps_only_the_rows_that_list_it(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
 ) -> None:
-    fake_rest.reply(NEWS_PATH, Reply(envelope([{"id": "n1", "title": "news"}])))
-    with caplog.at_level(logging.WARNING, LOGGER):
-        out = _fetch(session, NEWS, ["AAPL"])
-    assert _rows(out["AAPL"]) == []
-    assert caplog.messages == [
-        (
-            "reference.news: 1 row of the 1 Massive returned for no symbol names none of those "
-            "symbols, so no symbol's read owns it and it is left out."
+    # One named ticker follows the rule of several: a row listing none of them is left out and
+    # is the read's problem, and under RAISE the request's ticker fails.
+    events = _problems(session, monkeypatch)
+    articles = [{"benzinga_id": 1, "tickers": ["TSLA"]}, {"benzinga_id": 2, "tickers": ["AAPL"]}]
+    fake_rest.reply(BENZINGA_NEWS_PATH, Reply(envelope(articles)))
+    with caplog.at_level(logging.DEBUG):
+        out = _fetch(session, LISTED, ["AAPL"], unrequested=setting)
+    assert [query["tickers.any_of"] for _, query in fake_rest.get_queries()] == [["AAPL"]]
+    assert _zeroed(events) == [_unlisted(1, asked="AAPL", only=", only TSLA,", setting=setting)]
+    assert len(alarms(caplog)) == (1 if setting is dm.OnError.LOG else 0)
+    if setting is dm.OnError.RAISE:
+        failed = _failure(out["AAPL"])
+        assert isinstance(failed.error, RowDataError)
+        assert not failed.error.is_retryable
+        assert str(failed.error) == (
+            "partners.benzinga.news: Massive answered the request for AAPL with 1 row whose "
+            "Tickers lists no ticker asked for, only TSLA, so the library left it out. To go on "
+            "without such rows, pass on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) "
+            "to the call or to dm.MassiveConfig."
         )
-    ]
+    else:
+        assert [(r["BenzingaId"], r["Symbol"]) for r in _rows(out["AAPL"])] == [(2, "AAPL")]
 
 
 @pytest.mark.parametrize("setting", list(dm.OnError))
@@ -575,38 +944,78 @@ def _flat_window() -> HistoryWindow:
     return history_window(FLAT_TRADES, asked, start=MONDAY, end=MONDAY, now=MIDNIGHT + timedelta(7))
 
 
-def test_a_split_by_symbol_warns_about_rows_no_symbol_owns(
-    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+def _split(
+    m: dm.MassiveSession, table: Table, symbols: list[str], *, setting: dm.OnError
+) -> dict[str, Table]:
+    return split_by_symbol(
+        m._core,
+        FLAT_TRADES,
+        table,
+        symbols=symbols,
+        source="flat files",
+        policy=setting,
+        call=7,
+    )
+
+
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_a_split_by_symbol_reports_rows_no_symbol_owns(
+    *,
+    massive_session: dm.MassiveSession,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
 ) -> None:
+    # A row of another symbol, or of none, is left out as the read's problem, one event per
+    # symbol such rows name; under RAISE the read fails, which is every symbol's failure.
+    events = _problems(massive_session, monkeypatch)
     table = _flat_rows(massive_session, ["AAPL", "MSFT", "AAPL", "IBM", None])
-    with caplog.at_level(logging.WARNING, LOGGER):
-        out = split_by_symbol(
-            massive_session._core,
-            FLAT_TRADES,
-            table,
-            symbols=["NVDA", "AAPL", "MSFT"],
-            source="flat files",
+    asked = ["NVDA", "AAPL", "MSFT"]
+    expected = [
+        _unrequested(
+            symbol,
+            1,
+            asked="NVDA, AAPL, and MSFT",
+            setting=setting,
+            spec=FLAT_TRADES,
+            where="flat files",
+            detail=f"The read of flat files for NVDA, AAPL, and MSFT returned rows of "
+            f"{'no symbol' if symbol is None else symbol}, which the read did not ask for, so "
+            "they are left out",
         )
-    assert list(out) == ["NVDA", "AAPL", "MSFT"]
-    assert [part.size for part in out.values()] == [0, 2, 1]
-    assert caplog.messages == [
-        (
-            "stocks.trades: 2 rows of the 5 read from flat files for NVDA, AAPL, and MSFT name "
-            "none of those symbols, or no symbol, so no symbol's read owns them and they are "
-            "left out."
-        )
+        for symbol in ("IBM", None)
     ]
+    with caplog.at_level(logging.DEBUG):
+        if setting is dm.OnError.RAISE:
+            with pytest.raises(RowDataError) as raised:
+                _split(massive_session, table, asked, setting=setting)
+            assert str(raised.value) == (
+                "stocks.trades: the read of flat files for NVDA, AAPL, and MSFT returned 2 rows "
+                "of IBM and no symbol, which the read did not ask for, so the library left "
+                "them out. To go on without such rows, pass "
+                "on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) to the call or to "
+                "dm.MassiveConfig."
+            )
+        else:
+            out = _split(massive_session, table, asked, setting=setting)
+            assert list(out) == asked
+            assert [part.size for part in out.values()] == [0, 2, 1]
+    assert _zeroed(events) == expected
+    assert len(alarms(caplog)) == (1 if setting is dm.OnError.LOG else 0)
 
 
-def test_a_split_that_keeps_every_row_warns_nothing(
-    massive_session: dm.MassiveSession, caplog: pytest.LogCaptureFixture
+def test_a_split_that_keeps_every_row_reports_nothing(
+    *,
+    massive_session: dm.MassiveSession,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events = _problems(massive_session, monkeypatch)
     table = _flat_rows(massive_session, ["AAPL"])
-    with caplog.at_level(logging.WARNING, LOGGER):
-        split_by_symbol(
-            massive_session._core, FLAT_TRADES, table, symbols=["AAPL"], source="flat files"
-        )
-    assert caplog.messages == []
+    with caplog.at_level(logging.DEBUG):
+        _split(massive_session, table, ["AAPL"], setting=dm.OnError.RAISE)
+    assert events == []
+    assert alarms(caplog) == []
 
 
 def test_a_table_without_the_dataset_s_columns_is_a_library_defect(

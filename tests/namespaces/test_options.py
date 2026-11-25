@@ -1646,6 +1646,47 @@ def test_open_interest_by_underlying_sends_each_index_bare_and_names_it_canonica
     assert "OptionRoot" not in out[0]
 
 
+def test_a_watchlist_of_one_index_by_its_bare_ticker_gets_no_rows_and_a_problem(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_input_table: Callable[..., InputTable],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Massive's row for SPX is the index's, which the library names I:SPX. A watchlist of SPX
+    # did not ask for I:SPX, so the row is left out as its problem, whatever the watchlist's
+    # size: the rule of a watchlist of several symbols. The problem names the row by the
+    # symbol as Massive sent it, and its detail gives the table's spelling.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    fake_rest.reply(BY_UNDERLYING, Reply({"status": "OK", "results": [by_underlying_row("SPX")]}))
+    serve_indices(fake_rest, "SPX")
+    fake_rest.reply(CONTRACTS_LIST, first_contract("OCEICS"))
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watchlist.add(new_table([string_col("Symbol", ["SPX"])]))
+    table = rest_session.options.open_interest_by_underlying(watchlist).fetch(wait=True)
+    try:
+        assert rows(table) == []
+    finally:
+        rest_session.release(table)
+    assert fake_rest.get_queries(one_value=True)[0] == (
+        BY_UNDERLYING,
+        {"underlying_ticker.any_of": "SPX", "limit": "50000"},
+    )
+    assert [(e.cause, e.symbol, e.field, e.rows, e.detail) for e in events] == [
+        (
+            ProblemCause.UNREQUESTED_SYMBOLS,
+            "SPX",
+            "Symbol",
+            1,
+            (
+                "Massive answered the request for SPX with rows of SPX, which the read did "
+                "not ask for, so they are left out. The table spells SPX as I:SPX."
+            ),
+        )
+    ]
+
+
 def test_open_interest_by_underlying_asks_the_contracts_list_once_per_ticker(
     *,
     rest_session: dm.MassiveSession,

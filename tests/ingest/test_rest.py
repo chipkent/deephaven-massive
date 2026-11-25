@@ -72,7 +72,7 @@ from deephaven_massive._tables import poll, problem_reporter
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.problem_events import ProblemCause, ProblemEvent
+from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import (
@@ -5338,6 +5338,29 @@ def _listed(*rows: tuple[int, list[str]]) -> Reply:
     return Reply(envelope([{"benzinga_id": i, "tickers": t} for i, t in rows]))
 
 
+def _unlisted(rows: int, *, asked: str, only: str) -> tuple[object, ...]:
+    # The event of a call's rows that list no ticker it asked for, without its time and call.
+    return (
+        ProblemCause.UNREQUESTED_SYMBOLS,
+        ProblemAction.WITHHELD,
+        "partners.benzinga.news",
+        "REST GET /benzinga/v2/news",
+        None,
+        "Tickers",
+        rows,
+        (
+            f"Massive answered the request for {asked} with rows whose Tickers lists no ticker "
+            f"asked for{only} so they are left out"
+        ),
+    )
+
+
+def _unlisted_events(events: Sequence[ProblemEvent]) -> list[tuple[object, ...]]:
+    return [
+        (e.cause, e.action, e.dataset, e.where, e.symbol, e.field, e.rows, e.detail) for e in events
+    ]
+
+
 def test_a_row_is_listed_under_each_named_ticker_it_lists(
     *,
     session: dm.MassiveSession,
@@ -5346,8 +5369,7 @@ def test_a_row_is_listed_under_each_named_ticker_it_lists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # One request names both tickers; a row listing both is each one's, in its list's order,
-    # and a row listing neither is left out, as a row outside the window is: no event, and one
-    # WARNING a session.
+    # and a row listing neither is left out as the call's problem, one event per call.
     page = _listed((1, ["MSFT", "AAPL"]), (2, ["AAPL"]), (3, ["TSLA"]))
     fake_rest.reply(LISTED_PATH, page, page)
     events: list[ProblemEvent] = []
@@ -5361,22 +5383,101 @@ def test_a_row_is_listed_under_each_named_ticker_it_lists(
                 (2, "AAPL"),
             ]
     assert [q["tickers.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]] * 2
-    assert [m for m in caplog.messages if "lists none" in m] == [
-        (
-            "partners.benzinga.news: Massive sent 1 row from /benzinga/v2/news whose Tickers "
-            "lists none of the requested tickers AAPL and MSFT, so it is left out."
-        )
+    assert caplog.messages == []
+    expected = _unlisted(1, asked="AAPL and MSFT", only=", only TSLA,")
+    assert _unlisted_events(events) == [expected, expected]
+
+
+def test_one_named_ticker_keeps_only_the_rows_that_list_it_and_none_leaves_symbol_null(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One named ticker follows the rule of several: a row listing another ticker is left out.
+    page = _listed((4, ["TSLA"]), (5, ["AAPL", "TSLA"]))
+    fake_rest.reply(LISTED_PATH, page, page)
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    assert [(r["BenzingaId"], r["Symbol"]) for r in fetch(session, LISTED, symbols=["AAPL"])] == [
+        (5, "AAPL")
     ]
-    assert events == []
+    assert _unlisted_events(events) == [_unlisted(1, asked="AAPL", only=", only TSLA,")]
+    assert [r["Symbol"] for r in fetch(session, LISTED)] == [None, None]
+    assert len(events) == 1
 
 
-def test_one_named_ticker_is_every_row_s_and_none_leaves_symbol_null(
+def _two_pages(fake_rest: FakeRestServer, second: Reply) -> None:
+    # Two pages of articles, the first leaving out one row listing only TSLA.
+    articles = [{"benzinga_id": 1, "tickers": ["TSLA"]}, {"benzinga_id": 2, "tickers": ["AAPL"]}]
+    fake_rest.reply(
+        LISTED_PATH,
+        Reply(envelope(articles, next_url=f"{fake_rest.url}{LISTED_PATH}?cursor=2")),
+        second,
+    )
+
+
+def test_each_page_s_rows_listing_no_named_ticker_are_its_own_event(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each page reports the rows it leaves out as it is read, as it reports its withheld rows.
+    _two_pages(fake_rest, _listed((3, []), (4, ["IBM", "TSLA"])))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    out = fetch(session, LISTED, symbols=["AAPL"])
+    assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [(2, "AAPL")]
+    assert _unlisted_events(events) == [
+        _unlisted(1, asked="AAPL", only=", only TSLA,"),
+        _unlisted(2, asked="AAPL", only=", only IBM and TSLA,"),
+    ]
+
+
+def test_a_page_s_rows_left_out_are_reported_before_a_later_page_fails(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _two_pages(fake_rest, Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    with pytest.raises(dm.EntitlementError):
+        fetch(session, LISTED, symbols=["AAPL"])
+    assert _unlisted_events(events) == [_unlisted(1, asked="AAPL", only=", only TSLA,")]
+
+
+def test_rows_listing_no_named_ticker_fail_the_call_under_raise_on_their_page(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The first page leaves out a row, so the call fails there: the second page is never asked.
+    _two_pages(fake_rest, _listed((3, []), (4, ["IBM", "TSLA"])))
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(session._core, "problems", events.extend)
+    with pytest.raises(RowDataError) as raised:
+        fetch(
+            session,
+            LISTED,
+            symbols=["AAPL"],
+            on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.RAISE),
+        )
+    assert str(raised.value) == (
+        "partners.benzinga.news: Massive answered the request for AAPL with 1 row whose "
+        "Tickers lists no ticker asked for, only TSLA, so the library left it out. To go on "
+        "without such rows, pass on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) "
+        "to the call or to dm.MassiveConfig."
+    )
+    assert _unlisted_events(events) == [_unlisted(1, asked="AAPL", only=", only TSLA,")]
+    assert [e.policy for e in events] == [dm.OnError.RAISE]
+    assert len(fake_rest.get_queries()) == 1
+
+
+def test_a_static_read_keeps_every_row_and_only_the_dataset_s_columns(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    page = _listed((4, ["TSLA"]))
-    fake_rest.reply(LISTED_PATH, page, page)
-    assert [r["Symbol"] for r in fetch(session, LISTED, symbols=["AAPL"])] == ["AAPL"]
-    assert [r["Symbol"] for r in fetch(session, LISTED)] == [None]
+    # A read that is not by symbol publishes a row of another symbol too, and the symbol as
+    # Massive sent it, carried on the rows for a read by symbol, is no column of the table.
+    page = [{"ticker": "I:SPX", "value": 1.0}, {"ticker": "NDX", "value": 2.0}]
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope(page)))
+    q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    assert isinstance(q, FetchQuery)
+    table = q.fetch(wait=True)
+    assert [(r["Symbol"], r["Value"]) for r in rows(table)] == [("I:SPX", 1.0), ("I:NDX", 2.0)]
+    names = session._core.dataset_schema(INDEX_SNAPSHOTS).arrow_schema().names
+    assert dh_arrow.to_arrow(table).column_names == names
 
 
 def test_limit_counts_the_rows_massive_sent_not_those_kept(
@@ -5741,7 +5842,8 @@ def test_a_marked_row_whose_readable_list_names_none_of_the_tickers_is_left_out(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Its list was read and names none of the request's tickers, so whatever else is wrong with
-    # it, it is no row of the request: left out, with no event and no failure.
+    # it, it is no row of the request: left out as the call's unrequested row, and its bad
+    # value is never a problem of its own.
     page = Reply(
         envelope(
             [{"benzinga_id": 1, "tickers": ["MSFT"]}, {"benzinga_id": "x", "tickers": ["TSLA"]}]
@@ -5752,4 +5854,4 @@ def test_a_marked_row_whose_readable_list_names_none_of_the_tickers_is_left_out(
     monkeypatch.setattr(session._core, "problems", events.extend)
     out = fetch(session, LISTED, symbols=["AAPL", "MSFT"])
     assert [(r["BenzingaId"], r["Symbol"]) for r in out] == [(1, "MSFT")]
-    assert events == []
+    assert _unlisted_events(events) == [_unlisted(1, asked="AAPL and MSFT", only=", only TSLA,")]

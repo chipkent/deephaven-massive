@@ -540,8 +540,10 @@ def read_history_by_symbol(
     """Read `history()` from the flat files for each symbol, each with its own outcome.
 
     The files are scanned once for every symbol, by the rules of `read_history`, and their rows
-    split by `Symbol` (`symbol_reads.split_by_symbol`). A failure of the scan (an absent or
-    unpublished file where REST may not serve it, a refusal, a failed read) is every symbol's.
+    split by `Symbol` (`symbol_reads.split_by_symbol`), a row of another symbol left out as an
+    `unrequested_symbols` problem. A failure of the scan (an absent or unpublished file where
+    REST may not serve it, a refusal, a failed read, such a row under `RAISE`) is every
+    symbol's.
     The days the files lack are read from REST for each symbol (`RestTransport.
     history_by_symbol`, over day windows built for the call's instant), so a symbol fails
     alone when its own REST read fails, and a symbol that failed is not read for later days.
@@ -594,8 +596,26 @@ def read_history_by_symbol(
             problem=problem,
             forced=forced,
         )
+        tables: dict[str, Table] = {}
         if read is not None:
             _check_published(spec, read, problem=problem, forced=forced)
+            lacks = _files_lack_note(spec, read)
+            if lacks is not None:
+                logger.debug("call %d %s history by symbol: %s", call, spec.name, lacks)
+            with entered(core.exec_ctx):
+                files_rows = merge([read.empty, *(part for _, part in read.parts)])
+            # A followed table's description is fixed before its reads, so each symbol's
+            # transport in `m.symbol_reads()` names the venues the read skipped.
+            flat = refused_source(flat, read.refused)
+            tables = split_by_symbol(
+                core,
+                spec,
+                files_rows,
+                symbols=ordered,
+                source=flat,
+                policy=asked.on_error.unrequested_symbols,
+                call=call,
+            )
     except MassiveError as error:
         shared = dict.fromkeys(ordered, error)
         return symbol_outcomes(
@@ -607,15 +627,6 @@ def read_history_by_symbol(
             spec, asked, window, symbols=ordered, call=call, tally=tally, stop=stop
         )
         return tally.judge(spec.name, outcomes)
-    lacks = _files_lack_note(spec, read)
-    if lacks is not None:
-        logger.debug("call %d %s history by symbol: %s", call, spec.name, lacks)
-    with entered(core.exec_ctx):
-        files_rows = merge([read.empty, *(part for _, part in read.parts)])
-    # A followed table's description is fixed before its reads, so each symbol's transport in
-    # `m.symbol_reads()` names the venues the read skipped.
-    flat = refused_source(flat, read.refused)
-    tables = split_by_symbol(core, spec, files_rows, symbols=ordered, source=flat)
     if not read.unread:
         outcomes = symbol_outcomes(
             core, spec, symbols=ordered, tables=tables, failures={}, call=call, source=flat

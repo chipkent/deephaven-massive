@@ -50,6 +50,7 @@ __all__ = [
     "FAULT",
     "MARK_COLUMNS",
     "REASON",
+    "SYMBOL_SENT",
     "WITHHELD_LISTED",
     "Failure",
     "Withheld",
@@ -79,6 +80,14 @@ SENT: Final = "__sent"
 """The mark column of each row's symbol as Massive sent it, null when it has none."""
 MARK_COLUMNS: Final = (FAULT, FIELD, REASON, SENT)
 """The columns `with_marks` adds after a batch's own, which `withhold_rows` removes."""
+
+SYMBOL_SENT: Final = "__symbol_sent"
+"""The column a caller keeps each published row's `SENT` under, past `withhold_rows`.
+
+Appended to the rows before `withhold_rows`, which takes only the mark columns off, so that a
+step after it can still name a row by its symbol as Massive sent it. The REST reader carries it
+on the rows of a read by symbol (`rest.RestReader._page_rows`).
+"""
 
 _TEXT: Final = pa.string()
 

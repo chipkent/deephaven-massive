@@ -23,6 +23,7 @@ from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.history_source import history_window
 from deephaven_massive._datasets.request import Request
 from deephaven_massive._enums import Timespan
+from deephaven_massive._error_policy import resolve_policy
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._ingest.flatfiles import FlatFileHistory
 from deephaven_massive._ingest.history_reads import read_history, read_history_by_symbol
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
+    from deephaven_massive._tables.problem_events import ProblemEvent
 
 TRADES = _session.CATALOG.by_name["stocks.trades"]
 """A dataset REST serves too, one symbol at a time."""
@@ -395,8 +397,12 @@ def _by_symbol(
     forced: bool = False,
     end: date = TUESDAY,
     now: datetime | None = None,
+    unrequested: dm.OnError | None = None,
 ) -> dict[str, SymbolOutcome]:
-    request = Request(start=MONDAY, end=end)
+    policy = resolve_policy(
+        dm.ErrorPolicy(unrequested_symbols=unrequested), session._core.config.on_error
+    )
+    request = Request(start=MONDAY, end=end, on_error=policy)
     window = history_window(TRADES, request, start=MONDAY, end=end, now=now)
     return read_history_by_symbol(
         TRADES,
@@ -469,6 +475,40 @@ def test_files_that_serve_every_day_split_by_symbol(
     assert [_dates(o) for o in out.values()] == [["2025-03-03"], ["2025-03-03"]]
     assert rest.by_symbol == []
     assert "history by symbol: Session(s) 2025-03-03 may be incomplete" in caplog.text
+
+
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_a_file_row_of_a_symbol_the_read_did_not_ask_for_is_its_problem(
+    *,
+    massive_session: dm.MassiveSession,
+    rest: _Rest,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: dm.OnError,
+) -> None:
+    # The scan reads every symbol's rows at once, so a row of another symbol is left out as the
+    # read's problem; under RAISE the read fails, which is every symbol's failure.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(massive_session._core, "problems", events.extend)
+    monday = _rows(massive_session, ["AAPL", "IBM", "MSFT"], MONDAY)
+    files = FlatFileRead(((MONDAY, monday),), _rows(massive_session, [], MONDAY), (), ())
+    out = _by_symbol(massive_session, files, end=MONDAY, unrequested=setting)
+    assert [(e.symbol, e.rows, e.stream_id, e.where, e.policy) for e in events] == [
+        ("IBM", 1, 1, "flat files", setting)
+    ]
+    if setting is dm.OnError.RAISE:
+        errors = [o.error for o in out.values() if isinstance(o, SymbolFailure)]
+        assert len(errors) == 2
+        assert errors[0] is errors[1]
+        assert isinstance(errors[0], RowDataError)
+        assert str(errors[0]) == (
+            "stocks.trades: the read of flat files for MSFT and AAPL returned 1 row of IBM, "
+            "which the read did not ask for, so the library left it out. To go on without such "
+            "rows, pass on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) to the call "
+            "or to dm.MassiveConfig."
+        )
+    else:
+        assert [_dates(o) for o in out.values()] == [["2025-03-03"], ["2025-03-03"]]
+    assert rest.by_symbol == []
 
 
 def test_a_failed_scan_fails_every_symbol_with_one_error(

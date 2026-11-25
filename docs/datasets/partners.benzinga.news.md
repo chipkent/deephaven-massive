@@ -44,7 +44,7 @@ How recent the data is on each of Massive's plans, and how far back its history 
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A request that named one ticker gives it to every row. Null when the call named no ticker, and on a row that lists none of a request's named tickers. |
+| `Symbol` | String | The ticker the request named that the row lists in `Tickers`: a row that lists several of the named tickers appears once for each, so an article about AAPL and MSFT read for both is listed under each. A row that lists none of the named tickers is left out, as an `unrequested_symbols` problem. Null when the call named no ticker. |
 | `Timestamp` | Instant | The row's event time. From REST `published`: "The timestamp (formatted as an ISO 8601 timestamp) when the news article was originally published." |
 | `Author` | String | The name of the journalist or entity that authored the news article. |
 | `BenzingaId` | long | The identifier used by Benzinga for this record. |
