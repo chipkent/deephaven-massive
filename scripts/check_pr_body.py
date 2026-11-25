@@ -393,7 +393,7 @@ def _run(command: list[str]) -> str:
     return subprocess.run(command, check=True, capture_output=True, text=True).stdout  # noqa: S603 - fixed argv, no shell
 
 
-def _from_gh(number: int) -> tuple[str, list[str], str, list[str]]:
+def _from_pull_request(number: int) -> tuple[str, list[str], str, list[str]]:
     """Read a pull request's body, file list, diff, and its base's decision files.
 
     The body and the base come from gh. The diff and the file list come from git, as the
@@ -422,7 +422,7 @@ def _from_gh(number: int) -> tuple[str, list[str], str, list[str]]:
 
 
 def _fetch(ref: str) -> str:
-    """Fetch one ref from `origin` without changing any branch, and name its commit.
+    """Fetch one ref from `origin` without changing a local branch, and name its commit.
 
     Args:
         ref: The full ref on the remote, such as `refs/pull/613/head`.
@@ -555,7 +555,7 @@ def main(argv: list[str] | None = None) -> int:
     decisions: list[str] | None = None
     base = ""
     if args.pr is not None:
-        body, changed, diff, decisions = _from_gh(args.pr)
+        body, changed, diff, decisions = _from_pull_request(args.pr)
     elif args.body_file is not None:
         body, changed = args.body_file.read_text(), args.changed_file
         diff = args.diff_file.read_text() if args.diff_file else ""

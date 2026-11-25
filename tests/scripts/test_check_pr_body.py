@@ -454,7 +454,7 @@ def test_a_pull_request_s_diff_and_files_come_from_git_as_the_workflow_builds_th
     view = {"body": CLEAN, "baseRefName": "main"}
     outputs = {_VIEW: json.dumps(view), _LISTING: "0104-canonical-ticker-refused.md\nREADME.md\n"}
     monkeypatch.setattr(check, "_run", _gh_then_git(check, outputs))
-    body, changed, diff, decisions = check._from_gh(7)
+    body, changed, diff, decisions = check._from_pull_request(7)
     assert body == CLEAN
     assert changed == ["AGENTS.md"]
     assert "-- **Old rule.** Text.\n+- **New rule.** Text.\n" in diff
