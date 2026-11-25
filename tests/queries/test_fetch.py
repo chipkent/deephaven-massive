@@ -864,7 +864,11 @@ def test_a_one_time_read_lists_each_value_canonicalize_symbols_refused(
         ("noncanonical_symbols", "SKIPPED", "no pe!", None, "log", None),
         ("noncanonical_symbols", "SKIPPED", "bad one", "Symbol", "ignore", None),
     ]
-    assert all(r["Detail"].startswith("canonicalize_symbols refused it: ") for r in problem_rows())
+    # The converter's reason alone, without its fix: the row's Cause leads to the fix.
+    assert [r["Detail"] for r in problem_rows()] == [
+        "canonicalize_symbols refused it: 'no pe!' is not a Massive stock ticker.",
+        "canonicalize_symbols refused it: 'bad one' is not a Massive stock ticker.",
+    ]
 
 
 def test_a_followed_fetch_of_underlyings_names_their_column_in_field(

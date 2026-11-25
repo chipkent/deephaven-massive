@@ -326,6 +326,21 @@ def rule_deletions(diff: str) -> bool:
     return False
 
 
+def readable(path: str) -> str:
+    r"""Return a path as a message can print and write it in any locale.
+
+    Args:
+        path: A path as git lists it, decoded as `os.fsdecode` decodes it, so each byte the
+            encoding cannot read is a lone surrogate.
+
+    Returns:
+        The path's bytes read as UTF-8, each byte UTF-8 cannot read written as a `\xNN`
+        escape: `caf\xe9` for `café` written in Latin-1. A lone surrogate left in the message
+        would make writing it raise, to standard output or to `GITHUB_OUTPUT`.
+    """
+    return os.fsencode(path).decode("utf-8", "backslashreplace")
+
+
 def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
     """Return the problems of a pull request that edits AGENTS.md or a skill.
 
@@ -345,8 +360,9 @@ def check_rule_change(body: str, changed: list[str], diff: str) -> list[str]:
         return []
     problems = []
     if not is_answered_question(body):
+        shown = ", ".join(readable(path) for path in rule_files)
         problems.append(
-            f"The pull request changes a rule ({', '.join(rule_files)}) without the question "
+            f"The pull request changes a rule ({shown}) without the question "
             f"and the owner's dated answer that approve it (AGENTS.md, an approval is a "
             f"decision file or the owner's answer to a question)."
         )
@@ -598,7 +614,15 @@ def main(argv: list[str] | None = None) -> int:
         body, changed, diff, decisions = _from_pull_request(args.pr)
     elif args.body_file is not None:
         body, changed = args.body_file.read_text(), args.changed_file
-        diff = args.diff_file.read_text() if args.diff_file else ""
+        # Read as `_run` reads git's own diff, so a byte UTF-8 cannot read, such as one in a
+        # Latin-1 file the pull request changes, is checked like any other instead of raising.
+        diff = (
+            args.diff_file.read_text(
+                encoding=sys.getfilesystemencoding(), errors=sys.getfilesystemencodeerrors()
+            )
+            if args.diff_file
+            else ""
+        )
     elif BODY_FILE.exists():
         body, changed, diff, base = _from_branch()
     else:

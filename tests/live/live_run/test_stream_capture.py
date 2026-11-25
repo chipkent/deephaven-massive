@@ -373,7 +373,7 @@ def _chain_row(
         "Symbol": symbol,
         "ExpirationDate": expiry,
         "StrikePrice": strike,
-        "UnderlyingAssetPrice": price,
+        "UnderlyingPrice": price,
     }
 
 

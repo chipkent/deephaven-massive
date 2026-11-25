@@ -951,15 +951,16 @@ def test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent(
     table_rows: TableRows,
     evidence: Evidence,
 ) -> None:
-    """Whether `GreeksGamma` of the options snapshot is per $0.01 of the underlying, or per $1.
+    """Whether `Gamma` of the options snapshot is per $0.01 of the underlying, or per $1.
 
-    Massive's description, which the dataset page quotes, says per $0.01. Reads SPY's price
-    from its option chain (or its previous close, when the chain carries none), up to five
-    calls near the money that expire in 20 to 50 days, their snapshots, and the latest
-    3-month Treasury yield as the risk-free rate, with no dividend yield. For each call it
-    records `GreeksGamma`, the Black-Scholes gamma per $1 from the call's strike, its time to
-    expiry, and its `ImpliedVolatility` (`tests/_live/greeks.py`), their ratio, and the unit
-    the ratio matches. Passes when the snapshots returned their calls, whatever the unit: the
+    Massive's description says per $0.01; the dataset page says per $1, from Massive's own
+    sample and article (the field's `DESCRIPTION_FIXES` entry). Reads SPY's price from its
+    option chain (or its previous close, when the chain carries none), up to five calls near
+    the money that expire in 20 to 50 days, their snapshots, and the latest 3-month Treasury
+    yield as the risk-free rate, with no dividend yield. For each call it records `Gamma`,
+    the Black-Scholes gamma per $1 from the call's strike, its time to expiry, and its
+    `ImpliedVolatility` (`tests/_live/greeks.py`), their ratio, and the unit the ratio
+    matches. Passes when the snapshots returned their calls, whatever the unit: the
     evidence, read by a person, settles it.
     """
     today = calendar.today()
@@ -981,14 +982,14 @@ def test_snapshot_gamma_against_black_scholes_per_dollar_and_per_cent(
             volatility=row["ImpliedVolatility"],
             rate=rate,
         )
-        unit = greeks.gamma_unit(row["GreeksGamma"], textbook)
+        unit = greeks.gamma_unit(row["Gamma"], textbook)
         units.append(unit)
         evidence(
-            f"{row['Symbol']}: GreeksGamma {row['GreeksGamma']}, Black-Scholes per $1 "
-            f"{textbook:.6g}, ratio {row['GreeksGamma'] / textbook:.4g}: {unit}"
+            f"{row['Symbol']}: Gamma {row['Gamma']}, Black-Scholes per $1 "
+            f"{textbook:.6g}, ratio {row['Gamma'] / textbook:.4g}: {unit}"
         )
     assert units, "the snapshots returned no row"
-    evidence(f"units: {units}; Massive's description says per $0.01")
+    evidence(f"units: {units}; Massive's description says per $0.01, the dataset page per $1")
 
 
 def _risk_free_rate(
@@ -1009,7 +1010,7 @@ def _calls_near_the_money(
 ) -> tuple[float, list[str]]:
     """Return SPY's price and up to `_GAMMA_CONTRACTS` calls nearest it that carry greeks.
 
-    The price is the chain's `UnderlyingAssetPrice`, or SPY's previous close when the chain
+    The price is the chain's `UnderlyingPrice`, or SPY's previous close when the chain
     carries none, as on a plan without Stocks data.
     """
     window = {
@@ -1018,7 +1019,7 @@ def _calls_near_the_money(
     }
     calls = partial(live_session.options.chain, "SPY", contract_type=dm.ContractType.CALL)
     first = table_rows(calls(limit=1, filters=window).fetch(wait=True))
-    spot = first[0]["UnderlyingAssetPrice"] if first else None
+    spot = first[0]["UnderlyingPrice"] if first else None
     if spot is None:
         bars = table_rows(live_session.stocks.previous_day_bar("SPY").fetch(wait=True))
         assert len(bars) == 1, f"SPY has {len(bars)} previous-day bars, not one"
@@ -1026,7 +1027,7 @@ def _calls_near_the_money(
         assert spot is not None, "SPY's previous-day bar has no close"
     near = {"strike_price_gte": spot * 0.98, "strike_price_lte": spot * 1.02}
     chain = table_rows(calls(filters={**window, **near}).fetch(wait=True))
-    priced = [r for r in chain if r["GreeksGamma"] and r["ImpliedVolatility"]]
+    priced = [r for r in chain if r["Gamma"] and r["ImpliedVolatility"]]
     priced.sort(key=lambda r: abs(r["StrikePrice"] - spot))
     return float(spot), [r["Symbol"] for r in priced[:_GAMMA_CONTRACTS]]
 

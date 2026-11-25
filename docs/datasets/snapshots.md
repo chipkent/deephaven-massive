@@ -69,11 +69,11 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `StrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. |
 | `Error` | String | The error while looking for this ticker. |
 | `Fmv` | double | Fair Market Value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). |
-| `GreeksDelta` | double | The change in the option's price per $0.01 increment in the price of the underlying asset. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
-| `GreeksGamma` | double | The change in delta per $0.01 change in the price of the underlying asset. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
-| `GreeksTheta` | double | The change in the option's price per day. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
-| `GreeksVega` | double | The change in the option's price per 1% increment in volatility. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
 | `FmvLastUpdated` | Instant | If Fair Market Value (FMV) is available, this field is the nanosecond timestamp of the last FMV calculation. |
+| `Delta` | double | Change in option price per $1 move in the underlying. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
+| `Gamma` | double | Change in delta per $1 move in the underlying. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
+| `Theta` | double | The change in the option's price per day. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
+| `Vega` | double | The change in the option's price per 1% increment in volatility. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
 | `LastMinuteOpen` | double | The open value for the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this stock. |
 | `LastMinuteHigh` | double | The highest value for the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this stock. |
 | `LastMinuteLow` | double | The lowest value for the minute aggregate. From the `last_minute` object: The most recent minute aggregate for this stock. |
@@ -129,12 +129,12 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `SessionRegularTradingChangePercent` | double | Today's regular trading change as a percentage of `previous_close`. From the `session` object: Comprehensive trading session metrics, detailing price changes, trading volume, and key price points (open, close, high, low) for the asset within the current trading day. Includes specific changes during early, regular, and late trading periods to enable detailed performance analysis and trend tracking. Values describe the current trading session only; nothing carries over from the previous session apart from `previous_close`. For stocks snapshots, an asset that has not traded yet this session reports `volume: 0` with the price and change fields omitted rather than reported as 0. During early trading on stocks snapshots, `volume` and `price` track the session as it happens, but `open`, `high`, `low`, `close` and `vwap` are omitted until the regular session opens, as those report official session prices. They appear from the open and remain through late trading. For options snapshots, the early, regular and late trading changes use these sessions: early trading from 7:30 to 9:30 AM ET, the regular session from 9:30 AM to 4:00 PM ET (4:15 PM ET for some products, such as SPY and SPX options), and late trading from the end of the regular session to 5:00 PM ET. Only trades marked with the extended hours condition (EXHT, 248) count as early or late trading. Cboe's extended trading hours program covers selected equity options, so other contracts do not get an early or late trading change. Index options, such as SPX, SPXW and XSP, get the regular trading change only. A change field is omitted when the contract has no trade in that session on the current trading day, or when the price it is measured against is missing. A change of 0 is returned as 0. |
 | `TodaysChangePerc` | double | The percent of the price change for the asset from the previous trading day. From the `session` object: Comprehensive trading session metrics, detailing price changes, trading volume, and key price points (open, close, high, low) for the asset within the current trading day. Includes specific changes during early, regular, and late trading periods to enable detailed performance analysis and trend tracking. Values describe the current trading session only; nothing carries over from the previous session apart from `previous_close`. For stocks snapshots, an asset that has not traded yet this session reports `volume: 0` with the price and change fields omitted rather than reported as 0. During early trading on stocks snapshots, `volume` and `price` track the session as it happens, but `open`, `high`, `low`, `close` and `vwap` are omitted until the regular session opens, as those report official session prices. They appear from the open and remain through late trading. For options snapshots, the early, regular and late trading changes use these sessions: early trading from 7:30 to 9:30 AM ET, the regular session from 9:30 AM to 4:00 PM ET (4:15 PM ET for some products, such as SPY and SPX options), and late trading from the end of the regular session to 5:00 PM ET. Only trades marked with the extended hours condition (EXHT, 248) count as early or late trading. Cboe's extended trading hours program covers selected equity options, so other contracts do not get an early or late trading change. Index options, such as SPX, SPXW and XSP, get the regular trading change only. A change field is omitted when the contract has no trade in that session on the current trading day, or when the price it is measured against is missing. A change of 0 is returned as 0. |
 | `Timeframe` | String | The time relevance of the data. |
-| `UnderlyingAssetPrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
-| `UnderlyingAssetValue` | double | The value of the underlying index. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
-| `UnderlyingAssetChangeToBreakEven` | double | The change in price for the contract to break even. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
-| `UnderlyingAssetLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingPrice` | double | The price of the trade. This is the actual dollar value per whole share of this trade. A trade of 100 shares with a price of $2.00 would be worth a total dollar value of $200.00. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingValue` | double | The value of the underlying index. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingChangeToBreakEven` | double | The change in price for the contract to break even. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingLastUpdated` | Instant | The nanosecond timestamp of when this information was updated. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `Underlying` | String | The instrument Massive lists the row under, as Massive's ticker. From REST `underlying_asset.ticker`: "The ticker symbol for the contract's underlying asset. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan." |
-| `UnderlyingAssetTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
+| `UnderlyingTimeframe` | String | The time relevance of the data. From the `underlying_asset` object: Information on the underlying stock for this options contract. The market data returned depends on your current stocks plan. |
 | `Type` | String | The asset class for this ticker. |
 | `TimestampInsert` | Instant | When the library received the row, by the local clock. Rows that arrive together share it. It isn't Massive's time, and later rows can carry earlier times. In a `poll()` table, it's the time of the poll the row's values came from. |
 
@@ -157,11 +157,11 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `StrikePrice` | `details.strike_price` |
 | `Error` | `error` |
 | `Fmv` | `fmv` |
-| `GreeksDelta` | `greeks.delta` |
-| `GreeksGamma` | `greeks.gamma` |
-| `GreeksTheta` | `greeks.theta` |
-| `GreeksVega` | `greeks.vega` |
 | `FmvLastUpdated` | `fmv_last_updated` |
+| `Delta` | `greeks.delta` |
+| `Gamma` | `greeks.gamma` |
+| `Theta` | `greeks.theta` |
+| `Vega` | `greeks.vega` |
 | `LastMinuteOpen` | `last_minute.open` |
 | `LastMinuteHigh` | `last_minute.high` |
 | `LastMinuteLow` | `last_minute.low` |
@@ -217,12 +217,12 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `SessionRegularTradingChangePercent` | `session.regular_trading_change_percent` |
 | `TodaysChangePerc` | `session.change_percent` |
 | `Timeframe` | `timeframe` |
-| `UnderlyingAssetPrice` | `underlying_asset.price` |
-| `UnderlyingAssetValue` | `underlying_asset.value` |
-| `UnderlyingAssetChangeToBreakEven` | `underlying_asset.change_to_break_even` |
-| `UnderlyingAssetLastUpdated` | `underlying_asset.last_updated` |
+| `UnderlyingPrice` | `underlying_asset.price` |
+| `UnderlyingValue` | `underlying_asset.value` |
+| `UnderlyingChangeToBreakEven` | `underlying_asset.change_to_break_even` |
+| `UnderlyingLastUpdated` | `underlying_asset.last_updated` |
 | `Underlying` | `underlying_asset.ticker` |
-| `UnderlyingAssetTimeframe` | `underlying_asset.timeframe` |
+| `UnderlyingTimeframe` | `underlying_asset.timeframe` |
 | `Type` | `type` |
 | `TimestampInsert` |  |
 

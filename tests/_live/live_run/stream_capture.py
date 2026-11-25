@@ -314,7 +314,7 @@ def option_contracts(rows: list[dict[str, Any]], today: date) -> list[str]:
 
     Args:
         rows: The chain's rows: `Symbol`, `ExpirationDate`, `StrikePrice`, and
-            `UnderlyingAssetPrice`.
+            `UnderlyingPrice`.
         today: The New York date.
 
     Returns:
@@ -325,7 +325,7 @@ def option_contracts(rows: list[dict[str, Any]], today: date) -> list[str]:
         return []
     expiry = min(r["ExpirationDate"] for r in live)
     chosen = [r for r in live if r["ExpirationDate"] == expiry]
-    prices = [r["UnderlyingAssetPrice"] for r in chosen if r["UnderlyingAssetPrice"] is not None]
+    prices = [r["UnderlyingPrice"] for r in chosen if r["UnderlyingPrice"] is not None]
     strikes = sorted(r["StrikePrice"] for r in chosen)
     middle = prices[0] if prices else strikes[len(strikes) // 2]
     chosen.sort(key=lambda r: (abs(r["StrikePrice"] - middle), r["Symbol"]))

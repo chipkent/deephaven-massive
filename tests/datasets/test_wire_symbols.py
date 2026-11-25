@@ -196,6 +196,13 @@ def test_the_contracts_list_takes_an_index_underlying_bare(symbol: str, expected
     assert wire_symbols.contracts_underlying(symbol) == expected
 
 
+@pytest.mark.parametrize("bare", ["SPX", "DJT", "BRK.B"])
+def test_a_bare_ticker_spells_an_index_with_its_prefix(bare: str) -> None:
+    index = wire_symbols.index_ticker(bare)
+    assert index == f"I:{bare}"
+    assert wire_symbols.contracts_underlying(index) == bare
+
+
 def test_an_option_on_an_index_gets_its_prefix_by_its_cfi_code() -> None:
     # An SPX call is `OCEICS` (fourth letter I, an index); an AAPL call `OCASPS` (S, a stock).
     underlyings = pa.array(["SPX", "I:NDX", "AAPL", "VIX", None, "SPX"], pa.string())
