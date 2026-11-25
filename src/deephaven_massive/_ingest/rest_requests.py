@@ -360,7 +360,8 @@ def _symbol_parts(
     carry their own symbol), a `per_symbol` dataset, and a symbol parameter that takes one
     value (`ticker`) get one request per symbol. A list parameter
     (`ticker.any_of`, `tickers`) gets up to `DatasetSpec.symbols_per_request` symbols a
-    request (all of them when the dataset sets no limit). `dm.ALL`, no
+    request (all of them when the dataset sets no limit), each value as the wire takes it
+    (`_sent_value`: an index bare in `BARE_INDEX_LIST_PARAM`). `dm.ALL`, no
     symbols, and a path that takes neither get one request without symbols.
 
     Args:
@@ -407,7 +408,7 @@ def _symbol_parts(
         size = spec.symbols_per_request or len(explicit)
         listed = required(param, f"{rest_path.template}'s list parameter")
         return [
-            (None, {}, {listed: explicit[i : i + size]}, None)
+            (None, {}, {listed: _sent_value(listed, tuple(explicit[i : i + size]))}, None)
             for i in range(0, len(explicit), size)
         ]
     targets = _symbol_targets([key.column for key in from_request], slot=slot, pair=pair)

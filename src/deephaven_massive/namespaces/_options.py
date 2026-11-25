@@ -5,7 +5,8 @@ Datasets: `trades`, `last_trade` (each contract's latest trade), `quotes`, `bars
 `admin_messages` (OPRA's administrative messages and FLEX trade notices), `chain` (one underlying's
 option chain), `snapshots` (the current state of chosen contracts), `contracts` (the contracts
 list), `contract_details` (named contracts' reference data), `daily_open_close`, `open_interest`
-(each contract's open interest by day), `greeks` (each contract's end-of-day greeks and implied
+(each contract's open interest by day), `open_interest_by_underlying` (each underlying's open
+interest by day, every contract summed), `greeks` (each contract's end-of-day greeks and implied
 volatility), and `unusual_trades` (large trades and sweeps).
 
 Each dataset is one factory method on `OptionsNamespace`. The method validates its arguments and
@@ -31,7 +32,10 @@ too, or a table of them in a `Symbol` column (`value_table`), each read as if pa
 The chain takes and writes an index as `I:SPX`, but the contracts list takes and writes it bare
 (`SPX`, and no contract for `I:SPX`), so the REST transport sends it bare
 (`wire_symbols.contracts_underlying`) and the rows' index underlyings get their `I:` back by
-their CFI code (`wire_symbols.index_underlyings`).
+their CFI code (`wire_symbols.index_underlyings`). The open interest, the greeks, and the
+unusual trades write it bare with no code, so their rows' `Underlying` gets its `I:` by one
+lookup per option root, and the open interest by underlying, whose `Symbol` is the underlying
+itself, by one lookup per bare ticker (`DatasetSpec.index_prefix`, `_ingest/option_roots.py`).
 
 One `/options` WebSocket connection allows 1,000 contracts. The stream verbs count topics
 against that cap and raise `ValueError` before subscribing a static list that would cross it.
@@ -58,6 +62,7 @@ from deephaven_massive._enums import (
     ChannelFamily,
     ClassFromPrefix,
     ContractType,
+    IndexPrefix,
     NotBars,
     Order,
     PollMode,
@@ -118,6 +123,7 @@ _CONTRACTS: Final = "/v3/reference/options/contracts"
 _CONTRACT: Final = "/v3/reference/options/contracts/{options_ticker}"
 _OPEN_CLOSE: Final = "/v1/open-close/{optionsTicker}/{date}"
 _OPEN_INTEREST: Final = "/options/v1/open-interest"
+_OPEN_INTEREST_BY_UNDERLYING: Final = "/options/v1/open-interest/underlying"
 _GREEKS: Final = "/options/v1/analytics"
 _UNUSUAL_TRADES: Final = "/options/v1/unusual-trades"
 _ADMIN_MESSAGES: Final = "/options/v1/admin-messages"
@@ -339,6 +345,7 @@ CONTRACTS: Final = DatasetSpec(
     asset_class=AssetClass.OPTIONS,
     fetch_path=_CONTRACTS,
     keys={(_REST, _CONTRACTS): _keys("Ticker", fanout="UnderlyingTicker")},
+    index_prefix=IndexPrefix.FROM_CFI,
     # Massive's page marks `ticker` deprecated here and points to the per-contract endpoint.
     symbol_params_elsewhere={
         "ticker": "To read named contracts, call m.options.contract_details(contracts).fetch()."
@@ -351,6 +358,7 @@ CONTRACT_DETAILS: Final = DatasetSpec(
     fetch_path=_CONTRACT,
     # The rows carry their ticker, although the request names it too.
     keys={(_REST, _CONTRACT): _keys("Ticker", fanout="UnderlyingTicker")},
+    index_prefix=IndexPrefix.FROM_CFI,
     per_symbol=True,
 )
 
@@ -389,8 +397,34 @@ OPEN_INTEREST: Final = DatasetSpec(
     # as the snapshots are, which keeps each request's URL short.
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     poll_keys=("Symbol", "Date"),
-    underlying_by_root=True,
+    index_prefix=IndexPrefix.BY_ROOT,
     column_notes={"Underlying": _ROOT_UNDERLYING_NOTE},
+)
+
+_UNDERLYING_SYMBOL_NOTE: Final = (
+    "The underlying, with its `I:` prefix for an index (`I:SPX`), as in `m.options.contracts()`. "
+    "If Massive's "
+    "[All Contracts](https://massive.com/docs/rest/options/contracts/all-contracts) list "
+    "can't say whether a ticker is an index, the library leaves its rows out and lists them in "
+    "`m.problems()` as `unreadable_symbols`. A ticker that names both a stock and an index "
+    "(`DJT`) is classified by the first contract Massive lists for it, while Massive's row may "
+    "total the options on both."
+)
+"""The note on `Symbol` of the dataset whose rows name the bare underlying alone."""
+
+OPEN_INTEREST_BY_UNDERLYING: Final = DatasetSpec(
+    name="options.open_interest_by_underlying",
+    summary="Each underlying's open interest at the end of each trading day, calls and puts apart.",
+    fetch_path=_OPEN_INTEREST_BY_UNDERLYING,
+    # The row's symbol is the underlying itself: Massive totals every root on it.
+    keys={(_REST, _OPEN_INTEREST_BY_UNDERLYING): SourceKeys(symbol=KeySpec("UnderlyingTicker"))},
+    time_axis=("date.gte", "date.lte"),
+    symbol_param="underlying_ticker.any_of",
+    # A watchlist of underlyings is sent 250 to a request, as the contracts are.
+    symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
+    poll_keys=("Symbol", "Date"),
+    index_prefix=IndexPrefix.BY_UNDERLYING,
+    column_notes={"Symbol": _UNDERLYING_SYMBOL_NOTE},
 )
 
 GREEKS: Final = DatasetSpec(
@@ -404,7 +438,7 @@ GREEKS: Final = DatasetSpec(
     # One row per contract per day, as the open interest: the same 250 contracts a request.
     symbols_per_request=SNAPSHOT_SYMBOLS_PER_REQUEST,
     poll_keys=("Symbol", "Date"),
-    underlying_by_root=True,
+    index_prefix=IndexPrefix.BY_ROOT,
     column_notes={
         "Underlying": _ROOT_UNDERLYING_NOTE,
         "OpenInterest": "Massive publishes it the morning of `Date`, for the prior trading "
@@ -429,7 +463,7 @@ UNUSUAL_TRADES: Final = DatasetSpec(
     # Massive serves the latest days from its real-time data, so a poll, or a fetch that
     # reaches the present, reads current trades; a past range reads final ones.
     latest_is_current=True,
-    underlying_by_root=True,
+    index_prefix=IndexPrefix.BY_ROOT,
     column_notes={"Underlying": _ROOT_UNDERLYING_NOTE},
 )
 
@@ -447,6 +481,7 @@ DATASETS: Final[tuple[DatasetSpec, ...]] = (
     CONTRACT_DETAILS,
     DAILY_OPEN_CLOSE,
     OPEN_INTEREST,
+    OPEN_INTEREST_BY_UNDERLYING,
     GREEKS,
     UNUSUAL_TRADES,
 )
@@ -585,8 +620,8 @@ class OptionsNamespace(Namespace):
     - market data: trades, quotes, bars, and fair market value;
     - each contract's last trade, previous day's bar, and daily open and close;
     - option chains, snapshots, and contract reference data;
-    - each contract's open interest and end-of-day greeks by day, and the unusual trades
-      Massive flags;
+    - each contract's open interest and end-of-day greeks by day, each underlying's open
+      interest by day, and the unusual trades Massive flags;
     - OPRA's administrative messages.
 
     A contract's ticker is `O:` followed by its OCC symbol, such as `O:AAPL250117C00150000`. A
@@ -1340,6 +1375,86 @@ class OptionsNamespace(Namespace):
                 "contract_type": _contract_type(contract_type),
             },
             arguments={"root.any_of": "root"},
+            sort=sort,
+            order=order,
+            limit=limit,
+            filters=filters,
+            on_error=on_error,
+        )
+
+    @raises_through(list_query)
+    def open_interest_by_underlying(
+        self,
+        symbols: SymbolsLike | None = None,
+        *,
+        start: DateLike | None = None,
+        end: DateLike | None = None,
+        sort: str | None = None,
+        order: Order | None = None,
+        limit: int | None = None,
+        filters: Mapping[str, FilterValue] | None = None,
+        on_error: ErrorPolicy | None = None,
+    ) -> FetchQuery:
+        """Each underlying's open interest at the end of each trading day, calls and puts apart.
+
+        Each row holds one underlying's open interest on one trading day, summed over every
+        contract on it, whatever its root (`SPX` and `SPXW` alike), with the calls' and the
+        puts' shares apart. `Symbol` is the underlying, a stock, ETF, or index ticker. Massive
+        publishes a day's figures the next morning, so the latest `Date` is the previous
+        trading day. Leave out `symbols` to read every underlying.
+
+        `Symbol` has `I:` for an index (`I:SPX`), as in `m.options.contracts()`. To tell which
+        tickers are indices, a session reads Massive's list of index tickers once. A ticker not
+        on that list costs nothing more. A ticker on it, such as `SPX`, costs one request to
+        Massive's contracts list the first time the session meets it. If Massive can't say, the
+        library leaves the ticker's rows out and lists them in `m.problems()` as
+        `unreadable_symbols`. A ticker that names both a stock and an index, such as `DJT`,
+        takes the class of the first contract Massive lists for it, while Massive's row may
+        total the options on both.
+
+        Args:
+            symbols: Stock, ETF, or index tickers, such as `"AAPL"` or `"I:SPX"`; leave it
+                out for every underlying.
+            start: The first trading day.
+            end: The last trading day.
+            sort: Any of Massive's field names, such as `"open_interest"`.
+            order: The direction of `sort`.
+            limit: The most rows to return, in total. A watchlist's `fetch()` caps every request
+                instead.
+            filters: Further endpoint parameters, such as `{"underlying_ticker_gte": "A"}`.
+            on_error: What a bad symbol or row does in this call (`dm.ErrorPolicy`). None,
+                the default, takes each cause from the session's `MassiveConfig.on_error`.
+
+        Returns:
+            A query. Its columns, plans, and methods:
+            https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.open_interest_by_underlying.md.
+
+        Raises:
+            TypeError: If an argument has the wrong type.
+            ValueError: If:
+                - `symbols` is `dm.ALL` or empty;
+                - a ticker isn't Massive's exact ticker of a stock or an index, such as
+                  `"C:EURUSD"`;
+                - a bound isn't a date, or `end` is before `start`;
+                - `limit` isn't positive;
+                - `order` is given without `sort`, or with a `sort` that has its own `.asc` or
+                  `.desc`;
+                - a filter isn't one the dataset takes, or its value doesn't fit.
+
+        Example:
+            ::
+
+                positioning = m.options.open_interest_by_underlying(
+                    ["SPY", "I:SPX"], start="2026-11-13"
+                ).fetch()
+        """
+        return list_query(
+            self._core,
+            OPEN_INTEREST_BY_UNDERLYING,
+            all_alternative="Leave symbols out to read every underlying.",
+            symbols=symbols,
+            start=start,
+            end=end,
             sort=sort,
             order=order,
             limit=limit,

@@ -52,8 +52,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "Options contract ticker in Massive format (e.g. O:AMD261121C00220000)". |
 | `OptionRoot` | String | Option root symbol |
-| `Bid` | double | NBBO bid 15 minutes before the close |
-| `Ask` | double | NBBO ask 15 minutes before the close |
+| `BidPrice` | double | NBBO bid 15 minutes before the close |
+| `AskPrice` | double | NBBO ask 15 minutes before the close |
 | `Volume` | long | Contracts traded on date |
 | `Date` | String | The trading date the values reflect |
 | `ContractType` | String | call or put |
@@ -87,8 +87,8 @@ The Massive field behind each column, by source. An empty cell means the source 
 | --- | --- |
 | `Symbol` | `ticker` |
 | `OptionRoot` | `root` |
-| `Bid` | `bid` |
-| `Ask` | `ask` |
+| `BidPrice` | `bid` |
+| `AskPrice` | `ask` |
 | `Volume` | `volume` |
 | `Date` | `date` |
 | `ContractType` | `contract_type` |

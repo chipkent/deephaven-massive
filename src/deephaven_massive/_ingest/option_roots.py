@@ -1,21 +1,26 @@
-"""Which option roots are options on an index, from Massive's contracts reference.
+"""Which bare option underlyings are indices, from Massive's contracts reference.
 
-Massive's options open interest and unusual trades name each contract's underlying bare
-(`SPX`, `AAPL`), with no CFI code or market beside it, so a row alone cannot say whether `SPX`
-is an index (`I:SPX`) or a stock. Massive's contracts reference can: a contract's CFI code (ISO
-10962) marks an option on an index. An OCC option root (`SPXW`, `AAPL1`) names one underlying,
-so one contract of a root answers for every contract of that root. Most roots are on stocks, so
-`OptionRootKinds` first reads Massive's list of index tickers, once per session
-(`/v3/reference/tickers?market=indices`): a root whose bare underlying is not a listed index
-(`AAPL`) is a stock's or a fund's, with no further request. Only a root whose bare underlying
-is a listed index's ticker (`SPX`) gets the reference of its first contract
-(`/v3/reference/options/contracts/{options_ticker}`, as of that row's trading day). Every
-answer is kept for the session and shared between every caller, so a stock and an index that
-share a bare ticker each get their own root's answer. The pre-filter assumes the underlying of
-every option on an index is a ticker on Massive's index list, active or retired, which a live
-test checks; an index missing from it would keep its bare ticker with no warning. The rows of
-a root the reference can't classify are withheld as `unreadable_symbols`, since their
-underlying may be an index's without its `I:` (`canonical_underlyings`).
+Massive's options open interest, greeks, and unusual trades name each contract's underlying
+bare (`SPX`, `AAPL`), with no CFI code or market beside it, and the open interest by underlying
+names the bare underlying alone, with no contract, so a row alone cannot say whether `SPX` is
+an index (`I:SPX`) or a stock. Massive's contracts reference can: a contract's CFI code (ISO
+10962) marks an option on an index. `OptionRootKinds` answers by two keys. For a row with a
+contract, by its OCC option root (`SPXW`, `AAPL1`), which names one underlying, so one contract
+of a root answers for every contract of that root (`kind`). For a row with no contract, by the
+bare underlying itself, from the first contract Massive's contracts list gives for it
+(`underlying_kind`). Most underlyings are stocks, so both first read Massive's list of index
+tickers, once per session (`/v3/reference/tickers?market=indices`): a bare ticker not on it
+(`AAPL`) is a stock's or a fund's, with no further request. Only a listed index's ticker (`SPX`)
+costs a request: the reference of a root's first contract
+(`/v3/reference/options/contracts/{options_ticker}`), or the contracts list's first contract of
+the underlying (`/v3/reference/options/contracts?underlying_ticker=SPX&limit=1`), as of that
+row's trading day. Every answer is kept for the session and shared between every caller, so a
+stock and an index that share a bare ticker each get their own root's answer; by bare
+underlying alone they share one, the first contract's. The pre-filter assumes the underlying
+of every option on an index is a ticker on Massive's index list, active or retired, which a
+live test checks; an index missing from it would keep its bare ticker with no warning. The
+rows the reference can't classify are withheld as `unreadable_symbols`, since their underlying
+may be an index's without its `I:` (`canonical_underlyings`, `canonical_symbols`).
 
 The REST transport (`_ingest/rest.py`) holds the session's kinds in its `RestState` and reads
 them through a `RestReader`, whose patience and error conversion the lookups use, and reports
@@ -44,16 +49,18 @@ from deephaven_massive._massive import RowFault, WireError
 from deephaven_massive._tables.withheld import Withheld, mark, with_marks, withhold_rows
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from deephaven_massive._ingest.crypto_tickers import TickerListReader
-    from deephaven_massive._massive import Cancel, Patience, RestClient
+    from deephaven_massive._massive import Cancel, Page, Patience, RestClient
 
 __all__ = [
     "REREAD_AFTER",
     "KindOf",
     "OptionRootKinds",
     "RootKind",
+    "UnderlyingKindOf",
+    "canonical_symbols",
     "canonical_underlyings",
 ]
 
@@ -61,6 +68,9 @@ logger = logging.getLogger(__name__)
 
 _CONTRACT_PATH: Final = "/v3/reference/options/contracts/{options_ticker}"
 """The contracts reference of one contract, with its CFI code."""
+
+_CONTRACTS_PATH: Final = "/v3/reference/options/contracts"
+"""The contracts list, whose first contract of an underlying carries its CFI code."""
 
 _TICKERS_PATH: Final = "/v3/reference/tickers"
 """The reference path that lists Massive's tickers by market."""
@@ -71,8 +81,9 @@ _INDICES_FAILED: Final = "Reading Massive's index ticker list failed"
 _INDEX_PREFIX: Final = "I:"
 
 REREAD_AFTER: Final = 3600.0
-"""The seconds after which a root the reference could not classify is asked about again, so a
-contract Massive adds later is found without a restart, at most once an hour per root."""
+"""The seconds after which a root or an underlying the reference could not classify is asked
+about again, so a contract Massive adds later is found without a restart, at most once an hour
+per key."""
 
 
 class RootKind(enum.Enum):
@@ -94,21 +105,46 @@ class KindOf(Protocol):
         ...
 
 
+class UnderlyingKindOf(Protocol):
+    """What `canonical_symbols` asks: a bare underlying's kind (`RestReader.underlying_kind`)."""
+
+    def __call__(self, underlying: str, *, day: str) -> RootKind:
+        """Return a bare underlying's kind, from the trading day of a row that names it."""
+        ...
+
+
+def _kind_of(cfi: object) -> RootKind:
+    """Return the kind a contract's CFI code gives its underlying.
+
+    Args:
+        cfi: The code as Massive sent it, or None where the reference gave none.
+
+    Returns:
+        `INDEX` for an option on an index (`wire_symbols.is_index_option`), `OTHER` for any
+        other code, `UNKNOWN` for no code.
+    """
+    if not isinstance(cfi, str):
+        return RootKind.UNKNOWN
+    return RootKind.INDEX if is_index_option(cfi) else RootKind.OTHER
+
+
 class OptionRootKinds:
-    """A session's answers about option roots, asked once per root and shared by every caller.
+    """A session's answers about option underlyings, asked once per key and shared by every caller.
 
     `RestState` creates one per session, with the session's REST client; nothing is read until
-    the first `kind`. Thread-safe: the answers are kept in a `SharedLookup`, which lets one
-    caller ask about a root while the others wait, and every caller waits outside any lock.
+    the first `kind` or `underlying_kind`. Thread-safe: the answers are kept in a `SharedLookup`
+    per key, which lets one caller ask while the others wait, and every caller waits outside
+    any lock.
 
     Example:
         ::
 
             kinds = OptionRootKinds(client, "MassiveSession #1")
             kinds.kind("SPXW", contract="O:SPXW261218C06000000", day="2026-11-13", reader=reader)
+            kinds.underlying_kind("SPX", day="2026-11-13", reader=reader)
     """
 
-    __slots__ = ("_client", "_indices", "_label", "_lookup")
+    __slots__ = ("_client", "_indices", "_label", "_lookup", "_underlyings")
 
     def __init__(self, client: RestClient, label: str) -> None:
         """Hold the session's client; no request is made.
@@ -120,6 +156,7 @@ class OptionRootKinds:
         self._client = client
         self._label = label
         self._lookup: Final[SharedLookup[str, RootKind]] = SharedLookup(label, client.governor)
+        self._underlyings: Final[SharedLookup[str, RootKind]] = SharedLookup(label, client.governor)
         self._indices: Final[SharedLookup[str, frozenset[str]]] = SharedLookup(
             label, client.governor
         )
@@ -165,13 +202,117 @@ class OptionRootKinds:
         A failed request raises its public error (`AuthenticationError`, `EntitlementError`,
         or `MassiveError`), its message naming the root and the contract.
         """
-        known = self._lookup.known(root)
-        if known is RootKind.UNKNOWN and self._lookup.retire(root, known, REREAD_AFTER):
-            logger.info(
-                "%s: Massive's Contract Overview could not classify option root %s; asking "
-                "again, since the answer is an hour old or more",
-                self._label,
+        return self._classify(
+            self._lookup,
+            root,
+            underlying=underlying,
+            subject=f"the option root {root!r}",
+            source=f"Massive's Contract Overview of {contract}",
+            ask=lambda: self._ask(
                 root,
+                contract=contract,
+                day=day,
+                reader=reader,
+                patience=patience,
+                cancel=cancel,
+            ),
+            reader=reader,
+            patience=patience,
+            cancel=cancel,
+        )
+
+    def underlying_kind(
+        self,
+        underlying: str,
+        *,
+        day: str,
+        reader: TickerListReader,
+        patience: Patience,
+        cancel: Cancel | None = None,
+    ) -> RootKind:
+        """Return what a bare underlying's options are on, asking Massive on first need.
+
+        For a row that names its underlying bare with no contract beside it. A ticker not on
+        Massive's index list, read once per session, is `OTHER` with no further request. For
+        any other ticker, the first time a session meets it, it reads the first contract of
+        Massive's contracts list for that underlying as of `day` and keeps the answer: `INDEX`
+        when the contract's CFI code marks an option on an index
+        (`wire_symbols.is_index_option`), `OTHER` for any other code. A ticker that names both
+        a stock and an index gets the first contract's answer. Each request counts against
+        Massive's limit on reference data. Blocks the calling thread for them, or while another
+        thread makes them, holding no lock meanwhile. A failed request is not kept, so the next
+        call asks again. An answer of no contract or no CFI code is `UNKNOWN`, and is asked again
+        once it is an hour old or more.
+
+        Args:
+            underlying: The bare underlying Massive's row names, such as `"SPX"`.
+            day: The trading day of the row, as ISO text, for `as_of`, so a contract listed
+                then is still found.
+            reader: The read the lookup serves, whose error conversion it uses.
+            patience: The patience of the read, taken on its own thread (`RestReader.patience`),
+                which the lookup's pauses are charged to.
+            cancel: A background read's stop token, or None.
+
+        Returns:
+            The underlying's kind.
+
+        A failed request raises its public error (`AuthenticationError`, `EntitlementError`,
+        or `MassiveError`), its message naming the underlying.
+        """
+        return self._classify(
+            self._underlyings,
+            underlying,
+            underlying=underlying,
+            subject=f"the underlying {underlying!r}",
+            source=f"Massive's contracts list for {underlying}",
+            ask=lambda: self._ask_underlying(
+                underlying, day=day, reader=reader, patience=patience, cancel=cancel
+            ),
+            reader=reader,
+            patience=patience,
+            cancel=cancel,
+        )
+
+    def _classify(
+        self,
+        lookup: SharedLookup[str, RootKind],
+        key: str,
+        *,
+        underlying: str,
+        subject: str,
+        source: str,
+        ask: Callable[[], RootKind],
+        reader: TickerListReader,
+        patience: Patience,
+        cancel: Cancel | None,
+    ) -> RootKind:
+        """Answer one key from its lookup, the index list, or Massive, in that order.
+
+        Args:
+            lookup: The session's answers by this kind of key.
+            key: The root or the bare underlying asked about.
+            underlying: The bare underlying, checked against Massive's index list.
+            subject: What is asked about, for the messages, such as `"the option root 'SPXW'"`.
+            source: What `ask` reads, for the messages, such as `"Massive's Contract Overview
+                of O:SPXW261218C06000000"`.
+            ask: Reads Massive's answer for the key and keeps it in `lookup`.
+            reader: The read the lookup serves.
+            patience: The read's patience.
+            cancel: The caller's stop token, or None.
+
+        Returns:
+            The key's kind.
+
+        A failed read of the index list or of `ask` raises its public `MassiveError`, its
+        message naming `subject` and what failed.
+        """
+        known = lookup.known(key)
+        if known is RootKind.UNKNOWN and lookup.retire(key, known, REREAD_AFTER):
+            logger.info(
+                "%s: Massive's contracts reference could not classify %s; asking again, since "
+                "the answer is an hour old or more",
+                self._label,
+                subject,
             )
             known = None
         if known is not None:
@@ -181,33 +322,26 @@ class OptionRootKinds:
         except MassiveError as public:
             named = copy_error(
                 public,
-                f"The library cannot tell whether the option root {root!r} is an index, since "
-                f"reading Massive's index ticker list failed. {public}",
+                f"The library cannot tell whether {subject} is an index, since reading "
+                f"Massive's index ticker list failed. {public}",
             )
             raise named from public
         if underlying not in indices:
             logger.debug(
-                "%s: option root %s names %s, which is not on Massive's index ticker list, so "
-                "its contracts are not options on an index; no request",
+                "%s: %s names %s, which is not on Massive's index ticker list, so its options "
+                "are not options on an index; no request",
                 self._label,
-                root,
+                subject,
                 underlying,
             )
             return RootKind.OTHER
         try:
-            return self._ask(
-                root,
-                contract=contract,
-                day=day,
-                reader=reader,
-                patience=patience,
-                cancel=cancel,
-            )
+            return ask()
         except MassiveError as public:
             named = copy_error(
                 public,
-                f"The library cannot tell whether the option root {root!r} is an index, since "
-                f"reading Massive's Contract Overview of {contract} failed. {public}",
+                f"The library cannot tell whether {subject} is an index, since reading "
+                f"{source} failed. {public}",
             )
             raise named from public
 
@@ -352,53 +486,33 @@ class OptionRootKinds:
         )
         if not isinstance(claim, Claim):
             return claim
-        failed = f"Reading Massive's Contract Overview of {contract} failed"
-        try:
-            page = self._client.get(
+        page = self._read(
+            self._lookup,
+            claim,
+            reader=reader,
+            cancel=cancel,
+            failed=f"Reading Massive's Contract Overview of {contract} failed",
+            about=f"option root {root}",
+            request=lambda: self._client.get(
                 reader.rest_path(_CONTRACT_PATH),
                 {"options_ticker": contract},
                 {"as_of": date.fromisoformat(day)},
                 bucket=OTHER,
                 cancel=cancel,
                 patience=patience,
-            )
-        except WireError as error:
-            if error.status == HTTPStatus.NOT_FOUND:
-                logger.debug(
-                    "%s: Massive's Contract Overview has no %s as of %s (HTTP 404)",
-                    self._label,
-                    contract,
-                    day,
-                )
-                self._lookup.complete(claim, RootKind.UNKNOWN)
-                return RootKind.UNKNOWN
-            public = reader.public_error(error)
-            stopped = cancel is not None and cancel.is_set() and error.status is None
-            logger.debug(
-                "%s: asking Massive's Contract Overview about option root %s failed (status %s, "
-                "stop set %s); its waiters %s: %s",
-                self._label,
-                root,
-                error.status,
-                cancel is not None and cancel.is_set(),
-                "try again" if stopped else "get a copy of the error",
-                public,
-            )
-            self._lookup.fail(claim, public, failed, stopped=stopped)
-            raise public from error
-        except BaseException as error:
-            self._lookup.fail(claim, error, failed)
-            if source_of(error) is ErrorSource.LIBRARY:
-                logger.exception("%s. %s", failed, LIBRARY_BUG)
-            raise
-        cfi = next((row.get("cfi") for row in page.rows), None)
-        kind = (
-            RootKind.UNKNOWN
-            if not isinstance(cfi, str)
-            else RootKind.INDEX
-            if is_index_option(cfi)
-            else RootKind.OTHER
+            ),
         )
+        if page is None:
+            logger.debug(
+                "%s: Massive's Contract Overview has no %s as of %s (HTTP 404)",
+                self._label,
+                contract,
+                day,
+            )
+            self._lookup.complete(claim, RootKind.UNKNOWN)
+            return RootKind.UNKNOWN
+        cfi = next((row.get("cfi") for row in page.rows), None)
+        kind = _kind_of(cfi)
         logger.debug(
             "%s: option root %s is %s, by the CFI code %r of %s as of %s",
             self._label,
@@ -410,6 +524,132 @@ class OptionRootKinds:
         )
         self._lookup.complete(claim, kind)
         return kind
+
+    def _ask_underlying(
+        self,
+        underlying: str,
+        *,
+        day: str,
+        reader: TickerListReader,
+        patience: Patience,
+        cancel: Cancel | None,
+    ) -> RootKind:
+        """Ask Massive's contracts list about one bare underlying, single-flight, and keep it.
+
+        One page of one contract, `underlying_ticker=<bare>&limit=1&as_of=<day>`, classifies the
+        underlying by that contract's CFI code; a page with no contract, or a contract with no
+        code, is `UNKNOWN`.
+
+        Args:
+            underlying: The bare underlying, as Massive's row names it.
+            day: The `as_of` day.
+            reader: The read the lookup serves.
+            patience: The read's patience.
+            cancel: The caller's stop token, or None.
+
+        Returns:
+            The underlying's kind.
+
+        A failed request raises its public `MassiveError`, and every caller that waited on it a
+        copy; an unexpected error of the reader, a defect, is logged at ERROR with how to report
+        it and propagates.
+        """
+        claim = self._underlyings.claim_or_wait(
+            underlying,
+            bucket=OTHER,
+            patience=patience,
+            what=f"the contracts list of the underlying {underlying}",
+            public=reader.public_error,
+            cancel=cancel,
+        )
+        if not isinstance(claim, Claim):
+            return claim
+        page = self._read(
+            self._underlyings,
+            claim,
+            reader=reader,
+            cancel=cancel,
+            failed=f"Reading Massive's contracts list for {underlying} failed",
+            about=f"the underlying {underlying}",
+            request=lambda: self._client.get(
+                reader.rest_path(_CONTRACTS_PATH),
+                {},
+                {"underlying_ticker": underlying, "limit": 1, "as_of": date.fromisoformat(day)},
+                bucket=OTHER,
+                cancel=cancel,
+                patience=patience,
+            ),
+        )
+        # The list answers an unknown underlying with no rows, never with HTTP 404.
+        assert page is not None
+        first = next((row for row in page.rows), None)
+        cfi = None if first is None else first.get("cfi")
+        kind = _kind_of(cfi)
+        logger.debug(
+            "%s: the underlying %s is %s, by the CFI code %r of its first listed contract %s "
+            "as of %s",
+            self._label,
+            underlying,
+            kind.value,
+            cfi,
+            None if first is None else first.get("ticker"),
+            day,
+        )
+        self._underlyings.complete(claim, kind)
+        return kind
+
+    def _read(
+        self,
+        lookup: SharedLookup[str, RootKind],
+        claim: Claim[str, RootKind],
+        *,
+        reader: TickerListReader,
+        cancel: Cancel | None,
+        failed: str,
+        about: str,
+        request: Callable[[], Page],
+    ) -> Page | None:
+        """Make one lookup's request under its claim, ending the claim on any failure.
+
+        Args:
+            lookup: The lookup the claim is on.
+            claim: The caller's claim, which the caller completes when this returns a page.
+            reader: The read the lookup serves, whose error conversion it uses.
+            cancel: The caller's stop token, or None.
+            failed: What failed, for the waiters' messages and the defect log.
+            about: What was asked about, for the log.
+            request: Sends the request.
+
+        Returns:
+            The page, or None for HTTP 404: the caller decides what no answer means.
+
+        A failed request raises its public `MassiveError` after failing the claim, and an
+        unexpected error of the reader, a defect, is logged at ERROR and propagates.
+        """
+        try:
+            return request()
+        except WireError as error:
+            if error.status == HTTPStatus.NOT_FOUND:
+                return None
+            public = reader.public_error(error)
+            stopped = cancel is not None and cancel.is_set() and error.status is None
+            logger.debug(
+                "%s: asking Massive's contracts reference about %s failed (status %s, stop set "
+                "%s); its waiters %s: %s",
+                self._label,
+                about,
+                error.status,
+                cancel is not None and cancel.is_set(),
+                "try again" if stopped else "get a copy of the error",
+                public,
+            )
+            lookup.fail(claim, public, failed, stopped=stopped)
+            raise public from error
+        except BaseException as error:
+            lookup.fail(claim, error, failed)
+            if source_of(error) is ErrorSource.LIBRARY:
+                logger.exception("%s. %s", failed, LIBRARY_BUG)
+            raise
 
 
 _UNDERLYING: Final = "Underlying"
@@ -527,5 +767,111 @@ def _canonical(batch: pa.RecordBatch, kind: KindOf, *, dataset: str) -> pa.Recor
         RowFault.UNREADABLE_SYMBOLS,
         of_unknown,
         field=_UNDERLYING,
+        reason=lambda row: unknown[names[row]],
+    )
+
+
+def canonical_symbols(
+    batches: Sequence[pa.RecordBatch],
+    kind: UnderlyingKindOf,
+    *,
+    dataset: str,
+) -> Withheld:
+    """Give the `Symbol` of each row on an index its `I:`, and withhold the rows it can't.
+
+    For a dataset whose `Symbol` is the bare underlying itself, with no contract beside it. For
+    each bare `Symbol` among a page's rows, `kind` is asked once, with the first such row's
+    trading day; the rows of an `INDEX` ticker get `I:`. The rows of a ticker Massive's
+    contracts list could not classify (`UNKNOWN`) are withheld as `unreadable_symbols`, since
+    the ticker may be an index's without its `I:`, and the library publishes only canonical
+    tickers.
+
+    Args:
+        batches: A page's rows in the dataset's schema, with their `Date`; at least one.
+        kind: Returns a bare underlying's kind (`RestReader.underlying_kind`).
+        dataset: The dataset's name, for messages.
+
+    Returns:
+        The rows to publish, each index with its `I:`, and the withheld rows grouped by the
+        symbol as Massive sent it, for the reader to report.
+
+    A failed lookup raises the `MassiveError` of `kind`.
+    """
+    marked = [_canonical_symbol(batch, kind, dataset=dataset) for batch in batches]
+    return withhold_rows(pa.Table.from_batches(marked), symbol=None)
+
+
+def _canonical_symbol(
+    batch: pa.RecordBatch, kind: UnderlyingKindOf, *, dataset: str
+) -> pa.RecordBatch:
+    """Give one batch's index symbols their `I:`, and mark the rows of unclassified tickers.
+
+    Args:
+        batch: The rows.
+        kind: Returns a bare underlying's kind.
+        dataset: The dataset's name.
+
+    Returns:
+        The rows with the mark columns (`withheld.with_marks`), each index symbol with its `I:`
+        and each row of an unclassified ticker marked `UNREADABLE_SYMBOLS`.
+    """
+    symbols = batch.column(_SYMBOL)
+    # `Symbol` is a required key of every dataset that asks, so no row's is null.
+    bare = pc.invert(pc.starts_with(symbols, _INDEX_PREFIX))
+    if not pc.any(bare).as_py():
+        return with_marks(batch, {}, sent=symbols)
+    firsts: dict[str, str] = {}
+    for symbol, day, wanted in zip(
+        symbols.to_pylist(), batch.column(_DATE).to_pylist(), bare.to_pylist(), strict=True
+    ):
+        if wanted and symbol not in firsts:
+            firsts[symbol] = str(day)
+    indices: list[str] = []
+    unknown: dict[str, str] = {}
+    for symbol, day in firsts.items():
+        found = kind(symbol, day=day)
+        match found:
+            case RootKind.INDEX:
+                indices.append(symbol)
+            case RootKind.OTHER:
+                pass
+            case RootKind.UNKNOWN:
+                unknown[symbol] = (
+                    f"Massive's contracts list gives no CFI code for a contract on {symbol} "
+                    f"(asked as of {day}), so the library can't tell whether {symbol} is an "
+                    f"index ({_INDEX_PREFIX}{symbol}) or not"
+                )
+            case _:
+                assert_never(found)
+    if indices:
+        on_index = pc.is_in(symbols, value_set=pa.array(indices, pa.string()))
+        prefixed = pc.binary_join_element_wise(_INDEX_PREFIX, symbols, "")
+        logger.debug(
+            "%s: %d rows of the indices %s get the I: prefix",
+            dataset,
+            pc.sum(on_index).as_py() or 0,
+            indices,
+        )
+        position = batch.schema.get_field_index(_SYMBOL)
+        batch = batch.set_column(
+            position, batch.schema.field(position), pc.if_else(on_index, prefixed, symbols)
+        )
+    marked = with_marks(batch, {}, sent=symbols)
+    if not unknown:
+        return marked
+    of_unknown = pc.is_in(symbols, value_set=pa.array(list(unknown), pa.string()))
+    logger.debug(
+        "%s: %d rows of the tickers %s, which Massive's contracts list could not classify, "
+        "are withheld",
+        dataset,
+        pc.sum(of_unknown).as_py() or 0,
+        list(unknown),
+    )
+    names = symbols.to_pylist()
+    return mark(
+        marked,
+        RowFault.UNREADABLE_SYMBOLS,
+        of_unknown,
+        field=_SYMBOL,
         reason=lambda row: unknown[names[row]],
     )

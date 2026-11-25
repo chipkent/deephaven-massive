@@ -1837,6 +1837,13 @@ _QUOTE = (
     'as "The {side} price.", the text, type, and unit of `{key}_price` in `/v3/quotes`, and '
     "of the v2 snapshots' `lastQuote.{short}`, read as `{key}_price`."
 )
+_GREEKS_QUOTE = (
+    'The greeks document `{key}` as "NBBO {side} 15 minutes before the close": the NBBO {side} '
+    "price of the contract, a number in dollars, which `/v3/quotes/{{optionsTicker}}` "
+    'documents as "The {side} price." under `{key}_price`, and which the options snapshots\' '
+    "`last_quote.{key}` already takes as `{key}_price` so the merged table has one column per "
+    "field (`_QUOTE_PRICES`). The time of the quote is the greeks' own `quote_timestamp`."
+)
 _FUTURES_QUOTE = (
     'The futures snapshot\'s `last_quote.{key}` is "The {text}", the {side} price, beside '
     "`{key}_size` and `{key}_timestamp`, which `/futures/v1/quotes/{{ticker}}` spells alike. "
@@ -2031,6 +2038,15 @@ SPELLINGS: Mapping[tuple[str, str], Spelling] = MappingProxyType(
                 "/options/v1/unusual-trades",
                 "/options/v1/analytics",
             )
+        },
+        **{
+            ("/options/v1/analytics", key): Spelling(
+                long_name=f"{key}_price",
+                source=f"/v3/quotes/{{optionsTicker}} `{key}_price`",
+                reason=_GREEKS_QUOTE.format(key=key, side=side),
+                whole_key=True,
+            )
+            for key, side in (("bid", "bid"), ("ask", "ask"))
         },
     }
 )

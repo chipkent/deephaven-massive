@@ -238,6 +238,28 @@ def test_a_per_symbol_path_with_a_list_parameter_sends_one_symbol_each() -> None
     ]
 
 
+def test_a_list_of_underlyings_sends_each_index_bare() -> None:
+    # The open interest by underlying takes its symbols in `underlying_ticker.any_of`, which
+    # finds an index only by its bare ticker; any other list parameter keeps the symbols as is.
+    path_name = "/options/v1/open-interest/underlying"
+    spec = DatasetSpec(
+        summary="A dataset for the tests.",
+        name="options.by_underlying",
+        fetch_path=path_name,
+        symbol_param=rest_requests.BARE_INDEX_LIST_PARAM,
+        symbols_per_request=2,
+        keys={(R, path_name): SourceKeys(symbol=KeySpec("UnderlyingTicker"))},
+    )
+    path = _rest_path(path_name)
+    symbols = ("AAPL", "I:NDX", "I:SPX")
+    calls = rest_requests.plan_calls(spec, path, Request(), symbols=symbols, split=split_pair)
+    assert [dict(c.query) for c in calls] == [
+        {"limit": 50000, "underlying_ticker.any_of": ("AAPL", "NDX")},
+        {"limit": 50000, "underlying_ticker.any_of": ("SPX",)},
+    ]
+    assert rest_requests.BARE_INDEX_LIST_PARAM == "underlying_ticker.any_of"
+
+
 def test_a_symbol_filled_into_a_query_parameter() -> None:
     spec = DatasetSpec(
         summary="A dataset for the tests.",

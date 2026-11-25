@@ -13,7 +13,7 @@ from deephaven.table_factory import InputTable
 
 import deephaven_massive as dm
 from deephaven_massive import _enums
-from deephaven_massive._enums import ChannelFamily, Recency, _require_enum
+from deephaven_massive._enums import ChannelFamily, IndexPrefix, Recency, _require_enum
 from deephaven_massive._massive import ParamKind, Transport, source, sources
 
 EXPECTED_VALUES: dict[type[StrEnum], list[str]] = {
@@ -138,8 +138,10 @@ def test_ticker_type_mirrors_the_tickers_type_parameter() -> None:
 def test_internal_enums() -> None:
     assert [m.value for m in Recency] == ["REALTIME", "DELAYED", "UNKNOWN"]
     assert [m.value for m in ChannelFamily] == ["TICK", "FMV"]
+    assert [m.value for m in IndexPrefix] == ["NONE", "FROM_CFI", "BY_ROOT", "BY_UNDERLYING"]
     assert not hasattr(dm, "Recency")
     assert not hasattr(dm, "ChannelFamily")
+    assert not hasattr(dm, "IndexPrefix")
 
 
 def test_require_enum_returns_members() -> None:
@@ -197,6 +199,7 @@ def test_module_exports() -> None:
     assert set(_enums.__all__) == {e.__name__ for e in EXPECTED_VALUES} | {
         "Recency",
         "ChannelFamily",
+        "IndexPrefix",
         "subscription_of",
         "ClassFromPrefix",
         "NotBars",
@@ -461,6 +464,7 @@ ENUM_PARAMETERS = {
             "OptionsNamespace.contracts.order",
             "OptionsNamespace.open_interest.contract_type",
             "OptionsNamespace.open_interest.order",
+            "OptionsNamespace.open_interest_by_underlying.order",
             "OptionsNamespace.greeks.contract_type",
             "OptionsNamespace.greeks.order",
             "OptionsNamespace.unusual_trades.order",

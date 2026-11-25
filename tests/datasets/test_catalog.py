@@ -10,6 +10,7 @@ import re
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from typing import assert_never
 
 import pytest
 
@@ -26,6 +27,7 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._enums import (
     AssetClass,
     ClassFromPrefix,
+    IndexPrefix,
     NotBars,
     PollMode,
     Subscription,
@@ -1841,14 +1843,57 @@ def test_history_columns_refuse_a_transport_history_never_reads() -> None:
         CATALOG.history_columns(CATALOG.by_name["stocks.trades"], Transport.WS)
 
 
-def test_only_an_options_rest_dataset_classifies_its_underlyings_by_root() -> None:
-    with pytest.raises(ValueError, match="underlying_by_root is for an options REST dataset"):
-        dataclasses.replace(
-            ADMIN,
-            underlying_by_root=True,
-            history_path=None,
-            keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
-            time_axis=None,
-        )
-    with pytest.raises(ValueError, match="underlying_by_root is for an options REST dataset"):
-        dataclasses.replace(EXCHANGES, underlying_by_root=True)
+BY_UNDERLYING_PATH = "/options/v1/open-interest/underlying"
+BY_UNDERLYING = DatasetSpec(
+    name="options.by_underlying",
+    summary="A dataset for the tests.",
+    fetch_path=BY_UNDERLYING_PATH,
+    keys={(R, BY_UNDERLYING_PATH): SourceKeys(symbol=KeySpec("UnderlyingTicker"))},
+    symbol_param="underlying_ticker.any_of",
+    index_prefix=IndexPrefix.BY_UNDERLYING,
+)
+
+
+@pytest.mark.parametrize("prefix", list(IndexPrefix))
+def test_each_index_prefix_fits_only_the_datasets_whose_rows_can_tell_an_index(
+    prefix: IndexPrefix,
+) -> None:
+    options_only = "is for an options REST dataset"
+    every_class = "BY_UNDERLYING is for a REST dataset of every class whose rows carry their symbol"
+    stream = dataclasses.replace(
+        ADMIN,
+        history_path=None,
+        keys={(W, "options/AD"): SourceKeys(time=KeySpec("SipTimestamp"))},
+        time_axis=None,
+    )
+    from_request = dataclasses.replace(
+        STOCK_TRADES,
+        asset_class=ClassFromPrefix.ANY,
+        kind=None,
+        channels={},
+        flat_file_prefixes={},
+        keys={k: v for k, v in STOCK_TRADES.keys.items() if k[0] is R},
+        time_axis=None,
+    )
+    match prefix:
+        case IndexPrefix.NONE:
+            for spec in (CONTRACTS, EXCHANGES, stream, from_request, BY_UNDERLYING):
+                assert dataclasses.replace(spec, index_prefix=prefix).index_prefix is prefix
+        case IndexPrefix.FROM_CFI | IndexPrefix.BY_ROOT:
+            assert dataclasses.replace(CONTRACTS, index_prefix=prefix).index_prefix is prefix
+            for spec in (EXCHANGES, stream, BY_UNDERLYING):
+                with pytest.raises(ValueError, match=f"{prefix.value} {options_only}"):
+                    dataclasses.replace(spec, index_prefix=prefix)
+        case IndexPrefix.BY_UNDERLYING:
+            assert BY_UNDERLYING.symbols_are_underlyings
+            assert not CONTRACTS.symbols_are_underlyings
+            for spec in (CONTRACTS, EXCHANGES, stream, from_request):
+                with pytest.raises(ValueError, match=every_class):
+                    dataclasses.replace(spec, index_prefix=prefix)
+        case _:
+            assert_never(prefix)
+
+
+def test_an_index_prefix_no_case_handles_is_refused() -> None:
+    with pytest.raises(AssertionError):
+        dataclasses.replace(EXCHANGES, index_prefix="other")  # type: ignore[arg-type]  # the point

@@ -1505,8 +1505,8 @@
     {"default": "date.desc", "in_path": false, "kind": "string", "maximum": null, "name": "sort", "unit": null, "values": []}
    ],
    "fields": [
-    {"column": "Bid", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bid"},
-    {"column": "Ask", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "ask"},
+    {"column": "BidPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "bid"},
+    {"column": "AskPrice", "conversion": null, "required": false, "type": "double", "unit": null, "wire_key": "ask"},
     {"column": "Volume", "conversion": null, "required": true, "type": "long", "unit": null, "wire_key": "volume"},
     {"column": "Date", "conversion": null, "required": true, "type": "date", "unit": null, "wire_key": "date"},
     {"column": "ContractType", "conversion": null, "required": true, "type": "string", "unit": null, "wire_key": "contract_type"},

@@ -131,7 +131,7 @@ from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar, assert_never
 from urllib.parse import urlsplit
 
 import pyarrow as pa
@@ -144,7 +144,14 @@ from deephaven_massive._datasets.history_source import partition_dates, session_
 from deephaven_massive._datasets.row_times import START, StampRule, time_rule, whole
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_class
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
-from deephaven_massive._enums import AssetClass, OnError, Recency, Subscription, subscription_of
+from deephaven_massive._enums import (
+    AssetClass,
+    IndexPrefix,
+    OnError,
+    Recency,
+    Subscription,
+    subscription_of,
+)
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     AuthenticationError,
@@ -167,6 +174,7 @@ from deephaven_massive._ingest.crypto_tickers import CryptoTickerList
 from deephaven_massive._ingest.option_roots import (
     OptionRootKinds,
     RootKind,
+    canonical_symbols,
     canonical_underlyings,
 )
 from deephaven_massive._ingest.rate_limits import (
@@ -653,8 +661,9 @@ class RestState:
         crypto: Massive's list of crypto tickers with their two currencies
             (`RestReader.crypto_pair`): read on first need, and read again when a ticker it
             does not hold is asked for and it is an hour old or more.
-        option_roots: Whether each option root is an option on an index, from Massive's
-            contracts reference, asked once per root (`RestReader.root_kind`).
+        option_roots: Whether each option root, or each bare underlying, is an index, from
+            Massive's contracts reference, asked once per key (`RestReader.root_kind`,
+            `RestReader.underlying_kind`).
     """
 
     __slots__ = (
@@ -860,16 +869,16 @@ class RestReader:
         tally: ReadTally,
         index: str | None,
     ) -> list[pa.RecordBatch]:
-        """Give a page's index underlyings their `I:` by option root, where the dataset asks.
+        """Give a page's index underlyings their `I:` the way the dataset's rows allow.
 
-        Only a dataset with `DatasetSpec.underlying_by_root` is changed
-        (`option_roots.canonical_underlyings`); its rows' `Date` is filled by now, which dates
-        each root's lookup. The rows of a root Massive's contracts reference can't classify
-        are withheld as `unreadable_symbols` and reported as `_page_rows` reports its own
-        (`_report_withheld`), and counted in `tally` as withheld, since `_page_rows` counted
-        them among the page's rows already: a read whose every row is withheld fails. A call
-        that asked for an index by its bare ticker then has its kept rows checked
-        (`_warn_other_roots`).
+        `DatasetSpec.index_prefix` says how (`IndexPrefix`). The rows' `Date` is filled by
+        now, which dates each lookup. By option root (`option_roots.canonical_underlyings`) or
+        by bare underlying (`option_roots.canonical_symbols`), the rows Massive's contracts
+        reference can't classify are withheld as `unreadable_symbols` and reported as
+        `_page_rows` reports its own (`_report_withheld`), and counted in `tally` as withheld,
+        since `_page_rows` counted them among the page's rows already: a read whose every row
+        is withheld fails. A call that asked for an index by its bare ticker then has its kept
+        rows checked (`_warn_other_roots` by root, `_check_index_rows` by CFI code).
 
         Args:
             spec: The dataset.
@@ -890,22 +899,59 @@ class RestReader:
             RowDataError: If rows are withheld and `unreadable_symbols` is `RAISE` in the
                 read's policy.
 
-        A failed lookup raises the `MassiveError` of `root_kind`.
+        A failed lookup raises the `MassiveError` of `root_kind` or `underlying_kind`.
         """
-        if not spec.underlying_by_root or not rows:
+        if not rows:
             return rows
-        withheld = canonical_underlyings(
-            rows,
-            functools.partial(self.root_kind, patience=patience, cancel=stop),
-            dataset=spec.name,
-        )
+        match spec.index_prefix:
+            case IndexPrefix.NONE:
+                return rows
+            case IndexPrefix.FROM_CFI:
+                if index is not None:
+                    self._check_index_rows(spec, rows, index)
+                return rows
+            case IndexPrefix.BY_ROOT:
+                by_root = canonical_underlyings(
+                    rows,
+                    functools.partial(self.root_kind, patience=patience, cancel=stop),
+                    dataset=spec.name,
+                )
+                kept = self._kept_underlyings(spec, by_root, where=where, tally=tally)
+                if index is not None:
+                    self._warn_other_roots(spec, kept, index)
+                return kept
+            case IndexPrefix.BY_UNDERLYING:
+                by_underlying = canonical_symbols(
+                    rows,
+                    functools.partial(self.underlying_kind, patience=patience, cancel=stop),
+                    dataset=spec.name,
+                )
+                return self._kept_underlyings(spec, by_underlying, where=where, tally=tally)
+            case _:
+                assert_never(spec.index_prefix)
+
+    def _kept_underlyings(
+        self, spec: DatasetSpec, withheld: Withheld, *, where: str, tally: ReadTally
+    ) -> list[pa.RecordBatch]:
+        """Report and count a lookup's withheld rows, and return the rows to publish.
+
+        Args:
+            spec: The dataset.
+            withheld: The lookup's outcome: the rows to publish and the withheld groups.
+            where: The request template, for the events.
+            tally: The read's count of its rows and of those withheld.
+
+        Returns:
+            The rows to publish.
+
+        Raises:
+            RowDataError: If rows are withheld and `unreadable_symbols` is `RAISE` in the
+                read's policy.
+        """
         if withheld.groups:
             tally.add(0, withheld, source=where)
             self._report_withheld(spec, withheld, where=where)
-        kept = list(withheld.rows.to_batches())
-        if index is not None:
-            self._warn_other_roots(spec, kept, index)
-        return kept
+        return list(withheld.rows.to_batches())
 
     def _warn_other_roots(
         self, spec: DatasetSpec, batches: Sequence[pa.RecordBatch], index: str
@@ -981,6 +1027,41 @@ class RestReader:
             root,
             underlying=underlying,
             contract=contract,
+            day=day,
+            reader=self,
+            patience=self.patience() if patience is None else patience,
+            cancel=cancel,
+        )
+
+    def underlying_kind(
+        self,
+        underlying: str,
+        *,
+        day: str,
+        patience: Patience | None = None,
+        cancel: Cancel | None = None,
+    ) -> RootKind:
+        """Return whether a bare underlying's options are options on an index.
+
+        The session's `OptionRootKinds.underlying_kind` (`_ingest/option_roots.py`), read
+        through this reader: the first call reads Massive's index ticker list, once per
+        session, and the first call for a ticker on it reads the first contract of Massive's
+        contracts list for that underlying as of `day`, blocking the calling thread meanwhile.
+
+        Args:
+            underlying: The bare underlying the row names, such as `"SPX"`.
+            day: The trading day of the row that names it, as ISO text.
+            patience: The read's patience; None takes it now, on the calling thread
+                (`patience`).
+            cancel: A background read's stop token, or None.
+
+        Returns:
+            The underlying's kind.
+
+        A failed request raises its public `MassiveError`, naming the underlying.
+        """
+        return self.state.option_roots.underlying_kind(
+            underlying,
             day=day,
             reader=self,
             patience=self.patience() if patience is None else patience,
@@ -1569,10 +1650,6 @@ class RestReader:
                 self._warn_error_rows(converter, flagged, call.symbol, template=template)
                 if spec.ticker_list is not None:
                     batches = self._listed(spec, batches, own, template=template)
-                # The rows of a dataset that reads its underlyings by option root carry no CFI
-                # code: `_underlyings` checks them once their roots are classified.
-                if bare_index is not None and not spec.underlying_by_root:
-                    self._check_index_rows(spec, batches, bare_index)
                 # Stamp before keeping: `keep_window` judges a bar by its day's start, and an
                 # unexpected stamp outside the window still logs its WARNING.
                 if times.stamps is not None:
@@ -1861,11 +1938,9 @@ class RestReader:
 
         Args:
             spec: The dataset.
-            batches: One page's rows in the dataset's schema.
+            batches: One page's kept rows in the dataset's schema; at least one.
             index: The canonical index the call asked for, such as `I:SPX`.
         """
-        if not batches:
-            return
         underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
         other = pc.fill_null(pc.not_equal(underlyings, index), fill_value=True)
         if not pc.any(other).as_py():

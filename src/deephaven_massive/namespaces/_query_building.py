@@ -717,7 +717,9 @@ def _normalized_symbols(
             `Symbol` column, or `dm.ALL` is given to a dataset that refuses it.
 
     A `Symbol` column that is not text raises the `TypeError` of `_require_text_column`, and
-    a ticker `check_symbols` refuses its error.
+    a ticker `check_symbols` refuses its error, a ticker of another class than a stock or an
+    index included where the dataset's symbols are option underlyings
+    (`DatasetSpec.symbols_are_underlyings`).
     """
     normalized: NormalizedSymbols | None = None
     if symbols is None and not symbols_optional and core.catalog.takes_symbols(spec):
@@ -744,7 +746,12 @@ def _normalized_symbols(
         _require_text_column(symbols, "Symbol", what="the symbol table")
         normalized = SymbolTable(symbols)
     elif symbols is not None:
-        normalized = check_symbols(spec.asset_class, symbols, as_written=spec.symbols_as_written)
+        normalized = check_symbols(
+            spec.asset_class,
+            symbols,
+            as_written=spec.symbols_as_written,
+            underlying=spec.symbols_are_underlyings,
+        )
     if isinstance(normalized, AllSymbols) and all_alternative is not None:
         raise ValueError(user_defect(f"{spec.name} does not take dm.ALL", all_alternative))
     return normalized
