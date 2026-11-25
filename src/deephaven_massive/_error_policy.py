@@ -110,6 +110,20 @@ class ErrorPolicy:
 
             A symbol Massive answers with no rows and no error has no rows, whatever this
             setting says.
+        refused_symbols: Decides what happens to a symbol Massive refuses: it answers HTTP 403
+            for the symbol's request, an error row for it in a snapshot, or "not authorized" to
+            its subscription. Defaults to `LOG`.
+
+            Massive refuses a symbol when your plan doesn't serve it. Under `dm.OnError.LOG`
+            and `dm.OnError.IGNORE` the symbol gets no rows, the others are read or streamed,
+            and `m.problems()` lists it with Massive's answer. It isn't asked for again until
+            you delete its row and add it back, or call the method again. Set
+            `dm.OnError.RAISE` when a refused symbol means your plan or your list is wrong and
+            the table must not run without it.
+
+            A refusal of every symbol a call names, or of the feed itself (a dataset or a
+            delayed subscription your plan lacks), fails the call or table whatever this
+            setting says. A symbol a watchlist adds later never does.
         unrequested_symbols: Decides whether a row Massive returns for a symbol the call
             didn't ask for fails the table; the row is left out either way. Defaults to
             `LOG`.
@@ -227,6 +241,7 @@ class ErrorPolicy:
     noncanonical_symbols: OnError | None
     unreadable_symbols: OnError | None
     unavailable_symbols: OnError | None
+    refused_symbols: OnError | None
     unrequested_symbols: OnError | None
     unreadable_keys: OnError | None
     unconvertible_values: OnError | None
@@ -243,6 +258,7 @@ class ErrorPolicy:
         noncanonical_symbols: OnError | None = None,
         unreadable_symbols: OnError | None = None,
         unavailable_symbols: OnError | None = None,
+        refused_symbols: OnError | None = None,
         unrequested_symbols: OnError | None = None,
         unreadable_keys: OnError | None = None,
         unconvertible_values: OnError | None = None,
@@ -259,6 +275,7 @@ class ErrorPolicy:
             noncanonical_symbols: A watchlist row that isn't Massive's exact ticker.
             unreadable_symbols: A symbol in Massive's data that the library can't read.
             unavailable_symbols: A symbol Massive has no data for.
+            refused_symbols: A symbol Massive refuses, since the plan doesn't serve it.
             unrequested_symbols: A row Massive returns for a symbol the call didn't ask for.
             unreadable_keys: A row of Massive's data whose key the library can't read.
             unconvertible_values: A row of Massive's data with a value the library can't read.
@@ -276,6 +293,7 @@ class ErrorPolicy:
             "noncanonical_symbols": noncanonical_symbols,
             "unreadable_symbols": unreadable_symbols,
             "unavailable_symbols": unavailable_symbols,
+            "refused_symbols": refused_symbols,
             "unrequested_symbols": unrequested_symbols,
             "unreadable_keys": unreadable_keys,
             "unconvertible_values": unconvertible_values,
@@ -322,6 +340,7 @@ class ResolvedPolicy:
     noncanonical_symbols: OnError
     unreadable_symbols: OnError
     unavailable_symbols: OnError
+    refused_symbols: OnError
     unrequested_symbols: OnError
     unreadable_keys: OnError
     unconvertible_values: OnError
@@ -369,6 +388,9 @@ def resolve_policy(call: ErrorPolicy | None, session: ErrorPolicy) -> ResolvedPo
         ),
         unavailable_symbols=_first(
             given.unavailable_symbols, session.unavailable_symbols, default.unavailable_symbols
+        ),
+        refused_symbols=_first(
+            given.refused_symbols, session.refused_symbols, default.refused_symbols
         ),
         unrequested_symbols=_first(
             given.unrequested_symbols, session.unrequested_symbols, default.unrequested_symbols

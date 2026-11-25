@@ -38,6 +38,9 @@ failure of its run makes it `FAILED`, with an error that names the limit, as a `
 fails after its cycles have failed that long. Any other failure makes it `FAILED` at once.
 That rule, and each symbol's count of reads and run of failures, is `_tables/symbol_retry.py`'s
 (`SymbolRun`); the coordinator keeps one per symbol and schedules the retries it decides.
+A `RETRYING` or `FAILED` symbol is a span of `m.problems()`: a refusal of the symbol is a
+`refused_symbols` span, whose setting decides only how loudly it is logged, since under any
+setting the symbol alone fails; any other final failure is `symbol_read_failed`.
 Removed, it is `REMOVED`: under `Reread.ALWAYS` an empty download replaces its rows in the
 result, freeing them, and a re-add reads it again; under `Reread.NEVER` its download is kept, so
 a re-add shows the earlier download at once, with no request. A `FAILED` symbol is read again
@@ -102,6 +105,7 @@ from deephaven_massive._log_limits import (
     mark_failure_logged,
     prose_list,
 )
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import poll
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
@@ -114,7 +118,13 @@ from deephaven_massive._tables.liveness import QueueWorker
 from deephaven_massive._tables.poll import SymbolRowError
 from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
-from deephaven_massive._tables.symbol_retry import Failed, Retry, SymbolRun
+from deephaven_massive._tables.symbol_retry import (
+    SPAN_CAUSES,
+    Failed,
+    Retry,
+    SymbolRun,
+    is_symbol_refusal,
+)
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
@@ -124,6 +134,7 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._config import MassiveConfig
+    from deephaven_massive._enums import OnError
     from deephaven_massive._tables.followed_read import FollowPlan
     from deephaven_massive._tables.poll import PollClock
     from deephaven_massive._tables.problem_events import Problem
@@ -151,12 +162,6 @@ _FOLLOWING: Final = frozenset(
 
 _ENDED: Final = frozenset({SymbolReadState.FAILED, SymbolReadState.REMOVED, SymbolReadState.CLOSED})
 """The states a stop leaves as they are; every other becomes `STOPPED`."""
-
-_TROUBLE_CAUSES: Final = {
-    SymbolReadState.RETRYING: ProblemCause.SYMBOL_READ_RETRYING,
-    SymbolReadState.FAILED: ProblemCause.SYMBOL_READ_FAILED,
-}
-"""The cause of each state whose symbols are spans of `m.problems()`."""
 
 
 class FollowedReadRows(Protocol):
@@ -439,12 +444,12 @@ class _Counted:
     Attributes:
         state: Its state, which counts it as loading, retrying, or failed.
         rows: Its rows in the result.
-        cause: Its latest failure's cause, which groups a retrying or failed symbol.
+        span: The cause of its span of `m.problems()` (`SymbolRun.cause`), or None for none.
     """
 
     state: SymbolReadState
     rows: int
-    cause: str
+    span: ProblemCause | None
 
 
 @dataclass(slots=True)
@@ -460,7 +465,7 @@ class _Progress:
         members: The symbols the table holds now.
         loading: How many of them still wait for their rows (`QUEUED`, `LOADING`, `RETRYING`).
         rows: Their rows in the result, in all.
-        troubled: Of them, the `RETRYING` and `FAILED` ones, by state, then by cause.
+        troubled: Of them, the ones that hold a span of `m.problems()`, by its cause.
         members_changed: Whether `members` changed since `symbols` was last made.
         troubled_changed: Whether `troubled` changed since its spans were last reported.
         symbols: The `SymbolCount` and `Symbols` shown (`symbol_list_text`).
@@ -469,8 +474,8 @@ class _Progress:
     members: set[str] = field(default_factory=set)
     loading: int = 0
     rows: int = 0
-    troubled: dict[SymbolReadState, dict[str, set[str]]] = field(
-        default_factory=lambda: {SymbolReadState.RETRYING: {}, SymbolReadState.FAILED: {}}
+    troubled: dict[ProblemCause, set[str]] = field(
+        default_factory=lambda: {cause: set() for cause in SPAN_CAUSES}
     )
     members_changed: bool = True
     troubled_changed: bool = True
@@ -485,7 +490,7 @@ class _Progress:
         """
         before = symbol.counted
         after = (
-            _Counted(symbol.run.state, symbol.rows, symbol.cause or "") if symbol.in_table else None
+            _Counted(symbol.run.state, symbol.rows, symbol.run.cause) if symbol.in_table else None
         )
         if before == after:
             return
@@ -494,17 +499,13 @@ class _Progress:
                 continue
             self.loading += sign * (counted.state in _FOLLOWING)
             self.rows += sign * counted.rows
-            causes = self.troubled.get(counted.state)
-            if causes is None:
+            if counted.span is None:
                 continue
             self.troubled_changed = True
-            names = causes.setdefault(counted.cause, set())
             if sign > 0:
-                names.add(name)
-                continue
-            names.discard(name)
-            if not names:
-                del causes[counted.cause]
+                self.troubled[counted.span].add(name)
+            else:
+                self.troubled[counted.span].discard(name)
         if (before is None) != (after is None):
             self.members_changed = True
             if after is None:
@@ -533,7 +534,7 @@ class _Result:
         dirty: The symbols whose `m.symbol_reads()` row changed since it was last written.
         warned: The causes of failure already logged at WARNING for the result.
         transports: The sources its reads have used.
-        spans: Its `symbol_read_retrying` and `symbol_read_failed` spans of `m.problems()`.
+        spans: Its symbols' spans of `m.problems()`, by cause (`SPAN_CAUSES`).
         progress: Its `m.streams()` progress, kept current by `_show`.
         shown: The `m.streams()` progress last written, to skip an unchanged write.
         decided_at_step: The latest update cycle of the symbol table whose change the
@@ -560,7 +561,7 @@ class _Result:
     dirty: set[str] = field(default_factory=set)
     warned: set[str] = field(default_factory=set)
     transports: set[str] = field(default_factory=set)
-    spans: dict[SymbolReadState, SpanTracker] = field(default_factory=dict)
+    spans: dict[ProblemCause, SpanTracker] = field(default_factory=dict)
     progress: _Progress = field(default_factory=_Progress)
     shown: object = None
     call_time: dict[str, MassiveError | None] | None = None
@@ -592,6 +593,32 @@ def _cause(error: MassiveError) -> str:
     if error.is_bug:
         parts.append("bug")
     return " ".join(parts)
+
+
+def _failure_level(error: MassiveError, *, first: bool, refusals: OnError) -> int:
+    """Return the level of the record that says a symbol has failed for good.
+
+    The first failure of each cause on a result is logged at WARNING (a bug at ERROR, with its
+    traceback), and the later ones at DEBUG. A refusal of the symbol is a `refused_symbols`
+    span, which the session's problem reporter logs once per table at WARNING under `LOG`
+    and at DEBUG under `IGNORE`, so here it is a WARNING only under `RAISE`, where the
+    reporter stays quiet and the symbol, not the table, is what fails.
+
+    Args:
+        error: The symbol's final failure.
+        first: Whether it is the first failure of its cause on the result.
+        refusals: The read's `ErrorPolicy.refused_symbols`.
+
+    Returns:
+        `logging.ERROR`, `logging.WARNING`, or `logging.DEBUG`.
+    """
+    if not first:
+        return logging.DEBUG
+    if error.is_bug:
+        return logging.ERROR
+    if is_symbol_refusal(error) and not effect_of(refusals).fails:
+        return logging.DEBUG
+    return logging.WARNING
 
 
 def _transport(read: CoordinatedRead, outcome: SymbolOutcome) -> str:
@@ -1232,9 +1259,7 @@ class FollowCoordinator:
         first = symbol.cause not in result.warned
         result.warned.add(symbol.cause)
         mark_failure_logged(error)
-        level = logging.WARNING if first else logging.DEBUG
-        if error.is_bug and first:
-            level = logging.ERROR
+        level = _failure_level(error, first=first, refusals=result.read.plan.refused_symbols)
         logger.log(
             level,
             "%s call %d: %s failed after %d %s and is left out of the result. %s To read it "
@@ -1567,22 +1592,30 @@ class FollowCoordinator:
     def _report_troubled(result: _Result) -> None:
         """Report the result's `RETRYING` and `FAILED` symbols as spans of `m.problems()`.
 
-        Each symbol in one of those states is one span, `symbol_read_retrying` or
-        `symbol_read_failed`, with its latest error; a span ends when the symbol leaves the
-        state (it is read, retried, removed, or the result stops).
+        Each symbol in one of those states is one span, with its latest error, under the cause
+        its run gives (`SymbolRun.cause`): `symbol_read_retrying`, `refused_symbols`, which
+        carries the read's setting of that cause, or `symbol_read_failed`. A span ends when
+        the symbol leaves the state (it is read, retried, removed, or the result stops).
 
         Args:
             result: The result's state.
         """
         read = result.read
         found = []
-        for state, cause in _TROUBLE_CAUSES.items():
-            tracker = result.spans.get(state)
+        for cause in SPAN_CAUSES:
+            tracker = result.spans.get(cause)
             if tracker is None:
-                tracker = result.spans[state] = SpanTracker(
-                    cause, dataset=read.dataset, stream_id=read.call, where=f"call {read.call}"
+                policy = (
+                    read.plan.refused_symbols if cause is ProblemCause.REFUSED_SYMBOLS else None
                 )
-            names = {name for names in result.progress.troubled[state].values() for name in names}
+                tracker = result.spans[cause] = SpanTracker(
+                    cause,
+                    dataset=read.dataset,
+                    stream_id=read.call,
+                    where=f"call {read.call}",
+                    policy=policy,
+                )
+            names = result.progress.troubled[cause]
             spans = tracker.update(
                 {name: (name, None, result.symbols[name].error or "", 0) for name in names}
             )

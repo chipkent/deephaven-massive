@@ -149,6 +149,7 @@ def test_the_causes_are_pinned() -> None:
         "noncanonical_symbols",
         "unreadable_symbols",
         "unavailable_symbols",
+        "refused_symbols",
         "unrequested_symbols",
         "unreadable_keys",
         "unconvertible_values",

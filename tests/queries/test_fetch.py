@@ -328,7 +328,12 @@ def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
     massive_session: dm.MassiveSession,
     rest: Recorder,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Under RAISE the read itself warns of a refused symbol, so the warning names it here.
+    on_error = dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE)
+    config = dataclasses.replace(massive_session._core.config, on_error=on_error)
+    monkeypatch.setattr(massive_session._core, "config", config)
     # Massive's answer to the read of AAPL, as the REST client words it.
     refusal = dm.EntitlementError(
         "Massive answered GET /v2/last/trade/AAPL on api.massive.com with HTTP 403: "

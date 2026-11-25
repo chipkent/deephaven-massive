@@ -177,6 +177,7 @@ def follow(
         one_scan=one_scan,
         symbols_per_read=1,
         read=script.read,
+        refused_symbols=core.policy.refused_symbols,
     )
     return open_followed_read(
         core,

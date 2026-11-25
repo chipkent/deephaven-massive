@@ -192,6 +192,8 @@ on_error:
   unreadable_symbols: log  # the default
   # A symbol Massive has no data for.
   unavailable_symbols: log  # the default
+  # A symbol Massive refuses, since the plan doesn't serve it.
+  refused_symbols: log  # the default
   # A row Massive sent for a symbol the call didn't ask for.
   unrequested_symbols: log  # the default
   # A row of Massive's data whose key the library can't read.
@@ -250,6 +252,7 @@ A key inside the `websocket_hosts` or `on_error` mapping is named by its full pa
 | `on_error.noncanonical_symbols` | Decides what happens to a row of a watchlist or other table you pass whose value isn't Massive's exact ticker or futures product code, such as `SPX` for `I:SPX`. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unreadable_symbols` | Decides whether a row of Massive's data whose symbol the library can't read as Massive's ticker fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unavailable_symbols` | Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its crypto ticker list doesn't hold the pair. | `log`, `ignore`, or `raise` | `log` |
+| `on_error.refused_symbols` | Decides what happens to a symbol Massive refuses: it answers HTTP 403 for the symbol's request, an error row for it in a snapshot, or "not authorized" to its subscription. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unrequested_symbols` | Decides whether a row Massive returns for a symbol the call didn't ask for fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unreadable_keys` | Decides whether a row of Massive's data whose key the library can't read fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
 | `on_error.unconvertible_values` | Decides whether a row of Massive's data holding a value the library can't read as its column's type fails the table; the row is left out either way. | `log`, `ignore`, or `raise` | `log` |
@@ -391,6 +394,19 @@ others, and `m.problems()` lists it.
 
 A symbol Massive answers with no rows and no error has no rows, whatever this
 setting says.
+
+#### on_error.refused_symbols
+
+Massive refuses a symbol when your plan doesn't serve it. Under `log`
+and `ignore` the symbol gets no rows, the others are read or streamed,
+and `m.problems()` lists it with Massive's answer. It isn't asked for again until
+you delete its row and add it back, or call the method again. Set
+`raise` when a refused symbol means your plan or your list is wrong and
+the table must not run without it.
+
+A refusal of every symbol a call names, or of the feed itself (a dataset or a
+delayed subscription your plan lacks), fails the call or table whatever this
+setting says. A symbol a watchlist adds later never does.
 
 #### on_error.unrequested_symbols
 

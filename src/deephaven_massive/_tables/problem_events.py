@@ -99,6 +99,7 @@ class ProblemCause(StrEnum):
     NONCANONICAL_SYMBOLS = "noncanonical_symbols"
     UNREADABLE_SYMBOLS = "unreadable_symbols"
     UNAVAILABLE_SYMBOLS = "unavailable_symbols"
+    REFUSED_SYMBOLS = "refused_symbols"
     UNREQUESTED_SYMBOLS = "unrequested_symbols"
     UNREADABLE_KEYS = "unreadable_keys"
     UNCONVERTIBLE_VALUES = "unconvertible_values"
@@ -183,6 +184,18 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             summary="Massive has no data for the symbol. It answered HTTP 404, or the pair isn't "
             "on its crypto ticker list.",
             fix="Look the symbol up in Massive's lists, such as `m.reference.tickers()`.",
+        ),
+        _C.REFUSED_SYMBOLS: CauseTraits(
+            policy="refused_symbols",
+            source=_MASSIVE,
+            action=ProblemAction.SKIPPED,
+            span=True,
+            summary="Massive refused the symbol: your plan doesn't serve it there (HTTP 403, an "
+            'error row, or "not authorized"). One row per symbol, also for a request of many '
+            "symbols.",
+            fix="Remove the symbol, or change the plan or the feed the `Detail` names, then "
+            "delete the symbol's row and add it back, or call the method again for a list in "
+            "code.",
         ),
         _C.UNREQUESTED_SYMBOLS: CauseTraits(
             policy="unrequested_symbols",

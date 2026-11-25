@@ -1,11 +1,12 @@
 """Tests for `queries/_history.py`: `history()` from REST and flat files, and following a table."""
 
+import dataclasses
 import logging
 import re
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
-from typing import Any
+from typing import Any, assert_never
 
 import pytest
 from deephaven import new_table
@@ -785,32 +786,63 @@ def test_wait_true_raises_when_every_call_time_symbol_fails(
     follows(massive_session)
 
 
+_MSFT_403 = (
+    "Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on api.massive.com with "
+    'HTTP 403: "You are not entitled to this data".'
+)
+"""Massive's answer to the read of MSFT, as the REST client words it."""
+
+
+def _wait_true_warnings(setting: dm.OnError) -> list[str]:
+    # The WARNINGs a wait=True read logs when Massive refuses MSFT of its AAPL and MSFT.
+    match setting:
+        case dm.OnError.RAISE:  # the read's own, since the symbol fails as RAISE asks
+            return [
+                (
+                    "stocks.trades history: 1 of the 2 symbols failed and are left out of the "
+                    f"result for now. MSFT: {_MSFT_403} Check m.symbol_reads() for whether each "
+                    "one is retrying or has failed."
+                )
+            ]
+        case dm.OnError.LOG:  # the one alarm of its refused_symbols span
+            return [
+                (
+                    f"stocks.trades table 1: refused_symbols: MSFT: {_MSFT_403.removesuffix('.')} "
+                    "(at call 1). m.problems() lists it and every later refused_symbols problem of "
+                    "this table, which the log shows at DEBUG only."
+                )
+            ]
+        case dm.OnError.IGNORE:
+            return []
+        case _:
+            assert_never(setting)
+
+
+@pytest.mark.parametrize("setting", list(dm.OnError))
 def test_wait_true_warns_once_when_some_call_time_symbols_fail(
+    setting: dm.OnError,
     live: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
+    problem_rows: Callable[[], list[dict[str, Any]]],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Massive's answer to the read of MSFT, as the REST client words it.
-    refusal = dm.EntitlementError(
-        "Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on api.massive.com with "
-        'HTTP 403: "You are not entitled to this data".',
-        status=403,
-    )
-    rest.outcomes = {"MSFT": SymbolFailure(refusal)}
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
+    on_error = dm.ErrorPolicy(refused_symbols=setting)
+    config = dataclasses.replace(massive_session._core.config, on_error=on_error)
+    monkeypatch.setattr(massive_session._core, "config", config)
+    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError(_MSFT_403, status=403))}
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
         result = trades(massive_session, live("AAPL", "MSFT")).history(
             "2025-03-03", "2025-03-03", wait=True
         )
-    assert caplog.messages == [
-        (
-            "stocks.trades history: 1 of the 2 symbols failed and are left out of the result "
-            "for now. MSFT: Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on "
-            'api.massive.com with HTTP 403: "You are not entitled to this data". Check '
-            "m.symbol_reads() for whether each one is retrying or has failed."
+        until(
+            lambda: (
+                [(r["Cause"], r["Symbol"]) for r in problem_rows()] == [("refused_symbols", "MSFT")]
+            )
         )
-    ]
+    assert caplog.messages == _wait_true_warnings(setting)
     massive_session.release(result)
     follows(massive_session)
 

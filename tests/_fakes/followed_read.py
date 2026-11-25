@@ -96,7 +96,13 @@ class QuietRead:
     def __init__(self) -> None:
         """Make a read that has not failed."""
         self.core = QuietCore()
-        self.plan = FollowPlan(Transport.REST, one_scan=False, symbols_per_read=1, read=self.read)
+        self.plan = FollowPlan(
+            Transport.REST,
+            one_scan=False,
+            symbols_per_read=1,
+            read=self.read,
+            refused_symbols=dm.OnError.LOG,
+        )
         self.stop_token = threading.Event()
         self.failed: MassiveError | None = None
 

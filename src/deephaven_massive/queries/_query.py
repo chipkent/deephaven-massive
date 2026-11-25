@@ -34,6 +34,7 @@ from deephaven_massive._errors import (
     raises_through,
     user_defect,
 )
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
 from deephaven_massive._tables.columns import (
@@ -43,6 +44,7 @@ from deephaven_massive._tables.columns import (
 from deephaven_massive._tables.execution_context import entered, refuse_update_graph_thread
 from deephaven_massive._tables.follow_coordinator import FirstRead
 from deephaven_massive._tables.refused_values import refused_values_of
+from deephaven_massive._tables.symbol_retry import is_symbol_refusal
 from deephaven_massive._tables.transports import (
     SymbolFailure,
 )
@@ -559,6 +561,18 @@ class Query:
         if len(failed) == len(call_time):
             first = every_symbol_failed([failed[name].error for name in call_time])
             raise first from failed[call_time[0]].error
+        if not effect_of(plan.refused_symbols).fails:
+            # A refused symbol's alarm is its refused_symbols span, which the session's problem
+            # reporter logs once per table under LOG, and only at DEBUG under IGNORE.
+            refused = [name for name, o in failed.items() if is_symbol_refusal(o.error)]
+            if refused:
+                logger.debug(
+                    "%s %s: Massive refused %s; each is a refused_symbols problem",
+                    self._spec.name,
+                    verb,
+                    refused,
+                )
+            failed = {name: o for name, o in failed.items() if name not in refused}
         if failed:
             logger.warning(
                 "%s %s: %d of the %d symbols failed and are left out of the result for now. %s "
