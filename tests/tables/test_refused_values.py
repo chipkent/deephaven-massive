@@ -218,7 +218,8 @@ def test_a_static_conversion_keeps_its_refused_values_once() -> None:
         "Symbol",
         9,
     )
-    assert event.detail.startswith("canonicalize_symbols refused it: ")
+    # The converter's reason alone: the row's Cause leads to the fix.
+    assert event.detail == "canonicalize_symbols refused it: '^X' is not a crypto pair."
     assert event.policy is OnError.LOG
 
 

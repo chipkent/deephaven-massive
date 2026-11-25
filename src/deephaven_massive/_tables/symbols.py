@@ -22,6 +22,7 @@ formula it installs is pure, so Deephaven may run it on several threads at once.
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import TYPE_CHECKING, Final
 
@@ -31,6 +32,7 @@ from deephaven.table import Table
 from deephaven_massive._datasets.symbols import (
     CLASS_NOUNS,
     LOGGED_VALUES,
+    SymbolRefusalError,
     check_convention,
     convert_under,
     refusal,
@@ -55,22 +57,40 @@ _SHOWN: Final = 5
 """The most bad values one message lists."""
 
 
-def _refused(values: Iterable[str], convert: Callable[[str], str]) -> dict[str, str]:
-    """Return the distinct values that do not convert, with their reasons.
+def _refused(values: Iterable[str], convert: Callable[[str], str]) -> dict[str, SymbolRefusalError]:
+    """Return the distinct values that do not convert, with their refusals.
 
     Args:
         values: The distinct non-null values.
         convert: The class's strict verdict (`strict_converter`).
 
     Returns:
-        Each value that does not convert, mapped to its reason (`refusal`).
+        Each value that does not convert, mapped to its refusal (`refusal`): the reason and
+        the fix apart, and the message they make.
     """
-    refused: dict[str, str] = {}
+    refused: dict[str, SymbolRefusalError] = {}
     for value in values:
-        reason = refusal(value, convert)
-        if reason is not None:
-            refused[value] = reason
+        refused_as = refusal(value, convert)
+        if refused_as is not None:
+            refused[value] = refused_as
     return refused
+
+
+def _reason(value: str, convert: Callable[[str], str]) -> str | None:
+    """Return the reason a value does not convert, without the fix, or None when it does.
+
+    The `why` of a `RefusedValues` and a `ConversionRule`: `m.problems()` shows it as the
+    `Detail` of the value's `noncanonical_symbols` row, whose `Cause` leads to the fix.
+
+    Args:
+        value: The value.
+        convert: The class's strict verdict (`strict_converter`).
+
+    Returns:
+        The converter's reason, or None for a value that converts.
+    """
+    refused = refusal(value, convert)
+    return None if refused is None else refused.reason
 
 
 def canonicalize_symbols(
@@ -159,7 +179,7 @@ def canonicalize_symbols(
     if refused and effect.fails:
         count = len(refused)
         first = f" The first {_SHOWN}:" if count > _SHOWN else ""
-        shown = " ".join(refused[value] for value in sorted(refused)[:_SHOWN])
+        shown = " ".join(str(refused[value]) for value in sorted(refused)[:_SHOWN])
         raise ValueError(
             f"canonicalize_symbols cannot convert {count} {'value' if count == 1 else 'values'} "
             f"of the {column} column to {CLASS_NOUNS[resolved]} tickers.{first} {shown} Correct "
@@ -201,7 +221,7 @@ def _keep_refused(
         mode: The call's `on_error`, `LOG` or `IGNORE`.
         convert: The class's strict verdict (`strict_converter`).
     """
-    refused = RefusedValues(mode, why=lambda value: refusal(value, convert))
+    refused = RefusedValues(mode, why=functools.partial(_reason, convert=convert))
     refused.change(values)
     track_refused(converted, refused, column=column)
 
@@ -222,10 +242,7 @@ def _track_refused(
         mode: The call's `on_error`, `LOG` or `IGNORE`.
         convert: The class's strict verdict (`strict_converter`).
     """
-
-    def why(value: str) -> str | None:
-        return refusal(value, convert)
-
+    why = functools.partial(_reason, convert=convert)
     refused = RefusedValues(mode, why=why)
     watch = SymbolWatch(
         ConversionRule("canonicalize_symbols", column, why),

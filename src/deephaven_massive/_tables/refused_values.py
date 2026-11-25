@@ -69,7 +69,8 @@ class ConversionRule:
     Attributes:
         dataset: The name the watch's log records use, `canonicalize_symbols`.
         column: The input table's column of symbols.
-        why: Each value's reason it does not convert, or None for a value that does.
+        why: Each value's reason it does not convert, without the fix, or None for a value
+            that does.
     """
 
     dataset: str
@@ -127,7 +128,8 @@ class RefusedValues:
 
         Args:
             policy: The `on_error` of `canonicalize_symbols`, which the spans record.
-            why: Each value's reason it does not convert.
+            why: Each value's reason it does not convert, without the fix: the `Detail` of
+                its `noncanonical_symbols` problem.
         """
         self.policy: Final = policy
         self._why = why
@@ -220,10 +222,11 @@ def refused_detail(why: str) -> str:
     """Return the `Detail` of a value `canonicalize_symbols` refused.
 
     Args:
-        why: The converter's reason.
+        why: The converter's reason, without its fix.
 
     Returns:
-        Such as `"canonicalize_symbols refused it: not a pair"`.
+        Such as `"canonicalize_symbols refused it: 'BTC' is too short to hold a base currency
+        and a quote currency."`.
     """
     return f"canonicalize_symbols refused it: {why}"
 

@@ -20,8 +20,11 @@ from deephaven_massive._datasets import symbols
 from deephaven_massive._datasets.symbols import (
     ALL,
     AllSymbols,
+    SymbolRefusalError,
     SymbolsLike,
     SymbolTable,
+    _convert_single_future,
+    _convert_spread,
     as_written_fault,
     check_symbol,
     check_symbols,
@@ -128,10 +131,15 @@ NOT_CANONICAL = [
 ]
 
 
-FUTURES_FORMS = (
-    "A contract looks like 'ESZ5' or 'NGZ26' and a spread like 'GCQ6-GCZ6', in upper case. Pass "
-    "the ticker as m.futures.contracts() lists it."
+FUTURES_FORMS_REASON = (
+    "A contract looks like 'ESZ5' or 'NGZ26' and a spread like 'GCQ6-GCZ6', in upper case."
 )
+"""The sentence after the first of every refusal's reason for text that is no futures ticker."""
+
+FUTURES_FIX = "Pass the ticker as m.futures.contracts() lists it."
+"""The fix of every refusal of text that is no futures ticker."""
+
+FUTURES_FORMS = f"{FUTURES_FORMS_REASON} {FUTURES_FIX}"
 """The sentences after the first of every refusal of text that is no futures ticker."""
 
 
@@ -478,203 +486,210 @@ def stock_conventions_fix(text: str) -> str:
     )
 
 
-STOCK_FORMS = (
-    "is not a Massive stock ticker, which looks like 'AAPL', 'BRK.B', or 'KIMpL'. Pass the "
-    "ticker as m.reference.tickers() lists it."
-)
+STOCK_FORMS_REASON = "is not a Massive stock ticker, which looks like 'AAPL', 'BRK.B', or 'KIMpL'."
+"""The reason, after the text, of a refusal of text that is no stock ticker in any form the
+library names."""
+
+STOCK_FIX = "Pass the ticker as m.reference.tickers() lists it."
+"""The fix of that refusal."""
+
+STOCK_FORMS = f"{STOCK_FORMS_REASON} {STOCK_FIX}"
 """The refusal of text that is no stock ticker in any form the library names, after the text."""
+
+OPTION_FIX = "Pass the symbol as m.options.contracts() lists it."
+"""The fix of a refusal of text that is no OCC option symbol."""
+
+UNDOCUMENTED_SPELLINGS = (
+    "Massive documents no spelling for warrants, units, rights, when-issued, "
+    "when-distributed, called, or test issues, so the library converts none of them."
+)
+"""The second sentence of the reason a convention's other spellings are refused."""
+
+VERDICTS: dict[Callable[..., str | None], Callable[[str], str]] = {
+    dm.canonical_symbol_stock: strict_converter(STK, SymbolConvention.MASSIVE),
+    dm.canonical_symbol_option: strict_converter(OPT, SymbolConvention.MASSIVE),
+    dm.canonical_symbol_future: _convert_single_future,
+    dm.canonical_symbol_future_spread: _convert_spread,
+    dm.canonical_symbol_index: strict_converter(IDX, SymbolConvention.MASSIVE),
+    dm.canonical_symbol_forex: strict_converter(FX, SymbolConvention.MASSIVE),
+    dm.canonical_symbol_crypto: strict_converter(CRY, SymbolConvention.MASSIVE),
+    dm.canonical_symbol_stock_yahoo: strict_converter(STK, SymbolConvention.YAHOO),
+}
+"""The strict verdict behind each public converter, whose refusal `refusal` returns."""
 
 
 @pytest.mark.parametrize(
-    ("convert", "text", "message"),
+    ("convert", "text", "reason", "fix"),
     [
-        (
-            dm.canonical_symbol_stock,
-            "BRK-B",
-            f"'BRK-B' is not a Massive stock ticker. {stock_conventions_fix('BRK-B')}",
-        ),
-        (
-            dm.canonical_symbol_stock,
-            "BRK/B",
-            f"'BRK/B' is not a Massive stock ticker. {stock_conventions_fix('BRK/B')}",
-        ),
-        (
-            dm.canonical_symbol_stock,
-            "BRK B",
-            f"'BRK B' is not a Massive stock ticker. {stock_conventions_fix('BRK B')}",
+        # Every refusal a converter raises, with its reason and its fix apart: the message a
+        # user reads is the two joined, and m.problems() shows the reason alone.
+        *(
+            (
+                dm.canonical_symbol_stock,
+                text,
+                f"{text!r} is not a Massive stock ticker.",
+                stock_conventions_fix(text),
+            )
+            for text in ("BRK-B", "BRK/B", "BRK B")
         ),
         (
             dm.canonical_symbol_stock,
             "kimpl",
-            (
-                "'kimpl' is not a Massive stock ticker, because Massive's tickers are "
-                "case-sensitive. If you mean 'KIMPL', pass 'KIMPL'."
-            ),
+            "'kimpl' is not a Massive stock ticker, because Massive's tickers are case-sensitive.",
+            "If you mean 'KIMPL', pass 'KIMPL'.",
         ),
-        (dm.canonical_symbol_stock, " AAPL ", "' AAPL ' has surrounding whitespace. Pass 'AAPL'."),
-        (dm.canonical_symbol_stock, "Aapl", f"'Aapl' {STOCK_FORMS}"),
-        (dm.canonical_symbol_stock, "", f"'' {STOCK_FORMS}"),
+        (
+            dm.canonical_symbol_stock,
+            " AAPL ",
+            "' AAPL ' has surrounding whitespace.",
+            "Pass 'AAPL'.",
+        ),
+        (dm.canonical_symbol_stock, "Aapl", f"'Aapl' {STOCK_FORMS_REASON}", STOCK_FIX),
+        (dm.canonical_symbol_stock, "", f"'' {STOCK_FORMS_REASON}", STOCK_FIX),
         (
             dm.canonical_symbol_stock,
             "C:EURUSD",
-            (
-                "'C:EURUSD' is a forex ticker, not a stock one. "
-                "Call dm.canonical_symbol_forex('C:EURUSD')."
-            ),
+            "'C:EURUSD' is a forex ticker, not a stock one.",
+            "Call dm.canonical_symbol_forex('C:EURUSD').",
         ),
         (
             dm.canonical_symbol_crypto,
             "C:EURUSD",
-            (
-                "'C:EURUSD' is a forex ticker, not a crypto one. "
-                "Call dm.canonical_symbol_forex('C:EURUSD')."
-            ),
+            "'C:EURUSD' is a forex ticker, not a crypto one.",
+            "Call dm.canonical_symbol_forex('C:EURUSD').",
         ),
         (
             dm.canonical_symbol_forex,
             "X:BTCUSD",
-            (
-                "'X:BTCUSD' is a crypto ticker, not a forex one. "
-                "Call dm.canonical_symbol_crypto('X:BTCUSD')."
-            ),
+            "'X:BTCUSD' is a crypto ticker, not a forex one.",
+            "Call dm.canonical_symbol_crypto('X:BTCUSD').",
         ),
         (
             dm.canonical_symbol_stock,
             "o:AAPL250117C00150000",
-            (
-                "'o:AAPL250117C00150000' is an option ticker, not a stock one. "
-                "Call dm.canonical_symbol_option('o:AAPL250117C00150000')."
-            ),
+            "'o:AAPL250117C00150000' is an option ticker, not a stock one.",
+            "Call dm.canonical_symbol_option('o:AAPL250117C00150000').",
         ),
         (
             dm.canonical_symbol_option,
             "I:SPX",
-            (
-                "'I:SPX' is an index ticker, not an option one. "
-                "Call dm.canonical_symbol_index('I:SPX')."
-            ),
+            "'I:SPX' is an index ticker, not an option one.",
+            "Call dm.canonical_symbol_index('I:SPX').",
         ),
         (
             dm.canonical_symbol_option,
             "AAPL",
-            (
-                "'AAPL' is an underlying, not an OCC option symbol such as "
-                "'O:AAPL250117C00150000'. "
-                "Pass a contract's symbol from m.options.contracts('AAPL')."
-            ),
+            "'AAPL' is an underlying, not an OCC option symbol such as 'O:AAPL250117C00150000'.",
+            "Pass a contract's symbol from m.options.contracts('AAPL').",
         ),
-        (
-            dm.canonical_symbol_option,
-            "O:AAPL250132C00150000",
+        *(
             (
-                "'O:AAPL250132C00150000' has the shape of an OCC option symbol, but its expiry "
-                "250132, read as YYMMDD, is not a real date. Pass the symbol as "
-                "m.options.contracts() lists it."
-            ),
-        ),
-        (
-            dm.canonical_symbol_option,
-            "AAPL250230C00150000",
-            (
-                "'AAPL250230C00150000' has the shape of an OCC option symbol, but its expiry "
-                "250230, read as YYMMDD, is not a real date. Pass the symbol as "
-                "m.options.contracts() lists it."
-            ),
+                dm.canonical_symbol_option,
+                text,
+                (
+                    f"{text!r} has the shape of an OCC option symbol, but its expiry "
+                    f"{expiry}, read as YYMMDD, is not a real date."
+                ),
+                OPTION_FIX,
+            )
+            for text, expiry in (
+                ("O:AAPL250132C00150000", "250132"),
+                ("AAPL250230C00150000", "250230"),
+            )
         ),
         (
             dm.canonical_symbol_option,
             "BRKB 250117C00400000",
             (
                 "'BRKB 250117C00400000' is not an OCC option symbol, which looks like "
-                "'O:AAPL250117C00150000'. Pass the symbol as m.options.contracts() lists it."
+                "'O:AAPL250117C00150000'."
             ),
-        ),
-        (dm.canonical_symbol_future, " ESZ5 ", "' ESZ5 ' has surrounding whitespace. Pass 'ESZ5'."),
-        (dm.canonical_symbol_future, "", f"'' is not a Massive futures ticker. {FUTURES_FORMS}"),
-        (
-            dm.canonical_symbol_future,
-            "esz5",
-            f"'esz5' is not a Massive futures ticker. {FUTURES_FORMS}",
+            OPTION_FIX,
         ),
         (
             dm.canonical_symbol_future,
-            "ESZ",
-            f"'ESZ' is not a Massive futures ticker. {FUTURES_FORMS}",
+            " ESZ5 ",
+            "' ESZ5 ' has surrounding whitespace.",
+            "Pass 'ESZ5'.",
+        ),
+        *(
+            (
+                dm.canonical_symbol_future,
+                text,
+                f"{text!r} is not a Massive futures ticker. {FUTURES_FORMS_REASON}",
+                FUTURES_FIX,
+            )
+            for text in ("", "esz5", "ESZ")
         ),
         (
             dm.canonical_symbol_future,
             "GCQ6-GCZ6",
-            (
-                "'GCQ6-GCZ6' is a futures combo, such as a spread, not a single contract. "
-                "Call dm.canonical_symbol_future_spread('GCQ6-GCZ6')."
-            ),
+            "'GCQ6-GCZ6' is a futures combo, such as a spread, not a single contract.",
+            "Call dm.canonical_symbol_future_spread('GCQ6-GCZ6').",
         ),
         (
             dm.canonical_symbol_future_spread,
             "ESZ5",
-            (
-                "'ESZ5' is a single futures contract, not a combo. "
-                "Call dm.canonical_symbol_future('ESZ5')."
-            ),
+            "'ESZ5' is a single futures contract, not a combo.",
+            "Call dm.canonical_symbol_future('ESZ5').",
         ),
         (
             dm.canonical_symbol_future_spread,
             "GCQ6--GCZ6",
             (
                 "'GCQ6--GCZ6' is not a Massive futures combo ticker, which looks like 'GCQ6-GCZ6', "
-                "'BOB 02-01 U6', or 'CL:BF Q6-U6-V6'. Pass the ticker as m.futures.contracts() "
-                "lists it."
+                "'BOB 02-01 U6', or 'CL:BF Q6-U6-V6'."
             ),
+            FUTURES_FIX,
         ),
         (
             dm.canonical_symbol_future_spread,
             "X:BTCUSD",
-            (
-                "'X:BTCUSD' is a crypto ticker, not a futures one. "
-                "Call dm.canonical_symbol_crypto('X:BTCUSD')."
-            ),
+            "'X:BTCUSD' is a crypto ticker, not a futures one.",
+            "Call dm.canonical_symbol_crypto('X:BTCUSD').",
         ),
         (
             dm.canonical_symbol_future,
             "X:ESZ5",
-            (
-                "'X:ESZ5' is a crypto ticker, not a futures one. "
-                "Call dm.canonical_symbol_crypto('X:ESZ5')."
-            ),
+            "'X:ESZ5' is a crypto ticker, not a futures one.",
+            "Call dm.canonical_symbol_crypto('X:ESZ5').",
         ),
         (
             dm.canonical_symbol_index,
             "S P X",
-            (
-                "'S P X' is not a Massive index ticker, which looks like 'I:SPX'. Pass the ticker "
-                "as "
-                "m.reference.tickers(market=dm.Market.INDICES) lists it."
-            ),
+            "'S P X' is not a Massive index ticker, which looks like 'I:SPX'.",
+            "Pass the ticker as m.reference.tickers(market=dm.Market.INDICES) lists it.",
         ),
         (
             dm.canonical_symbol_index,
             "spx",
-            (
-                "'spx' is not a Massive index ticker. Index tickers are upper case. If you mean "
-                "'I:SPX', pass 'I:SPX'."
-            ),
+            "'spx' is not a Massive index ticker. Index tickers are upper case.",
+            "If you mean 'I:SPX', pass 'I:SPX'.",
         ),
         (
             dm.canonical_symbol_index,
             "C:EURUSD",
+            "'C:EURUSD' is a forex ticker, not an index one.",
+            "Call dm.canonical_symbol_forex('C:EURUSD').",
+        ),
+        (
+            dm.canonical_symbol_forex,
+            "EURUSD=X",
             (
-                "'C:EURUSD' is a forex ticker, not an index one. "
-                "Call dm.canonical_symbol_forex('C:EURUSD')."
+                "'EURUSD=X' is Yahoo Finance's spelling of a forex pair, which the library does "
+                "not read."
+            ),
+            (
+                "Write the pair as 'EUR/USD', 'EUR-USD', or 'EURUSD', or pass Massive's ticker, "
+                "such as 'C:EURUSD'."
             ),
         ),
         *(
             (
                 dm.canonical_symbol_forex,
                 pair,
-                (
-                    f"{pair!r} is not a forex pair of two three-letter currency codes. Write it as "
-                    "BASE/QUOTE, such as 'EUR/USD'."
-                ),
+                f"{pair!r} is not a forex pair of two three-letter currency codes.",
+                "Write it as BASE/QUOTE, such as 'EUR/USD'.",
             )
             for pair in ("EU1/USD", "EURO/USD", "EUR/USD/JPY", "EUR USD")
         ),
@@ -682,7 +697,8 @@ STOCK_FORMS = (
             (
                 dm.canonical_symbol_crypto,
                 pair,
-                f"{pair!r} is not a crypto pair. Write it as BASE-QUOTE, such as 'BTC-USD'.",
+                f"{pair!r} is not a crypto pair.",
+                "Write it as BASE-QUOTE, such as 'BTC-USD'.",
             )
             for pair in ("BTC.USD", "BTC--USD")
         ),
@@ -690,21 +706,84 @@ STOCK_FORMS = (
             (
                 dm.canonical_symbol_crypto,
                 pair,
-                (
-                    f"{pair!r} is too short to hold a base currency and a quote currency. "
-                    "Write the "
-                    "pair as BASE-QUOTE, such as 'BTC-USD'."
-                ),
+                f"{pair!r} is too short to hold a base currency and a quote currency.",
+                "Write the pair as BASE-QUOTE, such as 'BTC-USD'.",
             )
             for pair in ("BTC", "X:ETH")
         ),
+        # A stock convention's refusals; two carry no fix, since the reason makes it obvious.
+        (dm.canonical_symbol_stock_yahoo, "", "'' is empty, not a ticker.", ""),
+        (
+            dm.canonical_symbol_stock_yahoo,
+            "abc",
+            "'abc' is not a YAHOO ticker. The YAHOO convention writes tickers in upper case.",
+            "If you mean 'ABC', pass 'ABC'.",
+        ),
+        (
+            dm.canonical_symbol_stock_yahoo,
+            "VOD.L",
+            (
+                "'VOD.L' is a Yahoo ticker of a listing outside the US, since Yahoo's dot names "
+                "the exchange. Massive's stock tickers are US listings, so no Massive ticker "
+                "matches it."
+            ),
+            "",
+        ),
+        (
+            dm.canonical_symbol_stock_yahoo,
+            "ABC-U",
+            (
+                f"'ABC-U' is not a plain, class, or preferred ticker of the YAHOO convention. "
+                f"{UNDOCUMENTED_SPELLINGS}"
+            ),
+            "Pass Massive's own ticker, as m.reference.tickers() lists it.",
+        ),
     ],
 )
-def test_a_converter_refuses_with_a_reason(
-    convert: Callable[[str], str | None], text: str, message: str
+def test_a_converter_refuses_with_a_reason_and_a_fix(
+    *, convert: Callable[[str], str | None], text: str, reason: str, fix: str
 ) -> None:
-    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+    message = f"{reason} {fix}" if fix else reason
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$") as raised:
         convert(text)
+    # A plain ValueError with no chained cause: a user's traceback shows no private class.
+    assert type(raised.value) is ValueError
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+    # The refusal behind it carries the two apart, each a sentence, and holds no traceback,
+    # since a table keeps one per refused value.
+    refused = refusal(text, VERDICTS[convert])
+    assert refused is not None
+    assert (refused.reason, refused.fix, str(refused)) == (reason, fix, message)
+    assert reason.endswith(".")
+    assert fix == "" or fix.endswith(".")
+    assert refused.__traceback__ is None
+
+
+def test_a_refusal_joins_its_reason_and_fix_or_is_the_reason_alone() -> None:
+    both = SymbolRefusalError("'x' is not a ticker.", "Pass 'X'.")
+    assert (both.reason, both.fix, str(both)) == (
+        "'x' is not a ticker.",
+        "Pass 'X'.",
+        "'x' is not a ticker. Pass 'X'.",
+    )
+    alone = SymbolRefusalError("'' is empty, not a ticker.")
+    assert (alone.reason, alone.fix, str(alone)) == (
+        "'' is empty, not a ticker.",
+        "",
+        "'' is empty, not a ticker.",
+    )
+    assert isinstance(alone, ValueError)
+
+
+def test_the_symbol_check_raises_a_plain_value_error_for_a_converter_refusal() -> None:
+    with pytest.raises(
+        ValueError, match=r"^'msft' is not a Massive stock ticker, because"
+    ) as raised:
+        check_symbol(STK, "msft")
+    assert type(raised.value) is ValueError
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
 
 
 @pytest.mark.parametrize(
@@ -861,14 +940,15 @@ def test_a_scalar_and_a_table_cell_refuse_a_value_the_same_way(
         symbols, "_ignored_values", BoundedLog(symbols.logger, limit=50, level=logging.DEBUG)
     )
     table = new_table([string_col("Symbol", [text])])
-    reason = refusal(text, strict_converter(asset_class, SymbolConvention.MASSIVE))
+    refused = refusal(text, strict_converter(asset_class, SymbolConvention.MASSIVE))
     table_logger = "deephaven_massive._tables.symbols"
-    if reason is None:  # not canonical, but a spelling the class converts: no record
+    if refused is None:  # not canonical, but a spelling the class converts: no record
         converted = dm.canonical_symbol(text, asset_class, on_error=on_error)
         cells = dm.canonicalize_symbols(table, asset_class, on_error=on_error)
         assert [row[0] for row in cells.iter_tuple(cols="Symbol")] == [converted]
         assert converted is not None
         return
+    reason = str(refused)  # the message a user reads: the reason and the fix together
     if on_error is OnError.RAISE:
         with pytest.raises(ValueError, match=f"^{re.escape(reason)}$"):
             dm.canonical_symbol(text, asset_class, on_error=on_error)
