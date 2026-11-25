@@ -56,6 +56,7 @@ __all__ = [
     "WireSymbols",
     "canonical_from_wire",
     "contracts_underlying",
+    "index_ticker",
     "index_underlyings",
     "is_index_option",
     "unreadable_symbol_reason",
@@ -224,6 +225,18 @@ def contracts_underlying(symbol: str) -> str:
         The ticker without its `I:` prefix for an index, otherwise unchanged.
     """
     return symbol.removeprefix(_INDEX_PREFIX)
+
+
+def index_ticker(bare: str) -> str:
+    """Return the canonical index ticker a bare ticker spells (`SPX` to `I:SPX`).
+
+    Args:
+        bare: A ticker without its `I:` prefix, as `contracts_underlying` sends an index.
+
+    Returns:
+        The ticker with the prefix.
+    """
+    return f"{_INDEX_PREFIX}{bare}"
 
 
 def index_underlyings(underlyings: pa.Array, cfi: pa.Array) -> pa.Array:
