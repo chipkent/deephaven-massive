@@ -139,7 +139,6 @@ from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar, assert_never
 from urllib.parse import urlsplit
 
 import pyarrow as pa
-import pyarrow.compute as pc
 from typing_extensions import override
 
 from deephaven_massive._datasets.catalog import REFERENCE_PATH
@@ -147,7 +146,6 @@ from deephaven_massive._datasets.dates import day_class, is_trading_day, reaches
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
 from deephaven_massive._datasets.row_times import START, StampRule, time_rule, whole
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_class
-from deephaven_massive._datasets.wire_symbols import contracts_underlying, index_ticker
 from deephaven_massive._enums import (
     AssetClass,
     IndexPrefix,
@@ -207,7 +205,6 @@ from deephaven_massive._ingest.rest_requests import (
     wire_query,
 )
 from deephaven_massive._ingest.rest_rows import (
-    CFI,
     UNDERLYING,
     RowConverter,
     keep_window,
@@ -226,6 +223,7 @@ from deephaven_massive._ingest.symbol_reads import (
     fails_followed_read,
     fetch_units,
     history_units,
+    leave_out_unrequested,
     read_rest_by_symbol,
     read_rest_by_value,
     read_symbol_list,
@@ -367,80 +365,32 @@ def _missing_error(spec: DatasetSpec, missing: Sequence[_Missing]) -> Unavailabl
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _OtherSpelling:
-    """The instrument a call's bare underlying also names, beside the one the call asked for.
-
-    An underlying goes to Massive bare (`DJT` for the index `I:DJT`, `wire_query`), and a bare
-    ticker can name a stock and an index (`DJT` is both), so Massive may answer about the one
-    the caller did not name. Every dataset that takes `BARE_INDEX_PARAM` calls its argument
-    `underlying`, so a message can name it.
-
-    Attributes:
-        asked: The canonical ticker the call asked for, such as `I:DJT`.
-        other: The canonical ticker it did not ask for that the wire spells the same, `DJT`.
-        param: The wire parameter that carries the bare ticker, such as `underlying_ticker`.
-    """
-
-    asked: str
-    other: str
-    param: str
-
-    @property
-    def bare(self) -> str:
-        """The ticker as sent, `DJT`."""
-        return contracts_underlying(self.asked)
-
-    @property
-    def other_is_index(self) -> bool:
-        """Whether `other` is the index, so `asked` is the stock."""
-        return contracts_underlying(self.other) != self.other
-
-    @property
-    def kind(self) -> str:
-        """What `other` is, `"stock"` or `"index"`, for a message."""
-        return "index" if self.other_is_index else "stock"
-
-    @property
-    def both(self) -> list[str]:
-        """Both tickers, the stock first, as the caller would pass them."""
-        return [self.asked, self.other] if self.other_is_index else [self.other, self.asked]
-
-
-def _other_spellings(request: Request) -> dict[str, _OtherSpelling]:
-    """Return the instruments a call's bare underlyings also name, by their canonical ticker.
+def _filtered_underlyings(request: Request) -> tuple[str, ...]:
+    """Return the underlyings a call filters its rows by, canonical, as the caller named them.
 
     Args:
         request: The normalized arguments, which keep the canonical tickers; the wire gets
-            an index underlying bare (`rest_requests.wire_query`).
+            an index underlying bare (`rest_requests.wire_query`), so Massive's answer for
+            `I:DJT` holds the contracts of the stock `DJT` too.
 
     Returns:
-        For each ticker in `BARE_INDEX_PARAM` or `BARE_INDEX_LIST_PARAM`, the other ticker the
-        wire spells the same (`I:DJT` for `DJT`, `DJT` for `I:DJT`), keyed by that other
-        ticker, unless the call asked for it too; empty for any other call, and for a read of
-        a value table's values, which gives each row to the value it names and reports the
-        rows of any other as `unrequested_symbols` (`symbol_reads.attribute_values`). Only a
-        bare ticker and its `I:` form spell alike, so two asked tickers never share a key.
+        The tickers of `BARE_INDEX_PARAM` or `BARE_INDEX_LIST_PARAM`, such as `("I:DJT",)`;
+        empty for any other call, and for a read of a value table's values, whose rows
+        `symbol_reads.attribute_values` gives to the values they name.
     """
     if request.value_group:
-        return {}
+        return ()
     params = dict(request.params)
-    asked: dict[str, str] = {}
+    asked: list[str] = []
     one = params.get(BARE_INDEX_PARAM)
     if isinstance(one, str):
-        asked[one] = BARE_INDEX_PARAM
+        asked.append(one)
     listed = params.get(BARE_INDEX_LIST_PARAM)
     if isinstance(listed, tuple):
         for canonical in listed:
             assert isinstance(canonical, str)  # build_query refused any other element
-            asked[canonical] = BARE_INDEX_LIST_PARAM
-    found: dict[str, _OtherSpelling] = {}
-    for canonical, param in asked.items():
-        bare = contracts_underlying(canonical)
-        other = index_ticker(bare) if bare == canonical else bare
-        if other not in asked:
-            found[other] = _OtherSpelling(canonical, other, param)
-    return found
+            asked.append(canonical)
+    return tuple(asked)
 
 
 def _listed_rows(
@@ -931,7 +881,6 @@ class RestReader:
         stop: Cancel,
         patience: Patience,
         where: str,
-        others: Mapping[str, _OtherSpelling],
         symbol: str | None,
     ) -> Withheld:
         """Give a page's index underlyings their `I:` the way the dataset's rows allow.
@@ -942,11 +891,10 @@ class RestReader:
         reference can't classify are withheld as `unreadable_symbols` and reported as
         `_page_rows` reports its own (`_report_withheld`); the call counts them with the
         page's withheld rows (`_Outcome.withheld`), grouped by the symbol as Massive sent it
-        and by `symbol`, as the page's are. A call that asked for an underlying by a bare ticker
-        that names another instrument too then has its kept rows checked for that
-        instrument's (`_warn_other_instruments` by root, `_check_index_rows` by CFI code); by
-        bare underlying, the lookup itself warns about a ticker that names a stock too
-        (`OptionRootKinds.underlying_kind`), since its row is Massive's total for the ticker.
+        and by `symbol`, as the page's are. By bare underlying, the lookup itself warns about a
+        ticker that names a stock too (`OptionRootKinds.underlying_kind`), since its row is
+        Massive's total for the ticker. Rows of an underlying the call did not ask for are left
+        out after the call's last page (`_asked_underlyings`).
 
         Args:
             spec: The dataset.
@@ -956,8 +904,6 @@ class RestReader:
                 are charged to: `_call` may run on a fan-out worker, whose own patience would
                 not know a console caller holds the update graph's lock.
             where: The request template, for the events.
-            others: The instruments the call's bare underlyings also name, by canonical
-                ticker (`_other_spellings`); empty for any other call.
             symbol: The column the withheld rows are grouped by (`_withheld_symbol_column`).
 
         Returns:
@@ -970,10 +916,7 @@ class RestReader:
         A failed lookup raises the `MassiveError` of `root_kind` or `underlying_kind`.
         """
         match spec.index_prefix:
-            case IndexPrefix.NONE:
-                return Withheld(pa.Table.from_batches(rows))
-            case IndexPrefix.FROM_CFI:
-                self._check_index_rows(spec, rows, others)
+            case IndexPrefix.NONE | IndexPrefix.FROM_CFI:
                 return Withheld(pa.Table.from_batches(rows))
             case IndexPrefix.BY_ROOT:
                 by_root = canonical_underlyings(
@@ -983,7 +926,6 @@ class RestReader:
                     symbol=symbol,
                 )
                 self._report_lookup_withheld(spec, by_root, where=where)
-                self._warn_other_instruments(spec, list(by_root.rows.to_batches()), others)
                 return by_root
             case IndexPrefix.BY_UNDERLYING:
                 by_underlying = canonical_symbols(
@@ -1011,65 +953,6 @@ class RestReader:
         """
         if withheld.groups:
             self._report_withheld(spec, withheld, where=where)
-
-    def _warn_other_instruments(
-        self,
-        spec: DatasetSpec,
-        batches: Sequence[pa.RecordBatch],
-        others: Mapping[str, _OtherSpelling],
-    ) -> None:
-        """Warn about rows whose option root names an instrument the call did not ask for.
-
-        A dataset that reads its underlyings by root takes an index bare (`SPX` for `I:SPX`),
-        as the contracts list does, and a bare ticker can also name a stock (`DJT` is both a
-        stock and the index `I:DJT`), so Massive may answer about the other instrument's
-        contracts too: the stock's when the index was asked for, the index's when the stock
-        was, and neither is unasked when both were. Each root's contracts say whose they are,
-        so the rows keep the underlying Massive wrote, prefixed for the index's; one WARNING
-        per dataset and asked ticker per session names the request, the rows, and how to ask
-        for both or drop them, as `_check_index_rows` does for the contracts list. A null
-        `Underlying` says nothing about the instrument and is not counted. No row is dropped.
-
-        Args:
-            spec: The dataset.
-            batches: One page's kept rows, their index underlyings prefixed.
-            others: The instruments the call's bare underlyings also name, by canonical
-                ticker (`_other_spellings`).
-        """
-        if not batches or not others:
-            return
-        underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
-        unasked = pc.is_in(underlyings, value_set=pa.array(list(others)))
-        if not pc.any(unasked).as_py():
-            return
-        symbols = pa.chunked_array([batch.column("Symbol") for batch in batches])
-        for found in pc.unique(pc.filter(underlyings, unasked)).to_pylist():
-            other = others[found]
-            if not self.state.first("other-instrument", spec.name, other.asked):
-                continue
-            rows = pc.equal(underlyings, found)
-            first = pc.indices_nonzero(rows)[0].as_py()
-            logger.warning(
-                "%s: the underlying %r is sent to Massive as %s=%s, which also names the %s "
-                "%s, and the option root of %d of the rows is the %s's, so Massive answered "
-                "about the %s %s too. They keep the underlying Massive wrote. The first is %s, "
-                "with Underlying %s. Pass underlying=%r to ask for both, or drop the rows with "
-                '.where("Underlying != `%s`").',
-                spec.name,
-                other.asked,
-                other.param,
-                other.bare,
-                other.kind,
-                other.other,
-                pc.sum(rows).as_py(),
-                other.kind,
-                other.kind,
-                other.other,
-                symbols[first].as_py(),
-                found,
-                other.both,
-                found,
-            )
 
     def root_kind(
         self,
@@ -1837,7 +1720,6 @@ class RestReader:
                         stop=stop,
                         patience=patience,
                         where=f"GET {template}",
-                        others=_other_spellings(request),
                         symbol=grouped,
                     )
                     kept.extend(looked_up.rows.to_batches())
@@ -1853,13 +1735,57 @@ class RestReader:
                 requests=requests,
             )
         return _Outcome(
-            tuple(kept),
+            self._asked_underlyings(spec, request, kept, template=template),
             requests,
             merged(parts),
             requested,
             received=received_rows,
             answers=tuple(answers),
         )
+
+    def _asked_underlyings(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        kept: Sequence[pa.RecordBatch],
+        *,
+        template: str,
+    ) -> tuple[pa.RecordBatch, ...]:
+        """Keep a call's rows of the underlyings it filters by, and report the rows of any other.
+
+        An underlying goes to Massive bare (`I:DJT` as `DJT`), and a bare ticker can name a
+        stock and an index, so Massive may answer with the contracts of both. A row whose
+        `Underlying` names no underlying the call asked for is left out as an
+        `unrequested_symbols` problem (`symbol_reads.leave_out_unrequested`), as a read by
+        symbol leaves out a row of a symbol it did not ask for.
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments (`_filtered_underlyings`).
+            kept: The call's kept rows, every page's.
+            template: The request's path, for the events.
+
+        Returns:
+            The rows to keep: all of `kept` for a call that filters by no underlying.
+
+        Raises:
+            RowDataError: If a row is left out and `unrequested_symbols` is `RAISE` in the
+                read's policy.
+        """
+        underlyings = _filtered_underlyings(request)
+        if not underlyings or not kept:
+            return tuple(kept)
+        rows, unrequested = leave_out_unrequested(
+            self,
+            spec,
+            pa.Table.from_batches(kept),
+            column=UNDERLYING,
+            own=underlyings,
+            template=template,
+        )
+        if unrequested is not None:
+            raise unrequested
+        return tuple(rows.to_batches())
 
     def _page_batches(
         self,
@@ -2209,82 +2135,6 @@ class RestReader:
             f"whose {spec.ticker_list} lists no ticker asked for{only} so the library left "
             f"{'it' if total == 1 else 'them'} out. {hint}"
         )
-
-    def _check_index_rows(
-        self,
-        spec: DatasetSpec,
-        batches: Sequence[pa.RecordBatch],
-        others: Mapping[str, _OtherSpelling],
-    ) -> None:
-        """Warn about rows of the contracts list that do not read as the underlying asked for.
-
-        The contracts list takes an index bare (`SPX` for `I:SPX`), and a row gets its `I:` back
-        only when its CFI code marks an option on an index (`rest_rows.RowConverter`). A bare
-        ticker can also name a stock (`DJT` is both a stock and the index `I:DJT`, the Dow Jones
-        Transportation Average), so a row whose code marks the other kind of option is Massive's
-        answer about an instrument the call did not ask for, the stock's when the index was
-        asked for or the index's when the stock was: it keeps the underlying Massive wrote, and
-        one WARNING per dataset and asked ticker per session names the request, the rows, and
-        how to drop them. When an index was asked for, a row without a CFI code keeps the bare
-        ticker, since nothing says it is an index: one WARNING per dataset per session says so.
-        Neither drops a row.
-
-        Args:
-            spec: The dataset.
-            batches: One page's kept rows in the dataset's schema; at least one.
-            others: The instruments the call's bare underlyings also name, by canonical
-                ticker (`_other_spellings`).
-        """
-        if not others:
-            return
-        underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
-        cfi = pa.chunked_array([batch.column(CFI) for batch in batches])
-        symbols = pa.chunked_array([batch.column("Symbol") for batch in batches])
-        for other in others.values():
-            unasked = pc.fill_null(pc.not_equal(underlyings, other.asked), fill_value=True)
-            if not pc.any(unasked).as_py():
-                continue
-            other_kind = pc.and_(unasked, pc.is_valid(cfi))
-            if pc.any(other_kind).as_py() and self.state.first(
-                "other-instrument", spec.name, other.asked
-            ):
-                first = pc.indices_nonzero(other_kind)[0].as_py()
-                logger.warning(
-                    "%s: the underlying %r is sent to Massive as %s=%s, which also names the "
-                    "%s %s, and the CFI code of %d of the rows marks an option on %s, so "
-                    "Massive answered about the %s %s too. They keep the underlying Massive "
-                    "wrote. The first is %s, with Underlying %s and Cfi %s. Drop the rows with "
-                    '.where("Underlying != `%s`").',
-                    spec.name,
-                    other.asked,
-                    other.param,
-                    other.bare,
-                    other.kind,
-                    other.other,
-                    pc.sum(other_kind).as_py(),
-                    "an index" if other.other_is_index else "something other than an index",
-                    other.kind,
-                    other.other,
-                    symbols[first].as_py(),
-                    underlyings[first].as_py(),
-                    cfi[first].as_py(),
-                    other.other,
-                )
-            if other.asked == other.bare:
-                # The stock was asked for: a row without a code keeps the bare ticker, which is
-                # what was asked for, so nothing marks it as another instrument's.
-                continue
-            no_code = pc.and_(unasked, pc.is_null(cfi))
-            if pc.any(no_code).as_py() and self.state.first("index-no-cfi", spec.name):
-                logger.warning(
-                    "%s: the contracts of %s include %d with no CFI code, so nothing marks their "
-                    "underlying as the index, and they keep Massive's bare %r. The first is %s.",
-                    spec.name,
-                    other.asked,
-                    pc.sum(no_code).as_py(),
-                    other.bare,
-                    pc.filter(symbols, no_code)[0].as_py(),
-                )
 
     def _check_recency(
         self,

@@ -22,7 +22,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 
 | Argument | Description |
 | --- | --- |
-| `underlying` | Massive's exact ticker of the underlying, such as `"AAPL"` or `"I:SPX"`. A table of stock or index tickers in a `Symbol` column lists each one's contracts; a contract of an underlying the table doesn't hold, such as the stock `DJT`'s beside the index `I:DJT`, follows the `unrequested_symbols` cause of `on_error`. With a live table, add an underlying and its contracts appear. Leave it out for every underlying. |
+| `underlying` | Massive's exact ticker of the underlying, such as `"AAPL"` or `"I:SPX"`. A table of stock or index tickers in a `Symbol` column lists each one's contracts. A contract of an underlying you didn't ask for, such as the stock `DJT`'s in Massive's answer for the index `I:DJT`, follows the `unrequested_symbols` cause of `on_error`. With a live table, add an underlying and its contracts appear. Leave it out for every underlying. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`as_of`](README.md#as_of) | The day whose contracts to list; leave it out for today. |
 | `expired` | True asks Massive for expired contracts. |

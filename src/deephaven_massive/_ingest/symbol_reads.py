@@ -154,6 +154,7 @@ __all__ = [
     "fails_followed_read",
     "fetch_units",
     "history_units",
+    "leave_out_unrequested",
     "read_rest_by_symbol",
     "read_rest_by_value",
     "read_symbol_list",
@@ -939,21 +940,58 @@ def attribute_values(
         Each value's rows, and the failure of the request's values when a row was left out
         under `unrequested_symbols=RAISE` (None otherwise).
     """
-    named = rows[column]
+    kept, unrequested = leave_out_unrequested(
+        reader, spec, rows, column=column, own=own, template=template
+    )
+    named = kept[column]
     pieces: dict[str, pa.Table] = {}
     for value in own:
         mine = pc.equal(named, value)
         # As in `_attribute`: no copy of rows that are every one the value's.
         every = pc.all(mine, skip_nulls=False).as_py()
-        pieces[value] = rows if every else rows.filter(mine)
+        pieces[value] = kept if every else kept.filter(mine)
+    return pieces, unrequested
+
+
+def leave_out_unrequested(
+    reader: RestReader,
+    spec: DatasetSpec,
+    rows: pa.Table,
+    *,
+    column: str,
+    own: tuple[str, ...],
+    template: str,
+) -> tuple[pa.Table, RowDataError | None]:
+    """Keep a request's rows of the instruments it asked for, and report the rows of any other.
+
+    A row whose `column` names an instrument the request did not ask for, or none, is left
+    out as the read's `unrequested_symbols` problem (`_report_unrequested`), by the
+    instrument as Massive sent it: the rule `_attribute` applies to a request of symbols, for
+    a request that names its instruments in a parameter, such as a value table's value or
+    the options underlying of `m.options.contracts("I:DJT")`, which the wire sends bare, so
+    Massive answers with the stock `DJT`'s contracts too.
+
+    Args:
+        reader: The reader, whose policy and problem sink the read uses.
+        spec: The dataset.
+        rows: The request's rows; `column` is one of their columns.
+        column: The column of the rows that names their instrument.
+        own: The instruments the request asked for, canonical.
+        template: The request's path, for the events.
+
+    Returns:
+        The rows of the asked instruments, and the failure of the request when a row was left
+        out under `unrequested_symbols=RAISE` (None otherwise).
+    """
+    named = rows[column]
     asked = pc.fill_null(pc.is_in(named, value_set=pa.array(own, pa.string())), fill_value=False)
     others = Counter(
         (_sent_value(spec, value), value)
         for value in pc.filter(named, pc.invert(asked)).to_pylist()
     )
     if not others:
-        return pieces, None
-    return pieces, _report_unrequested(
+        return rows, None
+    return rows.filter(asked), _report_unrequested(
         reader, spec, others, own=own, column=column, template=template
     )
 
