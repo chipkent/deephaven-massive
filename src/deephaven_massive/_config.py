@@ -313,15 +313,15 @@ class MassiveConfig:
             limits before it fails. Defaults to 300 seconds.
 
             Set a larger value when your tables should ride out longer outages, or `0` when a
-            table must fail at the first one. A live table fails once its outage lasts
-            `max_outage`:
+            table must fail at the first one. A stream or `poll()` table fails once its outage
+            lasts `max_outage`:
 
             - A stream's outage is the time its connection is down.
             - A `poll()` table's outage is the time its polls keep failing or waiting for
               Massive's answer.
 
-            A symbol that keeps failing with a temporary error, such as a rate limit, stops
-            being read after `max_outage`, and `m.problems()` lists it. This applies to a
+            A symbol whose reads keep failing with a temporary error stops being read after
+            `max_outage`. Its row in `m.problems()` says why. This applies to a
             `poll()` and to a `fetch()` or `history()` of a watchlist.
 
             A failed table stays failed, so call the method again for a new one. See

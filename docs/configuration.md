@@ -144,7 +144,8 @@ finds while it waits. A problem found after a call returns fails the table, and 
 
 In a `fetch()`, `history()`, `poll()`, or stream of several symbols, one symbol's failure is
 its own. By default, the other symbols keep their rows, and `m.problems()` lists the failed one
-with its cause. The symbols can be a list or a watchlist, a live table of symbols.
+with its cause. You can pass the symbols in code, such as a list, or as a watchlist. A
+watchlist is a live table of symbols.
 
 Symbols that share one request or one flat file fail together when it fails with an error such
 as HTTP 503. Snapshots read several symbols in one request. A `history()` of many symbols can
@@ -184,10 +185,8 @@ Whatever the setting, each of these problems fails the whole table of a `fetch()
 - Massive refuses a call for `dm.ALL`.
 - Every symbol the table started with fails. A table whose watchlist was empty when you called
   the method never fails this way.
-- A `fetch()`, `history()`, or `poll()` of `dm.ALL` gets rows from Massive, and the library
-  can't read any of them.
-- A `fetch()` or `history()` of symbols in code gets rows from Massive, and the library can't
-  read any of them.
+- Massive sends rows and the library can't read any of them, in a `fetch()` or `history()` of
+  `dm.ALL` or of symbols in code, or in a `poll()` of `dm.ALL`.
 - A stream's or `poll()` table's outage outlasts [`max_outage`](#setting-details).
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
@@ -348,15 +347,15 @@ When sessions list different limits, the lowest applies.
 #### max_outage
 
 Set a larger value when your tables should ride out longer outages, or `0` when a
-table must fail at the first one. A live table fails once its outage lasts
-`max_outage`:
+table must fail at the first one. A stream or `poll()` table fails once its outage
+lasts `max_outage`:
 
 - A stream's outage is the time its connection is down.
 - A `poll()` table's outage is the time its polls keep failing or waiting for
   Massive's answer.
 
-A symbol that keeps failing with a temporary error, such as a rate limit, stops
-being read after `max_outage`, and `m.problems()` lists it. This applies to a
+A symbol whose reads keep failing with a temporary error stops being read after
+`max_outage`. Its row in `m.problems()` says why. This applies to a
 `poll()` and to a `fetch()` or `history()` of a watchlist.
 
 A failed table stays failed, so call the method again for a new one. See
