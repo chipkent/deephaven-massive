@@ -370,6 +370,35 @@ def test_a_followed_fetch_raises_when_every_call_time_symbol_fails_or_a_refusal_
     follows(massive_session)
 
 
+def test_a_followed_fetch_warns_of_a_symbol_whose_read_failed_and_reads_the_others(
+    *,
+    live: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A failure no setting makes the call's own, such as a 503 after the retries, leaves the
+    # symbol out and warns; the others are read.
+    busy = (
+        "Massive answered GET /v2/last/trade/AAPL on api.massive.com with HTTP 503: "
+        '"Service Unavailable"'
+    )
+    rest.outcomes = {"AAPL": SymbolFailure(dm.MassiveError(busy, status=503))}
+    with caplog.at_level(logging.WARNING, logger=QUERIES_LOGGER):
+        result = massive_session.stocks.last_trade(live("AAPL", "MSFT")).fetch(wait=True)
+    assert [r.getMessage() for r in caplog.records if r.name.startswith(QUERIES_LOGGER)] == [
+        (
+            "stocks.last_trade fetch: 1 of the 2 symbols failed and are left out of the result "
+            f"for now. AAPL: {busy}. Check m.symbol_reads() for whether each one is retrying "
+            "or has failed."
+        )
+    ]
+    assert not result.j_table.isFailed()
+    rest.outcomes = {}
+    massive_session.release(result)
+    follows(massive_session)
+
+
 def test_a_followed_fetch_without_wait_fails_its_table_only_when_a_refusal_raises(
     *,
     live: Callable[..., InputTable],
