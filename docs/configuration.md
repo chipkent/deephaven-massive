@@ -169,6 +169,10 @@ error. `m.problems()` gives what Massive sent and why, for a report to Massive.
 - A `fetch()`, a `history()`, or a `poll()` cycle of `dm.ALL` fails when it can read none of
   the rows.
 - A `fetch()` or `history()` of symbols listed in code fails when every symbol it names fails.
+  The same goes for a `fetch()` of a table of values, such as underlyings, that isn't live.
+- Unlike a `poll()` or a watchlist read, such a `fetch()` or `history()` judges its rows as a
+  whole. It fails when the library withheld every row it read. When one symbol kept rows and
+  another had every row withheld, `m.problems()` lists the withheld rows but not that symbol.
 - A `poll()` of symbols fails when every symbol of its first poll fails before any of them
   answers.
 - A watchlist read without `wait=True` fails its table when every symbol it started with fails.
@@ -433,12 +437,14 @@ or delayed subscription itself.
 
 Massive refuses a request of several symbols without naming them, so the library
 sends smaller groups of them again to find the refused ones. Finding one refused
-symbol among 100 costs at most 14 more requests. A stream's new symbols can wait
-up to 2 minutes for 4,096 symbols while it does.
+symbol among 100 costs at most 14 more requests. When Massive refuses both halves
+of a request, the library also sends the first symbol of each half alone, 2 more
+requests. So a request Massive refuses every symbol of costs 4 more. A stream's new
+symbols can wait up to 2 minutes for 4,096 symbols while it does.
 
-Sometimes the library refuses symbols your plan serves. That happens when two
-refused symbols land in different halves of a request, so the library refuses the
-whole request. To read the symbols your plan serves:
+Sometimes the library refuses symbols your plan serves. That happens when Massive
+refuses both halves of a request and the first symbol of each half alone, so the
+library refuses both halves. To read the symbols your plan serves:
 
 1. Delete the rows of the symbols your plan doesn't serve.
 2. Delete the rows of the others and add them back.
