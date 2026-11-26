@@ -118,8 +118,8 @@ library can't read one of them:
 `m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")`. The table gets 4
 rows. `m.problems()` lists the fifth, and the log warns once.
 
-Set every cause to `raise` when a call must fail rather than leave out a refused symbol, a
-symbol with no data, or a row the library can't read:
+Set every cause to `raise` when a call must fail instead of skipping a symbol or row for a
+problem of any `on_error` cause:
 
 ```python
 import deephaven_massive as dm
