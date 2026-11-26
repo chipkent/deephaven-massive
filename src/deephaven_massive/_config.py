@@ -312,8 +312,9 @@ class MassiveConfig:
         max_outage: Sets how many seconds a live table waits out an outage or Massive's rate
             limits before it fails. Defaults to 300 seconds.
 
-            Raise it to ride out longer outages, or set `0` to fail at the first one. A live
-            table fails once its outage lasts `max_outage`:
+            Set a larger value when your tables should ride out longer outages, or `0` when a
+            table must fail at the first one. A live table fails once its outage lasts
+            `max_outage`:
 
             - A stream's outage is the time its connection is down.
             - A `poll()` table's outage is the time its polls keep failing or waiting for

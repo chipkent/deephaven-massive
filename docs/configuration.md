@@ -146,20 +146,17 @@ In a `fetch()`, `history()`, `poll()`, or stream of several symbols, one symbol'
 its own. By default, the other symbols keep their rows, and `m.problems()` lists the failed one
 with its cause.
 
-Symbols that share a request or a file share its failure. A `fetch()` of a list, such as
-snapshots, can ask for several symbols in one request. A `history()` that reads Massive's flat
-files reads every symbol from the same files. When that request or file fails, each of its
-symbols fails.
+Symbols read by one request or one flat file fail together when it fails, unless the failure
+is Massive's refusal. A dataset whose request takes several tickers, such as snapshots, can read
+several symbols in one request. A `history()` that reads Massive's flat files reads every symbol
+from the same files.
 
 A symbol fails when:
 
 - Massive refuses it.
-- Its request keeps failing with a temporary error, such as HTTP 503.
+- Its request keeps failing with a temporary error, such as HTTP 503. See
+  [`max_outage`](#setting-details).
 - In a `poll()` or a read of a watchlist, the library can't read any row Massive sent for it.
-
-A `poll()` or a read of a watchlist tries a symbol with a temporary error again, for up to
-[`max_outage`](#setting-details). A `fetch()` or `history()` of symbols in code tries only as
-often as its request's own retries.
 
 By default, a symbol Massive has no data for doesn't fail. It gets no rows.
 
@@ -179,10 +176,10 @@ Whatever the setting, each of these problems fails a read or stream:
 - Massive serves current data delayed, and [`delayed_subscriptions`](#setting-details) doesn't
   list its subscription.
 - Massive refuses a read of `dm.ALL`, as on a plan without the dataset.
-- Every symbol a read or stream started with fails. A watchlist, `poll()`, or stream that
-  starts empty never fails this way.
-- A `fetch()` or `history()` of `dm.ALL`, or of symbols in code, can read none of the rows
-  Massive sent.
+- Every symbol a read or stream started with fails. A read, `poll()`, or stream of a watchlist
+  that was empty when you called it never fails this way.
+- A `fetch()` or `history()` of `dm.ALL`, or of symbols in code, gets rows from Massive, and
+  the library can't read any of them.
 - A stream's or `poll()` table's outage outlasts [`max_outage`](#setting-details).
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
@@ -342,8 +339,9 @@ When sessions list different limits, the lowest applies.
 
 #### max_outage
 
-Raise it to ride out longer outages, or set `0` to fail at the first one. A live
-table fails once its outage lasts `max_outage`:
+Set a larger value when your tables should ride out longer outages, or `0` when a
+table must fail at the first one. A live table fails once its outage lasts
+`max_outage`:
 
 - A stream's outage is the time its connection is down.
 - A `poll()` table's outage is the time its polls keep failing or waiting for
