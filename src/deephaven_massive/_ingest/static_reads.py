@@ -41,8 +41,9 @@ from deephaven_massive._errors import every_symbol_failed, failure_text
 from deephaven_massive._ingest.symbol_reads import read_symbol_list
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._tables.call_failure import fails_call, refusal_raised
-from deephaven_massive._tables.problem_events import ProblemCause, ProblemSpans, SpanTracker
+from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive._tables.symbol_retry import is_symbol_refusal
+from deephaven_massive._tables.symbol_spans import SymbolSpans
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -194,7 +195,7 @@ def report_failures(
             A refused symbol's, while another symbol did not fail, ends with the setting that
             reads the others (`refusal_raised`).
     """
-    spans: dict[ProblemCause, dict[str, tuple[str | None, str | None, str, int]]] = {
+    spans: dict[ProblemCause, dict[str, str]] = {
         ProblemCause.REFUSED_SYMBOLS: {},
         ProblemCause.SYMBOL_READ_FAILED: {},
     }
@@ -211,21 +212,16 @@ def report_failures(
             if not refused:
                 continue  # listed where it was found
         cause = ProblemCause.REFUSED_SYMBOLS if refused else ProblemCause.SYMBOL_READ_FAILED
-        spans[cause][symbol] = (symbol, None, failure_text(error), 0)
+        spans[cause][symbol] = failure_text(error)
     at = time.time_ns()
-    found: list[ProblemSpans] = []
-    for cause, held in spans.items():
-        if not held:
-            continue
-        policy = reader.policy.refused_symbols if cause is ProblemCause.REFUSED_SYMBOLS else None
-        tracker = SpanTracker(
-            cause, dataset=spec.name, stream_id=reader.stream_id, where=spec.name, policy=policy
-        )
-        found.extend(
-            snapshot
-            for snapshot in (tracker.update(held, at=at), tracker.update({}, at=at))
-            if snapshot is not None
-        )
+    tracked = SymbolSpans(
+        dataset=spec.name,
+        stream_id=reader.stream_id,
+        where=spec.name,
+        refused_symbols=reader.policy.refused_symbols,
+    )
+    # Each span starts and ends now: the call is over.
+    found = [*tracked.update(spans, at=at), *tracked.update({}, at=at)]
     if found:
         reader.problems(found)
     if fatal:

@@ -40,16 +40,16 @@ from typing import TYPE_CHECKING, assert_never
 
 from deephaven_massive._errors import copy_error, every_symbol_failed, failure_text, new_live_table
 from deephaven_massive._log_limits import bounded_list
-from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.symbol_read_rows import SymbolReadState
-from deephaven_massive._tables.symbol_retry import SPAN_CAUSES, Failed, Retry, SymbolRun
+from deephaven_massive._tables.symbol_retry import Failed, Retry, SymbolRun
+from deephaven_massive._tables.symbol_spans import SymbolSpans
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from deephaven_massive._enums import OnError
     from deephaven_massive._errors import MassiveError
-    from deephaven_massive._tables.problem_events import ProblemSpans
+    from deephaven_massive._tables.problem_events import ProblemCause, ProblemSpans
     from deephaven_massive._tables.watchlist import SymbolWatch
 
 __all__ = ["DroppedNames", "PollSymbols", "Settled"]
@@ -133,7 +133,7 @@ class PollSymbols:
         "_limit",
         "_runs",
         "_started",
-        "_trackers",
+        "_symbol_spans",
         "_watch",
     )
 
@@ -171,17 +171,12 @@ class PollSymbols:
         # Each first-cycle symbol with its final failure, or None while it has none; None once
         # the check is settled, or when the first cycle had no symbol.
         self._call_time: dict[str, MassiveError | None] | None = None
-        where = f"{dataset} poll() stream {stream_id}"
-        self._trackers = {
-            cause: SpanTracker(
-                cause,
-                dataset=dataset,
-                stream_id=stream_id,
-                where=where,
-                policy=refused_symbols if cause is ProblemCause.REFUSED_SYMBOLS else None,
-            )
-            for cause in SPAN_CAUSES
-        }
+        self._symbol_spans = SymbolSpans(
+            dataset=dataset,
+            stream_id=stream_id,
+            where=f"{dataset} poll() stream {stream_id}",
+            refused_symbols=refused_symbols,
+        )
 
     def due(self, names: tuple[str, ...], *, now: float) -> tuple[str, ...]:
         """Take the cycle's symbols and return those it reads.
@@ -313,18 +308,13 @@ class PollSymbols:
         Returns:
             The changed snapshots.
         """
-        held: dict[ProblemCause, dict[str, tuple[str | None, str | None, str, int]]] = {
-            cause: {} for cause in SPAN_CAUSES
-        }
+        held: dict[ProblemCause, dict[str, str]] = {}
         for name, run in self._runs.items():
             cause = run.cause
             if cause is not None:
                 assert run.error is not None  # a run holds a span only after a failure
-                held[cause][name] = (name, self._field, failure_text(run.error), 0)
-        changed = (
-            self._trackers[cause].update(spans, at=at, since=since) for cause, spans in held.items()
-        )
-        return tuple(spans for spans in changed if spans is not None)
+                held.setdefault(cause, {})[name] = failure_text(run.error)
+        return self._symbol_spans.update(held, field=self._field, at=at, since=since)
 
     def _call_time_left(self, name: str) -> None:
         """A symbol left the list: one of the first cycle's that had not failed settles the check.

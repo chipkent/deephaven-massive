@@ -118,7 +118,6 @@ from deephaven_massive._tables.diagnostics import (
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import QueueWorker
 from deephaven_massive._tables.poll import SymbolRowError
-from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
 from deephaven_massive._tables.symbol_retry import (
     SPAN_CAUSES,
@@ -127,6 +126,7 @@ from deephaven_massive._tables.symbol_retry import (
     SymbolRun,
     is_symbol_refusal,
 )
+from deephaven_massive._tables.symbol_spans import SymbolSpans
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
@@ -138,7 +138,7 @@ if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._tables.followed_read import FollowPlan
     from deephaven_massive._tables.poll import PollClock
-    from deephaven_massive._tables.problem_events import Problem
+    from deephaven_massive._tables.problem_events import Problem, ProblemCause
     from deephaven_massive._tables.read_pool import ReadPool
     from deephaven_massive._tables.transports import SymbolOutcome
 
@@ -562,7 +562,7 @@ class _Result:
     dirty: set[str] = field(default_factory=set)
     warned: set[str] = field(default_factory=set)
     transports: set[str] = field(default_factory=set)
-    spans: dict[ProblemCause, SpanTracker] = field(default_factory=dict)
+    spans: SymbolSpans | None = None
     progress: _Progress = field(default_factory=_Progress)
     shown: object = None
     call_time: dict[str, MassiveError | None] | None = None
@@ -1606,30 +1606,21 @@ class FollowCoordinator:
             result: The result's state.
         """
         read = result.read
-        found = []
-        for cause in SPAN_CAUSES:
-            tracker = result.spans.get(cause)
-            if tracker is None:
-                policy = (
-                    read.plan.policy.refused_symbols
-                    if cause is ProblemCause.REFUSED_SYMBOLS
-                    else None
-                )
-                tracker = result.spans[cause] = SpanTracker(
-                    cause,
-                    dataset=read.dataset,
-                    stream_id=read.call,
-                    where=f"call {read.call}",
-                    policy=policy,
-                )
-            names = result.progress.troubled[cause]
-            spans = tracker.update(
-                {name: (name, None, result.symbols[name].error or "", 0) for name in names}
+        if result.spans is None:
+            result.spans = SymbolSpans(
+                dataset=read.dataset,
+                stream_id=read.call,
+                where=f"call {read.call}",
+                refused_symbols=read.plan.policy.refused_symbols,
             )
-            if spans is not None:
-                found.append(spans)
+        found = result.spans.update(
+            {
+                cause: {name: result.symbols[name].error or "" for name in names}
+                for cause, names in result.progress.troubled.items()
+            }
+        )
         if found:
-            read.core.problems(found)
+            read.core.problems(list(found))
 
     def _forget(self, result: _Result) -> None:
         """Forget a result once its blink table has shut down: no event of it matters any more.
