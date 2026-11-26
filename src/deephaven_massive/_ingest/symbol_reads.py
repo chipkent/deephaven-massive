@@ -71,7 +71,7 @@ import functools
 import logging
 import time
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, assert_never
 
 import pyarrow as pa
@@ -173,11 +173,15 @@ class RequestRows:
             (`rest._withheld_symbol_column`); no rows.
         source: What the rows were read from, as the read's tally names it, such as
             `GET /v3/trades/AAPL`.
+        failed: The tickers its answer failed in place of their data, with their errors:
+            Massive's error row refusing a ticker, or, under `unavailable_symbols=RAISE`, one
+            saying it has no data (`RestReader._answer_failures`), as Massive sent them.
     """
 
     rows: pa.Table
     withheld: Withheld
     source: str
+    failed: Mapping[str, MassiveError] = field(default_factory=dict)
 
 
 class ReadEach(NamedTuple):
@@ -804,6 +808,8 @@ def attribute_units(
         elif result is None:
             continue  # Massive had no data for the request: its symbols get no rows from it
         elif isinstance(result, RequestRows):
+            for ticker, error in result.failed.items():
+                failures.setdefault(ticker, error)
             unrequested = _attribute(
                 reader,
                 spec,

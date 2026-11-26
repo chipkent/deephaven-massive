@@ -80,13 +80,14 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   routine of `_datasets/timestamps.py`, and the lattice widening of `source_columns.widen`, into one
   Arrow batch of the dataset's merged schema. Only one page of decoded rows is held at a time.
   A snapshot row that carries Massive's `error` in place of a ticker's data is left out of the
-  table and reported as a problem of its ticker (`_report_error_rows`).
+  table and fails its ticker as a request of that ticker alone would (`_answer_failures`): a
+  refused ticker is a refused symbol of the read, listed and judged as one HTTP 403 refused.
 - **Problems.** Each page's field Massive's documentation lacks is a `schema_drift` problem,
   each withheld row an event of its cause, each symbol Massive has no data for an
-  `unavailable_symbols` problem, and each ticker a snapshot's error row refuses a
-  `refused_symbols` problem, all handed to the session's problem sink with the read's
-  `StreamId` (`RestReader.stream_id`); undocumented envelope statuses and error-row values go
-  to the session's `DriftRegistry`, once per path.
+  `unavailable_symbols` problem (an error row of `NOT_FOUND` included), all handed to the
+  session's problem sink with the read's `StreamId` (`RestReader.stream_id`);
+  undocumented envelope statuses and error-row values go to the session's `DriftRegistry`, once
+  per path.
 - **Errors.** Every `WireError` becomes its public exception through `_errors.from_wire`
   (401 `AuthenticationError`, 403 `EntitlementError`), except a pause longer than the read's
   patience still covers (`rate_limits.read_patience`: 10 minutes of pauses for a read its
@@ -213,7 +214,7 @@ from deephaven_massive._ingest.rest_rows import (
     read_error_row,
 )
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
-from deephaven_massive._ingest.static_reads import read_symbols
+from deephaven_massive._ingest.static_reads import read_symbols, report_failures
 from deephaven_massive._ingest.stop_tokens import as_cancel
 from deephaven_massive._ingest.symbol_reads import (
     ReadEach,
@@ -580,6 +581,8 @@ class _Outcome:
             was asked for and why; None when the call was answered.
         received: How many rows Massive sent, before any was withheld, listed under its
             tickers, or left out of a window: what `limit` counts.
+        answers: The error rows of its pages (`rest_rows.read_error_row`): Massive's answer
+            for a ticker in place of its data, which no table holds (`_answer_failures`).
     """
 
     batches: tuple[pa.RecordBatch, ...]
@@ -588,11 +591,25 @@ class _Outcome:
     source: str
     missing: _Missing | None = None
     received: int = 0
+    answers: tuple[ErrorRow, ...] = ()
 
     @property
     def rows(self) -> int:
         """How many rows the call kept."""
         return sum(batch.num_rows for batch in self.batches)
+
+
+class _PageBatches(NamedTuple):
+    """What `RestReader._page_batches` made of one page.
+
+    Attributes:
+        batches: The page's rows, converted, with the mark columns.
+        answers: Its error rows, which the read gives their tickers as failures or no data
+            (`RestReader._answer_failures`).
+    """
+
+    batches: list[pa.RecordBatch]
+    answers: list[ErrorRow]
 
 
 class _PathRows(NamedTuple):
@@ -1225,6 +1242,15 @@ class RestReader:
                 outcome.rows + outcome.withheld.total, outcome.withheld, source=outcome.source
             )
         missing = [o.missing for o in outcomes if o.missing is not None]
+        refused: dict[str, MassiveError] = {}
+        for outcome in outcomes:
+            failed, absent = self._answer_failures(spec, outcome)
+            missing.extend(absent)
+            for ticker, error in failed.items():
+                refused.setdefault(ticker, error)
+        # A whole read names no symbol, so a ticker an error row refuses is listed as any
+        # refused symbol of a static read is, and fails the read only under RAISE.
+        report_failures(self, spec, symbols=list(refused), failures=refused)
         if missing:
             self._report_missing(spec, missing)
         batches = [
@@ -1329,13 +1355,17 @@ class RestReader:
         ]
         refused = effect_of(self.policy.unavailable_symbols).fails
         missing = [o.missing for _, o in answered if o.missing is not None]
+        verdicts = [
+            self._answer_failures(spec, o) if isinstance(o, _Outcome) else ({}, []) for o in done
+        ]
+        missing.extend(one for _, absent in verdicts for one in absent)
         if missing and refused:
             # Each such symbol fails alone below; its m.problems() row says why.
             self._report_missing_of_failed(spec, missing)
         elif missing:
             self._report_missing(spec, missing)
         results: list[RequestRows | MassiveError | None] = []
-        for (rest_path, _), outcome in zip(leaves, done, strict=True):
+        for (rest_path, _), outcome, (failed, absent) in zip(leaves, done, verdicts, strict=True):
             if not isinstance(outcome, _Outcome):
                 results.append(outcome)
             elif outcome.missing is not None:
@@ -1345,7 +1375,10 @@ class RestReader:
                 schema = converters[rest_path.template].arrow_schema
                 sent = schema.append(pa.field(SYMBOL_SENT, pa.string()))
                 rows = pa.Table.from_batches(outcome.batches, schema=sent)
-                results.append(RequestRows(rows, outcome.withheld, outcome.source))
+                # An error row fails its ticker as a request of that ticker alone would.
+                if refused:
+                    failed |= {one.symbol: _missing_error(spec, [one]) for one in absent}
+                results.append(RequestRows(rows, outcome.withheld, outcome.source, failed))
         return ReadEach(
             leaves,
             results,
@@ -1727,6 +1760,7 @@ class RestReader:
             return self._unsplit_outcome(spec, call, call.unsplit, template=template)
         kept: list[pa.RecordBatch] = []
         parts: list[Withheld] = []
+        answers: list[ErrorRow] = []
         requests = 0
         received_rows = 0
         # The path as sent, with the call's values in place of the template's placeholders.
@@ -1738,7 +1772,6 @@ class RestReader:
             warnings=self.warnings,
         )
         bucket = _request_bucket(spec, template, call)
-        others = _other_spellings(request)
         grouped = _withheld_symbol_column(spec, converter)
         try:
             for page in self.state.client.pages(
@@ -1767,17 +1800,19 @@ class RestReader:
                         on_recency=on_recency,
                     )
                 self._check_adjusted(spec, request, template=template, echoed=page.adjusted)
+                converted = self._page_batches(
+                    converter,
+                    page,
+                    call,
+                    spec=spec,
+                    times=times,
+                    record=record,
+                    requested=requested,
+                )
+                answers.extend(converted.answers)
                 rows, withheld = self._page_rows(
                     spec,
-                    self._page_batches(
-                        converter,
-                        page,
-                        call,
-                        spec=spec,
-                        times=times,
-                        record=record,
-                        requested=requested,
-                    ),
+                    converted.batches,
                     window=window,
                     time_name=converter.time_name,
                     fill=functools.partial(times.fill, received=received),
@@ -1795,7 +1830,7 @@ class RestReader:
                         stop=stop,
                         patience=patience,
                         where=f"GET {template}",
-                        others=others,
+                        others=_other_spellings(request),
                         symbol=grouped,
                     )
                     kept.extend(looked_up.rows.to_batches())
@@ -1810,7 +1845,14 @@ class RestReader:
                 window=window,
                 requests=requests,
             )
-        return _Outcome(tuple(kept), requests, merged(parts), requested, received=received_rows)
+        return _Outcome(
+            tuple(kept),
+            requests,
+            merged(parts),
+            requested,
+            received=received_rows,
+            answers=tuple(answers),
+        )
 
     def _page_batches(
         self,
@@ -1822,13 +1864,13 @@ class RestReader:
         times: TimeRule,
         record: Callable[[DriftReport], None] | None,
         requested: str,
-    ) -> list[pa.RecordBatch]:
+    ) -> _PageBatches:
         """Convert one page's rows, and fill and stamp them as the dataset's rows are.
 
-        The page's drift is reported (`drift_events`), its error rows reported as problems of
-        their tickers (`_report_error_rows`), its `Symbol` filled from each row's ticker list
-        where the dataset has one (`_listed`), and its bars of a day or longer stamped
-        (`_stamped`).
+        The page's drift is reported (`drift_events`), its error rows set apart and logged at
+        DEBUG, with an `error` value Massive does not document also recorded in the session's
+        `DriftRegistry` once per path, its `Symbol` filled from each row's ticker list where the
+        dataset has one (`_listed`), and its bars of a day or longer stamped (`_stamped`).
 
         Args:
             converter: The path's conversion.
@@ -1837,14 +1879,15 @@ class RestReader:
             spec: The dataset.
             times: The call's time rule, whose stamps the bars take.
             record: Also given the page's drift, or None.
-            requested: The request as sent, such as `GET /v3/snapshot`, for the problems.
+            requested: The request as sent, such as `GET /v3/snapshot`, for the log and the
+                drift record.
 
         Returns:
-            The page's rows, converted, with the mark columns.
+            The page's rows, converted, with the mark columns, and its error rows, which the
+            read gives their tickers as failures or no data (`_answer_failures`).
 
         A row that breaks the schema raises the `RowDataError` of
-        `rest_rows.RowConverter.convert`, and an error row the error of `_report_error_rows`
-        under `RAISE`.
+        `rest_rows.RowConverter.convert`.
         """
         template = converter.rest_path.template
         batches, drift, flagged = converter.convert(page.rows, call.symbol)
@@ -1860,14 +1903,24 @@ class RestReader:
             )
         if record is not None:
             record(drift)
-        if flagged:
-            self._report_error_rows(
-                spec,
-                [
-                    read_error_row(row, symbol_key=converter.symbol_key, symbol=call.symbol)
-                    for row in flagged
-                ],
-                template=template,
+        answers = [
+            read_error_row(row, symbol_key=converter.symbol_key, symbol=call.symbol)
+            for row in flagged
+        ]
+        for one in answers:
+            logger.debug(
+                "%s: Massive answered %s with %s for %s; the row is left out as %s",
+                spec.name,
+                requested,
+                one.answer,
+                one.ticker,
+                one.cause,
+            )
+        if answers:
+            self.drift.report_row_errors(
+                template,
+                frozenset(one.error for one in answers if not one.documented),
+                dataset=spec.name,
                 requested=requested,
             )
         if spec.ticker_list is not None:
@@ -1880,7 +1933,7 @@ class RestReader:
                 _stamped(times.stamps, spec.name, b, source=template, policy=self.policy)
                 for b in batches
             ]
-        return batches
+        return _PageBatches(batches, answers)
 
     def _not_found(
         self,
@@ -2407,87 +2460,48 @@ class RestReader:
                 is_retryable=True,
             )
 
-    def _report_error_rows(
-        self,
-        spec: DatasetSpec,
-        answers: Sequence[ErrorRow],
-        *,
-        template: str,
-        requested: str,
-    ) -> None:
-        """Report a page's error rows as problems of their tickers; no table holds them.
+    def _answer_failures(
+        self, spec: DatasetSpec, outcome: _Outcome
+    ) -> tuple[dict[str, MassiveError], list[_Missing]]:
+        """Return what a call's error rows answered for their tickers, as the read's other answers.
 
-        A `NOT_FOUND` row is a symbol Massive has no data for, as HTTP 404 is
-        (`_report_missing`, `unavailable_symbols`). Every other is a refused symbol
-        (`refused_symbols`), with Massive's error and message in its `Detail`; a value Massive
-        does not document also goes to the session's `DriftRegistry`, once per path. The
-        session's problem reporter logs the first of each cause; each row is logged at DEBUG.
+        A `NOT_FOUND` row means Massive has no data for its ticker, as HTTP 404 does, so the
+        read treats it as it treats a 404 (`_Missing`, `unavailable_symbols`). Every other row is
+        Massive's refusal of its ticker, as HTTP 403 for one symbol is: an `EntitlementError`
+        of that ticker alone, which the read lists and judges as it does every refused symbol
+        (`refused_symbols`), so a call or table whose every symbol Massive refused fails by the
+        same rule whichever way Massive refused them.
 
         Args:
             spec: The dataset.
-            answers: The page's error rows (`rest_rows.read_error_row`).
-            template: The path template, for the drift record.
-            requested: The request as sent, such as `GET /v3/snapshot`.
+            outcome: The call's outcome, with its error rows and the request as sent.
 
-        Raises:
-            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a `NOT_FOUND` row
-                (`_missing_error`).
-            EntitlementError: Under `refused_symbols=RAISE`, for any other row, naming the
-                tickers with Massive's answer for each and the setting that reads the others.
+        Returns:
+            Each refused ticker's error, such as `EntitlementError("indices.snapshots: Massive
+            refused I:VIX. Massive answered GET /v3/snapshot/indices with error NOT_ENTITLED
+            for I:VIX: "Not entitled to this ticker."")`, and each ticker Massive has no data
+            for, in the order Massive sent them.
+
         """
-        for one in answers:
-            logger.debug(
-                "%s: Massive answered %s with %s for %s; the row is left out as %s",
-                spec.name,
-                requested,
-                one.answer,
-                one.ticker,
-                one.cause,
-            )
-        self.drift.report_row_errors(
-            template,
-            frozenset(one.error for one in answers if not one.documented),
-            dataset=spec.name,
-            requested=requested,
-        )
-        refused = [one for one in answers if one.cause is ProblemCause.REFUSED_SYMBOLS]
-        if refused:
-            at = time.time_ns()
-            self.problems(
-                [
-                    ProblemEvent(
-                        cause=ProblemCause.REFUSED_SYMBOLS,
-                        action=ProblemAction.SKIPPED,
-                        dataset=spec.name,
-                        stream_id=self.stream_id,
-                        where=spec.name,
-                        symbol=one.ticker,
-                        field=None,
-                        rows=0,
-                        detail=f"Massive refused it ({one.answer} from {requested})",
-                        at=at,
-                        policy=self.policy.refused_symbols,
+        refused: dict[str, MassiveError] = {}
+        missing: list[_Missing] = []
+        for one in outcome.answers:
+            match one.cause:
+                case ProblemCause.UNAVAILABLE_SYMBOLS:
+                    missing.append(_Missing(one.ticker, f"({one.answer} from {outcome.source})"))
+                case ProblemCause.REFUSED_SYMBOLS:
+                    refused.setdefault(
+                        one.ticker,
+                        EntitlementError(
+                            f"{spec.name}: Massive refused {one.ticker}. Massive answered "
+                            f"{outcome.source} with error {one.error} for {one.ticker}: "
+                            f'"{one.message}"',
+                            source=ErrorSource.MASSIVE,
+                        ),
                     )
-                    for one in refused
-                ]
-            )
-        missing = [
-            _Missing(one.ticker, f"({one.answer} from {requested})")
-            for one in answers
-            if one.cause is ProblemCause.UNAVAILABLE_SYMBOLS
-        ]
-        if missing:
-            self._report_missing(spec, missing)
-        if refused and effect_of(self.policy.refused_symbols).fails:
-            them = "it" if len(refused) == 1 else "them"
-            hint = policy_hint(
-                OnError.LOG, "refused_symbols", purpose=f"Remove {them}, or, to read the others"
-            )
-            answered = prose_list((f"{one.ticker} ({one.answer})" for one in refused), "tickers")
-            raise EntitlementError(
-                f"{spec.name}: Massive refused {answered} in its answer to {requested}. {hint}",
-                source=ErrorSource.MASSIVE,
-            )
+                case _:
+                    assert_never(one.cause)
+        return refused, missing
 
     def public_error(self, error: WireError) -> MassiveError:
         """Return the public error of a wire error.

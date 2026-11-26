@@ -109,7 +109,7 @@ def test_an_error_row_is_one_whose_error_is_set(row: dict[str, object], flagged:
     ],
 )
 def test_an_error_row_is_the_problem_its_error_names(
-    error: str, cause: ProblemCause, documented: bool
+    error: str, cause: rest_rows.ErrorRowCause, documented: bool
 ) -> None:
     row = {"ticker": "I:VIX", "error": error, "message": "Massive's text."}
     read = rest_rows.read_error_row(row, symbol_key="ticker", symbol=None)

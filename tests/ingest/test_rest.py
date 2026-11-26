@@ -2265,24 +2265,25 @@ def test_error_rows_of_a_snapshot_leave_the_table_as_problems_of_their_tickers(
 ) -> None:
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX, _SPX, _MISSING_RUT])))
     events = record_problems(session, monkeypatch)
+    spans = record_spans(session, monkeypatch)
     with caplog.at_level(logging.DEBUG, LOGGER):
         out = fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX", "I:RUT"])
     assert [(r["Symbol"], r["Value"]) for r in out] == [("I:SPX", 5900.0)]
     assert "Error" not in out[0]
     assert "Message" not in out[0]
     requested = f"GET {INDEX_SNAPSHOT_PATH}"
-    assert [(e.cause, e.action, e.symbol, e.rows, e.detail, e.policy) for e in events] == [
+    # A refused ticker is listed as a ticker refused with HTTP 403 is: a span of the call.
+    assert spans == [
         (
             ProblemCause.REFUSED_SYMBOLS,
-            ProblemAction.SKIPPED,
             "I:VIX",
-            0,
             (
-                f'Massive refused it (error NOT_ENTITLED: "Not entitled to this ticker." from '
-                f"{requested})"
+                f"indices.snapshots: Massive refused I:VIX. Massive answered {requested} with "
+                'error NOT_ENTITLED for I:VIX: "Not entitled to this ticker."'
             ),
-            dm.OnError.LOG,
-        ),
+        )
+    ]
+    assert [(e.cause, e.action, e.symbol, e.rows, e.detail, e.policy) for e in events] == [
         (
             ProblemCause.UNAVAILABLE_SYMBOLS,
             ProblemAction.SKIPPED,
@@ -2302,6 +2303,38 @@ def test_error_rows_of_a_snapshot_leave_the_table_as_problems_of_their_tickers(
     ) in caplog.messages
 
 
+def test_an_error_row_of_a_whole_read_is_a_refused_symbol_of_it(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # dm.ALL names no symbol, so the refused ticker is listed and fails the read only under
+    # RAISE, as a refused symbol of a static read does.
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX, _SPX, _MISSING_RUT])))
+    refused = (
+        f"indices.snapshots: Massive refused I:VIX. Massive answered GET {INDEX_SNAPSHOT_PATH} "
+        'with error NOT_ENTITLED for I:VIX: "Not entitled to this ticker."'
+    )
+    for setting in (dm.OnError.LOG, dm.OnError.RAISE):
+        config = dm.MassiveConfig(
+            api_key="test-key",
+            rest_base_url=fake_rest.url,
+            on_error=dm.ErrorPolicy(refused_symbols=setting),
+        )
+        with dm.MassiveSession(config) as m:
+            spans = record_spans(m, monkeypatch)
+            events = record_problems(m, monkeypatch)
+            if setting is dm.OnError.LOG:
+                out = fetch(m, INDEX_SNAPSHOTS, symbols=dm.ALL)
+                assert [r["Symbol"] for r in out] == ["I:SPX"]
+                assert [(e.cause, e.symbol) for e in events] == [
+                    (ProblemCause.UNAVAILABLE_SYMBOLS, "I:RUT")
+                ]
+            else:
+                with pytest.raises(dm.EntitlementError) as info:
+                    fetch(m, INDEX_SNAPSHOTS, symbols=dm.ALL)
+                assert str(info.value) == refused
+            assert spans == [(ProblemCause.REFUSED_SYMBOLS, "I:VIX", refused)]
+
+
 def test_an_undocumented_error_value_is_a_refused_symbol_and_drift_once_per_session(
     *,
     session: dm.MassiveSession,
@@ -2312,16 +2345,19 @@ def test_an_undocumented_error_value_is_a_refused_symbol_and_drift_once_per_sess
     requested = f"GET {INDEX_SNAPSHOT_PATH}"
     gone = {"ticker": "I:VIX", "error": "DELISTED", "message": "Ticker delisted."}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([gone, _SPX])))
-    events = record_problems(session, monkeypatch)
+    spans = record_spans(session, monkeypatch)
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
             out = fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
             assert [r["Symbol"] for r in out] == ["I:SPX"]
-    assert [(e.cause, e.symbol, e.detail) for e in events] == 2 * [
+    assert spans == 2 * [
         (
             ProblemCause.REFUSED_SYMBOLS,
             "I:VIX",
-            f'Massive refused it (error DELISTED: "Ticker delisted." from {requested})',
+            (
+                f"indices.snapshots: Massive refused I:VIX. Massive answered {requested} with "
+                'error DELISTED for I:VIX: "Ticker delisted."'
+            ),
         )
     ]
     assert [r.getMessage() for r in caplog.records if r.name == diagnostics.__name__] == [
@@ -2353,11 +2389,10 @@ def test_a_refused_error_row_fails_the_read_under_raise_and_the_others_read_unde
                 assert setting is dm.OnError.LOG
                 assert [r["Symbol"] for r in out] == ["I:SPX"]
     [refusal] = raised
+    # The same error a ticker refused with HTTP 403 raises under RAISE.
     assert str(refusal) == (
-        'indices.snapshots: Massive refused I:VIX (error NOT_ENTITLED: "Not entitled to this '
-        f'ticker.") in its answer to GET {INDEX_SNAPSHOT_PATH}. Remove it, or, to read the '
-        "others, pass on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
-        "dm.MassiveConfig."
+        f"indices.snapshots: Massive refused I:VIX. Massive answered GET {INDEX_SNAPSHOT_PATH} "
+        'with error NOT_ENTITLED for I:VIX: "Not entitled to this ticker."'
     )
     assert refusal.source is dm.ErrorSource.MASSIVE
 
@@ -2386,8 +2421,31 @@ def test_an_error_rows_keys_are_never_drift(
     # An error row is set apart undecoded, so a key only it carries is no drift of the table.
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([{**_REFUSED_VIX, "new": "x"}])))
     events = record_problems(session, monkeypatch)
-    assert fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"]) == []
-    assert [e.cause for e in events] == [ProblemCause.REFUSED_SYMBOLS]
+    spans = record_spans(session, monkeypatch)
+    with pytest.raises(dm.EntitlementError, match=r"Massive refused I:VIX\."):
+        fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
+    assert events == []
+    assert [(cause, name) for cause, name, _ in spans] == [(ProblemCause.REFUSED_SYMBOLS, "I:VIX")]
+
+
+def test_a_snapshot_whose_every_ticker_is_refused_fails_as_any_read_and_lists_each(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The rule of every read: a call whose every symbol Massive refused fails under LOG too,
+    # once each is listed, whether Massive refused them with HTTP 403 or with error rows.
+    refused_spx = {**_REFUSED_VIX, "ticker": "I:SPX"}
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX, refused_spx])))
+    spans = record_spans(session, monkeypatch)
+    with pytest.raises(dm.EntitlementError) as info:
+        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
+    assert str(info.value) == (
+        f"indices.snapshots: Massive refused I:SPX. Massive answered GET {INDEX_SNAPSHOT_PATH} "
+        'with error NOT_ENTITLED for I:SPX: "Not entitled to this ticker."'
+    )
+    assert [(cause, name) for cause, name, _ in spans] == [
+        (ProblemCause.REFUSED_SYMBOLS, "I:SPX"),
+        (ProblemCause.REFUSED_SYMBOLS, "I:VIX"),
+    ]
 
 
 def test_drift_is_a_problem_of_each_read_and_its_status_is_logged_once(
@@ -3572,13 +3630,15 @@ def test_an_error_row_is_never_decoded(
         symbol_param="ticker.any_of",
         keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("LastUpdated"))},
     )
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX])))
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX, _SPX])))
     events = record_problems(session, monkeypatch)
+    spans = record_spans(session, monkeypatch)
     reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
-    request = Request(symbols=("I:VIX",))
-    table, _ = reader.read_fetch(timed, request, symbols=("I:VIX",), tally=ReadTally())
-    assert table.num_rows == 0
-    assert [(e.cause, e.symbol) for e in events] == [(ProblemCause.REFUSED_SYMBOLS, "I:VIX")]
+    request = Request(symbols=("I:SPX", "I:VIX"))
+    table, _ = reader.read_fetch(timed, request, symbols=("I:SPX", "I:VIX"), tally=ReadTally())
+    assert table.num_rows == 1
+    assert events == []
+    assert [(cause, name) for cause, name, _ in spans] == [(ProblemCause.REFUSED_SYMBOLS, "I:VIX")]
 
 
 def test_a_failed_call_cancels_the_calls_not_yet_started(
@@ -3700,16 +3760,15 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
         Reply({"status": "success", "request_id": "r", "last": refused}),
     )
     serve_pairs(fake_rest)
-    events = record_problems(session, monkeypatch)
-    assert fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"]) == []
-    requested = "GET /v1/last/crypto/BTC/USD"
-    assert [(e.cause, e.symbol, e.detail) for e in events] == [
-        (
-            ProblemCause.REFUSED_SYMBOLS,
-            "X:BTCUSD",
-            f'Massive refused it (error NOT_ENTITLED: "Not entitled" from {requested})',
-        )
-    ]
+    spans = record_spans(session, monkeypatch)
+    expected = (
+        "crypto.last: Massive refused X:BTCUSD. Massive answered GET /v1/last/crypto/BTC/USD "
+        'with error NOT_ENTITLED for X:BTCUSD: "Not entitled"'
+    )
+    with pytest.raises(dm.EntitlementError) as info:
+        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
+    assert str(info.value) == expected
+    assert spans == [(ProblemCause.REFUSED_SYMBOLS, "X:BTCUSD", expected)]
 
 
 def test_a_nanosecond_inclusive_axis_fails_a_reactive_poll_at_once(

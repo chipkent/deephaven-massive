@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Cancel, Patience
     from deephaven_massive._tables.read_tally import ReadTally
 
-__all__ = ["read_symbols"]
+__all__ = ["read_symbols", "report_failures"]
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ def read_symbols(
         # A crypto pair's lookup the stop ended: the read is over, not the pair.
         stopped = next(iter(failures.values()))
         raise stopped
-    _report_failures(reader, spec, symbols=ordered, failures=failures)
+    report_failures(reader, spec, symbols=ordered, failures=failures)
     if ordered and all(symbol in failures for symbol in ordered):
         logger.debug("%s: every symbol failed: %s", spec.name, bounded_list(ordered))
         error = every_symbol_failed([failures[symbol] for symbol in ordered])
@@ -132,7 +132,7 @@ def read_symbols(
     return read.rows, read.requests
 
 
-def _report_failures(
+def report_failures(
     reader: RestReader,
     spec: DatasetSpec,
     *,

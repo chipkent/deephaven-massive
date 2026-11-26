@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -71,6 +71,7 @@ __all__ = [
     "CFI",
     "UNDERLYING",
     "ErrorRow",
+    "ErrorRowCause",
     "RowConverter",
     "is_error_row",
     "keep_window",
@@ -78,6 +79,9 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+ErrorRowCause: TypeAlias = Literal[ProblemCause.UNAVAILABLE_SYMBOLS, ProblemCause.REFUSED_SYMBOLS]
+"""The problems an error row can be (`ErrorRow.cause`)."""
 
 UNDERLYING: Final = KEY_COLUMNS["fanout"]
 """The column naming the instrument a row is linked to, such as an option's underlying."""
@@ -410,7 +414,7 @@ class ErrorRow:
     ticker: str
     error: str
     message: str
-    cause: ProblemCause
+    cause: ErrorRowCause
     documented: bool = field(kw_only=True)
 
     @property
@@ -440,6 +444,7 @@ def read_error_row(
     """
     ticker = str(symbol if symbol_key is None else row.get(symbol_key))
     error, message = str(row.get("error")), str(row.get("message"))
+    cause: ErrorRowCause
     match error:
         case "NOT_FOUND":
             cause, documented = ProblemCause.UNAVAILABLE_SYMBOLS, True
