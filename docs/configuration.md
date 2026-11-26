@@ -130,13 +130,13 @@ apple = bars.history("2026-10-26", "2026-10-30")
 
 To do the same for every call, pass that policy to `MassiveConfig(on_error=...)`.
 
-A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
-In a call's policy, a cause it leaves unset follows the session's. A cause the session's policy
-leaves unset follows the default.
-
 Under `raise`, a `fetch()` or `history()` with `wait=True` raises an error for a problem it
 finds while it waits. A problem found after a call returns fails the table, and `Error` in
 `m.streams()` says why.
+
+A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
+In a call's policy, a cause it leaves unset follows the session's. A cause the session's policy
+leaves unset follows the default.
 
 <a id="failed-symbols"></a>
 
@@ -147,8 +147,8 @@ its own. By default, the other symbols keep their rows, and `m.problems()` lists
 with its cause. You can pass the symbols in code, such as a list, or as a watchlist. A
 watchlist is a live table of symbols.
 
-Symbols that share one request or one flat file fail together when it fails with an error such
-as HTTP 503. Snapshots read several symbols in one request. A `history()` of many symbols can
+Symbols that share one request or one flat file fail together when it keeps failing with a
+temporary error. Snapshots read several symbols in one request. A `history()` of many symbols can
 read them all from the same flat files. When Massive refuses a shared request, see
 [`on_error.refused_symbols`](#setting-details).
 
@@ -157,8 +157,8 @@ A symbol fails when:
 - Massive refuses it.
 - Its request keeps failing with a temporary error, such as HTTP 503. See
   [`max_outage`](#setting-details).
-- In a `poll()`, or a `fetch()` or `history()` of a watchlist, the library can't read any row
-  Massive sent for it.
+- The library can't read any row Massive sent for it, in a `poll()` or in a `fetch()` or
+  `history()` of a watchlist.
 
 By default, a symbol Massive has no data for doesn't fail. It gets no rows.
 
@@ -180,13 +180,16 @@ Whatever the setting, each of these problems fails the whole table of a `fetch()
 `poll()`, or stream:
 
 - Massive rejects your API key.
-- Massive serves current data delayed, and [`delayed_subscriptions`](#setting-details) doesn't
-  list its subscription.
+- Massive serves the current data of a `fetch()`, `poll()`, or stream delayed, and
+  [`delayed_subscriptions`](#setting-details) doesn't list its subscription. That entry names
+  the one exception.
 - Massive refuses a call for `dm.ALL`.
 - Every symbol the table started with fails. A table whose watchlist was empty when you called
   the method never fails this way.
-- Massive sends rows and the library can't read any of them, in a `fetch()` or `history()` of
-  `dm.ALL` or of symbols in code, or in a `poll()` of `dm.ALL`.
+- The library can read none of the rows Massive sends to a `fetch()`, `history()`, or `poll()`
+  of `dm.ALL`.
+- The library can read none of the rows Massive sends to a `fetch()` or `history()` of symbols
+  in code.
 - A stream's or `poll()` table's outage outlasts [`max_outage`](#setting-details).
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
@@ -355,8 +358,8 @@ lasts `max_outage`:
   Massive's answer.
 
 A symbol whose reads keep failing with a temporary error stops being read after
-`max_outage`. Its row in `m.problems()` says why. This applies to a
-`poll()` and to a `fetch()` or `history()` of a watchlist.
+`max_outage`, in a `poll()` and in a `fetch()` or `history()` of a watchlist. Its
+row in `m.problems()` says why.
 
 A failed table stays failed, so call the method again for a new one. See
 [Live table messages](troubleshooting.md#live-table-messages).

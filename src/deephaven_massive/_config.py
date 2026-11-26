@@ -321,8 +321,8 @@ class MassiveConfig:
               Massive's answer.
 
             A symbol whose reads keep failing with a temporary error stops being read after
-            `max_outage`. Its row in `m.problems()` says why. This applies to a
-            `poll()` and to a `fetch()` or `history()` of a watchlist.
+            `max_outage`, in a `poll()` and in a `fetch()` or `history()` of a watchlist. Its
+            row in `m.problems()` says why.
 
             A failed table stays failed, so call the method again for a new one. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
