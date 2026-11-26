@@ -1612,8 +1612,12 @@ def test_a_zero_max_outage_fails_every_stream_at_the_first_disconnect(
 
     def fired() -> bool:
         # The stream stays expired until its table fails, which needs the flush below; the
-        # outage itself can end first, once the reconnect's subscription is acknowledged.
-        return bool(custom_session.on_loop(connection, lambda: connection._episodes.expired))
+        # outage itself can end first, once the reconnect's subscription is acknowledged. The
+        # set is read on the loop: read here, it could show the stream before the same loop
+        # callback queued the stream's failure for the flush.
+        return (
+            custom_session.on_loop(connection, lambda: bool(connection._episodes.expired)) is True
+        )
 
     wait_for(fired)  # the zero-second timer fires on the loop's next turn
     custom_session.flush()
