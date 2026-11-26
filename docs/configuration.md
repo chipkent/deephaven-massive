@@ -144,43 +144,43 @@ finds while it waits. A problem found after a call returns fails the table, and 
 
 In a `fetch()`, `history()`, `poll()`, or stream of several symbols, one symbol's failure is
 its own. By default, the other symbols keep their rows, and `m.problems()` lists the failed one
-with its cause.
+with its cause. The symbols can be a list or a watchlist, a live table of symbols.
 
-Symbols read by one request or one flat file fail together when it fails. A dataset whose
-request takes several tickers, such as snapshots, can read several symbols in one request. When
-Massive refuses such a request, the library sends it again in parts to find the symbols Massive
-refuses, as [`on_error.refused_symbols`](#setting-details) explains. A `history()` that reads
-Massive's flat files reads every symbol from the same files. When Massive refuses the files, a
-`history()` with the default `source=dm.HistorySource.AUTO` reads every symbol from REST
-instead, if REST can serve the read.
+Symbols that share one request or one flat file fail together when it fails with an error such
+as HTTP 503. Snapshots read several symbols in one request, and a `history()` of many symbols
+can read them all from the same flat files. When Massive refuses a shared request, see
+[`on_error.refused_symbols`](#setting-details).
 
 A symbol fails when:
 
 - Massive refuses it.
 - Its request keeps failing with a temporary error, such as HTTP 503. See
   [`max_outage`](#setting-details).
-- In a `poll()` or a read of a watchlist, the library can't read any row Massive sent for it.
+- In a `poll()`, or a `fetch()` or `history()` of a watchlist, the library can't read any row
+  Massive sent for it.
 
 By default, a symbol Massive has no data for doesn't fail. It gets no rows.
 
 A failed symbol isn't read again. To read it again, delete its watchlist row and add it back.
-For symbols you pass in code, call `fetch()`, `history()`, or `poll()` again.
+For symbols you pass in code, call `fetch()`, `history()`, or `poll()` again. For a stream of
+symbols in code, release each of its tables with `m.release()`, then call the method again.
 
 When a symbol of a `poll()` fails, a `dm.PollMode.REPLACE` table drops its rows. A
 `dm.PollMode.APPEND` or `dm.PollMode.UPSERT` table keeps them.
 
 <a id="read-failures"></a>
 
-#### Reads that fail under every setting
+#### Problems that fail the whole table
 
-Whatever the setting, each of these problems fails a read or stream:
+Whatever the setting, each of these problems fails the whole table of a `fetch()`, `history()`,
+`poll()`, or stream:
 
 - Massive rejects your API key.
 - Massive serves current data delayed, and [`delayed_subscriptions`](#setting-details) doesn't
   list its subscription.
-- Massive refuses a read of `dm.ALL`, as on a plan without the dataset.
-- Every symbol a read or stream started with fails. A read, `poll()`, or stream of a watchlist
-  that was empty when you called it never fails this way.
+- Massive refuses a call for `dm.ALL`.
+- Every symbol the table started with fails. A table whose watchlist was empty when you called
+  the method never fails this way.
 - A `fetch()` or `history()` of `dm.ALL`, or of symbols in code, gets rows from Massive, and
   the library can't read any of them.
 - A stream's or `poll()` table's outage outlasts [`max_outage`](#setting-details).
@@ -350,9 +350,9 @@ table must fail at the first one. A live table fails once its outage lasts
 - A `poll()` table's outage is the time its polls keep failing or waiting for
   Massive's answer.
 
-A symbol that keeps failing with a temporary error isn't read again after
-`max_outage`, in a `poll()` or a read of a watchlist. A rate limit is one such
-error. `m.problems()` lists the symbol.
+In a `poll()`, or a `fetch()` or `history()` of a watchlist, a symbol that keeps
+failing with a temporary error isn't read again after `max_outage`. A rate limit
+is one such error. `m.problems()` lists the symbol.
 
 A failed table stays failed, so call the method again for a new one. See
 [Live table messages](troubleshooting.md#live-table-messages).

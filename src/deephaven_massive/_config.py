@@ -320,9 +320,9 @@ class MassiveConfig:
             - A `poll()` table's outage is the time its polls keep failing or waiting for
               Massive's answer.
 
-            A symbol that keeps failing with a temporary error isn't read again after
-            `max_outage`, in a `poll()` or a read of a watchlist. A rate limit is one such
-            error. `m.problems()` lists the symbol.
+            In a `poll()`, or a `fetch()` or `history()` of a watchlist, a symbol that keeps
+            failing with a temporary error isn't read again after `max_outage`. A rate limit
+            is one such error. `m.problems()` lists the symbol.
 
             A failed table stays failed, so call the method again for a new one. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
