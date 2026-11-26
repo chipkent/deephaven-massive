@@ -6625,7 +6625,7 @@ def test_read_each_raises_only_the_failures_its_caller_says_are_the_read_s(
             read()
         return
     _, results, answered, _ = read()
-    assert answered == 0
+    assert answered == 1  # a failed request counts once
     [result] = results
     assert isinstance(result, MassiveError)
     assert result.status == status
@@ -6756,7 +6756,7 @@ def test_read_each_resends_a_refused_list_request_in_halves_and_returns_the_unit
     assert sorted(r.target for r in fake_rest.requests) == sorted(
         [_indices_target(*_INDICES), _indices_target("I:DJI"), _indices_target("I:NDX", "I:SPX")]
     )
-    assert read.requests == 1
+    assert read.requests == 3  # the refused request and both halves
     results = _by_symbol(read)
     answered = results["I:SPX"]
     assert isinstance(answered, RequestRows)
@@ -6775,7 +6775,7 @@ def test_a_list_request_refused_in_every_part_marks_every_symbol_refused(
     # The halves are one symbol and two: the lone refused symbol says nothing of the other
     # two, so their half splits too, and each of the three is refused on its own answer.
     assert len(fake_rest.requests) == 5
-    assert read.requests == 0
+    assert read.requests == 5  # each refusal is an answer
     results = _by_symbol(read)
     assert sorted(results) == sorted(_INDICES)
     assert all(isinstance(result, dm.EntitlementError) for result in results.values())

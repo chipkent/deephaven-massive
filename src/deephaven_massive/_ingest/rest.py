@@ -1248,7 +1248,18 @@ class RestReader:
             on_recency=on_recency,
             record=record,
         )
-        send = functools.partial(self._send_each, run=run, cancel=cancel, executor=executor)
+        answered_requests = 0
+
+        def send(parts: Sequence[RestUnit]) -> list[_Outcome | MassiveError]:
+            # Every request counts, a refused one and those of a search included: a failed
+            # request's error is one answer, its pages' requests uncounted.
+            nonlocal answered_requests
+            outcomes = self._send_each(parts, run=run, cancel=cancel, executor=executor)
+            answered_requests += sum(
+                one.requests if isinstance(one, _Outcome) else 1 for one in outcomes
+            )
+            return outcomes
+
         sent, answers = drop_named_refusals(spec, units, send(units), send=send)
         leaves, done = search_refusals(spec, sent, answers, send=send)
         answered = [
@@ -1285,7 +1296,7 @@ class RestReader:
         return ReadEach(
             leaves,
             results,
-            sum(outcome.requests for _, outcome in answered),
+            answered_requests,
             sum(outcome.received for _, outcome in answered),
         )
 

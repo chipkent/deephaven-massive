@@ -205,7 +205,8 @@ class ReadEach(NamedTuple):
             sent again that each symbol's answer came from (`_ingest/rest_refusals.py`).
         results: Each unit's rows, its failure, or None for a request of a symbol Massive has
             no data for.
-        requests: How many requests Massive answered, those of the search included.
+        requests: How many requests Massive answered, a refused one and those of the search
+            included.
         received: How many rows Massive sent in them, before any was withheld or listed
             under its tickers, as the client counts them when it stops paging.
     """
