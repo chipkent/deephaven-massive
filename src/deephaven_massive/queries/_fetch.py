@@ -17,8 +17,6 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
-from deephaven import merge
-
 from deephaven_massive._config import require_positive_number
 from deephaven_massive._datasets.filters import param_base
 from deephaven_massive._datasets.symbols import SymbolTable
@@ -43,7 +41,6 @@ from deephaven_massive._tables.refused_values import refused_values_of
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import (
     RestTransport,
-    SymbolFailure,
 )
 from deephaven_massive._tables.watchlist import (
     SKIPPED_ROWS_FIX,
@@ -54,14 +51,11 @@ from deephaven_massive._tables.watchlist import (
 from deephaven_massive.queries._query import Query, _read_symbol_table, _verb, _wait
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from deephaven.table import Table
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.request import ValueTable
     from deephaven_massive._enums import OnError
-    from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = ["MINIMUM_POLL_INTERVAL", "FetchQuery"]
 
@@ -200,31 +194,6 @@ def _read_value_table(
     return rows.symbols
 
 
-def _merged(core: SessionCore, outcomes: Mapping[str, SymbolOutcome]) -> Table:
-    """Join the values' tables of a static read of a value table, or raise its first failure.
-
-    A static table of values is a fixed list in code: like a list call, it fails when any of
-    its values does.
-
-    Args:
-        core: The session core, for its execution context.
-        outcomes: Each value's outcome, in the order read.
-
-    Returns:
-        One static table of every value's rows, in value order.
-
-    Raises:
-        MassiveError: The first failed value's error.
-    """
-    tables = []
-    for outcome in outcomes.values():
-        if isinstance(outcome, SymbolFailure):
-            raise outcome.error
-        tables.append(outcome.table)
-    with entered(core.exec_ctx):
-        return merge(tables)
-
-
 def _symbols_per_read(spec: DatasetSpec) -> int:
     """Return how many symbols one read of a followed `fetch()` takes.
 
@@ -270,11 +239,11 @@ class FetchQuery(Query):
         refuse_update_graph_thread,
         _read_symbol_table,
         _read_value_table,
-        _merged,
         RestTransport.fetch,
         RestTransport.check_fetch,
         RestTransport.fetch_by_symbol,
         RestTransport.fetch_by_value,
+        RestTransport.fetch_values,
         open_followed_read,
         _wait,
     )
@@ -430,8 +399,9 @@ class FetchQuery(Query):
         """Run a `fetch()` call whose one-value argument is a table (`Request.value_table`).
 
         Each value is read with the requests `fetch()` makes when it is passed alone
-        (`RestTransport.fetch_by_value`). A static table is read once, as a fixed list: the
-        result joins every value's rows, and a failed value fails the call. A refreshing one is
+        (`RestTransport.fetch_by_value`). A static table is read once, as a fixed list
+        (`RestTransport.fetch_values`): a failed value is listed and left out, as a symbol in code
+        is, and the call fails only when every value fails. A refreshing one is
         followed (`_followed_value_fetch`). A symbol table passed beside it is read once.
 
         Args:
@@ -464,9 +434,7 @@ class FetchQuery(Query):
             wait=wait,
             transport=Transport.REST,
             note=rest_recency_note(spec, core.config.delayed_subscriptions),
-            run=lambda stop: _merged(
-                core, rest.fetch_by_value(spec, request, values=names, call=call, stop=stop)
-            ),
+            run=lambda stop: rest.fetch_values(spec, request, values=names, call=call, stop=stop),
         )
 
     def _followed_value_fetch(self, call: int, values: ValueTable, *, wait: bool) -> Table:

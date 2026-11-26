@@ -139,6 +139,7 @@ from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar, assert_never
 from urllib.parse import urlsplit
 
 import pyarrow as pa
+from deephaven import merge
 from typing_extensions import override
 
 from deephaven_massive._datasets.catalog import REFERENCE_PATH
@@ -211,7 +212,7 @@ from deephaven_massive._ingest.rest_rows import (
     read_error_row,
 )
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
-from deephaven_massive._ingest.static_reads import read_symbols, report_failures
+from deephaven_massive._ingest.static_reads import judge_failures, read_symbols, report_failures
 from deephaven_massive._ingest.stop_tokens import as_cancel
 from deephaven_massive._ingest.symbol_reads import (
     ReadEach,
@@ -252,6 +253,7 @@ from deephaven_massive._tables.problem_events import (
     drift_events,
 )
 from deephaven_massive._tables.read_tally import ReadTally
+from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive._tables.withheld import (
     FAULT,
     SENT,
@@ -3573,6 +3575,61 @@ class RestEndpoints:
             cancel=as_cancel(stop),
             to_table=functools.partial(self._static, spec),
         )
+
+    def fetch_values(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        values: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Table:
+        """Read `fetch` once for a static table of values, as a fixed list: one table.
+
+        See `RestTransport.fetch_values`. Each value is read as `fetch_by_value` reads it, and
+        the failures are judged as a static read of symbols judges them
+        (`static_reads.judge_failures`).
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with a value table and static symbols.
+            values: The values to read, already checked.
+            call: The call's id, which names the read's threads and its problems.
+            stop: A background read's stop token, or None, as `fetch` takes it.
+
+        Returns:
+            A static table of every value's rows, in value order.
+
+        Errors are those of `symbol_reads.read_rest_by_value` and `static_reads.judge_failures`.
+        """
+        reader = self._reader(
+            f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
+        )
+        cancel = as_cancel(stop)
+        outcomes = read_rest_by_value(
+            reader,
+            self._core,
+            spec,
+            request=request,
+            values=values,
+            call=call,
+            cancel=cancel,
+            to_table=functools.partial(self._static, spec),
+        )
+        tables: list[Table] = []
+        failures: dict[str, MassiveError] = {}
+        for value, outcome in outcomes.items():
+            match outcome:
+                case SymbolRows():
+                    tables.append(outcome.table)
+                case SymbolFailure():
+                    failures[value] = outcome.error
+                case _:
+                    assert_never(outcome)
+        judge_failures(reader, spec, symbols=tuple(outcomes), failures=failures, cancel=cancel)
+        with entered(self._core.exec_ctx):
+            return merge(tables)
 
     def history(
         self,

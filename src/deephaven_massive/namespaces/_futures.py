@@ -506,7 +506,8 @@ class FuturesNamespace(Namespace):
 
         A table of product codes is read value by value, each as if passed alone. A row of a
         code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
-        live table is followed. In a static table, one failed code fails the call.
+        live table is followed. In a static table, a failed code is left out and listed in
+        `m.problems()`, and the call fails only when every code fails.
 
         Args:
             symbols: Contract tickers, a contracts table, or `dm.ALL` for every contract.
@@ -575,7 +576,8 @@ class FuturesNamespace(Namespace):
 
         A table of product codes is read value by value, each as if passed alone. A row of a
         code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
-        live table is followed. In a static table, one failed code fails the call.
+        live table is followed. In a static table, a failed code is left out and listed in
+        `m.problems()`, and the call fails only when every code fails.
 
         Args:
             symbols: Only these contracts; leave it out for every contract. `dm.ALL` is refused;
@@ -657,7 +659,8 @@ class FuturesNamespace(Namespace):
 
         A table of product codes is read value by value, each as if passed alone. A row of a
         code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
-        live table is followed. In a static table, one failed code fails the call.
+        live table is followed. In a static table, a failed code is left out and listed in
+        `m.problems()`, and the call fails only when every code fails.
 
         Args:
             product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A
@@ -758,7 +761,8 @@ class FuturesNamespace(Namespace):
 
         A table of product codes is read value by value, each as if passed alone. A row of a
         code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
-        live table is followed. In a static table, one failed code fails the call.
+        live table is followed. In a static table, a failed code is left out and listed in
+        `m.problems()`, and the call fails only when every code fails.
 
         Args:
             product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A
@@ -817,7 +821,8 @@ class FuturesNamespace(Namespace):
 
         A table of product codes is read value by value, each as if passed alone. A row of a
         code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
-        live table is followed. In a static table, one failed code fails the call.
+        live table is followed. In a static table, a failed code is left out and listed in
+        `m.problems()`, and the call fails only when every code fails.
 
         Args:
             product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A

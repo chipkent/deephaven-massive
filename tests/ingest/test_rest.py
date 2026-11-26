@@ -6116,6 +6116,70 @@ def test_a_poll_cycle_of_an_empty_table_of_values_reads_nothing(
     assert (read.rows.num_rows, read.requests, read.left_out) == (0, 0, ())
 
 
+def _static_values(m: dm.MassiveSession, values: list[str]) -> Table:
+    # A static fetch() of futures products over a static table of product codes.
+    with entered(m._core.exec_ctx):
+        table = new_table([string_col("ProductCode", values)])
+    boxed = ValueTable("product_code", "product_code", "ProductCode", underlying=False, table=table)
+    request = Request(value_table=boxed, on_error=m._core.policy)
+    rest = m._core.rest_transport()
+    return rest.fetch_values(futures_ns.PRODUCTS, request, values=values, call=7)
+
+
+PRODUCTS_REFUSAL: Final = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+"""Massive's refusal of one futures product code."""
+
+ES_PRODUCT: Final = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+"""ES's futures product."""
+
+
+def test_a_static_table_of_values_lists_a_refused_value_and_returns_the_others(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # One value after another: NQ is refused, ES answers. As a symbol in code, NQ is listed.
+    fake_rest.reply("/futures/v1/products", PRODUCTS_REFUSAL, ES_PRODUCT)
+    spans = record_spans(rest_session, monkeypatch)
+    table = _static_values(rest_session, ["NQ", "ES"])
+    assert [row["ProductCode"] for row in dh_to_pylist(table)] == ["ES"]
+    assert [(cause, name) for cause, name, _ in spans] == [(ProblemCause.REFUSED_SYMBOLS, "NQ")]
+
+
+def test_a_static_table_of_values_fails_when_every_value_fails(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/futures/v1/products", PRODUCTS_REFUSAL, PRODUCTS_REFUSAL)
+    with pytest.raises(dm.EntitlementError, match="upgrade"):
+        _static_values(rest_session, ["NQ", "ES"])
+
+
+def test_a_static_table_of_values_raises_a_refused_value_under_raise(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_rest.reply("/futures/v1/products", PRODUCTS_REFUSAL, ES_PRODUCT)
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE),
+    )
+    with dm.MassiveSession(config) as strict:
+        spans = record_spans(strict, monkeypatch)
+        with pytest.raises(dm.EntitlementError) as raised:
+            _static_values(strict, ["NQ", "ES"])
+    # NQ is listed before the call raises, and the error names the setting that reads ES.
+    assert str(raised.value) == (
+        "futures.products: Massive refused this read for the Futures subscription. Massive "
+        "answered GET /futures/v1/products?product_code=NQ&limit=50000 on 127.0.0.1 with HTTP "
+        '403: "upgrade". Remove NQ, or, to read the others, pass '
+        "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    assert [(cause, name) for cause, name, _ in spans] == [(ProblemCause.REFUSED_SYMBOLS, "NQ")]
+
+
 def _not_found(
     m: dm.MassiveSession, error: _massive.WireError, *, symbol: str | None, requests: int
 ) -> object:

@@ -378,6 +378,39 @@ class RestTransport(Protocol):
         """
         ...
 
+    def fetch_values(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        values: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Table:
+        """Read `fetch` once for a static table of values, as a fixed list: one table.
+
+        Each value is read as `fetch_by_value` reads it. As a static read of symbols in code,
+        a value that fails alone is left out of the table and listed in `m.problems()`, and
+        the others' rows are returned.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with a value table and static symbols.
+            values: The values to read, already checked; a repeated one is read once.
+            call: The id of the verb call the read serves.
+            stop: A background read's stop token, or None, as `fetch` takes it.
+
+        Returns:
+            A static table of every value's rows, in value order.
+
+        Raises:
+            MassiveError: When every value failed (the first value's failure), for a failure
+                of the whole read (a rejected key, a refused feed, a closed session), and for
+                a value's failure whose cause is set to `RAISE`, once every failed value is
+                listed.
+        """
+        ...
+
     def poll(
         self,
         spec: DatasetSpec,

@@ -552,7 +552,7 @@ def test_a_static_table_of_underlyings_reads_each_chain_once(
     assert request.for_value("AAPL").params == (("underlyingAsset", "AAPL"),)
 
 
-def test_a_static_table_of_values_fails_when_one_value_fails(
+def test_a_static_table_of_values_raises_what_its_read_raises(
     *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")

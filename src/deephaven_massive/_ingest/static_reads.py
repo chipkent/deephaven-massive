@@ -1,5 +1,9 @@
 """A static `fetch()` or REST `history()` of symbols in code: one table, each failure its own.
 
+A static table of values, passed where a dataset takes one value, is a fixed list too: its
+values are read by value (`RestTransport.fetch_values`) and judged as symbols are
+(`judge_failures`).
+
 The read makes the requests a read by symbol makes and gives each request's rows to the
 symbols it named (`symbol_reads.read_symbol_list`), so one symbol's failure
 never takes another's rows: its read goes on, and the failed symbol is left out of the table
@@ -53,7 +57,7 @@ if TYPE_CHECKING:
     from deephaven_massive._massive import Cancel, Patience
     from deephaven_massive._tables.read_tally import ReadTally
 
-__all__ = ["read_symbols", "report_failures"]
+__all__ = ["judge_failures", "read_symbols", "report_failures"]
 
 logger = logging.getLogger(__name__)
 
@@ -118,17 +122,44 @@ def read_symbols(
         patience=patience,
         tally=tally,
     )
-    failures = read.failures
+    judge_failures(reader, spec, symbols=ordered, failures=read.failures, cancel=cancel)
+    return read.rows, read.requests
+
+
+def judge_failures(
+    reader: RestReader,
+    spec: DatasetSpec,
+    *,
+    symbols: Sequence[str],
+    failures: Mapping[str, MassiveError],
+    cancel: Cancel | None,
+) -> None:
+    """End a static read of a fixed list whose members failed alone: list each, raise as needed.
+
+    The last step of every static read of a fixed list: symbols in code, and the values of a
+    static table passed where a dataset takes one value, which are judged as symbols are.
+
+    Args:
+        reader: The reader, whose problem sink, policy, and call id the spans take.
+        spec: The dataset.
+        symbols: The call's symbols or values, each once, in the order the spans follow.
+        failures: Each failed one's error.
+        cancel: The read's stop token, or None.
+
+    Raises:
+        MassiveError: The first failure when the stop token is set: the read is over, not the
+            symbol. Else, once each failure is listed, the failure `report_failures` raises,
+            or the error of `every_symbol_failed` when every symbol failed.
+    """
     if failures and cancel is not None and cancel.is_set():
         # A crypto pair's lookup the stop ended: the read is over, not the pair.
         stopped = next(iter(failures.values()))
         raise stopped
-    report_failures(reader, spec, symbols=ordered, failures=failures)
-    if ordered and all(symbol in failures for symbol in ordered):
-        logger.debug("%s: every symbol failed: %s", spec.name, bounded_list(ordered))
-        error = every_symbol_failed([failures[symbol] for symbol in ordered])
-        raise error from failures[ordered[0]]
-    return read.rows, read.requests
+    report_failures(reader, spec, symbols=symbols, failures=failures)
+    if symbols and all(symbol in failures for symbol in symbols):
+        logger.debug("%s: every symbol failed: %s", spec.name, bounded_list(symbols))
+        error = every_symbol_failed([failures[symbol] for symbol in symbols])
+        raise error from failures[symbols[0]]
 
 
 def report_failures(

@@ -981,7 +981,8 @@ class OptionsNamespace(Namespace):
         follows the `noncanonical_symbols` cause of `on_error`, which skips and logs it by
         default. A contract of an underlying the table doesn't hold follows its
         `unrequested_symbols` cause, which leaves it out and lists it in `m.problems()`. A live
-        table is followed. In a static table, one failed underlying fails the call.
+        table is followed. In a static table, a failed underlying is left out and listed in
+        `m.problems()`, and the call fails only when every underlying fails.
 
         Args:
             underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A
