@@ -120,7 +120,7 @@ def test_judge_fails_a_symbol_only_for_its_own_withheld_rows(
         "by cause and symbol."
     )
     named = str(failed.error).removeprefix("stocks.trades: ")  # the log names the dataset once
-    assert caplog.messages[-1] == f"stocks.trades by symbol fails AAPL: {named}"
+    assert caplog.messages[-1] == f"stocks.trades: AAPL fails alone, its rows withheld: {named}"
     assert [judged[s] is outcomes[s] for s in ("MSFT", "NVDA", "IBM")] == [True] * 3
 
 

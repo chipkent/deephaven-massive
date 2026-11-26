@@ -39,6 +39,7 @@ from deephaven_massive._errors import (
     BrokenGuaranteeError,
     FeedRefusalError,
     MassiveError,
+    RowDataError,
     session_closed,
 )
 from deephaven_massive._massive import RowFault, Transport
@@ -1684,9 +1685,12 @@ def test_a_symbol_whose_rows_are_all_withheld_fails_the_table_under_raise(
     massive_session: dm.MassiveSession,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The table's failure is the one WARNING, though the failure is the symbol's own error.
+    # Under RAISE the page raises a RowDataError at AAPL's first withheld row. The table's
+    # failure is the one WARNING, though the failure is the symbol's own error.
     script = Script(massive_session)
-    failure = all_withheld("AAPL")
+    failure = SymbolFailure(
+        RowDataError('test.trades: Price expects double, got "x" in a row of AAPL.')
+    )
     script.answers["AAPL"] = [failure]
     gate = script.gates["MSFT"] = threading.Event()  # the table may still read another symbol
     with caplog.at_level(logging.WARNING, logger=LOGGER):

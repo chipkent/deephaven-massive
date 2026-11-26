@@ -22,7 +22,6 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.symbol_retry import is_symbol_refusal
-from deephaven_massive._tables.withheld import setting_of
 
 if TYPE_CHECKING:
     from deephaven_massive._error_policy import ResolvedPolicy
@@ -36,9 +35,10 @@ def fails_call(error: MassiveError, policy: ResolvedPolicy) -> bool:
 
     A failure whose cause the call set to `RAISE` does: a refused symbol under
     `refused_symbols`, a symbol Massive has no data for (`UnavailableSymbolError`) under
-    `unavailable_symbols`, a withheld or unrequested row (`RowDataError`, made only under its
-    cause), and a symbol whose rows were all withheld (`WithheldSymbolError`, made under any
-    setting) when a cause of its rows is `RAISE`. Any other failure is the symbol's own.
+    `unavailable_symbols`, and a withheld or unrequested row (`RowDataError`, made only under
+    its cause). Any other failure is the symbol's own, a symbol whose rows were all withheld
+    (`WithheldSymbolError`) included: a read raises a `RowDataError` at a row whose cause is
+    `RAISE`, so such a symbol's rows were all withheld under `LOG` or `IGNORE`.
 
     Args:
         error: A symbol's failure, as its request or its planning gave it.
@@ -48,7 +48,7 @@ def fails_call(error: MassiveError, policy: ResolvedPolicy) -> bool:
         True for a failure of the whole call.
     """
     if isinstance(error, WithheldSymbolError):
-        return any(effect_of(setting_of(policy, fault)).fails for fault in error.faults)
+        return False
     if isinstance(error, UnavailableSymbolError):
         return effect_of(policy.unavailable_symbols).fails
     if isinstance(error, RowDataError):

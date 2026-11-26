@@ -17,8 +17,8 @@ part.
   `add`, by the canonical symbol a flat file's row names). A withheld row whose symbol is not
   known could be any of its request's symbols': when that request kept no row at all, each of
   those symbols that got no row fails. A withheld row of another symbol fails no one. Such a
-  failure (`WithheldSymbolError`) carries the faults of its rows, so it fails the whole call
-  only when one of their causes is `RAISE` (`call_failure.fails_call`).
+  failure (`WithheldSymbolError`) is the symbol's alone: a row whose cause is `RAISE` never
+  reaches the tally, since the read raises at it.
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ from deephaven_massive._tables.withheld import WITHHELD_LISTED, Withheld, reason
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from deephaven_massive._massive import RowFault
     from deephaven_massive._tables.transports import SymbolOutcome
     from deephaven_massive._tables.withheld import WithheldGroup
 
@@ -53,13 +52,11 @@ class _Withholding:
         rows: How many.
         reason: Why the first of them was withheld.
         sources: What they were read from, in the order first seen.
-        faults: Their faults, in the order first seen.
     """
 
     rows: int = 0
     reason: str = ""
     sources: dict[str, None] = field(default_factory=dict)
-    faults: dict[RowFault, None] = field(default_factory=dict)
 
     def take(self, group: WithheldGroup, source: str) -> None:
         """Count withheld rows.
@@ -71,7 +68,6 @@ class _Withholding:
         self.rows += group.rows
         self.reason = self.reason or group.reason
         self.sources.setdefault(source, None)
-        self.faults.setdefault(group.fault, None)
 
 
 @dataclass(slots=True)
@@ -282,7 +278,7 @@ class ReadTally:
             # At DEBUG and not marked logged: the call's own record of the symbol, or of the
             # table it fails, is the one a user sees.
             logger.debug(
-                "%s by symbol fails %s: %s",
+                "%s: %s fails alone, its rows withheld: %s",
                 dataset,
                 symbol,
                 str(failure).removeprefix(f"{dataset}: "),
@@ -323,14 +319,13 @@ def _symbol_failure(dataset: str, withholding: _Withholding, *, whose: str) -> W
 
     Args:
         dataset: The dataset.
-        withholding: The rows, their first reason and faults, and what they were read from.
+        withholding: The rows, their first reason, and what they were read from.
         whose: Whose rows they were, such as `"for MSFT"`.
 
     Returns:
-        The failure, with the message `_message` gives and the rows' faults.
+        The failure, with the message `_message` gives.
     """
-    message = _message(dataset, withholding, whose=whose)
-    return WithheldSymbolError(message, faults=tuple(withholding.faults))
+    return WithheldSymbolError(_message(dataset, withholding, whose=whose))
 
 
 def _message(dataset: str, withholding: _Withholding, *, whose: str) -> str:

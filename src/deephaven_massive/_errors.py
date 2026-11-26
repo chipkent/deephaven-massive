@@ -73,7 +73,6 @@ from typing import TYPE_CHECKING, ClassVar, Final, TypeVar
 
 from deephaven_massive._massive import (
     RETRYABLE_STATUSES,
-    RowFault,
     WireAuthError,
     WireEntitlementError,
     WireError,
@@ -874,50 +873,13 @@ class RowDataError(PermanentError):
 
 
 class WithheldSymbolError(RowDataError):
-    """A symbol of a read by symbol whose every row, or every row it could have had, was withheld.
+    """A symbol or value of a read whose every row, or every row it could have had, was withheld.
 
     Internal: not exported from `dm`; raised as the `RowDataError` it is. Unlike a
-    `RowDataError` of withheld rows, it is made whatever the read's policy
-    (`_tables/read_tally.py`), so it carries the faults of its rows: it fails the whole call
-    only when one of their causes is `RAISE` (`_tables/call_failure.py`), and else the symbol
-    alone.
-
-    Attributes:
-        faults: The faults of the withheld rows, each once.
+    `RowDataError` of withheld rows, which a read raises when a row's cause is `RAISE`, it is
+    made only when every withheld row's cause was `LOG` or `IGNORE` (`_tables/read_tally.py`),
+    so it fails the symbol alone, never the whole call (`_tables/call_failure.py`).
     """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        faults: Sequence[RowFault] = (),
-        status: int | None = None,
-        request_id: str | None = None,
-        source: ErrorSource | None = None,
-        is_retryable: bool | None = None,
-        is_bug: bool | None = None,
-    ) -> None:
-        """Create the error.
-
-        Args:
-            message: The failure's message.
-            faults: The faults of the withheld rows; none for a copy (`copy_error`), which is
-                raised for a whole call and never judged by symbol.
-            status: The HTTP status, or None.
-            request_id: Massive's request id, or None.
-            source: Whose failure it is, or None for the class's.
-            is_retryable: Whether the same read may succeed later, or None for the class's.
-            is_bug: Whether it is a defect, or None for the class's.
-        """
-        super().__init__(
-            message,
-            status=status,
-            request_id=request_id,
-            source=source,
-            is_retryable=is_retryable,
-            is_bug=is_bug,
-        )
-        self.faults = tuple(faults)
 
 
 class UnavailableSymbolError(PermanentError):

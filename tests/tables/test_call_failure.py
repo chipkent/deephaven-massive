@@ -14,7 +14,6 @@ from deephaven_massive._errors import (
     UnavailableSymbolError,
     WithheldSymbolError,
 )
-from deephaven_massive._massive import RowFault
 from deephaven_massive._tables.call_failure import call_failure, fails_call
 
 _REFUSAL = (
@@ -52,20 +51,13 @@ def test_a_symbol_massive_has_no_data_for_fails_the_call_only_under_raise(
     assert fails_call(UnavailableSymbolError("no data"), policy) is fails
 
 
-@pytest.mark.parametrize(
-    ("setting", "fails"),
-    [(dm.OnError.RAISE, True), (dm.OnError.LOG, False), (dm.OnError.IGNORE, False)],
-)
-def test_a_symbol_whose_rows_were_all_withheld_fails_the_call_only_when_a_cause_raises(
-    setting: dm.OnError, fails: bool
-) -> None:
-    # Made whatever the read's policy, it is judged by the setting of each of its rows' causes.
-    error = WithheldSymbolError(
-        "withheld", faults=(RowFault.UNREADABLE_KEYS, RowFault.UNCONVERTIBLE_VALUES)
-    )
+@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_a_symbol_whose_rows_were_all_withheld_never_fails_the_call(setting: dm.OnError) -> None:
+    # Its rows were withheld under LOG or IGNORE: a RAISE cause raised at the row instead.
+    error = WithheldSymbolError("withheld")
     policy = dataclasses.replace(DEFAULT_POLICY, unconvertible_values=setting)
-    assert fails_call(error, policy) is fails
-    assert (call_failure("AAPL", error, policy) is error) is fails
+    assert not fails_call(error, policy)
+    assert call_failure("AAPL", error, policy) is None
 
 
 def test_a_failure_of_its_own_and_a_feed_refusal_never_fail_the_call_here() -> None:

@@ -191,7 +191,8 @@ def report_failures(
         MassiveError: Once every failed symbol is listed, the first symbol's failure, in the
             call's order, that the call must not survive: a refused symbol under
             `refused_symbols=RAISE`, an `UnavailableSymbolError` (only under
-            `unavailable_symbols=RAISE`), or a `RowDataError` (only under its cause's `RAISE`).
+            `unavailable_symbols=RAISE`), or a `RowDataError` made under its cause's `RAISE`
+            (never a `WithheldSymbolError`, whose rows were withheld under `LOG` or `IGNORE`).
             A refused symbol's, while another symbol did not fail, ends with the setting that
             reads the others (`refusal_raised`).
     """
