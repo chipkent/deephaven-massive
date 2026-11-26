@@ -384,7 +384,7 @@ def test_a_failure_is_retryable_only_when_its_cause_may_pass(
         (AuthenticationError("the key is refused", status=401), True),
         (SessionClosedError(session_closed()), True),
         (EntitlementError("refused", status=403), False),
-        (FeedRefusalError("delayed", source=ErrorSource.USER), False),
+        (FeedRefusalError("delayed", source=ErrorSource.USER), True),
         (MassiveError("HTTP 503", status=503), False),
         (MassiveError("connection reset", source=ErrorSource.NETWORK), False),
         (CutShortError("cut short", status=404), False),

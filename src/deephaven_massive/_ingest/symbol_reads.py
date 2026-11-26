@@ -49,10 +49,11 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   HTTP 404 on a symbol's first request is no failure: the symbol has no data, and its table is
   empty.
 - **Whole-read failures** (`fails_followed_read`): a rejected API key
-  (`AuthenticationError`) and a session closed during the read would fail every symbol alike,
-  so they raise, and the reader cancels the requests not yet made (`RestReader.read_each`).
+  (`AuthenticationError`), a refusal of the feed (`FeedRefusalError`), and a session closed
+  during the read would fail every symbol alike, so they raise, and the reader cancels the
+  requests not yet made (`RestReader.read_each`).
 - **Failures that fail the call** (`fails_call`): one symbol's failure fails its whole call or
-  table only when it is the feed's (`FeedRefusalError`) or its cause is set to `RAISE`.
+  table only when its cause is set to `RAISE`.
 - **A list in one table** (`read_symbol_list`): the rows of every symbol of a list that did
   not fail, in one Arrow table, with each failed symbol's error beside it, for a static
   `fetch()` or `history()` of symbols in code (`_ingest/static_reads.py`) and for a `poll()`
@@ -333,9 +334,10 @@ def fails_followed_read(error: MassiveError) -> bool:
     """Tell whether a request's failure fails a read that follows a symbol table whole.
 
     The read's failures are those that would fail every symbol alike: Massive rejecting the
-    API key, and the session closing during the read. Any other failure is the failed
-    request's symbols' own, and the read goes on with the others; a failure that may pass is
-    read again later (`_tables/follow_coordinator.py`).
+    API key, a refusal of the feed (`FeedRefusalError`, which no symbol escapes, even when it
+    answers one part of a refused request being searched), and the session closing during the
+    read. Any other failure is the failed request's symbols' own, and the read goes on with the
+    others; a failure that may pass is read again later (`_tables/follow_coordinator.py`).
 
     Args:
         error: A request's failure (`RestReader.read_each`).
@@ -343,17 +345,17 @@ def fails_followed_read(error: MassiveError) -> bool:
     Returns:
         True for a failure of the whole read.
     """
-    return isinstance(error, (AuthenticationError, SessionClosedError))
+    return isinstance(error, (AuthenticationError, FeedRefusalError, SessionClosedError))
 
 
 def fails_call(error: MassiveError, policy: ResolvedPolicy) -> bool:
     """Tell whether one symbol's failure fails its whole call or table, not only the symbol.
 
-    A refusal of the feed (`FeedRefusalError`) does, since no symbol escapes it. So does a
-    failure whose cause the call set to `RAISE`: a refused symbol under `refused_symbols`, a
-    symbol Massive has no data for (`UnavailableSymbolError`, only under
+    A failure whose cause the call set to `RAISE` does: a refused symbol under
+    `refused_symbols`, a symbol Massive has no data for (`UnavailableSymbolError`, only under
     `unavailable_symbols`), and a withheld or unrequested row (`RowDataError`, only under its
-    cause). Any other failure is the symbol's own.
+    cause). Any other failure is the symbol's own. A refusal of the feed never reaches here: it
+    fails the whole read as it happens (`fails_followed_read`).
 
     Args:
         error: A symbol's failure, as its request or its planning gave it.
@@ -362,7 +364,7 @@ def fails_call(error: MassiveError, policy: ResolvedPolicy) -> bool:
     Returns:
         True for a failure of the whole call.
     """
-    if isinstance(error, (FeedRefusalError, UnavailableSymbolError, RowDataError)):
+    if isinstance(error, (UnavailableSymbolError, RowDataError)):
         return True
     return is_symbol_refusal(error) and effect_of(policy.refused_symbols).fails
 

@@ -2500,8 +2500,7 @@ class RestReader:
         is its own: its rows are left out, and it is returned in `CycleRows.failures` for the
         poller to retry or list, while the others' rows are kept. A failure of the whole read
         (`symbol_reads.fails_followed_read`) raises, and a failure that fails the table
-        (`symbol_reads.fails_call`) is returned as `CycleRows.fatal`, except a value cycle's refusal
-        of the feed (`FeedRefusalError`), which raises. A cycle of `ALL`, or of a
+        (`symbol_reads.fails_call`) is returned as `CycleRows.fatal`. A cycle of `ALL`, or of a
         dataset without instruments, is one read (`_read_one_cycle`), whose failure is the
         cycle's.
 
@@ -2524,7 +2523,7 @@ class RestReader:
         Raises:
             RowDataError: If the library could read none of the rows of a cycle of `ALL` whole,
                 whatever its policy.
-            MassiveError: A failure of the whole read, a value cycle's refusal of the feed,
+            MassiveError: A failure of the whole read, a refusal of the feed included,
                 any failure once the poller is stopped, or a failure of a cycle of `ALL`, as
                 `_read_one_cycle` raises it.
         """
@@ -2663,9 +2662,9 @@ class RestReader:
     ) -> poll.CycleRows:
         """Read a cycle of values, as a static `fetch()` of them reads them (`read_by_value`).
 
-        A refusal of the feed (`FeedRefusalError`) and any failure once the poller is stopped
-        raise, besides a failure of the whole read; a value whose failure's cause is set to
-        `RAISE` is also returned as `CycleRows.fatal`, which fails the table.
+        A failure of the whole read (`symbol_reads.fails_followed_read`, a refusal of the feed
+        included) and any failure once the poller is stopped raise; a value whose failure's cause
+        is set to `RAISE` is also returned as `CycleRows.fatal`, which fails the table.
 
         Args:
             spec: The dataset.
@@ -2690,12 +2689,7 @@ class RestReader:
             return cycle.rows, cycle.requests, cycle.left_out
 
         def fails_cycle(error: MassiveError) -> bool:
-            return (
-                fails_followed_read(error)
-                or isinstance(error, FeedRefusalError)
-                or self.state.closed
-                or cancel.is_set()
-            )
+            return fails_followed_read(error) or self.state.closed or cancel.is_set()
 
         got = self.read_by_value(spec, request, values, read=read_one, fails_read=fails_cycle)
         schema = self.catalog.dataset_schema(spec).arrow_schema()

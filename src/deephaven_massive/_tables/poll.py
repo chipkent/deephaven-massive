@@ -363,7 +363,7 @@ class CycleRows:
         failures: Each symbol or value of the cycle that failed on its own, with its error;
             its rows are left out of `rows`. Empty for none.
         fatal: The first failure of a symbol or value that fails the whole table
-            (`symbol_reads.fails_call`: the feed's refusal, or a cause set to `RAISE`), or
+            (`symbol_reads.fails_call`: a cause set to `RAISE`), or
             None.
     """
 

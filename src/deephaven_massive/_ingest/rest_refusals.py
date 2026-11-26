@@ -12,7 +12,8 @@ another, so a read by symbol (`RestReader.read_each`) sends the request again in
   (`search_refusals`, `refusal_search.RefusalSearch`): split by asset class, then into halves,
   the parts of every search sent together, one round per level, until each symbol is answered,
   refused, or failed for another reason.
-- **A refusal of the feed** (`FeedRefusalError`) is neither: no symbol escapes it.
+- **A refusal of the feed** (`FeedRefusalError`) is neither: no symbol escapes it, so it fails
+  the whole read wherever it comes, a part of a search included (`send` raises it).
 
 Each part's answer is its own symbols' alone, so no symbol gets rows twice or loses them: the
 refused request had none. The functions here decide what to send and read the answers; the
@@ -220,12 +221,16 @@ class _SearchedRequest(Generic[Answer]):
         Args:
             part: The part, as the search gave it.
             unit: The request sent for it.
-            outcome: Its outcome or failure: rows are its symbols', a refusal is searched
-                further (one of the feed's included: a part of a request that named no
-                symbol's feed alone), and any other failure (a 5xx, a timeout) is its
-                symbols' own.
+            outcome: Its outcome or failure: rows are its symbols', a refusal that names its
+                symbols refuses those and sends the rest again, any other refusal is searched
+                further, and any other failure (a 5xx, a timeout) is its symbols' own. A
+                refusal of the feed never comes here: `send` raises it.
         """
-        if isinstance(outcome, EntitlementError):
+        if isinstance(outcome, SymbolRefusalError):
+            # It names its symbols: refuse those, and send the rest of the part again.
+            named = self.search.refused_by_name(part, outcome.symbols)
+            self.refusals.update(dict.fromkeys(named, outcome))
+        elif isinstance(outcome, EntitlementError):
             self.search.refused(part)
             self.refusals.update(dict.fromkeys(part, outcome))
         elif isinstance(outcome, MassiveError):
@@ -282,9 +287,11 @@ def search_refusals(
 
     Each request Massive refused whole without naming a symbol is searched
     (`_SearchedRequest`): split by asset class, then into halves, the parts of every search
-    sent together, one round per level. Two refused halves end the search with both refused,
-    so a refusal of every symbol costs two more requests, and finding one refused symbol
-    among `n` about `2 * ceil(log2(n))`.
+    sent together, one round per level. Two refused halves of two groups or more are probed,
+    one group of each sent alone, and two refused probes end the search with both halves
+    refused (`refusal_search`), so a refusal of every symbol of a class costs four more
+    requests, and finding one refused symbol among `n` about `2 * ceil(log2(n))` plus two
+    per probe.
 
     Args:
         spec: The dataset.

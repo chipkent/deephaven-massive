@@ -41,9 +41,10 @@ def test_two_refused_halves_end_the_search_with_every_item_refused() -> None:
     items = [f"S{i:03d}" for i in range(250)]
     search = search_of(items)
     answer(search, set(items))
-    # The plan lacks the data: two requests, no further halving.
+    answer(search, set(items))
+    # The plan lacks the data: two halves and a probe of each, no further halving.
     assert search.done
-    assert search.requests == 2
+    assert search.requests == 4
     assert sorted(search.refused_items) == items
     assert search.failed_items == {}
 
@@ -120,13 +121,98 @@ def test_a_half_refused_first_waits_for_its_sibling_sent_one_at_a_time() -> None
     assert list(search.refused_items) == ["A", "B"]
 
 
-def test_a_half_refused_after_its_waiting_sibling_refuses_both() -> None:
+def test_two_refused_halves_send_a_probe_of_each_and_two_refused_probes_refuse_both() -> None:
     search = search_of(["A", "B", "C", "D"])
     search.refused(("A", "B"))
     search.refused(("C", "D"))
+    assert search.pending() == [("A",), ("C",)]
+    search.refused(("A",))
+    assert search.pending() == [("C",)]  # the other probe's answer decides
+    search.refused(("C",))
     assert search.done
     assert search.refused_items == ("A", "B", "C", "D")
-    assert search.requests == 2
+    assert search.requests == 4
+
+
+def test_an_answered_probe_splits_its_half_and_a_refused_one_sends_its_half_again() -> None:
+    search = search_of(["A", "B", "C", "D", "E", "F"])
+    search.refused(("A", "B", "C"))
+    search.refused(("D", "E", "F"))
+    search.answered(("A",))
+    search.refused(("D",))
+    # B and C hold a refusal still, so they split; E and F may not, so they go again.
+    assert search.pending() == [("B",), ("C",), ("E", "F")]
+    assert list(search.refused_items) == ["D"]
+    search.answered(("B",))
+    search.refused(("C",))
+    search.answered(("E", "F"))
+    assert search.done
+    assert list(search.refused_items) == ["D", "C"]
+    assert search.requests == 7
+
+
+@pytest.mark.parametrize("other", ["failed", "dropped"])
+def test_a_probe_that_failed_or_was_dropped_sends_its_half_again(other: str) -> None:
+    search = search_of(["A", "B", "C", "D"])
+    search.refused(("A", "B"))
+    search.refused(("C", "D"))
+    if other == "failed":
+        search.failed(("C",), "timeout")
+    else:
+        search.dropped(("C",))
+    search.answered(("A",))
+    assert search.pending() == [("D",)]  # B is refused: its half was, and A was answered
+    assert search.refused_items == ("B",)
+
+
+def test_a_half_of_one_group_refused_lets_its_refused_sibling_split_with_a_request() -> None:
+    # Three groups split one and two: the refused lone group says nothing of the other two.
+    search = search_of(["A", "B", "C"])
+    assert search.pending() == [("A",), ("B", "C")]
+    search.refused(("A",))
+    search.refused(("B", "C"))
+    assert search.pending() == [("B",), ("C",)]
+    search.answered(("B",))
+    search.answered(("C",))
+    assert search.refused_items == ("A",)
+    search = search_of(["A", "B", "C"])
+    search.refused(("B", "C"))  # refused first, it waits for its sibling
+    search.refused(("A",))
+    assert search.pending() == [("B",), ("C",)]
+
+
+def test_a_refusal_that_names_its_items_refuses_their_groups_and_sends_the_rest_again() -> None:
+    search = search_of(["A", "B", "C", "D"])
+    assert search.refused_by_name(("A", "B"), {"A", "Z"}) == ("A",)
+    assert search.refused_items == ("A",)
+    assert search.pending() == [("C", "D"), ("B",)]
+    search.answered(("C", "D"))
+    search.answered(("B",))
+    assert search.done
+
+
+def test_a_named_refusal_of_none_of_the_part_refuses_it_whole() -> None:
+    search = search_of(["A", "B", "C", "D"])
+    assert search.refused_by_name(("A", "B"), {"Z"}) == ("A", "B")
+    search.answered(("C", "D"))
+    assert search.pending() == [("A",), ("B",)]
+
+
+def test_named_probes_refuse_both_halves() -> None:
+    search = search_of(["A", "B", "C", "D"])
+    search.refused(("A", "B"))
+    search.refused(("C", "D"))
+    assert search.refused_by_name(("A",), {"A"}) == ("A",)
+    search.refused(("C",))
+    assert search.done
+    assert search.refused_items == ("A", "B", "C", "D")
+    search = search_of(["A", "B", "C", "D"])
+    search.refused(("A", "B"))
+    search.refused(("C", "D"))
+    search.refused_by_name(("A",), {"A"})
+    search.answered(("C",))
+    assert search.pending() == [("B",)]  # A's half may hold no other refusal
+    assert search.refused_items == ("A", "D")
 
 
 def test_an_answered_part_searches_the_items_it_refused_without_naming_them() -> None:
@@ -155,3 +241,5 @@ def test_an_answer_to_a_part_that_is_not_pending_is_a_defect() -> None:
     search = search_of(["A", "B"])
     with pytest.raises(BrokenGuaranteeError, match=r"^\['A', 'B'\] is no pending part\. "):
         search.answered(("A", "B"))
+    with pytest.raises(BrokenGuaranteeError, match=r"^\['A', 'B'\] is no pending part\. "):
+        search.refused_by_name(("A", "B"), {"A"})

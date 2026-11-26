@@ -14,7 +14,7 @@ import pytest
 from deephaven_massive._datasets.catalog import DatasetSpec, KeySpec, SourceKeys
 from deephaven_massive._errors import EntitlementError, MassiveError, SymbolRefusalError
 from deephaven_massive._ingest import rest_requests
-from deephaven_massive._ingest.rest_refusals import drop_named_refusals
+from deephaven_massive._ingest.rest_refusals import drop_named_refusals, search_refusals
 from deephaven_massive._massive import RestPath, Transport
 
 if TYPE_CHECKING:
@@ -136,3 +136,18 @@ def test_a_request_with_nothing_left_to_send_again_is_kept_as_it_was(
     units, done = drop_named_refusals(SNAPSHOT, [unit], [answer], send=send)
     assert (units, done) == ([unit], [answer])
     assert send.sent == []
+
+
+def test_a_part_of_a_search_refused_by_name_refuses_those_and_sends_the_rest_again() -> None:
+    whole = EntitlementError("NOT_AUTHORIZED", status=403)
+    send = Rounds(
+        {("A", "B"): refused("A"), ("C", "D"): "rows of C and D"},
+        {("B",): "rows of B"},
+    )
+    units, done = search_refusals(SNAPSHOT, [listed("A", "B", "C", "D")], [whole], send=send)
+    assert send.sent == [[("A", "B"), ("C", "D")], [("B",)]]
+    assert named(units, done) == [
+        (("C", "D"), "rows of C and D"),
+        (("B",), "rows of B"),
+        (("A",), "delayed for A"),
+    ]

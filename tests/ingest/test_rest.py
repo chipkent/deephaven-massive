@@ -6567,12 +6567,14 @@ def test_read_each_resends_a_refused_list_request_in_halves_and_returns_the_unit
     assert _indices_target("I:DJI").split("?")[1] in str(refused)
 
 
-def test_a_list_request_refused_in_both_halves_marks_every_symbol_after_two_more_requests(
+def test_a_list_request_refused_in_every_part_marks_every_symbol_refused(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply(INDEX_SNAPSHOT_PATH, _REFUSED)
     read = _read_indices(session)
-    assert len(fake_rest.requests) == 3
+    # The halves are one symbol and two: the lone refused symbol says nothing of the other
+    # two, so their half splits too, and each of the three is refused on its own answer.
+    assert len(fake_rest.requests) == 5
     assert read.requests == 0
     results = _by_symbol(read)
     assert sorted(results) == sorted(_INDICES)

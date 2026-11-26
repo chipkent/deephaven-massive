@@ -15,12 +15,11 @@ Both are spans of the call that end when it returns. The call raises instead of 
 
 - when every symbol it named failed (`every_symbol_failed`): no symbol got an answer. Each
   is listed first, since the error gives only the first symbol's reason;
-- for a failure of the whole read (`symbol_reads.fails_followed_read`: a rejected key, a closed
-  session), which the reader raises at once;
+- for a failure of the whole read (`symbol_reads.fails_followed_read`: a rejected key, a refusal
+  of the feed such as a `DELAYED` label on the subscription the request is charged to, a closed
+  session), which the reader raises at once, since no symbol escapes it;
 - for a failure once the read's stop token is set: its table is gone, so the failure is the
   read's, not its symbol's, and no symbol is listed;
-- for a refusal of the feed (`FeedRefusalError`: a `DELAYED` label on the subscription the
-  request is charged to), which no symbol escapes;
 - for a failure under a cause set to `RAISE`: `refused_symbols`, `unavailable_symbols`
   (`UnavailableSymbolError`), and a withheld or unrequested row's cause (`RowDataError`), after
   every failed symbol is listed.
@@ -157,12 +156,11 @@ def report_failures(
 
     Raises:
         MassiveError: Once every failed symbol is listed, the first symbol's failure, in the
-            call's order, that the call must not survive: a refusal of the feed
-            (`FeedRefusalError`), a refused symbol under `refused_symbols=RAISE`, an
-            `UnavailableSymbolError` (only under `unavailable_symbols=RAISE`), or a
-            `RowDataError` (only under its cause's `RAISE`). A refused symbol's, while another
-            symbol did not fail, ends with the setting that reads the others
-            (`refusal_raised`).
+            call's order, that the call must not survive: a refused symbol under
+            `refused_symbols=RAISE`, an `UnavailableSymbolError` (only under
+            `unavailable_symbols=RAISE`), or a `RowDataError` (only under its cause's `RAISE`).
+            A refused symbol's, while another symbol did not fail, ends with the setting that
+            reads the others (`refusal_raised`).
     """
     spans: dict[ProblemCause, dict[str, tuple[str | None, str | None, str, int]]] = {
         ProblemCause.REFUSED_SYMBOLS: {},
@@ -179,7 +177,7 @@ def report_failures(
             raised = refused and others
             fatal.append(refusal_raised(error, symbol if named else None) if raised else error)
             if not refused:
-                continue  # listed where it was found, or no symbol escapes it
+                continue  # listed where it was found
         cause = ProblemCause.REFUSED_SYMBOLS if refused else ProblemCause.SYMBOL_READ_FAILED
         spans[cause][symbol] = (symbol, None, failure_text(error), 0)
     at = time.time_ns()
