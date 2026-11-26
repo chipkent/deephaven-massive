@@ -394,8 +394,8 @@ class WsConnections:
         # The crypto pairs each stream does not subscribe, by stream; guarded by the group's lock.
         self._pair_states: dict[int, _PairState] = {}
         # The symbols each opening symbol table's watch replays, its call-time symbols, by
-        # stream; guarded by the group's lock.
-        self._replays: dict[int, set[str]] = {}
+        # stream, with the thread that replays them; guarded by the group's lock.
+        self._replays: dict[int, tuple[int, set[str]]] = {}
         self._closed = False
 
     @property
@@ -525,12 +525,12 @@ class WsConnections:
                 )
             if opened.watch is not None:
                 with self._lock:
-                    self._replays[stream_id] = set()
+                    self._replays[stream_id] = (threading.get_ident(), set())
                 try:
                     opened.watch.start()  # replays the table's rows on this thread
                 finally:
                     with self._lock:
-                        replayed = frozenset(self._replays.pop(stream_id))
+                        replayed = frozenset(self._replays.pop(stream_id)[1])
                 connection.post(connection.settle_call_time, stream_id, replayed)
         except BaseException:
             release_scope(core.exec_ctx, opened.handle.scope)
@@ -790,8 +790,11 @@ class WsConnections:
         with self._lock:
             connection = self.group.streams.get(stream_id)
             replay = self._replays.get(stream_id)
-            if replay is not None:  # the watch's replay: the stream's call-time symbols
-                replay.update(added)
+            # The watch's replay, on the thread that started it: the stream's call-time symbols.
+            # A change an update cycle delivers once the replay is done, before the opening
+            # thread takes the replay, is a later one, never the call's.
+            if replay is not None and replay[0] == threading.get_ident():
+                replay[1].update(added)
         if connection is None:
             return
         asset_class = connection.asset_class

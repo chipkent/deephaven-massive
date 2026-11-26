@@ -50,7 +50,11 @@ from deephaven_massive._ingest.rest import RestReader
 from deephaven_massive._massive import Status, StatusKind, Transport, WsState
 from deephaven_massive._tables import poll, problem_reporter
 from deephaven_massive._tables.diagnostics import ConnectionState, StreamUpdate
-from deephaven_massive._tables.execution_context import entered, update_cycle
+from deephaven_massive._tables.execution_context import (
+    entered,
+    update_cycle,
+    wait_for_update_cycle,
+)
 from deephaven_massive._tables.liveness import new_scope, release_scope
 from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive._tables.stream import open_stream_tables
@@ -486,6 +490,49 @@ def test_a_refusal_before_the_watchlist_s_replay_arrives_is_judged_with_it(
     wait_for(lambda: failed_after_flush(ws_session, result))
     [row] = streams_of(ws_session, dh_to_pylist)
     assert row["Error"] == f"test.trades: {refused_text('T.XYZ')}"
+
+
+def test_a_change_an_update_cycle_delivers_after_the_replay_is_not_the_call_s(
+    ws_session: WsSession,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # AAPL is added on another thread once the replay of XYZ is done, and its change reaches
+    # the stream on an update-graph thread before the opening thread takes the replay: the
+    # call's symbols are XYZ alone.
+    watchlist = watchlist_of(dh_input_table, "XYZ")
+    exec_ctx = ws_session.session._core.exec_ctx
+    settled: list[frozenset[str]] = []
+    start = SymbolWatch.start
+    settle = ws_connection.Connection.settle_call_time
+
+    def start_then_add(watch: SymbolWatch) -> None:
+        start(watch)
+
+        def add() -> None:
+            with entered(exec_ctx):
+                watchlist.add(new_table([string_col("Symbol", ["AAPL"])]))
+                # The cycle that delivers AAPL's change has ended once a later one has.
+                assert wait_for_update_cycle(exec_ctx, TIMEOUT)
+
+        adder = threading.Thread(target=add)
+        adder.start()
+        adder.join(TIMEOUT)
+
+    def settle_call_time(
+        connection: ws_connection.Connection, stream_id: int, symbols: frozenset[str]
+    ) -> None:
+        settled.append(symbols)
+        settle(connection, stream_id, symbols)
+
+    monkeypatch.setattr(SymbolWatch, "start", start_then_add)
+    monkeypatch.setattr(ws_connection.Connection, "settle_call_time", settle_call_time)
+    result = ws_session.query(TRADES, watchlist).blink()
+    ws_session.subscribed("T.AAPL")
+    wait_for(lambda: settled != [])
+    assert settled == [frozenset({"XYZ"})]
+    del result
 
 
 def test_only_a_starting_symbol_s_acknowledgement_settles_the_check(
