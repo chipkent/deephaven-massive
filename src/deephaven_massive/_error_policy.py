@@ -103,63 +103,52 @@ class ErrorPolicy:
             written together. Under `dm.OnError.LOG` or `dm.OnError.IGNORE` it gets no rows, and
             `m.problems()` lists it. A watchlist read by `fetch()` also names it in `Error` in
             `m.symbol_reads()`.
-        unavailable_symbols: Decides what happens to a symbol Massive has no data for: it
-            answers HTTP 404, its snapshot entry holds the `error` `NOT_FOUND`, or its crypto
-            ticker list doesn't hold the pair. Defaults to `LOG`.
+        unavailable_symbols: Decides what happens to a symbol Massive has no data for.
+            Defaults to `LOG`.
 
             Set `dm.OnError.RAISE` when a missing symbol means your list is wrong. Under
             `dm.OnError.LOG` and `dm.OnError.IGNORE`, the call skips the symbol and reads the
-            others, and `m.problems()` lists it.
+            others, and `m.problems()` lists it. Massive has no data for a symbol when it
+            gives one of these answers:
+
+            - HTTP 404 for the symbol's request;
+            - a snapshot row whose `error` is `NOT_FOUND`;
+            - a crypto ticker list without the pair.
 
             A symbol Massive answers with no rows and no error has no rows, whatever this
             setting says.
-        refused_symbols: Decides what happens to a symbol Massive refuses: it answers the
-            symbol's request with HTTP 403 or its subscription with "not authorized", or its
-            snapshot entry holds an `error` other than `NOT_FOUND`. Defaults to `LOG`.
+        refused_symbols: Decides what happens to a symbol Massive refuses, usually because
+            your plan doesn't serve it. Defaults to `LOG`.
 
             Set `dm.OnError.RAISE` when a `fetch()`, `history()`, `poll()`, or stream must not
-            run without every symbol you named. Massive refuses a symbol when your plan doesn't
-            serve it. Under `dm.OnError.LOG` and `dm.OnError.IGNORE`, the symbol gets no rows,
-            and the others are read. `m.problems()` lists it with Massive's answer.
+            run without every symbol you named. Under `dm.OnError.LOG` and `dm.OnError.IGNORE`,
+            the symbol gets no rows, and the others are read. `m.problems()` lists it with
+            Massive's answer. Under every setting, a call or table fails when Massive refuses
+            every symbol it starts with. It also fails when Massive refuses the dataset or the
+            delayed subscription.
 
-            Under every setting, a call or table fails when Massive refuses every symbol it
-            starts with. It also fails when Massive refuses the dataset or delayed subscription
-            itself.
+            Massive doesn't name the symbols it refuses in a request of several, so finding them
+            takes more requests. When Massive refuses several symbols of one request, the
+            library may refuse some your plan serves along with them. To read those:
 
-            Massive refuses a request of several symbols without naming them, so the library
-            sends smaller groups of them again to find the refused ones. Finding one refused
-            symbol among 100 costs at most 14 more requests. When Massive refuses both halves
-            of a request, the library also sends the first symbol of each half alone, 2 more
-            requests. So a request Massive refuses every symbol of costs 4 more. A stream's new
-            symbols can wait up to 2 minutes for 4,096 symbols while it does.
-
-            Sometimes the library refuses symbols your plan serves. That happens when Massive
-            refuses both halves of a request and the first symbol of each half alone, so the
-            library refuses both halves. To read the symbols your plan serves:
-
-            1. Delete the rows of the symbols your plan doesn't serve.
-            2. Delete the rows of the others and add them back.
-
-            For symbols listed in code, call the method again without the symbols your plan
-            doesn't serve.
+            1. Read each refused symbol alone. Massive's answer is then that symbol's own.
+            2. Remove the symbols Massive refuses.
+            3. Delete the others' rows and add them back, or call the method again.
         unrequested_symbols: Decides whether a row Massive returns for a symbol the call
             didn't ask for fails the table; the row is left out either way. Defaults to
             `LOG`.
 
-            Set `dm.OnError.RAISE` to fail the symbols or underlyings whose request got such a
-            row, or the plain `fetch()` that did. Massive can answer a request with rows of a
-            symbol the call didn't ask for. The library leaves such a row out, and
-            `m.problems()` lists it with its symbol and count. It happens in these cases:
+            Set `dm.OnError.RAISE` to fail the call or table when Massive sends a row of a
+            symbol the call didn't ask for. The row is left out either way, and `m.problems()`
+            lists it with its symbol and count. Massive sends such rows in these cases:
 
             - A watchlist read by `fetch()` or `history()` asks for an index by its bare
               ticker, such as `SPX`, and Massive answers with rows of `I:SPX`.
             - A dataset whose rows list their tickers, such as `m.partners.benzinga.news()`,
-              sends a row that lists none of the tickers the call named. This happens in a
-              plain `fetch()` too.
-            - An options dataset sends rows of another underlying.
-              `m.options.contracts("I:DJT")` leaves out the stock `DJT`'s contracts. A call
-              that asks for both gets each one's contracts once. A table of futures product
-              codes gets only each code's own rows the same way.
+              sends a row that lists none of the tickers the call named.
+            - An options dataset sends rows of another underlying. For example,
+              `m.options.contracts("I:DJT")` leaves out the stock `DJT`'s contracts.
+            - A futures read by a table of product codes gets a row of another code.
         unreadable_keys: Decides whether a row of Massive's data whose key the library can't
             read fails the table; the row is left out either way. Defaults to `LOG`.
 
@@ -298,7 +287,7 @@ class ErrorPolicy:
             noncanonical_symbols: A watchlist row that isn't Massive's exact ticker.
             unreadable_symbols: A symbol in Massive's data that the library can't read.
             unavailable_symbols: A symbol Massive has no data for.
-            refused_symbols: A symbol Massive refuses, since the plan doesn't serve it.
+            refused_symbols: A symbol Massive refuses.
             unrequested_symbols: A row Massive returns for a symbol the call didn't ask for.
             unreadable_keys: A row of Massive's data whose key the library can't read.
             unconvertible_values: A row of Massive's data with a value the library can't read.

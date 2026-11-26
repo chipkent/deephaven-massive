@@ -181,8 +181,8 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_MASSIVE,
             action=ProblemAction.SKIPPED,
             span=False,
-            summary="Massive has no data for the symbol. It answered HTTP 404 or a snapshot row "
-            "of `NOT_FOUND`, or the pair isn't on its crypto ticker list.",
+            summary="Massive has no data for the symbol. It answered HTTP 404 or `NOT_FOUND`. "
+            "For a crypto pair, the pair isn't on its crypto ticker list.",
             fix="Look the symbol up in Massive's lists, such as `m.reference.tickers()`.",
         ),
         _C.REFUSED_SYMBOLS: CauseTraits(
@@ -190,9 +190,11 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_MASSIVE,
             action=ProblemAction.SKIPPED,
             span=True,
-            summary="Massive refused the symbol, as your plan doesn't serve it.",
-            fix="Remove the symbol, or change the plan `Detail` names. Then delete its row and "
-            "add it back, or call the method again.",
+            summary="Massive refused the symbol, usually because your plan doesn't serve it. "
+            "`Detail` gives Massive's answer.",
+            fix="Remove the symbol, or move to a Massive plan that serves it. If your plan "
+            "serves it, [`refused_symbols`](configuration.md#setting-details) says how to read "
+            "it.",
         ),
         _C.UNREQUESTED_SYMBOLS: CauseTraits(
             policy="unrequested_symbols",
@@ -381,7 +383,7 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_LIBRARY,
             action=ProblemAction.FAILED,
             span=True,
-            summary="A symbol's read failed for good.",
+            summary="A symbol's read failed and won't be tried again.",
             fix="Fix what `Detail` names. Then delete the symbol's row and add it back, or call "
             "the method again.",
         ),

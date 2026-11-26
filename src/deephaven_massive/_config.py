@@ -316,14 +316,12 @@ class MassiveConfig:
 
             - A stream counts the time its connection is down.
             - A `poll()` table counts the time its polls keep failing or stop arriving. A poll
-              fails when none of its symbols answered and at least one failed with a temporary
-              error. A poll that would wait longer than `max_outage` for Massive's rate limits
-              gives up, and counts as a failed poll.
-            - Each symbol of a `poll()` counts the time its reads keep failing with a
-              temporary error. Then the poll stops reading it, and `m.problems()` lists it.
-            - A watchlist's `fetch()` or `history()` counts the time each symbol's reads keep
-              failing with a temporary error. Then `m.symbol_reads()` shows that symbol
-              `FAILED`. Delete its row and add it back to read it again.
+              fails when no symbol answers. A poll that would wait longer than `max_outage`
+              for Massive's rate limits gives up, and counts as a failed poll.
+            - Each symbol of a `poll()` or a watchlist's `fetch()` or `history()` counts the
+              time its reads keep failing with a temporary error. Then the library stops
+              reading it, and `m.problems()` lists it. Delete its row and add it back to read
+              it again.
             - Any other `fetch()` or `history()` without `wait=True` counts the time it waits
               out Massive's rate limits.
 
@@ -1773,7 +1771,7 @@ _CAUSE_COMMENTS: Final[Mapping[str, str]] = {
     "noncanonical_symbols": "A watchlist value that isn't Massive's exact ticker.",
     "unreadable_symbols": "A symbol in Massive's data that the library can't read.",
     "unavailable_symbols": "A symbol Massive has no data for.",
-    "refused_symbols": "A symbol Massive refuses, since the plan doesn't serve it.",
+    "refused_symbols": "A symbol Massive refuses.",
     "unrequested_symbols": "A row Massive sent for a symbol the call didn't ask for.",
     "unreadable_keys": "A row of Massive's data whose key the library can't read.",
     "unconvertible_values": "A row of Massive's data with a value the library can't read.",
