@@ -2215,7 +2215,7 @@ def test_a_refusal_adds_a_real_time_note_only_to_the_streams_that_carry_one(
 
 
 def test_a_refused_wildcard_is_the_feed_s_refusal_and_a_refused_symbol_its_own(
-    ws_session: WsSession,
+    make_ws_session: Callable[..., WsSession],
     fake_ws_server: FakeMassiveServer,
     dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
     *,
@@ -2225,7 +2225,9 @@ def test_a_refused_wildcard_is_the_feed_s_refusal_and_a_refused_symbol_its_own(
     # One status refuses a channel's wildcard and another channel's one symbol, before Massive
     # answered either: the stream that asked for every symbol gets the feed's refusal, and the
     # other, refused every symbol it was opened with, its symbol's. The refusal is one error of
-    # the connection, so it is alarmed once, whatever the kinds.
+    # the connection, so it is alarmed once, whatever the kinds. One subscription is sent at a
+    # time, so Q.AAPL goes once T.* is left unconfirmed: a short wait keeps the test quick.
+    ws_session = make_ws_session(subscription_confirmation_timeout=0.05)
     fake_ws_server.auto_ack = False
     m = ws_session.session
     every = m.stocks.trades(dm.ALL).blink()
