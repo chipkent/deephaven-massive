@@ -557,6 +557,39 @@ def test_only_a_starting_symbol_s_acknowledgement_settles_the_check(
     assert row["Error"] == f"test.trades: {refused_text('T.XYZ')}"
 
 
+def test_a_starting_symbol_deleted_before_its_answer_settles_the_check(
+    ws_session: WsSession,
+    fake_ws_server: FakeMassiveServer,
+    dh_to_pylist: ToPylist,
+    *,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # XYZ and ABC are the watchlist's rows at the call, and neither is answered. ABC is deleted
+    # before it failed, so XYZ's refusal is XYZ's own and the stream keeps running.
+    fake_ws_server.silent.update({"T.XYZ", "T.ABC"})
+    watchlist = watchlist_of(dh_input_table, "XYZ", "ABC")
+    result = ws_session.query(TRADES, watchlist).append_only()
+    ws_session.subscribed("T.XYZ", "T.ABC")
+    connection = ws_session.connection()
+    [row] = streams_of(ws_session, dh_to_pylist)
+    stream_id = row["StreamId"]
+
+    def call_time() -> object:
+        return connection._streams[stream_id].call_time
+
+    starting = frozenset({"XYZ", "ABC"})
+    wait_for(lambda: ws_session.on_loop(connection, call_time) == starting)
+    watchlist.delete(new_table([string_col("Symbol", ["ABC"])]))
+    ws_session.unsubscribed("T.ABC")
+    assert ws_session.on_loop(connection, call_time) is None
+    ws_session.on_loop(connection, lambda: connection._refused(("T.XYZ",), "not authorized"))
+    listed = (stream_id, "XYZ", refused_text("T.XYZ"), False)
+    wait_for(lambda: refusals_of(ws_session, dh_to_pylist) == [listed])
+    assert not failed_after_flush(ws_session, result)
+    [row] = streams_of(ws_session, dh_to_pylist)
+    assert row["State"] == "RUNNING"
+
+
 def test_a_refused_symbol_removed_from_the_watchlist_ends_its_span(
     ws_session: WsSession,
     fake_ws_server: FakeMassiveServer,
