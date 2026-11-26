@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import new_table
@@ -41,6 +42,7 @@ from deephaven_massive._errors import (
     session_closed,
 )
 from deephaven_massive._ingest import rate_limits, rest, symbol_reads
+from deephaven_massive._ingest.rest_requests import Call
 from deephaven_massive._ingest.symbol_reads import (
     AttributedRows,
     RequestRows,
@@ -66,7 +68,7 @@ from deephaven_massive.namespaces import _options as options
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from deephaven.table import Table
 
@@ -452,24 +454,87 @@ def test_attribution_gives_each_request_s_rows_failure_or_no_data_to_its_symbols
     error = MassiveError("HTTP 503", status=503)
     tally = ReadTally()
     # The first request answered with AAPL's row; NVDA's had no data.
-    out = attribute_units(
-        reader, DIVIDENDS, units, results=[answered, None], symbols=symbols, tally=tally
-    )
+    out = attribute_units(reader, DIVIDENDS, units, results=[answered, None], tally=tally)
     assert out.failures == {}
-    assert list(out.pieces) == symbols
-    [aapl] = out.pieces["AAPL"]
+    pieces = out.pieces(symbols)
+    assert list(pieces) == symbols
+    [aapl] = pieces["AAPL"]
     assert aapl.equals(sent.drop_columns([SYMBOL_SENT]))
-    [msft] = out.pieces["MSFT"]  # named by the answered request, which gave it no row
+    [msft] = pieces["MSFT"]  # named by the answered request, which gave it no row
     assert msft.num_rows == 0
-    assert out.pieces["NVDA"] == []  # named only by the request with no data
+    assert pieces["NVDA"] == []  # named only by the request with no data
     # The first request failed: its failure is both its symbols'.
-    out = attribute_units(
-        reader, DIVIDENDS, units, results=[error, None], symbols=symbols, tally=ReadTally()
-    )
-    assert out == AttributedRows(
-        {"AAPL": [], "MSFT": [], "NVDA": []}, {"AAPL": error, "MSFT": error}, []
-    )
+    out = attribute_units(reader, DIVIDENDS, units, results=[error, None], tally=ReadTally())
+    assert out == AttributedRows({"AAPL": error, "MSFT": error}, [])
+    assert out.pieces(symbols) == {"AAPL": [], "MSFT": [], "NVDA": []}
     assert out.failures["AAPL"] is error  # the one error object, shared by the request's symbols
+
+
+class _CountingCompute:
+    # Stands in for the module's `pyarrow.compute`, counting each compute call made through it.
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __getattr__(self, name: str) -> Callable[..., object]:
+        function: Callable[..., object] = getattr(pc, name)  # whichever function the code calls
+
+        def counted(*args: object, **kwargs: object) -> object:
+            self.calls += 1
+            return function(*args, **kwargs)
+
+        return counted
+
+
+def test_a_request_s_rows_are_grouped_in_compute_calls_that_do_not_grow_with_its_symbols(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A request naming a thousand symbols must not cost a compute pass per symbol: a snapshot
+    # read of a large watchlist ran 2.5 times slower when each symbol filtered the rows alone.
+    transport = session._core.rest_transport()
+    assert isinstance(transport, rest.RestEndpoints)
+    reader = transport._reader("call-7", session._core.policy, waiter=rate_limits.Waiter.CALL)
+    units, _ = fetch_units(reader, DIVIDENDS, Request(), symbols=["AAPL"], cancel=None)
+    [(rest_path, _)] = units
+    schema = session._core.dataset_schema(DIVIDENDS).arrow_schema()
+    schema = schema.append(pa.field(SYMBOL_SENT, pa.string()))
+
+    def attribute(count: int) -> tuple[int, dict[str, list[float]]]:
+        own = tuple(f"S{i:03}" for i in range(count))
+        # Each symbol's rows interleaved with the others', then a row of no symbol and one of
+        # a symbol the request did not name.
+        rows = [
+            {"Symbol": symbol, "CashAmount": float(n), SYMBOL_SENT: symbol}
+            for n in range(2)
+            for symbol in reversed(own)
+        ]
+        rows += [
+            {"Symbol": None, "CashAmount": 9.0, SYMBOL_SENT: None},
+            {"Symbol": "IBM", "CashAmount": 9.0, SYMBOL_SENT: "IBM"},
+        ]
+        answered = RequestRows(
+            pa.Table.from_pylist(rows, schema=schema), Withheld(pa.table({})), "GET dividends"
+        )
+        planned = Call({}, {}, symbols=own)
+        counting = _CountingCompute()
+        with monkeypatch.context() as patched:
+            patched.setattr(symbol_reads, "pc", counting)
+            out = attribute_units(
+                reader, DIVIDENDS, [(rest_path, planned)], results=[answered], tally=ReadTally()
+            )
+            pieces = out.pieces(own)
+        cash = {
+            symbol: [v for piece in mine for v in piece["CashAmount"].to_pylist()]
+            for symbol, mine in pieces.items()
+        }
+        return counting.calls, cash
+
+    few, few_cash = attribute(3)
+    many, many_cash = attribute(300)
+    assert few == many
+    # Each symbol keeps its own rows, in the order Massive sent them, and no other row.
+    assert few_cash == {"S000": [0.0, 1.0], "S001": [0.0, 1.0], "S002": [0.0, 1.0]}
+    assert all(cash == [0.0, 1.0] for cash in many_cash.values())
+    assert len(many_cash) == 300
 
 
 # --- fetch by symbol ----------------------------------------------------------------------------

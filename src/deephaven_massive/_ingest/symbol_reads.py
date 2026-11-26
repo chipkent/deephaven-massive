@@ -142,6 +142,7 @@ if TYPE_CHECKING:
     from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = [
+    "AnsweredRows",
     "AttributedRows",
     "ReadEach",
     "RequestRows",
@@ -217,28 +218,54 @@ class ReadEach(NamedTuple):
     received: int
 
 
+class AnsweredRows(NamedTuple):
+    """One answered request's rows of the symbols it named (`AttributedRows.answered`).
+
+    Attributes:
+        column: The request's asked column (`asked_column`), which names each row's symbol.
+        symbols: The symbols the request named (`Call.symbols`).
+        rows: The request's rows of those symbols, in page order, without `SYMBOL_SENT`.
+    """
+
+    column: str
+    symbols: tuple[str, ...]
+    rows: pa.Table
+
+
 @dataclass(frozen=True, slots=True)
 class AttributedRows:
     """What a read by symbol's requests gave each symbol, before any Deephaven table is built.
 
     The outcome of `attribute_units`, at the Arrow level, so that a caller can build what it
-    needs from it: one static table per symbol, or one table of every symbol's rows.
+    needs from it: one table of every symbol's rows from `answered`, or each symbol's own
+    rows from `pieces`, which groups them only when asked.
 
     Attributes:
-        pieces: Each asked symbol's rows: one Arrow table, perhaps empty, per answered
-            request that named it, in plan order, without `SYMBOL_SENT`; no table for a
-            symbol no request answered.
         failures: Each failed symbol's error: its request's failure, which is every symbol's
             the request named, or the read's `unrequested_symbols` failure under `RAISE`.
-        answered: Each answered request's asked column (`asked_column`) and its rows of the
-            symbols it named, in plan order and then page order, without `SYMBOL_SENT`: the
-            same rows as `pieces`, in the order Massive sent them, for one table of every
-            symbol's rows.
+        answered: Each answered request's rows of the symbols it named, in plan order and then
+            page order, in the order Massive sent them.
     """
 
-    pieces: Mapping[str, Sequence[pa.Table]]
     failures: Mapping[str, MassiveError]
-    answered: Sequence[tuple[str, pa.Table]]
+    answered: Sequence[AnsweredRows]
+
+    def pieces(self, symbols: Sequence[str]) -> dict[str, list[pa.Table]]:
+        """Return each asked symbol's rows, grouped from the answered requests that named it.
+
+        Args:
+            symbols: The asked symbols, which the result is keyed by, in order; every symbol
+                a request names is one of them.
+
+        Returns:
+            Each symbol's rows: one Arrow table, perhaps empty, per answered request that
+            named it, in plan order; no table for a symbol no request answered.
+        """
+        pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in symbols}
+        for column, own, rows in self.answered:
+            for symbol, mine in _rows_by_symbol(rows, column, own).items():
+                pieces[symbol].append(mine)
+        return pieces
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,21 +482,19 @@ def read_symbol_list(
     else:
         assert limit is not None  # a total cap is the only other case
         leaves, results, requests = _send_capped(spec, units, read, limit=limit)
-    attributed = attribute_units(
-        reader, spec, leaves, results=results, symbols=ordered, tally=tally
-    )
+    attributed = attribute_units(reader, spec, leaves, results=results, tally=tally)
     failures = {**attributed.failures, **failed}  # a planning failure comes first
     gone = pa.array(list(failures), pa.string())
     pieces = [
         rows.filter(pc.invert(pc.is_in(rows[column], value_set=gone))) if failures else rows
-        for column, rows in attributed.answered
+        for column, _, rows in attributed.answered
     ]
     schema = reader.catalog.dataset_schema(spec).arrow_schema()
     rows = pa.concat_tables(pieces) if pieces else schema.empty_table()
     asked = pa.chunked_array(
         [
             pc.cast(piece[column], pa.string())
-            for (column, _), piece in zip(attributed.answered, pieces, strict=True)
+            for (column, _, _), piece in zip(attributed.answered, pieces, strict=True)
         ],
         pa.string(),
     )
@@ -743,14 +768,12 @@ def read_rest_by_symbol(
         len(units),
         patience.seconds,
     )
-    attributed = attribute_units(
-        reader, spec, read.units, results=read.results, symbols=ordered, tally=tally
-    )
+    attributed = attribute_units(reader, spec, read.units, results=read.results, tally=tally)
     failures = {**attributed.failures, **failed}  # a planning failure comes first
     empty = core.dataset_schema(spec).arrow_schema().empty_table()
     tables = {
         symbol: to_table(pa.concat_tables(rows) if rows else empty)
-        for symbol, rows in attributed.pieces.items()
+        for symbol, rows in attributed.pieces(ordered).items()
         if symbol not in failures
     }
     outcomes = symbol_outcomes(
@@ -771,7 +794,6 @@ def attribute_units(
     units: Sequence[RestUnit],
     *,
     results: Sequence[RequestRows | MassiveError | None],
-    symbols: Sequence[str],
     tally: ReadTally,
 ) -> AttributedRows:
     """Give each answered request's rows to the symbols it named, and each failure to its symbols.
@@ -788,16 +810,13 @@ def attribute_units(
         units: The planned requests, each with its path.
         results: Each request's rows, failure, or None for no data, in plan order
             (`RestReader.read_each`).
-        symbols: The asked symbols, which the pieces are keyed by; every symbol a request
-            names is one of them.
         tally: The whole read's count of its rows and of those withheld.
 
     Returns:
-        Each symbol's rows, and each failed symbol's error.
+        Each answered request's rows of its symbols, and each failed symbol's error.
     """
-    pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in symbols}
     failures: dict[str, MassiveError] = {}
-    answered: list[tuple[str, pa.Table]] = []
+    answered: list[AnsweredRows] = []
     for (rest_path, planned), result in zip(units, results, strict=True):
         own = planned.symbols
         if isinstance(result, MassiveError):
@@ -814,7 +833,6 @@ def attribute_units(
                 result,
                 template=rest_path.template,
                 planned=planned,
-                pieces=pieces,
                 kept=answered,
                 tally=tally,
             )
@@ -823,7 +841,7 @@ def attribute_units(
                     failures.setdefault(symbol, unrequested)
         else:
             assert_never(result)
-    return AttributedRows(pieces, failures, answered)
+    return AttributedRows(failures, answered)
 
 
 def _with_skipped(
@@ -933,14 +951,7 @@ def attribute_values(
     kept, unrequested = leave_out_unrequested(
         reader, spec, rows, column=column, own=own, template=template
     )
-    named = kept[column]
-    pieces: dict[str, pa.Table] = {}
-    for value in own:
-        mine = pc.equal(named, value)
-        # As in `_attribute`: no copy of rows that are every one the value's.
-        every = pc.all(mine, skip_nulls=False).as_py()
-        pieces[value] = kept if every else kept.filter(mine)
-    return pieces, unrequested
+    return _rows_by_symbol(kept, column, own), unrequested
 
 
 def leave_out_unrequested(
@@ -1156,8 +1167,7 @@ def _attribute(
     *,
     template: str,
     planned: Call,
-    pieces: dict[str, list[pa.Table]],
-    kept: list[tuple[str, pa.Table]],
+    kept: list[AnsweredRows],
     tally: ReadTally,
 ) -> RowDataError | None:
     """Give one request's rows to the symbols it named, and report the rows of any other.
@@ -1183,9 +1193,8 @@ def _attribute(
             without `SYMBOL_SENT`.
         template: The request's path, for the events.
         planned: The request, whose symbols are those it named (`Call.symbols`).
-        pieces: Each symbol's rows so far, which receive the request's.
-        kept: Each request's asked column and kept rows so far, which receive the
-            request's (`AttributedRows.answered`).
+        kept: Each request's kept rows so far, which receive the request's
+            (`AttributedRows.answered`); `AttributedRows.pieces` groups them by symbol.
         tally: The read's count of its rows and of those withheld, which the request's add to.
 
     Returns:
@@ -1197,14 +1206,10 @@ def _attribute(
     sent = answered.rows[SYMBOL_SENT]
     rows = answered.rows.drop_columns([SYMBOL_SENT])
     symbols = rows[column]
-    for symbol in own:
-        mine = pc.equal(symbols, symbol)
-        # The rows are filtered only when some are another symbol's: a copy of a large read
-        # whose every row is the symbol's would double its memory for nothing.
-        every = pc.all(mine, skip_nulls=False).as_py()
-        pieces[symbol].append(rows if every else rows.filter(mine))
     asked = pc.fill_null(pc.is_in(symbols, value_set=pa.array(own, pa.string())), fill_value=False)
-    kept.append((column, rows if pc.all(asked).as_py() else rows.filter(asked)))
+    # The rows are filtered only when some are another symbol's: a copy of a large read whose
+    # every row is the request's would double its memory for nothing.
+    kept.append(AnsweredRows(column, own, rows if pc.all(asked).as_py() else rows.filter(asked)))
     left = pc.invert(asked)
     others = Counter(
         zip(pc.filter(sent, left).to_pylist(), pc.filter(symbols, left).to_pylist(), strict=True)
@@ -1219,6 +1224,40 @@ def _attribute(
     if not others:
         return None
     return _report_unrequested(reader, spec, others, own=own, column=column, template=template)
+
+
+def _rows_by_symbol(rows: pa.Table, column: str, own: Sequence[str]) -> dict[str, pa.Table]:
+    """Group a request's rows by the symbol `column` names, for each symbol the request named.
+
+    One stable sort groups the rows, so a request naming a thousand symbols costs the same
+    few compute passes as one naming two, and each symbol's rows keep the order Massive sent
+    them in. Rows that name every one the same symbol are given as they are: a copy of a
+    large read of one symbol would double its memory for nothing.
+
+    Args:
+        rows: The request's rows; `column` is one of their string columns.
+        column: The column that names each row's symbol.
+        own: The symbols the request named.
+
+    Returns:
+        Each named symbol's rows, in `own` order; a symbol no row names gets an empty table
+        with the rows' columns. Rows naming no symbol, or another, are in none.
+    """
+    named = rows[column]
+    runs = pc.value_counts(named).to_pylist()
+    grouped = rows
+    if len(runs) > 1:
+        order = pc.sort_indices(named)  # stable, so a symbol's rows keep their order
+        grouped = rows.take(order)
+        runs = pc.value_counts(grouped[column]).to_pylist()  # in sorted order, so each a run
+    found: dict[str | None, pa.Table] = {}
+    start = 0
+    for run in runs:
+        found[run["values"]] = grouped.slice(start, run["counts"])
+        start += run["counts"]
+    none = rows.slice(0, 0)
+    # A named symbol Massive sent no row of gets none.
+    return {symbol: found.get(symbol, none) for symbol in own}
 
 
 def _owners(own: tuple[str, ...], symbol: str | None, *, by_lookup: bool) -> tuple[str, ...]:
