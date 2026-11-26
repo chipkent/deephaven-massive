@@ -79,13 +79,14 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   generated fields), then `source_columns.rename`'s column mapping for the dataset, the timestamp
   routine of `_datasets/timestamps.py`, and the lattice widening of `source_columns.widen`, into one
   Arrow batch of the dataset's merged schema. Only one page of decoded rows is held at a time.
-  A row that carries an `error` (a ticker the plan does not include) keeps its `Error` and
-  `Message` columns and is logged once.
+  A snapshot row that carries Massive's `error` in place of a ticker's data is left out of the
+  table and reported as a problem of its ticker (`_report_error_rows`).
 - **Problems.** Each page's field Massive's documentation lacks is a `schema_drift` problem,
-  each withheld row an event of its cause, and each symbol Massive has no data for an
-  `unavailable_symbols` problem, all handed to the session's problem sink with the read's
-  `StreamId` (`RestReader.stream_id`); undocumented envelope statuses go to the session's
-  `DriftRegistry`, once per path.
+  each withheld row an event of its cause, each symbol Massive has no data for an
+  `unavailable_symbols` problem, and each ticker a snapshot's error row refuses a
+  `refused_symbols` problem, all handed to the session's problem sink with the read's
+  `StreamId` (`RestReader.stream_id`); undocumented envelope statuses and error-row values go
+  to the session's `DriftRegistry`, once per path.
 - **Errors.** Every `WireError` becomes its public exception through `_errors.from_wire`
   (401 `AuthenticationError`, 403 `EntitlementError`), except a pause longer than the read's
   patience still covers (`rate_limits.read_patience`: 10 minutes of pauses for a read its
@@ -208,6 +209,7 @@ from deephaven_massive._ingest.rest_rows import (
     UNDERLYING,
     RowConverter,
     keep_window,
+    read_error_row,
 )
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
 from deephaven_massive._ingest.stop_tokens import as_cancel
@@ -269,6 +271,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.row_times import TimeRule
     from deephaven_massive._enums import ChannelFamily, PollMode
     from deephaven_massive._error_policy import ResolvedPolicy
+    from deephaven_massive._ingest.rest_rows import ErrorRow
     from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import Page, Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
@@ -301,10 +304,6 @@ at the cost of warning about an old fact once more."""
 _ANY_VALUE: Final = "VALUE"
 """The value a value-table poll's parameters are checked with (`RestReader.check_parameters`):
 the check reads only which parameters a request carries, never their values."""
-
-_ANSWER_SHOWN: Final = 200
-"""The most characters of one error row's answer a WARNING shows (`_cut`); the row's DEBUG
-line shows it whole."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -550,18 +549,6 @@ def _read_capped(
         requests += path_rows.requests
         remaining -= path_rows.received
     return tables, requests
-
-
-def _cut(text: str) -> str:
-    """Return a text from Massive cut to `_ANSWER_SHOWN` characters, for a WARNING's list.
-
-    Args:
-        text: The text.
-
-    Returns:
-        The text, or its first characters ending in `…` when it is longer.
-    """
-    return text if len(text) <= _ANSWER_SHOWN else text[: _ANSWER_SHOWN - 1] + "…"
 
 
 def _stamped(
@@ -1767,7 +1754,13 @@ class RestReader:
                 rows, withheld = self._page_rows(
                     spec,
                     self._page_batches(
-                        converter, page, call, spec=spec, times=times, record=record
+                        converter,
+                        page,
+                        call,
+                        spec=spec,
+                        times=times,
+                        record=record,
+                        requested=requested,
                     ),
                     window=window,
                     time_name=converter.time_name,
@@ -1811,12 +1804,14 @@ class RestReader:
         spec: DatasetSpec,
         times: TimeRule,
         record: Callable[[DriftReport], None] | None,
+        requested: str,
     ) -> list[pa.RecordBatch]:
         """Convert one page's rows, and fill and stamp them as the dataset's rows are.
 
-        The page's drift is reported (`drift_events`), its error rows warned about
-        (`_warn_error_rows`), its `Symbol` filled from each row's ticker list where the dataset
-        has one (`_listed`), and its bars of a day or longer stamped (`_stamped`).
+        The page's drift is reported (`drift_events`), its error rows reported as problems of
+        their tickers (`_report_error_rows`), its `Symbol` filled from each row's ticker list
+        where the dataset has one (`_listed`), and its bars of a day or longer stamped
+        (`_stamped`).
 
         Args:
             converter: The path's conversion.
@@ -1825,12 +1820,14 @@ class RestReader:
             spec: The dataset.
             times: The call's time rule, whose stamps the bars take.
             record: Also given the page's drift, or None.
+            requested: The request as sent, such as `GET /v3/snapshot`, for the problems.
 
         Returns:
             The page's rows, converted, with the mark columns.
 
         A row that breaks the schema raises the `RowDataError` of
-        `rest_rows.RowConverter.convert`.
+        `rest_rows.RowConverter.convert`, and an error row the error of `_report_error_rows`
+        under `RAISE`.
         """
         template = converter.rest_path.template
         batches, drift, flagged = converter.convert(page.rows, call.symbol)
@@ -1846,7 +1843,16 @@ class RestReader:
             )
         if record is not None:
             record(drift)
-        self._warn_error_rows(converter, flagged, call.symbol, template=template)
+        if flagged:
+            self._report_error_rows(
+                spec,
+                [
+                    read_error_row(row, symbol_key=converter.symbol_key, symbol=call.symbol)
+                    for row in flagged
+                ],
+                template=template,
+                requested=requested,
+            )
         if spec.ticker_list is not None:
             batches, unlisted = self._listed(spec, batches, call.symbols)
             self._report_unlisted(spec, unlisted, named=call.symbols, template=template)
@@ -2373,44 +2379,86 @@ class RestReader:
                 is_retryable=True,
             )
 
-    def _warn_error_rows(
+    def _report_error_rows(
         self,
-        converter: RowConverter,
-        flagged: Sequence[Mapping[str, object]],
-        symbol: str | None,
+        spec: DatasetSpec,
+        answers: Sequence[ErrorRow],
         *,
         template: str,
+        requested: str,
     ) -> None:
-        """Log a page's error rows: each at DEBUG, and one WARNING for the tickers new to it.
+        """Report a page's error rows as problems of their tickers; no table holds them.
 
-        The WARNING lists each ticker not warned about before in the session, with Massive's
-        error and message, through `prose_list`, so a page of thousands of error rows logs
-        one short line. The rows are kept, with their `Error` and `Message` columns.
+        A `NOT_FOUND` row is a symbol Massive has no data for, as HTTP 404 is
+        (`_report_missing`, `unavailable_symbols`). Every other is a refused symbol
+        (`refused_symbols`), with Massive's error and message in its `Detail`; a value Massive
+        does not document also goes to the session's `DriftRegistry`, once per path. The
+        session's problem reporter logs the first of each cause; each row is logged at DEBUG.
 
         Args:
-            converter: The path's conversion.
-            flagged: The page's error rows.
-            symbol: The request's one symbol, for a path whose rows do not carry it.
-            template: The path template, for the record.
+            spec: The dataset.
+            answers: The page's error rows (`rest_rows.read_error_row`).
+            template: The path template, for the drift record.
+            requested: The request as sent, such as `GET /v3/snapshot`.
+
+        Raises:
+            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a `NOT_FOUND` row
+                (`_missing_error`).
+            EntitlementError: Under `refused_symbols=RAISE`, for any other row, naming the
+                tickers with Massive's answer for each and the setting that reads the others.
         """
-        dataset = converter.dataset
-        key = converter.symbol_key
-        new = []
-        for row in flagged:
-            ticker = str(symbol if key is None else row.get(key))
-            answer = f'{ticker} with "{row.get("error")}: {row.get("message")}"'
+        for one in answers:
             logger.debug(
-                "%s: Massive answered an error row from %s for %s", dataset, template, answer
+                "%s: Massive answered %s with %s for %s; the row is left out as %s",
+                spec.name,
+                requested,
+                one.answer,
+                one.ticker,
+                one.cause,
             )
-            if self.state.first("error-row", dataset, ticker):
-                # The WARNING shows the start of each answer; the DEBUG line above has it all.
-                new.append(_cut(answer))
-        if new:
-            logger.warning(
-                "%s: Massive answered error rows for %s. The rows are kept, with Massive's "
-                "answer in their Error and Message columns.",
-                dataset,
-                prose_list(new, "tickers"),
+        self.drift.report_row_errors(
+            template,
+            frozenset(one.error for one in answers if not one.documented),
+            dataset=spec.name,
+            requested=requested,
+        )
+        refused = [one for one in answers if one.cause is ProblemCause.REFUSED_SYMBOLS]
+        if refused:
+            at = time.time_ns()
+            self.problems(
+                [
+                    ProblemEvent(
+                        cause=ProblemCause.REFUSED_SYMBOLS,
+                        action=ProblemAction.SKIPPED,
+                        dataset=spec.name,
+                        stream_id=self.stream_id,
+                        where=spec.name,
+                        symbol=one.ticker,
+                        field=None,
+                        rows=0,
+                        detail=f"Massive refused it ({one.answer} from {requested})",
+                        at=at,
+                        policy=self.policy.refused_symbols,
+                    )
+                    for one in refused
+                ]
+            )
+        missing = [
+            _Missing(one.ticker, f"({one.answer} from {requested})")
+            for one in answers
+            if one.cause is ProblemCause.UNAVAILABLE_SYMBOLS
+        ]
+        if missing:
+            self._report_missing(spec, missing)
+        if refused and effect_of(self.policy.refused_symbols).fails:
+            them = "it" if len(refused) == 1 else "them"
+            hint = policy_hint(
+                OnError.LOG, "refused_symbols", purpose=f"Remove {them}, or, to read the others"
+            )
+            answered = prose_list((f"{one.ticker} ({one.answer})" for one in refused), "tickers")
+            raise EntitlementError(
+                f"{spec.name}: Massive refused {answered} in its answer to {requested}. {hint}",
+                source=ErrorSource.MASSIVE,
             )
 
     def public_error(self, error: WireError) -> MassiveError:

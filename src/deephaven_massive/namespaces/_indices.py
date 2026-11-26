@@ -341,8 +341,9 @@ class IndicesNamespace(Namespace):
         """The current state of each index: its level, its session so far, and its status.
 
         Each row holds one index's level and its session's open, high, low, close, and change. It
-        also holds the market status and the index's name. An index Massive doesn't know, or your
-        plan lacks, keeps its row, and its `Error` and `Message` give the reason.
+        also holds the market status and the index's name. An index Massive doesn't know gets no
+        row, and `m.problems()` lists it as `unavailable_symbols`. One your plan lacks gets no
+        row either, and `m.problems()` lists it as `refused_symbols` with Massive's answer.
 
         Args:
             symbols: Indices with the `I:` prefix, or `dm.ALL` for every index.

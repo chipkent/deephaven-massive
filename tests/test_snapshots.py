@@ -12,6 +12,7 @@ from deephaven_massive._datasets.schema import ColumnType
 from deephaven_massive._datasets.source_columns import required_fields
 from deephaven_massive._enums import ClassFromPrefix
 from deephaven_massive._ingest.rest_requests import page_size
+from deephaven_massive._ingest.rest_rows import is_error_row
 from deephaven_massive._massive import RestPath, Transport, source, to_batch
 from deephaven_massive._session import CATALOG
 from tests._fakes.rest import FakeRestServer, Reply, envelope
@@ -57,7 +58,8 @@ def test_the_schema_has_the_options_columns_of_the_options_snapshot() -> None:
     assert types["LastTradeConditions"] is ColumnType.LONG_ARRAY
     assert types["LastQuoteAskExchange"] is ColumnType.LONG
     assert types["LastUpdated"] is ColumnType.INSTANT
-    assert {"Error", "Message"} <= set(types)
+    # Massive's per-ticker answer is a problem in m.problems(), never a column.
+    assert {"Error", "Message"}.isdisjoint(types)
     assert set(snapshots.SNAPSHOTS.revision_keys) <= set(types)
 
 
@@ -70,7 +72,8 @@ def test_the_summary_opens_the_docstring() -> None:
 def test_the_vendor_sample_decodes(load_fixture: Fixture) -> None:
     rest_path = source(R, "/v3/snapshot")
     assert isinstance(rest_path, RestPath)
-    rows = vendor_sample(load_fixture)["results"]
+    # An error row is Massive's answer for its ticker, never decoded (`is_error_row`).
+    rows = [r for r in vendor_sample(load_fixture)["results"] if not is_error_row(r)]
     required = [f.column for f in required_fields(snapshots.SNAPSHOTS, rest_path)]
     batch, report, marks = to_batch(rows, rest_path, required=required)
     assert marks == {}  # every row read whole
@@ -100,14 +103,14 @@ def test_fetch_fills_the_underlying_and_root_of_options_rows_only(
         )
     ]
     by_symbol = {r["Symbol"]: r for r in out}
-    assert set(by_symbol) == set(symbols)
+    # TSLAAPL's row says NOT_FOUND in place of data: m.problems() lists it, and no row holds it.
+    assert set(by_symbol) == {"O:NCLH221014C00005000", "AAPL"}
     option = by_symbol["O:NCLH221014C00005000"]
     assert (option["Underlying"], option["OptionRoot"]) == ("AAPL", "NCLH")
     assert option["LastTradeConditions"] == [209]
     assert option["LastTradeSipTimestamp"].value == 1675280958783136800  # every nanosecond
-    # A stock row has neither, and a ticker Massive does not know keeps its row, with the error.
+    # A stock row has neither.
     assert (by_symbol["AAPL"]["Underlying"], by_symbol["AAPL"]["OptionRoot"]) == (None, None)
-    assert by_symbol["TSLAAPL"]["Error"] == "NOT_FOUND"
 
 
 def test_fetch_sends_250_tickers_a_request(

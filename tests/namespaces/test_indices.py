@@ -29,6 +29,7 @@ import deephaven_massive as dm
 from deephaven_massive._datasets import history_source
 from deephaven_massive._datasets.catalog import Catalog, DatasetSpec
 from deephaven_massive._enums import NotBars
+from deephaven_massive._ingest.rest_rows import is_error_row
 from deephaven_massive._massive import Transport, sources
 from deephaven_massive._session import CATALOG
 from deephaven_massive._tables import stream
@@ -172,10 +173,8 @@ def test_snapshots_schema() -> None:
     assert _schema(indices.SNAPSHOTS) == [
         ("Symbol", "String"),
         ("Value", "double"),
-        ("Error", "String"),
         ("LastUpdated", "Instant"),
         ("MarketStatus", "String"),
-        ("Message", "String"),
         ("Name", "String"),
         ("TodaysChange", "double"),
         ("SessionOpen", "double"),
@@ -252,8 +251,10 @@ def test_rest_fixtures_carry_only_generated_fields(
     body = json.loads(load_fixture(OWNER, name))
     rows = [body] if source.result_key is None else body[source.result_key]
     fields = {f.wire_key for f in source.fields}
+    # An error row is Massive's answer for its ticker, never decoded: only its ticker is a field.
     for row in rows:
-        assert set(_flatten(row)) - _ENVELOPE <= fields
+        keys = {"ticker"} if is_error_row(row) else set(_flatten(row)) - _ENVELOPE
+        assert keys <= fields
     required = {f.wire_key for f in source.fields if f.required}
     assert any(required <= set(_flatten(row)) for row in rows)
 
@@ -573,7 +574,7 @@ def test_snapshots_order_alone_is_sent_as_is(
     ]
 
 
-def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
+def test_snapshots_fetch_keeps_every_field_and_leaves_out_the_error_rows(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -597,10 +598,8 @@ def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
     ]
     assert out[0] == {
         "Symbol": "I:SPX",
-        "Error": None,
         "LastUpdated": 1748894400 * NS,
         "MarketStatus": "closed",
-        "Message": None,
         "Name": "S&P 500",
         "TodaysChange": 24.25,
         "TodaysChangePerc": 0.41,
@@ -613,10 +612,8 @@ def test_snapshots_fetch_keeps_every_field_and_the_error_rows(
         "Type": "indices",
         "Value": 5935.94,
     }
-    assert [(r["Symbol"], r["Error"], r["Message"], r["Value"]) for r in out[1:]] == [
-        ("I:NDX", None, None, 21491.1),
-        ("I:NOPE", "NOT_FOUND", "Ticker not found.", None),
-    ]
+    # I:NOPE's row says NOT_FOUND in place of data: m.problems() lists it, and no row holds it.
+    assert [(r["Symbol"], r["Value"]) for r in out[1:]] == [("I:NDX", 21491.1)]
 
 
 def test_previous_day_bars_fetch_one_index_a_request(

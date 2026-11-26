@@ -47,10 +47,8 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | --- | --- | --- |
 | `Symbol` | String | The row's instrument, as Massive's ticker. From REST `ticker`: "Ticker of asset queried." |
 | `Value` | double | Value of Index. |
-| `Error` | String | The error while looking for this ticker. |
 | `LastUpdated` | Instant | The nanosecond timestamp of when this information was updated. |
 | `MarketStatus` | String | The market status for the market that trades this ticker. |
-| `Message` | String | The error message while looking for this ticker. |
 | `Name` | String | Name of Index. |
 | `TodaysChange` | double | The value of the change for the index from the previous trading day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
 | `SessionOpen` | double | The open value for the index of the day. From the `session` object: Trading session metrics, detailing change percentages and key price points (open, close, high, low) for the asset within the current trading day. |
@@ -73,10 +71,8 @@ The Massive field behind each column, by source. An empty cell means the source 
 | --- | --- |
 | `Symbol` | `ticker` |
 | `Value` | `value` |
-| `Error` | `error` |
 | `LastUpdated` | `last_updated` |
 | `MarketStatus` | `market_status` |
-| `Message` | `message` |
 | `Name` | `name` |
 | `TodaysChange` | `session.change` |
 | `SessionOpen` | `session.open` |

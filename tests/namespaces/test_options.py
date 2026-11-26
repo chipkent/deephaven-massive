@@ -46,6 +46,7 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._ingest.recency_labels import delayed_refusal
 from deephaven_massive._ingest.rest_requests import page_size
+from deephaven_massive._ingest.rest_rows import is_error_row
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import RowFault, Transport, to_batch
 from deephaven_massive._session import CATALOG
@@ -362,10 +363,17 @@ def test_contract_rows_carry_symbol_and_underlying(spec: DatasetSpec, gone: set[
     assert types["Underlying"] is ColumnType.STRING
 
 
-def test_snapshots_carry_the_greeks_and_the_per_ticker_error() -> None:
+def test_snapshots_carry_the_greeks_and_no_error_columns() -> None:
     names = set(CATALOG.dataset_schema(options.SNAPSHOTS).column_names)
     assert {"Delta", "Gamma", "Theta", "Vega"} <= names
-    assert {"ImpliedVolatility", "OpenInterest", "Error", "Message"} <= names
+    assert {"ImpliedVolatility", "OpenInterest"} <= names
+    # Massive's per-ticker answer is a problem in m.problems(), never a column.
+    assert {"Error", "Message"}.isdisjoint(names)
+
+
+def test_admin_messages_keep_their_message_column() -> None:
+    # An OPRA administrative message's text is the data itself.
+    assert "Message" in CATALOG.dataset_schema(options.ADMIN_MESSAGES).column_names
 
 
 def test_daily_open_close_has_symbol_and_its_day() -> None:
@@ -426,7 +434,8 @@ def test_fixtures_are_shaped_like_the_generated_fields(
         rows = [{k: v for k, v in body.items() if k not in {"status", "request_id"}}]
     else:
         found = body[rest.result_key]
-        rows = found if isinstance(found, list) else [found]
+        # An error row is Massive's answer for its ticker, never decoded (`is_error_row`).
+        rows = [r for r in (found if isinstance(found, list) else [found]) if not is_error_row(r)]
     batch, drift, marks = to_batch(rows, rest, required=required)
     assert marks == {}  # every row read whole
     assert batch.num_rows == len(rows)
@@ -437,13 +446,13 @@ def test_the_snapshot_fixture_has_a_per_ticker_error_row(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     rows = json.loads(load_fixture(OWNER, "snapshot.json"))["results"]
+    assert [is_error_row(row) for row in rows] == [False, True]
     rest = CATALOG.rest_path("/v3/snapshot")
-    batch, _, marks = to_batch(rows, rest, required=("Ticker",))
+    batch, _, marks = to_batch(rows[:1], rest, required=("Ticker",))
     assert marks == {}  # every row read whole
     table = batch.to_pydict()
-    assert table["Ticker"] == ["O:NCLH221014C00005000", "O:NCLH221014C00999000"]
-    assert table["UnderlyingTicker"] == ["NCLH", None]
-    assert table["Error"] == [None, "NOT_FOUND"]
+    assert table["Ticker"] == ["O:NCLH221014C00005000"]
+    assert table["UnderlyingTicker"] == ["NCLH"]
 
 
 # --- Factories -------------------------------------------------------------------------------
@@ -1196,7 +1205,7 @@ def test_snapshots_send_no_type_beside_tickers(
     ]
 
 
-def test_snapshots_keep_the_error_row_of_a_contract(
+def test_snapshots_list_the_error_row_of_a_contract_in_problems(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -1205,16 +1214,19 @@ def test_snapshots_keep_the_error_row_of_a_contract(
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
     out = rows(rest_session.options.snapshots(dm.ALL).fetch(wait=True))
     assert fake_rest.get_queries() == [("/v3/snapshot", {"type": ["options"], "limit": ["250"]})]
-    found, missing = out
-    assert (found["Symbol"], found["Underlying"], found["Error"]) == (
-        "O:NCLH221014C00005000",
-        "NCLH",
-        None,
-    )
+    (found,) = out
+    assert (found["Symbol"], found["Underlying"]) == ("O:NCLH221014C00005000", "NCLH")
     assert found["Delta"] == 0.5520187372272933
     assert found["LastTradeSipTimestamp"] == 1675280958783136800
-    assert (missing["Symbol"], missing["Underlying"]) == ("O:NCLH221014C00999000", None)
-    assert (missing["Error"], missing["Message"]) == ("NOT_FOUND", "Ticker not found.")
+    assert rest_session._core.diagnostics.wait_until_shown(30.0)
+    requested = "GET /v3/snapshot"
+    assert [(r["Cause"], r["Symbol"], r["Detail"]) for r in rows(rest_session.problems())] == [
+        (
+            "unavailable_symbols",
+            "O:NCLH221014C00999000",
+            f'Massive has no data for it (error NOT_FOUND: "Ticker not found." from {requested})',
+        )
+    ]
 
 
 def test_contracts_list_and_contract_details_read_each_contract(

@@ -673,11 +673,13 @@ def symbol_list_text(count: int, first: Sequence[str]) -> tuple[int, str]:
 
 
 class DriftRegistry:
-    """The session's record of the undocumented REST envelope statuses it has logged.
+    """The session's record of the undocumented REST answer values it has logged.
 
     A REST page's envelope holds a status (`OK`, `DELAYED`); one outside Massive's documented
     ones is drift of the envelope, not of a table's rows, and the page's rows are kept.
     `report_statuses` logs one WARNING per (REST path, status) for the life of the session.
+    A snapshot's error row holds an `error` (`NOT_FOUND`, `NOT_ENTITLED`); one outside those is
+    drift of Massive's answer, and `report_row_errors` logs one WARNING per (REST path, value).
     Every other drift (a field a payload had that the schema does not declare) is a
     `schema_drift` problem of the table that received it, in `m.problems()`.
 
@@ -686,12 +688,13 @@ class DriftRegistry:
     hold `registry_lock`, since a log handler may do I/O.
     """
 
-    __slots__ = ("_lock", "_statuses")
+    __slots__ = ("_errors", "_lock", "_statuses")
 
     def __init__(self) -> None:
-        """Start with no status seen."""
+        """Start with no status or error value seen."""
         self._lock = threading.Lock()
         self._statuses: set[tuple[str, str]] = set()
+        self._errors: set[tuple[str, str]] = set()
 
     def report_statuses(
         self, path: str, statuses: frozenset[str], *, dataset: str, requested: str
@@ -716,6 +719,33 @@ class DriftRegistry:
                 dataset,
                 requested,
                 status,
+            )
+
+    def report_row_errors(
+        self, path: str, errors: frozenset[str], *, dataset: str, requested: str
+    ) -> None:
+        """Log a WARNING for each undocumented error-row value not yet seen for the path.
+
+        Args:
+            path: The REST path template, such as `"/v3/snapshot"`, which says whether a value
+                was seen before.
+            errors: The page's error-row values outside the documented ones
+                (`rest_rows.ErrorRow.documented`).
+            dataset: The dataset that read the page, such as `"snapshots"`.
+            requested: The request as sent, such as `"GET /v3/snapshot"`, which the WARNING
+                names.
+        """
+        with self._lock:
+            new = sorted(error for error in errors if (path, error) not in self._errors)
+            self._errors.update((path, error) for error in new)
+        for error in new:
+            logger.warning(
+                "%s: Massive answered %s with an error row of error %r, which Massive does not "
+                "document. Nothing to do: the library lists each such ticker in m.problems() "
+                "under refused_symbols, with Massive's message.",
+                dataset,
+                requested,
+                error,
             )
 
 

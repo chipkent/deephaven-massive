@@ -443,8 +443,10 @@ class MassiveSession:  # noqa: PLR0904 - the API's top level: ten dataset namesp
 
         Each row holds one ticker's latest trade, quote, and minute bar, and its session's open,
         high, low, close, and change. An option's row adds its greeks, implied volatility, and open
-        interest. A column of another asset class is null. A ticker Massive doesn't know, or your
-        plan doesn't cover, keeps its row. Its `Error` and `Message` give the reason.
+        interest. A column of another asset class is null. A ticker Massive doesn't know gets no
+        row, and `m.problems()` lists it as `unavailable_symbols`. One your plan doesn't cover
+        gets no row either, and `m.problems()` lists it as `refused_symbols` with Massive's
+        answer.
 
         Args:
             symbols: Tickers of any asset class, such as `["AAPL", "X:BTCUSD", "I:SPX"]`. `dm.ALL`
