@@ -1756,6 +1756,47 @@ def test_a_topic_never_acknowledged_holds_down_only_its_stream(
     custom_session.session.release(result)
 
 
+def test_a_topic_massive_refused_never_holds_a_dropped_stream_down(
+    *,
+    make_ws_session: Callable[..., WsSession],
+    fake_ws_server: FakeMassiveServer,
+) -> None:
+    # XYZ is refused, so it is never acknowledged on any socket. After a reconnect the quiet
+    # stream recovers once AAPL is acknowledged, without waiting for a row to arrive.
+    fake_ws_server.refuse["T.XYZ"] = "not authorized"
+    custom_session = make_ws_session()
+    result = custom_session.query(TRADES, ["AAPL", "XYZ"]).last_by()
+    custom_session.subscribed("T.AAPL", "T.XYZ")
+    custom_session.publish(trade("AAPL"))  # rows that could look current
+    connection = custom_session.connection()
+    # Massive's error names no topic, so the library finds XYZ by subscribing the topics apart.
+    wait_for(
+        lambda: bool(
+            custom_session.on_loop(
+                connection, lambda: all(s.refused for s in connection._streams.values())
+            )
+        )
+    )
+    fake_ws_server.close(1011)
+    custom_session.wait(lambda s: s.opens == 2)
+
+    def acknowledged_again() -> bool:
+        return bool(
+            custom_session.on_loop(
+                connection,
+                lambda: (
+                    connection._state is ConnectionState.CONNECTED
+                    and connection.subscriptions.counts()[1] == 1
+                ),
+            )
+        )
+
+    wait_for(acknowledged_again)
+    custom_session.on_loop(connection, connection._check_recovered)
+    assert _down(custom_session, connection) == set()
+    custom_session.session.release(result)
+
+
 def test_a_stream_that_never_received_a_row_runs_on_with_its_topic_unacknowledged(
     *,
     make_ws_session: Callable[..., WsSession],

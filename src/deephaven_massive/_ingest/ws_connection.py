@@ -1764,7 +1764,8 @@ class Connection:
         that has received rows: Massive never confirmed it, so its rows may never come, and
         its last values could look current. A stream that has never received a row shows no
         stale data, so it recovers once each such topic is acknowledged or in `NO_ACK`, and
-        runs on with its no-acknowledgement note.
+        runs on with its no-acknowledgement note. A topic Massive refused (`stream.refused`) is
+        never acknowledged, so it waits for nothing: its refusal is its own problem.
 
         Args:
             stream: A down stream.
@@ -1779,7 +1780,7 @@ class Connection:
         resolved = topics.acknowledged if sink.rows_published else topics.answered
         return all(
             t in resolved or wildcard(channel_of(t)) in topics.acknowledged
-            for t in stream.topics - topics.deferred
+            for t in stream.topics - topics.deferred - stream.refused.keys()
         )
 
     def _check_recovered(self) -> None:
