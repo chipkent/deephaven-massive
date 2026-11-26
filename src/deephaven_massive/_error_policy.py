@@ -124,25 +124,25 @@ class ErrorPolicy:
             run without every symbol you named. Under `dm.OnError.LOG` and `dm.OnError.IGNORE`,
             the symbol gets no rows, and the others are read. `m.problems()` lists it with
             Massive's answer. Under every setting, a call or table fails when Massive refuses
-            every symbol it starts with. It also fails when Massive refuses the dataset, or
-            serves it delayed on a subscription that `delayed_subscriptions` leaves out.
+            every symbol it starts with.
 
-            When Massive refuses several symbols of one request, the library may refuse some your
-            plan serves along with them. To read those:
+            When Massive refuses several symbols of one request, the library ends its search
+            for the refused ones early, so a symbol your plan serves can be listed as refused.
+            To read it:
 
             1. Read each refused symbol alone. Massive's answer is then that symbol's own.
             2. Remove the symbols Massive refuses.
-            3. Delete the others' rows and add them back, or call the method again.
+            3. Delete the rows of the symbols Massive served in step 1 and add them back, or
+               call the method again.
         unrequested_symbols: Decides whether a row Massive returns for a symbol the call
             didn't ask for fails the table; the row is left out either way. Defaults to
             `LOG`.
 
             Set `dm.OnError.RAISE` to fail the call or table when Massive sends a row of a
-            symbol the call didn't ask for. The row is left out either way, and `m.problems()`
-            lists it with its symbol and count. Massive sends such rows in these cases:
+            symbol the call didn't ask for. `m.problems()` lists each such row with its symbol
+            and count. Massive sends such rows in these cases:
 
-            - A read of an index, such as `I:SPX`, gets rows of another index, such as
-              `I:NDX`.
+            - `m.options.open_interest_by_underlying()` asked for `SPX` gets rows of `I:SPX`.
             - A dataset whose rows list their tickers, such as `m.partners.benzinga.news()`,
               sends a row that lists none of the tickers the call named.
             - An options dataset sends rows of another underlying. For example,
@@ -189,8 +189,7 @@ class ErrorPolicy:
               one's row number, never the line itself.
             - `dm.OnError.IGNORE` does the same, logging only at `DEBUG`.
             - `dm.OnError.RAISE` makes `history()` raise `MassiveError`, naming the file and the
-              first such line's row. A `history()` of a live table instead marks every symbol
-              of the read `FAILED` in `m.symbol_reads()`.
+              first such line's row. A `history()` of a live table fails the table instead.
 
             Only a `history()` that reads flat files meets such a line. Under any setting, a
             file whose every line is malformed fails the read.

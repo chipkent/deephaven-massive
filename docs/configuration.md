@@ -146,44 +146,45 @@ method:
 
 #### Symbols that fail
 
-A `fetch()`, `history()`, or `poll()` that sends REST requests reads each symbol on its own.
-By default, when one symbol fails, the others keep their rows, and `m.problems()` lists the
-failure with its cause. A watchlist read by `fetch()` or `history()` also shows a failed symbol
-`FAILED` in `m.symbol_reads()`.
-
-A `history()` that reads Massive's flat files reads every symbol from the same files, so a
-failed file fails every symbol. [`flat_file_symbol_threshold`](#settings-reference) says when
-a `history()` reads them.
+A `fetch()`, `history()`, or `poll()` that sends REST requests judges each symbol on its own.
+One symbol's failure leaves the other symbols' rows in the table by default. `m.problems()`
+lists the failure with its cause. A watchlist read by `fetch()` or `history()` also shows the
+symbol `FAILED` in `m.symbol_reads()`. A stream keeps its other symbols when Massive refuses
+one.
 
 What the library does with the symbol depends on the read:
 
-| What happened to the symbol | A `poll()`, or a watchlist read | A `fetch()` or `history()` of symbols you pass in code |
+| What happened to the symbol | A `poll()`, or a watchlist read | A `fetch()` or `history()` of a list, or of a static table |
 |---|---|---|
 | Massive refused it | Stops reading it. | Leaves it out. |
 | The library withheld every row Massive sent for it | Stops reading it. | Leaves out the withheld rows. `m.problems()` lists the rows, not the symbol. |
-| Its request failed with a temporary error | Reads it again until [`max_outage`](#settings-reference) passes, then stops reading it. | Retries it, then leaves it out. |
-| Massive has no data for it ([`unavailable_symbols`](#settings-reference)) | Gives it no rows. A `poll()` reads it again at each poll. | Leaves it out. |
-| Massive sent no rows for it | Nothing. No rows isn't a problem. | Nothing. No rows isn't a problem. |
-
-While a `poll()` retries a symbol after a temporary error, a `dm.PollMode.REPLACE` table
-keeps its last rows.
+| Its request failed with a temporary error | Reads it again until [`max_outage`](#setting-details) passes, then stops reading it. A `dm.PollMode.REPLACE` poll keeps its last rows meanwhile. | Retries it, then leaves it out. |
+| Massive has no data for it ([`unavailable_symbols`](#setting-details)) | Gives it no rows. A `poll()` asks again at each poll. | Leaves it out. |
 
 To read a symbol again once the library stops, delete its row and add it back. For symbols
 you pass in code, call the method again.
+
+The exception is a `history()` that reads Massive's flat files. It reads every symbol from the
+same files, so a failed file fails every symbol.
+[`flat_file_symbol_threshold`](#setting-details) says when a `history()` reads them.
 
 <a id="read-failures"></a>
 
 #### Reads that fail under every setting
 
-A read or stream fails, whatever the setting, when it would otherwise hold nothing and show no
-error:
+A read or stream fails, whatever the setting, when Massive rejects the API key or refuses the
+dataset. A `fetch()` or `poll()` of current data, such as a snapshot, can also fail when
+Massive serves it delayed. [`delayed_subscriptions`](#setting-details) says when.
+
+A read or stream also fails when it would otherwise hold nothing and show no error:
 
 - A `fetch()`, a `history()`, or a `poll()` cycle of `dm.ALL` fails when it can read none of
   the rows.
-- A `fetch()` or `history()` of symbols you pass in code fails when every symbol fails. It also
-  fails when the library withheld every row it read.
-- A `fetch()` of a static table, such as one of underlyings, fails when every value fails.
-- A `poll()` of symbols fails when every symbol of its first poll fails before one answers.
+- A `fetch()` or `history()` of a list fails when every symbol fails. It also fails when the
+  library withheld every row it read.
+- A `fetch()` of a static table of values, such as underlyings for `m.options.contracts()`,
+  fails when every value fails.
+- A `poll()` of symbols fails when every symbol of its first poll fails.
 - A watchlist read without `wait=True` fails its table when every symbol it started with fails.
 - A `dm.ALL` stream fails after 100 unreadable rows with none read between them.
 - A stream of the symbols you list fails after 100 rows whose symbol it can't read, with none
@@ -349,17 +350,17 @@ When sessions list different limits, the lowest applies.
 
 #### max_outage
 
-Set `0` to fail at the first outage. Each kind of table counts its own time:
+Set `0` to fail at the first outage. A live table fails once its outage lasts
+`max_outage`:
 
-- A stream: while its connection is down.
-- A `poll()` table: while its polls fail or stop arriving. A poll fails when no
-  symbol answers and one failed with a temporary error, or when Massive's rate
-  limits would hold it past `max_outage`.
-- Each symbol of a `poll()` or a watchlist's `fetch()` or `history()`: while its
-  reads fail with a temporary error. Then it isn't read again until you delete its
-  row and add it back, or call the method again.
-- Any other `fetch()` or `history()` without `wait=True`: while it waits out
-  Massive's rate limits.
+- A stream's outage is the time its connection is down.
+- A `poll()` table's outage is the time its polls keep failing or stop arriving,
+  including polls that would wait out Massive's rate limits past `max_outage`.
+- Any other `fetch()` or `history()` without `wait=True` counts the time it waits
+  out Massive's rate limits.
+
+A symbol of a `poll()` or a watchlist's `fetch()` or `history()` whose reads keep
+failing with a temporary error for `max_outage` isn't read again. The table goes on.
 
 Until the limit passes, `m.problems()` lists the problem with the time it began. A
 failed table stays failed, so call the method again for a new one. See
@@ -443,24 +444,24 @@ Set `raise` when a `fetch()`, `history()`, `poll()`, or stream must not
 run without every symbol you named. Under `log` and `ignore`,
 the symbol gets no rows, and the others are read. `m.problems()` lists it with
 Massive's answer. Under every setting, a call or table fails when Massive refuses
-every symbol it starts with. It also fails when Massive refuses the dataset, or
-serves it delayed on a subscription that `delayed_subscriptions` leaves out.
+every symbol it starts with.
 
-When Massive refuses several symbols of one request, the library may refuse some your
-plan serves along with them. To read those:
+When Massive refuses several symbols of one request, the library ends its search
+for the refused ones early, so a symbol your plan serves can be listed as refused.
+To read it:
 
 1. Read each refused symbol alone. Massive's answer is then that symbol's own.
 2. Remove the symbols Massive refuses.
-3. Delete the others' rows and add them back, or call the method again.
+3. Delete the rows of the symbols Massive served in step 1 and add them back, or
+   call the method again.
 
 #### on_error.unrequested_symbols
 
 Set `raise` to fail the call or table when Massive sends a row of a
-symbol the call didn't ask for. The row is left out either way, and `m.problems()`
-lists it with its symbol and count. Massive sends such rows in these cases:
+symbol the call didn't ask for. `m.problems()` lists each such row with its symbol
+and count. Massive sends such rows in these cases:
 
-- A read of an index, such as `I:SPX`, gets rows of another index, such as
-  `I:NDX`.
+- `m.options.open_interest_by_underlying()` asked for `SPX` gets rows of `I:SPX`.
 - A dataset whose rows list their tickers, such as `m.partners.benzinga.news()`,
   sends a row that lists none of the tickers the call named.
 - An options dataset sends rows of another underlying. For example,
@@ -505,8 +506,7 @@ of each file it reads.
   one's row number, never the line itself.
 - `ignore` does the same, logging only at `DEBUG`.
 - `raise` makes `history()` raise `MassiveError`, naming the file and the
-  first such line's row. A `history()` of a live table instead marks every symbol
-  of the read `FAILED` in `m.symbol_reads()`.
+  first such line's row. A `history()` of a live table fails the table instead.
 
 Only a `history()` that reads flat files meets such a line. Under any setting, a
 file whose every line is malformed fails the read.
