@@ -149,8 +149,7 @@ method:
 A `fetch()`, `history()`, or `poll()` that sends REST requests judges each symbol on its own.
 One symbol's failure leaves the other symbols' rows in the table by default. `m.problems()`
 lists the failure with its cause. A watchlist read by `fetch()` or `history()` also shows the
-symbol `FAILED` in `m.symbol_reads()`. A stream keeps its other symbols when Massive refuses
-one.
+symbol `FAILED` in `m.symbol_reads()`.
 
 What the library does with the symbol depends on the read:
 
@@ -162,7 +161,8 @@ What the library does with the symbol depends on the read:
 | Massive has no data for it ([`unavailable_symbols`](#setting-details)) | Gives it no rows. A `poll()` asks again at each poll. | Leaves it out. |
 
 To read a symbol again once the library stops, delete its row and add it back. For symbols
-you pass in code, call the method again.
+you pass in code, call the method again. A stream keeps its other symbols when Massive refuses
+one.
 
 The exception is a `history()` that reads Massive's flat files. It reads every symbol from the
 same files, so a failed file fails every symbol.
@@ -172,9 +172,10 @@ same files, so a failed file fails every symbol.
 
 #### Reads that fail under every setting
 
-A read or stream fails, whatever the setting, when Massive rejects the API key or refuses the
-dataset. A `fetch()` or `poll()` of current data, such as a snapshot, can also fail when
-Massive serves it delayed. [`delayed_subscriptions`](#setting-details) says when.
+A read or stream fails, whatever the setting, when Massive rejects the API key or refuses every
+symbol it starts with, as it does on a plan without the dataset. A `fetch()`, `poll()`, or
+stream of current data can also fail when Massive serves it delayed.
+[`delayed_subscriptions`](#setting-details) says when.
 
 A read or stream also fails when it would otherwise hold nothing and show no error:
 
@@ -354,13 +355,13 @@ Set `0` to fail at the first outage. A live table fails once its outage lasts
 `max_outage`:
 
 - A stream's outage is the time its connection is down.
-- A `poll()` table's outage is the time its polls keep failing or stop arriving,
-  including polls that would wait out Massive's rate limits past `max_outage`.
-- Any other `fetch()` or `history()` without `wait=True` counts the time it waits
-  out Massive's rate limits.
+- A `poll()` table's outage is the time its polls keep failing or stop arriving. A
+  poll that would wait longer than `max_outage` for Massive's rate limits fails.
+- A `fetch()` or `history()` without `wait=True` counts the time it waits out
+  Massive's rate limits.
 
-A symbol of a `poll()` or a watchlist's `fetch()` or `history()` whose reads keep
-failing with a temporary error for `max_outage` isn't read again. The table goes on.
+In a `poll()` or a watchlist read, a symbol whose reads fail with a temporary error
+for `max_outage` isn't read again. The table goes on while another symbol answers.
 
 Until the limit passes, `m.problems()` lists the problem with the time it began. A
 failed table stays failed, so call the method again for a new one. See
@@ -446,9 +447,8 @@ the symbol gets no rows, and the others are read. `m.problems()` lists it with
 Massive's answer. Under every setting, a call or table fails when Massive refuses
 every symbol it starts with.
 
-When Massive refuses several symbols of one request, the library ends its search
-for the refused ones early, so a symbol your plan serves can be listed as refused.
-To read it:
+When Massive refuses several symbols of one request, a symbol your plan serves can
+be listed as refused too. To read it:
 
 1. Read each refused symbol alone. Massive's answer is then that symbol's own.
 2. Remove the symbols Massive refuses.

@@ -183,7 +183,7 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             span=False,
             summary="Massive has no data for the symbol. It answered HTTP 404, or a snapshot "
             "row's `error` was `NOT_FOUND`. "
-            "For a crypto pair, the pair isn't on its crypto ticker list.",
+            "For a crypto pair, the pair isn't on Massive's crypto ticker list.",
             fix="Look the symbol up in Massive's lists, such as `m.reference.tickers()`.",
         ),
         _C.REFUSED_SYMBOLS: CauseTraits(

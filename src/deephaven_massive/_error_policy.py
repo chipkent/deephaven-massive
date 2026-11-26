@@ -126,9 +126,8 @@ class ErrorPolicy:
             Massive's answer. Under every setting, a call or table fails when Massive refuses
             every symbol it starts with.
 
-            When Massive refuses several symbols of one request, the library ends its search
-            for the refused ones early, so a symbol your plan serves can be listed as refused.
-            To read it:
+            When Massive refuses several symbols of one request, a symbol your plan serves can
+            be listed as refused too. To read it:
 
             1. Read each refused symbol alone. Massive's answer is then that symbol's own.
             2. Remove the symbols Massive refuses.
