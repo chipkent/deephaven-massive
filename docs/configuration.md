@@ -139,7 +139,8 @@ Under `raise`:
 - A problem found when you make the call raises at once.
 - A problem found later, as the rows arrive, raises from a `fetch()` or `history()` with
   `wait=True`. Without `wait=True`, it fails the table.
-- A `poll()`, a stream, or a watchlist read by `fetch()` or `history()` fails its table.
+- A `poll()`, a stream, or a watchlist read by `fetch()` or `history()` fails its table
+  ([decision 139](dev/decisions/0139-raise-fails-watchlist-table-in-every-verb.md)).
 - A watchlist row whose value isn't Massive's exact ticker fails the whole table.
 
 <a id="one-symbol"></a>
