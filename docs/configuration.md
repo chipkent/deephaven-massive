@@ -152,7 +152,8 @@ failure with its cause. A watchlist read by `fetch()` or `history()` also shows 
 `FAILED` in `m.symbol_reads()`.
 
 A `history()` that reads Massive's flat files reads every symbol from the same files, so a
-failed file fails every symbol.
+failed file fails every symbol. [`flat_file_symbol_threshold`](#settings-reference) says when
+a `history()` reads them.
 
 What the library does with the symbol depends on the read:
 
@@ -161,9 +162,11 @@ What the library does with the symbol depends on the read:
 | Massive refused it | Stops reading it. | Leaves it out. |
 | The library withheld every row Massive sent for it | Stops reading it. | Leaves out the withheld rows. `m.problems()` lists the rows, not the symbol. |
 | Its request failed with a temporary error | Reads it again until [`max_outage`](#settings-reference) passes, then stops reading it. | Retries it, then leaves it out. |
+| Massive has no data for it ([`unavailable_symbols`](#settings-reference)) | Gives it no rows. A `poll()` reads it again at each poll. | Leaves it out. |
 | Massive sent no rows for it | Nothing. No rows isn't a problem. | Nothing. No rows isn't a problem. |
 
-While a `poll()` reads a symbol again, a `dm.PollMode.REPLACE` table keeps its last rows.
+While a `poll()` retries a symbol after a temporary error, a `dm.PollMode.REPLACE` table
+keeps its last rows.
 
 To read a symbol again once the library stops, delete its row and add it back. For symbols
 you pass in code, call the method again.
@@ -350,12 +353,12 @@ Set `0` to fail at the first outage. Each kind of table counts its own time:
 
 - A stream counts the time its connection is down.
 - A `poll()` table counts the time its polls keep failing or stop arriving. A poll
-  fails when no symbol answers. A poll that would wait longer than `max_outage`
-  for Massive's rate limits gives up, and counts as a failed poll.
+  fails when no symbol answers and at least one failed with a temporary error. A
+  poll that would wait longer than `max_outage` for Massive's rate limits gives up,
+  and counts as a failed poll.
 - Each symbol of a `poll()` or a watchlist's `fetch()` or `history()` counts the
   time its reads keep failing with a temporary error. Then the library stops
-  reading it, and `m.problems()` lists it. Delete its row and add it back to read
-  it again.
+  reading it ([Symbols that fail](#failed-symbols) says how to read it again).
 - Any other `fetch()` or `history()` without `wait=True` counts the time it waits
   out Massive's rate limits.
 
@@ -441,12 +444,11 @@ Set `raise` when a `fetch()`, `history()`, `poll()`, or stream must not
 run without every symbol you named. Under `log` and `ignore`,
 the symbol gets no rows, and the others are read. `m.problems()` lists it with
 Massive's answer. Under every setting, a call or table fails when Massive refuses
-every symbol it starts with. It also fails when Massive refuses the dataset or the
-delayed subscription.
+every symbol it starts with. It also fails when Massive refuses the dataset, or
+serves it delayed on a subscription that `delayed_subscriptions` leaves out.
 
-Massive doesn't name the symbols it refuses in a request of several, so finding them
-takes more requests. When Massive refuses several symbols of one request, the
-library may refuse some your plan serves along with them. To read those:
+When Massive refuses several symbols of one request, the library may refuse some your
+plan serves along with them. To read those:
 
 1. Read each refused symbol alone. Massive's answer is then that symbol's own.
 2. Remove the symbols Massive refuses.
@@ -458,8 +460,8 @@ Set `raise` to fail the call or table when Massive sends a row of a
 symbol the call didn't ask for. The row is left out either way, and `m.problems()`
 lists it with its symbol and count. Massive sends such rows in these cases:
 
-- A watchlist read by `fetch()` or `history()` asks for an index by its bare
-  ticker, such as `SPX`, and Massive answers with rows of `I:SPX`.
+- A read of an index, such as `I:SPX`, gets rows of another index, such as
+  `I:NDX`.
 - A dataset whose rows list their tickers, such as `m.partners.benzinga.news()`,
   sends a row that lists none of the tickers the call named.
 - An options dataset sends rows of another underlying. For example,

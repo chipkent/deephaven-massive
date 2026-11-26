@@ -316,12 +316,12 @@ class MassiveConfig:
 
             - A stream counts the time its connection is down.
             - A `poll()` table counts the time its polls keep failing or stop arriving. A poll
-              fails when no symbol answers. A poll that would wait longer than `max_outage`
-              for Massive's rate limits gives up, and counts as a failed poll.
+              fails when no symbol answers and at least one failed with a temporary error. A
+              poll that would wait longer than `max_outage` for Massive's rate limits gives up,
+              and counts as a failed poll.
             - Each symbol of a `poll()` or a watchlist's `fetch()` or `history()` counts the
               time its reads keep failing with a temporary error. Then the library stops
-              reading it, and `m.problems()` lists it. Delete its row and add it back to read
-              it again.
+              reading it ([Symbols that fail](#failed-symbols) says how to read it again).
             - Any other `fetch()` or `history()` without `wait=True` counts the time it waits
               out Massive's rate limits.
 

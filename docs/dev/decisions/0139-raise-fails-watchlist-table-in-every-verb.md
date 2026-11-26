@@ -33,5 +33,5 @@ one symbol meets the problem, as `poll()` and streams already did.
 
 ## Rule
 
-`docs/configuration.md`, "Under `raise`", and `on_error.refused_symbols`; decision 137 sets
-the default.
+`docs/configuration.md`, the paragraph on a cause set to `raise`, and
+`on_error.refused_symbols`; decision 137 sets the default.

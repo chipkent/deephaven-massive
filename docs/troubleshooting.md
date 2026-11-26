@@ -244,8 +244,8 @@ has already retried, so wait before you call again.
 `fetch()` and every other query method raise `dm.SessionClosedError` once you call
 `m.close()`, and so does `m.streams()`. Create a new session to read again.
 
-When one symbol of a `fetch()`, `history()`, or `poll()` fails, [Symbols that
-fail](configuration.md#failed-symbols) says what happens to it, and [Reads that fail under every
+[Symbols that fail](configuration.md#failed-symbols) says what happens to one symbol of a
+`fetch()`, `history()`, or `poll()` that fails. [Reads that fail under every
 setting](configuration.md#read-failures) says when the whole read fails.
 
 <a id="diagnostics"></a>

@@ -124,12 +124,11 @@ class ErrorPolicy:
             run without every symbol you named. Under `dm.OnError.LOG` and `dm.OnError.IGNORE`,
             the symbol gets no rows, and the others are read. `m.problems()` lists it with
             Massive's answer. Under every setting, a call or table fails when Massive refuses
-            every symbol it starts with. It also fails when Massive refuses the dataset or the
-            delayed subscription.
+            every symbol it starts with. It also fails when Massive refuses the dataset, or
+            serves it delayed on a subscription that `delayed_subscriptions` leaves out.
 
-            Massive doesn't name the symbols it refuses in a request of several, so finding them
-            takes more requests. When Massive refuses several symbols of one request, the
-            library may refuse some your plan serves along with them. To read those:
+            When Massive refuses several symbols of one request, the library may refuse some your
+            plan serves along with them. To read those:
 
             1. Read each refused symbol alone. Massive's answer is then that symbol's own.
             2. Remove the symbols Massive refuses.
@@ -142,8 +141,8 @@ class ErrorPolicy:
             symbol the call didn't ask for. The row is left out either way, and `m.problems()`
             lists it with its symbol and count. Massive sends such rows in these cases:
 
-            - A watchlist read by `fetch()` or `history()` asks for an index by its bare
-              ticker, such as `SPX`, and Massive answers with rows of `I:SPX`.
+            - A read of an index, such as `I:SPX`, gets rows of another index, such as
+              `I:NDX`.
             - A dataset whose rows list their tickers, such as `m.partners.benzinga.news()`,
               sends a row that lists none of the tickers the call named.
             - An options dataset sends rows of another underlying. For example,
