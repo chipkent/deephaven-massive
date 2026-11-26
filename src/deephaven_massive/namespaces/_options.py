@@ -982,7 +982,8 @@ class OptionsNamespace(Namespace):
         default. A contract of an underlying the table doesn't hold follows its
         `unrequested_symbols` cause, which leaves it out and lists it in `m.problems()`. A live
         table is followed. In a static table, a failed underlying is left out and listed in
-        `m.problems()`, and the call fails only when every underlying fails.
+        `m.problems()`, and the call fails when every underlying fails, or when an underlying's
+        problem has a cause set to `dm.OnError.RAISE`.
 
         Args:
             underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A

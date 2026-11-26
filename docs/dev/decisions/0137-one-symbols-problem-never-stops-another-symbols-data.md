@@ -2,7 +2,7 @@
 
 Date: 2026-11-25
 
-Status: accepted
+Status: partly superseded: a problem of one symbol never stopping another symbol's rows under `raise`, by [139](0139-raise-fails-watchlist-table-in-every-verb.md)
 
 ## Question
 

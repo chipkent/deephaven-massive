@@ -258,7 +258,8 @@ class FetchQuery(Query):
 
         A static table of symbols is read once, when you call. A watchlist is followed: a symbol you
         add is read, and one you delete leaves. One symbol's failure leaves the watchlist's other
-        symbols in place, and `m.symbol_reads()` shows each symbol's read.
+        symbols in place, unless its cause is set to `dm.OnError.RAISE`, which fails the table.
+        `m.symbol_reads()` shows each symbol's read.
 
         Args:
             wait: False, the default, returns at once and fills the table in the background. True
@@ -345,8 +346,8 @@ class FetchQuery(Query):
         later, is read with the requests `fetch()` makes for it
         (`RestTransport.fetch_by_symbol`), as Massive answers at that read, and is read again
         whenever it returns to the table. With `wait=True` the call-time symbols are read now,
-        as one read; the call raises only when every one of them failed, and logs one WARNING
-        when some did.
+        as one read; the call raises when every one of them failed, or when one failed for a
+        cause set to `RAISE`, and else logs one WARNING when some did.
 
         Args:
             call: The call id.
@@ -401,7 +402,8 @@ class FetchQuery(Query):
         Each value is read with the requests `fetch()` makes when it is passed alone
         (`RestTransport.fetch_by_value`). A static table is read once, as a fixed list
         (`RestTransport.fetch_values`): a failed value is listed and left out, as a symbol in code
-        is, and the call fails only when every value fails. A refreshing one is
+        is, and the call fails when every value fails, or when one fails for a cause set to
+        `RAISE`. A refreshing one is
         followed (`_followed_value_fetch`). A symbol table passed beside it is read once.
 
         Args:
