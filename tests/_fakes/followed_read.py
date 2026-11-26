@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import deephaven_massive as dm
 from deephaven_massive._enums import Reread
+from deephaven_massive._error_policy import DEFAULT_POLICY
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.followed_read import FollowPlan
 
@@ -101,7 +102,7 @@ class QuietRead:
             one_scan=False,
             symbols_per_read=1,
             read=self.read,
-            refused_symbols=dm.OnError.LOG,
+            policy=DEFAULT_POLICY,
         )
         self.stop_token = threading.Event()
         self.failed: MassiveError | None = None

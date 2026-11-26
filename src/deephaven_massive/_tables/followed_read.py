@@ -160,7 +160,7 @@ if TYPE_CHECKING:
 
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.schema import Schema
-    from deephaven_massive._enums import OnError
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._massive import Transport
     from deephaven_massive._tables.follow_coordinator import FirstRead
     from deephaven_massive._tables.problem_events import Problem
@@ -224,16 +224,19 @@ class FollowPlan:
             `history()`
             (`RestTransport.history_by_symbol`, `FlatFileTransport.history_by_symbol`), and as
             Massive answers now for `fetch()` (`RestTransport.fetch_by_symbol`). It raises
-            what fails every symbol alike (a rejected key, a closed session).
-        refused_symbols: The call's `ErrorPolicy.refused_symbols`, which decides how loudly a
-            symbol Massive refuses is logged; under any setting the symbol alone fails.
+            what fails every symbol alike (a rejected key, a refusal of the feed, a closed
+            session).
+        policy: The call's resolved `dm.ErrorPolicy`. Its `refused_symbols` decides how loudly a
+            symbol Massive refuses is logged, and a symbol's final failure whose cause it sets
+            to `RAISE` fails the table (`call_failure.fails_call`); any other fails the symbol
+            alone.
     """
 
     transport: Transport
     one_scan: bool
     symbols_per_read: int
     read: Callable[[tuple[str, ...], threading.Event | None], Mapping[str, SymbolOutcome]]
-    refused_symbols: OnError
+    policy: ResolvedPolicy
 
 
 class FollowedRead:

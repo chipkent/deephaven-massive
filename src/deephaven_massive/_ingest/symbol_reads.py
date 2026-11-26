@@ -52,8 +52,8 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   (`AuthenticationError`), a refusal of the feed (`FeedRefusalError`), and a session closed
   during the read would fail every symbol alike, so they raise, and the reader cancels the
   requests not yet made (`RestReader.read_each`).
-- **Failures that fail the call** (`fails_call`): one symbol's failure fails its whole call or
-  table only when its cause is set to `RAISE`.
+- **Failures that fail the call** (`_tables/call_failure.py`, `fails_call`): one symbol's
+  failure fails its whole call or table only when its cause is set to `RAISE`.
 - **A list in one table** (`read_symbol_list`): the rows of every symbol of a list that did
   not fail, in one Arrow table, with each failed symbol's error beside it, for a static
   `fetch()` or `history()` of symbols in code (`_ingest/static_reads.py`) and for a `poll()`
@@ -96,8 +96,6 @@ from deephaven_massive._errors import (
     PermanentError,
     RowDataError,
     SessionClosedError,
-    UnavailableSymbolError,
-    copy_error,
     library_bug,
     required,
     required_instance,
@@ -115,6 +113,7 @@ from deephaven_massive._ingest.rest_requests import (
 from deephaven_massive._log_limits import bounded_list, counted, log_failure, prose_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._on_error import effect_of
+from deephaven_massive._tables.call_failure import fails_call, refusal_raised
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
@@ -152,7 +151,6 @@ __all__ = [
     "asked_column",
     "attribute_units",
     "attribute_values",
-    "fails_call",
     "fails_followed_read",
     "fetch_units",
     "history_units",
@@ -160,7 +158,6 @@ __all__ = [
     "read_rest_by_symbol",
     "read_rest_by_value",
     "read_symbol_list",
-    "refusal_raised",
     "split_by_symbol",
     "split_failures",
     "symbol_outcomes",
@@ -348,27 +345,6 @@ def fails_followed_read(error: MassiveError) -> bool:
     return isinstance(error, (AuthenticationError, FeedRefusalError, SessionClosedError))
 
 
-def fails_call(error: MassiveError, policy: ResolvedPolicy) -> bool:
-    """Tell whether one symbol's failure fails its whole call or table, not only the symbol.
-
-    A failure whose cause the call set to `RAISE` does: a refused symbol under
-    `refused_symbols`, a symbol Massive has no data for (`UnavailableSymbolError`, only under
-    `unavailable_symbols`), and a withheld or unrequested row (`RowDataError`, only under its
-    cause). Any other failure is the symbol's own. A refusal of the feed never reaches here: it
-    fails the whole read as it happens (`fails_followed_read`).
-
-    Args:
-        error: A symbol's failure, as its request or its planning gave it.
-        policy: The call's resolved policy.
-
-    Returns:
-        True for a failure of the whole call.
-    """
-    if isinstance(error, (UnavailableSymbolError, RowDataError)):
-        return True
-    return is_symbol_refusal(error) and effect_of(policy.refused_symbols).fails
-
-
 def split_failures(
     failed: Mapping[str, MassiveError], order: Sequence[str], policy: ResolvedPolicy
 ) -> tuple[dict[str, MassiveError], MassiveError | None]:
@@ -401,28 +377,6 @@ def split_failures(
     if is_symbol_refusal(failed[fatal]) and not all(name in failed for name in order):
         return own, refusal_raised(failed[fatal], fatal)
     return own, failed[fatal]
-
-
-def refusal_raised(error: MassiveError, symbol: str | None) -> MassiveError:
-    """Return the error a call raises for a refused symbol under `refused_symbols=RAISE`.
-
-    Only while another symbol of the call may still be read: when every symbol was refused,
-    the call fails under any setting, and the refusal is raised as it is.
-
-    Args:
-        error: Massive's refusal of the symbol, as its `m.problems()` row gives it.
-        symbol: The symbol, as the call named it; None for a ticker of a read that named
-            none (`dm.ALL`), which the user can't remove.
-
-    Returns:
-        A copy of `error` that ends with the setting that reads the others, such as
-        `"... Remove I:VIX, or, to read the others, pass
-        on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to
-        dm.MassiveConfig."`.
-    """
-    purpose = "To read the others" if symbol is None else f"Remove {symbol}, or, to read the others"
-    hint = policy_hint(OnError.LOG, "refused_symbols", purpose=purpose)
-    return copy_error(error, f"{error} {hint}")
 
 
 def read_symbol_list(

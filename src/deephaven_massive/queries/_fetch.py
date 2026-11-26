@@ -407,7 +407,7 @@ class FetchQuery(Query):
             read=lambda names, stop: rest.fetch_by_symbol(
                 spec, request, symbols=names, call=call, stop=stop
             ),
-            refused_symbols=request.on_error.refused_symbols,
+            policy=request.on_error,
         )
         recency = rest_recency_note(spec, core.config.delayed_subscriptions)
         note = "Follows its symbol table: each symbol's rows are Massive's answer as of its read."
@@ -518,7 +518,7 @@ class FetchQuery(Query):
             read=lambda names, stop: rest.fetch_by_value(
                 spec, request, values=names, call=call, stop=stop
             ),
-            refused_symbols=request.on_error.refused_symbols,
+            policy=request.on_error,
         )
         recency = rest_recency_note(spec, core.config.delayed_subscriptions)
         note = (

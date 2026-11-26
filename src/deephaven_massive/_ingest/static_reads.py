@@ -34,8 +34,9 @@ import time
 from typing import TYPE_CHECKING
 
 from deephaven_massive._errors import every_symbol_failed, failure_text
-from deephaven_massive._ingest.symbol_reads import fails_call, read_symbol_list, refusal_raised
+from deephaven_massive._ingest.symbol_reads import read_symbol_list
 from deephaven_massive._log_limits import bounded_list
+from deephaven_massive._tables.call_failure import fails_call, refusal_raised
 from deephaven_massive._tables.problem_events import ProblemCause, ProblemSpans, SpanTracker
 from deephaven_massive._tables.symbol_retry import is_symbol_refusal
 

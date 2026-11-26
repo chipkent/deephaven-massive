@@ -139,10 +139,7 @@ Under `raise`:
 - A problem found when you make the call raises at once.
 - A problem found later, as the rows arrive, raises from a `fetch()` or `history()` with
   `wait=True`. Without `wait=True`, it fails the table.
-- A `poll()` or a stream fails its table.
-- A watchlist read by `fetch()` or `history()` fails only the symbols whose read met the
-  problem, and `m.symbol_reads()` shows them `FAILED`.
-- A malformed flat-file line fails every symbol of that file's read.
+- A `poll()`, a stream, or a watchlist read by `fetch()` or `history()` fails its table.
 - A watchlist row whose value isn't Massive's exact ticker fails the whole table.
 
 <a id="one-symbol"></a>
@@ -426,10 +423,9 @@ run without every symbol you named. Massive refuses a symbol when your plan does
 serve it. Under `log` and `ignore`, the symbol gets no rows,
 and the others are read. `m.problems()` lists it with Massive's answer.
 
-A watchlist read by `fetch()` or `history()` fails only the refused symbol,
-whatever this setting says. Under every setting, a call or table fails when Massive
-refuses every symbol it starts with. It also fails when Massive refuses the dataset
-or delayed subscription itself.
+Under every setting, a call or table fails when Massive refuses every symbol it
+starts with. It also fails when Massive refuses the dataset or delayed subscription
+itself.
 
 Massive refuses a request of several symbols without naming them, so the library
 sends smaller groups of them again to find the refused ones. Finding one refused

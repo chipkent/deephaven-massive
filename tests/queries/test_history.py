@@ -6,7 +6,7 @@ import re
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime
-from typing import Any, assert_never
+from typing import Any
 
 import pytest
 from deephaven import new_table
@@ -25,7 +25,7 @@ from deephaven_massive._enums import (
     NotBars,
     Timespan,
 )
-from deephaven_massive._errors import BrokenGuaranteeError
+from deephaven_massive._errors import BrokenGuaranteeError, FeedRefusalError
 from deephaven_massive._tables.transports import (
     SymbolFailure,
 )
@@ -46,6 +46,7 @@ from tests._fakes.queries import (
     make,
     released,
     strict,
+    symbol_reads,
     trades,
     until,
 )
@@ -793,32 +794,26 @@ _MSFT_403 = (
 """Massive's answer to the read of MSFT, as the REST client words it."""
 
 
-def _wait_true_warnings(setting: dm.OnError) -> list[str]:
-    # The WARNINGs a wait=True read logs when Massive refuses MSFT of its AAPL and MSFT.
-    match setting:
-        case dm.OnError.RAISE:  # the read's own, since the symbol fails as RAISE asks
-            return [
-                (
-                    "stocks.trades history: 1 of the 2 symbols failed and are left out of the "
-                    f"result for now. MSFT: {_MSFT_403} Check m.symbol_reads() for whether each "
-                    "one is retrying or has failed."
-                )
-            ]
-        case dm.OnError.LOG:  # the one alarm of its refused_symbols span
-            return [
-                (
-                    f"stocks.trades table 1: refused_symbols: MSFT: {_MSFT_403.removesuffix('.')} "
-                    "(at call 1). m.problems() lists it and every later refused_symbols problem of "
-                    "this table, which the log shows at DEBUG only."
-                )
-            ]
-        case dm.OnError.IGNORE:
-            return []
-        case _:
-            assert_never(setting)
+_WAIT_TRUE_WARNINGS = {
+    # The one alarm of MSFT's refused_symbols span.
+    dm.OnError.LOG: [
+        (
+            f"stocks.trades table 1: refused_symbols: MSFT: {_MSFT_403.removesuffix('.')} "
+            "(at call 1). m.problems() lists it and every later refused_symbols problem of "
+            "this table, which the log shows at DEBUG only."
+        )
+    ],
+    dm.OnError.IGNORE: [],
+}
+"""The WARNINGs a wait=True read logs when Massive refuses MSFT of its AAPL and MSFT, under each
+setting that reads the others; under RAISE the call raises instead."""
 
 
-@pytest.mark.parametrize("setting", list(dm.OnError))
+def test_each_setting_but_raise_has_its_wait_true_warnings() -> None:
+    assert set(_WAIT_TRUE_WARNINGS) == set(dm.OnError) - {dm.OnError.RAISE}
+
+
+@pytest.mark.parametrize("setting", list(_WAIT_TRUE_WARNINGS))
 def test_wait_true_warns_once_when_some_call_time_symbols_fail(
     setting: dm.OnError,
     live: Callable[..., InputTable],
@@ -842,8 +837,78 @@ def test_wait_true_warns_once_when_some_call_time_symbols_fail(
                 [(r["Cause"], r["Symbol"]) for r in problem_rows()] == [("refused_symbols", "MSFT")]
             )
         )
-    assert caplog.messages == _wait_true_warnings(setting)
+    assert caplog.messages == _WAIT_TRUE_WARNINGS[setting]
     massive_session.release(result)
+    follows(massive_session)
+
+
+REFUSALS_RAISE = dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE)
+REFUSALS_LOG = dm.ErrorPolicy(refused_symbols=dm.OnError.LOG)
+
+
+def test_wait_true_raises_when_a_refused_symbol_raises(
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    # Under RAISE, one refused symbol fails the call, with the setting that reads the others.
+    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError(_MSFT_403, status=403))}
+    query = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_RAISE)
+    with pytest.raises(dm.EntitlementError) as raised:
+        query.history("2025-03-03", "2025-03-03", wait=True)
+    assert str(raised.value) == (
+        f"{_MSFT_403} Remove MSFT, or, to read the others, pass "
+        "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    # The setting the error names reads the others.
+    logged = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_LOG)
+    result = logged.history("2025-03-03", "2025-03-03", wait=True)
+    assert not result.j_table.isFailed()
+    rest.outcomes = {}  # the raised error's traceback holds the session
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_a_followed_history_without_wait_fails_its_table_only_when_a_refusal_raises(
+    live: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    drain: Callable[[], None],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError(_MSFT_403, status=403))}
+    query = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_LOG)
+    logged = query.history("2025-03-03", "2025-03-03")
+    until(
+        lambda: (
+            {
+                name: row["State"]
+                for name, row in symbol_reads(massive_session, drain, dh_to_pylist).items()
+            }
+            == {"AAPL": "DONE", "MSFT": "FAILED"}
+        )
+    )
+    assert not logged.j_table.isFailed()
+    massive_session.release(logged)
+    follows(massive_session)
+    query = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_RAISE)
+    raised = query.history("2025-03-03", "2025-03-03")
+    until(lambda: bool(raised.j_table.isFailed()))
+    follows(massive_session)
+
+
+def test_a_feed_refusal_fails_a_followed_history(
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    # A refusal of the feed is no symbol's: the read raises it, even under LOG, so a call that
+    # waits raises it and one that does not fails its table.
+    rest.raises = FeedRefusalError(_MSFT_403, status=403)
+    query = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_LOG)
+    with pytest.raises(FeedRefusalError):
+        query.history("2025-03-03", "2025-03-03", wait=True)
+    result = query.history("2025-03-03", "2025-03-03")
+    until(lambda: bool(result.j_table.isFailed()))
+    rest.raises = None  # the raised error's traceback holds the session
     follows(massive_session)
 
 
