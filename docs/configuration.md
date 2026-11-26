@@ -134,51 +134,55 @@ A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm
 In a call's policy, a cause it leaves unset follows the session's. A cause the session's policy
 leaves unset follows the default.
 
-Under `raise`, a `fetch()` or `history()` with `wait=True` raises a problem it finds while it
-waits. A problem found after a call returns fails the table, and `Error` in `m.streams()` says
-why.
+Under `raise`, a `fetch()` or `history()` with `wait=True` raises an error for a problem it
+finds while it waits. A problem found after a call returns fails the table, and `Error` in
+`m.streams()` says why.
 
 <a id="failed-symbols"></a>
 
 #### Symbols that fail
 
-A `fetch()`, `history()`, `poll()`, or stream of several symbols reads each one on its own.
-By default, when one symbol fails, the table keeps the other symbols' rows, and `m.problems()` lists the
-failed symbol with its cause. A symbol fails when:
-
-- Massive refuses it.
-- Its request keeps failing with a temporary error, such as HTTP 503. A list you pass in code
-  leaves the symbol out. A `poll()` or a watchlist read tries it again until
-  [`max_outage`](#setting-details) passes.
-- In a `poll()` or a watchlist read, the library withholds every row Massive sent for it.
-
-A symbol Massive has no data for doesn't fail. It gets no rows.
-
-A failed symbol isn't read again. To read it again, delete its watchlist row and add it back,
-or call the method again for symbols you passed in code. In a `poll()` table, a failed symbol's
-rows leave a `dm.PollMode.REPLACE` table, and stay in an `APPEND` or `UPSERT` table.
+In a `fetch()`, `history()`, `poll()`, or stream of several symbols, one symbol's failure is
+its own. By default, the other symbols keep their rows, and `m.problems()` lists the failed one
+with its cause.
 
 The exception is a `history()` that reads Massive's flat files. It reads every symbol from the
 same files, so a failed file fails every symbol.
 [`flat_file_symbol_threshold`](#setting-details) says when a `history()` reads them.
 
+A symbol fails when:
+
+- Massive refuses it.
+- Its request keeps failing with a temporary error, such as HTTP 503. A `fetch()` or
+  `history()` of symbols in code leaves the symbol out. A `poll()`, or a `fetch()` or
+  `history()` of a watchlist, tries it again for up to [`max_outage`](#setting-details).
+- In a `poll()`, or a `fetch()` or `history()` of a watchlist, the library can't read any row
+  Massive sent for it.
+
+A symbol Massive has no data for doesn't fail. It gets no rows.
+
+A failed symbol isn't read again. To read it again, delete its watchlist row and add it back.
+For symbols you pass in code, call `fetch()`, `history()`, or `poll()` again.
+
+When a `poll()` stops reading a symbol, a `dm.PollMode.REPLACE` table drops its rows. An
+`APPEND` or `UPSERT` table keeps them.
+
 <a id="read-failures"></a>
 
 #### Reads that fail under every setting
 
-`on_error` covers one symbol's or one row's problem. A problem that leaves a read or stream
-nothing to show fails it, whatever the setting:
+These problems fail a read or stream, whatever the setting:
 
 - Massive rejects your API key.
 - Massive serves current data delayed, and [`delayed_subscriptions`](#setting-details) doesn't
   list its subscription.
 - Every symbol the read or stream started with fails, as on a plan without the dataset. A
   watchlist, `poll()`, or stream that starts empty never fails this way.
-- Massive sent rows, and the library withheld every one. A `dm.ALL` stream fails after 100
-  withheld rows in a row, and a stream of named symbols after 100 rows in a row whose symbol
-  the library can't read.
+- A `fetch()` or `history()` of `dm.ALL` or of symbols in code, or a `poll()` cycle of
+  `dm.ALL`, gets rows from Massive and the library can't read any of them.
 
-For withheld rows, `m.problems()` gives what Massive sent and why, for a report to Massive.
+When the library can't read Massive's rows, `m.problems()` gives what Massive sent and why, for
+a report to Massive.
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 
@@ -337,16 +341,17 @@ When sessions list different limits, the lowest applies.
 
 #### max_outage
 
-Set `0` to fail at the first outage. A live table fails once its outage lasts
-`max_outage`:
+A live table fails once an outage lasts `max_outage`:
 
-- A stream's outage is the time its connection is down.
-- A `poll()` table's outage is the time its polls keep failing or get no answer.
-- A `fetch()` or `history()` without `wait=True` counts the time it waits out
-  Massive's rate limits, and so does a `poll()` table.
+- A stream fails once its connection has been down that long.
+- A `poll()` table fails once its polls have failed, or received nothing, that
+  long.
 
-In a `poll()` or a watchlist read, a symbol whose reads keep failing with a
-temporary error for `max_outage` isn't read again. `m.problems()` lists it.
+Raise it to ride out longer outages, or set `0` to fail at the first one.
+
+In a `poll()`, or a `fetch()` or `history()` of a watchlist, a symbol that keeps
+failing with a temporary error isn't read again after `max_outage`. A rate limit is
+one such error. `m.problems()` lists the symbol.
 
 A failed table stays failed, so call the method again for a new one. See
 [Live table messages](troubleshooting.md#live-table-messages).
@@ -430,14 +435,16 @@ run without every symbol you named. Under `log` and `ignore`,
 the symbol gets no rows, the others are read, and `m.problems()` lists it with
 Massive's answer.
 
-When Massive refuses a request for several symbols at once, such as a snapshot of
-a list, a symbol your plan serves can be listed as refused too. To check:
+Massive can refuse a request for several symbols at once, such as a snapshot of a
+list. A symbol your plan serves can then be listed as refused too. To find which
+symbols Massive refuses:
 
-1. Read the symbol alone, such as `m.stocks.snapshots("AAPL").fetch(wait=True)`.
-   It raises `dm.EntitlementError` if Massive refuses it.
-2. Remove each symbol Massive refused alone.
-3. Call the method again. For a watchlist, delete the rows of the symbols Massive
-   served alone, and add them back.
+1. Read each listed symbol by itself, such as
+   `m.stocks.snapshots("AAPL").fetch(wait=True)`. The call raises
+   `dm.EntitlementError` when Massive refuses that symbol.
+2. Remove the symbols whose call raised.
+3. Call the method again. For a watchlist, delete the rows of the other listed
+   symbols and add them back.
 
 #### on_error.unrequested_symbols
 

@@ -125,14 +125,16 @@ class ErrorPolicy:
             the symbol gets no rows, the others are read, and `m.problems()` lists it with
             Massive's answer.
 
-            When Massive refuses a request for several symbols at once, such as a snapshot of
-            a list, a symbol your plan serves can be listed as refused too. To check:
+            Massive can refuse a request for several symbols at once, such as a snapshot of a
+            list. A symbol your plan serves can then be listed as refused too. To find which
+            symbols Massive refuses:
 
-            1. Read the symbol alone, such as `m.stocks.snapshots("AAPL").fetch(wait=True)`.
-               It raises `dm.EntitlementError` if Massive refuses it.
-            2. Remove each symbol Massive refused alone.
-            3. Call the method again. For a watchlist, delete the rows of the symbols Massive
-               served alone, and add them back.
+            1. Read each listed symbol by itself, such as
+               `m.stocks.snapshots("AAPL").fetch(wait=True)`. The call raises
+               `dm.EntitlementError` when Massive refuses that symbol.
+            2. Remove the symbols whose call raised.
+            3. Call the method again. For a watchlist, delete the rows of the other listed
+               symbols and add them back.
         unrequested_symbols: Decides whether a row Massive returns for a symbol the call
             didn't ask for fails the table; the row is left out either way. Defaults to
             `LOG`.

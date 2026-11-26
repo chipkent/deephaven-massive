@@ -244,9 +244,9 @@ has already retried, so wait before you call again.
 `fetch()` and every other query method raise `dm.SessionClosedError` once you call
 `m.close()`, and so does `m.streams()`. Create a new session to read again.
 
-When one symbol of a read fails, the table keeps the others: [Symbols that
-fail](configuration.md#failed-symbols) says what happens to it. [Reads that fail under every
-setting](configuration.md#read-failures) lists the problems that fail a read whole.
+Some problems fail a read whatever `on_error` says. [Reads that fail under every
+setting](configuration.md#read-failures) lists them. By default, one symbol's failure raises
+nothing, and [Symbols that fail](configuration.md#failed-symbols) says what happens to it.
 
 <a id="diagnostics"></a>
 
