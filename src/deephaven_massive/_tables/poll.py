@@ -183,6 +183,7 @@ from deephaven_massive._tables.liveness import make_result
 from deephaven_massive._tables.poll_symbols import DroppedNames, PollSymbols
 from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.refused_values import refused_values_of
 from deephaven_massive._tables.watchlist import (
     SkippedValues,
@@ -1186,11 +1187,12 @@ class Poller:
         self._watch_end()  # before the row's update, so no late mark can follow it
         if self._stop.is_set():
             return False
+        rows, asked, unread = self._withhold_unkeyed(core, read.rows, read.asked)
         settled = None
         if due is not None:
             settled = self._names.settle(
                 due,
-                read.failures,
+                {**read.failures, **unread},
                 now=self._clock.monotonic(),
                 at=int(self._clock.time() * 1e9),
                 since=int(self._began_at * 1e9),
@@ -1203,7 +1205,6 @@ class Poller:
         if fatal is not None:
             self._fail_fatal(core, fatal)
             return False
-        rows, asked = self._withhold_unkeyed(core, read.rows, read.asked)
         published = self._publish(rows, asked)
         self._published += published
         logger.debug(
@@ -1438,7 +1439,7 @@ class Poller:
 
     def _withhold_unkeyed(
         self, core: SessionCore, table: pa.Table, asked: pa.ChunkedArray | None
-    ) -> tuple[pa.Table, pa.ChunkedArray | None]:
+    ) -> tuple[pa.Table, pa.ChunkedArray | None, dict[str, MassiveError]]:
         """Withhold the cycle's rows with a null (or NaN) poll key, under `unreadable_keys`.
 
         A null key would silently merge unrelated rows: one keyed row for all of them, or
@@ -1451,22 +1452,28 @@ class Poller:
         `PutCall`, empty for common stock) and its revision keys are not checked: a null there
         is a value.
 
+        A cycle of symbols or values judges each one by its own rows, as its read does
+        (`ReadTally.unread_symbols`): a symbol whose every row this cycle was withheld fails on
+        its own, and the poller settles it with the cycle's other failures, so one symbol's
+        rows never fail another's. A cycle of one table fails it when every row was withheld.
+
         Args:
             core: The session's core.
             table: The cycle's rows.
             asked: Each row's symbol or value (`CycleRows.asked`), or None.
 
         Returns:
-            The cycle's rows with a value in every poll key that must have one, and the symbol
-            or value of each, or None.
+            The cycle's rows with a value in every poll key that must have one, the symbol
+            or value of each, or None, and the failure of each symbol or value whose every row
+            was withheld.
 
         Raises:
             RowDataError: Under `unreadable_keys=RAISE`, when a row is withheld; or, whatever
-                the policy, when every row of the cycle is withheld, the sign of a change in
-                Massive's format. Each names the dataset and the first such
-                row: its position in the cycle, the key column, and its non-null values but
-                its `TimestampInsert`, truncated to `_ROW_TEXT` characters, so the row can be
-                found although it was never published.
+                the policy, when every row of a cycle of one table (no symbols or values) is
+                withheld, the sign of a change in Massive's format. Each names the dataset and
+                the first such row: its position in the cycle, the key column, and its non-null
+                values but its `TimestampInsert`, truncated to `_ROW_TEXT` characters, so the
+                row can be found although it was never published.
         """
         nullable = self._spec.nullable_poll_keys
         masks = [
@@ -1475,7 +1482,7 @@ class Poller:
             if name not in nullable
         ]
         if not any(pc.any(mask).as_py() for _, mask in masks):
-            return table, asked
+            return table, asked, {}
         symbol = _SYMBOL if _SYMBOL in table.schema.names else None
         sent = None if symbol is None else table.column(symbol)
         marked = with_marks(table, {}, sent=sent)
@@ -1499,6 +1506,12 @@ class Poller:
         failure = failure_of(counts, policy, dataset=dataset, first_reason=withheld.first_reason)
         if failure is not None:
             raise RowDataError(failure)
+        unkeyed = functools.reduce(pc.or_, (mask for _, mask in masks))
+        if asked is not None:
+            unread = _unread_names(
+                marked, unkeyed, asked, symbol=symbol, dataset=spec.name, where=where
+            )
+            return withheld.rows, asked.filter(pc.invert(unkeyed)), unread
         if not withheld.rows.num_rows:
             sent = (
                 "the 1 row Massive sent this cycle has a null key column, so the library "
@@ -1510,10 +1523,7 @@ class Poller:
             raise RowDataError(
                 f"{dataset}: {sent}. {reason_sentence(withheld.first_reason)} {WITHHELD_LISTED}"
             )
-        if asked is not None:
-            unkeyed = functools.reduce(pc.or_, (mask for _, mask in masks))
-            asked = asked.filter(pc.invert(unkeyed))  # the rows `withhold_rows` kept
-        return withheld.rows, asked
+        return withheld.rows, None, {}
 
     def _fresh(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
         """Keep the rows of an `APPEND` cycle whose identity the poller has not appended yet.
@@ -2097,6 +2107,59 @@ def open_poll(
     )
     poller.start()
     return result
+
+
+def _unread_names(
+    marked: pa.Table,
+    unkeyed: pa.ChunkedArray,
+    asked: pa.ChunkedArray,
+    *,
+    symbol: str | None,
+    dataset: str,
+    where: str,
+) -> dict[str, MassiveError]:
+    """Return the failure of each symbol or value of a cycle whose every row was withheld.
+
+    Args:
+        marked: The cycle's rows, each withheld one marked (`withheld.mark`).
+        unkeyed: Which rows were withheld.
+        asked: Each row's symbol or value (`CycleRows.asked`).
+        symbol: The rows' symbol column, for the withheld rows' symbol as Massive sent it, or
+            None when the dataset has none.
+        dataset: The dataset, for the messages.
+        where: The request the rows came from, such as `"GET /v3/reference/dividends"`.
+
+    Returns:
+        Each such symbol's or value's failure (`ReadTally.unread_symbols`), in the order of
+        its first withheld row; a symbol or value that kept a row has none.
+    """
+    tally = ReadTally()
+    empty: list[str] = []
+    for name in pc.unique(asked.filter(unkeyed)).to_pylist():
+        own = pc.equal(asked, name)
+        if pc.any(pc.and_(own, pc.invert(unkeyed))).as_py():
+            continue  # it kept a row, so its withheld rows fail no one
+        empty.append(name)
+        tally.add_request(
+            kept=0,
+            withheld=withhold_rows(marked.filter(own), symbol=symbol),
+            owners=functools.partial(_owned_by, name),
+            source=where,
+        )
+    return dict(tally.unread_symbols(dataset, empty, empty))
+
+
+def _owned_by(name: str, _sent: str | None) -> tuple[str, ...]:
+    """Give withheld rows to the one symbol or value they were read for, whatever they name.
+
+    Args:
+        name: The symbol or value.
+        _sent: The symbol the rows name as Massive sent it, which does not matter here.
+
+    Returns:
+        The name alone.
+    """
+    return (name,)
 
 
 def _null_key_reason(table: pa.Table, name: str, row: int) -> str:

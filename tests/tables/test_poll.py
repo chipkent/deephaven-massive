@@ -2972,10 +2972,46 @@ def test_a_row_with_a_null_poll_key_is_withheld_quietly_under_ignore(
     assert not [m for m in caplog.messages if "withheld" in m or "null poll key" in m]
 
 
-def test_a_cycle_whose_every_row_has_a_null_poll_key_fails_the_table(
+@pytest.mark.parametrize("msft", [["m"], []], ids=["other symbol has rows", "no rows"])
+def test_a_symbol_whose_every_row_has_a_null_poll_key_fails_on_its_own(
+    *,
+    feed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: ToPylist,
+    msft: list[str],
+) -> None:
+    # One symbol's unkeyed rows never fail another's, even one Massive sent no rows for this
+    # cycle: AAPL fails alone with a span of its own, and its withheld rows are listed.
+    others = [{"id": i, "ticker": "MSFT", "currency": "USD"} for i in msft]
+    fake_rest.reply(PATH, Reply(envelope([NULL_ID, NULL_ID, *others])))
+    q = build_query(
+        feed_session._core,
+        FEED,
+        query_type=FetchQuery,
+        symbols=["AAPL", "MSFT"],
+        start="2025-01-02",
+    )
+    table = q.poll(60, mode=PollMode.APPEND)
+    until(lambda: problems_of(feed_session, dh_to_pylist, READ_FAILED) != [])
+    until(lambda: [row["Id"] for row in dh_to_pylist(table)] == msft)
+    (row,) = streams_of(feed_session, dh_to_pylist)
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    (span,) = problems_of(feed_session, dh_to_pylist, READ_FAILED)
+    assert (span["Symbol"], span["EndedAt"]) == ("AAPL", None)
+    assert span["Detail"] == (
+        "stocks.dividends: Massive sent 2 rows for AAPL from GET /stocks/v1/dividends, and the "
+        "library could read none of them whole, so it withheld them all. Row 0 of the cycle "
+        "has a null key column 'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}. m.problems() "
+        "counts the withheld rows by cause and symbol."
+    )
+    (withheld,) = problems_of(feed_session, dh_to_pylist, ProblemCause.UNREADABLE_KEYS)
+    assert (withheld["Symbol"], withheld["Rows"]) == ("AAPL", 2)
+
+
+def test_a_poll_whose_only_symbol_has_a_null_poll_key_in_every_row_fails(
     *, feed_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToPylist
 ) -> None:
-    # A problem of every row the cycle read fails the table, whatever the policy.
+    # Every symbol of the first cycle failed, so the table fails, whatever the policy.
     fake_rest.reply(PATH, Reply(envelope([NULL_ID, NULL_ID])))
     q = build_query(
         feed_session._core, FEED, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02"
@@ -2985,12 +3021,54 @@ def test_a_cycle_whose_every_row_has_a_null_poll_key_fails_the_table(
     (row,) = streams_of(feed_session, dh_to_pylist)
     assert row["State"] == "FAILED"
     assert row["Error"] == (
-        "stocks.dividends poll(): every one of the 2 rows Massive sent this cycle has a null "
-        "key column, so the library withheld them all. Row 0 of the cycle has a null key "
-        "column 'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}. m.problems() counts the withheld "
-        "rows by cause and symbol."
+        "stocks.dividends: Massive sent 2 rows for AAPL from GET /stocks/v1/dividends, and the "
+        "library could read none of them whole, so it withheld them all. Row 0 of the cycle "
+        "has a null key column 'Id': {'Symbol': 'AAPL', 'Currency': 'USD'}. m.problems() "
+        "counts the withheld rows by cause and symbol."
     )
     assert row["RowsPublished"] == 0
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_a_cycle_of_one_table_whose_every_row_has_a_null_poll_key_fails_it(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    count: int,
+) -> None:
+    # A poll of ALL has one table: a problem of every row the cycle read fails it.
+    script.rows(*[("AAPL", float("nan"))] * count)
+    table = open_poll(
+        massive_session._core,
+        spec=dataclasses.replace(DIVIDENDS, poll_keys=("CashAmount",)),
+        request=Request(symbols=dm.ALL),
+        interval=timedelta(seconds=60),
+        mode=PollMode.APPEND,
+        query="<Query test>",
+        read=script,
+        pollers=pollers,
+        host="api.massive.com",
+        path=PATH,
+        recency=None,
+        clock=clock,
+        stop=threading.Event(),
+    )
+    until(lambda: is_failed(table))
+    (row,) = streams_of(massive_session, dh_to_pylist)
+    sent = (
+        "the 1 row Massive sent this cycle has a null key column, so the library withheld it"
+        if count == 1
+        else "every one of the 2 rows Massive sent this cycle has a null key column, so the "
+        "library withheld them all"
+    )
+    assert row["Error"] == (
+        f"stocks.dividends poll(): {sent}. Row 0 of the cycle has a null key column "
+        "'CashAmount': {'Symbol': 'AAPL', 'CashAmount': nan}. m.problems() counts the withheld "
+        "rows by cause and symbol."
+    )
 
 
 @pytest.mark.parametrize("mode", list(PollMode))
