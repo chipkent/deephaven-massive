@@ -5979,6 +5979,75 @@ def test_a_poll_cycle_judges_each_value_alone(
     assert read.fatal is None
 
 
+def _unrequested(
+    events: Sequence[ProblemEvent],
+) -> list[tuple[str | None, str | None, int, str]]:
+    return [
+        (e.symbol, e.field, e.rows, e.detail)
+        for e in events
+        if e.cause is ProblemCause.UNREQUESTED_SYMBOLS
+    ]
+
+
+_NQ_IN_ES = (
+    "NQ",
+    "ProductCode",
+    1,
+    (
+        "Massive answered the request for ES with rows of NQ, which the read did not ask for, "
+        "so they are left out"
+    ),
+)
+
+
+def test_a_poll_cycle_of_product_codes_leaves_out_a_row_of_an_unasked_code(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each row goes to the code it names: NQ's row in ES's answer is no row of ES, and the
+    # table did not ask for NQ, so it is withheld as an unrequested_symbols problem.
+    events = record_problems(rest_session, monkeypatch)
+    es = {"product_code": "ES", "name": "E-mini S&P 500"}
+    fake_rest.reply("/futures/v1/products", Reply(envelope([es, {"product_code": "NQ"}])))
+    read = _value_cycle(rest_session, ("ES",))
+    assert read.rows.column("ProductCode").to_pylist() == ["ES"]
+    assert read.asked is not None
+    assert read.asked.to_pylist() == ["ES"]
+    assert (read.failures, read.fatal) == ({}, None)
+    assert _unrequested(events) == [_NQ_IN_ES]
+
+
+def test_a_fetch_of_product_codes_leaves_out_a_row_of_an_unasked_code(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A static fetch() of a table of codes reads each code as a poll() cycle does.
+    events = record_problems(rest_session, monkeypatch)
+    es = {"product_code": "ES", "name": "E-mini S&P 500"}
+    fake_rest.reply("/futures/v1/products", Reply(envelope([es, {"product_code": "NQ"}])))
+    codes = new_table([string_col("ProductCode", ["ES"])])
+    table = rest_session.futures.products(product_code=codes).fetch(wait=True)
+    assert dh_arrow.to_arrow(table).column("ProductCode").to_pylist() == ["ES"]
+    assert _unrequested(events) == [_NQ_IN_ES]
+
+
+def test_a_row_of_an_unasked_code_fails_its_value_under_raise(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.RAISE),
+    )
+    fake_rest.reply("/futures/v1/products", Reply(envelope([{"product_code": "NQ"}])))
+    with dm.MassiveSession(config) as m:
+        read = _value_cycle(m, ("ES",))
+    assert read.rows.num_rows == 0
+    assert isinstance(read.fatal, RowDataError)
+    assert str(read.fatal).startswith(
+        "futures.products: Massive answered the request for ES with 1 row of NQ, which the "
+        "read did not ask for, so the library left it out."
+    )
+
+
 def test_a_poll_cycle_fails_on_a_value_massive_has_no_data_for_under_raise(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

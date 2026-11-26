@@ -504,8 +504,9 @@ class FuturesNamespace(Namespace):
         close, volume, and settlement of its current session. `dm.ALL` with `product_code` reads
         every contract of those products.
 
-        A table of product codes is read value by value, each as if passed alone. A live table is
-        followed. In a static table, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A row of a
+        code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
+        live table is followed. In a static table, one failed code fails the call.
 
         Args:
             symbols: Contract tickers, a contracts table, or `dm.ALL` for every contract.
@@ -572,8 +573,9 @@ class FuturesNamespace(Namespace):
         ticker, and a combo, such as a spread, has the `Type` `combo`. The table works as `symbols`
         for `trades()`, `quotes()`, `bars()`, and `snapshots()`.
 
-        A table of product codes is read value by value, each as if passed alone. A live table is
-        followed. In a static table, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A row of a
+        code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
+        live table is followed. In a static table, one failed code fails the call.
 
         Args:
             symbols: Only these contracts; leave it out for every contract. `dm.ALL` is refused;
@@ -653,8 +655,9 @@ class FuturesNamespace(Namespace):
         currency, price quotation, and unit of measure. The dataset takes no symbols and has no
         `Symbol` column.
 
-        A table of product codes is read value by value, each as if passed alone. A live table is
-        followed. In a static table, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A row of a
+        code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
+        live table is followed. In a static table, one failed code fails the call.
 
         Args:
             product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A
@@ -753,8 +756,9 @@ class FuturesNamespace(Namespace):
         takes no `filters`, `sort`, or `order`. The dataset takes no symbols and has no `Symbol`
         column.
 
-        A table of product codes is read value by value, each as if passed alone. A live table is
-        followed. In a static table, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A row of a
+        code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
+        live table is followed. In a static table, one failed code fails the call.
 
         Args:
             product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A
@@ -811,8 +815,9 @@ class FuturesNamespace(Namespace):
         trading venue. The events cover session hours, intraday breaks, and holiday changes. The
         dataset takes no symbols and has no `Symbol` column.
 
-        A table of product codes is read value by value, each as if passed alone. A live table is
-        followed. In a static table, one failed code fails the call.
+        A table of product codes is read value by value, each as if passed alone. A row of a
+        code the table doesn't hold follows the `unrequested_symbols` cause of `on_error`. A
+        live table is followed. In a static table, one failed code fails the call.
 
         Args:
             product_code: Only this product, such as `"ES"`, or these, such as `["ES", "NQ"]`. A

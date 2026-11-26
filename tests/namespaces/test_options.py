@@ -1361,8 +1361,10 @@ def test_a_table_of_underlyings_reads_each_one_s_chain(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     for underlying in ("AAPL", "MSFT"):
-        reply = Reply(body(load_fixture, "chain.json"))
-        fake_rest.reply(f"/v3/snapshot/options/{underlying}", reply)
+        chain = load_fixture(OWNER, "chain.json").replace(
+            b'"ticker": "AAPL"', f'"ticker": "{underlying}"'.encode()
+        )
+        fake_rest.reply(f"/v3/snapshot/options/{underlying}", Reply(json.loads(chain)))
     underlyings = new_table([string_col("Symbol", ["MSFT", "AAPL"])])
     out = rows(rest_session.options.chain(underlyings).fetch(wait=True))
     assert [path for path, _ in fake_rest.get_queries()] == [
@@ -1370,6 +1372,25 @@ def test_a_table_of_underlyings_reads_each_one_s_chain(
         "/v3/snapshot/options/MSFT",
     ]
     assert len(out) == 2  # each chain's one contract
+
+
+def test_a_table_of_underlyings_leaves_out_a_chain_row_of_an_unasked_underlying(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each chain row goes to the underlying it names: AAPL's contract in MSFT's chain is no row
+    # of MSFT, and the table did not ask for AAPL, so it is withheld and listed.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    fake_rest.reply("/v3/snapshot/options/MSFT", Reply(body(load_fixture, "chain.json")))
+    underlyings = new_table([string_col("Symbol", ["MSFT"])])
+    assert rows(rest_session.options.chain(underlyings).fetch(wait=True)) == []
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNREQUESTED_SYMBOLS, "AAPL", "Underlying", 1)
+    ]
 
 
 def contract_row(ticker: str, underlying: str, cfi: str | None) -> dict[str, object]:
@@ -1394,6 +1415,62 @@ def serve_djt_contracts(server: FakeRestServer) -> None:
         "/v3/reference/options/contracts",
         Reply(body={"status": "OK", "request_id": "r", "results": results}),
     )
+
+
+def test_a_table_of_underlyings_leaves_out_the_contracts_of_an_unasked_spelling(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `I:DJT` is sent as `DJT`, and Massive answers with the stock's contracts too. The table
+    # did not ask for the stock, so its row is withheld and listed, and nothing else warns.
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    serve_djt_contracts(fake_rest)
+    underlyings = new_table([string_col("Symbol", ["I:DJT"])])
+    listed = rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    assert [(r["Symbol"], r["Underlying"]) for r in rows(listed)] == [
+        ("O:DJTW261120C00020000", "I:DJT")
+    ]
+    assert [(e.cause, e.symbol, e.field, e.rows, e.detail) for e in events] == [
+        (
+            ProblemCause.UNREQUESTED_SYMBOLS,
+            "DJT",
+            "Underlying",
+            1,
+            (
+                "Massive answered the request for I:DJT with rows of DJT, which the read did "
+                "not ask for, so they are left out"
+            ),
+        )
+    ]
+    assert warnings_of(caplog) == []
+
+
+def test_a_table_of_both_spellings_reads_them_once_and_keeps_each_set_once(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `DJT` and `I:DJT` are one value on the wire: one request reads both, and each keeps its
+    # own contracts once, with no problem and no warning.
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    serve_djt_contracts(fake_rest)
+    underlyings = new_table([string_col("Symbol", ["I:DJT", "DJT"])])
+    listed = rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    assert sorted((r["Symbol"], r["Underlying"]) for r in rows(listed)) == [
+        ("O:DJT261120C00020000", "DJT"),
+        ("O:DJTW261120C00020000", "I:DJT"),
+    ]
+    assert [query["underlying_ticker"] for _, query in fake_rest.get_queries()] == [["DJT"]]
+    assert (events, warnings_of(caplog)) == ([], [])
 
 
 def test_the_stock_s_contracts_beside_an_index_s_keep_their_underlying_and_warn_once(

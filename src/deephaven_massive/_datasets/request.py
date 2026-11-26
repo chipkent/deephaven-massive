@@ -84,6 +84,15 @@ class ValueTable:
         """Record the wrapper's identity."""
         object.__setattr__(self, "table_id", id(self.table))
 
+    @property
+    def row_column(self) -> str:
+        """The column of the dataset's rows that names the value each row is about.
+
+        `Underlying` for underlyings, `ProductCode` for product codes: each row of a value's
+        request goes to the value this column names (`symbol_reads.attribute_values`).
+        """
+        return "Underlying" if self.underlying else "ProductCode"
+
 
 @dataclass(frozen=True, slots=True)
 class Request:
@@ -123,6 +132,8 @@ class Request:
         on_error: The call's setting of every cause: its `on_error` argument, else the
             session's `MassiveConfig.on_error`, else `ErrorPolicy.DEFAULTS`
             (`resolve_policy`). Every transport the call reaches reads it.
+        value_group: The values of a value table one request reads (`for_value`), whose rows
+            the read gives to the value each names; empty for any other request.
     """
 
     symbols: NormalizedSymbols | None = None
@@ -138,22 +149,32 @@ class Request:
     limit: int | None = None
     value_table: ValueTable | None = None
     on_error: ResolvedPolicy = DEFAULT_POLICY
+    value_group: tuple[str, ...] = ()
 
-    def for_value(self, value: str) -> Request:
+    def for_value(self, value: str, *, group: tuple[str, ...] = ()) -> Request:
         """Return the request that reads one value of the value table, as if passed alone.
 
         Called only on a request with a value table.
 
         Args:
             value: One value of `value_table`, such as `"AAPL"` or `"ES"`, already checked.
+            group: The table's values Massive takes as `value`, which the request reads
+                together, such as `("DJT", "I:DJT")` for the contracts list, which sends an
+                index underlying bare; `(value,)` when left empty.
 
         Returns:
-            The request with no value table and `value` sent as its parameter, exactly the
-            request the dataset method builds for that one value.
+            The request with no value table and `value` sent as its parameter, the request the
+            dataset method builds for that one value, with the values it reads
+            (`value_group`).
         """
         parameter = required(self.value_table, "the request's value table").parameter
         params = {**dict(self.params), parameter: value}
-        return replace(self, value_table=None, params=tuple(sorted(params.items())))
+        return replace(
+            self,
+            value_table=None,
+            params=tuple(sorted(params.items())),
+            value_group=group or (value,),
+        )
 
     @property
     def static_symbols(self) -> tuple[str, ...] | AllSymbols | None:

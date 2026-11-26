@@ -979,7 +979,8 @@ class OptionsNamespace(Namespace):
 
         A table of underlyings is read value by value. A row that isn't a stock or index ticker
         follows the `noncanonical_symbols` cause of `on_error`, which skips and logs it by
-        default. A live
+        default. A contract of an underlying the table doesn't hold follows its
+        `unrequested_symbols` cause, which leaves it out and lists it in `m.problems()`. A live
         table is followed. In a static table, one failed underlying fails the call.
 
         Args:
@@ -1135,8 +1136,10 @@ class OptionsNamespace(Namespace):
         Args:
             underlying: Massive's exact ticker of the underlying, such as `"AAPL"` or `"I:SPX"`.
                 A table of stock or index tickers in a `Symbol` column lists each one's
-                contracts. With a live table, add an underlying and its contracts appear. Leave
-                it out for every underlying.
+                contracts; a contract of an underlying the table doesn't hold, such as the
+                stock `DJT`'s beside the index `I:DJT`, follows the `unrequested_symbols`
+                cause of `on_error`. With a live table, add an underlying and its contracts
+                appear. Leave it out for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
             expired: True asks Massive for expired contracts.

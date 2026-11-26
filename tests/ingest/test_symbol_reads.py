@@ -40,7 +40,7 @@ from deephaven_massive._errors import (
     UnavailableSymbolError,
     session_closed,
 )
-from deephaven_massive._ingest import rate_limits, rest
+from deephaven_massive._ingest import rate_limits, rest, symbol_reads
 from deephaven_massive._ingest.symbol_reads import (
     AttributedRows,
     RequestRows,
@@ -1505,3 +1505,27 @@ def test_a_parameter_the_path_does_not_take_fails_each_value_before_any_request(
         "symbols in a call without it."
     )
     assert fake_rest.get_queries() == []
+
+
+@pytest.mark.parametrize(
+    ("spec", "value", "sent"),
+    [
+        (futures.PRODUCTS, None, None),  # a row that names no value
+        (futures.PRODUCTS, "NQ", "NQ"),
+        (options.CONTRACTS, "I:DJT", "DJT"),  # the contracts list writes an index bare
+    ],
+)
+def test_a_value_row_is_named_as_massive_sent_it(
+    spec: DatasetSpec, value: str | None, sent: str | None
+) -> None:
+    assert symbol_reads._sent_value(spec, value) == sent
+
+
+def test_an_index_prefix_no_case_handles_is_refused() -> None:
+    # A dataset refuses such a prefix when it is built, so a stand-in carries it.
+    unplanned = SimpleNamespace(index_prefix="SOMEHOW")
+    with pytest.raises(AssertionError):
+        symbol_reads._sent_value(
+            unplanned,  # type: ignore[arg-type]  # the point: a prefix no case names is refused
+            "I:DJT",
+        )

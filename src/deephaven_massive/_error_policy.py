@@ -137,9 +137,12 @@ class ErrorPolicy:
             symbol of the watchlist, so it is left out, whatever the watchlist's size, and
             `m.problems()` lists it with its symbol and count. On a dataset whose rows list
             their tickers, such as `m.partners.benzinga.news()`, a row that lists none of the
-            tickers the call named is left out the same way, in a plain `fetch()` too. Set
-            `dm.OnError.RAISE` to fail the symbols whose request got such a row, or the
-            plain `fetch()` that did.
+            tickers the call named is left out the same way, in a plain `fetch()` too. A
+            table of underlyings or product codes, such as `m.options.contracts(t)`, gives
+            each row to the value it names: a table of `I:DJT` leaves out the stock `DJT`'s
+            contracts, and a table of both keeps each one's once. Set `dm.OnError.RAISE` to
+            fail the symbols or values whose request got such a row, or the plain `fetch()`
+            that did.
         unreadable_keys: Decides whether a row of Massive's data whose key the library can't
             read fails the table; the row is left out either way. Defaults to `LOG`.
 

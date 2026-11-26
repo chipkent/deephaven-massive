@@ -32,10 +32,14 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   (`history_reads.read_history_by_symbol`): its rows are split by `Symbol`
   (`split_by_symbol`) under the same rule, and its failure is every symbol's; the days its
   files lack are read from REST symbol by symbol.
-- **Reads by value** (`read_rest_by_value`): a table passed where a dataset takes one value (an
-  option chain's underlying, a futures product code) is read value by value, each with the
-  requests `fetch()` makes for that value alone, so every row belongs to the value whose
-  request returned it, and one value's failure fails only that value.
+- **Reads by value** (`read_rest_by_value`, `RestReader.read_by_value`): a table passed where
+  a dataset takes one value (an option chain's underlying, a futures product code) is read
+  value by value, each with the requests `fetch()` makes for that value alone, and the values
+  Massive takes as one (`DJT` and `I:DJT` on the contracts list) by one request
+  (`value_groups`). Each row goes to the value its `ValueTable.row_column` names, and a row of
+  any other value is the read's `unrequested_symbols` problem (`attribute_values`), the rule
+  of a read by symbol. One value's failure fails only that value. A static or followed
+  `fetch()` reads them as a `poll()` cycle does.
 - **Classes of failure** (the error's `is_retryable`): retryable when the cause may pass (a
   rate limit beyond the read's patience, a server error after the client's retries, a network
   failure, a symbol's later page that answered HTTP 404); otherwise the same read would fail
@@ -81,7 +85,7 @@ from deephaven import arrow as dh_arrow
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.source_columns import key_column
 from deephaven_massive._datasets.wire_symbols import contracts_underlying
-from deephaven_massive._enums import OnError
+from deephaven_massive._enums import IndexPrefix, OnError
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     AuthenticationError,
@@ -99,6 +103,7 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._ingest.crypto_tickers import recording_split
 from deephaven_massive._ingest.rest_requests import (
+    BARE_INDEX_PARAM,
     capped_call,
     caps_each_symbol,
     fetch_paths,
@@ -111,7 +116,6 @@ from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
-from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.symbol_retry import is_symbol_refusal
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive._tables.withheld import SYMBOL_SENT, Withheld
@@ -131,6 +135,7 @@ if TYPE_CHECKING:
     from deephaven_massive._ingest.rest import RestReader
     from deephaven_massive._ingest.rest_requests import Call, CryptoSplit
     from deephaven_massive._massive import Cancel, DriftReport, Patience, RestPath
+    from deephaven_massive._tables.read_tally import ReadTally
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import SymbolOutcome
 
@@ -141,8 +146,10 @@ __all__ = [
     "RestUnit",
     "SymbolListRead",
     "UnsupportedParameterError",
+    "ValueRead",
     "asked_column",
     "attribute_units",
+    "attribute_values",
     "fails_call",
     "fails_followed_read",
     "fetch_units",
@@ -153,6 +160,7 @@ __all__ = [
     "split_by_symbol",
     "split_failures",
     "symbol_outcomes",
+    "value_groups",
 ]
 
 logger = logging.getLogger(__name__)
@@ -858,6 +866,121 @@ def _with_skipped(
     return outcomes
 
 
+class ValueRead(NamedTuple):
+    """A read of a value table's values (`RestReader.read_by_value`).
+
+    Attributes:
+        pieces: The rows of each value that did not fail, in value order; a value Massive
+            had no data for has none.
+        requests: How many requests the read made.
+        left_out: What the reads left out, each with why, such as `"NQ (HTTP 404 from GET
+            /futures/v1/products?product_code=NQ)"`.
+        failures: The error of each value that failed, but for those in `unread`.
+        unread: The failure of each value whose request got rows and whose every row the
+            library withheld (`ReadTally.failure`), which fails the value alone whatever the
+            policy, so never the call.
+    """
+
+    pieces: dict[str, pa.Table]
+    requests: int
+    left_out: tuple[str, ...]
+    failures: dict[str, MassiveError]
+    unread: dict[str, MassiveError]
+
+
+def value_groups(request: Request, values: Sequence[str]) -> list[tuple[str, ...]]:
+    """Group a value table's values by the value each is sent as, one request per group.
+
+    The contracts list takes an index underlying bare (`BARE_INDEX_PARAM`), so `DJT` and
+    `I:DJT` are one value on the wire, and Massive answers it with the contracts of both: one
+    request reads them together and gives each its own rows (`attribute_values`), so a table
+    that names both keeps each set once. Every other value is sent as written, alone.
+
+    Args:
+        request: The normalized arguments, with a value table.
+        values: The values, each once.
+
+    Returns:
+        The groups, in the order of each group's first value.
+    """
+    parameter = required(request.value_table, "the request's value table").parameter
+    groups: dict[str, list[str]] = {}
+    for value in values:
+        sent = contracts_underlying(value) if parameter == BARE_INDEX_PARAM else value
+        groups.setdefault(sent, []).append(value)
+    return [tuple(group) for group in groups.values()]
+
+
+def attribute_values(
+    reader: RestReader,
+    spec: DatasetSpec,
+    rows: pa.Table,
+    *,
+    column: str,
+    own: tuple[str, ...],
+    template: str,
+) -> tuple[dict[str, pa.Table], RowDataError | None]:
+    """Give one value request's rows to the values it read, and report the rows of any other.
+
+    The rule `_attribute` applies to a request of symbols: each row goes to the value its
+    `column` names (`ValueTable.row_column`), and a row naming a value the request did not
+    read, or none, is left out as the read's `unrequested_symbols` problem
+    (`_report_unrequested`), by the value as Massive sent it.
+
+    Args:
+        reader: The reader, whose policy and problem sink the read uses.
+        spec: The dataset.
+        rows: The request's rows, in the dataset's schema.
+        column: The column of the rows that names their value.
+        own: The values the request read (`Request.value_group`).
+        template: The request's path, for the events.
+
+    Returns:
+        Each value's rows, and the failure of the request's values when a row was left out
+        under `unrequested_symbols=RAISE` (None otherwise).
+    """
+    named = rows[column]
+    pieces: dict[str, pa.Table] = {}
+    for value in own:
+        mine = pc.equal(named, value)
+        # As in `_attribute`: no copy of rows that are every one the value's.
+        every = pc.all(mine, skip_nulls=False).as_py()
+        pieces[value] = rows if every else rows.filter(mine)
+    asked = pc.fill_null(pc.is_in(named, value_set=pa.array(own, pa.string())), fill_value=False)
+    others = Counter(
+        (_sent_value(spec, value), value)
+        for value in pc.filter(named, pc.invert(asked)).to_pylist()
+    )
+    if not others:
+        return pieces, None
+    return pieces, _report_unrequested(
+        reader, spec, others, own=own, column=column, template=template
+    )
+
+
+def _sent_value(spec: DatasetSpec, value: str | None) -> str | None:
+    """Return a row's value as Massive sent it, from the spelling the table gives it.
+
+    Args:
+        spec: The dataset.
+        value: The row's value in the table, or None.
+
+    Returns:
+        The value as the table spells it when Massive writes an index with its `I:`
+        (`IndexPrefix.NONE`); otherwise the bare ticker Massive wrote, to which the library
+        gave the `I:` of an index (`I:DJT` was sent as `DJT`).
+    """
+    if value is None:
+        return None
+    match spec.index_prefix:
+        case IndexPrefix.NONE:
+            return value
+        case IndexPrefix.FROM_CFI | IndexPrefix.BY_ROOT | IndexPrefix.BY_UNDERLYING:
+            return contracts_underlying(value)
+        case _:
+            assert_never(spec.index_prefix)
+
+
 def read_rest_by_value(
     reader: RestReader,
     core: SessionCore,
@@ -869,16 +992,14 @@ def read_rest_by_value(
     cancel: Cancel | None,
     to_table: Callable[[pa.Table], Table],
 ) -> dict[str, SymbolOutcome]:
-    """Read `fetch()` for each value of a value table, one value after another.
+    """Read `fetch()` for each value of a value table, as a `poll()` cycle of the values reads them.
 
-    Each value is read with the requests `fetch()` makes when that value is passed alone
-    (`Request.for_value`, `RestReader.read_fetch`), so all of a request's rows belong to its
-    value and `Request.limit` caps each value's requests as it would that call's. A value whose
-    read fails gets its own failure; a parameter its path does not take fails it with
-    `UnsupportedParameterError`. A rejected API key stops the read, since every value would
-    be refused. Each value's rows count in a tally of its own (`ReadTally.failure`), since
-    every row of its requests is its own: a value that got rows and whose every row the
-    library withheld fails, and the other values are untouched.
+    The values are read by `RestReader.read_by_value`, as a `poll()` cycle reads them: each
+    with the requests `fetch()` makes for that value alone (`RestReader.read_fetch`), the
+    values Massive takes as one value read together (`value_groups`), each row given to the
+    value it names (`attribute_values`), and one value's failure its own. A parameter its path
+    does not take fails a value with `UnsupportedParameterError`. A value Massive has no data
+    for gets an empty table.
 
     Args:
         reader: The reader of the session's paths.
@@ -893,39 +1014,42 @@ def read_rest_by_value(
     Returns:
         Each value, in the order given, with its outcome.
 
-    Errors are those of `symbol_outcomes`.
+    Errors are those of `RestReader.read_by_value` and `symbol_outcomes`.
     """
     ordered = _ordered(values)
     pauses = holds_update_graph_lock(core.exec_ctx)
-    tables: dict[str, Table] = {}
-    failures: dict[str, MassiveError] = {}
-    for value in ordered:
-        tally = ReadTally()
+
+    def read_one(one: Request, tally: ReadTally) -> tuple[pa.Table, int, tuple[str, ...]]:
         try:
             rows, requests = reader.read_fetch(
                 spec,
-                request.for_value(value),
+                one,
                 symbols=request.static_symbols,
                 cancel=cancel,
                 pauses_live_tables=pauses,
                 tally=tally,
             )
-        except MassiveError as error:
-            failures[value] = error
-            if isinstance(error, AuthenticationError):
-                break  # every later value would be refused too
-            continue
         except ValueError as error:
-            failures.update(_refused((value,), error))
-            continue
-        logger.debug(
-            "call %d %s by value: %s read in %d requests", call, spec.name, value, requests
-        )
-        withheld = tally.failure(spec.name, whose=f"Massive sent for {value}")
-        if withheld is not None:
-            failures[value] = withheld
-            continue
-        tables[value] = to_table(rows)
+            raise _refused(one.value_group, error)[one.value_group[0]] from error
+        return rows, requests, ()
+
+    read = reader.read_by_value(
+        spec, request, ordered, read=read_one, fails_read=fails_followed_read
+    )
+    logger.debug(
+        "call %d %s by value: %d values in %d requests",
+        call,
+        spec.name,
+        len(ordered),
+        read.requests,
+    )
+    empty = core.dataset_schema(spec).arrow_schema().empty_table()
+    failures = {**read.failures, **read.unread}
+    tables = {
+        value: to_table(read.pieces.get(value, empty))  # a value with no data has no rows
+        for value in ordered
+        if value not in failures
+    }
     return symbol_outcomes(
         core,
         spec,

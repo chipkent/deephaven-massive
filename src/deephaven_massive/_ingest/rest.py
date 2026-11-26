@@ -220,7 +220,9 @@ from deephaven_massive._ingest.symbol_reads import (
     ReadEach,
     RequestRows,
     RestUnit,
+    ValueRead,
     asked_column,
+    attribute_values,
     fails_followed_read,
     fetch_units,
     history_units,
@@ -228,6 +230,7 @@ from deephaven_massive._ingest.symbol_reads import (
     read_rest_by_value,
     read_symbol_list,
     split_failures,
+    value_groups,
 )
 from deephaven_massive._log_limits import bounded_list, counted, log_once, prose_list
 from deephaven_massive._massive import (
@@ -414,9 +417,13 @@ def _other_spellings(request: Request) -> dict[str, _OtherSpelling]:
     Returns:
         For each ticker in `BARE_INDEX_PARAM` or `BARE_INDEX_LIST_PARAM`, the other ticker the
         wire spells the same (`I:DJT` for `DJT`, `DJT` for `I:DJT`), keyed by that other
-        ticker, unless the call asked for it too; empty for any other call. Only a bare ticker
-        and its `I:` form spell alike, so two asked tickers never share a key.
+        ticker, unless the call asked for it too; empty for any other call, and for a read of
+        a value table's values, which gives each row to the value it names and reports the
+        rows of any other as `unrequested_symbols` (`symbol_reads.attribute_values`). Only a
+        bare ticker and its `I:` form spell alike, so two asked tickers never share a key.
     """
+    if request.value_group:
+        return {}
     params = dict(request.params)
     asked: dict[str, str] = {}
     one = params.get(BARE_INDEX_PARAM)
@@ -2805,17 +2812,11 @@ class RestReader:
         cancel: Cancel,
         patience: Patience,
     ) -> poll.CycleRows:
-        """Read a cycle of values one after another, each value's failure its own.
+        """Read a cycle of values, as a static `fetch()` of them reads them (`read_by_value`).
 
-        Each value is read as if passed alone (`Request.for_value`), so every row of its requests is
-        its own, and its rows count in a tally of its own: a value that got rows and whose every row
-        the library withheld fails on its own (`ReadTally.failure`), whatever its policy. A value
-        Massive answers with HTTP 404 follows `ErrorPolicy.unavailable_symbols`, as a symbol does:
-        under `LOG` and `IGNORE` it is left out of the cycle and named in its `left_out`. Any other
-        failure of a value's read is the value's (one whose cause is set to `RAISE` is also returned
-        as `CycleRows.fatal`, which fails the table), but for a failure of the whole read
-        (`fails_followed_read`), a refusal of the feed (`FeedRefusalError`), and any failure once
-        the poller is stopped, which raise.
+        A refusal of the feed (`FeedRefusalError`) and any failure once the poller is stopped
+        raise, besides a failure of the whole read; a value whose failure's cause is set to
+        `RAISE` is also returned as `CycleRows.fatal`, which fails the table.
 
         Args:
             spec: The dataset.
@@ -2834,47 +2835,124 @@ class RestReader:
             MassiveError: A failure of a value's read that fails the whole read, as
                 `_read_one_cycle` raises it.
         """
-        reads: list[tuple[str, poll.CycleRows]] = []
-        absent: list[str] = []
-        failed: dict[str, MassiveError] = {}
-        withheld: dict[str, MassiveError] = {}
-        for value in values:
-            tally = ReadTally()
-            try:
-                one = read(request.for_value(value), tally=tally)
-            except MassiveError as error:
-                if fails_followed_read(error) or isinstance(error, FeedRefusalError):
-                    raise
-                if self.state.closed or cancel.is_set():
-                    raise
-                if error.status != HTTPStatus.NOT_FOUND:
-                    failed[value] = error
-                    continue
-                found = _Missing(
-                    value, f"(HTTP 404 from GET {self._value_target(spec, request, value)})"
-                )
-                self._report_missing(spec, [found])
-                absent.append(str(found))
-                continue
-            unread = tally.failure(spec.name, whose=f"Massive sent for {value}")
-            if unread is not None:
-                withheld[value] = unread
-                continue
-            reads.append((value, one))
+
+        def read_one(one: Request, tally: ReadTally) -> tuple[pa.Table, int, tuple[str, ...]]:
+            cycle = read(one, tally=tally)
+            return cycle.rows, cycle.requests, cycle.left_out
+
+        def fails_cycle(error: MassiveError) -> bool:
+            return (
+                fails_followed_read(error)
+                or isinstance(error, FeedRefusalError)
+                or self.state.closed
+                or cancel.is_set()
+            )
+
+        got = self.read_by_value(spec, request, values, read=read_one, fails_read=fails_cycle)
         schema = self.catalog.dataset_schema(spec).arrow_schema()
-        failures, fatal = split_failures(failed, values, self.policy)
+        failures, fatal = split_failures(got.failures, values, self.policy)
+        pieces = [(value, got.pieces[value]) for value in values if value in got.pieces]
         return poll.CycleRows(
-            pa.concat_tables([one.rows for _, one in reads]) if reads else schema.empty_table(),
-            sum(one.requests for _, one in reads),
+            pa.concat_tables([rows for _, rows in pieces]) if pieces else schema.empty_table(),
+            got.requests,
             patience.seconds,
-            (*(name for _, one in reads for name in one.left_out), *absent),
+            got.left_out,
             asked=pa.chunked_array(
-                [pa.array([value] * one.rows.num_rows, pa.string()) for value, one in reads],
+                [pa.array([value] * rows.num_rows, pa.string()) for value, rows in pieces],
                 pa.string(),
             ),
-            failures={**failures, **withheld},
+            failures={**failures, **got.unread},
             fatal=fatal,
         )
+
+    def read_by_value(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        values: Sequence[str],
+        *,
+        read: Callable[[Request, ReadTally], tuple[pa.Table, int, tuple[str, ...]]],
+        fails_read: Callable[[MassiveError], bool],
+    ) -> ValueRead:
+        """Read each value of a value table on its own, for a `fetch()` or a `poll()` cycle.
+
+        The values Massive takes as one value are read by one request (`value_groups`), as if
+        passed alone (`Request.for_value`), and each row goes to the value it names
+        (`attribute_values`): a row of a value the request did not read is an
+        `unrequested_symbols` problem. Each request's rows count in a tally of their own: a
+        request that got rows and whose every row the library withheld fails its values on
+        their own (`ReadTally.failure`), whatever the policy. A value Massive answers with
+        HTTP 404 follows `ErrorPolicy.unavailable_symbols`, as a symbol does (`_report_missing`):
+        under `LOG` and `IGNORE` it gets no rows and is named in `left_out`. Any other failure
+        is its values' own, but for one `fails_read` names, which raises.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with a value table.
+            values: The values, each once, in the order to read them.
+            read: Reads one request (`Request.for_value`) into its rows, its request count,
+                and what it left out, counting its rows in the tally given.
+            fails_read: Whether a value's failure fails the whole read instead.
+
+        Returns:
+            Each value's rows, the requests, what the reads left out, and each failed value,
+            those whose every row was withheld apart (`ValueRead.unread`).
+
+        Raises:
+            MassiveError: A failure `fails_read` names, as `read` raises it.
+            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a value Massive has
+                no data for (`_report_missing`).
+        """
+        column = required(request.value_table, "the request's value table").row_column
+        template = required(spec.fetch_path, f"{spec.name}'s fetch path")
+        pieces: dict[str, pa.Table] = {}
+        requests = 0
+        left_out: list[str] = []
+        failed: dict[str, MassiveError] = {}
+        unread: dict[str, MassiveError] = {}
+        for group in value_groups(request, values):
+            tally = ReadTally()
+            try:
+                rows, sent, skipped = read(request.for_value(group[0], group=group), tally)
+            except MassiveError as error:
+                if fails_read(error):
+                    raise
+                if error.status != HTTPStatus.NOT_FOUND:
+                    failed.update(dict.fromkeys(group, error))
+                    continue
+                found = [
+                    _Missing(
+                        value, f"(HTTP 404 from GET {self._value_target(spec, request, value)})"
+                    )
+                    for value in group
+                ]
+                self._report_missing(spec, found)
+                left_out.extend(str(one) for one in found)
+                continue
+            requests += sent
+            left_out.extend(skipped)
+            withheld = tally.failure(
+                spec.name, whose=f"Massive sent for {prose_list(group, 'values')}"
+            )
+            if withheld is not None:
+                unread.update(dict.fromkeys(group, withheld))
+                continue
+            own, unrequested = attribute_values(
+                self, spec, rows, column=column, own=group, template=template
+            )
+            if unrequested is not None:
+                failed.update(dict.fromkeys(group, unrequested))
+                continue
+            pieces.update(own)
+        logger.debug(
+            "%s by value: %d values in %d requests; failed: %s; left out: %s",
+            spec.name,
+            len(values),
+            requests,
+            bounded_list([*failed, *unread]) if failed or unread else "none",
+            bounded_list(left_out) if left_out else "none",
+        )
+        return ValueRead(pieces, requests, tuple(left_out), failed, unread)
 
     def _read_one_cycle(
         self,

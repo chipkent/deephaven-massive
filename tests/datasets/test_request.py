@@ -51,5 +51,5 @@ def test_a_value_table_compares_by_its_wrapper_and_sends_each_value_alone(
     request = Request(params=(("date", "2026-11-02"),), limit=5, value_table=values)
     # One value is the request the method builds for it alone, its parameter in name order.
     assert request.for_value("ES") == Request(
-        params=(("date", "2026-11-02"), ("product_code", "ES")), limit=5
+        params=(("date", "2026-11-02"), ("product_code", "ES")), limit=5, value_group=("ES",)
     )
