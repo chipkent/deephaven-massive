@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.symbol_retry import SPAN_CAUSES
 
@@ -84,7 +85,14 @@ class SymbolSpans:
 
         Returns:
             The changed snapshots, in the order of `SPAN_CAUSES`.
+
+        Raises:
+            BrokenGuaranteeError: `held` names a cause that is not a span cause, whose symbols
+                would otherwise go unlisted.
         """
+        unknown = held.keys() - self._trackers.keys()
+        if unknown:
+            raise BrokenGuaranteeError(f"no span of a symbol's failure has the cause {unknown}")
         changed = (
             tracker.update(
                 {

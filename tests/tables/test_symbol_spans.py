@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from deephaven_massive._enums import OnError
+from deephaven_massive._errors import BrokenGuaranteeError
 from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive._tables.symbol_spans import SymbolSpans
 
@@ -43,3 +46,8 @@ def test_only_a_changed_cause_is_returned_and_a_cause_left_out_ends_its_spans() 
     assert tracked.update({REFUSED: {"XYZ": "refused"}, FAILED: {"ABC": "broken"}}, at=2) == ()
     (ended,) = tracked.update({REFUSED: {"XYZ": "refused"}}, at=3)
     assert (ended.cause, dict(ended.spans), ended.at) == (FAILED, {}, 3)
+
+
+def test_a_cause_that_is_no_span_cause_is_a_defect() -> None:
+    with pytest.raises(BrokenGuaranteeError, match="unreadable_keys"):
+        spans().update({ProblemCause.UNREADABLE_KEYS: {"XYZ": "bad"}})

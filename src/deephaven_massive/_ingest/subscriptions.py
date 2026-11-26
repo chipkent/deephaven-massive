@@ -584,13 +584,15 @@ class Subscriptions:
         the one topic on the connection that awaits an answer, with no topic in `NO_ACK` and no
         re-send round outstanding; and to the step in flight of several topics, marked for its
         search at the step's timeout (`_judge_step`). The search refuses only a part that draws
-        a refusal of its own, so the step is marked even while older topics are in `NO_ACK`: a
-        late refusal of one of them makes the search find nothing, and waiting for them instead
-        would leave the step's refused topics re-sent for as long as an older one goes
-        unanswered. Any other refusal is logged at INFO and fails nothing: a late answer to an
-        old topic could otherwise refuse a healthy one. The unanswered topics keep their notes,
-        and a stream with rows still fails at `max_outage` after a reconnect, so nothing stale
-        goes unmarked.
+        a refusal of its own, so the step is marked even while older topics are in `NO_ACK`:
+        waiting for them instead would leave the step's refused topics re-sent for as long as an
+        older one goes unanswered. A late refusal of an older topic that lands between parts
+        makes the search find nothing; one that lands while a part awaits its answer refuses
+        that part, a risk Massive's answers in order and within the timeout keep small. Any
+        other refusal is logged at INFO and fails nothing: a late answer to an old topic could
+        otherwise refuse a healthy one. The unanswered topics keep their notes, and a stream
+        with rows still fails at `max_outage` after a reconnect, so nothing stale goes
+        unmarked.
 
         A wanted topic with a space, such as a futures combo's `T.CL:BF Q6-U6-V6`, is never one
         word of the message, so it counts as named when the message holds it whole and no
