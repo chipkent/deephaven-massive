@@ -8,7 +8,13 @@ import pytest
 
 import deephaven_massive as dm
 from deephaven_massive._error_policy import DEFAULT_POLICY
-from deephaven_massive._errors import FeedRefusalError, RowDataError, UnavailableSymbolError
+from deephaven_massive._errors import (
+    FeedRefusalError,
+    RowDataError,
+    UnavailableSymbolError,
+    WithheldSymbolError,
+)
+from deephaven_massive._massive import RowFault
 from deephaven_massive._tables.call_failure import call_failure, fails_call
 
 _REFUSAL = (
@@ -30,10 +36,36 @@ def test_a_refused_symbol_fails_the_call_only_under_raise(
     assert fails_call(dm.EntitlementError(_REFUSAL, status=403), policy) is fails
 
 
-def test_an_error_raised_only_under_raise_always_fails_the_call() -> None:
-    # Each is raised only when its cause is set to RAISE, so it fails the call whatever it holds.
-    for error in (UnavailableSymbolError("no data"), RowDataError("withheld")):
-        assert fails_call(error, DEFAULT_POLICY)
+def test_a_row_error_made_only_under_raise_always_fails_the_call() -> None:
+    # A withheld or unrequested row's RowDataError is made only when its cause is RAISE.
+    assert fails_call(RowDataError("withheld"), DEFAULT_POLICY)
+
+
+@pytest.mark.parametrize(
+    ("setting", "fails"),
+    [(dm.OnError.RAISE, True), (dm.OnError.LOG, False), (dm.OnError.IGNORE, False)],
+)
+def test_a_symbol_massive_has_no_data_for_fails_the_call_only_under_raise(
+    setting: dm.OnError, fails: bool
+) -> None:
+    policy = dataclasses.replace(DEFAULT_POLICY, unavailable_symbols=setting)
+    assert fails_call(UnavailableSymbolError("no data"), policy) is fails
+
+
+@pytest.mark.parametrize(
+    ("setting", "fails"),
+    [(dm.OnError.RAISE, True), (dm.OnError.LOG, False), (dm.OnError.IGNORE, False)],
+)
+def test_a_symbol_whose_rows_were_all_withheld_fails_the_call_only_when_a_cause_raises(
+    setting: dm.OnError, fails: bool
+) -> None:
+    # Made whatever the read's policy, it is judged by the setting of each of its rows' causes.
+    error = WithheldSymbolError(
+        "withheld", faults=(RowFault.UNREADABLE_KEYS, RowFault.UNCONVERTIBLE_VALUES)
+    )
+    policy = dataclasses.replace(DEFAULT_POLICY, unconvertible_values=setting)
+    assert fails_call(error, policy) is fails
+    assert (call_failure("AAPL", error, policy) is error) is fails
 
 
 def test_a_failure_of_its_own_and_a_feed_refusal_never_fail_the_call_here() -> None:
@@ -60,4 +92,5 @@ def test_the_call_fails_with_a_refusal_that_names_the_setting_that_reads_the_oth
     assert raised.status == 403
     assert call_failure("AAPL", refusal, DEFAULT_POLICY) is None
     unavailable = UnavailableSymbolError("no data")
-    assert call_failure("AAPL", unavailable, DEFAULT_POLICY) is unavailable
+    strict = dataclasses.replace(DEFAULT_POLICY, unavailable_symbols=dm.OnError.RAISE)
+    assert call_failure("AAPL", unavailable, strict) is unavailable

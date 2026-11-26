@@ -1260,8 +1260,10 @@ class FollowCoordinator:
         symbol.next_attempt_at = None
         first = symbol.cause not in result.warned
         result.warned.add(symbol.cause)
-        mark_failure_logged(error)
         fatal = call_failure(name, error, result.read.plan.policy)
+        if fatal is not error:
+            # Logged below. A table it fails logs it in `_fail`, at WARNING, as its alarm.
+            mark_failure_logged(error)
         level = _failure_level(error, first=first, fails_table=fatal is not None)
         logger.log(
             level,

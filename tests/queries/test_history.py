@@ -1017,6 +1017,45 @@ def test_a_followed_history_reads_each_symbol_from_rest_with_its_own_outcome(
     follows(rest_session)
 
 
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.RAISE])
+def test_a_followed_history_fails_a_symbol_whose_rows_are_all_withheld_alone_unless_raise(
+    setting: dm.OnError,
+    live: Callable[..., InputTable],
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    drain: Callable[[], None],
+) -> None:
+    # Through the real REST transport: MSFT's only trade has a price the library cannot read,
+    # so it is withheld, and NVDA has one trade. Under LOG, MSFT fails alone and NVDA keeps its
+    # row; under RAISE, the table fails.
+    nanos = int(datetime(2025, 3, 3, 15, tzinfo=UTC).timestamp() * 1e9)
+    for symbol, price in (("MSFT", "x"), ("NVDA", 1.0)):
+        fake_rest.reply(
+            f"/v3/trades/{symbol}",
+            Reply(envelope([{"sip_timestamp": nanos, "price": price, "size": 10}])),
+        )
+    query = rest_session.stocks.trades(
+        live("MSFT", "NVDA"), on_error=dm.ErrorPolicy(unconvertible_values=setting)
+    )
+    result = query.history("2025-03-03", "2025-03-03", wait=False)
+    if setting is dm.OnError.RAISE:
+        until(lambda: bool(result.j_table.isFailed()))
+        follows(rest_session)
+        return
+    until(lambda: [r["Symbol"] for r in dh_to_pylist(result)] == ["NVDA"])
+
+    def states() -> dict[str, str]:
+        drain()
+        return {r["Symbol"]: r["State"] for r in dh_to_pylist(rest_session.symbol_reads())}
+
+    until(lambda: states() == {"MSFT": "FAILED", "NVDA": "DONE"})
+    assert not result.j_table.isFailed()
+    rest_session.release(result)
+    follows(rest_session)
+
+
 def test_symbol_classes_raise_a_library_defect_for_a_symbols_form_with_no_rule() -> None:
     with pytest.raises(BrokenGuaranteeError, match="has no rule for a value of type object"):
         _history._symbol_classes(object())  # type: ignore[arg-type]  # the point: refused at run time

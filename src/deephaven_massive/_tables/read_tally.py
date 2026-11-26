@@ -16,7 +16,9 @@ part.
   were its own (`add_request`, by the asked symbol each withheld row would have gone to;
   `add`, by the canonical symbol a flat file's row names). A withheld row whose symbol is not
   known could be any of its request's symbols': when that request kept no row at all, each of
-  those symbols that got no row fails. A withheld row of another symbol fails no one.
+  those symbols that got no row fails. A withheld row of another symbol fails no one. Such a
+  failure (`WithheldSymbolError`) carries the faults of its rows, so it fails the whole call
+  only when one of their causes is `RAISE` (`call_failure.fails_call`).
 """
 
 from __future__ import annotations
@@ -26,15 +28,17 @@ import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from deephaven_massive._errors import RowDataError
-from deephaven_massive._log_limits import counted, log_failure, prose_list
+from deephaven_massive._errors import RowDataError, WithheldSymbolError
+from deephaven_massive._log_limits import counted, prose_list
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive._tables.withheld import WITHHELD_LISTED, Withheld, reason_sentence
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
+    from deephaven_massive._massive import RowFault
     from deephaven_massive._tables.transports import SymbolOutcome
+    from deephaven_massive._tables.withheld import WithheldGroup
 
 __all__ = ["ReadTally"]
 
@@ -49,23 +53,25 @@ class _Withholding:
         rows: How many.
         reason: Why the first of them was withheld.
         sources: What they were read from, in the order first seen.
+        faults: Their faults, in the order first seen.
     """
 
     rows: int = 0
     reason: str = ""
     sources: dict[str, None] = field(default_factory=dict)
+    faults: dict[RowFault, None] = field(default_factory=dict)
 
-    def take(self, rows: int, reason: str, source: str) -> None:
+    def take(self, group: WithheldGroup, source: str) -> None:
         """Count withheld rows.
 
         Args:
-            rows: How many.
-            reason: Why the first of them was withheld.
+            group: The rows.
             source: What they were read from.
         """
-        self.rows += rows
-        self.reason = self.reason or reason
+        self.rows += group.rows
+        self.reason = self.reason or group.reason
         self.sources.setdefault(source, None)
+        self.faults.setdefault(group.fault, None)
 
 
 @dataclass(slots=True)
@@ -138,7 +144,7 @@ class ReadTally:
                     known = self._scan.unknown.setdefault((), _Withholding())
                 else:
                     known = self._owned.setdefault(group.symbol, _Withholding())
-                known.take(group.rows, group.reason, source)
+                known.take(group, source)
 
     def add_request(
         self,
@@ -174,10 +180,10 @@ class ReadTally:
                 self._first_reason = self._first_reason or group.reason
                 if len(found) == 1:
                     owned = self._owned.setdefault(found[0], _Withholding())
-                    owned.take(group.rows, group.reason, source)
+                    owned.take(group, source)
                 else:
                     unknown = request.unknown.setdefault(found, _Withholding())
-                    unknown.take(group.rows, group.reason, source)
+                    unknown.take(group, source)
             self._asked += asked
             if asked:
                 self._sources.setdefault(source, None)
@@ -212,7 +218,7 @@ class ReadTally:
         )
         if not asked or withheld < asked:
             return None
-        return _failure(dataset, _Withholding(asked, first, sources), whose=whose)
+        return RowDataError(_message(dataset, _Withholding(asked, first, sources), whose=whose))
 
     def check(self, dataset: str) -> None:
         """Fail a read of one table if the library could read none of its rows whole.
@@ -257,7 +263,7 @@ class ReadTally:
 
     def unread_symbols(
         self, dataset: str, empty: Sequence[str], everyone: Sequence[str]
-    ) -> dict[str, RowDataError]:
+    ) -> dict[str, WithheldSymbolError]:
         """Return the failure of each symbol that got no row and whose rows were withheld.
 
         Args:
@@ -269,26 +275,25 @@ class ReadTally:
             Each such symbol's failure (`symbol_failure`), in the order of `empty`; a symbol
             with no withheld row of its own, such as one Massive had no data for, has none.
         """
-        failed: dict[str, RowDataError] = {}
+        failed: dict[str, WithheldSymbolError] = {}
         for symbol in empty:
             failure = self.symbol_failure(dataset, symbol, everyone)
             if failure is None:
                 continue
-            log_failure(
-                logger,
-                failure,
+            # At DEBUG and not marked logged: the call's own record of the symbol, or of the
+            # table it fails, is the one a user sees.
+            logger.debug(
                 "%s by symbol fails %s: %s",
                 dataset,
                 symbol,
-                expected=logging.DEBUG,
-                named=dataset,
+                str(failure).removeprefix(f"{dataset}: "),
             )
             failed[symbol] = failure
         return failed
 
     def symbol_failure(
         self, dataset: str, symbol: str, everyone: Sequence[str]
-    ) -> RowDataError | None:
+    ) -> WithheldSymbolError | None:
         """Return a symbol's failure, if rows that were or could be its own were all withheld.
 
         Args:
@@ -302,7 +307,7 @@ class ReadTally:
         """
         with self._lock:
             if symbol in self._owned:
-                return _failure(dataset, self._owned[symbol], whose=f"for {symbol}")
+                return _symbol_failure(dataset, self._owned[symbol], whose=f"for {symbol}")
             for request in (*self._requests, self._scan):
                 if request.kept:
                     continue
@@ -310,12 +315,27 @@ class ReadTally:
                     named = could or tuple(everyone)
                     if symbol in named:
                         whose = f"for {prose_list(named, 'symbols')}"
-                        return _failure(dataset, withholding, whose=whose)
+                        return _symbol_failure(dataset, withholding, whose=whose)
         return None
 
 
-def _failure(dataset: str, withholding: _Withholding, *, whose: str) -> RowDataError:
-    """Return the failure of a read or symbol whose rows the library withheld every one of.
+def _symbol_failure(dataset: str, withholding: _Withholding, *, whose: str) -> WithheldSymbolError:
+    """Return the failure of a symbol whose rows the library withheld every one of.
+
+    Args:
+        dataset: The dataset.
+        withholding: The rows, their first reason and faults, and what they were read from.
+        whose: Whose rows they were, such as `"for MSFT"`.
+
+    Returns:
+        The failure, with the message `_message` gives and the rows' faults.
+    """
+    message = _message(dataset, withholding, whose=whose)
+    return WithheldSymbolError(message, faults=tuple(withholding.faults))
+
+
+def _message(dataset: str, withholding: _Withholding, *, whose: str) -> str:
+    """Return the message of a read or symbol whose rows the library withheld every one of.
 
     Args:
         dataset: The dataset.
@@ -333,7 +353,7 @@ def _failure(dataset: str, withholding: _Withholding, *, whose: str) -> RowDataE
         if rows == 1
         else "the library could read none of them whole, so it withheld them all"
     )
-    return RowDataError(
+    return (
         f"{dataset}: Massive sent {counted(rows, 'row')} {whose} from {sources}, and {read}. "
         f"{reason_sentence(withholding.reason)} {WITHHELD_LISTED}"
     )

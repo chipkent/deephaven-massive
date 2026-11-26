@@ -14,9 +14,15 @@ from typing import TYPE_CHECKING
 
 from deephaven_massive._enums import OnError
 from deephaven_massive._error_policy import policy_hint
-from deephaven_massive._errors import RowDataError, UnavailableSymbolError, copy_error
+from deephaven_massive._errors import (
+    RowDataError,
+    UnavailableSymbolError,
+    WithheldSymbolError,
+    copy_error,
+)
 from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.symbol_retry import is_symbol_refusal
+from deephaven_massive._tables.withheld import setting_of
 
 if TYPE_CHECKING:
     from deephaven_massive._error_policy import ResolvedPolicy
@@ -29,9 +35,10 @@ def fails_call(error: MassiveError, policy: ResolvedPolicy) -> bool:
     """Tell whether one symbol's failure fails its whole call or table, not only the symbol.
 
     A failure whose cause the call set to `RAISE` does: a refused symbol under
-    `refused_symbols`, a symbol Massive has no data for (`UnavailableSymbolError`, only under
-    `unavailable_symbols`), and a withheld or unrequested row (`RowDataError`, only under its
-    cause). Any other failure is the symbol's own.
+    `refused_symbols`, a symbol Massive has no data for (`UnavailableSymbolError`) under
+    `unavailable_symbols`, a withheld or unrequested row (`RowDataError`, made only under its
+    cause), and a symbol whose rows were all withheld (`WithheldSymbolError`, made under any
+    setting) when a cause of its rows is `RAISE`. Any other failure is the symbol's own.
 
     Args:
         error: A symbol's failure, as its request or its planning gave it.
@@ -40,7 +47,11 @@ def fails_call(error: MassiveError, policy: ResolvedPolicy) -> bool:
     Returns:
         True for a failure of the whole call.
     """
-    if isinstance(error, (UnavailableSymbolError, RowDataError)):
+    if isinstance(error, WithheldSymbolError):
+        return any(effect_of(setting_of(policy, fault)).fails for fault in error.faults)
+    if isinstance(error, UnavailableSymbolError):
+        return effect_of(policy.unavailable_symbols).fails
+    if isinstance(error, RowDataError):
         return True
     return is_symbol_refusal(error) and effect_of(policy.refused_symbols).fails
 
