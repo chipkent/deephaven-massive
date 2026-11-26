@@ -82,6 +82,8 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   A snapshot row that carries Massive's `error` in place of a ticker's data is left out of the
   table and fails its ticker as a request of that ticker alone would (`_answer_failures`): a
   refused ticker is a refused symbol of the read, listed and judged as one HTTP 403 refused.
+  An error row of a ticker the request did not name is an `unrequested_symbols` problem, as a
+  data row of one is (`_leave_out_unrequested_answers`).
 - **Problems.** Each page's field Massive's documentation lacks is a `schema_drift` problem,
   each withheld row an event of its cause, each symbol Massive has no data for an
   `unavailable_symbols` problem (an error row of `NOT_FOUND` included), all handed to the
@@ -1803,8 +1805,10 @@ class RestReader:
 
         The page's drift is reported (`drift_events`), its error rows set apart and logged at
         DEBUG, with an `error` value Massive does not document also recorded in the session's
-        `DriftRegistry` once per path, its `Symbol` filled from each row's ticker list where the
-        dataset has one (`_listed`), and its bars of a day or longer stamped (`_stamped`).
+        `DriftRegistry` once per path and those of a ticker the request did not name left out
+        (`_leave_out_unrequested_answers`), its `Symbol` filled from each row's ticker list
+        where the dataset has one (`_listed`), and its bars of a day or longer stamped
+        (`_stamped`).
 
         Args:
             converter: The path's conversion.
@@ -1856,6 +1860,10 @@ class RestReader:
                 frozenset(one.error for one in answers if not one.documented),
                 dataset=spec.name,
                 requested=requested,
+            )
+        if call.symbols:
+            answers = self._leave_out_unrequested_answers(
+                spec, answers, named=call.symbols, template=template
             )
         if spec.ticker_list is not None:
             batches, unlisted = self._listed(spec, batches, call.symbols)
@@ -2136,6 +2144,86 @@ class RestReader:
             f"whose {spec.ticker_list} lists no ticker asked for{only} so the library left "
             f"{'it' if total == 1 else 'them'} out. {hint}"
         )
+
+    def _leave_out_unrequested_answers(
+        self,
+        spec: DatasetSpec,
+        answers: Sequence[ErrorRow],
+        *,
+        named: Sequence[str],
+        template: str,
+    ) -> list[ErrorRow]:
+        """Keep a page's error rows of the tickers its request named, and report the others.
+
+        An error row is Massive's answer for its ticker, so one for a ticker the request did
+        not name is the read's `unrequested_symbols` problem, as a data row of such a ticker
+        is: one event per such row, by the ticker as Massive sent it, handed to the session's
+        reporter, which alarms once per table and lists it in `m.problems()`. The row is
+        never another symbol's failure or no-data answer.
+
+        Args:
+            spec: The dataset.
+            answers: The page's error rows, in the order Massive sent them.
+            named: The tickers the request named, canonical; never empty.
+            template: The path, for the events.
+
+        Returns:
+            The error rows of the named tickers.
+
+        Raises:
+            RowDataError: If a row was left out and `unrequested_symbols` is `RAISE` in the
+                read's policy: the call's failure, raised on the first such page.
+        """
+        asked = set(named)
+        others = [one for one in answers if one.ticker not in asked]
+        if not others:
+            return list(answers)
+        setting = self.policy.unrequested_symbols
+        asked_for = prose_list(named, "symbols")
+        at = time.time_ns()
+        self.problems(
+            [
+                ProblemEvent(
+                    cause=ProblemCause.UNREQUESTED_SYMBOLS,
+                    action=ProblemAction.WITHHELD,
+                    dataset=spec.name,
+                    stream_id=self.stream_id,
+                    where=f"{Transport.REST.value} GET {template}",
+                    symbol=one.ticker,
+                    field=None,
+                    rows=1,
+                    detail=f"Massive answered the request for {asked_for} with {one.answer} for "
+                    f"{one.ticker}, which the read did not ask for, so the row is left out",
+                    at=at,
+                    policy=setting,
+                )
+                for one in others
+            ]
+        )
+        logger.debug(
+            "%s: Massive answered the request for %s with error rows for %s, which it did not "
+            "name; they are left out as unrequested_symbols (%s)",
+            spec.name,
+            asked_for,
+            [one.ticker for one in others],
+            setting.value,
+        )
+        if effect_of(setting).fails:
+            [first, *rest] = others
+            what = (
+                f"{first.answer} for {first.ticker}"
+                if not rest
+                else f"error rows for {prose_list([one.ticker for one in others], 'tickers')}"
+            )
+            hint = policy_hint(
+                OnError.LOG, "unrequested_symbols", purpose="To go on without such rows"
+            )
+            raise RowDataError(
+                f"{spec.name}: Massive answered the request for {asked_for} with {what}, which "
+                f"the read did not ask for, so the library left {'it' if not rest else 'them'} "
+                f"out. {hint}"
+            )
+        return [one for one in answers if one.ticker in asked]
 
     def _check_recency(
         self,

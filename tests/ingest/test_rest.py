@@ -2303,6 +2303,81 @@ def test_error_rows_of_a_snapshot_leave_the_table_as_problems_of_their_tickers(
     ) in caplog.messages
 
 
+def test_an_error_row_of_a_ticker_the_call_did_not_name_is_an_unrequested_row(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Massive's answer for another ticker is neither a failure nor a no-data answer of an asked
+    # symbol: it is left out as any row of a ticker the call did not ask for.
+    fake_rest.reply(
+        INDEX_SNAPSHOT_PATH,
+        Reply(envelope([_SPX, _MISSING_RUT])),
+        Reply(envelope([_REFUSED_VIX, _SPX, _MISSING_RUT])),
+    )
+    hint = (
+        "To go on without such rows, pass "
+        "on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    strict = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.RAISE),
+    )
+    with dm.MassiveSession(strict) as m, pytest.raises(RowDataError) as one:
+        fetch(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    assert str(one.value) == (
+        'indices.snapshots: Massive answered the request for I:SPX with error NOT_FOUND: "Ticker '
+        'not found." for I:RUT, which the read did not ask for, so the library left it out. '
+        f"{hint}"
+    )
+    for setting in (dm.OnError.LOG, dm.OnError.RAISE):
+        config = dm.MassiveConfig(
+            api_key="test-key",
+            rest_base_url=fake_rest.url,
+            on_error=dm.ErrorPolicy(unrequested_symbols=setting),
+        )
+        with dm.MassiveSession(config) as m:
+            spans = record_spans(m, monkeypatch)
+            events = record_problems(m, monkeypatch)
+            if setting is dm.OnError.LOG:
+                out = fetch(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+                assert [r["Symbol"] for r in out] == ["I:SPX"]
+            else:
+                with pytest.raises(RowDataError) as info:
+                    fetch(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+                assert str(info.value) == (
+                    "indices.snapshots: Massive answered the request for I:SPX with error rows "
+                    f"for I:VIX and I:RUT, which the read did not ask for, so the library left "
+                    f"them out. {hint}"
+                )
+            assert spans == []
+            assert [(e.cause, e.action, e.symbol, e.rows, e.detail, e.policy) for e in events] == [
+                (
+                    ProblemCause.UNREQUESTED_SYMBOLS,
+                    ProblemAction.WITHHELD,
+                    "I:VIX",
+                    1,
+                    (
+                        'Massive answered the request for I:SPX with error NOT_ENTITLED: "Not '
+                        'entitled to this ticker." for I:VIX, which the read did not ask for, so '
+                        "the row is left out"
+                    ),
+                    setting,
+                ),
+                (
+                    ProblemCause.UNREQUESTED_SYMBOLS,
+                    ProblemAction.WITHHELD,
+                    "I:RUT",
+                    1,
+                    (
+                        'Massive answered the request for I:SPX with error NOT_FOUND: "Ticker not '
+                        'found." for I:RUT, which the read did not ask for, so the row is left out'
+                    ),
+                    setting,
+                ),
+            ]
+
+
 def test_an_error_row_of_a_whole_read_is_a_refused_symbol_of_it(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
