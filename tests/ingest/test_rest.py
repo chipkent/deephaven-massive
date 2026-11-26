@@ -73,7 +73,7 @@ from deephaven_massive._ingest import (
 from deephaven_massive._ingest.clients import SessionClients
 from deephaven_massive._ingest.crypto_tickers import LIST_KEY, NOT_LISTED, CryptoTickers
 from deephaven_massive._ingest.rate_limits import Waiter
-from deephaven_massive._ingest.rest_rows import RowConverter
+from deephaven_massive._ingest.rest_rows import ErrorRow, RowConverter
 from deephaven_massive._ingest.shared_lookup import SharedLookup
 from deephaven_massive._ingest.symbol_reads import (
     ReadEach,
@@ -2413,6 +2413,21 @@ def test_a_not_found_error_row_follows_unavailable_symbols_as_http_404_does(
         "pass on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call or to "
         "dm.MassiveConfig."
     )
+
+
+def test_an_error_row_cause_no_case_handles_is_refused(session: dm.MassiveSession) -> None:
+    unplanned = ErrorRow(
+        "I:VIX",
+        "NOT_ENTITLED",
+        "Not entitled to this ticker.",
+        ProblemCause.SYMBOL_READ_FAILED,  # type: ignore[arg-type]  # the point: a cause no case names is refused
+        documented=True,
+    )
+    outcome = rest._Outcome(
+        (), 1, Withheld(pa.table({})), "GET /v3/snapshot/indices", answers=(unplanned,)
+    )
+    with pytest.raises(AssertionError):
+        _reader(session)._answer_failures(INDEX_SNAPSHOTS, outcome)
 
 
 def test_an_error_rows_keys_are_never_drift(
