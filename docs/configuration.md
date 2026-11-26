@@ -146,43 +146,44 @@ In a `fetch()`, `history()`, `poll()`, or stream of several symbols, one symbol'
 its own. By default, the other symbols keep their rows, and `m.problems()` lists the failed one
 with its cause.
 
-The exception is a `history()` that reads Massive's flat files. It reads every symbol from the
-same files, so a failed file fails every symbol.
-[`flat_file_symbol_threshold`](#setting-details) says when a `history()` reads them.
+Symbols that share a request or a file share its failure. A `fetch()` of a list, such as
+snapshots, can ask for several symbols in one request. A `history()` that reads Massive's flat
+files reads every symbol from the same files. When that request or file fails, each of its
+symbols fails.
 
 A symbol fails when:
 
 - Massive refuses it.
-- Its request keeps failing with a temporary error, such as HTTP 503. A `fetch()` or
-  `history()` of symbols in code leaves the symbol out. A `poll()`, or a `fetch()` or
-  `history()` of a watchlist, tries it again for up to [`max_outage`](#setting-details).
-- In a `poll()`, or a `fetch()` or `history()` of a watchlist, the library can't read any row
-  Massive sent for it.
+- Its request keeps failing with a temporary error, such as HTTP 503.
+- In a `poll()` or a read of a watchlist, the library can't read any row Massive sent for it.
 
-A symbol Massive has no data for doesn't fail. It gets no rows.
+A `poll()` or a read of a watchlist tries a symbol with a temporary error again, for up to
+[`max_outage`](#setting-details). A `fetch()` or `history()` of symbols in code tries only as
+often as its request's own retries.
+
+By default, a symbol Massive has no data for doesn't fail. It gets no rows.
 
 A failed symbol isn't read again. To read it again, delete its watchlist row and add it back.
 For symbols you pass in code, call `fetch()`, `history()`, or `poll()` again.
 
-When a `poll()` stops reading a symbol, a `dm.PollMode.REPLACE` table drops its rows. An
-`APPEND` or `UPSERT` table keeps them.
+When a symbol of a `poll()` fails, a `dm.PollMode.REPLACE` table drops its rows. A
+`dm.PollMode.APPEND` or `dm.PollMode.UPSERT` table keeps them.
 
 <a id="read-failures"></a>
 
 #### Reads that fail under every setting
 
-These problems fail a read or stream, whatever the setting:
+Whatever the setting, each of these problems fails a read or stream:
 
 - Massive rejects your API key.
 - Massive serves current data delayed, and [`delayed_subscriptions`](#setting-details) doesn't
   list its subscription.
-- Every symbol the read or stream started with fails, as on a plan without the dataset. A
-  watchlist, `poll()`, or stream that starts empty never fails this way.
-- A `fetch()` or `history()` of `dm.ALL` or of symbols in code, or a `poll()` cycle of
-  `dm.ALL`, gets rows from Massive and the library can't read any of them.
-
-When the library can't read Massive's rows, `m.problems()` gives what Massive sent and why, for
-a report to Massive.
+- Massive refuses a read of `dm.ALL`, as on a plan without the dataset.
+- Every symbol a read or stream started with fails. A watchlist, `poll()`, or stream that
+  starts empty never fails this way.
+- A `fetch()` or `history()` of `dm.ALL`, or of symbols in code, can read none of the rows
+  Massive sent.
+- A stream's or `poll()` table's outage outlasts [`max_outage`](#setting-details).
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
 
@@ -341,17 +342,16 @@ When sessions list different limits, the lowest applies.
 
 #### max_outage
 
-A live table fails once an outage lasts `max_outage`:
+Raise it to ride out longer outages, or set `0` to fail at the first one. A live
+table fails once its outage lasts `max_outage`:
 
-- A stream fails once its connection has been down that long.
-- A `poll()` table fails once its polls have failed, or received nothing, that
-  long.
+- A stream's outage is the time its connection is down.
+- A `poll()` table's outage is the time its polls keep failing or waiting for
+  Massive's answer.
 
-Raise it to ride out longer outages, or set `0` to fail at the first one.
-
-In a `poll()`, or a `fetch()` or `history()` of a watchlist, a symbol that keeps
-failing with a temporary error isn't read again after `max_outage`. A rate limit is
-one such error. `m.problems()` lists the symbol.
+A symbol that keeps failing with a temporary error isn't read again after
+`max_outage`, in a `poll()` or a read of a watchlist. A rate limit is one such
+error. `m.problems()` lists the symbol.
 
 A failed table stays failed, so call the method again for a new one. See
 [Live table messages](troubleshooting.md#live-table-messages).
