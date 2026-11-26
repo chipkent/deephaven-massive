@@ -122,10 +122,9 @@ class ErrorPolicy:
             serve it. Under `dm.OnError.LOG` and `dm.OnError.IGNORE`, the symbol gets no rows,
             and the others are read. `m.problems()` lists it with Massive's answer.
 
-            A watchlist read by `fetch()` or `history()` fails only the refused symbol,
-            whatever this setting says. Under every setting, a call or table fails when Massive
-            refuses every symbol it starts with. It also fails when Massive refuses the dataset
-            or delayed subscription itself.
+            Under every setting, a call or table fails when Massive refuses every symbol it
+            starts with. It also fails when Massive refuses the dataset or delayed subscription
+            itself.
 
             Massive refuses a request of several symbols without naming them, so the library
             sends smaller groups of them again to find the refused ones. Finding one refused

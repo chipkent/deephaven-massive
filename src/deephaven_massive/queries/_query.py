@@ -34,9 +34,9 @@ from deephaven_massive._errors import (
     raises_through,
     user_defect,
 )
-from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import follow_coordinator
 from deephaven_massive._tables.background_read import open_read
+from deephaven_massive._tables.call_failure import call_failure
 from deephaven_massive._tables.columns import (
     column_table,
     describe,
@@ -547,8 +547,10 @@ class Query:
 
         Raises:
             MassiveError: The first symbol's error, retryable only when every symbol's is,
-                when every symbol failed. A failure of every symbol alike (a rejected key, a
-                closed session) propagates from the read.
+                when every symbol failed. Else the first symbol's failure, in call order, whose
+                cause the call set to `RAISE` (`call_failure.call_failure`), such as a refused
+                symbol under `refused_symbols=RAISE`. A failure of every symbol alike (a
+                rejected key, a refusal of the feed, a closed session) propagates from the read.
         """
         began_at = int(follow_coordinator.CLOCK.time() * 1e9)
         started = time.monotonic()
@@ -561,18 +563,22 @@ class Query:
         if len(failed) == len(call_time):
             first = every_symbol_failed([failed[name].error for name in call_time])
             raise first from failed[call_time[0]].error
-        if not effect_of(plan.refused_symbols).fails:
-            # A refused symbol's alarm is its refused_symbols span, which the session's problem
-            # reporter logs once per table under LOG, and only at DEBUG under IGNORE.
-            refused = [name for name, o in failed.items() if is_symbol_refusal(o.error)]
-            if refused:
-                logger.debug(
-                    "%s %s: Massive refused %s; each is a refused_symbols problem",
-                    self._spec.name,
-                    verb,
-                    refused,
-                )
-            failed = {name: o for name, o in failed.items() if name not in refused}
+        for name in call_time:
+            fatal = call_failure(name, failed[name].error, plan.policy) if name in failed else None
+            if fatal is not None:
+                logger.debug("%s %s: %s fails the call: %s", self._spec.name, verb, name, fatal)
+                raise fatal
+        # A refused symbol's alarm is its refused_symbols span, which the session's problem
+        # reporter logs once per table under LOG, and only at DEBUG under IGNORE.
+        refused = [name for name, o in failed.items() if is_symbol_refusal(o.error)]
+        if refused:
+            logger.debug(
+                "%s %s: Massive refused %s; each is a refused_symbols problem",
+                self._spec.name,
+                verb,
+                refused,
+            )
+        failed = {name: o for name, o in failed.items() if name not in refused}
         if failed:
             logger.warning(
                 "%s %s: %d of the %d symbols failed and are left out of the result for now. %s "

@@ -217,7 +217,7 @@ def follow(
         one_scan=one_scan,
         symbols_per_read=symbols_per_read,
         read=script.read,
-        refused_symbols=refused_symbols,
+        policy=dataclasses.replace(core.policy, refused_symbols=refused_symbols),
     )
     return open_followed_read(
         core,
@@ -1116,21 +1116,16 @@ _REFUSAL_WARNINGS = {
         r"problem of this table, which the log shows at DEBUG only\."
     ],
     dm.OnError.IGNORE: [],
-    dm.OnError.RAISE: [
-        r"test\.trades call \d+: AAPL failed after 1 attempt and is left out of the result\. "
-        + re.escape(
-            f"{answer(403)} To read it again, delete its row from the symbol table and add it back."
-        )
-    ],
 }
-"""The WARNINGs a followed read's refused symbol logs under each `refused_symbols` setting."""
+"""The WARNINGs a followed read's refused symbol logs under each `refused_symbols` setting that
+reads the others; under RAISE the table fails instead."""
 
 
-def test_each_setting_has_its_refusal_warnings() -> None:
-    assert set(_REFUSAL_WARNINGS) == set(dm.OnError)
+def test_each_setting_but_raise_has_its_refusal_warnings() -> None:
+    assert set(_REFUSAL_WARNINGS) == set(dm.OnError) - {dm.OnError.RAISE}
 
 
-@pytest.mark.parametrize("setting", list(dm.OnError))
+@pytest.mark.parametrize("setting", list(_REFUSAL_WARNINGS))
 def test_a_refused_symbol_is_a_refused_symbols_span_and_fails_only_itself(
     setting: dm.OnError,
     watchlist: Callable[..., InputTable],
@@ -1141,8 +1136,9 @@ def test_a_refused_symbol_is_a_refused_symbols_span_and_fails_only_itself(
     problem_rows: Callable[[], list[dict[str, Any]]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Massive refuses AAPL: under every setting it alone fails, as a refused_symbols span that
-    # carries the setting; the setting decides only how loudly the log says so.
+    # Massive refuses AAPL: under a setting that reads the others it alone fails, as a
+    # refused_symbols span that carries the setting; the setting decides how loudly the log
+    # says so.
     script = Script(massive_session)
     script.answers["AAPL"] = [not_entitled()]
     with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
@@ -1167,6 +1163,61 @@ def test_a_refused_symbol_is_a_refused_symbols_span_and_fails_only_itself(
     for warning, pattern in zip(warnings, patterns, strict=True):
         assert re.fullmatch(pattern, warning), warning
     massive_session.release(result)
+
+
+_RAISED = (
+    f"{answer(403)} Remove AAPL, or, to read the others, pass "
+    "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+)
+"""The Error of a followed read whose refused AAPL fails it under `refused_symbols=RAISE`."""
+
+
+def test_a_refused_symbol_fails_the_table_under_raise(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    drain: Callable[[], None],
+    dh_to_pylist: ToList,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # MSFT's read is held, so the table may still read another symbol: AAPL's refusal fails it
+    # as RAISE asks, with the setting that reads the others, and the table's failure is the
+    # one WARNING.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [not_entitled()]
+    gate = script.gates["MSFT"] = threading.Event()
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
+        result = follow(
+            massive_session,
+            watchlist("AAPL", "MSFT"),
+            script,
+            refused_symbols=dm.OnError.RAISE,
+        )
+        until(lambda: bool(result.j_table.isFailed()))
+        wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
+    gate.set()
+    row = stream(massive_session, drain, dh_to_pylist)
+    assert row["Error"] == _RAISED
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == [
+        f"test.trades call {row['StreamId']}: the read failed, and so did its table: {_RAISED}"
+    ]
+
+
+def test_a_table_whose_every_call_time_symbol_is_refused_fails_with_the_refusal_under_raise(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    drain: Callable[[], None],
+    dh_to_pylist: ToList,
+) -> None:
+    # No other symbol is left to read, so the refusal fails the table as it is, as under any
+    # setting.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [not_entitled()]
+    result = follow(massive_session, watchlist("AAPL"), script, refused_symbols=dm.OnError.RAISE)
+    until(lambda: bool(result.j_table.isFailed()))
+    assert stream(massive_session, drain, dh_to_pylist)["Error"] == answer(403)
 
 
 def test_a_feed_refusal_of_a_symbol_is_a_failed_read_not_a_refused_symbol(

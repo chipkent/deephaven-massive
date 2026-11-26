@@ -39,8 +39,9 @@ fails after its cycles have failed that long. Any other failure makes it `FAILED
 That rule, and each symbol's count of reads and run of failures, is `_tables/symbol_retry.py`'s
 (`SymbolRun`); the coordinator keeps one per symbol and schedules the retries it decides.
 A `RETRYING` or `FAILED` symbol is a span of `m.problems()`: a refusal of the symbol is a
-`refused_symbols` span, whose setting decides only how loudly it is logged, since under any
-setting the symbol alone fails; any other final failure is `symbol_read_failed`.
+`refused_symbols` span, carrying the call's setting; any other final failure is
+`symbol_read_failed`. A final failure is the symbol's alone unless its cause is set to `RAISE`
+(`call_failure.fails_call`), which fails the table too.
 Removed, it is `REMOVED`: under `Reread.ALWAYS` an empty download replaces its rows in the
 result, freeing them, and a re-add reads it again; under `Reread.NEVER` its download is kept, so
 a re-add shows the earlier download at once, with no request. A `FAILED` symbol is read again
@@ -51,9 +52,10 @@ re-add during a read waits for it to end). When the result stops (released and u
 every symbol still following is `STOPPED`, and stays so: a read that starts after the stop
 changes nothing.
 
-**Whole-table failures.** A read that raises (`AuthenticationError`, a session closed during
-the read, or a defect) and a symbol table that fails or, under
-`noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
+**Whole-table failures.** A read that raises (`AuthenticationError`, a refusal of the feed, a
+session closed during the read, or a defect), a symbol's final failure whose cause is set to
+`RAISE` (a refused symbol under `refused_symbols=RAISE`), and a symbol table that fails or,
+under `noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
 the coordinator records the failure and publishes it, never the listener. So does a call that
 did not wait whose call-time symbols (the table's symbols when the watch started) all end
 `FAILED`, such as on a plan without the dataset, which refuses every symbol: the table fails
@@ -105,8 +107,8 @@ from deephaven_massive._log_limits import (
     mark_failure_logged,
     prose_list,
 )
-from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables import poll
+from deephaven_massive._tables.call_failure import call_failure
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
     SYMBOLS_LISTED,
@@ -134,7 +136,6 @@ if TYPE_CHECKING:
     from deephaven.table import Table
 
     from deephaven_massive._config import MassiveConfig
-    from deephaven_massive._enums import OnError
     from deephaven_massive._tables.followed_read import FollowPlan
     from deephaven_massive._tables.poll import PollClock
     from deephaven_massive._tables.problem_events import Problem
@@ -595,28 +596,28 @@ def _cause(error: MassiveError) -> str:
     return " ".join(parts)
 
 
-def _failure_level(error: MassiveError, *, first: bool, refusals: OnError) -> int:
+def _failure_level(error: MassiveError, *, first: bool, fails_table: bool) -> int:
     """Return the level of the record that says a symbol has failed for good.
 
     The first failure of each cause on a result is logged at WARNING (a bug at ERROR, with its
-    traceback), and the later ones at DEBUG. A refusal of the symbol is a `refused_symbols`
-    span, which the session's problem reporter logs once per table at WARNING under `LOG`
-    and at DEBUG under `IGNORE`, so here it is a WARNING only under `RAISE`, where the
-    reporter stays quiet and the symbol, not the table, is what fails.
+    traceback), and the later ones at DEBUG. A failure that fails the table is at DEBUG, since
+    the table's failure is its alarm (`_fail`). A refusal of the symbol that does not is a
+    `refused_symbols` span, which the session's problem reporter logs once per table at WARNING
+    under `LOG` and at DEBUG under `IGNORE`, so it is at DEBUG here too.
 
     Args:
         error: The symbol's final failure.
         first: Whether it is the first failure of its cause on the result.
-        refusals: The read's `ErrorPolicy.refused_symbols`.
+        fails_table: Whether the failure fails the table (`call_failure.fails_call`).
 
     Returns:
         `logging.ERROR`, `logging.WARNING`, or `logging.DEBUG`.
     """
-    if not first:
+    if not first or fails_table:
         return logging.DEBUG
     if error.is_bug:
         return logging.ERROR
-    if is_symbol_refusal(error) and not effect_of(refusals).fails:
+    if is_symbol_refusal(error):
         return logging.DEBUG
     return logging.WARNING
 
@@ -1213,13 +1214,14 @@ class FollowCoordinator:
         self._failed(result, name, outcome)
 
     def _failed(self, result: _Result, name: str, outcome: SymbolFailure) -> None:
-        """Make a failed symbol `RETRYING` or `FAILED`, and log it.
+        """Make a failed symbol `RETRYING` or `FAILED`, log it, and fail the table if it must.
 
         The symbol's run decides which (`SymbolRun.failed`): a failure that may pass is read
         again after its delay, until one lands `MassiveConfig.max_outage` seconds or more
         after the run's first failure landed; that failure, and any other, is final. A
         read's own time is not counted, since it may have spent most of it receiving pages.
-        A retry goes on the heap of retries, due at the run's time.
+        A retry goes on the heap of retries, due at the run's time. A final failure whose
+        cause the call set to `RAISE` (`call_failure.fails_call`) fails the table too.
 
         Args:
             result: The result's state.
@@ -1259,7 +1261,8 @@ class FollowCoordinator:
         first = symbol.cause not in result.warned
         result.warned.add(symbol.cause)
         mark_failure_logged(error)
-        level = _failure_level(error, first=first, refusals=result.read.plan.refused_symbols)
+        fatal = call_failure(name, error, result.read.plan.policy)
+        level = _failure_level(error, first=first, fails_table=fatal is not None)
         logger.log(
             level,
             "%s call %d: %s failed after %d %s and is left out of the result. %s To read it "
@@ -1273,6 +1276,8 @@ class FollowCoordinator:
             exc_info=error if level == logging.ERROR else None,  # a bug, with its traceback
         )
         self._call_time_outcome(result, name, error)
+        if fatal is not None:  # a cause set to RAISE; a no-op when the check above failed it
+            self._fail(result, fatal)
 
     def _call_time_outcome(self, result: _Result, name: str, error: MassiveError | None) -> None:
         """Take a symbol's outcome toward the call-time check of a call that did not wait.
@@ -1606,7 +1611,9 @@ class FollowCoordinator:
             tracker = result.spans.get(cause)
             if tracker is None:
                 policy = (
-                    read.plan.refused_symbols if cause is ProblemCause.REFUSED_SYMBOLS else None
+                    read.plan.policy.refused_symbols
+                    if cause is ProblemCause.REFUSED_SYMBOLS
+                    else None
                 )
                 tracker = result.spans[cause] = SpanTracker(
                     cause,

@@ -2589,7 +2589,7 @@ class RestReader:
         is its own: its rows are left out, and it is returned in `CycleRows.failures` for the
         poller to retry or list, while the others' rows are kept. A failure of the whole read
         (`symbol_reads.fails_followed_read`) raises, and a failure that fails the table
-        (`symbol_reads.fails_call`) is returned as `CycleRows.fatal`. A cycle of `ALL`, or of a
+        (`call_failure.fails_call`) is returned as `CycleRows.fatal`. A cycle of `ALL`, or of a
         dataset without instruments, is one read (`_read_one_cycle`), whose failure is the
         cycle's.
 

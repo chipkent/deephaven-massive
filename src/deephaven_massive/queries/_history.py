@@ -432,7 +432,7 @@ class HistoryQuery(Query):
                     logged=logged,
                     stop=stop,
                 ),
-                refused_symbols=request.on_error.refused_symbols,
+                policy=request.on_error,
             )
             note = (
                 "Read from flat files: requested with source=dm.HistorySource.FLAT_FILES."
@@ -477,7 +477,7 @@ class HistoryQuery(Query):
             read=lambda names, stop: self._read_rest_by_symbol(
                 request, window, symbols=names, call=call, stop=stop
             ),
-            refused_symbols=request.on_error.refused_symbols,
+            policy=request.on_error,
         )
 
     def _flat_history(
