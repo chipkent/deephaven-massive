@@ -50,6 +50,7 @@ from deephaven_massive._ingest.symbol_reads import (
     fails_followed_read,
     fetch_units,
     split_by_symbol,
+    split_failures,
     symbol_outcomes,
 )
 from deephaven_massive._massive import Transport
@@ -410,6 +411,29 @@ def test_a_followed_read_fails_whole_only_for_what_fails_every_symbol_alike(
     assert fails_followed_read(error) is whole
 
 
+def test_a_refused_symbol_under_raise_fails_the_call_with_the_setting_that_reads_the_others() -> (
+    None
+):
+    # A poll() cycle fails its table with this error; the message names the setting only while
+    # another symbol may still be read, since a call whose every symbol is refused fails anyway.
+    policy = resolve_policy(dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE), dm.ErrorPolicy())
+    refusal = EntitlementError(
+        'stocks.dividends: Massive answered GET /stocks/v1/dividends with HTTP 403: "upgrade".',
+        status=403,
+    )
+    own, fatal = split_failures({"AAPL": refusal}, ["AAPL", "MSFT"], policy)
+    assert own == {"AAPL": refusal}
+    assert isinstance(fatal, EntitlementError)
+    assert fatal.status == 403
+    assert str(fatal) == (
+        'stocks.dividends: Massive answered GET /stocks/v1/dividends with HTTP 403: "upgrade". '
+        "Remove AAPL, or, to read the others, pass "
+        "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    assert split_failures({"AAPL": refusal}, ["AAPL"], policy) == ({"AAPL": refusal}, refusal)
+
+
 def test_attribution_gives_each_request_s_rows_failure_or_no_data_to_its_symbols(
     session: dm.MassiveSession,
 ) -> None:
@@ -542,8 +566,8 @@ def test_a_row_of_another_symbol_is_no_row_of_the_read_s_symbols(
     failed = _failure(out["AAPL"])
     assert isinstance(failed.error, RowDataError)
     assert str(failed.error) == (
-        "stocks.dividends: the library could not read the 1 row Massive sent for AAPL from "
-        "GET /stocks/v1/dividends whole, so it withheld it. /stocks/v1/dividends: row 0: "
+        "stocks.dividends: Massive sent 1 row for AAPL from GET /stocks/v1/dividends, and the "
+        "library could not read it whole, so it withheld it. /stocks/v1/dividends: row 0: "
         "CashAmount (wire key 'cash_amount') expects double, got \"a lot\". m.problems() counts "
         "the withheld rows by cause and symbol."
     )
@@ -596,8 +620,8 @@ def test_a_withheld_row_of_another_symbol_leaves_the_read_s_count_and_its_reason
     failed = _failure(out["AAPL"])
     assert isinstance(failed.error, RowDataError)
     assert str(failed.error) == (
-        "stocks.dividends: the library could not read the 1 row Massive sent for AAPL from "
-        "GET /stocks/v1/dividends whole, so it withheld it. /stocks/v1/dividends: row 1: "
+        "stocks.dividends: Massive sent 1 row for AAPL from GET /stocks/v1/dividends, and the "
+        "library could not read it whole, so it withheld it. /stocks/v1/dividends: row 1: "
         "CashAmount (wire key 'cash_amount') expects double, got \"plenty\". m.problems() counts "
         "the withheld rows by cause and symbol."
     )
@@ -618,10 +642,10 @@ def test_a_withheld_row_of_another_symbol_s_request_is_not_the_read_s(
     fake_rest.reply("/v2/aggs/ticker/MSFT/prev", Reply(envelope([{"T": "MSFT", "c": "a lot"}])))
     out = _fetch(session, PREV, ["AAPL", "MSFT"])
     assert str(_failure(out["MSFT"]).error) == (
-        "stocks.previous_day_bar: the library could not read the 1 row Massive sent for MSFT "
-        "from GET /v2/aggs/ticker/MSFT/prev whole, so it withheld it. "
-        "/v2/aggs/ticker/{stocksTicker}/prev: row 0: Close (wire key 'c') expects double, got "
-        '"a lot". m.problems() counts the withheld rows by cause and symbol.'
+        "stocks.previous_day_bar: Massive sent 1 row for MSFT from GET /v2/aggs/ticker/MSFT/prev, "
+        "and the library could not read it whole, so it withheld it. "
+        "/v2/aggs/ticker/{stocksTicker}/prev: row 0: Close (wire key 'c') expects double, got \"a "
+        'lot". m.problems() counts the withheld rows by cause and symbol.'
     )
     assert _rows(out["AAPL"]) == []
 
@@ -636,8 +660,8 @@ def test_a_symbol_with_no_rows_beside_one_wholly_withheld_fails_only_the_withhel
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(rows)))
     out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"])
     assert str(_failure(out["MSFT"]).error) == (
-        "stocks.dividends: the library could not read the 1 row Massive sent for MSFT from "
-        "GET /stocks/v1/dividends whole, so it withheld it. /stocks/v1/dividends: row 0: "
+        "stocks.dividends: Massive sent 1 row for MSFT from GET /stocks/v1/dividends, and the "
+        "library could not read it whole, so it withheld it. /stocks/v1/dividends: row 0: "
         "CashAmount (wire key 'cash_amount') expects double, got \"a lot\". m.problems() counts "
         "the withheld rows by cause and symbol."
     )
@@ -662,8 +686,8 @@ def test_a_request_whose_only_row_has_an_unreadable_symbol_fails_its_symbols(
     out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"])
     for symbol in ("AAPL", "MSFT"):
         assert str(_failure(out[symbol]).error).startswith(
-            "stocks.dividends: the library could not read the 1 row Massive sent for AAPL and "
-            "MSFT from GET /stocks/v1/dividends whole, so it withheld it. "
+            "stocks.dividends: Massive sent 1 row for AAPL and MSFT from GET /stocks/v1/dividends, "
+            "and the library could not read it whole, so it withheld it. "
         )
     out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"])
     assert (len(_rows(out["AAPL"])), len(_rows(out["MSFT"]))) == (0, 1)
@@ -702,9 +726,9 @@ def test_a_withheld_row_of_a_bare_underlying_is_its_asked_index_s(
     failed = _failure(out["I:SPX"])
     assert isinstance(failed.error, RowDataError)
     assert str(failed.error).startswith(
-        "options.open_interest_by_underlying: the library could not read the 1 row Massive "
-        "sent for I:SPX from GET /options/v1/open-interest/underlying whole, so it withheld "
-        "it. "
+        "options.open_interest_by_underlying: Massive sent 1 row for I:SPX from GET "
+        "/options/v1/open-interest/underlying, and the library could not read it whole, so it "
+        "withheld it. "
     )
     assert [(e.cause, e.symbol, e.rows) for e in events] == [
         (ProblemCause.UNCONVERTIBLE_VALUES, "SPX", 1),
@@ -775,9 +799,9 @@ def test_a_row_the_index_lookup_withholds_of_the_asked_index_fails_it(
     fake_rest.reply(CONTRACTS_LIST_PATH, Reply(envelope([])))
     out = _fetch(session, options.OPEN_INTEREST_BY_UNDERLYING, ["I:SPX"])
     assert str(_failure(out["I:SPX"]).error).startswith(
-        "options.open_interest_by_underlying: the library could not read the 1 row Massive "
-        "sent for I:SPX from GET /options/v1/open-interest/underlying whole, so it withheld "
-        "it. Massive's contracts list has no contract with a CFI code for SPX"
+        "options.open_interest_by_underlying: Massive sent 1 row for I:SPX from GET "
+        "/options/v1/open-interest/underlying, and the library could not read it whole, so it "
+        "withheld it. Massive's contracts list has no contract with a CFI code for SPX"
     )
 
 
@@ -849,8 +873,8 @@ def test_a_row_left_out_is_named_as_massive_sent_it(
             spec=INDEX,
             where=f"REST GET {INDEX_PATH}",
             detail=(
-                "Massive answered the request for I:SPX with rows of NDX, which the read did "
-                "not ask for, so they are left out. The table spells NDX as I:NDX."
+                "Massive answered the request for I:SPX with rows of I:NDX, which the read did not "
+                "ask for, so they are left out. Massive writes I:NDX as NDX"
             ),
         )
     ]
@@ -858,10 +882,11 @@ def test_a_row_left_out_is_named_as_massive_sent_it(
         failed = _failure(out["I:SPX"])
         assert isinstance(failed.error, RowDataError)
         assert str(failed.error) == (
-            "indices.snapshots: Massive answered the request for I:SPX with 1 row of NDX, "
-            "which the read did not ask for, so the library left it out. The table spells NDX "
-            "as I:NDX. To go on without such rows, pass on_error=dm.ErrorPolicy("
-            "unrequested_symbols=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+            "indices.snapshots: Massive answered the request for I:SPX with 1 row of I:NDX, which "
+            "the read did not ask for, so the library left it out. Massive writes I:NDX as NDX. To "
+            "go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
         )
     else:
         rows = _rows(out["I:SPX"])
@@ -968,8 +993,8 @@ def test_a_listed_request_s_row_naming_no_symbol_belongs_to_none(
             None,
             1,
             (
-                "Massive answered the request for AAPL with rows of no symbol, which the "
-                "read did not ask for, so they are left out"
+                "Massive answered the request for AAPL with rows of no symbol, which the read did "
+                "not ask for, so they are left out"
             ),
         )
     ]
@@ -1017,8 +1042,8 @@ def _unlisted(
         spec=LISTED,
         where="REST GET /benzinga/v2/news",
         field="Tickers",
-        detail=f"Massive answered the request for {asked} with rows whose Tickers lists no "
-        f"ticker asked for{only} so they are left out",
+        detail=f"Massive answered the request for {asked} with rows whose Tickers lists no ticker "
+        f"asked for{only} so they are left out",
     )
 
 
@@ -1480,8 +1505,8 @@ def test_a_value_whose_rows_are_all_unreadable_fails_alone(
     error = _failure(out["NQ"]).error
     assert isinstance(error, RowDataError)
     assert str(error).startswith(
-        "futures.products: the library could not read the 1 row Massive sent for NQ from "
-        "GET /futures/v1/products whole, so it withheld it. "
+        "futures.products: Massive sent 1 row for NQ from GET /futures/v1/products, and the "
+        "library could not read it whole, so it withheld it. "
     )
 
 

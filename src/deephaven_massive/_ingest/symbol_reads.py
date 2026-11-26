@@ -96,6 +96,7 @@ from deephaven_massive._errors import (
     RowDataError,
     SessionClosedError,
     UnavailableSymbolError,
+    copy_error,
     library_bug,
     required,
     required_instance,
@@ -158,6 +159,7 @@ __all__ = [
     "read_rest_by_symbol",
     "read_rest_by_value",
     "read_symbol_list",
+    "refusal_raised",
     "split_by_symbol",
     "split_failures",
     "symbol_outcomes",
@@ -380,18 +382,45 @@ def split_failures(
         are listed where they were found, or fail it whatever the symbol (a refusal of the
         feed, HTTP 404 under `RAISE`, a withheld or unrequested row under `RAISE`); a refused
         symbol under `refused_symbols=RAISE` is its own and fails the call too. And the first
-        failure, in `order`, that fails the call (`fails_call`), or None.
+        failure, in `order`, that fails the call (`fails_call`), or None: a refused symbol's,
+        while another symbol did not fail, ends with the setting that reads the others
+        (`refusal_raised`).
     """
     fatal = next(
-        (failed[name] for name in order if name in failed and fails_call(failed[name], policy)),
-        None,
+        (name for name in order if name in failed and fails_call(failed[name], policy)), None
     )
     own = {
         name: error
         for name, error in failed.items()
         if is_symbol_refusal(error) or not fails_call(error, policy)
     }
-    return own, fatal
+    if fatal is None:
+        return own, None
+    if is_symbol_refusal(failed[fatal]) and not all(name in failed for name in order):
+        return own, refusal_raised(failed[fatal], fatal)
+    return own, failed[fatal]
+
+
+def refusal_raised(error: MassiveError, symbol: str | None) -> MassiveError:
+    """Return the error a call raises for a refused symbol under `refused_symbols=RAISE`.
+
+    Only while another symbol of the call may still be read: when every symbol was refused,
+    the call fails under any setting, and the refusal is raised as it is.
+
+    Args:
+        error: Massive's refusal of the symbol, as its `m.problems()` row gives it.
+        symbol: The symbol, as the call named it; None for a ticker of a read that named
+            none (`dm.ALL`), which the user can't remove.
+
+    Returns:
+        A copy of `error` that ends with the setting that reads the others, such as
+        `"... Remove I:VIX, or, to read the others, pass
+        on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to
+        dm.MassiveConfig."`.
+    """
+    purpose = "To read the others" if symbol is None else f"Remove {symbol}, or, to read the others"
+    hint = policy_hint(OnError.LOG, "refused_symbols", purpose=purpose)
+    return copy_error(error, f"{error} {hint}")
 
 
 def read_symbol_list(
@@ -1249,7 +1278,7 @@ def _report_unrequested(
     asked_for = prose_list(own, "symbols")
     events: list[ProblemEvent] = []
     for (spelling, symbol), count in others.items():
-        spelled = _spellings([(spelling, symbol)])
+        spelled = _spellings([(spelling, symbol)]).removesuffix(".")
         events.append(
             ProblemEvent(
                 cause=ProblemCause.UNREQUESTED_SYMBOLS,
@@ -1261,8 +1290,8 @@ def _report_unrequested(
                 field=column,
                 rows=count,
                 detail=f"Massive answered the request for {asked_for} with rows of "
-                f"{_no_symbol(spelling)}, which the read did not ask for, so they are left out"
-                f"{f'. {spelled}' if spelled else ''}",
+                f"{_table_symbol(spelling, symbol)}, which the read did not ask for, so they are "
+                f"left out{f'. {spelled}' if spelled else ''}",
                 at=at,
                 policy=setting,
             )
@@ -1271,14 +1300,29 @@ def _report_unrequested(
     if not effect_of(setting).fails:
         return None
     total = sum(others.values())
-    named = prose_list([_no_symbol(spelling) for spelling, _ in others], "symbols")
+    names = dict.fromkeys(_table_symbol(spelling, symbol) for spelling, symbol in others)
     spelled = _spellings(others)
     return RowDataError(
         f"{spec.name}: Massive answered the request for {asked_for} with "
-        f"{counted(total, 'row')} of {named}, which the read did not ask for, so the library "
-        f"left {'it' if total == 1 else 'them'} out. {f'{spelled} ' if spelled else ''}"
+        f"{counted(total, 'row')} of {prose_list(names, 'symbols')}, which the read did not ask "
+        f"for, so the library left {'it' if total == 1 else 'them'} out. "
+        f"{f'{spelled} ' if spelled else ''}"
         f"{policy_hint(OnError.LOG, 'unrequested_symbols', purpose='To go on without such rows')}"
     )
+
+
+def _table_symbol(spelling: str | None, symbol: str | None) -> str:
+    """Return a left-out row's symbol for a message: the table's spelling of it, when known.
+
+    Args:
+        spelling: The symbol as Massive sent it, or None for none.
+        symbol: The spelling the table gives it, or None when the library has none.
+
+    Returns:
+        Such as `"I:DJT"` for the index's row Massive sent as `DJT`, the symbol as Massive
+        sent it when the table has no spelling of it, or `"no symbol"`.
+    """
+    return _no_symbol(spelling if symbol is None else symbol)
 
 
 def _no_symbol(symbol: str | None) -> str:
@@ -1287,17 +1331,22 @@ def _no_symbol(symbol: str | None) -> str:
 
 
 def _spellings(pairs: Iterable[tuple[str | None, str | None]]) -> str:
-    """Return the sentence naming the table's spelling of each symbol Massive spelled otherwise.
+    """Return the sentence naming how Massive writes a left-out symbol the table spells otherwise.
 
     Args:
         pairs: Each symbol as Massive sent it with the spelling the table gives it.
 
     Returns:
-        `"The table spells SPX as I:SPX and ETH-USD as X:ETHUSD."`, or `""` when the table
-        spells each symbol as Massive sent it.
+        `"Massive writes I:SPX as SPX and X:ETHUSD as ETH-USD."`, or `""` when Massive wrote
+        each symbol as the table spells it. A symbol without both spellings is not named: a
+        row of no symbol, or one the table can't spell, has no other spelling to give.
     """
-    differ = [f"{sent} as {symbol}" for sent, symbol in pairs if sent != symbol]
-    return f"The table spells {prose_list(differ, 'symbols')}." if differ else ""
+    differ = [
+        f"{symbol} as {sent}"
+        for sent, symbol in pairs
+        if sent is not None and symbol is not None and sent != symbol
+    ]
+    return f"Massive writes {prose_list(differ, 'symbols')}." if differ else ""
 
 
 def split_by_symbol(

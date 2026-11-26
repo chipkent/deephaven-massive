@@ -35,7 +35,7 @@ import time
 from typing import TYPE_CHECKING
 
 from deephaven_massive._errors import every_symbol_failed, failure_text
-from deephaven_massive._ingest.symbol_reads import fails_call, read_symbol_list
+from deephaven_massive._ingest.symbol_reads import fails_call, read_symbol_list, refusal_raised
 from deephaven_massive._log_limits import bounded_list
 from deephaven_massive._tables.problem_events import ProblemCause, ProblemSpans, SpanTracker
 from deephaven_massive._tables.symbol_retry import is_symbol_refusal
@@ -138,6 +138,7 @@ def report_failures(
     *,
     symbols: Sequence[str],
     failures: Mapping[str, MassiveError],
+    named: bool = True,
 ) -> None:
     """List each failed symbol in `m.problems()`, and raise a failure the call must not survive.
 
@@ -151,26 +152,32 @@ def report_failures(
         spec: The dataset.
         symbols: The call's symbols, in the order the spans follow.
         failures: Each failed symbol's error.
+        named: Whether the call named `symbols`; False for the tickers of a read that named
+            none (`dm.ALL`), which the call's refusal never tells the user to remove.
 
     Raises:
         MassiveError: Once every failed symbol is listed, the first symbol's failure, in the
             call's order, that the call must not survive: a refusal of the feed
             (`FeedRefusalError`), a refused symbol under `refused_symbols=RAISE`, an
             `UnavailableSymbolError` (only under `unavailable_symbols=RAISE`), or a
-            `RowDataError` (only under its cause's `RAISE`).
+            `RowDataError` (only under its cause's `RAISE`). A refused symbol's, while another
+            symbol did not fail, ends with the setting that reads the others
+            (`refusal_raised`).
     """
     spans: dict[ProblemCause, dict[str, tuple[str | None, str | None, str, int]]] = {
         ProblemCause.REFUSED_SYMBOLS: {},
         ProblemCause.SYMBOL_READ_FAILED: {},
     }
     fatal: list[MassiveError] = []
+    others = not named or not all(symbol in failures for symbol in symbols)
     for symbol in symbols:
         error = failures.get(symbol)
         if error is None:
             continue
         refused = is_symbol_refusal(error)
         if fails_call(error, reader.policy):
-            fatal.append(error)
+            raised = refused and others
+            fatal.append(refusal_raised(error, symbol if named else None) if raised else error)
             if not refused:
                 continue  # listed where it was found, or no symbol escapes it
         cause = ProblemCause.REFUSED_SYMBOLS if refused else ProblemCause.SYMBOL_READ_FAILED

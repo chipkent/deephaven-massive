@@ -190,12 +190,9 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_MASSIVE,
             action=ProblemAction.SKIPPED,
             span=True,
-            summary="Massive refused the symbol: your plan doesn't serve it there (HTTP 403, an "
-            'error row, or "not authorized"). One row per symbol, also for a request of many '
-            "symbols.",
-            fix="Remove the symbol, or change the plan or the feed the `Detail` names, then "
-            "delete the symbol's row and add it back, or call the method again for a list in "
-            "code.",
+            summary="Massive refused the symbol, as your plan doesn't serve it.",
+            fix="Remove the symbol, or change the plan `Detail` names. Then delete its row and "
+            "add it back, or call the method again.",
         ),
         _C.UNREQUESTED_SYMBOLS: CauseTraits(
             policy="unrequested_symbols",
@@ -384,9 +381,9 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_LIBRARY,
             action=ProblemAction.FAILED,
             span=True,
-            summary="A symbol of a watchlist or a `poll()` failed and won't be read again.",
-            fix="Fix what `Detail` names. Then delete the symbol's row and add it back to read "
-            "it again. For symbols listed in code, call `poll()` again.",
+            summary="A symbol's read failed for good.",
+            fix="Fix what `Detail` names. Then delete the symbol's row and add it back, or call "
+            "the method again.",
         ),
         _C.STREAM_FAILED: CauseTraits(
             policy=None,

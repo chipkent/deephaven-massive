@@ -1661,8 +1661,9 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
     assert "Defaults to" not in texts["reconnect_backoff"]
     assert "EntitlementError" not in texts["delayed_subscriptions"]
     assert texts["on_error.unavailable_symbols"] == (
-        "Decides what happens to a symbol Massive has no data for: it answers HTTP 404, a "
-        "snapshot row for it says `NOT_FOUND`, or its crypto ticker list doesn't hold the pair."
+        "Decides what happens to a symbol Massive has no data for: it answers HTTP 404, its "
+        "snapshot entry holds the `error` `NOT_FOUND`, or its crypto ticker list doesn't hold "
+        "the pair."
     )
     details = _config._setting_details()
     assert details["s3_bucket"] == ["Change it only with `s3_endpoint_url`."]

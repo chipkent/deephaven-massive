@@ -1077,8 +1077,8 @@ def test_each_symbol_s_outcome_holds_only_its_own_rows(
         aapl, msft, nvda = out["AAPL"], out["MSFT"], out["NVDA"]
         assert isinstance(aapl, SymbolFailure)
         assert str(aapl.error).startswith(
-            "stocks.trades: the library could not read the 1 row Massive sent for AAPL from "
-            "the flat files of us_stocks_sip/trades_v1 whole, so it withheld it. "
+            "stocks.trades: Massive sent 1 row for AAPL from the flat files of "
+            "us_stocks_sip/trades_v1, and the library could not read it whole, so it withheld it. "
         )
         assert isinstance(msft, SymbolRows)
         assert msft.table.size == 0
@@ -1196,9 +1196,9 @@ def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000)))
     with pytest.raises(
         RowDataError,
-        match=r"^stocks\.trades: the library could not read the 1 row of the read's "
-        r"symbols and window from the flat files of us_stocks_sip/trades_v1 whole, so it withheld "
-        r"it\. Timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
+        match=r"^stocks\.trades: Massive sent 1 row of the read's symbols and window from the "
+        r"flat files of us_stocks_sip/trades_v1, and the library could not read it whole, so it "
+        r"withheld it\. Timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
         r"outside 1990 to 2100\. m\.problems\(\) counts the withheld rows by cause and symbol\."
         "$",
     ) as info:
@@ -1232,8 +1232,7 @@ def test_a_file_whose_rows_in_the_window_are_all_unreadable_fails_the_read(
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
     with pytest.raises(
         RowDataError,
-        match=r"the library could (read none of the \d rows|not read the 1 row) of the read's "
-        r"symbols and window",
+        match=r"Massive sent \d rows? of the read's symbols and window",
     ):
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
 
@@ -1864,7 +1863,7 @@ def test_auto_judges_its_files_and_rest_fills_as_one_read(
         events = capture_problems(m, monkeypatch)
         q = query(m, STOCK_TRADES, symbols=MANY)
         if not files_whole:
-            with pytest.raises(RowDataError, match="could read none of the 2 rows"):
+            with pytest.raises(RowDataError, match="Massive sent 2 rows "):
                 q.history("2025-03-03", "2025-03-04", wait=True)
             return
         t = q.history("2025-03-03", "2025-03-04", wait=True)

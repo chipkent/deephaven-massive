@@ -50,10 +50,10 @@ def test_a_read_whose_rows_are_all_withheld_fails_with_its_first_reason() -> Non
     with pytest.raises(RowDataError) as info:
         tally.check("stocks.trades")
     assert str(info.value) == (
-        "stocks.trades: the library could read none of the 4 rows of the read's symbols and "
-        "window from the flat files of us_stocks_sip/trades_v1, GET /v3/trades/AAPL "
-        "whole, so it withheld them all. First. m.problems() counts the withheld rows by cause "
-        "and symbol."
+        "stocks.trades: Massive sent 4 rows of the read's symbols and window from the flat files "
+        "of us_stocks_sip/trades_v1, GET /v3/trades/AAPL, and the library could read none of them "
+        "whole, so it withheld them all. First. m.problems() counts the withheld rows by cause and "
+        "symbol."
     )
     assert (info.value.source, info.value.is_bug) == (ErrorSource.MASSIVE, False)
 
@@ -72,7 +72,7 @@ def test_threads_adding_at_once_lose_no_count() -> None:
         thread.start()
     for thread in threads:
         thread.join()
-    with pytest.raises(RowDataError, match="none of the 4,000 rows"):
+    with pytest.raises(RowDataError, match="Massive sent 4,000 rows "):
         tally.check("stocks.trades")
 
 
@@ -115,8 +115,8 @@ def test_judge_fails_a_symbol_only_for_its_own_withheld_rows(
     assert isinstance(failed, SymbolFailure)
     assert isinstance(failed.error, RowDataError)
     assert str(failed.error) == (
-        "stocks.trades: the library could read none of the 2 rows Massive sent for AAPL from "
-        "GET /v3/x whole, so it withheld them all. First. m.problems() counts the withheld rows "
+        "stocks.trades: Massive sent 2 rows for AAPL from GET /v3/x, and the library could read "
+        "none of them whole, so it withheld them all. First. m.problems() counts the withheld rows "
         "by cause and symbol."
     )
     named = str(failed.error).removeprefix("stocks.trades: ")  # the log names the dataset once
@@ -151,9 +151,9 @@ def test_a_row_of_no_known_symbol_fails_its_request_s_symbols_only_when_it_kept_
         failed = judged[symbol]
         assert isinstance(failed, SymbolFailure)
         assert str(failed.error) == (
-            "stocks.trades: the library could read none of the 2 rows Massive sent for AAPL "
-            "and MSFT from GET /v3/x whole, so it withheld them all. Unread. m.problems() "
-            "counts the withheld rows by cause and symbol."
+            "stocks.trades: Massive sent 2 rows for AAPL and MSFT from GET /v3/x, and the library "
+            "could read none of them whole, so it withheld them all. Unread. m.problems() counts "
+            "the withheld rows by cause and symbol."
         )
     assert judged["NVDA"] is outcomes["NVDA"]
     # The same rows beside one the request kept, of a symbol that now has it: no one fails.
@@ -171,9 +171,9 @@ def test_a_scan_row_of_no_known_symbol_could_be_any_symbol_s() -> None:
     failed = judged["MSFT"]
     assert isinstance(failed, SymbolFailure)
     assert str(failed.error) == (
-        "stocks.trades: the library could not read the 1 row Massive sent for AAPL and MSFT "
-        "from the files whole, so it withheld it. Unread. m.problems() counts the withheld rows "
-        "by cause and symbol."
+        "stocks.trades: Massive sent 1 row for AAPL and MSFT from the files, and the library could "
+        "not read it whole, so it withheld it. Unread. m.problems() counts the withheld rows by "
+        "cause and symbol."
     )
     # A scan that kept a row fails no symbol for it.
     tally.add(1, withheld(0, ""), source="the files")
@@ -183,10 +183,10 @@ def test_a_scan_row_of_no_known_symbol_could_be_any_symbol_s() -> None:
 def test_a_value_s_failure_names_the_value() -> None:
     tally = ReadTally()
     tally.add(1, withheld(1, "First"), source="GET /v3/snapshot/options/AAPL")
-    failure = tally.failure("options.chain", whose="Massive sent for AAPL")
+    failure = tally.failure("options.chain", whose="for AAPL")
     assert failure is not None
     assert str(failure) == (
-        "options.chain: the library could not read the 1 row Massive sent for AAPL from "
-        "GET /v3/snapshot/options/AAPL whole, so it withheld it. First. m.problems() counts "
-        "the withheld rows by cause and symbol."
+        "options.chain: Massive sent 1 row for AAPL from GET /v3/snapshot/options/AAPL, and the "
+        "library could not read it whole, so it withheld it. First. m.problems() counts the "
+        "withheld rows by cause and symbol."
     )

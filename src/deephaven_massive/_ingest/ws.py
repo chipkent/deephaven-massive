@@ -12,9 +12,10 @@ one connection, and the group that shares connections between sessions, to
 `_ingest/ws_connection.py` (`Connection`, `ConnectionGroup`); the session's side of
 everything else belongs here:
 
-- **Refusals.** A refused topic fails exactly the streams that want it, with
-  `EntitlementError`; nothing tears down the connection, and no connection moves to another
-  host. A refusal that names no topic applies to the whole step in flight.
+- **Refusals.** A refused topic is its symbol's `refused_symbols` problem in each stream that
+  wants it, and fails a stream only when every symbol the stream started with is refused, or
+  under `RAISE`. Nothing tears down the connection, and no connection moves to another host.
+  A refusal that names no topic applies to the whole step in flight.
 - **Rows and drift.** Rows go to the connection's flush thread (`Flusher`), which publishes
   them. A row the library cannot read whole is withheld, counted, and reported, and fails only
   a stream whose policy is `RAISE` for its cause. A connection logs one WARNING per outage,

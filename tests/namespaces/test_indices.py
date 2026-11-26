@@ -735,10 +735,10 @@ def test_index_bars_of_a_day_or_longer_start_at_midnight_in_chicago(
     assert not stamp_warnings(caplog)
     # A week bar at the close, or a day bar at 02:00, may be another cut: each is withheld,
     # so a page of no other bar fails the read; each warns once.
-    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
+    with pytest.raises(dm.MassiveError, match="could not read it whole"):
         week.history(first, last, source=dm.HistorySource.REST, wait=True)
     fake_rest.reply_first(quote(day_path), bars_reply(MIDNIGHT_MS + 2 * HOUR_MS))
-    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
+    with pytest.raises(dm.MassiveError, match="could not read it whole"):
         q.history(day, day, source=dm.HistorySource.REST, wait=True)
     week_warning, day_warning = stamp_warnings(caplog)
     assert week_warning.startswith(

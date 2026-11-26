@@ -131,9 +131,22 @@ def test_refused_symbols_set_to_raise_fails_the_call_once_the_symbol_is_listed(
     fake_rest.reply(PREV.format("MSFT"), prev_bar("MSFT"))
     recorded = Recorded(rest_session, monkeypatch)
     strict = dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE)
-    with pytest.raises(dm.EntitlementError, match="Not entitled"):
+    with pytest.raises(dm.EntitlementError) as info:
         rest_session.stocks.previous_day_bar(["AAPL", "MSFT"], on_error=strict).fetch(wait=True)
+    assert str(info.value) == (
+        "stocks.previous_day_bar: Massive refused this read for the Stocks subscription. Massive "
+        "answered GET /v2/aggs/ticker/AAPL/prev?adjusted=true on 127.0.0.1 with HTTP 403: "
+        '"Not entitled.". Remove AAPL, or, to read the others, pass '
+        "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
     assert recorded.spans() == [(ProblemCause.REFUSED_SYMBOLS, "AAPL")]
+    # The advice works: under LOG the call reads MSFT, and without AAPL it reads under RAISE.
+    loose = dm.ErrorPolicy(refused_symbols=dm.OnError.LOG)
+    table = rest_session.stocks.previous_day_bar(["AAPL", "MSFT"], on_error=loose).fetch(wait=True)
+    assert symbols_of(table) == ["MSFT"]
+    table = rest_session.stocks.previous_day_bar(["MSFT"], on_error=strict).fetch(wait=True)
+    assert symbols_of(table) == ["MSFT"]
 
 
 def test_a_symbol_without_data_under_raise_fails_the_call_once_it_is_listed(

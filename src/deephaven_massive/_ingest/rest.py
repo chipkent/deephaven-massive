@@ -1140,7 +1140,7 @@ class RestReader:
                 refused.setdefault(ticker, error)
         # A whole read names no symbol, so a ticker an error row refuses is listed as any
         # refused symbol of a static read is, and fails the read only under RAISE.
-        report_failures(self, spec, symbols=list(refused), failures=refused)
+        report_failures(self, spec, symbols=list(refused), failures=refused, named=False)
         if missing:
             self._report_missing(spec, missing)
         batches = [
@@ -2335,9 +2335,9 @@ class RestReader:
 
         Returns:
             Each refused ticker's error, such as `EntitlementError("indices.snapshots: Massive
-            refused I:VIX. Massive answered GET /v3/snapshot/indices with error NOT_ENTITLED
-            for I:VIX: "Not entitled to this ticker."")`, and each ticker Massive has no data
-            for, in the order Massive sent them.
+            answered GET /v3/snapshot/indices with error NOT_ENTITLED for I:VIX: "Not entitled
+            to this ticker.".")`, and each ticker Massive has no data for, in the order Massive
+            sent them.
 
         """
         refused: dict[str, MassiveError] = {}
@@ -2350,9 +2350,8 @@ class RestReader:
                     refused.setdefault(
                         one.ticker,
                         EntitlementError(
-                            f"{spec.name}: Massive refused {one.ticker}. Massive answered "
-                            f"{outcome.source} with error {one.error} for {one.ticker}: "
-                            f'"{one.message}"',
+                            f"{spec.name}: Massive answered {outcome.source} with error "
+                            f'{one.error} for {one.ticker}: "{one.message}".',
                             source=ErrorSource.MASSIVE,
                         ),
                     )
@@ -2781,9 +2780,7 @@ class RestReader:
                 continue
             requests += sent
             left_out.extend(skipped)
-            withheld = tally.failure(
-                spec.name, whose=f"Massive sent for {prose_list(group, 'values')}"
-            )
+            withheld = tally.failure(spec.name, whose=f"for {prose_list(group, 'values')}")
             if withheld is not None:
                 unread.update(dict.fromkeys(group, withheld))
                 continue

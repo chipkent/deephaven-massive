@@ -1123,7 +1123,7 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_warns(
     ]
     assert not stamp_warnings(caplog)
     # 14:30 is withheld, so a page of no other bar fails the read, with one WARNING.
-    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
+    with pytest.raises(dm.MassiveError, match="could not read it whole"):
         rest_session.options.previous_day_bar(TSLA).fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
@@ -1442,8 +1442,8 @@ def test_a_table_of_underlyings_leaves_out_the_contracts_of_an_unasked_spelling(
             "Underlying",
             1,
             (
-                "Massive answered the request for I:DJT with rows of DJT, which the read did "
-                "not ask for, so they are left out"
+                "Massive answered the request for I:DJT with rows of DJT, which the read did not "
+                "ask for, so they are left out"
             ),
         )
     ]
@@ -1536,8 +1536,8 @@ def test_the_index_s_contracts_in_the_answer_for_a_stock_are_left_out(
             "Underlying",
             1,
             (
-                "Massive answered the request for DJT with rows of DJT, which the read did not ask "
-                "for, so they are left out. The table spells DJT as I:DJT."
+                "Massive answered the request for DJT with rows of I:DJT, which the read did not "
+                "ask for, so they are left out. Massive writes I:DJT as DJT"
             ),
         )
     ]
@@ -1784,8 +1784,8 @@ def test_a_watchlist_of_one_index_by_its_bare_ticker_gets_no_rows_and_a_problem(
             "Symbol",
             1,
             (
-                "Massive answered the request for SPX with rows of SPX, which the read did "
-                "not ask for, so they are left out. The table spells SPX as I:SPX."
+                "Massive answered the request for SPX with rows of I:SPX, which the read did not "
+                "ask for, so they are left out. Massive writes I:SPX as SPX"
             ),
         )
     ]
@@ -1890,7 +1890,7 @@ def test_open_interest_by_underlying_withholds_a_ticker_the_contracts_list_canno
     with pytest.raises(RowDataError, match=r"2 under unreadable_symbols.*code for SPX"):
         rest_session.options.open_interest_by_underlying(on_error=strict).fetch(wait=True)
     # Every row the read would return is withheld, so it fails under the default LOG too.
-    with pytest.raises(RowDataError, match=r"none of the 2 rows.*code for SPX"):
+    with pytest.raises(RowDataError, match=r"Massive sent 2 rows .*code for SPX"):
         rest_session.options.open_interest_by_underlying("I:SPX").fetch(wait=True)
 
 
@@ -1947,7 +1947,7 @@ def test_greeks_of_an_index_asked_bare_whose_every_root_is_unclassified_fail(
     )
     # No row is kept, so there is nothing to check against the index asked for; the read fails
     # because every row it would return is withheld.
-    with pytest.raises(RowDataError, match=r"none of the 2 rows.*option root SPXW"):
+    with pytest.raises(RowDataError, match=r"Massive sent 2 rows .*option root SPXW"):
         rest_session.options.greeks(underlying="I:SPX").fetch(wait=True)
 
 
@@ -2627,7 +2627,7 @@ def test_a_read_of_an_unclassified_root_alone_fails_whatever_the_setting(
         Reply({"status": "OK", "results": {}}),
     )
     # Every row the read would return is withheld, so it fails under the default LOG too.
-    with pytest.raises(RowDataError, match=r"none of the 2 rows.*option root SPXW"):
+    with pytest.raises(RowDataError, match=r"Massive sent 2 rows .*option root SPXW"):
         rest_session.options.open_interest(root="SPXW").fetch(wait=True)
 
 
@@ -3277,7 +3277,7 @@ def test_an_archive_read_with_no_readable_message_fails_as_a_format_change(
     # Under the default LOG, a read with rows but none whole fails rather than read empty.
     page = [{"id": "1-1", "exchange": 300, "message": "OPRA SYSTEM NORMAL", "sequence_number": 1}]
     fake_rest.reply(ADMIN_ARCHIVE, Reply({"status": "OK", "results": page}))
-    with pytest.raises(RowDataError, match="could not read the 1 row"):
+    with pytest.raises(RowDataError, match="could not read it whole"):
         rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
 
 

@@ -684,9 +684,9 @@ def test_a_symbol_with_no_file_rows_beside_one_wholly_withheld_fails_only_the_wi
     aapl, msft = out["AAPL"], out["MSFT"]
     assert isinstance(aapl, SymbolFailure)
     assert str(aapl.error) == (
-        "stocks.trades: the library could not read the 1 row Massive sent for AAPL from the "
-        "flat files whole, so it withheld it. X. m.problems() counts the withheld rows by "
-        "cause and symbol."
+        "stocks.trades: Massive sent 1 row for AAPL from the flat files, and the library could not "
+        "read it whole, so it withheld it. X. m.problems() counts the withheld rows by cause and "
+        "symbol."
     )
     assert isinstance(msft, SymbolRows)
     assert msft.table.size == 0
@@ -725,9 +725,10 @@ def test_a_scan_whose_only_row_has_no_readable_symbol_fails_each_symbol_without_
     for symbol in ("AAPL", "MSFT"):
         failed = out[symbol]
         assert isinstance(failed, SymbolFailure)
-        assert str(failed.error).startswith(
-            "stocks.trades: the library could not read the 1 row Massive sent for AAPL and "
-            "MSFT from the flat files whole"
+        assert str(failed.error) == (
+            "stocks.trades: Massive sent 1 row for AAPL and MSFT from the flat files, and the "
+            "library could not read it whole, so it withheld it. X. m.problems() counts the "
+            "withheld rows by cause and symbol."
         )
 
 

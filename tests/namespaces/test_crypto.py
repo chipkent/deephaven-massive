@@ -745,7 +745,7 @@ def test_a_daily_bar_stamped_inside_its_utc_day_is_withheld_with_a_warning(
     # Which day the bar covers would be a guess, so it is withheld; a page of no other bar
     # fails the read.
     serve(fake_rest, "/v2/aggs/ticker/X:BTCUSD/prev", load_fixture(OWNER, "prev.json"))
-    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
+    with pytest.raises(dm.MassiveError, match="could not read it whole"):
         rest_session.crypto.previous_day_bar("X:BTCUSD").fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
@@ -757,7 +757,7 @@ def test_a_daily_bar_stamped_inside_its_utc_day_is_withheld_with_a_warning(
     # time of day warns.
     path = "/v2/aggs/grouped/locale/global/market/crypto/2020-02-02"
     serve(fake_rest, path, load_fixture(OWNER, "grouped.json"))
-    with pytest.raises(dm.MassiveError, match="could read none of the 2 rows"):
+    with pytest.raises(dm.MassiveError, match="Massive sent 2 rows "):
         rest_session.crypto.bars(dm.ALL, dm.Timespan.DAY).history(
             "2020-02-02", "2020-02-02", source=dm.HistorySource.REST, wait=True
         )
@@ -1086,7 +1086,7 @@ def test_a_flat_file_day_bar_stamped_inside_its_utc_day_is_withheld_with_a_warni
     fake_s3.put("global_crypto/day_aggs_v1/2023/03/2023-03-29.csv.gz", make_csv_gz(empty))
     q = s3_session.crypto.bars(dm.ALL, dm.Timespan.DAY)
     # The bar is withheld; a file of no other bar fails the read.
-    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
+    with pytest.raises(dm.MassiveError, match="could not read it whole"):
         q.history("2023-03-28", "2023-03-29", source=dm.HistorySource.FLAT_FILES, wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(

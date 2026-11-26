@@ -2278,8 +2278,8 @@ def test_error_rows_of_a_snapshot_leave_the_table_as_problems_of_their_tickers(
             ProblemCause.REFUSED_SYMBOLS,
             "I:VIX",
             (
-                f"indices.snapshots: Massive refused I:VIX. Massive answered {requested} with "
-                'error NOT_ENTITLED for I:VIX: "Not entitled to this ticker."'
+                f"indices.snapshots: Massive answered {requested} with error NOT_ENTITLED for "
+                f'I:VIX: "Not entitled to this ticker.".'
             ),
         )
     ]
@@ -2310,8 +2310,8 @@ def test_an_error_row_of_a_whole_read_is_a_refused_symbol_of_it(
     # RAISE, as a refused symbol of a static read does.
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX, _SPX, _MISSING_RUT])))
     refused = (
-        f"indices.snapshots: Massive refused I:VIX. Massive answered GET {INDEX_SNAPSHOT_PATH} "
-        'with error NOT_ENTITLED for I:VIX: "Not entitled to this ticker."'
+        f"indices.snapshots: Massive answered GET {INDEX_SNAPSHOT_PATH} with error NOT_ENTITLED "
+        f'for I:VIX: "Not entitled to this ticker.".'
     )
     for setting in (dm.OnError.LOG, dm.OnError.RAISE):
         config = dm.MassiveConfig(
@@ -2331,7 +2331,13 @@ def test_an_error_row_of_a_whole_read_is_a_refused_symbol_of_it(
             else:
                 with pytest.raises(dm.EntitlementError) as info:
                     fetch(m, INDEX_SNAPSHOTS, symbols=dm.ALL)
-                assert str(info.value) == refused
+                # The call named no ticker to remove; the setting it names reads the others,
+                # as the LOG pass above shows.
+                assert str(info.value) == (
+                    f"{refused} To read the others, pass "
+                    "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+                    "dm.MassiveConfig."
+                )
             assert spans == [(ProblemCause.REFUSED_SYMBOLS, "I:VIX", refused)]
 
 
@@ -2355,8 +2361,8 @@ def test_an_undocumented_error_value_is_a_refused_symbol_and_drift_once_per_sess
             ProblemCause.REFUSED_SYMBOLS,
             "I:VIX",
             (
-                f"indices.snapshots: Massive refused I:VIX. Massive answered {requested} with "
-                'error DELISTED for I:VIX: "Ticker delisted."'
+                f"indices.snapshots: Massive answered {requested} with error DELISTED for I:VIX: "
+                f'"Ticker delisted.".'
             ),
         )
     ]
@@ -2389,12 +2395,24 @@ def test_a_refused_error_row_fails_the_read_under_raise_and_the_others_read_unde
                 assert setting is dm.OnError.LOG
                 assert [r["Symbol"] for r in out] == ["I:SPX"]
     [refusal] = raised
-    # The same error a ticker refused with HTTP 403 raises under RAISE.
+    # The same error a ticker refused with HTTP 403 raises under RAISE, with the setting that
+    # reads the others; the LOG pass above runs that advice.
     assert str(refusal) == (
-        f"indices.snapshots: Massive refused I:VIX. Massive answered GET {INDEX_SNAPSHOT_PATH} "
-        'with error NOT_ENTITLED for I:VIX: "Not entitled to this ticker."'
+        f"indices.snapshots: Massive answered GET {INDEX_SNAPSHOT_PATH} with error NOT_ENTITLED "
+        'for I:VIX: "Not entitled to this ticker.". Remove I:VIX, or, to read the others, pass '
+        "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
     )
     assert refusal.source is dm.ErrorSource.MASSIVE
+    # The other advice: a call without I:VIX reads I:SPX under RAISE.
+    strict = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE),
+    )
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_SPX])))
+    with dm.MassiveSession(strict) as m:
+        assert [r["Symbol"] for r in fetch(m, INDEX_SNAPSHOTS, symbols=["I:SPX"])] == ["I:SPX"]
 
 
 def test_a_not_found_error_row_follows_unavailable_symbols_as_http_404_does(
@@ -2437,7 +2455,7 @@ def test_an_error_rows_keys_are_never_drift(
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([{**_REFUSED_VIX, "new": "x"}])))
     events = record_problems(session, monkeypatch)
     spans = record_spans(session, monkeypatch)
-    with pytest.raises(dm.EntitlementError, match=r"Massive refused I:VIX\."):
+    with pytest.raises(dm.EntitlementError, match=r"with error NOT_ENTITLED for I:VIX: "):
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
     assert events == []
     assert [(cause, name) for cause, name, _ in spans] == [(ProblemCause.REFUSED_SYMBOLS, "I:VIX")]
@@ -2454,8 +2472,8 @@ def test_a_snapshot_whose_every_ticker_is_refused_fails_as_any_read_and_lists_ea
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
     assert str(info.value) == (
-        f"indices.snapshots: Massive refused I:SPX. Massive answered GET {INDEX_SNAPSHOT_PATH} "
-        'with error NOT_ENTITLED for I:SPX: "Not entitled to this ticker."'
+        f"indices.snapshots: Massive answered GET {INDEX_SNAPSHOT_PATH} with error NOT_ENTITLED "
+        f'for I:SPX: "Not entitled to this ticker.".'
     )
     assert [(cause, name) for cause, name, _ in spans] == [
         (ProblemCause.REFUSED_SYMBOLS, "I:SPX"),
@@ -2597,8 +2615,8 @@ def test_a_timestamp_out_of_bounds_is_a_data_failure(
     with pytest.raises(RowDataError) as info:
         fetch(session, SMA, symbols=["AAPL"])
     assert str(info.value) == (
-        "indicators.sma: the library could not read the 1 row of the read's symbols and "
-        "window from GET /v1/indicators/sma/AAPL whole, so it withheld it. "
+        "indicators.sma: Massive sent 1 row of the read's symbols and window from GET "
+        "/v1/indicators/sma/AAPL, and the library could not read it whole, so it withheld it. "
         "Timestamp unit mismatch for indicators.sma.TimestampStart: 1704310200000000000 ms "
         "overflows 64-bit nanoseconds. m.problems() counts the withheld rows by cause and symbol."
     )
@@ -2840,8 +2858,8 @@ def test_a_read_whose_rows_in_the_window_are_all_unreadable_fails(
     fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(envelope(page)))
     with pytest.raises(
         RowDataError,
-        match=r"^stocks\.trades: the library could (read none of the \d rows|not read the 1 row) "
-        r"of the read's symbols and window from GET /v3/trades/AAPL whole",
+        match=r"^stocks\.trades: Massive sent \d rows? of the read's symbols and window from "
+        r"GET /v3/trades/AAPL, and the library could",
     ):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
 
@@ -2882,7 +2900,7 @@ def test_a_read_of_many_pages_whose_rows_are_all_unreadable_fails(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     serve_pages(fake_rest, [[window_trade(index + 1, "x")] for index in range(11)])
-    with pytest.raises(RowDataError, match=r"could read none of the 11 rows of the read's"):
+    with pytest.raises(RowDataError, match="Massive sent 11 rows of the read's symbols"):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
 
 
@@ -2915,9 +2933,11 @@ def test_a_symbol_whose_rows_are_all_unreadable_beside_one_read_whole_fails_alon
     out = read_aapl_and_msft_by_symbol(session, fake_rest, msft_price=1.0)
     aapl, msft = out["AAPL"], out["MSFT"]
     assert isinstance(aapl, SymbolFailure)
-    assert str(aapl.error).startswith(
-        "stocks.trades: the library could not read the 1 row Massive sent for AAPL from "
-        "GET /v3/trades/AAPL whole, so it withheld it. "
+    assert str(aapl.error) == (
+        "stocks.trades: Massive sent 1 row for AAPL from GET /v3/trades/AAPL, and the library "
+        "could not read it whole, so it withheld it. /v3/trades/{stockTicker}: row 0: Price "
+        "(wire key 'price') expects double, got \"x\". m.problems() counts the withheld rows "
+        "by cause and symbol."
     )
     assert isinstance(msft, SymbolRows)
     assert msft.table.size == 1
@@ -2928,13 +2948,15 @@ def test_a_read_by_symbol_whose_rows_are_all_unreadable_fails_each_symbol_alone(
 ) -> None:
     # Each symbol fails, as a failed request fails its own, so a followed table goes on.
     out = read_aapl_and_msft_by_symbol(session, fake_rest, msft_price="y")
-    for symbol in ("AAPL", "MSFT"):
+    for symbol, price in (("AAPL", "x"), ("MSFT", "y")):
         failed = out[symbol]
         assert isinstance(failed, SymbolFailure)
         assert isinstance(failed.error, RowDataError)
-        assert str(failed.error).startswith(
-            f"stocks.trades: the library could not read the 1 row Massive sent for {symbol} "
-            f"from GET /v3/trades/{symbol} whole, so it withheld it. "
+        assert str(failed.error) == (
+            f"stocks.trades: Massive sent 1 row for {symbol} from GET /v3/trades/{symbol}, and "
+            "the library could not read it whole, so it withheld it. /v3/trades/{stockTicker}: "
+            f"row 0: Price (wire key 'price') expects double, got \"{price}\". m.problems() "
+            "counts the withheld rows by cause and symbol."
         )
 
 
@@ -3777,8 +3799,8 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
     serve_pairs(fake_rest)
     spans = record_spans(session, monkeypatch)
     expected = (
-        "crypto.last: Massive refused X:BTCUSD. Massive answered GET /v1/last/crypto/BTC/USD "
-        'with error NOT_ENTITLED for X:BTCUSD: "Not entitled"'
+        "crypto.last: Massive answered GET /v1/last/crypto/BTC/USD with error NOT_ENTITLED for "
+        'X:BTCUSD: "Not entitled".'
     )
     with pytest.raises(dm.EntitlementError) as info:
         fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
@@ -4065,7 +4087,7 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     two_days = f"/v2/aggs/ticker/X:BTCUSD/range/2/day/{start}/{end}".replace(":", "%3A")
     new_york = ny_ms(date(2025, 3, 3))
     fake_rest.reply(two_days, Reply(envelope([{"t": new_york, "c": 1.0}])))
-    with pytest.raises(RowDataError, match="could not read the 1 row"):
+    with pytest.raises(RowDataError, match="could not read it whole"):
         crypto_bars(session, Timespan.DAY, multiplier=2, start="2025-03-03", end="2025-03-06")
     [warning] = unexpected_stamps(caplog)
     assert warning == (
@@ -4092,7 +4114,7 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     assert not unexpected_stamps(caplog)
     # A week bar stamped on another day may cover another week: it is withheld, and its form
     # warns.
-    with pytest.raises(RowDataError, match="could not read the 1 row"):
+    with pytest.raises(RowDataError, match="could not read it whole"):
         crypto_bars(session, Timespan.WEEK, multiplier=1, start="2026-10-11", end="2026-10-17")
     [warning] = unexpected_stamps(caplog)
     assert warning == (
@@ -4119,7 +4141,7 @@ def test_longer_crypto_bars_are_expected_at_utc_midnight(
     ]
     assert not unexpected_stamps(caplog)
     # A month bar stamped on the 2nd is withheld.
-    with pytest.raises(RowDataError, match="could not read the 1 row"):
+    with pytest.raises(RowDataError, match="could not read it whole"):
         crypto_bars(session, Timespan.MONTH, multiplier=1, start="2025-03-01", end="2025-03-31")
     [warning] = unexpected_stamps(caplog)
     assert warning == (
@@ -5618,7 +5640,7 @@ def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
             "on_error=dm.ErrorPolicy(unreadable_symbols=dm.OnError.LOG) to the call or to "
             "dm.MassiveConfig."
         )
-        with pytest.raises(dm.MassiveError, match=r"could not read the 1 row"):
+        with pytest.raises(dm.MassiveError, match="could not read it whole"):
             fetch(m, CONVERSION, params=params)
 
 
@@ -5994,8 +6016,8 @@ _NQ_IN_ES = (
     "ProductCode",
     1,
     (
-        "Massive answered the request for ES with rows of NQ, which the read did not ask for, "
-        "so they are left out"
+        "Massive answered the request for ES with rows of NQ, which the read did not ask for, so "
+        "they are left out"
     ),
 )
 

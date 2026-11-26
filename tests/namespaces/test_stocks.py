@@ -1002,7 +1002,7 @@ def test_previous_day_bar_withholds_an_unexpected_stamp_with_a_warning(
     fake_rest.reply(
         "/v2/aggs/ticker/AAPL/prev", Reply({"status": "OK", "adjusted": True, "results": [bar]})
     )
-    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
+    with pytest.raises(dm.MassiveError, match="could not read it whole"):
         rest_session.stocks.previous_day_bar("AAPL").fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
@@ -1880,7 +1880,7 @@ def test_a_day_file_moves_an_early_close_and_warns_on_an_unexpected_stamp(
     # withheld, and a file of no other bar fails the read; one WARNING names it.
     afternoon = day + 29 * HOUR_NS // 2
     fake_s3.put(key, make_csv_gz(f"{header}BCC,1,61.68,61.99,62.565,61.41,{afternoon},1\n"))
-    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
+    with pytest.raises(dm.MassiveError, match="could not read it whole"):
         query.history("2024-11-29", "2024-11-29", source=dm.HistorySource.FLAT_FILES, wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(

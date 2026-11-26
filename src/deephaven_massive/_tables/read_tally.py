@@ -193,7 +193,7 @@ class ReadTally:
         Args:
             dataset: The dataset, for the message.
             whose: Whose rows they are, for the message: the read's, or, for a tally of one
-                value's rows, `"Massive sent for <value>"`.
+                value's rows, `"for <value>"`.
 
         Returns:
             The `RowDataError` of a read that had rows of its symbols and window and withheld
@@ -278,14 +278,14 @@ class ReadTally:
         """
         with self._lock:
             if symbol in self._owned:
-                return _failure(dataset, self._owned[symbol], whose=f"Massive sent for {symbol}")
+                return _failure(dataset, self._owned[symbol], whose=f"for {symbol}")
             for request in (*self._requests, self._scan):
                 if request.kept:
                     continue
                 for could, withholding in request.unknown.items():
                     named = could or tuple(everyone)
                     if symbol in named:
-                        whose = f"Massive sent for {prose_list(named, 'symbols')}"
+                        whose = f"for {prose_list(named, 'symbols')}"
                         return _failure(dataset, withholding, whose=whose)
         return None
 
@@ -296,19 +296,20 @@ def _failure(dataset: str, withholding: _Withholding, *, whose: str) -> RowDataE
     Args:
         dataset: The dataset.
         withholding: The rows, their first reason, and what they were read from.
-        whose: Whose rows they were, after "the N rows", such as `"Massive sent for MSFT"`.
+        whose: Whose rows they were, after "Massive sent N rows", such as `"for MSFT"`.
 
     Returns:
-        Such as `stocks.bars: the library could read none of the 2 rows Massive sent for MSFT
-        from GET /v2/aggs/ticker/MSFT/range/1/day/... whole, so it withheld them all. ...`.
+        Such as `stocks.bars: Massive sent 2 rows for MSFT from GET
+        /v2/aggs/ticker/MSFT/range/1/day/..., and the library could read none of them whole,
+        so it withheld them all. ...`.
     """
     rows, sources = withholding.rows, ", ".join(withholding.sources)
     read = (
-        f"could not read the 1 row {whose} from {sources} whole, so it withheld it"
+        "the library could not read it whole, so it withheld it"
         if rows == 1
-        else f"could read none of the {counted(rows, 'row')} {whose} from {sources} whole, "
-        "so it withheld them all"
+        else "the library could read none of them whole, so it withheld them all"
     )
     return RowDataError(
-        f"{dataset}: the library {read}. {reason_sentence(withholding.reason)} {WITHHELD_LISTED}"
+        f"{dataset}: Massive sent {counted(rows, 'row')} {whose} from {sources}, and {read}. "
+        f"{reason_sentence(withholding.reason)} {WITHHELD_LISTED}"
     )

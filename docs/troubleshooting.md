@@ -76,7 +76,7 @@ Each cause, and what to do about it:
 | `noncanonical_symbols` | `user` | `SKIPPED` | yes | A value of a watchlist or other table you pass isn't Massive's exact ticker, or `dm.canonicalize_symbols` couldn't convert it, so its row is skipped. A `fetch()`, `history()`, or stream of a static table lists it once. | Fix or delete the row. Massive's lists, such as `m.reference.tickers()`, show its spelling. |
 | `unreadable_symbols` | `massive` | `WITHHELD` | no | Massive sent a row whose symbol the library can't read as Massive's ticker. The row is left out. | The library withheld the row because Massive sent it in a form the library can't read. `Detail` gives what Massive sent and why, for a report to Massive. Set `unreadable_symbols` to `dm.OnError.IGNORE` to quiet it, or to `dm.OnError.RAISE` to fail the table. |
 | `unavailable_symbols` | `massive` | `SKIPPED` | no | Massive has no data for the symbol. It answered HTTP 404 or a snapshot row of `NOT_FOUND`, or the pair isn't on its crypto ticker list. | Look the symbol up in Massive's lists, such as `m.reference.tickers()`. |
-| `refused_symbols` | `massive` | `SKIPPED` | yes | Massive refused the symbol: your plan doesn't serve it there (HTTP 403, an error row, or "not authorized"). One row per symbol, also for a request of many symbols. | Remove the symbol, or change the plan or the feed the `Detail` names, then delete the symbol's row and add it back, or call the method again for a list in code. |
+| `refused_symbols` | `massive` | `SKIPPED` | yes | Massive refused the symbol, as your plan doesn't serve it. | Remove the symbol, or change the plan `Detail` names. Then delete its row and add it back, or call the method again. |
 | `unrequested_symbols` | `massive` | `WITHHELD` | no | Massive answered a call's request with a row of a symbol the call didn't ask for. The row is left out. | Nothing, if the row is Massive's answer about another instrument. To read that symbol, name it in the call or add it to the watchlist. Set `unrequested_symbols` to `dm.OnError.IGNORE` to quiet it, or to `dm.OnError.RAISE` to fail the table. |
 | `unreadable_keys` | `massive` | `WITHHELD` | no | Massive sent a row whose symbol, time, or other key the library can't read. The row is left out. | The library withheld the row because Massive sent it in a form the library can't read. `Detail` gives what Massive sent and why, for a report to Massive. Set `unreadable_keys` to `dm.OnError.IGNORE` to quiet it, or to `dm.OnError.RAISE` to fail the table. |
 | `unconvertible_values` | `massive` | `WITHHELD` | no | Massive sent a row with a value the library can't read as its column's type. The row is left out. | The library withheld the row because Massive sent it in a form the library can't read. `Detail` gives what Massive sent and why, for a report to Massive. Set `unconvertible_values` to `dm.OnError.IGNORE` to quiet it, or to `dm.OnError.RAISE` to fail the table. |
@@ -95,7 +95,7 @@ Each cause, and what to do about it:
 | `poll_cycle_failed` | `library` | `GAP` | yes | `poll()` cycles failed, so rows may be missing. It ends with the next good cycle. | Fix what `Detail` names. The poll keeps trying, and the table fails once its cycles have failed for [`max_outage`](configuration.md#settings-reference). |
 | `poll_cycle_late` | `library` | `DELAYED` | yes | `poll()` cycles take longer than the interval, so the table updates late. | Poll fewer symbols, or pass `poll()` a longer interval. |
 | `symbol_read_retrying` | `library` | `DELAYED` | yes | A symbol's read failed in a way that may pass, so the library tries it again. A `dm.PollMode.REPLACE` poll keeps the symbol's last rows meanwhile. A read that waits on Massive's crypto ticker list is one of these. | Nothing, unless it lasts. Then fix what `Detail` names. |
-| `symbol_read_failed` | `library` | `FAILED` | yes | A symbol of a watchlist or a `poll()` failed and won't be read again. | Fix what `Detail` names. Then delete the symbol's row and add it back to read it again. For symbols listed in code, call `poll()` again. |
+| `symbol_read_failed` | `library` | `FAILED` | yes | A symbol's read failed for good. | Fix what `Detail` names. Then delete the symbol's row and add it back, or call the method again. |
 | `stream_failed` | `library` | `FAILED` | no | The table failed. `Detail` and its `Error` in `m.streams()` say why. | Fix what `Detail` names. Then run the line that made the table again. |
 
 <!-- End of the generated causes. -->
@@ -247,6 +247,10 @@ has already retried, so wait before you call again.
 A `fetch()` or `history()` of a watchlist fails when Massive rejects the API key, or when every
 symbol on the watchlist at the call failed. When only some fail, such as when Massive refuses one
 symbol's request, the log reports them and `m.symbol_reads()` shows each one's error.
+
+A `fetch()` or `history()` of symbols listed in code fails only when every symbol fails, by
+default. Otherwise it returns the other symbols' rows, and `m.problems()` lists each failed
+symbol.
 
 <a id="diagnostics"></a>
 
