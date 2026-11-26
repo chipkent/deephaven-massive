@@ -443,7 +443,7 @@ def test_attribution_gives_each_request_s_rows_failure_or_no_data_to_its_symbols
         reader, DIVIDENDS, units, results=[error, None], symbols=symbols, tally=ReadTally()
     )
     assert out == AttributedRows(
-        {"AAPL": [], "MSFT": [], "NVDA": []}, {"AAPL": error, "MSFT": error}
+        {"AAPL": [], "MSFT": [], "NVDA": []}, {"AAPL": error, "MSFT": error}, []
     )
     assert out.failures["AAPL"] is error  # the one error object, shared by the request's symbols
 

@@ -156,7 +156,6 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
-    BrokenGuaranteeError,
     CutShortError,
     EntitlementError,
     ErrorSource,
@@ -164,6 +163,7 @@ from deephaven_massive._errors import (
     MassiveError,
     RowDataError,
     SessionClosedError,
+    SymbolRefusalError,
     UnavailableSymbolError,
     failure_text,
     from_wire,
@@ -190,7 +190,7 @@ from deephaven_massive._ingest.rate_limits import (
 )
 from deephaven_massive._ingest.recency_labels import DELAYED as DELAYED_LABEL
 from deephaven_massive._ingest.recency_labels import delayed_refusal, read_labels
-from deephaven_massive._ingest.refusal_search import RefusalSearch
+from deephaven_massive._ingest.rest_refusals import drop_named_refusals, search_refusals
 from deephaven_massive._ingest.rest_requests import (
     BARE_INDEX_LIST_PARAM,
     BARE_INDEX_PARAM,
@@ -198,12 +198,11 @@ from deephaven_massive._ingest.rest_requests import (
     CryptoSplit,
     axis_query,
     capped_call,
+    caps_each_symbol,
     fetch_paths,
     history_calls,
-    listed_part,
     plan_calls,
     shared_params,
-    wire_group,
     wire_query,
 )
 from deephaven_massive._ingest.rest_rows import (
@@ -213,6 +212,7 @@ from deephaven_massive._ingest.rest_rows import (
     keep_window,
 )
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
+from deephaven_massive._ingest.static_reads import read_symbols
 from deephaven_massive._ingest.stop_tokens import as_cancel
 from deephaven_massive._ingest.symbol_reads import (
     ReadEach,
@@ -246,7 +246,6 @@ from deephaven_massive._tables.problem_events import (
     drift_events,
 )
 from deephaven_massive._tables.read_tally import ReadTally
-from deephaven_massive._tables.symbol_retry import is_symbol_refusal
 from deephaven_massive._tables.withheld import (
     FAULT,
     SENT,
@@ -477,165 +476,6 @@ def _listed_rows(
     arrays = list(taken.columns)
     arrays[position] = pa.array(symbols, taken.schema.field(position).type)
     return pa.RecordBatch.from_arrays(arrays, schema=taken.schema), unlisted
-
-
-def _per_symbol(name: str, planned: Sequence[tuple[RestPath, list[Call]]]) -> bool:
-    """Return whether every planned call names one symbol, so `limit` caps each symbol.
-
-    Args:
-        name: The dataset's name, for the error.
-        planned: Each path with its calls.
-
-    Returns:
-        True when every call names one symbol (`Call.symbol`); False when none does, or there
-        are no calls.
-
-    Raises:
-        BrokenGuaranteeError: If some calls name one symbol and others do not: no dataset plans
-            such a read, and neither cap would be right for it.
-    """
-    kinds = {call.symbol is not None for _, calls in planned for call in calls}
-    if len(kinds) > 1:
-        raise BrokenGuaranteeError(
-            library_bug(
-                f"{name} planned requests of one symbol beside requests of several, so limit "
-                "can cap neither each symbol nor the whole call"
-            )
-        )
-    return True in kinds
-
-
-@dataclass(slots=True)
-class _SearchedRequest:
-    """A listed request Massive refused whole, and the search for the symbols it refuses.
-
-    Attributes:
-        unit: The refused request and its path.
-        search: The search over its symbols (`RefusalSearch`).
-        refusals: Each symbol's refusal so far: Massive's answer to the smallest refused part
-            that held it, the request's own refusal until a part is refused.
-        answered: Each part Massive answered, with its outcome, in the order answered.
-    """
-
-    unit: RestUnit
-    search: RefusalSearch[MassiveError]
-    refusals: dict[str, MassiveError]
-    answered: list[tuple[RestUnit, _Outcome]]
-
-    @classmethod
-    def of(
-        cls, spec: DatasetSpec, unit: RestUnit, outcome: _Outcome | MassiveError
-    ) -> _SearchedRequest | None:
-        """Start the search of a request's refusal, when its symbols can be told apart.
-
-        A refusal of the feed (`FeedRefusalError`) is never searched, since no symbol escapes
-        it, nor a request whose symbols can't be sent apart: a per-symbol request, or the
-        symbols of one wire spelling (`wire_group`). A request of several wire spellings lists
-        them (`listed_part`).
-
-        Args:
-            spec: The dataset.
-            unit: A planned request and its path.
-            outcome: Its outcome or failure.
-
-        Returns:
-            The search, or None when the outcome is not a refusal to search.
-        """
-        rest_path, call = unit
-        if not isinstance(outcome, MassiveError) or not is_symbol_refusal(outcome):
-            return None
-        if call.symbol is not None or len({wire_group(spec, s) for s in call.symbols}) <= 1:
-            return None  # a per-symbol request, or one wire spelling: nothing smaller to send
-        logger.debug(
-            "%s: Massive refused the request of %s for %s whole; sending it again in parts to "
-            "find the symbols it refuses: %s",
-            spec.name,
-            rest_path.template,
-            bounded_list(call.symbols),
-            outcome,
-        )
-        search: RefusalSearch[MassiveError] = RefusalSearch(
-            call.symbols, group=functools.partial(wire_group, spec), class_of=_class_name
-        )
-        return cls(unit, search, dict.fromkeys(call.symbols, outcome), [])
-
-    def part_unit(self, spec: DatasetSpec, part: Sequence[str]) -> RestUnit:
-        """Return the request for a part of the refused request's symbols.
-
-        Args:
-            spec: The dataset.
-            part: A part the search has pending.
-
-        Returns:
-            The refused request narrowed to `part` (`listed_part`), with its path.
-        """
-        rest_path, call = self.unit
-        return rest_path, listed_part(spec, call, part)
-
-    def take(self, part: tuple[str, ...], unit: RestUnit, outcome: _Outcome | MassiveError) -> None:
-        """Take Massive's answer to a part.
-
-        Args:
-            part: The part, as the search gave it.
-            unit: The request sent for it.
-            outcome: Its outcome or failure: rows are its symbols', a refusal is searched
-                further, and any other failure (a 5xx, a timeout) is its symbols' own.
-        """
-        if isinstance(outcome, _Outcome):
-            self.search.answered(part)
-            self.answered.append((unit, outcome))
-        elif isinstance(outcome, EntitlementError):
-            self.search.refused(part)
-            self.refusals.update(dict.fromkeys(part, outcome))
-        else:
-            self.search.failed(part, outcome)
-
-    def leaves(self, spec: DatasetSpec) -> list[tuple[RestUnit, _Outcome | MassiveError]]:
-        """Return the parts that answer each symbol, once the search is done.
-
-        Args:
-            spec: The dataset.
-
-        Returns:
-            Each answered part with its outcome, then one part per failure, with the symbols
-            that failure is theirs: each refused symbol with its refusal, each failed one with
-            its error. Every symbol of the request is in exactly one.
-        """
-        failures = {
-            **{item: self.refusals[item] for item in self.search.refused_items},
-            **self.search.failed_items,
-        }
-        by_error: dict[int, tuple[MassiveError, list[str]]] = {}
-        for item, error in failures.items():
-            by_error.setdefault(id(error), (error, []))[1].append(item)
-        rest_path, call = self.unit
-        logger.debug(
-            "%s: the search of the request of %s for %s cost %d more requests: %d symbols "
-            "answered; refused: %s; failed otherwise: %s",
-            spec.name,
-            rest_path.template,
-            bounded_list(call.symbols),
-            self.search.requests,
-            len(call.symbols) - len(failures),
-            bounded_list(self.search.refused_items) if self.search.refused_items else "none",
-            bounded_list(self.search.failed_items) if self.search.failed_items else "none",
-        )
-        return [
-            *self.answered,
-            *((self.part_unit(spec, items), error) for error, items in by_error.values()),
-        ]
-
-
-def _class_name(symbol: str) -> str:
-    """Return a symbol's asset class, by which a search splits a refused request first.
-
-    Args:
-        symbol: A canonical symbol.
-
-    Returns:
-        Its class's name (`symbol_class`), such as `"indices"`.
-    """
-    return symbol_class(symbol).value
 
 
 def _read_capped(
@@ -1440,12 +1280,13 @@ class RestReader:
         `min(max_concurrency, requests)` threads made for this read, and listen to a `Cancel`
         token of the read's own (following `cancel`), which is also the read's lane in the
         rate governor. Each is made as `read` makes it (`_call`), capped at `limit`. A listed
-        request Massive refuses whole, naming no symbol, is sent again in parts until each of
-        its symbols is answered, refused, or failed on its own (`_search_refusals`). A symbol
-        Massive answered HTTP 404 on its first request has no data and follows
+        request Massive refuses for some of its symbols is sent again in parts until each of
+        its symbols is answered, refused, or failed on its own (`_ingest/rest_refusals.py`). A
+        symbol Massive answered HTTP 404 on its first request has no data and follows
         `ErrorPolicy.unavailable_symbols`: under `LOG` and `IGNORE` it has no rows and one
         line per path names it (`_report_missing`); under `RAISE` its result is an
-        `UnavailableSymbolError`. The read's tally counts nothing here: the caller counts each
+        `UnavailableSymbolError`, and `m.problems()` lists it with why
+        (`_report_missing_of_failed`). The read's tally counts nothing here: the caller counts each
         request's rows once it knows which are the read's symbols' (`symbol_reads._attribute`).
 
         Args:
@@ -1497,7 +1338,8 @@ class RestReader:
             record=record,
         )
         send = functools.partial(self._send_each, run=run, cancel=cancel, executor=executor)
-        leaves, done = self._search_refusals(spec, units, send(units), send=send)
+        sent, answers = drop_named_refusals(spec, units, send(units), send=send)
+        leaves, done = search_refusals(spec, sent, answers, send=send)
         answered = [
             (rest_path.template, outcome)
             for (rest_path, _), outcome in zip(leaves, done, strict=True)
@@ -1505,7 +1347,10 @@ class RestReader:
         ]
         refused = effect_of(self.policy.unavailable_symbols).fails
         missing = [o.missing for _, o in answered if o.missing is not None]
-        if missing and not refused:
+        if missing and refused:
+            # Each such symbol fails alone below; its m.problems() row says why.
+            self._report_missing_of_failed(spec, missing)
+        elif missing:
             self._report_missing(spec, missing)
         results: list[RequestRows | MassiveError | None] = []
         for (rest_path, _), outcome in zip(leaves, done, strict=True):
@@ -1519,7 +1364,12 @@ class RestReader:
                 sent = schema.append(pa.field(SYMBOL_SENT, pa.string()))
                 rows = pa.Table.from_batches(outcome.batches, schema=sent)
                 results.append(RequestRows(rows, outcome.withheld, outcome.source))
-        return ReadEach(leaves, results, sum(outcome.requests for _, outcome in answered))
+        return ReadEach(
+            leaves,
+            results,
+            sum(outcome.requests for _, outcome in answered),
+            sum(outcome.received for _, outcome in answered),
+        )
 
     def _call_alone(
         self,
@@ -1626,63 +1476,6 @@ class RestReader:
                 return [bound(unit) for unit in units]
             return self._fan_out(bound, units, executor=executor, stop=stop)
 
-    def _search_refusals(
-        self,
-        spec: DatasetSpec,
-        units: Sequence[RestUnit],
-        done: Sequence[_Outcome | MassiveError],
-        *,
-        send: Callable[[Sequence[RestUnit]], list[_Outcome | MassiveError]],
-    ) -> tuple[list[RestUnit], list[_Outcome | MassiveError]]:
-        """Find which symbols of each refused listed request Massive refuses, by sending parts.
-
-        Massive refuses a request of several symbols whole, without naming the symbols it
-        refuses (HTTP 403, or `NOT_AUTHORIZED`), so refusing all of them would leave an
-        entitled symbol out for good because of another. Each such request is searched
-        (`refusal_search.RefusalSearch`): split by asset class, then into halves, the parts of
-        every search sent together, one round per level, until each symbol is answered,
-        refused, or failed for another reason. A refusal of the feed (`FeedRefusalError`) is
-        never searched: no symbol escapes it. Two refused halves end the search with both
-        refused, so a refusal of every symbol costs two more requests, and finding one refused
-        symbol among `n` about `2 * ceil(log2(n))`. Each part's answer is that part's symbols'
-        alone, so no symbol gets rows twice or loses them: the refused request had none.
-
-        Args:
-            spec: The dataset.
-            units: The planned requests.
-            done: Each request's outcome or failure, in order.
-            send: Sends one round of requests (`_send_each`).
-
-        Returns:
-            The requests the outcomes answer, each planned request in its place or, once
-            searched, the parts that answered its symbols, with each one's outcome or failure:
-            a refused part's error is Massive's refusal of the smallest part that held its
-            symbols.
-
-        Errors are those of `send`: a failure of the whole read raises.
-        """
-        searched = {
-            index: found
-            for index, (unit, outcome) in enumerate(zip(units, done, strict=True))
-            if (found := _SearchedRequest.of(spec, unit, outcome)) is not None
-        }
-        while not all(one.search.done for one in searched.values()):
-            sent = [
-                (one, part, one.part_unit(spec, part))
-                for one in searched.values()
-                for part in one.search.pending()
-            ]
-            answers = send([unit for _, _, unit in sent])
-            for (one, part, unit), outcome in zip(sent, answers, strict=True):
-                one.take(part, unit, outcome)
-        leaves: list[RestUnit] = []
-        results: list[_Outcome | MassiveError] = []
-        for index, (unit, outcome) in enumerate(zip(units, done, strict=True)):
-            parts = searched[index].leaves(spec) if index in searched else [(unit, outcome)]
-            leaves.extend(part for part, _ in parts)
-            results.extend(answer for _, answer in parts)
-        return leaves, results
-
     def _report_missing(self, spec: DatasetSpec, missing: Sequence[_Missing]) -> None:
         """Apply `ErrorPolicy.unavailable_symbols` to the symbols a read found no data for.
 
@@ -1713,17 +1506,18 @@ class RestReader:
         )
 
     def _report_missing_of_failed(self, spec: DatasetSpec, missing: Sequence[_Missing]) -> None:
-        """List the symbols Massive has no data for among the calls of a read another call failed.
+        """List the symbols Massive has no data for in a read that fails for them or another.
 
-        The read raises the other call's failure, so `ErrorPolicy.unavailable_symbols` decides
+        The read raises another call's failure, or, in a read by symbol under `RAISE`, gives
+        each such symbol its own (`read_each`), so `ErrorPolicy.unavailable_symbols` decides
         nothing here: each symbol is only an `unavailable_symbols` problem of the read's table,
         with the setting, so the failure never hides what Massive answered for it.
 
         Args:
             spec: The dataset.
             missing: The symbols Massive answered with HTTP 404 in the calls that completed,
-                in call order: those of one path's calls (`_fan_out`), or of a `poll()`
-                cycle's earlier paths (`_read_one_cycle`).
+                in call order: those of one path's calls (`_fan_out`), of a `poll()`
+                cycle's earlier paths (`_read_one_cycle`), or of a read by symbol.
         """
         if not missing:
             return
@@ -2466,9 +2260,10 @@ class RestReader:
         request served: any label on a page charged to a subscription, since the page is that
         subscription's data, and an envelope label on a page of the `other` bucket when every
         class the request names is unlisted. A row's label on a page of the `other` bucket,
-        and an envelope label on one that names a listed class beside an unlisted one, are a
-        plain `EntitlementError`: the request's own, which a read by symbol gives to every
-        symbol the request named.
+        and an envelope label on one that names a listed class beside an unlisted one, refuse
+        the symbols they label (`SymbolRefusalError`): the labelled rows' tickers the request
+        named, or the request's symbols of the unlisted classes. A read by symbol refuses
+        exactly those and asks again for the others (`_ingest/rest_refusals.py`).
 
         Args:
             spec: The dataset, for the message.
@@ -2484,7 +2279,7 @@ class RestReader:
         Raises:
             EntitlementError: If a label says delayed for a subscription not listed
                 (`recency_labels.delayed_refusal`): a `FeedRefusalError` when the label is
-                the feed's.
+                the feed's, else a `SymbolRefusalError` naming the labelled symbols.
         """
         listed = self.delayed_subscriptions
         fixed = None if bucket == OTHER else Subscription(bucket)
@@ -2505,7 +2300,12 @@ class RestReader:
                 # The feed's when the label leaves no class of the request served: the one
                 # subscription the page is charged to, or every class a mixed page names.
                 # Currencies are never unlisted, so a mixed page naming them is a symbol's.
-                raise _feed_refusal(refusal) if named <= set(unlisted) else refusal
+                whose = _whose_refusal(
+                    refusal,
+                    feed=named <= set(unlisted),
+                    symbols=[s for s in own if subscription_of(symbol_class(s)) in unlisted],
+                )
+                raise whose
         recency = _page_recency(
             page.rows, fixed=fixed, listed=listed, symbol_key=symbol_key, symbol=call.symbol
         )
@@ -2523,7 +2323,12 @@ class RestReader:
             )
             # A row's label on a page charged to a subscription is held against that
             # subscription, so it is the feed's; on the `other` bucket it is the row's own.
-            raise _feed_refusal(refusal) if fixed is not None else refusal
+            whose = _whose_refusal(
+                refusal,
+                feed=fixed is not None,
+                symbols=[s for s in own if any(s in t for t, _ in recency.refused.values())],
+            )
+            raise whose
         delayed = recency.delayed or (page.status == DELAYED_LABEL and bool(named))
         if on_recency is not None and (delayed or recency.real_time):
             on_recency(Recency.DELAYED if delayed else Recency.REALTIME)
@@ -3193,7 +2998,7 @@ class RestReader:
 
         Raises:
             BrokenGuaranteeError: If a capped plan mixes per-symbol calls with calls of several
-                symbols (`_per_symbol`).
+                symbols (`caps_each_symbol`).
 
         Errors are otherwise those of `read`.
         """
@@ -3210,7 +3015,9 @@ class RestReader:
             tally=tally,
             on_missing=on_missing,
         )
-        per_symbol = request.limit is not None and _per_symbol(spec.name, planned)
+        per_symbol = request.limit is not None and caps_each_symbol(
+            spec.name, [call for _, calls in planned for call in calls]
+        )
         if request.limit is None or per_symbol:
             done = [read(rest_path, calls, limit=request.limit) for rest_path, calls in planned]
             tables = [path_rows.table for path_rows in done]
@@ -3465,6 +3272,12 @@ class RestEndpoints:
         a row several requests return once (`RestReader._read_planned`). Drift is logged, once
         per field.
 
+        Symbols in code are read by symbol (`static_reads.read_symbols`): a symbol's own
+        failure (a refusal, a request that failed after retries) leaves the others' rows, and
+        `m.problems()` lists it; the call raises when every symbol it names fails, for a
+        failure of the whole read, and under `RAISE` for the failed symbol's cause. `dm.ALL`
+        and a path without symbols are read whole.
+
         Args:
             spec: The dataset, with a fetch path.
             request: The normalized arguments, with static symbols (the query reads a reactive
@@ -3480,12 +3293,13 @@ class RestEndpoints:
             A static table in the dataset's schema.
 
         Errors, which the verb's call logs at the level their `is_bug` gives (DEBUG for an
-        expected one, ERROR for a defect): `AuthenticationError` (HTTP 401),
-        `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`, or a `DELAYED` label on a subscription
-        not in `MassiveConfig.delayed_subscriptions`, `RestReader._check_recency`),
-        `RowDataError` for a row that breaks the schema, and `MassiveError` itself for any other
-        failure (a rate limit with status 429, a closed session as
-        `"This session is closed. ..."`).
+        expected one, ERROR for a defect), each raised for symbols in code only as the
+        paragraph above says: `AuthenticationError` (HTTP 401), `EntitlementError` (HTTP 403 or
+        `NOT_AUTHORIZED`, or a `DELAYED` label on a subscription not in
+        `MassiveConfig.delayed_subscriptions`, `RestReader._check_recency`), `RowDataError` for
+        a read whose every row of its symbols was withheld (`ReadTally.check`), and
+        `MassiveError` itself for any other failure (a rate limit with status 429, a closed
+        session as `"This session is closed. ..."`).
 
         A parameter a path does not take raises the `ValueError` of `shared_params` before any
         request: every path is planned before the first one is read.
@@ -3494,14 +3308,47 @@ class RestEndpoints:
             f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
         )
         tally = ReadTally()
-        table, _ = reader.read_fetch(
-            spec,
-            request,
-            symbols=request.static_symbols,
-            tally=tally,
-            cancel=as_cancel(stop),
-            pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
-        )
+        cancel = as_cancel(stop)
+        symbols = request.static_symbols
+        if isinstance(symbols, tuple):
+            units, failed = fetch_units(reader, spec, request, symbols=symbols, cancel=cancel)
+            patience = reader.patience()  # once for every request, before any fan-out
+            logger.debug(
+                "%s fetch: %d requests on %d paths; the read waits out %.0f s of pauses",
+                spec.name,
+                len(units),
+                len({rest_path.template for rest_path, _ in units}),
+                patience.seconds,
+            )
+            announce(
+                self._state.client.governor,
+                f"{spec.name} fetch",
+                [call_bucket(spec, rest_path.template, unit) for rest_path, unit in units],
+                pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+            )
+            table, _ = read_symbols(
+                reader,
+                spec,
+                request,
+                symbols=symbols,
+                units=units,
+                failed=failed,
+                window=None,
+                current=_fetch_is_current(spec, request),
+                limit=request.limit,
+                cancel=cancel,
+                patience=patience,
+                tally=tally,
+            )
+        else:
+            table, _ = reader.read_fetch(
+                spec,
+                request,
+                symbols=symbols,
+                tally=tally,
+                cancel=cancel,
+                pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+            )
         tally.check(spec.name)
         return self._static(spec, table)
 
@@ -3675,19 +3522,57 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Errors: as `fetch` raises them, and `MassiveError` for a page whose `adjusted` echo
-        differs from the request and for a symbol whose later page answers HTTP 404, its data
-        cut short.
+        Symbols are read by symbol, as `fetch` reads them: one symbol's failure leaves the
+        others' rows.
+
+        Errors: as `fetch` raises them. A page whose `adjusted` echo differs from the request,
+        and a later page that answers HTTP 404 (the data cut short), are failures of the
+        request's symbols, and of the whole read on a `dm.ALL` read.
         """
         reader = self._reader(
             f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
         )
+        cancel = as_cancel(stop)
+        symbols = request.static_symbols
+        if isinstance(symbols, tuple):
+            units, failed = history_units(
+                reader, spec, request, window=window, symbols=symbols, cancel=cancel
+            )
+            announce(
+                self._state.client.governor,
+                f"{spec.name} history",
+                [call_bucket(spec, rest_path.template, unit) for rest_path, unit in units],
+                shape=ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED,
+                pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+            )
+            patience = reader.patience()
+            table, requests = read_symbols(
+                reader,
+                spec,
+                request,
+                symbols=symbols,
+                units=units,
+                failed=failed,
+                window=window,
+                current=False,
+                limit=None,
+                cancel=cancel,
+                patience=patience,
+                tally=tally,
+            )
+            logger.info(
+                "%s history: source=REST requests=%d, waiting out at most %.0f s of pauses",
+                spec.name,
+                requests,
+                patience.seconds,
+            )
+            return self._static(spec, table)
         rest_path, calls, shape = _history_plan(
             reader,
             spec,
             request,
             window=window,
-            split=functools.partial(reader.crypto_pair, cancel=as_cancel(stop)),
+            split=functools.partial(reader.crypto_pair, cancel=cancel),
             days=days,
         )
         announce(
@@ -3705,7 +3590,7 @@ class RestEndpoints:
             request=request,
             limit=None,
             window=window,
-            cancel=as_cancel(stop),
+            cancel=cancel,
             patience=patience,
             tally=tally,
         )
@@ -3905,6 +3790,36 @@ def _feed_refusal(refusal: EntitlementError) -> FeedRefusalError:
     """
     return FeedRefusalError(
         str(refusal),
+        status=refusal.status,
+        request_id=refusal.request_id,
+        source=refusal.source,
+        is_retryable=refusal.is_retryable,
+    )
+
+
+def _whose_refusal(
+    refusal: EntitlementError, *, feed: bool, symbols: Sequence[str]
+) -> EntitlementError:
+    """Return a refusal of delayed data typed by whose it is.
+
+    Args:
+        refusal: The refusal (`recency_labels.delayed_refusal`).
+        feed: True when the label leaves no symbol of the request served.
+        symbols: The request's symbols the label refuses, when it is not the feed's.
+
+    Returns:
+        The same refusal, its status, request id, and source included: a `FeedRefusalError`
+        for the feed's (`_feed_refusal`), else a `SymbolRefusalError` naming `symbols`, or
+        the plain refusal when it names no symbol of the request (rows of tickers the
+        request did not name), which a read by symbol then searches.
+    """
+    if feed:
+        return _feed_refusal(refusal)
+    if not symbols:
+        return refusal
+    return SymbolRefusalError(
+        str(refusal),
+        symbols=symbols,
         status=refusal.status,
         request_id=refusal.request_id,
         source=refusal.source,

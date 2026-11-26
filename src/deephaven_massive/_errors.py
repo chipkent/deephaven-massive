@@ -98,6 +98,7 @@ __all__ = [
     "PermanentError",
     "RowDataError",
     "SessionClosedError",
+    "SymbolRefusalError",
     "UnavailableSymbolError",
     "copy_error",
     "every_symbol_failed",
@@ -406,6 +407,55 @@ class FeedRefusalError(EntitlementError):
     names a symbol, and is that symbol's plain `EntitlementError`. The class says only whose
     the refusal is: its message, status, and source are those the plain error would carry.
     """
+
+
+class SymbolRefusalError(EntitlementError):
+    """A refusal of some symbols of a request, which the refusal itself names.
+
+    Internal: not exported from `dm`; raised as the `EntitlementError` it is. A page of several
+    classes' current data can be labelled delayed for some of the symbols it names: rows
+    labelled delayed for a subscription `MassiveConfig.delayed_subscriptions` does not list,
+    or an envelope label on a page that names a listed class beside an unlisted one
+    (`_ingest/rest.py`). A read by symbol refuses exactly these symbols and sends the request
+    again for the others (`_ingest/rest_refusals.py`). Its message, status, and source are
+    those the plain error would carry.
+
+    Attributes:
+        symbols: The refused symbols, canonical, as the request named them.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        symbols: Sequence[str] = (),
+        status: int | None = None,
+        request_id: str | None = None,
+        source: ErrorSource | None = None,
+        is_retryable: bool | None = None,
+        is_bug: bool | None = None,
+    ) -> None:
+        """Create the error.
+
+        Args:
+            message: The refusal's message.
+            symbols: The refused symbols; none for a copy (`copy_error`), which is raised to
+                the caller and never read by symbol.
+            status: The HTTP status, or None.
+            request_id: Massive's request id, or None.
+            source: Whose failure it is, or None for the class's.
+            is_retryable: Whether the same request may succeed later, or None for the class's.
+            is_bug: Whether it is a defect, or None for the class's.
+        """
+        super().__init__(
+            message,
+            status=status,
+            request_id=request_id,
+            source=source,
+            is_retryable=is_retryable,
+            is_bug=is_bug,
+        )
+        self.symbols = tuple(symbols)
 
 
 class PermanentError(MassiveError):

@@ -53,7 +53,10 @@ class ErrorPolicy:
     reports it. When the library can read none of the rows of your symbols inside your call's
     window whole, across all the pages or files the call read, the call fails whatever the
     setting, since the table would otherwise hold nothing and show no error. Rows outside the
-    window count neither way. A live stream judges runs of rows instead:
+    window, and rows of a symbol the call didn't ask for, count neither way. One symbol's
+    failure never takes another's rows: a call that names symbols returns the rows of those
+    that didn't fail, and `m.problems()` lists each that did. Whatever the setting, it fails
+    when every symbol it names fails. A live stream judges runs of rows instead:
     https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error lists
     how each read and stream judges.
 

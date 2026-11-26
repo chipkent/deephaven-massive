@@ -28,7 +28,13 @@ from typing_extensions import Unpack, override
 import deephaven_massive as dm
 from deephaven_massive import _log_limits, _massive, _session
 from deephaven_massive._datasets import history_source
-from deephaven_massive._datasets.catalog import Catalog, DatasetSpec, KeySpec, SourceKeys
+from deephaven_massive._datasets.catalog import (
+    NO_NAMED_TICKER,
+    Catalog,
+    DatasetSpec,
+    KeySpec,
+    SourceKeys,
+)
 from deephaven_massive._datasets.futures_sessions import CHICAGO
 from deephaven_massive._datasets.history_source import history_window
 from deephaven_massive._datasets.request import Request, ValueTable
@@ -48,11 +54,11 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._errors import (
     LIBRARY_BUG,
-    BrokenGuaranteeError,
     CutShortError,
     FeedRefusalError,
     MassiveError,
     RowDataError,
+    SymbolRefusalError,
     UnavailableSymbolError,
     session_closed,
 )
@@ -76,12 +82,18 @@ from deephaven_massive._ingest.symbol_reads import (
     fetch_units,
 )
 from deephaven_massive._log_limits import LoggedKeys
-from deephaven_massive._massive import Cancel, DriftReport, RestPath, Transport
+from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._tables import poll, problem_reporter
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.execution_context import entered
-from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
+from deephaven_massive._tables.problem_events import (
+    Problem,
+    ProblemAction,
+    ProblemCause,
+    ProblemEvent,
+    ProblemSpans,
+)
 from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import (
@@ -124,17 +136,38 @@ def alarms(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 def record_problems(m: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch) -> list[ProblemEvent]:
-    # The problems the session's reads report, in order; they still reach its reporter, which
-    # logs the alarm, and m.problems().
+    # The events the session's reads report, in order (`record_spans` records the spans);
+    # every problem still reaches its reporter, which logs the alarm, and m.problems().
     events: list[ProblemEvent] = []
     report = m._core.problems
 
-    def recorded(found: Sequence[ProblemEvent]) -> None:
-        events.extend(found)
+    def recorded(found: Sequence[Problem]) -> None:
+        events.extend(problem for problem in found if isinstance(problem, ProblemEvent))
         report(found)
 
     monkeypatch.setattr(m._core, "problems", recorded)
     return events
+
+
+def record_spans(
+    m: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> list[tuple[ProblemCause, str, str]]:
+    # Each span the session's reads report as it holds, by cause, name, and detail; every
+    # problem still reaches the session's reporter.
+    spans: list[tuple[ProblemCause, str, str]] = []
+    report = m._core.problems
+
+    def recorded(found: Sequence[Problem]) -> None:
+        spans.extend(
+            (problem.cause, name, span.detail)
+            for problem in found
+            if isinstance(problem, ProblemSpans)
+            for name, span in problem.spans.items()
+        )
+        report(found)
+
+    monkeypatch.setattr(m._core, "problems", recorded)
+    return spans
 
 
 def no_data_alarm(dataset: str, read: int, symbol: str, *, why: str) -> str:
@@ -385,8 +418,11 @@ NEWS_TICKERS = DatasetSpec(
     name="reference.news_tickers",
     fetch_path=NEWS_PATH,
     symbol_param="ticker",
+    ticker_list="Tickers",
     time_axis=("published_utc.gte", "published_utc.lt"),
     keys={(R, NEWS_PATH): SourceKeys()},
+    poll_keys=("Id", "Symbol"),
+    nullable_poll_keys={"Symbol": NO_NAMED_TICKER},
 )
 # A path per symbol class makes each request follow its symbols' class, as the indicators do.
 NEWS_BY_CLASS = dataclasses.replace(
@@ -551,6 +587,11 @@ def test_fetch_sends_the_typed_parameters_axis_filters_and_page_size(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND])))
+    msft = (
+        f"{DIVIDENDS_PATH}?sort=ex_dividend_date.desc&frequency.gte=4&limit=1000"
+        "&ex_dividend_date.gte=2025-01-01&ex_dividend_date.lte=2025-03-31&ticker.any_of=MSFT"
+    )
+    fake_rest.reply(msft, Reply(envelope([])))
     out = fetch(
         session,
         DIVIDENDS,
@@ -571,8 +612,7 @@ def test_fetch_sends_the_typed_parameters_axis_filters_and_page_size(
     assert first["frequency.gte"] == ["4"]
     assert first["limit"] == ["1000"]  # the page size, never the row cap
     assert [(r["Symbol"], r["CashAmount"], r["ExDividendDate"]) for r in out] == [
-        ("AAPL", 0.25, "2025-02-10"),
-        ("AAPL", 0.25, "2025-02-10"),
+        ("AAPL", 0.25, "2025-02-10")
     ]
 
 
@@ -1407,43 +1447,44 @@ def test_a_stopped_read_stops_waiting_on_the_crypto_ticker_list(
 
 
 def test_a_stopped_fetch_reads_no_crypto_ticker_list(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Planning a crypto pair's requests listens to the read's stop token.
+    # Planning a crypto pair's requests listens to the read's stop token, and a stopped read
+    # fails whole: its table is gone, so no pair is listed as failed.
     rest = session._core.rest_transport()
-    pair = query(session, CRYPTO_OPEN_CLOSE, symbols=["X:DOTUSD"], params={"date": "2025-03-03"})
+    spans = record_spans(session, monkeypatch)
+    pairs = query(
+        session,
+        CRYPTO_OPEN_CLOSE,
+        symbols=["X:DOTUSD", "X:BTCUSD"],
+        params={"date": "2025-03-03"},
+    )
     stop = Cancel()
     stop.set()
     with pytest.raises(dm.MassiveError, match="cancelled"):
-        rest.fetch(CRYPTO_OPEN_CLOSE, pair._request, call=1, stop=stop)
+        rest.fetch(CRYPTO_OPEN_CLOSE, pairs._request, call=1, stop=stop)
     assert fake_rest.requests == []
+    assert spans == []
 
 
 def test_a_stopped_history_splits_its_pairs_with_its_stop_token(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A REST history's planning splits its crypto pairs with a lookup that listens to the
-    # read's stop token, so a released read reads no ticker list.
+    # read's stop token, so a released read reads no ticker list, and fails whole: its table
+    # is gone, so no pair is listed as failed.
     transport = session._core.rest_transport()
-    splits: list[Callable[[str], tuple[str, str]]] = []
-
-    def planned(*_: object, split: Callable[[str], tuple[str, str]], **__: object) -> None:
-        splits.append(split)
-        raise KeyboardInterrupt  # the plan is all this test needs
-
-    monkeypatch.setattr(rest, "_history_plan", planned)
-    q = query(session, CRYPTO_BARS, symbols=["X:DOTUSD"], timespan=Timespan.DAY)
+    spans = record_spans(session, monkeypatch)
+    q = query(session, CRYPTO_BARS, symbols=["X:DOTUSD", "X:BTCUSD"], timespan=Timespan.DAY)
     day = date(2025, 3, 3)
     request = dataclasses.replace(q._request, start=day, end=day)
     window = history_window(CRYPTO_BARS, request, start=day, end=day, classes=())
     stop = Cancel()
     stop.set()
-    with pytest.raises(KeyboardInterrupt):
-        transport.history(CRYPTO_BARS, request, window, call=1, tally=ReadTally(), stop=stop)
-    (split,) = splits
     with pytest.raises(dm.MassiveError, match="cancelled"):
-        split("X:DOTUSD")
+        transport.history(CRYPTO_BARS, request, window, call=1, tally=ReadTally(), stop=stop)
     assert fake_rest.requests == []
+    assert spans == []
 
 
 @pytest.mark.parametrize("console", ["joiner", "maker"])
@@ -1820,9 +1861,14 @@ def test_a_list_symbol_parameter_under_a_limit_still_takes_every_symbol_at_once(
 def test_limit_caps_rows_across_requests(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND, AAPL_DIVIDEND])))
-    out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=3)
-    assert len(out) == 3
+    nvda = {**AAPL_DIVIDEND, "ticker": "NVDA", "id": "E3"}
+    fake_rest.reply(
+        DIVIDENDS_PATH,
+        Reply(envelope([AAPL_DIVIDEND, AAPL_DIVIDEND])),
+        Reply(envelope([nvda])),
+    )
+    out = fetch(session, DIVIDENDS, symbols=["AAPL", "MSFT", "NVDA"], limit=3)
+    assert [r["Symbol"] for r in out] == ["AAPL", "AAPL", "NVDA"]
     # A cap below the page size is the page size: no request asks for rows it cannot keep.
     # The second request asks only for the row still wanted.
     assert [q["limit"] for _, q in fake_rest.get_queries()] == [["3"], ["1"]]
@@ -1833,14 +1879,52 @@ def test_limit_sends_no_request_once_its_rows_have_arrived(
 ) -> None:
     # The symbols take two requests, but the first answers every row the call asked for.
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND, AAPL_DIVIDEND])))
-    with caplog.at_level(logging.DEBUG, LOGGER):
-        out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=2)
+    with caplog.at_level(logging.DEBUG):
+        out = fetch(session, DIVIDENDS, symbols=["AAPL", "MSFT", "NVDA"], limit=2)
     assert len(out) == 2
-    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["A,B"]]
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]]
     assert (
         "stocks.dividends: limit=2 rows arrived after 1 of 2 planned requests; the other 1 are "
         "not sent"
     ) in caplog.messages
+
+
+def test_a_whole_read_of_symbols_sends_no_request_once_its_rows_have_arrived(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A read of one value's symbols (`fetch_by_value`) reads them whole: `limit` caps the
+    # read's rows, and no request is sent once Massive has sent that many.
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([AAPL_DIVIDEND, AAPL_DIVIDEND])))
+    symbols = ("AAPL", "MSFT", "NVDA")
+    request = query(session, DIVIDENDS, symbols=list(symbols), limit=2)._request
+    table, requests = _reader(session).read_fetch(
+        DIVIDENDS, request, symbols=symbols, tally=ReadTally()
+    )
+    assert (table.num_rows, requests) == (2, 1)
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]]
+
+
+def test_a_whole_read_of_symbols_lists_a_symbol_without_data(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    last = {"price": 97000.5, "size": 1.0, "exchange": 1, "conditions": [1]}
+    fake_rest.reply(
+        "/v1/last/crypto/BTC/USD",
+        Reply(
+            {
+                "status": "success",
+                "symbol": "BTC-USD",
+                "last": {**last, "timestamp": 1704310200000},
+            }
+        ),
+    )
+    serve_pairs(fake_rest)
+    events = record_problems(session, monkeypatch)
+    symbols = ("X:BTCUSD", "X:ETHUSD")
+    request = query(session, CRYPTO_LAST, symbols=list(symbols))._request
+    table, _ = _reader(session).read_fetch(CRYPTO_LAST, request, symbols=symbols, tally=ReadTally())
+    assert table.num_rows == 1
+    assert [(e.cause, e.symbol) for e in events] == [(ProblemCause.UNAVAILABLE_SYMBOLS, "X:ETHUSD")]
 
 
 def test_limit_caps_each_symbol_s_rows_where_a_request_names_one_symbol(
@@ -2175,8 +2259,8 @@ def test_error_rows_of_a_snapshot_are_kept_and_logged_once(
     spx = {"ticker": "I:SPX", "value": 5900.0, "last_updated": 1704310200000000000}
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused, spx, other])))
     with caplog.at_level(logging.WARNING, LOGGER):
-        out = fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
-        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
+        out = fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX", "I:RUT"])
+        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX", "I:RUT"])
     assert [(r["Symbol"], r["Error"], r["Value"]) for r in out] == [
         ("I:SPX", None, 5900.0),
         ("I:VIX", "NOT_ENTITLED", None),
@@ -2487,13 +2571,29 @@ def test_a_lasting_rate_limit_names_itself_and_warns_once(
     assert "test-key" not in caplog.text
 
 
-def test_a_failed_symbol_fails_the_whole_fan_out(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+def test_a_failed_symbol_leaves_the_others_rows_and_is_listed(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_rest.reply("/v1/last/crypto/BTC/USD", Reply(b"oops", status=500))
+    last = {
+        "price": 3500.5,
+        "size": 1.0,
+        "exchange": 1,
+        "conditions": [1],
+        "timestamp": 1704310200000,
+    }
+    fake_rest.reply(
+        "/v1/last/crypto/ETH/USD",
+        Reply({"status": "success", "request_id": "r1", "symbol": "ETH-USD", "last": last}),
+    )
     serve_pairs(fake_rest)
-    with pytest.raises(dm.MassiveError, match="HTTP 500"):
-        fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD", "X:SOLUSD"])
+    spans = record_spans(session, monkeypatch)
+    out = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD", "X:ETHUSD"])
+    assert [r["Symbol"] for r in out] == ["X:ETHUSD"]
+    assert [(cause, name) for cause, name, _ in spans] == [
+        (ProblemCause.SYMBOL_READ_FAILED, "X:BTCUSD")
+    ]
+    assert "HTTP 500" in spans[0][2]
 
 
 def test_a_closed_session_reports_itself(session: dm.MassiveSession) -> None:
@@ -3279,7 +3379,9 @@ def test_a_failed_history_is_logged_and_raised(
     with caplog.at_level(logging.DEBUG), pytest.raises(dm.EntitlementError):
         history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL"])
     assert "HTTP 403" in caplog.text
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # The one WARNING is the alarm of the refused symbol's m.problems() row.
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warning.startswith("stocks.trades table 1: refused_symbols: AAPL: ")
 
 
 def test_a_404_without_a_symbol_fails_the_call(
@@ -4014,7 +4116,7 @@ def test_a_paced_fetch_announces_how_long_it_takes(
     ) in caplog.messages
 
 
-def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
+def test_a_call_failing_the_whole_read_stops_the_calls_waiting_for_a_slot_and_is_raised(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A manual clock: a call waiting for a slot can only stop by being cancelled.
@@ -4040,15 +4142,16 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
             governor.admission("currencies", lane=object()).acquire(_massive.Cancel()),
             answered=True,
         )
-    refused = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    # A rejected key fails every symbol alike; a refused symbol would fail only itself.
+    rejected = Reply({"status": "ERROR", "message": "bad key"}, status=401)
     for pair in ("EUR/USD", "GBP/USD", "AUD/USD"):
-        fake_rest.reply(f"/v1/conversion/{pair}", refused)
+        fake_rest.reply(f"/v1/conversion/{pair}", rejected)
     errors: list[BaseException] = []
 
     def read() -> None:
         try:
             fetch(m, CONVERSION, symbols=["C:EURUSD", "C:GBPUSD", "C:AUDUSD"])
-        except dm.EntitlementError as error:
+        except dm.AuthenticationError as error:
             errors.append(error)
 
     try:
@@ -4058,7 +4161,7 @@ def test_a_failed_call_stops_the_calls_waiting_for_a_slot_and_is_the_one_raised(
         reader.join(TIMEOUT)
         assert not reader.is_alive(), "the calls waiting for a slot were not stopped"
         assert len(errors) == 1
-        assert "upgrade" in str(errors[0])
+        assert "bad key" in str(errors[0])
         assert len(fake_rest.requests) == 1  # the others gave up their places unsent
         assert next(s for s in governor.snapshot() if s.bucket == "currencies").waiting == 0
     finally:
@@ -4959,6 +5062,23 @@ def test_a_delayed_stock_row_fails_a_unified_snapshot(
     )
 
 
+def test_a_delayed_row_of_a_ticker_the_request_did_not_name_refuses_the_request(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The label names no symbol of the request, so the refusal is the request's plain one.
+    monkeypatch.setattr(_session, "CATALOG", Catalog(SPECS))
+    m = _delayed_session(fake_rest, Subscription.STOCKS)
+    try:
+        stock = {"ticker": "AAPL", "last_trade": {"timeframe": "DELAYED"}}
+        other = {"ticker": "O:SPY251219C00600000", "last_trade": {"timeframe": "DELAYED"}}
+        fake_rest.reply(UNIFIED_PATH, Reply(envelope([stock, other])))
+        with pytest.raises(dm.EntitlementError, match=r"dm\.Subscription\.OPTIONS is not in") as e:
+            _unified(m, "AAPL")
+        assert not isinstance(e.value, (FeedRefusalError, SymbolRefusalError))
+    finally:
+        m.close()
+
+
 def test_each_unified_row_is_held_to_its_own_subscription(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4971,10 +5091,17 @@ def test_each_unified_row_is_held_to_its_own_subscription(
         fake_rest.reply(UNIFIED_PATH, Reply(envelope([stock, option])))
         # Stocks are listed: its delayed row passes beside a real-time option.
         assert [r["Symbol"] for r in _unified(m, "AAPL", contract)] == ["AAPL", contract]
+        # A delayed option row refuses the option alone: AAPL is asked for again without it.
         delayed_option = {"ticker": contract, "last_trade": {"timeframe": "DELAYED"}}
-        fake_rest.reply_first(UNIFIED_PATH, Reply(envelope([stock, delayed_option])))
-        with pytest.raises(dm.EntitlementError, match=r"dm\.Subscription\.OPTIONS is not in"):
-            _unified(m, "AAPL", contract)
+        fake_rest.reply_first(
+            UNIFIED_PATH, Reply(envelope([stock, delayed_option])), Reply(envelope([stock]))
+        )
+        spans = record_spans(m, monkeypatch)
+        assert [r["Symbol"] for r in _unified(m, "AAPL", contract)] == ["AAPL"]
+        [(cause, name, detail)] = spans
+        assert (cause, name) == (ProblemCause.REFUSED_SYMBOLS, contract)
+        assert "dm.Subscription.OPTIONS is not in delayed_subscriptions" in detail
+        assert [q.get("ticker.any_of") for _, q in fake_rest.get_queries()][-1] == ["AAPL"]
     finally:
         m.close()
 
@@ -4998,14 +5125,16 @@ def test_a_delayed_envelope_needs_every_class_of_the_request_listed(
     contract = "O:SPY251219C00600000"
     try:
         fake_rest.reply(UNIFIED_PATH, Reply(envelope([{"ticker": "AAPL"}], status="DELAYED")))
+        spans = record_spans(m, monkeypatch)
+        assert [r["Symbol"] for r in _unified(m, "AAPL", contract)] == ["AAPL"]
         if refused is None:
-            assert [r["Symbol"] for r in _unified(m, "AAPL", contract)] == ["AAPL"]
+            assert spans == []
         else:
-            with pytest.raises(dm.EntitlementError, match=rf"dm\.Subscription\.{refused} is") as e:
-                _unified(m, "AAPL", contract)
             # Stocks are served under the label, so the refusal is the options symbols', not
-            # the feed's.
-            assert type(e.value) is not FeedRefusalError
+            # the feed's: the option is listed, and AAPL is read again without it.
+            [(cause, name, detail)] = spans
+            assert (cause, name) == (ProblemCause.REFUSED_SYMBOLS, contract)
+            assert f"dm.Subscription.{refused} is not in delayed_subscriptions" in detail
     finally:
         m.close()
 
@@ -5023,16 +5152,27 @@ def test_a_delayed_envelope_on_a_mixed_page_is_the_feed_s_only_when_no_class_is_
     *,
     session: dm.MassiveSession,
     fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
     tickers: tuple[str, ...],
     feed: bool,
 ) -> None:
     # Nothing is listed as delayed. An envelope label refuses the feed when every class the
     # request names is unlisted; currencies are never held to a label, so a request naming a
-    # crypto pair beside a stock has a class served, and the refusal is the stock's.
-    fake_rest.reply(UNIFIED_PATH, Reply(envelope([{"ticker": tickers[0]}], status="DELAYED")))
-    with pytest.raises(dm.EntitlementError, match=r"is not in delayed_subscriptions") as info:
-        _unified(session, *tickers)
-    assert isinstance(info.value, FeedRefusalError) is feed
+    # crypto pair beside a stock has a class served, and the refusal is the stock's: the
+    # pair is read again without it.
+    page = [{"ticker": ticker} for ticker in tickers]
+    fake_rest.reply(
+        UNIFIED_PATH,
+        Reply(envelope(page, status="DELAYED")),
+        Reply(envelope(page[1:], status="DELAYED")),
+    )
+    if feed:
+        with pytest.raises(FeedRefusalError, match=r"is not in delayed_subscriptions"):
+            _unified(session, *tickers)
+        return
+    spans = record_spans(session, monkeypatch)
+    assert [r["Symbol"] for r in _unified(session, *tickers)] == ["X:BTCUSD"]
+    assert [(cause, name) for cause, name, _ in spans] == [(ProblemCause.REFUSED_SYMBOLS, "AAPL")]
 
 
 def test_a_delay_label_is_never_held_against_currencies(
@@ -5117,11 +5257,11 @@ def test_the_missing_symbols_of_a_read_warn_once_and_each_is_a_problem(
     assert together == [f"{left_out} left out"] * 2
 
 
-def test_a_symbol_without_data_is_listed_when_another_request_fails_the_read(
+def test_a_symbol_without_data_is_listed_beside_another_symbol_s_failure(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # ZZZZ answers HTTP 404 and its call completes; only then does AAPL's request fail. The
-    # read raises AAPL's failure, and m.problems() still lists ZZZZ.
+    # read returns, and m.problems() lists both: ZZZZ without data, AAPL failed.
     fake_rest.reply(TRADES_PATH.format(stockTicker="AAPL"), Reply(b"oops", status=500))
     events = record_problems(session, monkeypatch)
     answered = threading.Event()
@@ -5141,11 +5281,15 @@ def test_a_symbol_without_data_is_listed_when_another_request_fails_the_read(
         return gated
 
     monkeypatch.setattr(rest.RestReader, "_call", gating(rest.RestReader._call))
-    with pytest.raises(dm.MassiveError, match="HTTP 500"):
-        history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "ZZZZ"])
+    spans = record_spans(session, monkeypatch)
+    out = history(session, TRADES, start="2025-03-03", end="2025-03-03", symbols=["AAPL", "ZZZZ"])
+    assert out == []
     why = "(HTTP 404 from GET /v3/trades/ZZZZ)"
     assert [(e.cause, e.symbol, e.detail) for e in events] == [
         (ProblemCause.UNAVAILABLE_SYMBOLS, "ZZZZ", f"Massive has no data for it {why}")
+    ]
+    assert [(cause, name) for cause, name, _ in spans] == [
+        (ProblemCause.SYMBOL_READ_FAILED, "AAPL")
     ]
 
 
@@ -5286,7 +5430,7 @@ def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
     refused = [{"ticker": t, "error": "NOT_ENTITLED", "message": "Not entitled"} for t in tickers]
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope(refused)))
     with caplog.at_level(logging.DEBUG, LOGGER):
-        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+        fetch(session, INDEX_SNAPSHOTS, symbols=tickers)
     (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert warning == (
         "indices.snapshots: Massive answered error rows for 25 tickers, the first 3: I:X00 with "
@@ -5416,9 +5560,12 @@ def _unlisted(rows: int, *, asked: str, only: str) -> tuple[object, ...]:
     )
 
 
-def _unlisted_events(events: Sequence[ProblemEvent]) -> list[tuple[object, ...]]:
+def _unlisted_events(events: Sequence[Problem]) -> list[tuple[object, ...]]:
+    # The events of rows left out; a failed symbol's span is checked apart.
     return [
-        (e.cause, e.action, e.dataset, e.where, e.symbol, e.field, e.rows, e.detail) for e in events
+        (e.cause, e.action, e.dataset, e.where, e.symbol, e.field, e.rows, e.detail)
+        for e in events
+        if isinstance(e, ProblemEvent)
     ]
 
 
@@ -5526,14 +5673,14 @@ def test_rows_listing_no_named_ticker_fail_the_call_under_raise_on_their_page(
     assert len(fake_rest.get_queries()) == 1
 
 
-def test_a_static_read_keeps_every_row_and_only_the_dataset_s_columns(
+def test_a_static_read_keeps_its_symbols_rows_and_only_the_dataset_s_columns(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # A read that is not by symbol publishes a row of another symbol too, and the symbol as
-    # Massive sent it, carried on the rows for a read by symbol, is no column of the table.
+    # The symbol as Massive sent it (`NDX`), carried on the rows to give each to its asked
+    # symbol, is no column of the table.
     page = [{"ticker": "I:SPX", "value": 1.0}, {"ticker": "NDX", "value": 2.0}]
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope(page)))
-    q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX"])
+    q = query(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:NDX"])
     assert isinstance(q, FetchQuery)
     table = q.fetch(wait=True)
     assert [(r["Symbol"], r["Value"]) for r in rows(table)] == [("I:SPX", 1.0), ("I:NDX", 2.0)]
@@ -5548,35 +5695,9 @@ def test_limit_counts_the_rows_massive_sent_not_those_kept(
     # paging at the rows that arrived: the second request is not sent.
     odd = {**AAPL_DIVIDEND, "id": "E2", "frequency": 4.5}
     fake_rest.reply(DIVIDENDS_PATH, Reply(envelope([odd, AAPL_DIVIDEND])))
-    out = fetch(session, DIVIDENDS, symbols=["A", "B", "C"], limit=2)
+    out = fetch(session, DIVIDENDS, symbols=["AAPL", "MSFT", "NVDA"], limit=2)
     assert [r["Id"] for r in out] == ["E1"]
-    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["A,B"]]
-
-
-def test_a_read_mixing_per_symbol_and_shared_requests_is_a_library_defect() -> None:
-    # Neither cap fits such a plan, and no dataset makes one.
-    path = RestPath(key="/x", fields=(), params=())
-    planned = [
-        (
-            path,
-            [
-                rest_requests.Call({}, {}, "AAPL", symbols=("AAPL",)),
-                rest_requests.Call({}, {}, symbols=()),
-            ],
-        )
-    ]
-    with pytest.raises(
-        BrokenGuaranteeError,
-        match=r"^stocks\.dividends planned requests of one symbol beside requests of several, so "
-        r"limit can cap neither each symbol nor the whole call\. This is a bug in "
-        r"deephaven-massive\. ",
-    ):
-        rest._per_symbol("stocks.dividends", planned)
-    assert (
-        rest._per_symbol("stocks.dividends", [(path, [rest_requests.Call({}, {}, symbols=())])])
-        is False
-    )
-    assert rest._per_symbol("stocks.dividends", []) is False
+    assert [q["ticker.any_of"] for _, q in fake_rest.get_queries()] == [["AAPL,MSFT"]]
 
 
 def test_limit_caps_the_rows_listed_under_each_ticker(
@@ -6006,7 +6127,7 @@ def test_read_each_raises_only_the_failures_its_caller_says_are_the_read_s(
         with pytest.raises(dm.MassiveError, match=f"HTTP {status}"):
             read()
         return
-    _, results, answered = read()
+    _, results, answered, _ = read()
     assert answered == 0
     [result] = results
     assert isinstance(result, MassiveError)
@@ -6023,7 +6144,7 @@ def test_read_each_hands_each_page_s_recency_and_drift_to_its_caller(
     units, _ = fetch_units(reader, INDEX_SNAPSHOTS, request, symbols=["I:SPX"], cancel=None)
     seen: list[Recency] = []
     drifts: list[DriftReport] = []
-    _, results, answered = reader.read_each(
+    _, results, answered, _ = reader.read_each(
         INDEX_SNAPSHOTS,
         units,
         request=request,
@@ -6067,7 +6188,7 @@ def test_read_each_runs_its_requests_on_the_caller_s_pool(
     units, _ = fetch_units(reader, SMA, request, symbols=["AAPL", "MSFT"], cancel=None)
     assert len(units) == 2
     with _CountingPool(2) as pool:
-        _, results, answered = reader.read_each(
+        _, results, answered, _ = reader.read_each(
             SMA,
             units,
             request=request,

@@ -2404,9 +2404,12 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
     serve_indices(fake_rest, "SPX")
     fake_rest.reply(wire(spxw), contract_reference("OCEICS"))
     start = datetime(2025, 10, 29, 15, tzinfo=UTC)
+    # The fixture answers with a trade of each contract, so the call asks for both.
     out = rows(
         rest_session.options.unusual_trades(
-            "O:SPY260123C00687000", start=start, end=datetime(2025, 10, 29, 16, tzinfo=UTC)
+            ["O:SPY260123C00687000", "O:SPXW261218C06000000"],
+            start=start,
+            end=datetime(2025, 10, 29, 16, tzinfo=UTC),
         ).fetch(wait=True)
     )
     [(sent_path, sent), *references] = fake_rest.get_queries(one_value=True)
@@ -2418,7 +2421,7 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
         (INDEX_LIST, {"market": "indices", "active": "false", "limit": "1000"}),
         (spxw, {"as_of": "2025-10-29"}),
     ]
-    assert sent["ticker.any_of"] == "O:SPY260123C00687000"
+    assert sent["ticker.any_of"] == "O:SPXW261218C06000000,O:SPY260123C00687000"
     assert {"sip_timestamp.gte", "sip_timestamp.lt", "limit"} <= sent.keys()
     picked = ("Symbol", "Date", "Timestamp", "OptionRoot", "Price", "Size", "Flags")
     assert [tuple(r[c] for c in picked) for r in out] == [

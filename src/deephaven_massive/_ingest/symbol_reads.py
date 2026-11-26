@@ -168,15 +168,18 @@ class ReadEach(NamedTuple):
     Attributes:
         units: The requests the results answer, in plan order, each symbol in one of them: a
             planned request, or, for a listed request Massive refused whole, the parts of it
-            sent again that each symbol's answer came from (`refusal_search.RefusalSearch`).
+            sent again that each symbol's answer came from (`_ingest/rest_refusals.py`).
         results: Each unit's rows, its failure, or None for a request of a symbol Massive has
             no data for.
         requests: How many requests Massive answered, those of the search included.
+        received: How many rows Massive sent in them, before any was withheld or listed
+            under its tickers, as the client counts them when it stops paging.
     """
 
     units: list[RestUnit]
     results: list[RequestRows | MassiveError | None]
     requests: int
+    received: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,10 +195,15 @@ class AttributedRows:
             symbol no request answered.
         failures: Each failed symbol's error: its request's failure, which is every symbol's
             the request named, or the read's `unrequested_symbols` failure under `RAISE`.
+        answered: Each answered request's asked column (`asked_column`) and its rows of the
+            symbols it named, in plan order and then page order, without `SYMBOL_SENT`: the
+            same rows as `pieces`, in the order Massive sent them, for one table of every
+            symbol's rows.
     """
 
     pieces: Mapping[str, Sequence[pa.Table]]
     failures: Mapping[str, MassiveError]
+    answered: Sequence[tuple[str, pa.Table]]
 
 
 class UnsupportedParameterError(PermanentError):
@@ -518,6 +526,7 @@ def attribute_units(
     """
     pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in symbols}
     failures: dict[str, MassiveError] = {}
+    answered: list[tuple[str, pa.Table]] = []
     for (rest_path, planned), result in zip(units, results, strict=True):
         own = planned.symbols
         if isinstance(result, MassiveError):
@@ -533,6 +542,7 @@ def attribute_units(
                 template=rest_path.template,
                 planned=planned,
                 pieces=pieces,
+                kept=answered,
                 tally=tally,
             )
             if unrequested is not None:
@@ -540,7 +550,7 @@ def attribute_units(
                     failures.setdefault(symbol, unrequested)
         else:
             assert_never(result)
-    return AttributedRows(pieces, failures)
+    return AttributedRows(pieces, failures, answered)
 
 
 def _with_skipped(
@@ -683,6 +693,7 @@ def _attribute(
     template: str,
     planned: Call,
     pieces: dict[str, list[pa.Table]],
+    kept: list[tuple[str, pa.Table]],
     tally: ReadTally,
 ) -> RowDataError | None:
     """Give one request's rows to the symbols it named, and report the rows of any other.
@@ -709,6 +720,8 @@ def _attribute(
         template: The request's path, for the events.
         planned: The request, whose symbols are those it named (`Call.symbols`).
         pieces: Each symbol's rows so far, which receive the request's.
+        kept: Each request's asked column and kept rows so far, which receive the
+            request's (`AttributedRows.answered`).
         tally: The read's count of its rows and of those withheld, which the request's add to.
 
     Returns:
@@ -727,6 +740,7 @@ def _attribute(
         every = pc.all(mine, skip_nulls=False).as_py()
         pieces[symbol].append(rows if every else rows.filter(mine))
     asked = pc.fill_null(pc.is_in(symbols, value_set=pa.array(own, pa.string())), fill_value=False)
+    kept.append((column, rows if pc.all(asked).as_py() else rows.filter(asked)))
     left = pc.invert(asked)
     others = Counter(
         zip(pc.filter(sent, left).to_pylist(), pc.filter(symbols, left).to_pylist(), strict=True)

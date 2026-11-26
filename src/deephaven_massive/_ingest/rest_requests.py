@@ -64,6 +64,7 @@ __all__ = [
     "CryptoSplit",
     "axis_query",
     "capped_call",
+    "caps_each_symbol",
     "fetch_paths",
     "history_calls",
     "largest_page",
@@ -711,6 +712,32 @@ def _page_limit(spec: DatasetSpec, rest_path: RestPath, cap: int | None) -> int 
     """
     sizes = [v for v in (page_size(spec, rest_path), cap) if v is not None]
     return min(sizes) if sizes else None
+
+
+def caps_each_symbol(name: str, calls: Sequence[Call]) -> bool:
+    """Return whether every planned call names one symbol, so `limit` caps each symbol.
+
+    Args:
+        name: The dataset's name, for the error.
+        calls: The planned calls.
+
+    Returns:
+        True when every call names one symbol (`Call.symbol`); False when none does, or there
+        are no calls.
+
+    Raises:
+        BrokenGuaranteeError: If some calls name one symbol and others do not: no dataset plans
+            such a read, and neither cap would be right for it.
+    """
+    kinds = {call.symbol is not None for call in calls}
+    if len(kinds) > 1:
+        raise BrokenGuaranteeError(
+            library_bug(
+                f"{name} planned requests of one symbol beside requests of several, so limit "
+                "can cap neither each symbol nor the whole call"
+            )
+        )
+    return True in kinds
 
 
 def capped_call(spec: DatasetSpec, rest_path: RestPath, call: Call, *, cap: int) -> Call:

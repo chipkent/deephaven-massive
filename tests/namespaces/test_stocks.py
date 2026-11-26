@@ -1140,11 +1140,11 @@ def test_snapshots_send_the_tickers_and_the_otc_flag(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, load_fixture: Fixture
 ) -> None:
     serve(fake_rest, load_fixture, snapshots=SNAPSHOTS_PATH)
-    out = table_rows(rest_session.stocks.snapshots(["MSFT", "AAPL"]).fetch(wait=True))
+    out = table_rows(rest_session.stocks.snapshots(["MSFT", "BCAT"]).fetch(wait=True))
     assert fake_rest.get_queries(one_value=True) == [
-        (SNAPSHOTS_PATH, {"tickers": "AAPL,MSFT", "include_otc": "false"})
+        (SNAPSHOTS_PATH, {"tickers": "BCAT,MSFT", "include_otc": "false"})
     ]
-    # The documented example answers with its own tickers; its times mix ns and ms.
+    # The documented example answers with its own ticker, BCAT; its times mix ns and ms.
     assert {k: out[0][k] for k in SNAPSHOT_INSTANTS} == {
         "Symbol": "BCAT",
         "Updated": 1605192894630916600,

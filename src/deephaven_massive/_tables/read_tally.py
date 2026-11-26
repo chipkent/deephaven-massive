@@ -7,9 +7,10 @@ every part of the read, which adds each call's, request's, or file's rows once i
 rows those are, and never checks it; the entry point checks it once, after the read's last
 part.
 
-- **A read that names no symbol** (`dm.ALL`, a path without symbols; `check`): every row is
-  the read's, so it fails, whatever its policy, when it had rows and the library could read
-  none of them whole, a problem of every row it would publish.
+- **A read of one table** (`check`): a `fetch()` or `history()` that names no symbol
+  (`dm.ALL`, a path without symbols), or a static one of a list, whose every row goes to its
+  one table: it fails, whatever its policy, when it had rows and the library could read none
+  of them whole, a problem of every row it would publish.
 - **A read by symbol** (`judge`): each symbol is judged by its own rows, so one symbol's rows
   never fail another. A symbol fails when it got no row and the library withheld rows that
   were its own (`add_request`, by the asked symbol each withheld row would have gone to;
@@ -147,7 +148,11 @@ class ReadTally:
         owners: Callable[[str | None], tuple[str, ...]],
         source: str,
     ) -> None:
-        """Count one request's rows of a read by symbol, for `judge`.
+        """Count one request's rows of a read by symbol, for `judge` and for `check`.
+
+        The rows that count are those of the asked symbols: its kept rows, and the withheld rows
+        `owners` gives to one or more of them. A withheld row of another symbol counts for
+        neither, since no table of the read would have received it.
 
         Args:
             kept: The request's rows given to the symbols it named.
@@ -159,14 +164,23 @@ class ReadTally:
         """
         request = _Request(kept)
         with self._lock:
+            asked = kept
             for group in withheld.groups:
                 found = owners(group.symbol)
+                if not found:
+                    continue  # another symbol's row is none of the read's
+                asked += group.rows
+                self._withheld += group.rows
+                self._first_reason = self._first_reason or group.reason
                 if len(found) == 1:
                     owned = self._owned.setdefault(found[0], _Withholding())
                     owned.take(group.rows, group.reason, source)
-                elif found:
+                else:
                     unknown = request.unknown.setdefault(found, _Withholding())
                     unknown.take(group.rows, group.reason, source)
+            self._asked += asked
+            if asked:
+                self._sources.setdefault(source, None)
             self._requests.append(request)
 
     def failure(
@@ -201,7 +215,7 @@ class ReadTally:
         return _failure(dataset, _Withholding(asked, first, sources), whose=whose)
 
     def check(self, dataset: str) -> None:
-        """Fail a read that names no symbol if the library could read none of its rows whole.
+        """Fail a read of one table if the library could read none of its rows whole.
 
         Args:
             dataset: The dataset, for the message.
