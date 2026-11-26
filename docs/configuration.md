@@ -146,10 +146,13 @@ In a `fetch()`, `history()`, `poll()`, or stream of several symbols, one symbol'
 its own. By default, the other symbols keep their rows, and `m.problems()` lists the failed one
 with its cause.
 
-Symbols read by one request or one flat file fail together when it fails, unless the failure
-is Massive's refusal. A dataset whose request takes several tickers, such as snapshots, can read
-several symbols in one request. A `history()` that reads Massive's flat files reads every symbol
-from the same files.
+Symbols read by one request or one flat file fail together when it fails. A dataset whose
+request takes several tickers, such as snapshots, can read several symbols in one request. When
+Massive refuses such a request, the library sends it again in parts to find the symbols Massive
+refuses, as [`on_error.refused_symbols`](#setting-details) explains. A `history()` that reads
+Massive's flat files reads every symbol from the same files. When Massive refuses the files, a
+`history()` with the default `source=dm.HistorySource.AUTO` reads every symbol from REST
+instead, if REST can serve the read.
 
 A symbol fails when:
 
