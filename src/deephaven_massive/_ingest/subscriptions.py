@@ -221,8 +221,8 @@ class Subscriptions:
     topic is credited to the step in flight, else to the round awaiting its answer, else to the
     latest step's `NO_ACK` topics, whose answer came after their watchdogs gave up. A refusal naming
     no topic is credited only where it cannot be wrong (`_refuse_status`): to the one topic on the
-    connection that awaits an answer, or to the step in flight of several topics when nothing older
-    awaits one; any other is logged and fails nothing. An acknowledgement that
+    connection that awaits an answer, or to the step in flight of several topics, which a search
+    then checks part by part; any other is logged and fails nothing. An acknowledgement that
     arrives later clears `NO_ACK`. The connection is never reconnected for it: a reconnect
     would cut every other stream on the connection over one late answer. A watchdog whose
     topic has left the wire or whose generation has ended does nothing more.
@@ -582,11 +582,15 @@ class Subscriptions:
         to the part of a search in flight (`_judge_part`), judged at once when one of its
         topics awaits an answer; to a single unresolved topic of the step in flight, when it is
         the one topic on the connection that awaits an answer, with no topic in `NO_ACK` and no
-        re-send round outstanding; and to the step in flight of several topics, under the same
-        condition, marked for its search at the step's timeout (`_judge_step`). Any other is
-        logged at INFO and fails nothing: a late answer to an old topic could otherwise refuse
-        a healthy one. The unanswered topics keep their notes, and a stream with rows still
-        fails at `max_outage` after a reconnect, so nothing stale goes unmarked.
+        re-send round outstanding; and to the step in flight of several topics, marked for its
+        search at the step's timeout (`_judge_step`). The search refuses only a part that draws
+        a refusal of its own, so the step is marked even while older topics are in `NO_ACK`: a
+        late refusal of one of them makes the search find nothing, and waiting for them instead
+        would leave the step's refused topics re-sent for as long as an older one goes
+        unanswered. Any other refusal is logged at INFO and fails nothing: a late answer to an
+        old topic could otherwise refuse a healthy one. The unanswered topics keep their notes,
+        and a stream with rows still fails at `max_outage` after a reconnect, so nothing stale
+        goes unmarked.
 
         A wanted topic with a space, such as a futures combo's `T.CL:BF Q6-U6-V6`, is never one
         word of the message, so it counts as named when the message holds it whole and no
@@ -608,8 +612,7 @@ class Subscriptions:
             if len(self._pending) == 1:
                 self._judge_part()
             return
-        awaiting = len(self._pending) + len(self._noack) + len(self._resend)
-        if len(self._pending) > 1 and awaiting == len(self._pending):
+        if len(self._pending) > 1:  # a step in flight: no round of re-sends awaits an answer
             logger.debug(
                 "generation %s: a refusal named no topic while the step's %s await an answer; "
                 "they are judged at the step's timeout: %s",
@@ -619,6 +622,7 @@ class Subscriptions:
             )
             self._step_refusal = status.message
             return
+        awaiting = len(self._pending) + len(self._noack) + len(self._resend)
         if len(self._pending) != 1 or awaiting != 1:
             logger.info(
                 "a refusal named no topic while %d topics await an answer (%d in flight, %d "

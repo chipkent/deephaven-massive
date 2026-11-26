@@ -477,6 +477,24 @@ def test_a_late_refusal_of_an_old_topic_never_fails_a_new_step(
     assert loop.subs.acknowledged == frozenset({"T.MSFT"})
 
 
+def test_a_refused_step_of_several_is_searched_while_an_older_topic_is_no_ack() -> None:
+    # T.AAPL never got an answer; a watchlist adds T.B and T.C, and Massive refuses their step
+    # naming neither. The search finds them refused, so they are never re-sent with T.AAPL.
+    loop = no_ack("T.AAPL")
+    loop.subs.add(["T.B", "T.C"])
+    loop.subs.reconcile()
+    assert loop.sender.take() == [("subscribe", 1, ("T.B", "T.C"))]
+    loop.subs.status(refusal())
+    loop.timers.fire()  # the step's timeout: a search, its first part sent
+    assert loop.sender.take() == [("subscribe", 1, ("T.B",))]
+    loop.subs.status(refusal())
+    assert loop.sender.take() == [("subscribe", 1, ("T.C",))]
+    loop.subs.status(refusal())
+    assert loop.refused == [(("T.B", "T.C"), "not authorized")]
+    assert loop.sender.take() == []
+    assert loop.subs.no_ack == frozenset({"T.AAPL"})  # it keeps its note
+
+
 def test_a_round_waits_while_the_previous_round_awaits_its_answer() -> None:
     loop = no_ack("T.AAPL")
     loop.timers.fire()
