@@ -516,9 +516,9 @@ def test_a_change_an_update_cycle_delivers_after_the_replay_is_not_the_call_s(
                 # The cycle that delivers AAPL's change has ended once a later one has.
                 assert wait_for_update_cycle(exec_ctx, TIMEOUT)
 
-        adder = threading.Thread(target=add)
-        adder.start()
-        adder.join(TIMEOUT)
+        with ThreadPoolExecutor(max_workers=1) as adder:
+            # Raises what `add` raised, or a timeout while the update was never delivered.
+            adder.submit(add).result(TIMEOUT)
 
     def settle_call_time(
         connection: ws_connection.Connection, stream_id: int, symbols: frozenset[str]
@@ -698,11 +698,18 @@ def test_a_watchlist_removing_a_symbol_another_stream_holds_keeps_its_topic(
     ws_session.subscribed("T.AAPL", "T.MSFT")
     watchlist.delete(new_table([string_col("Symbol", ["MSFT"])]))
     wait_for(lambda: streams_of(ws_session, dh_to_pylist)[0]["Symbols"] == "AAPL")
-    assert fake_ws_server.connections[-1].topics == {"T.AAPL", "T.MSFT"}  # never unsubscribed
+    # The loop has taken the removal, and a frame sent after it has reached the server, which
+    # reads its frames in order: an unsubscribe of T.MSFT would be among those it holds.
+    ws_session.on_loop(ws_session.connection(), lambda: None)
+    ibm = ws_session.query(TRADES, ["IBM"]).append_only()
+    ws_session.subscribed("T.IBM")
+    sent = [json.loads(frame) for frame in fake_ws_server.frames()]
+    assert [f["params"] for f in sent if f["action"] == "unsubscribe"] == []
     ws_session.send(trade("AAPL"), trade("MSFT"))
     ws_session.flush()
     rows_when(second, lambda rows: [r["Symbol"] for r in rows] == ["MSFT"])
     rows_when(first, lambda rows: [r["Symbol"] for r in rows] == ["AAPL"])
+    ws_session.session.release(ibm)
 
 
 def test_two_refused_symbols_in_one_step_are_listed_and_the_stream_keeps_running(
