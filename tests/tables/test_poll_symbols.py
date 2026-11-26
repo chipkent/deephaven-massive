@@ -92,6 +92,22 @@ def test_a_failed_symbol_is_not_due_and_a_retrying_one_is_due_once_its_retry_is(
     assert symbols.due(("AAPL", "IBM", "MSFT"), now=RETRY_DELAYS[0]) == ("IBM", "MSFT")
 
 
+def test_a_cycle_that_never_settles_counts_no_read_and_keeps_a_retry_time() -> None:
+    symbols = names()
+    symbols.due(("AAPL", "IBM"), now=0.0)
+    symbols.settle(("AAPL", "IBM"), {"IBM": busy()}, now=0.0, at=AT, since=AT)
+    # The cycle at IBM's retry raises whole before it settles: nothing is counted, and IBM
+    # keeps its retry time.
+    assert symbols.due(("AAPL", "IBM"), now=RETRY_DELAYS[0]) == ("AAPL", "IBM")
+    run = symbols._runs["IBM"]
+    assert (run.attempts, run.state) == (1, SymbolReadState.RETRYING)
+    later = RETRY_DELAYS[0] + 1
+    symbols.due(("AAPL", "IBM"), now=later)
+    symbols.settle(("AAPL", "IBM"), {"IBM": busy()}, now=later, at=AT, since=AT)
+    assert run.attempts == 2
+    assert run.due == later + RETRY_DELAYS[1]
+
+
 def test_a_symbol_that_left_the_list_is_read_afresh_when_it_comes_back() -> None:
     symbols = names()
     symbols.due(("AAPL", "MSFT"), now=0.0)

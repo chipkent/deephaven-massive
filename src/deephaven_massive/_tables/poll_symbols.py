@@ -184,7 +184,7 @@ class PollSymbols:
         }
 
     def due(self, names: tuple[str, ...], *, now: float) -> tuple[str, ...]:
-        """Take the cycle's symbols and return those it reads, each counted as started.
+        """Take the cycle's symbols and return those it reads.
 
         A symbol no longer listed, or dropped from the table since the last cycle, is
         forgotten: its span ends at the next `settle`, and a symbol listed again starts a new
@@ -210,7 +210,6 @@ class PollSymbols:
         for name in names:
             run = self._runs.setdefault(name, SymbolRun())
             if _is_due(run, now):
-                run.started()
                 due.append(name)
         if len(due) < len(names):
             logger.debug(
@@ -254,7 +253,11 @@ class PollSymbols:
         at: int,
         since: int,
     ) -> Settled:
-        """Take the outcomes of the symbols a cycle read.
+        """Take the outcomes of the symbols a cycle read, each counted as a read of its run.
+
+        A symbol is counted here, not when the cycle takes it (`due`): a cycle that raises
+        whole never settles, so it counts toward no symbol's retry delay, and a retrying
+        symbol keeps its retry time.
 
         Args:
             read: The symbols the cycle read (`due`).
@@ -266,6 +269,8 @@ class PollSymbols:
         Returns:
             What the outcomes mean for the table (`Settled`).
         """
+        for name in read:
+            self._runs[name].started()
         answered = [name for name in read if name not in failures]
         for name in answered:
             self._runs[name].succeeded()
