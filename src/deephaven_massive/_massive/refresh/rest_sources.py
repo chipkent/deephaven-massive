@@ -19,7 +19,9 @@ be in the specification (the `docs` gate).
 **Rows and fields.** A path's rows sit under its result key: `results` unless
 `overrides.RESULT_KEYS` names another key, a dotted path of keys (`results.values`), or `None`
 for a body that is itself the rows. A JSON-object body without a result key is one row, and
-the envelope keys (`spec.types.ENVELOPE_KEYS`) are left out of its fields. Within a row,
+the envelope keys (`spec.types.ENVELOPE_KEYS`) are left out of its fields, as are the fields
+`exclusions.ANSWER_FIELDS` names, which carry Massive's answer about a row instead of its data.
+Within a row,
 `$ref` is resolved, `allOf` is merged, a `oneOf` or `anyOf` with one branch is that branch
 (`openapi`), and nested objects are flattened into dotted wire keys (`day.c`), in the order
 the served document lists them (which is the vendor's documented order; Massive serves every
@@ -264,8 +266,9 @@ class _PathGenerator(SourceFields):
             operation: The GET operation.
 
         Returns:
-            The result key and the flattened fields of one row, or the result key and `None`
-            (with a problem) when the response has no rows where the result key says.
+            The result key and the flattened fields of one row, but those `ANSWER_FIELDS`
+            names, or the result key and `None` (with a problem) when the response has no rows
+            where the result key says.
         """
         entry = self.hand.result_keys.get(self.path)
         result_key = entry.key if entry is not None else "results"
@@ -296,7 +299,8 @@ class _PathGenerator(SourceFields):
         skip = ENVELOPE_KEYS if result_key is None and single_object else frozenset()
         self.flatten(node, "", is_required=True, out=out, skip=skip)
         self.undeclared(out)
-        return result_key, out
+        answers = {e.wire_key for e in self.hand.answer_fields if e.path == self.path}
+        return result_key, [raw for raw in out if raw.wire_key not in answers]
 
     def undeclared(self, out: list[RawField]) -> None:
         """Add the path's `UNDECLARED_FIELDS` entries to its flattened fields.

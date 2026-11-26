@@ -481,7 +481,8 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
     The entries checked here are those whose staleness shows only once every source of every
     transport has run: `NAMES`, `UNITS`, `TAG_CONFLICTS`, `TYPE_FIXES`, `KEY_FIXES` (by the
     declared key), `SPELLINGS`, `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `SAMPLE_ERRORS`,
-    `IGNORED_KEYS` (also when the source declares the key), lexicon `SHAPES`, `PARAM_UNITS`,
+    `IGNORED_KEYS` (also when the source declares the key), `ANSWER_FIELDS`, lexicon
+    `SHAPES`, `PARAM_UNITS`,
     `IDENTITY`, and `RESULT_KEYS`; `unused_description_fixes` checks `DESCRIPTION_FIXES`, and
     `field_spellings` `SHARED_DESCRIPTIONS`. An entry the
     snapshot contradicts on a field it does generate is reported by the generator that meets
@@ -510,6 +511,11 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
             (hand.undeclared_fields, fields, f"UNDECLARED_FIELDS {absent}"),
             (hand.optional_fields, fields, f"OPTIONAL_FIELDS {absent}"),
             ([(e.path, e.wire_key) for e in hand.sample_errors], fields, f"SAMPLE_ERRORS {absent}"),
+            (
+                [(e.path, e.wire_key) for e in hand.answer_fields],
+                fields,
+                "ANSWER_FIELDS entry for a field the snapshot does not declare",
+            ),
         ],
     )
     yield from _stale_ignored_keys(hand, uses)

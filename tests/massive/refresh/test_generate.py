@@ -471,6 +471,7 @@ def test_gate_shape_two_transports_with_one_source_key() -> None:
         undeclared_fields={},
         optional_fields={},
         ignored_keys=(),
+        answer_fields=(),
     )
     with pytest.raises(RefreshError) as caught:
         generate.generate(snapshot, empty)

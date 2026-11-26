@@ -430,6 +430,7 @@ def _hand(
     sample_errors: Sequence[exclusions_module.SampleError] = (),
     undeclared_fields: Mapping[tuple[str, str], overrides.UndeclaredField] | None = None,
     optional_fields: Mapping[tuple[str, str], str] | None = None,
+    answer_fields: Sequence[exclusions_module.AnswerField] = (),
 ) -> HandInput:
     """Return hand input with every table empty except those given."""
     return HandInput(
@@ -455,6 +456,7 @@ def _hand(
         undeclared_fields=undeclared_fields or {},
         optional_fields=optional_fields or {},
         ignored_keys=(),
+        answer_fields=answer_fields,
     )
 
 
@@ -1619,3 +1621,14 @@ def test_problems_found_before_an_unreadable_schema_are_kept() -> None:
 
 def test_the_envelope_types_cover_exactly_the_envelope_keys() -> None:
     assert set(rest_sources._ENVELOPE_TYPES) == ENVELOPE_KEYS
+
+
+def test_an_answer_field_is_left_out_and_stale_once_undeclared() -> None:
+    row = _row(price={"type": "number"}, error={"type": "string"})
+    answer = exclusions_module.AnswerField(path=_PATH, wire_key="error", reason="test")
+    path = _one(row, _hand(answer_fields=(answer,)))
+    assert [f.wire_key for f in path.fields] == ["price"]
+    gone = exclusions_module.AnswerField(path=_PATH, wire_key="message", reason="test")
+    assert _problems(_snapshot({_PATH: _item(row)}), _hand(answer_fields=(gone,))) == [
+        ("stale-entry", _PATH, "message")
+    ]

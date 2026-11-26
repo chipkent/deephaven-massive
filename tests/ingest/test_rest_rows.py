@@ -21,6 +21,7 @@ from deephaven_massive._massive import (
     source,
 )
 from deephaven_massive._session import CATALOG
+from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive._tables.withheld import FAULT, Withheld, with_marks, withhold_rows
 
 NS = 10**9
@@ -97,6 +98,28 @@ def test_keep_keeps_a_marked_row_it_cannot_place() -> None:
 )
 def test_an_error_row_is_one_whose_error_is_set(row: dict[str, object], flagged: bool) -> None:
     assert is_error_row(row) is flagged
+
+
+@pytest.mark.parametrize(
+    ("error", "cause", "documented"),
+    [
+        ("NOT_FOUND", ProblemCause.UNAVAILABLE_SYMBOLS, True),
+        ("NOT_ENTITLED", ProblemCause.REFUSED_SYMBOLS, True),
+        ("DELISTED", ProblemCause.REFUSED_SYMBOLS, False),
+    ],
+)
+def test_an_error_row_is_the_problem_its_error_names(
+    error: str, cause: ProblemCause, documented: bool
+) -> None:
+    row = {"ticker": "I:VIX", "error": error, "message": "Massive's text."}
+    read = rest_rows.read_error_row(row, symbol_key="ticker", symbol=None)
+    assert read == rest_rows.ErrorRow(
+        "I:VIX", error, "Massive's text.", cause, documented=documented
+    )
+    assert read.answer == f'error {error}: "Massive\'s text."'
+    # A path whose rows do not carry the ticker takes the request's one symbol.
+    by_request = rest_rows.read_error_row(row, symbol_key=None, symbol="X:BTCUSD")
+    assert by_request.ticker == "X:BTCUSD"
 
 
 # --- Odd values and rows ---------------------------------------------------------------------

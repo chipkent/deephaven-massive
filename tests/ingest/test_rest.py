@@ -13,7 +13,7 @@ from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, Future, ThreadPoo
 from concurrent.futures import wait as futures_wait
 from datetime import UTC, date, datetime, timedelta
 from types import MethodType
-from typing import Any, NoReturn, ParamSpec, TypedDict, TypeVar
+from typing import Any, Final, NoReturn, ParamSpec, TypedDict, TypeVar
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -83,7 +83,7 @@ from deephaven_massive._ingest.symbol_reads import (
 )
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Cancel, DriftReport, Transport
-from deephaven_massive._tables import poll, problem_reporter
+from deephaven_massive._tables import diagnostics, poll, problem_reporter
 from deephaven_massive._tables.background_read import BackgroundRead
 from deephaven_massive._tables.diagnostics import Diagnostics
 from deephaven_massive._tables.execution_context import entered
@@ -2247,44 +2247,147 @@ def test_a_reactive_symbol_table_is_read_once_for_fetch(
 # --- Rows ----------------------------------------------------------------------------------------
 
 
-def test_error_rows_of_a_snapshot_are_kept_and_logged_once(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+_REFUSED_VIX: Final = {
+    "ticker": "I:VIX",
+    "error": "NOT_ENTITLED",
+    "message": "Not entitled to this ticker.",
+}
+_MISSING_RUT: Final = {"ticker": "I:RUT", "error": "NOT_FOUND", "message": "Ticker not found."}
+_SPX: Final = {"ticker": "I:SPX", "value": 5900.0, "last_updated": 1704310200000000000}
+
+
+def test_error_rows_of_a_snapshot_leave_the_table_as_problems_of_their_tickers(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
-    other = {**refused, "ticker": "I:RUT"}
-    spx = {"ticker": "I:SPX", "value": 5900.0, "last_updated": 1704310200000000000}
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused, spx, other])))
-    with caplog.at_level(logging.WARNING, LOGGER):
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX, _SPX, _MISSING_RUT])))
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.DEBUG, LOGGER):
         out = fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX", "I:RUT"])
-        fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX", "I:RUT"])
-    assert [(r["Symbol"], r["Error"], r["Value"]) for r in out] == [
-        ("I:SPX", None, 5900.0),
-        ("I:VIX", "NOT_ENTITLED", None),
-        ("I:RUT", "NOT_ENTITLED", None),
-    ]
-    # One WARNING per page, naming each ticker once per session.
-    assert [r.message for r in caplog.records if "error rows" in r.message] == [
+    assert [(r["Symbol"], r["Value"]) for r in out] == [("I:SPX", 5900.0)]
+    assert "Error" not in out[0]
+    assert "Message" not in out[0]
+    requested = f"GET {INDEX_SNAPSHOT_PATH}"
+    assert [(e.cause, e.action, e.symbol, e.rows, e.detail, e.policy) for e in events] == [
         (
-            'indices.snapshots: Massive answered error rows for I:VIX with "NOT_ENTITLED: Not '
-            'entitled" and I:RUT with "NOT_ENTITLED: Not entitled". The rows are kept, with '
-            "Massive's answer in their Error and Message columns."
+            ProblemCause.REFUSED_SYMBOLS,
+            ProblemAction.SKIPPED,
+            "I:VIX",
+            0,
+            (
+                f'Massive refused it (error NOT_ENTITLED: "Not entitled to this ticker." from '
+                f"{requested})"
+            ),
+            dm.OnError.LOG,
+        ),
+        (
+            ProblemCause.UNAVAILABLE_SYMBOLS,
+            ProblemAction.SKIPPED,
+            "I:RUT",
+            0,
+            f'Massive has no data for it (error NOT_FOUND: "Ticker not found." from {requested})',
+            dm.OnError.LOG,
+        ),
+    ]
+    # The alarm is the problem reporter's, one per cause; each row is logged at DEBUG.
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == alarms(caplog)
+    assert len(warnings) == 2
+    assert (
+        f'indices.snapshots: Massive answered {requested} with error NOT_FOUND: "Ticker not '
+        'found." for I:RUT; the row is left out as unavailable_symbols'
+    ) in caplog.messages
+
+
+def test_an_undocumented_error_value_is_a_refused_symbol_and_drift_once_per_session(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requested = f"GET {INDEX_SNAPSHOT_PATH}"
+    gone = {"ticker": "I:VIX", "error": "DELISTED", "message": "Ticker delisted."}
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([gone, _SPX])))
+    events = record_problems(session, monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            out = fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
+            assert [r["Symbol"] for r in out] == ["I:SPX"]
+    assert [(e.cause, e.symbol, e.detail) for e in events] == 2 * [
+        (
+            ProblemCause.REFUSED_SYMBOLS,
+            "I:VIX",
+            f'Massive refused it (error DELISTED: "Ticker delisted." from {requested})',
+        )
+    ]
+    assert [r.getMessage() for r in caplog.records if r.name == diagnostics.__name__] == [
+        (
+            f"indices.snapshots: Massive answered GET {INDEX_SNAPSHOT_PATH} with an error row of "
+            "error 'DELISTED', which Massive does not document. Nothing to do: the library lists "
+            "each such ticker in m.problems() under refused_symbols, with Massive's message."
         )
     ]
 
 
-def test_the_first_part_of_a_page_gives_a_drift_sample(
+def test_a_refused_error_row_fails_the_read_under_raise_and_the_others_read_under_log(
+    *, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX, _SPX])))
+    raised: list[dm.MassiveError] = []
+    for setting in (dm.OnError.RAISE, dm.OnError.LOG):
+        config = dm.MassiveConfig(
+            api_key="test-key",
+            rest_base_url=fake_rest.url,
+            on_error=dm.ErrorPolicy(refused_symbols=setting),
+        )
+        with dm.MassiveSession(config) as m:
+            try:
+                out = fetch(m, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
+            except dm.EntitlementError as error:
+                raised.append(error)
+            else:
+                assert setting is dm.OnError.LOG
+                assert [r["Symbol"] for r in out] == ["I:SPX"]
+    [refusal] = raised
+    assert str(refusal) == (
+        'indices.snapshots: Massive refused I:VIX (error NOT_ENTITLED: "Not entitled to this '
+        f'ticker.") in its answer to GET {INDEX_SNAPSHOT_PATH}. Remove it, or, to read the '
+        "others, pass on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    assert refusal.source is dm.ErrorSource.MASSIVE
+
+
+def test_a_not_found_error_row_follows_unavailable_symbols_as_http_404_does(
+    *, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_MISSING_RUT, _SPX])))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE),
+    )
+    with dm.MassiveSession(config) as m, pytest.raises(dm.MassiveError) as raised:
+        fetch(m, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:RUT"])
+    assert str(raised.value) == (
+        "indices.snapshots: Massive has no data for I:RUT. Remove it, or, to read the others, "
+        "pass on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+
+
+def test_an_error_rows_keys_are_never_drift(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A snapshot page is read in two parts, its good rows and then its error rows; a field both
-    # parts carry is sampled from the good rows, read first, whatever the rows' order.
-    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "x", "new": "from error"}
-    spx = {"ticker": "I:SPX", "value": 1.0, "last_updated": 1704310200000000000, "new": "good"}
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused, spx])))
+    # An error row is set apart undecoded, so a key only it carries is no drift of the table.
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([{**_REFUSED_VIX, "new": "x"}])))
     events = record_problems(session, monkeypatch)
-    fetch(session, INDEX_SNAPSHOTS, symbols=["I:SPX", "I:VIX"])
-    [drift] = [e for e in events if e.cause is ProblemCause.SCHEMA_DRIFT]
-    assert drift.field == "new"
-    assert drift.detail.endswith(' Its first value: "good".')
+    assert fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"]) == []
+    assert [e.cause for e in events] == [ProblemCause.REFUSED_SYMBOLS]
 
 
 def test_drift_is_a_problem_of_each_read_and_its_status_is_logged_once(
@@ -3348,23 +3451,18 @@ def test_columns_a_path_does_not_carry_are_null(
     assert (row["Symbol"], row["CashAmount"], row["StrikePrice"]) == ("AAPL", 0.25, None)
 
 
-def test_a_missing_symbol_warns_once_per_read_and_an_error_row_once_per_session(
+def test_a_missing_symbol_warns_once_per_read(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
     serve_pairs(fake_rest)
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
             assert fetch(session, CRYPTO_LAST, symbols=["X:ETHUSD"]) == []
-            (row,) = fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
-            assert (row["Symbol"], row["Error"]) == ("I:VIX", "NOT_ENTITLED")
     # Each read is its own table in m.problems(), so each warns of its first missing symbol.
     why = "(HTTP 404 from GET /v1/last/crypto/ETH/USD)"
     assert alarms(caplog) == [
-        no_data_alarm("crypto.last", read, "X:ETHUSD", why=why) for read in (1, 3)
+        no_data_alarm("crypto.last", read, "X:ETHUSD", why=why) for read in (1, 2)
     ]
-    assert caplog.text.count('error rows for I:VIX with "NOT_ENTITLED: Not entitled".') == 1
 
 
 def test_a_read_fans_out_on_the_callers_pool(
@@ -3462,10 +3560,10 @@ def test_a_404_once_the_session_is_closed_reports_the_close_not_a_symbol_without
     ) in caplog.messages
 
 
-def test_an_error_row_needs_only_its_symbol(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+def test_an_error_row_is_never_decoded(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The time key is required of every data row, but an error row carries no time.
+    # The time key is required of every data row; an error row carries none, and is no row.
     timed = DatasetSpec(
         summary="A dataset for the tests.",
         name="indices.timed",
@@ -3474,14 +3572,13 @@ def test_an_error_row_needs_only_its_symbol(
         symbol_param="ticker.any_of",
         keys={(R, INDEX_SNAPSHOT_PATH): SourceKeys(KeySpec("Ticker"), KeySpec("LastUpdated"))},
     )
-    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": "Not entitled"}
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX])))
+    events = record_problems(session, monkeypatch)
     reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
-    table, _ = reader.read_fetch(
-        timed, Request(symbols=("I:VIX",)), symbols=("I:VIX",), tally=ReadTally()
-    )
-    assert table.column("Symbol").to_pylist() == ["I:VIX"]
-    assert table.column("Timestamp").to_pylist() == [None]
+    request = Request(symbols=("I:VIX",))
+    table, _ = reader.read_fetch(timed, request, symbols=("I:VIX",), tally=ReadTally())
+    assert table.num_rows == 0
+    assert [(e.cause, e.symbol) for e in events] == [(ProblemCause.REFUSED_SYMBOLS, "I:VIX")]
 
 
 def test_a_failed_call_cancels_the_calls_not_yet_started(
@@ -3595,7 +3692,7 @@ def test_an_empty_symbol_tuple_reads_nothing(*, session: dm.MassiveSession) -> N
 
 
 def test_an_error_row_of_a_request_symbol_names_that_symbol(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     refused = {"error": "NOT_ENTITLED", "message": "Not entitled"}
     fake_rest.reply(
@@ -3603,14 +3700,14 @@ def test_an_error_row_of_a_request_symbol_names_that_symbol(
         Reply({"status": "success", "request_id": "r", "last": refused}),
     )
     serve_pairs(fake_rest)
-    with caplog.at_level(logging.WARNING, LOGGER):
-        (row,) = fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"])
-    assert row["Symbol"] == "X:BTCUSD"
-    assert [r.getMessage() for r in caplog.records if "error rows" in r.getMessage()] == [
+    events = record_problems(session, monkeypatch)
+    assert fetch(session, CRYPTO_LAST, symbols=["X:BTCUSD"]) == []
+    requested = "GET /v1/last/crypto/BTC/USD"
+    assert [(e.cause, e.symbol, e.detail) for e in events] == [
         (
-            'crypto.last: Massive answered error rows for X:BTCUSD with "NOT_ENTITLED: Not '
-            "entitled\". The rows are kept, with Massive's answer in their Error and Message "
-            "columns."
+            ProblemCause.REFUSED_SYMBOLS,
+            "X:BTCUSD",
+            f'Massive refused it (error NOT_ENTITLED: "Not entitled" from {requested})',
         )
     ]
 
@@ -5449,46 +5546,6 @@ def test_a_rest_fetch_follows_the_call_s_unreadable_symbols_over_the_session_s(
         )
         with pytest.raises(dm.MassiveError, match=r"could not read the 1 row"):
             fetch(m, CONVERSION, params=params)
-
-
-def test_the_error_rows_of_a_page_warn_in_one_bounded_line_and_each_at_debug(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
-) -> None:
-    tickers = [f"I:X{n:02d}" for n in range(25)]
-    refused = [{"ticker": t, "error": "NOT_ENTITLED", "message": "Not entitled"} for t in tickers]
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope(refused)))
-    with caplog.at_level(logging.DEBUG, LOGGER):
-        fetch(session, INDEX_SNAPSHOTS, symbols=tickers)
-    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert warning == (
-        "indices.snapshots: Massive answered error rows for 25 tickers, the first 3: I:X00 with "
-        '"NOT_ENTITLED: Not entitled", I:X01 with "NOT_ENTITLED: Not entitled", and I:X02 with '
-        '"NOT_ENTITLED: Not entitled". The rows are kept, with Massive\'s answer in their Error '
-        "and Message columns."
-    )
-    debug = [r.getMessage() for r in caplog.records if "an error row" in r.getMessage()]
-    assert debug[-1] == (
-        f"indices.snapshots: Massive answered an error row from {INDEX_SNAPSHOT_PATH} for "
-        'I:X24 with "NOT_ENTITLED: Not entitled"'
-    )
-    assert len(debug) == 25
-
-
-def test_an_error_row_answer_is_cut_in_the_warning_and_whole_at_debug(
-    *, session: dm.MassiveSession, fake_rest: FakeRestServer, caplog: pytest.LogCaptureFixture
-) -> None:
-    message = "x" * 500
-    refused = {"ticker": "I:VIX", "error": "NOT_ENTITLED", "message": message}
-    fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([refused])))
-    with caplog.at_level(logging.DEBUG, LOGGER):
-        fetch(session, INDEX_SNAPSHOTS, symbols=["I:VIX"])
-    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    shown = 'I:VIX with "NOT_ENTITLED: ' + message
-    assert warning == (
-        f"indices.snapshots: Massive answered error rows for {shown[: rest._ANSWER_SHOWN - 1]}…. "
-        "The rows are kept, with Massive's answer in their Error and Message columns."
-    )
-    assert any(f'for {shown}"' in r.getMessage() for r in caplog.records)
 
 
 def test_the_facts_a_session_warned_about_are_bounded(

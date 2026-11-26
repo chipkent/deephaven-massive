@@ -104,8 +104,8 @@ class ErrorPolicy:
             `m.problems()` lists it. A watchlist read by `fetch()` also names it in `Error` in
             `m.symbol_reads()`.
         unavailable_symbols: Decides what happens to a symbol Massive has no data for: it
-            answers HTTP 404, or its crypto ticker list doesn't hold the pair. Defaults to
-            `LOG`.
+            answers HTTP 404, a snapshot row for it says `NOT_FOUND`, or its crypto ticker list
+            doesn't hold the pair. Defaults to `LOG`.
 
             Set `dm.OnError.RAISE` when a missing symbol means your list is wrong. Under
             `dm.OnError.LOG` and `dm.OnError.IGNORE`, the call skips the symbol and reads the

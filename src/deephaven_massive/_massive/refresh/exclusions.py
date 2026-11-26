@@ -55,6 +55,13 @@ column already holds). The refresh writes them onto the source (`Source.ignored_
 the decoders drop them without reporting drift, so the drift report keeps showing only what
 needs a decision. An entry for a key the source declares, or for a source the snapshot does not
 generate, fails the refresh as stale.
+
+`ANSWER_FIELDS` lists the fields a REST source declares that carry Massive's answer about a
+row's ticker instead of its data: a snapshot's per-ticker `error` and `message`, on a row whose
+data fields are all absent. The refresh leaves them out of the source's fields, so no table
+has a column for them, and the REST transport reports such a row as a problem of its ticker in
+`m.problems()` instead. An entry for a key the source no longer declares fails the refresh as
+stale.
 """
 
 from __future__ import annotations
@@ -67,7 +74,16 @@ from deephaven_massive._massive.spec.types import Transport
 if TYPE_CHECKING:
     from deephaven_massive._massive.refresh.openapi import Json
 
-__all__ = ["EXCLUSIONS", "IGNORED_KEYS", "SAMPLE_ERRORS", "Exclusion", "IgnoredKey", "SampleError"]
+__all__ = [
+    "ANSWER_FIELDS",
+    "EXCLUSIONS",
+    "IGNORED_KEYS",
+    "SAMPLE_ERRORS",
+    "AnswerField",
+    "Exclusion",
+    "IgnoredKey",
+    "SampleError",
+]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -288,3 +304,37 @@ IGNORED_KEYS: tuple[IgnoredKey, ...] = (
     ),
 )
 """Every undeclared key the decoders drop without reporting drift."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class AnswerField:
+    """One declared REST field that carries Massive's answer about a row instead of its data.
+
+    Attributes:
+        path: The REST path template, exactly as the specification spells it.
+        wire_key: The key as Massive sends it, at the top of the row.
+        reason: What the field holds, and where Massive documents it.
+    """
+
+    path: str
+    wire_key: str
+    reason: str
+
+
+_TICKER_ERROR = (
+    "Massive answers a ticker it has no data for, or that the plan does not include, with a "
+    "row that holds only the ticker, an `error` (`NOT_FOUND` or `NOT_ENTITLED`), and a "
+    "`message` (`Ticker not found.`, `Not entitled to this ticker.`), as the response sample of "
+    "{page} shows. That answer is a problem of the ticker, reported in m.problems() as "
+    "unavailable_symbols or refused_symbols, not data."
+)
+
+ANSWER_FIELDS: tuple[AnswerField, ...] = tuple(
+    AnswerField(path=path, wire_key=key, reason=_TICKER_ERROR.format(page=page))
+    for path, page in (
+        ("/v3/snapshot", "every asset class's unified snapshot page"),
+        ("/v3/snapshot/indices", "the indices snapshot page"),
+    )
+    for key in ("error", "message")
+)
+"""Every declared field the refresh leaves out because it holds Massive's answer, not data."""

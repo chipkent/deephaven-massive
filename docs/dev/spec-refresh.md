@@ -26,7 +26,8 @@ gate, and what to do when a refresh adds something new.
     `UNDECLARED_FIELDS`, `OPTIONAL_FIELDS`, `DESCRIPTION_FIXES`, `RESULT_KEYS`,
     `PARAM_UNITS`, `KINDS`, `PROJECTIONS`, `TRANSPORT_ONLY`, `VENUES`, and `SPELLINGS` and
     `SHARED_DESCRIPTIONS`, which give one field one name across datasets;
-  - `refresh/exclusions.py`: `EXCLUSIONS`, `SAMPLE_ERRORS`, and `IGNORED_KEYS`.
+  - `refresh/exclusions.py`: `EXCLUSIONS`, `SAMPLE_ERRORS`, `IGNORED_KEYS`, and
+    `ANSWER_FIELDS`.
 - **The dataset reference**, `docs/datasets/`: an index, `README.md`, and one page per dataset,
   `<dataset>.md` (`stocks.trades.md`, `snapshots.md`), each with Massive's plan tables for
   its pages, rendered by
