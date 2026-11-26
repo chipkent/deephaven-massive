@@ -122,17 +122,17 @@ class ErrorPolicy:
 
             Set `dm.OnError.RAISE` when a `fetch()`, `history()`, `poll()`, or stream must not
             run without every symbol you named. Under `dm.OnError.LOG` and `dm.OnError.IGNORE`,
-            the symbol gets no rows, and the others are read. `m.problems()` lists it with
-            Massive's answer. Under every setting, a call or table fails when Massive refuses
-            every symbol it starts with.
+            the symbol gets no rows, the others are read, and `m.problems()` lists it with
+            Massive's answer.
 
-            When Massive refuses several symbols of one request, a symbol your plan serves can
-            be listed as refused too. To read it:
+            When Massive refuses a request for several symbols at once, such as a snapshot of
+            a list, a symbol your plan serves can be listed as refused too. To check:
 
-            1. Read each refused symbol alone. Massive's answer is then that symbol's own.
-            2. Remove the symbols Massive refuses.
-            3. Delete the rows of the symbols Massive served in step 1 and add them back, or
-               call the method again.
+            1. Read the symbol alone, such as `m.stocks.snapshots("AAPL").fetch(wait=True)`.
+               It raises `dm.EntitlementError` if Massive refuses it.
+            2. Remove each symbol Massive refused alone.
+            3. Call the method again. For a watchlist, delete the rows of the symbols Massive
+               served alone, and add them back.
         unrequested_symbols: Decides whether a row Massive returns for a symbol the call
             didn't ask for fails the table; the row is left out either way. Defaults to
             `LOG`.

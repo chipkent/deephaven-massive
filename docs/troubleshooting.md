@@ -244,10 +244,9 @@ has already retried, so wait before you call again.
 `fetch()` and every other query method raise `dm.SessionClosedError` once you call
 `m.close()`, and so does `m.streams()`. Create a new session to read again.
 
-A read fails whole when Massive rejects the API key or refuses every symbol it starts with. [Symbols that
-fail](configuration.md#failed-symbols) says what happens when one symbol of a `fetch()`,
-`history()`, or `poll()` fails. [Reads that fail under every
-setting](configuration.md#read-failures) lists the other reads that fail whole.
+When one symbol of a read fails, the table keeps the others: [Symbols that
+fail](configuration.md#failed-symbols) says what happens to it. [Reads that fail under every
+setting](configuration.md#read-failures) lists the problems that fail a read whole.
 
 <a id="diagnostics"></a>
 

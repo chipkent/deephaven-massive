@@ -316,16 +316,14 @@ class MassiveConfig:
             `max_outage`:
 
             - A stream's outage is the time its connection is down.
-            - A `poll()` table's outage is the time its polls keep failing or stop arriving. A
-              poll that would wait longer than `max_outage` for Massive's rate limits fails.
+            - A `poll()` table's outage is the time its polls keep failing or get no answer.
             - A `fetch()` or `history()` without `wait=True` counts the time it waits out
-              Massive's rate limits.
+              Massive's rate limits, and so does a `poll()` table.
 
-            In a `poll()` or a watchlist read, a symbol whose reads fail with a temporary error
-            for `max_outage` isn't read again. The table goes on while another symbol answers.
+            In a `poll()` or a watchlist read, a symbol whose reads keep failing with a
+            temporary error for `max_outage` isn't read again. `m.problems()` lists it.
 
-            Until the limit passes, `m.problems()` lists the problem with the time it began. A
-            failed table stays failed, so call the method again for a new one. See
+            A failed table stays failed, so call the method again for a new one. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
         flat_file_symbol_threshold: Sets how many symbols in a list make a `history()` call read
             Massive's flat files instead of a request per symbol, when both can serve it. Defaults
