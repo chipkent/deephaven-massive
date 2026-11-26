@@ -3426,12 +3426,13 @@ def test_the_options_snapshots_and_chain_describe_a_trade_alike() -> None:
     assert "AAPL" not in snapshots["LastTradeId"].description
 
 
-def test_a_withheld_row_of_a_spelling_two_values_share_names_both(
+def test_each_value_of_a_shared_request_fails_for_its_own_withheld_rows(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # `DJT` and `I:DJT` are read by one request, since Massive writes both as `DJT`. When the
-    # library withholds every row of it, each row could be either one's: the failure of each
-    # names both.
+    # `DJT` and `I:DJT` are read by one request, since Massive writes both as `DJT`. Each
+    # contract's code tells the stock's from the index's, so when the library withholds every
+    # row of the request, each value fails for its own row (one row each), and the static
+    # read, which kept no row, raises one of those failures.
     found: list[object] = []
     monkeypatch.setattr(rest_session._core, "problems", found.extend)
     broken = [row | {"strike_price": "x"} for row in (DJT_STOCK_CONTRACT, DJT_INDEX_CONTRACT)]
@@ -3443,9 +3444,9 @@ def test_a_withheld_row_of_a_spelling_two_values_share_names_both(
     with pytest.raises(RowDataError) as raised:
         rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
     failure = (
-        "options.contracts: Massive sent 2 rows that could be DJT's or I:DJT's from GET "
-        "/v3/reference/options/contracts, and the library could read none of them whole, so "
-        "it withheld them all. /v3/reference/options/contracts: row 0: StrikePrice (wire key "
+        "options.contracts: Massive sent 1 row for DJT from GET "
+        "/v3/reference/options/contracts, and the library could not read it whole, so it "
+        "withheld it. /v3/reference/options/contracts: row 0: StrikePrice (wire key "
         "'strike_price') expects double, got \"x\". m.problems() counts the withheld rows by "
         "cause and symbol."
     )
@@ -3459,3 +3460,57 @@ def test_a_withheld_row_of_a_spelling_two_values_share_names_both(
     # The withheld rows' own events list them, and a static read fails whole instead of
     # listing its values.
     assert spans == []
+
+
+def test_another_spelling_s_withheld_row_fails_no_asked_value(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `I:DJT` is sent as `DJT`, and Massive answers with only the stock's contract, which the
+    # library cannot read whole. The row names the stock, so it is no row of `I:DJT`: the
+    # table reads `I:DJT` as having no rows, and lists the withheld row as its own problem.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    fake_rest.reply(
+        "/v3/reference/options/contracts",
+        Reply(
+            body={
+                "status": "OK",
+                "request_id": "r",
+                "results": [DJT_STOCK_CONTRACT | {"strike_price": "x"}],
+            }
+        ),
+    )
+    underlyings = new_table([string_col("Symbol", ["I:DJT"])])
+    listed = rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    assert rows(listed) == []
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "O:DJT261120C00020000", "StrikePrice", 1)
+    ]
+
+
+def test_an_asked_value_whose_own_rows_are_all_withheld_fails_beside_another_s_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive answers `I:DJT`, sent as `DJT`, with a valid contract of the stock and an index
+    # contract the library cannot read whole. The stock's row is not `I:DJT`'s, so every row
+    # of `I:DJT` was withheld, and the read fails rather than return an empty table.
+    fake_rest.reply(
+        "/v3/reference/options/contracts",
+        Reply(
+            body={
+                "status": "OK",
+                "request_id": "r",
+                "results": [DJT_STOCK_CONTRACT, DJT_INDEX_CONTRACT | {"strike_price": "x"}],
+            }
+        ),
+    )
+    underlyings = new_table([string_col("Symbol", ["I:DJT"])])
+    with pytest.raises(RowDataError) as raised:
+        rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    assert str(raised.value) == (
+        "options.contracts: Massive sent 1 row for I:DJT from GET "
+        "/v3/reference/options/contracts, and the library could not read it whole, so it "
+        "withheld it. /v3/reference/options/contracts: row 1: StrikePrice (wire key "
+        "'strike_price') expects double, got \"x\". m.problems() counts the withheld rows by "
+        "cause and symbol."
+    )

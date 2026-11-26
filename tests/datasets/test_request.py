@@ -49,7 +49,11 @@ def test_a_value_table_compares_by_its_wrapper_and_sends_each_value_alone(
         "product_code", "product_code", "ProductCode", underlying=False, table=other
     )
     request = Request(params=(("date", "2026-11-02"),), limit=5, value_table=values)
-    # One value is the request the method builds for it alone, its parameter in name order.
+    # One value is the request the method builds for it alone, its parameter in name order,
+    # with the column of its rows that names their value.
     assert request.for_value("ES") == Request(
-        params=(("date", "2026-11-02"), ("product_code", "ES")), limit=5, value_group=("ES",)
+        params=(("date", "2026-11-02"), ("product_code", "ES")),
+        limit=5,
+        value_group=("ES",),
+        value_column="ProductCode",
     )

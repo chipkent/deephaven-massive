@@ -189,17 +189,13 @@ class ReadTally:
                 self._sources.setdefault(source, None)
             self._requests.append(request)
 
-    def failure(
-        self, dataset: str, *, whose: str = "of the read's symbols and window"
-    ) -> RowDataError | None:
+    def failure(self, dataset: str) -> RowDataError | None:
         """Return the read's failure if the library could read none of its rows (`add`) whole.
 
         Logs the read's counts at DEBUG.
 
         Args:
             dataset: The dataset, for the message.
-            whose: Whose rows they are, for the message: the read's, or, for a tally of one
-                value's rows, `"for <value>"`.
 
         Returns:
             The `RowDataError` of a read that had rows of its symbols and window and withheld
@@ -218,7 +214,10 @@ class ReadTally:
         )
         if not asked or withheld < asked:
             return None
-        return RowDataError(_message(dataset, _Withholding(asked, first, sources), whose=whose))
+        withholding = _Withholding(asked, first, sources)
+        return RowDataError(
+            _message(dataset, withholding, whose="of the read's symbols and window")
+        )
 
     def check(self, dataset: str) -> None:
         """Fail a read of one table if the library could read none of its rows whole.

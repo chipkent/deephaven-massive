@@ -178,15 +178,3 @@ def test_a_scan_row_of_no_known_symbol_could_be_any_symbol_s() -> None:
     # A scan that kept a row fails no symbol for it.
     tally.add(1, withheld(0, ""), source="the files")
     assert tally.judge("stocks.trades", outcomes) == outcomes
-
-
-def test_a_value_s_failure_names_the_value() -> None:
-    tally = ReadTally()
-    tally.add(1, withheld(1, "First"), source="GET /v3/snapshot/options/AAPL")
-    failure = tally.failure("options.chain", whose="for AAPL")
-    assert failure is not None
-    assert str(failure) == (
-        "options.chain: Massive sent 1 row for AAPL from GET /v3/snapshot/options/AAPL, and the "
-        "library could not read it whole, so it withheld it. First. m.problems() counts the "
-        "withheld rows by cause and symbol."
-    )

@@ -134,6 +134,9 @@ class Request:
             (`resolve_policy`). Every transport the call reaches reads it.
         value_group: The values of a value table one request reads (`for_value`), whose rows
             the read gives to the value each names; empty for any other request.
+        value_column: The column of the rows of a `value_group` request that names the value
+            each row is about (`ValueTable.row_column`), by which its withheld rows count for
+            their value; None for any other request.
     """
 
     symbols: NormalizedSymbols | None = None
@@ -150,6 +153,7 @@ class Request:
     value_table: ValueTable | None = None
     on_error: ResolvedPolicy = DEFAULT_POLICY
     value_group: tuple[str, ...] = ()
+    value_column: str | None = None
 
     def for_value(self, value: str, *, group: tuple[str, ...] = ()) -> Request:
         """Return the request that reads one value of the value table, as if passed alone.
@@ -165,15 +169,17 @@ class Request:
         Returns:
             The request with no value table and `value` sent as its parameter, the request the
             dataset method builds for that one value, with the values it reads
-            (`value_group`).
+            (`value_group`) and the column that names each row's value (`value_column`).
         """
-        parameter = required(self.value_table, "the request's value table").parameter
+        values = required(self.value_table, "the request's value table")
+        parameter = values.parameter
         params = {**dict(self.params), parameter: value}
         return replace(
             self,
             value_table=None,
             params=tuple(sorted(params.items())),
             value_group=group or (value,),
+            value_column=values.row_column,
         )
 
     @property

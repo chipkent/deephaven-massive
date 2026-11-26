@@ -2382,7 +2382,8 @@ def test_an_error_row_of_a_whole_read_is_a_refused_symbol_of_it(
     *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # dm.ALL names no symbol, so the refused ticker is listed and fails the read only under
-    # RAISE, as a refused symbol of a static read does.
+    # RAISE, as a refused symbol of a static read does. The ticker Massive has no data for is
+    # listed under either setting: the refusal's failure never hides it.
     fake_rest.reply(INDEX_SNAPSHOT_PATH, Reply(envelope([_REFUSED_VIX, _SPX, _MISSING_RUT])))
     refused = (
         f"indices.snapshots: Massive answered GET {INDEX_SNAPSHOT_PATH} with error NOT_ENTITLED "
@@ -2400,9 +2401,6 @@ def test_an_error_row_of_a_whole_read_is_a_refused_symbol_of_it(
             if setting is dm.OnError.LOG:
                 out = fetch(m, INDEX_SNAPSHOTS, symbols=dm.ALL)
                 assert [r["Symbol"] for r in out] == ["I:SPX"]
-                assert [(e.cause, e.symbol) for e in events] == [
-                    (ProblemCause.UNAVAILABLE_SYMBOLS, "I:RUT")
-                ]
             else:
                 with pytest.raises(dm.EntitlementError) as info:
                     fetch(m, INDEX_SNAPSHOTS, symbols=dm.ALL)
@@ -2414,6 +2412,9 @@ def test_an_error_row_of_a_whole_read_is_a_refused_symbol_of_it(
                     "dm.MassiveConfig."
                 )
             assert spans == [(ProblemCause.REFUSED_SYMBOLS, "I:VIX", refused)]
+            assert [(e.cause, e.symbol, e.policy) for e in events] == [
+                (ProblemCause.UNAVAILABLE_SYMBOLS, "I:RUT", dm.OnError.LOG)
+            ]
 
 
 def test_an_undocumented_error_value_is_a_refused_symbol_and_drift_once_per_session(
@@ -6288,7 +6289,12 @@ def test_a_static_table_of_values_raises_a_refused_value_under_raise(
 
 
 def _not_found(
-    m: dm.MassiveSession, error: _massive.WireError, *, symbol: str | None, requests: int
+    m: dm.MassiveSession,
+    error: _massive.WireError,
+    *,
+    symbol: str | None,
+    requests: int,
+    request: Request | None = None,
 ) -> object:
     reader = _endpoints(m)._reader("call-1", m._core.policy, waiter=Waiter.CALL)
     return reader._not_found(
@@ -6297,6 +6303,7 @@ def _not_found(
         call=rest_requests.Call(
             {"stockTicker": symbol}, {}, symbol, symbols=() if symbol is None else (symbol,)
         ),
+        request=Request() if request is None else request,
         requested=f"GET /v3/trades/{symbol}",
         bucket="stocks",
         window=None,
@@ -6318,23 +6325,27 @@ def test_a_404_on_a_symbols_first_request_leaves_the_symbol_out(
 
 
 @pytest.mark.parametrize(
-    ("spec", "expected"),
+    ("spec", "value_column", "expected"),
     [
-        (TRADES, "Symbol"),
-        (reference.RELATED_COMPANIES, "Underlying"),
-        (reference.MARKET_STATUS, None),  # its rows name no symbol
-        (options_ns.OPEN_INTEREST, "Symbol"),  # the lookup prefixes Underlying, not Symbol
-        (options_ns.OPEN_INTEREST_BY_UNDERLYING, "Symbol"),  # bare until the lookup prefixes it
+        (TRADES, None, "Symbol"),
+        (reference.RELATED_COMPANIES, None, "Underlying"),
+        (reference.MARKET_STATUS, None, None),  # its rows name no symbol
+        (options_ns.OPEN_INTEREST, None, "Symbol"),  # the lookup prefixes Underlying, not Symbol
+        (options_ns.OPEN_INTEREST_BY_UNDERLYING, None, "Symbol"),  # bare until the lookup
+        # A value's request: by the column that names each row's value, not by Symbol.
+        (options_ns.CONTRACTS, "Underlying", "Underlying"),
+        (futures_ns.PRODUCTS, "ProductCode", "ProductCode"),
     ],
 )
 def test_withheld_rows_are_grouped_by_the_asked_column_where_the_page_carries_it(
-    session: dm.MassiveSession, spec: DatasetSpec, expected: str | None
+    *, session: dm.MassiveSession, spec: DatasetSpec, value_column: str | None, expected: str | None
 ) -> None:
     reader = _endpoints(session)._reader("call-1", session._core.policy, waiter=Waiter.CALL)
     template = spec.fetch_path or spec.history_path
     assert template is not None
     converter = RowConverter.build(reader.catalog, spec, reader.rest_path(template))
-    assert rest._withheld_symbol_column(spec, converter) == expected
+    request = Request(value_column=value_column)
+    assert rest._withheld_symbol_column(spec, converter, request) == expected
 
 
 def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:
@@ -6351,15 +6362,33 @@ def test_a_404_on_a_symbols_later_page_cuts_its_data_short(session: dm.MassiveSe
     assert info.value.request_id == "r1"
 
 
+def test_a_404_on_a_values_later_page_cuts_its_data_short(session: dm.MassiveSession) -> None:
+    # A value's request names no symbol; a 404 after its first page names its values.
+    error = _massive.WireError("gone", status=404, kind=_massive.WireFailure.REFUSED)
+    values = Request(value_group=("I:DJT", "DJT"), value_column="Underlying")
+    with pytest.raises(
+        CutShortError,
+        match=r"^stocks\.trades: the rows of I:DJT and DJT were cut short after 1 page arrived\. ",
+    ):
+        _not_found(session, error, symbol=None, requests=1, request=values)
+
+
 @pytest.mark.parametrize(
-    ("status", "symbol"), [(404, None), (500, "AAPL")], ids=["no-symbol", "not-404"]
+    ("status", "symbol", "requests", "request_"),
+    [
+        (404, None, 0, Request()),
+        (404, None, 2, Request()),  # a later page of a read that names no symbol or value
+        (404, None, 0, Request(value_group=("ES",))),  # the read by value settles this one
+        (500, "AAPL", 0, Request()),
+    ],
+    ids=["no-symbol", "no-symbol-later-page", "value-first-request", "not-404"],
 )
 def test_only_a_per_symbol_404_is_about_the_symbol(
-    *, session: dm.MassiveSession, status: int, symbol: str | None
+    *, session: dm.MassiveSession, status: int, symbol: str | None, requests: int, request_: Request
 ) -> None:
     error = _massive.WireError("failed", status=status, kind=_massive.WireFailure.REFUSED)
     with pytest.raises(dm.MassiveError) as info:
-        _not_found(session, error, symbol=symbol, requests=0)
+        _not_found(session, error, symbol=symbol, requests=requests, request=request_)
     assert not isinstance(info.value, CutShortError)
     assert info.value.status == status
 

@@ -42,10 +42,11 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   `fetch()` reads them as a `poll()` cycle does.
 - **Classes of failure** (the error's `is_retryable`): retryable when the cause may pass (a
   rate limit beyond the read's patience, a server error after the client's retries, a network
-  failure, a symbol's later page that answered HTTP 404); otherwise the same read would fail
-  again for this session's entitlements (a refusal of the plan, which an upgrade of the plan
-  lifts; rows that break the schema; a crypto pair Massive does not list; a parameter the path
-  does not take; any other HTTP 404, such as a path Massive retired; a defect of the library).
+  failure, a symbol's or value's later page that answered HTTP 404); otherwise the same read
+  would fail again for this session's entitlements (a refusal of the plan, which an upgrade
+  of the plan lifts; rows that break the schema; a crypto pair Massive does not list; a
+  parameter the path does not take; any other HTTP 404, such as a path Massive retired; a
+  defect of the library).
   HTTP 404 on a symbol's first request is no failure: the symbol has no data, and its table is
   empty.
 - **Whole-read failures** (`fails_followed_read`): a rejected API key
@@ -864,8 +865,8 @@ class ValueRead(NamedTuple):
         left_out: What the reads left out, each with why, such as `"NQ (HTTP 404 from GET
             /futures/v1/products?product_code=NQ)"`.
         failures: The error of each value that failed, but for those in `unread`.
-        unread: The failure of each value whose request got rows and whose every row the
-            library withheld (`ReadTally.failure`). It fails the value alone in a `poll()`
+        unread: The failure of each value that got no row and whose own rows the library
+            withheld (`ReadTally.unread_symbols`). It fails the value alone in a `poll()`
             cycle or a followed read, whatever the policy; a static read fails on it only
             when no value kept a row, as a static read of symbols is judged whole.
     """

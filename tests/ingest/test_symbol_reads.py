@@ -1510,6 +1510,35 @@ def test_a_value_whose_rows_are_all_unreadable_fails_alone(
     )
 
 
+def test_another_value_s_withheld_row_fails_no_asked_value(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Each value is judged by its own rows: Massive answers ES with only NQ's row, which the
+    # library withholds. It is no row of ES, so ES has no rows and does not fail.
+    fake_rest.reply(PRODUCTS_PATH, UNREADABLE_NQ)
+    out = _by_value(rest_session, ["ES"])
+    assert _rows(out["ES"]) == []
+
+
+def test_a_404_on_a_value_s_later_page_cuts_its_data_short(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Only a value's first answer of HTTP 404 means Massive has no data for it. A 404 after a
+    # page of rows arrived cuts the value's rows short: the value fails, and is never read as
+    # having no rows.
+    gone = f"{PRODUCTS_PATH}?cursor=gone"
+    fake_rest.reply(gone, Reply(b'{"status":"NOT_FOUND"}', status=404))
+    first = envelope([{"product_code": "ES"}], next_url=f"{fake_rest.url}{gone}")
+    fake_rest.reply(PRODUCTS_PATH, Reply(first))
+    out = _by_value(rest_session, ["ES"])
+    error = _failure(out["ES"]).error
+    assert isinstance(error, CutShortError)
+    assert error.is_retryable
+    assert str(error).startswith(
+        "futures.products: the rows of ES were cut short after 1 page arrived. "
+    )
+
+
 def test_a_rejected_key_stops_a_read_by_value(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

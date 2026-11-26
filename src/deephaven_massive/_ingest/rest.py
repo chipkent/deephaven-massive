@@ -1096,6 +1096,11 @@ class RestReader:
             The rows, in call order and then page order, the number of requests made, and how
             many rows Massive sent.
 
+        Raises:
+            MassiveError: The refusal of a ticker an error row refuses, under
+                `refused_symbols=RAISE` (`report_failures`), once the tickers Massive has no
+                data for are listed (`_report_missing_of_failed`).
+
         Errors: the public error of each `WireError` (`public_error`), the `RowDataError` of a
         withheld row's `RAISE` cause (`_page_rows`), and the `MassiveError` of `_call` for a
         page on another adjustment basis, its `CutShortError` for a symbol whose data was cut
@@ -1142,8 +1147,13 @@ class RestReader:
             for ticker, error in failed.items():
                 refused.setdefault(ticker, error)
         # A whole read names no symbol, so a ticker an error row refuses is listed as any
-        # refused symbol of a static read is, and fails the read only under RAISE.
-        report_failures(self, spec, symbols=list(refused), failures=refused, named=False)
+        # refused symbol of a static read is, and fails the read only under RAISE. The
+        # tickers Massive has no data for are listed before that failure, never hidden by it.
+        try:
+            report_failures(self, spec, symbols=list(refused), failures=refused, named=False)
+        except MassiveError:
+            self._report_missing_of_failed(spec, missing)
+            raise
         if missing:
             self._report_missing(spec, missing)
         batches = [
@@ -1637,9 +1647,10 @@ class RestReader:
             DEBUG line with its rows after each step (`_page_rows`).
 
         Raises:
-            CutShortError: If a per-symbol call's later page answers HTTP 404, so the symbol's
-                data was cut short: the message names the dataset, the symbol, the path, and
-                how many pages had arrived.
+            CutShortError: If a later page of a per-symbol call, or of a value's request
+                (`Request.value_group`), answers HTTP 404, so the symbol's or value's data was
+                cut short: the message names the dataset, the symbol or values, and how many
+                pages had arrived.
 
         A failed request otherwise raises the public error of its `WireError` (`public_error`), and
         once the session is closed every failed request does, a 404 included: the call raises
@@ -1665,7 +1676,7 @@ class RestReader:
             warnings=self.warnings,
         )
         bucket = _request_bucket(spec, template, call)
-        grouped = _withheld_symbol_column(spec, converter)
+        grouped = _withheld_symbol_column(spec, converter, request)
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
@@ -1732,6 +1743,7 @@ class RestReader:
                 error,
                 spec=spec,
                 call=call,
+                request=request,
                 requested=requested,
                 bucket=bucket,
                 window=window,
@@ -1883,6 +1895,7 @@ class RestReader:
         *,
         spec: DatasetSpec,
         call: Call,
+        request: Request,
         requested: str,
         bucket: str,
         window: HistoryWindow | None,
@@ -1893,12 +1906,16 @@ class RestReader:
         Only HTTP 404 on a per-symbol call while the session is open is about the symbol. On the
         call's first request it means the symbol has no data: the call returns no rows with the
         symbol in `missing`, scoped to the futures session a `history()` call asked for, and
-        logs it at DEBUG.
+        logs it at DEBUG. A value's request (`Request.value_group`) names no symbol: its first
+        404 is the call's failure, which the read by value takes as the value's no data
+        (`read_by_value`), and a 404 on its later page cuts the value's rows short, as a
+        symbol's.
 
         Args:
             error: The request's failure.
             spec: The dataset.
             call: The call.
+            request: The call's request, which names a value request's values.
             requested: The call's request as sent, such as `GET /v3/trades/AAPL`, for messages
                 and as the outcome's source.
             bucket: The call's rate-limit bucket, for the public error.
@@ -1910,15 +1927,23 @@ class RestReader:
             rows and nothing withheld, since the 404 was its first answer.
 
         Raises:
-            CutShortError: If a per-symbol call's later page answers HTTP 404, so the symbol's
-                data was cut short: the message names the dataset, the symbol, the path, and
-                how many pages had arrived.
+            CutShortError: If a later page of a per-symbol call, or of a value's request
+                (`Request.value_group`), answers HTTP 404, so the symbol's or value's data was
+                cut short: the message names the dataset, the symbol or values, and how many
+                pages had arrived.
 
         A 404 that arrives after the session closed raises the
         `SessionClosedError("This session is closed. ...")` of `public_error`, and any other
         failure the error of `_dataset_error`.
         """
-        if error.status != HTTPStatus.NOT_FOUND or call.symbol is None:
+        # What the 404 is about: the call's symbol, or a value request's values once a page
+        # of them arrived; a value request's first 404 is settled by the read by value.
+        about = (
+            call.symbol
+            if call.symbol is not None or not requests or not request.value_group
+            else prose_list(request.value_group, "values")
+        )
+        if error.status != HTTPStatus.NOT_FOUND or about is None:
             raise self._dataset_error(spec, bucket, error) from error
         # A 404 that arrives after the session closed is no answer about the symbol,
         # so the call reports the close rather than dropping a symbol with no data.
@@ -1926,7 +1951,7 @@ class RestReader:
             logger.debug(
                 "%s: HTTP 404 for %s from %s arrived after %s closed; the call reports the close",
                 spec.name,
-                call.symbol,
+                about,
                 requested,
                 self.state.label,
             )
@@ -1934,8 +1959,8 @@ class RestReader:
         if requests:
             pages = "1 page" if requests == 1 else f"{requests} pages"
             raise CutShortError(
-                f"{spec.name}: the rows of {call.symbol} were cut short after {pages} arrived. "
-                f"{error.message} Call m.{spec.name} again to read {call.symbol} from the start.",
+                f"{spec.name}: the rows of {about} were cut short after {pages} arrived. "
+                f"{error.message} Call m.{spec.name} again to read {about} from the start.",
                 status=error.status,
                 request_id=error.request_id,
             ) from error
@@ -1955,7 +1980,7 @@ class RestReader:
             error.request_id,
             error.message,
         )
-        missing = _Missing(call.symbol, f"{scope} (HTTP 404 from {requested})".lstrip())
+        missing = _Missing(about, f"{scope} (HTTP 404 from {requested})".lstrip())
         return _Outcome((), requests + 1, Withheld(pa.table({})), requested, missing=missing)
 
     def _page_rows(
@@ -2806,12 +2831,16 @@ class RestReader:
         The values Massive takes as one value are read by one request (`value_groups`), as if
         passed alone (`Request.for_value`), and each row goes to the value it names
         (`attribute_values`): a row of a value the request did not read is an
-        `unrequested_symbols` problem. Each request's rows count in a tally of their own: a
-        request that got rows and whose every row the library withheld fails its values on
-        their own (`ReadTally.failure`), whatever the policy. A value Massive answers with
-        HTTP 404 follows `ErrorPolicy.unavailable_symbols`, as a symbol does (`_report_missing`):
-        under `LOG` and `IGNORE` it gets no rows and is named in `left_out`. Any other failure
-        is its values' own, but for one `fails_read` names, which raises.
+        `unrequested_symbols` problem. Each request's rows count in a tally of their own, each
+        withheld row for the value it names (`Request.value_column`), so a value is judged by
+        its own rows, as a symbol of a read by symbol is (`ReadTally.unread_symbols`): a value
+        that got no row and whose own rows the library withheld fails on its own, whatever the
+        policy, and another value's withheld row fails none of the request's. A value Massive
+        answers with HTTP 404 on its first request follows `ErrorPolicy.unavailable_symbols`,
+        as a symbol does (`_report_missing`): under `LOG` and `IGNORE` it gets no rows and is
+        named in `left_out`. A 404 on a later page cuts its rows short (`CutShortError`), a
+        failure of its own. Any other failure is its values' own, but for one `fails_read`
+        names, which raises.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -2844,7 +2873,8 @@ class RestReader:
             except MassiveError as error:
                 if fails_read(error):
                     raise
-                if error.status != HTTPStatus.NOT_FOUND:
+                # Only a first answer of HTTP 404 is no data; a later page's cut the rows short.
+                if error.status != HTTPStatus.NOT_FOUND or isinstance(error, CutShortError):
                     failed.update(dict.fromkeys(group, error))
                     continue
                 found = [
@@ -2858,17 +2888,17 @@ class RestReader:
                 continue
             requests += sent
             left_out.extend(skipped)
-            withheld = tally.failure(spec.name, whose=_whose_rows(group))
-            if withheld is not None:
-                unread.update(dict.fromkeys(group, withheld))
-                continue
             own, unrequested = attribute_values(
                 self, spec, rows, column=column, own=group, template=template
             )
             if unrequested is not None:
                 failed.update(dict.fromkeys(group, unrequested))
                 continue
-            pieces.update(own)
+            withheld = tally.unread_symbols(
+                spec.name, [value for value in group if not own[value].num_rows], group
+            )
+            unread.update(withheld)
+            pieces.update((value, own[value]) for value in group if value not in withheld)
         logger.debug(
             "%s by value: %d values in %d requests; failed: %s; left out: %s",
             spec.name,
@@ -3986,23 +4016,9 @@ _DELAYED_TICKERS_SHOWN: Final = 5
 """How many tickers a refusal of delayed data names before it counts the rest."""
 
 
-def _whose_rows(group: tuple[str, ...]) -> str:
-    """Return whose rows a value request's withheld rows were, for its failure's message.
-
-    Args:
-        group: The values the request read (`value_groups`): one, or several Massive writes
-            alike, such as `DJT` and `I:DJT` on the options contracts list, whose rows could
-            be either one's.
-
-    Returns:
-        `"for NQ"` for one value; `"that could be DJT's or I:DJT's"` for several, sorted.
-    """
-    if len(group) == 1:
-        return f"for {group[0]}"
-    return "that could be " + " or ".join(f"{value}'s" for value in sorted(group))
-
-
-def _withheld_symbol_column(spec: DatasetSpec, converter: RowConverter) -> str | None:
+def _withheld_symbol_column(
+    spec: DatasetSpec, converter: RowConverter, request: Request
+) -> str | None:
     """Return the column a call's withheld rows are grouped by, for a read by symbol's count.
 
     A withheld row counts for the asked symbol it would have gone to
@@ -4010,16 +4026,24 @@ def _withheld_symbol_column(spec: DatasetSpec, converter: RowConverter) -> str |
     (`symbol_reads.asked_column`) as it reads when the row is withheld. Where the index lookup
     gives that column its `I:` only afterwards (`IndexPrefix.prefixed_by_lookup`), the value
     is the bare ticker, which the read by symbol resolves against its request's asked
-    spellings (`symbol_reads._owners`).
+    spellings (`symbol_reads._owners`). A request of a value table's values groups them by
+    the column that names each row's value (`Request.value_column`) instead, so that each
+    value is judged by its own rows (`RestReader.read_by_value`); no value table's column
+    gets its `I:` by a lookup, so it reads canonical.
 
     Args:
         spec: The dataset.
         converter: The path's conversion, whose schema says whether the rows carry the column.
+        request: The call's request, which names the column of a value's rows.
 
     Returns:
         The column, or None for a dataset whose rows lack it.
     """
-    asked = asked_column(spec, converter.rest_path.template)
+    asked = (
+        asked_column(spec, converter.rest_path.template)
+        if request.value_column is None
+        else request.value_column
+    )
     return asked if asked in converter.arrow_schema.names else None
 
 
