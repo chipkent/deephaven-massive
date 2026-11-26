@@ -136,11 +136,15 @@ def test_a_run_counts_its_reads_and_keeps_its_failures_until_one_succeeds() -> N
         None,
         None,
     )
-    # The next failure starts a new run of failures, timed from itself.
+    # The next failure starts a new run of failures, timed and counted from itself: a symbol
+    # read again and again (a poll) gets the first retry's delay, not the fourth read's.
     run.started()
     third = run.failed(busy(), name="AAPL", now=500.0, limit=LIMIT)
-    assert third == Retry(560.0, 60.0, attempts=4, failing_for=0.0)  # the fourth attempt's delay
-    assert run.failing_since == 500.0
+    assert third == Retry(502.0, 2.0, attempts=1, failing_for=0.0)
+    assert (run.attempts, run.failing_since) == (4, 500.0)
+    run.started()
+    fourth = run.failed(busy(), name="AAPL", now=502.5, limit=LIMIT)
+    assert fourth == Retry(510.5, 8.0, attempts=2, failing_for=2.5)
 
 
 def test_a_run_that_fails_for_good_is_failed_and_never_due() -> None:

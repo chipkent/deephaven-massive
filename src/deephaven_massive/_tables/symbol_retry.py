@@ -218,6 +218,9 @@ class SymbolRun:
     Attributes:
         state: Where the symbol stands (`SymbolReadState`): `QUEUED` until a read begins.
         attempts: Reads begun since the run was made.
+        succeeded_before: Reads begun before the current run of failures, which a symbol read
+            again and again (a `poll()`) has answered: its retry delays count only the reads of
+            the current run.
         failing_since: When the first failure of its current run of failures landed, monotonic
             seconds; None while it has none.
         due: When its next read is due, monotonic seconds, while `RETRYING`; None otherwise.
@@ -227,6 +230,7 @@ class SymbolRun:
 
     state: SymbolReadState = SymbolReadState.QUEUED
     attempts: int = 0
+    succeeded_before: int = 0
     failing_since: float | None = None
     due: float | None = None
     error: MassiveError | None = None
@@ -265,11 +269,12 @@ class SymbolRun:
         """
         if self.failing_since is None:
             self.failing_since = now
+            self.succeeded_before = self.attempts - 1
         step = next_step(
             error,
             name=name,
             failing_since=self.failing_since,
-            attempts=self.attempts,
+            attempts=self.attempts - self.succeeded_before,
             limit=limit,
             now=now,
         )
