@@ -6148,6 +6148,38 @@ def test_a_static_table_of_values_lists_a_refused_value_and_returns_the_others(
     assert [(cause, name) for cause, name, _ in spans] == [(ProblemCause.REFUSED_SYMBOLS, "NQ")]
 
 
+UNREADABLE_NQ_PRODUCT: Final = Reply(envelope([{"product_code": "NQ", "last_updated": "no time"}]))
+"""NQ's futures product, whose only row has an update time the library cannot read."""
+
+
+def test_a_static_table_of_values_keeps_the_read_when_one_value_s_rows_are_all_withheld(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # As a static read of symbols, the read is judged whole: ES kept a row, so NQ's withheld
+    # row is listed by its own event, and NQ is not listed as a failed value.
+    fake_rest.reply("/futures/v1/products", ES_PRODUCT, UNREADABLE_NQ_PRODUCT)
+    spans = record_spans(rest_session, monkeypatch)
+    table = _static_values(rest_session, ["ES", "NQ"])
+    assert [row["ProductCode"] for row in dh_to_pylist(table)] == ["ES"]
+    assert spans == []
+
+
+def test_a_static_table_of_values_fails_when_every_row_is_withheld(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    fake_rest.reply("/futures/v1/products", UNREADABLE_NQ_PRODUCT)
+    with pytest.raises(RowDataError) as raised:
+        _static_values(rest_session, ["NQ"])
+    assert str(raised.value).startswith(
+        "futures.products: Massive sent 1 row for NQ from GET /futures/v1/products, and the "
+        "library could not read it whole, so it withheld it. "
+    )
+
+
 def test_a_static_table_of_values_fails_when_every_value_fails(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:

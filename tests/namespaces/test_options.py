@@ -50,7 +50,11 @@ from deephaven_massive._ingest.rest_rows import is_error_row
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import RowFault, Transport, to_batch
 from deephaven_massive._session import CATALOG
-from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause
+from deephaven_massive._tables.problem_events import (
+    ProblemAction,
+    ProblemCause,
+    ProblemSpans,
+)
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces import _options as options
 from deephaven_massive.namespaces._namespace import Namespace
@@ -3420,3 +3424,38 @@ def test_the_options_snapshots_and_chain_describe_a_trade_alike() -> None:
     for name in ("LastTradePrice", "LastTradeExchange"):
         assert snapshots[name].description == chain[name].description
     assert "AAPL" not in snapshots["LastTradeId"].description
+
+
+def test_a_withheld_row_of_a_spelling_two_values_share_names_both(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `DJT` and `I:DJT` are read by one request, since Massive writes both as `DJT`. When the
+    # library withholds every row of it, each row could be either one's: the failure of each
+    # names both.
+    found: list[object] = []
+    monkeypatch.setattr(rest_session._core, "problems", found.extend)
+    broken = [row | {"strike_price": "x"} for row in (DJT_STOCK_CONTRACT, DJT_INDEX_CONTRACT)]
+    fake_rest.reply(
+        "/v3/reference/options/contracts",
+        Reply(body={"status": "OK", "request_id": "r", "results": broken}),
+    )
+    underlyings = new_table([string_col("Symbol", ["I:DJT", "DJT"])])
+    with pytest.raises(RowDataError) as raised:
+        rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    failure = (
+        "options.contracts: Massive sent 2 rows that could be DJT's or I:DJT's from GET "
+        "/v3/reference/options/contracts, and the library could read none of them whole, so "
+        "it withheld them all. /v3/reference/options/contracts: row 0: StrikePrice (wire key "
+        "'strike_price') expects double, got \"x\". m.problems() counts the withheld rows by "
+        "cause and symbol."
+    )
+    assert str(raised.value) == failure
+    spans = [
+        (problem.cause, name, span.detail)
+        for problem in found
+        if isinstance(problem, ProblemSpans)
+        for name, span in problem.spans.items()
+    ]
+    # The withheld rows' own events list them, and a static read fails whole instead of
+    # listing its values.
+    assert spans == []

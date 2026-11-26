@@ -139,7 +139,6 @@ from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar, assert_never
 from urllib.parse import urlsplit
 
 import pyarrow as pa
-from deephaven import merge
 from typing_extensions import override
 
 from deephaven_massive._datasets.catalog import REFERENCE_PATH
@@ -228,6 +227,7 @@ from deephaven_massive._ingest.symbol_reads import (
     read_rest_by_symbol,
     read_rest_by_value,
     read_symbol_list,
+    read_values,
     split_failures,
     value_groups,
 )
@@ -253,7 +253,6 @@ from deephaven_massive._tables.problem_events import (
     drift_events,
 )
 from deephaven_massive._tables.read_tally import ReadTally
-from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive._tables.withheld import (
     FAULT,
     SENT,
@@ -2776,7 +2775,7 @@ class RestReader:
                 continue
             requests += sent
             left_out.extend(skipped)
-            withheld = tally.failure(spec.name, whose=f"for {prose_list(group, 'values')}")
+            withheld = tally.failure(spec.name, whose=_whose_rows(group))
             if withheld is not None:
                 unread.update(dict.fromkeys(group, withheld))
                 continue
@@ -3587,9 +3586,10 @@ class RestEndpoints:
     ) -> Table:
         """Read `fetch` once for a static table of values, as a fixed list: one table.
 
-        See `RestTransport.fetch_values`. Each value is read as `fetch_by_value` reads it, and
-        the failures are judged as a static read of symbols judges them
-        (`static_reads.judge_failures`).
+        See `RestTransport.fetch_values`. The values are read as `fetch_by_value` reads them
+        (`symbol_reads.read_values`), and judged as a static read of symbols in code is: each
+        failed value is listed and left out (`static_reads.judge_failures`), and a value whose
+        every row was withheld fails only with the whole read, when no value kept a row.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -3601,35 +3601,27 @@ class RestEndpoints:
         Returns:
             A static table of every value's rows, in value order.
 
-        Errors are those of `symbol_reads.read_rest_by_value` and `static_reads.judge_failures`.
+        Errors are those of `symbol_reads.read_values` and `static_reads.judge_failures`, and
+        the `RowDataError` of the first value whose every row was withheld, when no value kept
+        a row.
         """
         reader = self._reader(
             f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
         )
         cancel = as_cancel(stop)
-        outcomes = read_rest_by_value(
-            reader,
-            self._core,
-            spec,
-            request=request,
-            values=values,
-            call=call,
-            cancel=cancel,
-            to_table=functools.partial(self._static, spec),
+        ordered = tuple(dict.fromkeys(values))
+        read = read_values(
+            reader, self._core, spec, request=request, values=ordered, call=call, cancel=cancel
         )
-        tables: list[Table] = []
-        failures: dict[str, MassiveError] = {}
-        for value, outcome in outcomes.items():
-            match outcome:
-                case SymbolRows():
-                    tables.append(outcome.table)
-                case SymbolFailure():
-                    failures[value] = outcome.error
-                case _:
-                    assert_never(outcome)
-        judge_failures(reader, spec, symbols=tuple(outcomes), failures=failures, cancel=cancel)
-        with entered(self._core.exec_ctx):
-            return merge(tables)
+        judge_failures(reader, spec, symbols=ordered, failures=read.failures, cancel=cancel)
+        pieces = [read.pieces[value] for value in ordered if value in read.pieces]
+        if read.unread and not any(piece.num_rows for piece in pieces):
+            # As a static read of symbols: a read whose every row was withheld fails whole.
+            unread = next(iter(read.unread.values()))
+            logger.debug("%s by value: every row was withheld: %s", spec.name, unread)
+            raise unread
+        schema = self._core.dataset_schema(spec).arrow_schema()
+        return self._static(spec, pa.concat_tables(pieces) if pieces else schema.empty_table())
 
     def history(
         self,
@@ -3909,6 +3901,22 @@ class RestEndpoints:
 
 _DELAYED_TICKERS_SHOWN: Final = 5
 """How many tickers a refusal of delayed data names before it counts the rest."""
+
+
+def _whose_rows(group: tuple[str, ...]) -> str:
+    """Return whose rows a value request's withheld rows were, for its failure's message.
+
+    Args:
+        group: The values the request read (`value_groups`): one, or several Massive writes
+            alike, such as `DJT` and `I:DJT` on the options contracts list, whose rows could
+            be either one's.
+
+    Returns:
+        `"for NQ"` for one value; `"that could be DJT's or I:DJT's"` for several, sorted.
+    """
+    if len(group) == 1:
+        return f"for {group[0]}"
+    return "that could be " + " or ".join(f"{value}'s" for value in sorted(group))
 
 
 def _withheld_symbol_column(spec: DatasetSpec, converter: RowConverter) -> str | None:

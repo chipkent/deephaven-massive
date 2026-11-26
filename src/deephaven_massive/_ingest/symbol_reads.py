@@ -160,6 +160,7 @@ __all__ = [
     "read_rest_by_symbol",
     "read_rest_by_value",
     "read_symbol_list",
+    "read_values",
     "refusal_raised",
     "split_by_symbol",
     "split_failures",
@@ -909,8 +910,9 @@ class ValueRead(NamedTuple):
             /futures/v1/products?product_code=NQ)"`.
         failures: The error of each value that failed, but for those in `unread`.
         unread: The failure of each value whose request got rows and whose every row the
-            library withheld (`ReadTally.failure`), which fails the value alone whatever the
-            policy, so never the call.
+            library withheld (`ReadTally.failure`). It fails the value alone in a `poll()`
+            cycle or a followed read, whatever the policy; a static read fails on it only
+            when no value kept a row, as a static read of symbols is judged whole.
     """
 
     pieces: dict[str, pa.Table]
@@ -1050,7 +1052,7 @@ def _sent_value(spec: DatasetSpec, value: str | None) -> str | None:
             assert_never(spec.index_prefix)
 
 
-def read_rest_by_value(
+def read_values(
     reader: RestReader,
     core: SessionCore,
     spec: DatasetSpec,
@@ -1059,33 +1061,31 @@ def read_rest_by_value(
     values: Sequence[str],
     call: int,
     cancel: Cancel | None,
-    to_table: Callable[[pa.Table], Table],
-) -> dict[str, SymbolOutcome]:
+) -> ValueRead:
     """Read `fetch()` for each value of a value table, as a `poll()` cycle of the values reads them.
 
     The values are read by `RestReader.read_by_value`, as a `poll()` cycle reads them: each
     with the requests `fetch()` makes for that value alone (`RestReader.read_fetch`), the
     values Massive takes as one value read together (`value_groups`), each row given to the
     value it names (`attribute_values`), and one value's failure its own. A parameter its path
-    does not take fails a value with `UnsupportedParameterError`. A value Massive has no data
-    for gets an empty table.
+    does not take fails a value with `UnsupportedParameterError`.
 
     Args:
         reader: The reader of the session's paths.
-        core: The session's core: its schema, its execution context, and whether it closed.
+        core: The session's core, whose execution context says whether the read pauses live
+            tables.
         spec: The dataset, with a fetch path.
         request: The normalized arguments, with a value table and static symbols.
-        values: The values, already checked; a repeated one is read once.
-        call: The verb call's id, for the log lines.
+        values: The values, already checked, each once.
+        call: The verb call's id, for the log line.
         cancel: The read's stop token, or None.
-        to_table: Converts a value's Arrow rows to a static Deephaven table.
 
     Returns:
-        Each value, in the order given, with its outcome.
+        The read: each value's rows, and each failed or unread value's error.
 
-    Errors are those of `RestReader.read_by_value` and `symbol_outcomes`.
+    Errors are those of `RestReader.read_by_value`, which raises a failure of the whole read
+    (`fails_followed_read`).
     """
-    ordered = _ordered(values)
     pauses = holds_update_graph_lock(core.exec_ctx)
 
     def read_one(one: Request, tally: ReadTally) -> tuple[pa.Table, int, tuple[str, ...]]:
@@ -1103,14 +1103,53 @@ def read_rest_by_value(
         return rows, requests, ()
 
     read = reader.read_by_value(
-        spec, request, ordered, read=read_one, fails_read=fails_followed_read
+        spec, request, values, read=read_one, fails_read=fails_followed_read
     )
     logger.debug(
         "call %d %s by value: %d values in %d requests",
         call,
         spec.name,
-        len(ordered),
+        len(values),
         read.requests,
+    )
+    return read
+
+
+def read_rest_by_value(
+    reader: RestReader,
+    core: SessionCore,
+    spec: DatasetSpec,
+    *,
+    request: Request,
+    values: Sequence[str],
+    call: int,
+    cancel: Cancel | None,
+    to_table: Callable[[pa.Table], Table],
+) -> dict[str, SymbolOutcome]:
+    """Read `fetch()` for each value of a value table: each one's rows, or its failure.
+
+    The values are read by `read_values`. A value whose every row was withheld fails alone,
+    as any other value's failure does, and a value Massive has no data for gets an empty
+    table.
+
+    Args:
+        reader: The reader of the session's paths.
+        core: The session's core: its schema, its execution context, and whether it closed.
+        spec: The dataset, with a fetch path.
+        request: The normalized arguments, with a value table and static symbols.
+        values: The values, already checked; a repeated one is read once.
+        call: The verb call's id, for the log lines.
+        cancel: The read's stop token, or None.
+        to_table: Converts a value's Arrow rows to a static Deephaven table.
+
+    Returns:
+        Each value, in the order given, with its outcome.
+
+    Errors are those of `read_values` and `symbol_outcomes`.
+    """
+    ordered = _ordered(values)
+    read = read_values(
+        reader, core, spec, request=request, values=ordered, call=call, cancel=cancel
     )
     empty = core.dataset_schema(spec).arrow_schema().empty_table()
     failures = {**read.failures, **read.unread}

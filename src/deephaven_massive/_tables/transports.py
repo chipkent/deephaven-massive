@@ -391,7 +391,8 @@ class RestTransport(Protocol):
 
         Each value is read as `fetch_by_value` reads it. As a static read of symbols in code,
         a value that fails alone is left out of the table and listed in `m.problems()`, and
-        the others' rows are returned.
+        the others' rows are returned; a value whose every row was withheld fails the call
+        only when no value kept a row.
 
         Args:
             spec: The dataset, with a fetch path.
@@ -407,7 +408,8 @@ class RestTransport(Protocol):
             MassiveError: When every value failed (the first value's failure), for a failure
                 of the whole read (a rejected key, a refused feed, a closed session), and for
                 a value's failure whose cause is set to `RAISE`, once every failed value is
-                listed.
+                listed. `RowDataError` when no value kept a row and the library withheld
+                some.
         """
         ...
 
