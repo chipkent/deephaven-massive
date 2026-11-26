@@ -147,8 +147,8 @@ its own. By default, the other symbols keep their rows, and `m.problems()` lists
 with its cause. The symbols can be a list or a watchlist, a live table of symbols.
 
 Symbols that share one request or one flat file fail together when it fails with an error such
-as HTTP 503. Snapshots read several symbols in one request, and a `history()` of many symbols
-can read them all from the same flat files. When Massive refuses a shared request, see
+as HTTP 503. Snapshots read several symbols in one request. A `history()` of many symbols can
+read them all from the same flat files. When Massive refuses a shared request, see
 [`on_error.refused_symbols`](#setting-details).
 
 A symbol fails when:
@@ -161,9 +161,12 @@ A symbol fails when:
 
 By default, a symbol Massive has no data for doesn't fail. It gets no rows.
 
-A failed symbol isn't read again. To read it again, delete its watchlist row and add it back.
-For symbols you pass in code, call `fetch()`, `history()`, or `poll()` again. For a stream of
-symbols in code, release each of its tables with `m.release()`, then call the method again.
+A failed symbol isn't read again. To read it again:
+
+- In a watchlist, delete its row and add it back.
+- For symbols in code, call `fetch()`, `history()`, or `poll()` again.
+- For a stream of symbols in code, release each of its tables with `m.release()`, then call
+  the method again.
 
 When a symbol of a `poll()` fails, a `dm.PollMode.REPLACE` table drops its rows. A
 `dm.PollMode.APPEND` or `dm.PollMode.UPSERT` table keeps them.
@@ -181,8 +184,10 @@ Whatever the setting, each of these problems fails the whole table of a `fetch()
 - Massive refuses a call for `dm.ALL`.
 - Every symbol the table started with fails. A table whose watchlist was empty when you called
   the method never fails this way.
-- A `fetch()` or `history()` of `dm.ALL`, or of symbols in code, gets rows from Massive, and
-  the library can't read any of them.
+- A `fetch()`, `history()`, or `poll()` of `dm.ALL` gets rows from Massive, and the library
+  can't read any of them.
+- A `fetch()` or `history()` of symbols in code gets rows from Massive, and the library can't
+  read any of them.
 - A stream's or `poll()` table's outage outlasts [`max_outage`](#setting-details).
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
@@ -350,9 +355,9 @@ table must fail at the first one. A live table fails once its outage lasts
 - A `poll()` table's outage is the time its polls keep failing or waiting for
   Massive's answer.
 
-In a `poll()`, or a `fetch()` or `history()` of a watchlist, a symbol that keeps
-failing with a temporary error isn't read again after `max_outage`. A rate limit
-is one such error. `m.problems()` lists the symbol.
+A symbol that keeps failing with a temporary error, such as a rate limit, stops
+being read after `max_outage`, and `m.problems()` lists it. This applies to a
+`poll()` and to a `fetch()` or `history()` of a watchlist.
 
 A failed table stays failed, so call the method again for a new one. See
 [Live table messages](troubleshooting.md#live-table-messages).
@@ -438,7 +443,7 @@ Massive's answer.
 
 Massive can refuse a request for several symbols at once, such as a snapshot of a
 list. A symbol your plan serves can then be listed as refused too. To find which
-symbols Massive refuses:
+symbols of a `fetch()`, `history()`, or `poll()` Massive refuses:
 
 1. Read each listed symbol by itself, such as
    `m.stocks.snapshots("AAPL").fetch(wait=True)`. The call raises

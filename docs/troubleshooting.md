@@ -246,7 +246,7 @@ has already retried, so wait before you call again.
 
 In a `fetch()`, `history()`, `poll()`, or stream of several symbols, one failed symbol raises
 nothing by default. [Symbols that fail](configuration.md#failed-symbols) says what happens to
-it. [Problems that fail the whole table](configuration.md#read-failures) lists the exceptions.
+it. [Problems that fail the whole table](configuration.md#read-failures) lists the problems that fail the whole table instead.
 
 <a id="diagnostics"></a>
 

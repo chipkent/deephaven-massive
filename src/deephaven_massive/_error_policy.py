@@ -127,7 +127,7 @@ class ErrorPolicy:
 
             Massive can refuse a request for several symbols at once, such as a snapshot of a
             list. A symbol your plan serves can then be listed as refused too. To find which
-            symbols Massive refuses:
+            symbols of a `fetch()`, `history()`, or `poll()` Massive refuses:
 
             1. Read each listed symbol by itself, such as
                `m.stocks.snapshots("AAPL").fetch(wait=True)`. The call raises
