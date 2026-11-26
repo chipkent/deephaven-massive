@@ -443,17 +443,6 @@ run without every symbol you named. Under `log` and `ignore`,
 the symbol gets no rows, the others are read, and `m.problems()` lists it with
 Massive's answer.
 
-Massive can refuse a request for several symbols at once, such as a snapshot of a
-list. A symbol your plan serves can then be listed as refused too. To find which
-symbols of a `fetch()`, `history()`, or `poll()` Massive refuses:
-
-1. Read each listed symbol by itself, such as
-   `m.stocks.snapshots("AAPL").fetch(wait=True)`. The call raises
-   `dm.EntitlementError` when Massive refuses that symbol.
-2. Remove the symbols whose call raised.
-3. Call the method again. For a watchlist, delete the rows of the other listed
-   symbols and add them back.
-
 #### on_error.unrequested_symbols
 
 Set `raise` to fail the call or table when Massive sends a row of a

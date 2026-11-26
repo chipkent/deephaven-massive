@@ -6685,10 +6685,10 @@ def _indices_target(*tickers: str) -> str:
 _REFUSED = Reply({"status": "NOT_AUTHORIZED", "message": "Not entitled."}, status=403)
 
 
-def _read_indices(session: dm.MassiveSession) -> ReadEach:
+def _read_indices(session: dm.MassiveSession, indices: list[str] = _INDICES) -> ReadEach:
     reader = _reader(session)
-    request = query(session, INDEX_SNAPSHOTS, symbols=_INDICES)._request
-    units, failed = fetch_units(reader, INDEX_SNAPSHOTS, request, symbols=_INDICES, cancel=None)
+    request = query(session, INDEX_SNAPSHOTS, symbols=indices)._request
+    units, failed = fetch_units(reader, INDEX_SNAPSHOTS, request, symbols=indices, cancel=None)
     assert not failed
     assert len(units) == 1
     return reader.read_each(
@@ -6750,6 +6750,35 @@ def test_a_list_request_refused_in_every_part_marks_every_symbol_refused(
     results = _by_symbol(read)
     assert sorted(results) == sorted(_INDICES)
     assert all(isinstance(result, dm.EntitlementError) for result in results.values())
+
+
+def test_two_refused_probes_send_every_other_symbol_alone_and_refuse_only_the_refused_ones(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    indices = ["I:SPX", "I:NDX", "I:DJI", "I:RUT", "I:VIX", "I:COMP"]
+    refused = {"I:COMP", "I:RUT", "I:NDX"}
+    fake_rest.reply(INDEX_SNAPSHOT_PATH, _REFUSED)
+    for ticker in sorted(set(indices) - refused):
+        fake_rest.reply(_indices_target(ticker), Reply(envelope([{"ticker": ticker}])))
+    results = _by_symbol(_read_indices(session, indices))
+    # The halves are COMP, DJI, NDX and RUT, SPX, VIX; their probes COMP and RUT are refused,
+    # so each other symbol is sent alone and judged by its own answer. A round's requests go
+    # together, so their order is not kept.
+    assert sorted(r.target for r in fake_rest.requests) == sorted(
+        [
+            _indices_target(*indices),
+            _indices_target("I:COMP", "I:DJI", "I:NDX"),
+            _indices_target("I:RUT", "I:SPX", "I:VIX"),
+            _indices_target("I:COMP"),
+            _indices_target("I:RUT"),
+            _indices_target("I:DJI"),
+            _indices_target("I:NDX"),
+            _indices_target("I:SPX"),
+            _indices_target("I:VIX"),
+        ]
+    )
+    assert {s for s, r in results.items() if isinstance(r, dm.EntitlementError)} == refused
+    assert all(isinstance(results[s], RequestRows) for s in set(indices) - refused)
 
 
 def test_a_5xx_inside_the_search_is_its_symbols_own_failure_and_the_refused_half_is_found(

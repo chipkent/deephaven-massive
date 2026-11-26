@@ -287,11 +287,7 @@ def search_refusals(
 
     Each request Massive refused whole without naming a symbol is searched
     (`_SearchedRequest`): split by asset class, then into halves, the parts of every search
-    sent together, one round per level. Two refused halves of two groups or more are probed,
-    one group of each sent alone, and two refused probes end the search with both halves
-    refused (`refusal_search`), so a refusal of every symbol of a class costs four more
-    requests, and finding one refused symbol among `n` about `2 * ceil(log2(n))` plus two
-    per probe.
+    sent together, one round per level (`refusal_search` gives the search and its cost).
 
     Args:
         spec: The dataset.

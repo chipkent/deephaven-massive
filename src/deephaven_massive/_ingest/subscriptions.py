@@ -237,8 +237,8 @@ class Subscriptions:
     returns its topics to the ordinary steps, which re-send them until Massive confirms. A search
     refuses the topics it found at its end, so they are never sent again nor counted `NO_ACK`.
     While it runs, its parts are the only subscriptions sent: other topics wait for its end, and
-    unsubscriptions still go. Each part waits at most `subscription_confirmation_timeout`, and a
-    search of `n` topics sends at most `2 * ceil(log2(n))` parts to find one refused topic.
+    unsubscriptions still go. Each part waits at most `subscription_confirmation_timeout`
+    (`refusal_search` gives the search and its cost).
 
     Created by `Connection`, which passes the client, its loop's `call_later`, and its
     callbacks: `on_refused(topics, message)` for topics the server refused, and `on_change()`

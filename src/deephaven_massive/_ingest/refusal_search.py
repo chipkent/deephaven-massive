@@ -12,21 +12,24 @@ or failed for a reason that says nothing about entitlement:
    is the items one request can't split apart (two symbols spelled alike on the wire).
 2. An answered part is final: its items are served.
 3. When both halves of a part are refused whole and each holds two groups or more, one group
-   of each is sent alone (a probe). Both probes refused end the search there: every item of
-   both halves is refused, since Massive refusing all four is the plan lacking the data, and
-   halving further would cost two requests per level to learn the same. Otherwise each half
-   goes on without its probe: the rest of a half whose probe was answered is still refused,
-   so it splits again, and the rest of one whose probe was refused or failed is sent again.
-   A refused half of one group is refused, and its sibling splits on its own.
+   of each is sent alone (a probe). Both probes refused refuse the two probed groups and send
+   every other group of both halves alone: where refusals are that dense, halving further
+   would cost more than a request per group. Otherwise each half goes on without its probe:
+   the rest of a half whose probe was answered is still refused, so it splits again, and the
+   rest of one whose probe was refused or failed is sent again. A refused half of one group
+   is refused, and its sibling splits on its own. So an item is refused only by a refusal of
+   a part whose other groups Massive served, or by a refusal naming it, never because of a
+   neighbor Massive refused too.
 4. A part that fails for another reason (a 5xx, a timeout, no answer) keeps that failure for
    its items and lets a refused sibling split.
 5. A refusal that names the items it refuses (`refused_by_name`) refuses exactly their groups,
    and the rest of the part is sent again.
 
-Finding one refused item among `n` costs about `2 * ceil(log2(n))` requests, plus two for each
-probe, and a refusal of every item of a class four. The search is pure: it sends nothing and
-keeps no clock. A REST read sends every pending part of a level at once; a WebSocket
-connection sends one part at a time.
+Among `n` groups of one class, finding one refused group costs at most
+`2 * ceil(log2(n))` requests, a refusal of every group `n + 2` when `n` is four or more, and no
+search more than `2 * n - 2`. The search is pure: it sends nothing and keeps no clock. A REST
+read sends every pending part of a level at once; a WebSocket connection sends one part at a
+time.
 """
 
 from __future__ import annotations
@@ -275,10 +278,12 @@ class RefusalSearch(Generic[E]):
         halves = ((other, theirs, other.rest), (probe, mine, probe.rest))
         refused = {_Verdict.REFUSED, _Verdict.NAMED}
         if mine in refused and theirs in refused:
-            # All four refused: the plan lacks the data, so every item of both halves is.
+            # All four refused: each other group is sent alone, so a refusal is surely its own.
             for p, verdict, rest in halves:
-                own = p.items if verdict is _Verdict.REFUSED else ()  # a named one's are refused
-                self._refuse(own + tuple(item for group in rest for item in group))
+                if verdict is _Verdict.REFUSED:
+                    self._refuse(p.items)  # a named probe's items are refused when taken
+                for group in rest:
+                    self._send((group,))
             return
         for p, verdict, rest in halves:
             match verdict:
