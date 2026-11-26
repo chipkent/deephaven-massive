@@ -134,6 +134,7 @@ class PollSymbols:
         "_runs",
         "_started",
         "_symbol_spans",
+        "_taken",
         "_watch",
     )
 
@@ -168,6 +169,8 @@ class PollSymbols:
         self._limit = limit
         self._runs: dict[str, SymbolRun] = {}
         self._started = False
+        # The dropped names `take_dropped` drained for the cycle `due` is about to plan.
+        self._taken: frozenset[str] = frozenset()
         # Each first-cycle symbol with its final failure, or None while it has none; None once
         # the check is settled, or when the first cycle had no symbol.
         self._call_time: dict[str, MassiveError | None] | None = None
@@ -178,12 +181,23 @@ class PollSymbols:
             refused_symbols=refused_symbols,
         )
 
+    def take_dropped(self) -> None:
+        """Drain the names the table dropped, for the next `due`; call it before listing.
+
+        A name dropped after this call, such as one deleted and added back while the cycle
+        lists the table, stays for the following cycle, which lists it again and resets its run
+        against that listing.
+        """
+        if self._dropped is not None:
+            self._taken |= self._dropped.take()
+
     def due(self, names: tuple[str, ...], *, now: float) -> tuple[str, ...]:
         """Take the cycle's symbols and return those it reads.
 
-        A symbol no longer listed, or dropped from the table since the last cycle, is
-        forgotten: its span ends at the next `settle`, and a symbol listed again starts a new
-        run. A symbol is read unless it is `FAILED`, or `RETRYING` with its retry not yet due.
+        A symbol no longer listed, or dropped from the table (`take_dropped`) since the last
+        cycle, is forgotten: its span ends at the next `settle`, and a symbol listed again
+        starts a new run. A symbol is read unless it is `FAILED`, or `RETRYING` with its retry
+        not yet due.
 
         Args:
             names: The symbols (or values) the table lists now, sorted.
@@ -193,7 +207,7 @@ class PollSymbols:
             The symbols to read, in the order given.
         """
         listed = set(names)
-        dropped = frozenset() if self._dropped is None else self._dropped.take()
+        dropped, self._taken = self._taken, frozenset()
         for gone in [name for name in self._runs if name not in listed or name in dropped]:
             logger.debug("%s poll(): %s left the symbol list; its run ends", self._dataset, gone)
             del self._runs[gone]

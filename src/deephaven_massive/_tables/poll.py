@@ -1168,6 +1168,8 @@ class Poller:
         Returns:
             False if the poller was stopped while it read, so nothing was published.
         """
+        # Drained before the table is listed: a deletion landing after it is for the next cycle.
+        self._names.take_dropped()
         symbols, skipped_symbols = self._symbols()
         values, skipped_values = self._values()
         # The rows hold these values whether or not the read succeeds, so they are listed now.

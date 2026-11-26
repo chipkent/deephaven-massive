@@ -126,6 +126,20 @@ def test_a_symbol_dropped_and_added_back_between_two_cycles_is_read_afresh() -> 
     symbols._dropped = dropped
     dropped.on_change(frozenset(), frozenset({"MSFT"}))
     dropped.on_change(frozenset({"MSFT"}), frozenset())
+    symbols.take_dropped()
+    assert symbols.due(("AAPL", "MSFT"), now=2.0) == ("AAPL", "MSFT")
+
+
+def test_a_symbol_dropped_after_the_names_were_taken_is_reset_by_the_next_cycle() -> None:
+    dropped = DroppedNames()
+    symbols = names()
+    symbols._dropped = dropped
+    symbols.due(("AAPL", "MSFT"), now=0.0)
+    symbols.settle(("AAPL", "MSFT"), {"MSFT": refused()}, now=0.0, at=AT, since=AT)
+    symbols.take_dropped()
+    dropped.on_change(frozenset(), frozenset({"MSFT"}))  # after the take, before the listing
+    assert symbols.due(("AAPL", "MSFT"), now=1.0) == ("AAPL",)
+    symbols.take_dropped()
     assert symbols.due(("AAPL", "MSFT"), now=2.0) == ("AAPL", "MSFT")
 
 

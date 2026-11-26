@@ -50,6 +50,7 @@ from deephaven_massive._tables.liveness import (
     release_scope,
 )
 from deephaven_massive._tables.poll import LIVE_COLUMN, Pollers, open_poll
+from deephaven_massive._tables.poll_symbols import PollSymbols
 from deephaven_massive._tables.problem_events import (
     Problem,
     ProblemAction,
@@ -3959,6 +3960,7 @@ def test_a_refused_symbol_racing_its_watchlist_edits_leaves_the_table_running(
     table = q.poll(60, mode=PollMode.REPLACE)
     until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
     done = threading.Event()
+    edited = threading.Event()
     msft = new_table([string_col("Symbol", ["MSFT"])])
 
     def edit() -> None:
@@ -3966,16 +3968,23 @@ def test_a_refused_symbol_racing_its_watchlist_edits_leaves_the_table_running(
             while not done.is_set():
                 watch.delete(msft)
                 watch.add(msft)
+                edited.set()
+
+    def msft_requests() -> int:
+        return sum("/MSFT" in received.target for received in fake_rest.requests)
 
     editor = threading.Thread(target=edit)
     editor.start()
     try:
+        assert edited.wait(TIMEOUT)  # the cycles below run after the first delete and re-add
+        before = msft_requests()
         for _ in range(5):
             next_cycle(clock)
     finally:
         done.set()
         editor.join(TIMEOUT)
     next_cycle(clock)
+    assert msft_requests() > before  # a re-added symbol is read again, and refused again
     (row,) = streams_of(routed_session, dh_to_pylist)
     assert (row["State"], row["Error"]) == ("RUNNING", None)
     assert symbols_of(table, dh_to_pylist) == ["AAPL"]
@@ -3983,6 +3992,58 @@ def test_a_refused_symbol_racing_its_watchlist_edits_leaves_the_table_running(
     assert {row["Symbol"] for row in refused} == {"MSFT"}
     assert [row["EndedAt"] for row in refused][-1] is None  # the latest span holds
     assert problems_of(routed_session, dh_to_pylist, FAILED) == []
+
+
+def test_a_refused_symbol_deleted_and_added_back_while_a_cycle_plans_is_read_next_cycle(
+    *,
+    routed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # The edit lands after the cycle listed the table and before it plans its reads. That cycle
+    # cannot see the edit, so the next cycle must read MSFT again.
+    fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
+    fake_rest.reply(
+        "/v1/indicators/sma/MSFT", Reply({"status": "NOT_AUTHORIZED", "message": "no"}, status=403)
+    )
+    watch, _ = symbol_watchlist(dh_input_table, "AAPL", "MSFT")
+    msft = new_table([string_col("Symbol", ["MSFT"])])
+    plans: list[tuple[str, ...]] = []
+    real_due = PollSymbols.due
+
+    def due_after_an_edit(
+        self: PollSymbols, names: tuple[str, ...], *, now: float
+    ) -> tuple[str, ...]:
+        plans.append(names)
+        if len(plans) == 2:
+            dropped = self._dropped
+            assert dropped is not None
+
+            def reported() -> bool:
+                with dropped._lock:
+                    return "MSFT" in dropped._dropped
+
+            watch.delete(msft)
+            watch.add(msft)
+            until(reported)  # the watch reports the deletion on an update-graph thread
+        return real_due(self, names, now=now)
+
+    monkeypatch.setattr(PollSymbols, "due", due_after_an_edit)
+    q = build_query(routed_session._core, SMA, query_type=FetchQuery, symbols=watch)
+    table = q.poll(60, mode=PollMode.REPLACE)
+    until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
+
+    def msft_requests() -> int:
+        return sum("/MSFT" in received.target for received in fake_rest.requests)
+
+    assert msft_requests() == 1
+    next_cycle(clock)  # the edit lands in this cycle, after it listed MSFT: not read
+    assert msft_requests() == 1
+    next_cycle(clock)  # the edit applies now, so MSFT starts a new run and is read again
+    assert msft_requests() == 2
 
 
 _DIVIDEND = {"ticker": "AAPL", "id": "a", "frequency": 4, "cash_amount": 1.0}
@@ -4012,6 +4073,28 @@ _RAISED_CAUSES: dict[str, tuple[Any, str, list[str], Reply]] = {
 }
 
 
+def _raised_cause_poll(
+    cause: str,
+    *,
+    policy: dm.ErrorPolicy | None,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FakeClock,
+) -> tuple[dm.MassiveSession, Table]:
+    # A session (the default policy when None) polling the cause's symbols against its reply.
+    spec, path, symbols, reply = _RAISED_CAUSES[cause]
+    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url)
+    if policy is not None:
+        config = dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, on_error=policy)
+    m = dm.MassiveSession(config)
+    fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
+    fake_rest.reply(path, reply)
+    q = build_query(m._core, spec, query_type=FetchQuery, symbols=symbols)
+    return m, q.poll(60, mode=PollMode.REPLACE)
+
+
 @pytest.mark.parametrize("cause", list(_RAISED_CAUSES))
 def test_a_symbols_problem_under_raise_fails_the_poll(
     *,
@@ -4022,21 +4105,39 @@ def test_a_symbols_problem_under_raise_fails_the_poll(
     dh_to_pylist: ToPylist,
 ) -> None:
     # One symbol's problem fails the whole table when its cause is set to RAISE, as asked.
-    spec, path, symbols, reply = _RAISED_CAUSES[cause]
-    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA)))
-    monkeypatch.setattr(poll, "CLOCK", clock)
     policy = dm.ErrorPolicy(**{cause: dm.OnError.RAISE})
-    m = dm.MassiveSession(
-        dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, on_error=policy)
+    m, table = _raised_cause_poll(
+        cause, policy=policy, fake_rest=fake_rest, monkeypatch=monkeypatch, clock=clock
     )
     try:
-        fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
-        fake_rest.reply(path, reply)
-        q = build_query(m._core, spec, query_type=FetchQuery, symbols=symbols)
-        table = q.poll(60, mode=PollMode.REPLACE)
         until(lambda: bool(table.j_table.isFailed()))
         until(lambda: streams_of(m, dh_to_pylist)[0]["State"] == "FAILED")
         (row,) = streams_of(m, dh_to_pylist)
-        assert row["Error"]
+        # The failure names the setting of the selected cause, as its fix.
+        assert f"{cause}=dm.OnError.LOG" in row["Error"]
+        assert problems_of(m, dh_to_pylist, ProblemCause(cause))
+    finally:
+        m.close()
+
+
+@pytest.mark.parametrize("cause", list(_RAISED_CAUSES))
+def test_the_same_reply_under_the_default_policy_keeps_the_poll_running(
+    *,
+    cause: str,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # The control of the test above: only the RAISE setting fails the table.
+    m, table = _raised_cause_poll(
+        cause, policy=None, fake_rest=fake_rest, monkeypatch=monkeypatch, clock=clock
+    )
+    try:
+        until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
+        (row,) = streams_of(m, dh_to_pylist)
+        assert (row["State"], row["Error"]) == ("RUNNING", None)
+        assert problems_of(m, dh_to_pylist, ProblemCause(cause))
+        assert problems_of(m, dh_to_pylist, ProblemCause.STREAM_FAILED) == []
     finally:
         m.close()
