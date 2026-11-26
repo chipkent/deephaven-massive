@@ -206,8 +206,8 @@ These protect the owner's repository, money, and secrets.
     and how loudly the log reports the problem, never whether a row is published or whether
     `m.problems()` lists it. A refusal of one symbol among those a call names is that symbol's
     problem (`refused_symbols`, `LOG` by default; decision 137): the others are served,
-    `m.problems()` lists it with Massive's answer, and a symbol a watchlist adds later never
-    fails a table. A refusal of every symbol a call names, or of the feed itself (a dataset or
+    `m.problems()` lists it with Massive's answer, and, unless the setting is `RAISE`
+    (decision 139), a symbol a watchlist adds later never fails a table. A refusal of every symbol a call names, or of the feed itself (a dataset or
     a delayed subscription the plan lacks), fails the table, since Massive serves nothing the
     call asked for. The one exception is a futures exchange named in `venues`
     (`refused_venues`, `RAISE` by default): the owner ruled (decision 107) that naming an
