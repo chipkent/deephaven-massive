@@ -243,3 +243,15 @@ def test_an_answer_to_a_part_that_is_not_pending_is_a_defect() -> None:
         search.answered(("A", "B"))
     with pytest.raises(BrokenGuaranteeError, match=r"^\['A', 'B'\] is no pending part\. "):
         search.refused_by_name(("A", "B"), {"A"})
+
+
+def test_a_probe_verdict_no_case_names_is_a_defect() -> None:
+    search = search_of(["A", "B", "C", "D"])
+    search.refused(("A", "B"))
+    search.refused(("C", "D"))
+    search.answered(("A",))
+    first_probe = search._pending[("C",)].sibling
+    assert first_probe is not None
+    first_probe.verdict = "SOMEHOW"  # type: ignore[assignment]  # the point: an unplanned verdict
+    with pytest.raises(AssertionError):
+        search.answered(("C",))

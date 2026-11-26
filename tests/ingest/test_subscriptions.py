@@ -745,16 +745,21 @@ def test_a_marked_step_with_acknowledgements_searches_only_its_unanswered_topics
     assert loop.subs.acknowledged == {"T.A", "T.C"}
 
 
-def test_two_refused_halves_refuse_the_whole_step_after_two_sub_steps() -> None:
+def test_two_refused_halves_and_their_two_refused_probes_refuse_the_whole_step() -> None:
     loop = refused_step("T.A", "T.B", "T.C", "T.D")
     loop.timers.fire()
     loop.subs.status(refusal())
     loop.timers.fire()  # the half is refused whole: it waits for its sibling
     loop.subs.status(refusal())
-    loop.timers.fire()
+    loop.timers.fire()  # both halves refused whole: one topic of each is sent alone
+    loop.subs.status(refusal())  # a part of one topic awaiting an answer: judged at once
+    assert loop.refused == []  # the other probe's answer decides
+    loop.subs.status(refusal())
     assert loop.sender.take() == [
         ("subscribe", 1, ("T.A", "T.B")),
         ("subscribe", 1, ("T.C", "T.D")),
+        ("subscribe", 1, ("T.A",)),
+        ("subscribe", 1, ("T.C",)),
     ]
     assert loop.refused == [(("T.A", "T.B", "T.C", "T.D"), "not authorized")]
     assert loop.subs.counts() == (0, 0, 0, 0)
@@ -883,7 +888,9 @@ def test_a_topic_removed_from_a_refused_part_is_never_refused() -> None:
     loop.subs.remove(["T.B"])  # nobody wants it any more: no verdict on it reaches a stream
     loop.timers.fire()
     loop.subs.status(refusal())
-    loop.timers.fire()  # both halves refused whole
+    loop.timers.fire()  # both halves refused whole: T.A and T.C are sent alone
+    loop.subs.status(refusal())
+    loop.subs.status(refusal())  # both probes refused: every topic of both halves is
     assert loop.refused == [(("T.A", "T.C", "T.D"), "not authorized")]
 
 
