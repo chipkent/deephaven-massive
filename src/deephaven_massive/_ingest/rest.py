@@ -198,7 +198,6 @@ from deephaven_massive._ingest.rest_requests import (
     CryptoSplit,
     axis_query,
     capped_call,
-    caps_each_symbol,
     fetch_paths,
     history_calls,
     plan_calls,
@@ -219,10 +218,13 @@ from deephaven_massive._ingest.symbol_reads import (
     RequestRows,
     RestUnit,
     asked_column,
+    fails_followed_read,
     fetch_units,
     history_units,
     read_rest_by_symbol,
     read_rest_by_value,
+    read_symbol_list,
+    split_failures,
 )
 from deephaven_massive._log_limits import bounded_list, counted, log_once, prose_list
 from deephaven_massive._massive import (
@@ -1150,7 +1152,6 @@ class RestReader:
         cancel: Cancel | None = None,
         patience: Patience,
         tally: ReadTally,
-        on_missing: Callable[[Sequence[_Missing]], None] | None = None,
     ) -> _PathRows:
         """Make the calls and return their rows as one Arrow table of the dataset's schema.
 
@@ -1193,10 +1194,6 @@ class RestReader:
             tally: The whole read's count of its rows and of those withheld, which this read
                 adds each call's to, every row of a static read being the read's, and the
                 caller checks after the read's last path (`ReadTally.check`).
-            on_missing: Given the symbols of the read Massive has no data for, each with why
-                (`_Outcome.missing`), in call order, when there are any; the caller then
-                applies `ErrorPolicy.unavailable_symbols` (a `poll()` cycle). None to apply
-                that setting here (`_report_missing`).
 
         Returns:
             The rows, in call order and then page order, the number of requests made, and how
@@ -1205,9 +1202,9 @@ class RestReader:
         Errors: the public error of each `WireError` (`public_error`), the `RowDataError` of a
         withheld row's `RAISE` cause (`_page_rows`), and the `MassiveError` of `_call` for a
         page on another adjustment basis, its `CutShortError` for a symbol whose data was cut
-        short, the `EntitlementError` of `_check_recency` for delayed data, and, with no
-        `on_missing`, the `UnavailableSymbolError` of `_report_missing` for a symbol Massive has
-        no data for. A closed session raises `SessionClosedError("This session is closed. ...")`.
+        short, the `EntitlementError` of `_check_recency` for delayed data, and the
+        `UnavailableSymbolError` of `_report_missing` for a symbol Massive has no data for. A
+        closed session raises `SessionClosedError("This session is closed. ...")`.
         """
         converter = RowConverter.build(self.catalog, spec, rest_path)
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
@@ -1241,9 +1238,7 @@ class RestReader:
                 outcome.rows + outcome.withheld.total, outcome.withheld, source=outcome.source
             )
         missing = [o.missing for o in outcomes if o.missing is not None]
-        if missing and on_missing is not None:
-            on_missing(missing)
-        elif missing:
+        if missing:
             self._report_missing(spec, missing)
         batches = [
             batch.drop_columns([SYMBOL_SENT]) for outcome in outcomes for batch in outcome.batches
@@ -1516,8 +1511,7 @@ class RestReader:
         Args:
             spec: The dataset.
             missing: The symbols Massive answered with HTTP 404 in the calls that completed,
-                in call order: those of one path's calls (`_fan_out`), of a `poll()`
-                cycle's earlier paths (`_read_one_cycle`), or of a read by symbol.
+                in call order: those of one path's calls (`_fan_out`), or of a read by symbol.
         """
         if not missing:
             return
@@ -2581,24 +2575,25 @@ class RestReader:
         cancel: Cancel,
         pace: PaceCheck,
     ) -> poll.CycleRows:
-        """Run one `poll()` cycle, once for each value of a value table when there is one.
+        """Run one `poll()` cycle: its symbols, or its values, each read on its own.
 
-        Without a value table the cycle is one read (`_read_one_cycle`). With one, each of the
-        cycle's values is read as if passed alone (`Request.for_value`), one after another,
-        and the reads are joined: their rows in value order, their requests summed, and what
-        each left out. They share one patience, taken once for the cycle, so the cycle's pauses
-        together stay within it. The cycle is one read: its rows count in one tally, checked once
-        after its last value (`ReadTally.check`), so a value whose rows are all withheld,
-        beside others read whole, adds no rows. A value Massive answers with HTTP 404 follows
-        `ErrorPolicy.unavailable_symbols`, as a symbol does: under `LOG` and `IGNORE` it is
-        left out of the cycle and named in its `left_out`.
+        A cycle of symbols in a list (`_read_cycle_by_symbol`) or of the values of a value
+        table (`_read_cycle_by_value`) reads each symbol or value on its own, so one's failure
+        is its own: its rows are left out, and it is returned in `CycleRows.failures` for the
+        poller to retry or list, while the others' rows are kept. A failure of the whole read
+        (`symbol_reads.fails_followed_read`) raises, and a failure that fails the table
+        (`symbol_reads.fails_call`) is returned as `CycleRows.fatal`, except a value cycle's refusal
+        of the feed (`FeedRefusalError`), which raises. A cycle of `ALL`, or of a
+        dataset without instruments, is one read (`_read_one_cycle`), whose failure is the
+        cycle's.
 
         Args:
             spec: The dataset.
             request: The normalized arguments.
-            symbols: The cycle's static symbols (a reactive table already read).
-            values: The values the value table holds now (already checked), or None when the
-                request has no value table.
+            symbols: The cycle's symbols: those due this cycle for a list (a reactive table
+                already read), else `ALL` or None.
+            values: The values due this cycle, of those the value table holds now (already
+                checked), or None when the request has no value table.
             record: Given each page's drift, as the cycle's progress.
             on_recency: Records each page's recency evidence, for the table's `Recency`.
             executor: The poller's fan-out pool.
@@ -2609,52 +2604,214 @@ class RestReader:
             The cycle's read (`poll.CycleRows`).
 
         Raises:
-            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a
-                value Massive answered with HTTP 404.
-            RowDataError: If the library could read none of the rows of the cycle's symbols
-                whole, across all its values, paths, and pages, whatever its policy.
-            MassiveError: Any other failure of a read, as `_read_one_cycle` raises it.
+            RowDataError: If the library could read none of the rows of a cycle of `ALL` whole,
+                whatever its policy.
+            MassiveError: A failure of the whole read, a value cycle's refusal of the feed,
+                any failure once the poller is stopped, or a failure of a cycle of `ALL`, as
+                `_read_one_cycle` raises it.
         """
-        tally = ReadTally()
-        patience = self.patience()  # once for the cycle, on this thread, before any value's read
+        patience = self.patience()  # once for the cycle, on this thread, before any request
         read = functools.partial(
             self._read_one_cycle,
             spec,
-            symbols=symbols,
             record=record,
             on_recency=on_recency,
             executor=executor,
             cancel=cancel,
             pace=pace,
-            tally=tally,
             patience=patience,
         )
-        if values is None:
-            rows = read(request)
-            tally.check(spec.name)
-            return rows
-        reads: list[poll.CycleRows] = []
+        if values is not None:
+            return self._read_cycle_by_value(
+                spec,
+                request,
+                values,
+                read=functools.partial(read, symbols=symbols),
+                cancel=cancel,
+                patience=patience,
+            )
+        if isinstance(symbols, tuple):
+            return self._read_cycle_by_symbol(
+                spec,
+                request,
+                symbols,
+                record=record,
+                on_recency=on_recency,
+                executor=executor,
+                cancel=cancel,
+                pace=pace,
+                patience=patience,
+            )
+        tally = ReadTally()
+        rows = read(request, symbols=symbols, tally=tally)
+        tally.check(spec.name)
+        return rows
+
+    def _read_cycle_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        symbols: tuple[str, ...],
+        *,
+        record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
+        executor: ThreadPoolExecutor,
+        cancel: Cancel,
+        pace: PaceCheck,
+        patience: Patience,
+    ) -> poll.CycleRows:
+        """Read a cycle of symbols in a list, each symbol's failure its own.
+
+        The requests are those `fetch()` makes for the symbols (`symbol_reads.fetch_units`),
+        read as a static `fetch()` of them reads them (`symbol_reads.read_symbol_list`). A
+        symbol that got no row and whose rows the library withheld every one of fails on its
+        own (`ReadTally.symbol_failure`), whatever its policy. A symbol Massive answered with
+        HTTP 404 has no rows, and the reader lists it (`read_each`).
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments.
+            symbols: The symbols due this cycle, sorted.
+            record: Given each page's drift, as the cycle's progress.
+            on_recency: Records each page's recency evidence, for the table's `Recency`.
+            executor: The poller's fan-out pool.
+            cancel: The poller's stop token, which ends the cycle's waits.
+            pace: The table's pace check.
+            patience: The cycle's patience.
+
+        Returns:
+            The cycle's read (`poll.CycleRows`), with each row's symbol and each failure.
+
+        Errors are those `symbol_reads.read_symbol_list` raises for a failure of the whole read.
+        """
+        tally = ReadTally()
+        units, failed = fetch_units(self, spec, request, symbols=symbols, cancel=cancel)
+        sent = [(rest_path, call) for rest_path, call in units if call.unsplit is None]
+        pace.check(
+            self.state.client.governor,
+            Counter(call_bucket(spec, rest_path.template, call) for rest_path, call in sent),
+        )
+        read = read_symbol_list(
+            self,
+            spec,
+            request,
+            symbols=symbols,
+            units=units,
+            failed=failed,
+            window=None,
+            current=spec.serves_current_data or spec.latest_is_current,
+            limit=request.limit,
+            cancel=cancel,
+            patience=patience,
+            tally=tally,
+            on_recency=on_recency,
+            record=record,
+            executor=executor,
+        )
+        with_rows = set(read.asked.to_pylist())
+        withheld = {
+            symbol: failure
+            for symbol in symbols
+            if symbol not in read.failures and symbol not in with_rows
+            for failure in (tally.symbol_failure(spec.name, symbol, symbols),)
+            if failure is not None
+        }
+        left_out = [
+            f"{call.symbol} ({call.unsplit.why})"
+            for _, call in units
+            if call.unsplit is not None and not call.unsplit.no_data
+        ]
+        left_out.extend(f"{symbol} (no data)" for symbol in read.no_data)
+        failures, fatal = split_failures(read.failures, symbols, self.policy)
+        return poll.CycleRows(
+            read.rows,
+            read.requests,
+            patience.seconds,
+            tuple(left_out),
+            asked=read.asked,
+            failures={**failures, **withheld},
+            fatal=fatal,
+        )
+
+    def _read_cycle_by_value(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        values: tuple[str, ...],
+        *,
+        read: Callable[..., poll.CycleRows],
+        cancel: Cancel,
+        patience: Patience,
+    ) -> poll.CycleRows:
+        """Read a cycle of values one after another, each value's failure its own.
+
+        Each value is read as if passed alone (`Request.for_value`), so every row of its requests is
+        its own, and its rows count in a tally of its own: a value that got rows and whose every row
+        the library withheld fails on its own (`ReadTally.failure`), whatever its policy. A value
+        Massive answers with HTTP 404 follows `ErrorPolicy.unavailable_symbols`, as a symbol does:
+        under `LOG` and `IGNORE` it is left out of the cycle and named in its `left_out`. Any other
+        failure of a value's read is the value's (one whose cause is set to `RAISE` is also returned
+        as `CycleRows.fatal`, which fails the table), but for a failure of the whole read
+        (`fails_followed_read`), a refusal of the feed (`FeedRefusalError`), and any failure once
+        the poller is stopped, which raise.
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments.
+            values: The values due this cycle.
+            read: Reads one value's request into the cycle's rows (`_read_one_cycle`, bound
+                to the cycle), given the request and the value's tally as `tally`.
+            cancel: The poller's stop token.
+            patience: The cycle's patience, which every value's read shares.
+
+        Returns:
+            The cycle's read (`poll.CycleRows`): the values' rows in value order, with each
+            row's value, their requests summed, what each left out, and each failed value.
+
+        Raises:
+            MassiveError: A failure of a value's read that fails the whole read, as
+                `_read_one_cycle` raises it.
+        """
+        reads: list[tuple[str, poll.CycleRows]] = []
         absent: list[str] = []
+        failed: dict[str, MassiveError] = {}
+        withheld: dict[str, MassiveError] = {}
         for value in values:
+            tally = ReadTally()
             try:
-                reads.append(read(request.for_value(value)))
+                one = read(request.for_value(value), tally=tally)
             except MassiveError as error:
-                if error.status != HTTPStatus.NOT_FOUND or self.state.closed:
+                if fails_followed_read(error) or isinstance(error, FeedRefusalError):
                     raise
+                if self.state.closed or cancel.is_set():
+                    raise
+                if error.status != HTTPStatus.NOT_FOUND:
+                    failed[value] = error
+                    continue
                 found = _Missing(
                     value, f"(HTTP 404 from GET {self._value_target(spec, request, value)})"
                 )
                 self._report_missing(spec, [found])
                 absent.append(str(found))
-        tally.check(spec.name)
-        schema = self.catalog.dataset_schema(spec)
+                continue
+            unread = tally.failure(spec.name, whose=f"Massive sent for {value}")
+            if unread is not None:
+                withheld[value] = unread
+                continue
+            reads.append((value, one))
+        schema = self.catalog.dataset_schema(spec).arrow_schema()
+        failures, fatal = split_failures(failed, values, self.policy)
         return poll.CycleRows(
-            pa.concat_tables([one.rows for one in reads])
-            if reads
-            else schema.arrow_schema().empty_table(),
-            sum(one.requests for one in reads),
+            pa.concat_tables([one.rows for _, one in reads]) if reads else schema.empty_table(),
+            sum(one.requests for _, one in reads),
             patience.seconds,
-            (*(name for one in reads for name in one.left_out), *absent),
+            (*(name for _, one in reads for name in one.left_out), *absent),
+            asked=pa.chunked_array(
+                [pa.array([value] * one.rows.num_rows, pa.string()) for value, one in reads],
+                pa.string(),
+            ),
+            failures={**failures, **withheld},
+            fatal=fatal,
         )
 
     def _read_one_cycle(
@@ -2671,15 +2828,12 @@ class RestReader:
         tally: ReadTally,
         patience: Patience,
     ) -> poll.CycleRows:
-        """Run one read of a `poll()` cycle: the planned requests of `read_fetch` for its symbols.
+        """Run one read of a `poll()` cycle: the planned requests of `read_fetch` for `ALL` or None.
 
-        By default one symbol never fails the table. Massive can answer HTTP 404 for a symbol
-        (no data), and `ErrorPolicy.unavailable_symbols` decides (`_report_missing`): under
-        `LOG` and `IGNORE` such symbols are left out of the cycle, each an
-        `unavailable_symbols` problem of the table, and named in its `left_out`; under `RAISE`
-        the table fails. When a later path's failure fails the cycle, the symbols earlier paths
-        answered with HTTP 404 are still problems of the table (`_report_missing_of_failed`).
-        A parameter a path does not take never reaches a cycle:
+        Its requests name no symbol. Its failure is the cycle's for `ALL`, and the value's for
+        one value of a value table (`_read_cycle_by_value`). A cycle of symbols in a
+        list goes through `_read_cycle_by_symbol` instead. A parameter a path does not take
+        never reaches a cycle:
         `check_parameters` refused it when the table was made.
         Before reading, the cycle's requests per bucket go to `pace`, which warns once when
         the paced ones outlast the interval.
@@ -2687,7 +2841,7 @@ class RestReader:
         Args:
             spec: The dataset.
             request: The normalized arguments.
-            symbols: The cycle's static symbols (a reactive table already read).
+            symbols: The cycle's symbols, `ALL` or None.
             record: Given each page's drift, as the cycle's progress.
             on_recency: Records each page's recency evidence, for the table's `Recency`.
             executor: The poller's fan-out pool.
@@ -2702,36 +2856,22 @@ class RestReader:
             rate-limit pauses the cycle's reads wait out together, and the symbols it left out,
             each with why.
 
-        Raises:
-            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a
-                symbol Massive answered with HTTP 404 (`_report_missing`).
-
-        Any other error is that of `read_fetch`.
+        Errors are those of `read_fetch`.
         """
         planned, left_out = self._plan_cycle(spec, request, symbols, cancel=cancel)
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
-        missing: list[_Missing] = []
-        try:
-            table, requests = self._read_planned(
-                spec,
-                request,
-                planned,
-                current=spec.serves_current_data or spec.latest_is_current,
-                record=record,
-                on_recency=on_recency,
-                executor=executor,
-                cancel=cancel,
-                patience=patience,
-                tally=tally,
-                on_missing=missing.extend,
-            )
-        except Exception:
-            # A later path's failure fails the cycle; the earlier paths' 404s are still listed.
-            self._report_missing_of_failed(spec, missing)
-            raise
-        if missing:
-            self._report_missing(spec, missing)
-            left_out.extend(str(one) for one in missing)
+        table, requests = self._read_planned(
+            spec,
+            request,
+            planned,
+            current=spec.serves_current_data or spec.latest_is_current,
+            record=record,
+            on_recency=on_recency,
+            executor=executor,
+            cancel=cancel,
+            patience=patience,
+            tally=tally,
+        )
         return poll.CycleRows(table, requests, patience.seconds, tuple(left_out))
 
     def _plan_cycle(
@@ -2764,8 +2904,6 @@ class RestReader:
 
         A failed read of the crypto ticker list raises the `MassiveError` of `crypto_pair`.
         """
-        if symbols == ():
-            return [], []
         planned = []
         left_out: list[str] = []
         for template, own in fetch_paths(spec, symbols):
@@ -2919,8 +3057,8 @@ class RestReader:
                 runs.
 
         Returns:
-            The rows of every path, in path order, capped at `Request.limit` (each symbol's
-            rows where a request names one symbol; `_read_planned`), and the request count.
+            The rows of every path, in path order, capped in total at `Request.limit`
+            (`_read_planned`), and the request count.
 
         Errors are those of `read`, and a parameter a path does not take raises the
         `ValueError` of `shared_params`.
@@ -2965,15 +3103,13 @@ class RestReader:
         patience: Patience,
         tally: ReadTally,
         on_recency: Callable[[Recency], None] | None = None,
-        on_missing: Callable[[Sequence[_Missing]], None] | None = None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the rows at `Request.limit`.
 
-        The cap is on the total rows (`_read_capped`), except where each request names one
-        symbol (`Call.symbol`, a per-symbol path): there it caps each symbol's rows, so a few
-        symbols with many rows never crowd out the rest, and the calls of a path run together.
-        On a dataset whose rows list their tickers, each row is repeated once per named ticker
-        it lists (`_listed_rows`), and the cap counts the repeated rows.
+        The cap is on the total rows (`_read_capped`): the read is of `ALL`, of no symbols, or
+        of one value of a value table, so its requests name no symbol. On a dataset whose rows
+        list their tickers, each row is repeated once per named ticker it lists
+        (`_listed_rows`), and the cap counts the repeated rows.
 
         Args:
             spec: The dataset.
@@ -2990,17 +3126,11 @@ class RestReader:
             tally: The whole read's count of its rows and of those withheld, which this read
                 adds to and never checks: the read's entry point checks it after its last part.
             on_recency: Receives each page's recency evidence (`read`), or None.
-            on_missing: Receives each path's template and its symbols Massive answered with
-                HTTP 404 (`read`), or None.
 
         Returns:
             The rows of every path, in path order, and the request count.
 
-        Raises:
-            BrokenGuaranteeError: If a capped plan mixes per-symbol calls with calls of several
-                symbols (`caps_each_symbol`).
-
-        Errors are otherwise those of `read`.
+        Errors are those of `read`.
         """
         read = functools.partial(
             self.read,
@@ -3013,12 +3143,8 @@ class RestReader:
             cancel=cancel,
             patience=patience,
             tally=tally,
-            on_missing=on_missing,
         )
-        per_symbol = request.limit is not None and caps_each_symbol(
-            spec.name, [call for _, calls in planned for call in calls]
-        )
-        if request.limit is None or per_symbol:
+        if request.limit is None:
             done = [read(rest_path, calls, limit=request.limit) for rest_path, calls in planned]
             tables = [path_rows.table for path_rows in done]
             requests = sum(path_rows.requests for path_rows in done)
@@ -3028,16 +3154,7 @@ class RestReader:
             schema = self.catalog.dataset_schema(spec)
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
-        if request.limit is not None and per_symbol:
-            # Each request named one symbol and was capped on its own.
-            logger.debug(
-                "%s: kept %d rows from %d one-symbol requests; limit=%d per symbol",
-                spec.name,
-                rows.num_rows,
-                requests,
-                request.limit,
-            )
-        elif request.limit is not None:
+        if request.limit is not None:
             # Rows listed under several named tickers can outnumber the rows Massive capped.
             rows = rows.slice(0, request.limit)
         return rows, requests

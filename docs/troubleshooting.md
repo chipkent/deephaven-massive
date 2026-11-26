@@ -94,8 +94,8 @@ Each cause, and what to do about it:
 | `rate_limited` | `massive` | `DELAYED` | yes | Massive refused a request for coming too fast (HTTP 429), so the requests of that Massive subscription wait until the pause ends. | Nothing: the requests go on after the pause. `m.rate_limits()` shows it. |
 | `poll_cycle_failed` | `library` | `GAP` | yes | `poll()` cycles failed, so rows may be missing. It ends with the next good cycle. | Fix what `Detail` names. The poll keeps trying, and the table fails once its cycles have failed for [`max_outage`](configuration.md#settings-reference). |
 | `poll_cycle_late` | `library` | `DELAYED` | yes | `poll()` cycles take longer than the interval, so the table updates late. | Poll fewer symbols, or pass `poll()` a longer interval. |
-| `symbol_read_retrying` | `library` | `DELAYED` | yes | A symbol's read failed in a way that may pass, so the library tries it again. A read that waits on Massive's crypto ticker list is one of these. | Nothing, unless it lasts. Then fix what `Detail` names. |
-| `symbol_read_failed` | `library` | `FAILED` | yes | A watchlist symbol's read failed and won't be tried again. | Fix what `Detail` names. Then delete the symbol's watchlist row and add it back to read it again. |
+| `symbol_read_retrying` | `library` | `DELAYED` | yes | A symbol's read failed in a way that may pass, so the library tries it again. A `dm.PollMode.REPLACE` poll keeps the symbol's last rows meanwhile. A read that waits on Massive's crypto ticker list is one of these. | Nothing, unless it lasts. Then fix what `Detail` names. |
+| `symbol_read_failed` | `library` | `FAILED` | yes | A symbol of a watchlist or a `poll()` failed and won't be read again. | Fix what `Detail` names. Then delete the symbol's row and add it back to read it again. For symbols listed in code, call `poll()` again. |
 | `stream_failed` | `library` | `FAILED` | no | The table failed. `Detail` and its `Error` in `m.streams()` say why. | Fix what `Detail` names. Then run the line that made the table again. |
 
 <!-- End of the generated causes. -->
@@ -261,7 +261,7 @@ checking:
 | `m.streams()` | Live table, and each `fetch()` or `history()` that runs in the background or follows a watchlist | A table failed or stays empty |
 | `m.connections()` | Streaming connection, and a `REST` row for each kind of data, saying whether it's real-time or delayed | A stream gets no data |
 | `m.rate_limits()` | Massive subscription, with its rate-limit state | A read is slow |
-| `m.symbol_reads()` | Symbol of a watchlist read with `history()` or `fetch()` | A watchlist symbol has no rows |
+| `m.symbol_reads()` | Symbol of a watchlist read with `history()` or `fetch()` | A watchlist symbol has no rows (for a `poll()` symbol, read `m.problems()`) |
 
 To see a table's state, read `m.streams()`. This example polls Apple's news and shows the
 poll's row:

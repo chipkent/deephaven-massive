@@ -44,19 +44,31 @@ reactive table. Its problems are rows of `m.problems()`: a run of failed cycles 
 `poll_cycle_failed` span, cycles that end after their interval a `poll_cycle_late` span, and a
 symbol-table value it skips a `noncanonical_symbols` span.
 
-**Symbols left out.** By default one symbol never fails a whole table. Symbols Massive answers
-with HTTP 404 follow `ErrorPolicy.unavailable_symbols`: under `LOG`, the default, and `IGNORE`
-they have no rows in the cycle (a `REPLACE` table drops their rows), and the REST reader
-reports each, with the reason, as an `unavailable_symbols` problem of the table every cycle
-that leaves it out, so the table never loses rows without saying why. Under `RAISE` the REST
-reader raises `UnavailableSymbolError`, a `PermanentError`, which fails the table.
+**Each symbol on its own.** A poll of symbols or of a table of values reads each one on its own
+(the REST reader's `read_cycle`), so one symbol's failure never takes another's rows, and
+`PollSymbols` (`_tables/poll_symbols.py`) keeps each symbol's run: a symbol whose read may pass
+(a 5xx after the client's retries, a timeout) is read again on the retry schedule of a followed
+`fetch()`, and keeps its keys in a `REPLACE` table meanwhile; one Massive refuses, or whose rows
+the library withheld every one of, or that has failed for `MassiveConfig.max_outage`, is not
+read again, and its keys leave a `REPLACE` table, until its row is deleted from the table of
+symbols and added back (a `SymbolWatch` reports the deletion, so a delete and re-add between two
+cycles counts) or the poll is called again. Each such symbol is a `refused_symbols`,
+`symbol_read_retrying`, or `symbol_read_failed` span of `m.problems()` until it answers or leaves,
+so the table never loses a symbol's rows without saying why. When every symbol of the first cycle
+has failed for good, the table fails, as a call that waits raises; once one of them answered, or
+left before failing, a symbol's failure is its own. Symbols Massive answers with HTTP 404 follow
+`ErrorPolicy.unavailable_symbols`: under `LOG`, the default, and `IGNORE` they have no rows in the
+cycle (a `REPLACE` table drops their rows), and the REST reader reports each, with the
+reason, as an `unavailable_symbols` problem of the table every cycle that leaves it out.
 
-**Failures.** A cycle that raises `AuthenticationError`, `EntitlementError`, or a
-`PermanentError` fails the table through `publish_failure`, marks the row `FAILED`
-(`SessionCore.fail_stream`), and ends the poller. The permanent errors are `RowDataError` (a
-read of which the library could read no row whole, or a withheld row of a cause the policy sets
-to `RAISE`; one row the library cannot read whole is withheld and reported, and the table goes
-on, a row with a null poll key, which would merge unrelated rows, included),
+**Failures.** A cycle whose read fails the whole table fails it through `publish_failure`, marks
+the row `FAILED` (`SessionCore.fail_stream`), and ends the poller: `AuthenticationError`, an
+`EntitlementError` of the whole read (a poll of `dm.ALL`, or a feed refusal such as a delayed
+page for a real-time plan, `FeedRefusalError`), a `PermanentError`, and a symbol's problem whose
+cause the policy sets to `RAISE` (`CycleRows.fatal`). The permanent errors are `RowDataError` (a
+read of `dm.ALL` of which the library could read no row whole, or a withheld row of a cause the
+policy sets to `RAISE`; one row the library cannot read whole is withheld and reported, and the
+table goes on, a row with a null poll key, which would merge unrelated rows, included),
 `SymbolRowError` (a symbol table's row that is not Massive's ticker, under
 `noncanonical_symbols=RAISE`; under `LOG` and `IGNORE` the row is skipped and listed in
 `m.problems()`), and `UnavailableSymbolError` (a symbol Massive has no data for, under
@@ -65,7 +77,10 @@ on, a row with a null poll key, which would merge unrelated rows, included),
 A refusal (`AuthenticationError` or `EntitlementError`) logs one WARNING per session, dataset,
 and kind of refusal, and each later `poll()` table refused the same way logs at DEBUG: every
 poll makes its own requests and gets its own error, so twenty polls of a dataset the plan
-does not include would otherwise log twenty WARNINGs for one cause. Any
+does not include would otherwise log twenty WARNINGs for one cause. A cycle of symbols in which
+none answered and one at least failed in a way that may pass, as in an outage of Massive, is a
+failed cycle like a cycle that raised; one in which no symbol was due, or whose failures are
+all final, is neither failed nor good. Any
 other error, also one while publishing, opens the table's `poll_cycle_failed` span of
 `m.problems()`, with the error and the time of the last good cycle (or, before one, of the
 poll's start); the table keeps its rows and the next cycle runs as scheduled, and ends the span
@@ -122,8 +137,8 @@ import threading
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Protocol
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Final, NamedTuple, Protocol
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -165,10 +180,16 @@ from deephaven_massive._tables.diagnostics import (
 )
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import make_result
+from deephaven_massive._tables.poll_symbols import DroppedNames, PollSymbols
 from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.publisher import BlinkPublisher, blink_publisher
 from deephaven_massive._tables.refused_values import refused_values_of
-from deephaven_massive._tables.watchlist import SkippedValues, SymbolRowRule, read_symbols
+from deephaven_massive._tables.watchlist import (
+    SkippedValues,
+    SymbolRowRule,
+    SymbolWatch,
+    read_symbols,
+)
 from deephaven_massive._tables.withheld import (
     WITHHELD_LISTED,
     failure_of,
@@ -179,7 +200,7 @@ from deephaven_massive._tables.withheld import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Hashable, Sequence
+    from collections.abc import Callable, Hashable, Mapping, Sequence
     from datetime import timedelta
 
     from deephaven.liveness_scope import LivenessScope
@@ -334,14 +355,25 @@ class CycleRows:
             patience), for the cycle's log line.
         left_out: The symbols the cycle has no rows for, each with why, such as
             `"X:FOOUSD (its currencies cannot be read)"` or
-            `"AAPL1 (HTTP 404 from /v3/trades/{stockTicker})"`, in the order found; empty for
+            `"AAPL1 (no data)"`, in the order found; empty for
             none, for the cycle's log line. The REST reader reports each in `m.problems()`.
+        asked: For a cycle of symbols or values, each row's symbol or value: the one it was
+            read for, a string array as long as `rows`. None when the rows name none (`ALL`,
+            or a dataset without instruments).
+        failures: Each symbol or value of the cycle that failed on its own, with its error;
+            its rows are left out of `rows`. Empty for none.
+        fatal: The first failure of a symbol or value that fails the whole table
+            (`symbol_reads.fails_call`: the feed's refusal, or a cause set to `RAISE`), or
+            None.
     """
 
     rows: pa.Table
     requests: int
     patience: float
     left_out: tuple[str, ...] = ()
+    asked: pa.ChunkedArray | None = None
+    failures: Mapping[str, MassiveError] = field(default_factory=dict)
+    fatal: MassiveError | None = None
 
 
 class CycleReader(Protocol):
@@ -583,7 +615,6 @@ class Poller:
         "_gap_from",
         "_good_at",
         "_interval",
-        "_key_names",
         "_keys",
         "_late",
         "_late_spans",
@@ -592,6 +623,7 @@ class Poller:
         "_max_concurrency",
         "_max_outage",
         "_mode",
+        "_names",
         "_pollers",
         "_progress_at",
         "_publish_lock",
@@ -630,6 +662,7 @@ class Poller:
         clock: PollClock,
         publisher: Publisher,
         stop: threading.Event,
+        watched: tuple[SymbolWatch, DroppedNames] | None = None,
     ) -> None:
         """Prepare the poller; nothing is requested, and the thread is not started yet.
 
@@ -647,6 +680,9 @@ class Poller:
             stop: Set to stop the poller; the publisher's blink table sets it when it shuts
                 down. Each cycle's requests listen to it, so a stopped poller never waits for
                 a rate-limited slot.
+            watched: For a refreshing table of symbols or values, the started watch of the
+                table and the symbols it saw leave (`watch_names`); the poller holds the watch
+                and stops it when its thread ends (`PollSymbols`). None for any other poll.
 
         Raises:
             BrokenGuaranteeError: If `mode` is not one a cycle publishes by (`REPLACE`,
@@ -666,8 +702,7 @@ class Poller:
         self._max_outage = core.config.max_outage
         self._schema = core.dataset_schema(spec)
         self._spec = spec
-        self._key_names = spec.poll_keys
-        self._list_keys = list_keys(self._schema, self._key_names)
+        self._list_keys = list_keys(self._schema, self._spec.poll_keys)
         self._request = request
         self._rule = SymbolRowRule.of(spec, request.on_error.noncanonical_symbols)
         self._value_rule = (
@@ -732,7 +767,18 @@ class Poller:
         self._progress_at = 0.0
         self._marked_late = False
         self._watched = (0.0, 0.0, "")  # the cycle's start (monotonic, wall) and good text
-        self._keys: set[tuple[Hashable, ...]] = set()
+        # Each key a REPLACE table holds, with the symbol or value its row was read for (None
+        # for a poll of `ALL`); only the poller thread touches it.
+        self._keys: dict[tuple[Hashable, ...], str | None] = {}
+        # Each symbol's (or value's) run of reads; only the poller thread touches it.
+        self._names = PollSymbols(
+            dataset=spec.name,
+            stream_id=stream_id,
+            field=None if request.value_table is None else request.value_table.column,
+            refused_symbols=request.on_error.refused_symbols,
+            limit=self._max_outage,
+            watched=watched,
+        )
         # The identities an APPEND table holds; only the poller thread touches it.
         self._seen: set[tuple[Hashable, ...]] = set()
         self._published = 0
@@ -801,7 +847,8 @@ class Poller:
         """Run cycles until stopped or failed, waiting `interval` from one start to the next.
 
         The poller leaves the session's `Pollers` when the thread ends, however it ends, and
-        logs at DEBUG why it ended (`_end_reason`) and how many cycles it started.
+        logs at DEBUG why it ended (`_end_reason`) and how many cycles it started. The watch of
+        a refreshing symbol table stops first, so nothing follows the table for a poller gone.
         """
         reason = "its thread raised"
         try:
@@ -809,15 +856,18 @@ class Poller:
                 entered(self._exec_ctx),
                 ThreadPoolExecutor(self._max_concurrency, f"{self._thread_name} rest") as pool,
             ):
-                while not self._stop.is_set():
-                    began = self._began = self._clock.monotonic()
-                    self._began_at = self._clock.time()
-                    self._cycles += 1
-                    if not self._cycle(pool):
-                        break
-                    took = self._clock.monotonic() - began
-                    self._note_pace(took)
-                    self._clock.wait(self._stop, max(self._interval - took, 0.0))
+                try:
+                    while not self._stop.is_set():
+                        began = self._began = self._clock.monotonic()
+                        self._began_at = self._clock.time()
+                        self._cycles += 1
+                        if not self._cycle(pool):
+                            break
+                        took = self._clock.monotonic() - began
+                        self._note_pace(took)
+                        self._clock.wait(self._stop, max(self._interval - took, 0.0))
+                finally:
+                    self._names.stop_watch()
             reason = self._end_reason()
         finally:
             self._pollers.discard(self)
@@ -1121,13 +1171,14 @@ class Poller:
         values, skipped_values = self._values()
         # The rows hold these values whether or not the read succeeds, so they are listed now.
         self._skipped.update(skipped_symbols, values=skipped_values)
-        record = self._page_received
+        names = values if values is not None else symbols if isinstance(symbols, tuple) else None
+        due = None if names is None else self._names.due(names, now=self._began)
         seen = _RecencySeen()
         read = self._read(
             stream_id=self._stream_id,
-            symbols=symbols,
-            values=values,
-            record=record,
+            symbols=due if values is None and due is not None else symbols,
+            values=due if values is not None else None,
+            record=self._page_received,
             on_recency=seen.add,
             executor=pool,
             cancel=self._stop,
@@ -1135,11 +1186,29 @@ class Poller:
         self._watch_end()  # before the row's update, so no late mark can follow it
         if self._stop.is_set():
             return False
-        published = self._publish(self._withhold_unkeyed(core, read.rows))
+        settled = None
+        if due is not None:
+            settled = self._names.settle(
+                due,
+                read.failures,
+                now=self._clock.monotonic(),
+                at=int(self._clock.time() * 1e9),
+                since=int(self._began_at * 1e9),
+            )
+            if settled.spans:
+                core.problems(list(settled.spans))
+        fatal = read.fatal
+        if fatal is None and settled is not None:
+            fatal = settled.fatal
+        if fatal is not None:
+            self._fail_fatal(core, fatal)
+            return False
+        rows, asked = self._withhold_unkeyed(core, read.rows, read.asked)
+        published = self._publish(rows, asked)
         self._published += published
         logger.debug(
             "stream %d: %s poll() cycle: %d requests, %d rows read, %d published in %.3f s, "
-            "waiting out at most %.0f s of pauses; left out: %s",
+            "waiting out at most %.0f s of pauses; left out: %s; failed: %s",
             self._stream_id,
             self._spec.name,
             read.requests,
@@ -1148,6 +1217,7 @@ class Poller:
             self._clock.monotonic() - self._began,
             read.patience,
             bounded_list(read.left_out) if read.left_out else "none",
+            bounded_list(read.failures) if read.failures else "none",
         )
         update = StreamUpdate(
             rows_published=self._published,
@@ -1156,7 +1226,19 @@ class Poller:
             recency=seen.shown(),
         )
         core.update_streams({self._stream_id: update})
-        # A successful cycle ends an earlier run of failed cycles.
+        if settled is not None and settled.failure is not None:
+            # Every symbol the cycle read failed, one at least of a failure that may pass.
+            return self._carry_on(core, settled.failure)
+        if settled is None or settled.answered:
+            self._cycle_succeeded(core)
+        return True
+
+    def _cycle_succeeded(self, core: SessionCore) -> None:
+        """End the table's run of failed cycles, if one is open: rows flow again.
+
+        Args:
+            core: The session's core.
+        """
         ended = self._failures.update({}, at=int(self._began_at * 1e9))  # where rows flow again
         if ended is not None:
             core.problems([ended])
@@ -1171,7 +1253,6 @@ class Poller:
                 utc_text(self._gap_from),
                 utc_text(self._began_at),
             )
-        return True
 
     def _fail_fatal(self, core: SessionCore, error: MassiveError) -> None:
         """Fail the table with a cycle's fatal error; a failure that raises is logged at ERROR.
@@ -1313,14 +1394,15 @@ class Poller:
         failure.__cause__ = error  # its log record carries the latest error's traceback too
         return failure
 
-    def _publish(self, table: pa.Table) -> int:
+    def _publish(self, table: pa.Table, asked: pa.ChunkedArray | None) -> int:
         """Publish one cycle's rows as the mode shapes them.
 
-        `REPLACE` adds a tombstone for each key the cycle lost; `APPEND` keeps only the rows
-        not seen before (`_fresh`). `UPSERT` publishes the rows as they are.
+        `REPLACE` adds a tombstone for each key the cycle lost (`_replace`); `APPEND` keeps
+        only the rows not seen before (`_fresh`). `UPSERT` publishes the rows as they are.
 
         Args:
             table: The cycle's rows in the dataset's schema.
+            asked: Each row's symbol or value (`CycleRows.asked`), or None.
 
         Returns:
             How many of the cycle's rows were published (tombstones not counted); 0 once the
@@ -1330,7 +1412,7 @@ class Poller:
         identities = None
         published: int = table.num_rows
         if self._mode is PollMode.REPLACE:
-            table, keys = self._replace(table)
+            table, keys = self._replace(table, asked)
         elif self._mode is PollMode.APPEND:
             table, identities = self._fresh(table)
             published = table.num_rows
@@ -1354,7 +1436,9 @@ class Poller:
             self._seen |= identities
         return published
 
-    def _withhold_unkeyed(self, core: SessionCore, table: pa.Table) -> pa.Table:
+    def _withhold_unkeyed(
+        self, core: SessionCore, table: pa.Table, asked: pa.ChunkedArray | None
+    ) -> tuple[pa.Table, pa.ChunkedArray | None]:
         """Withhold the cycle's rows with a null (or NaN) poll key, under `unreadable_keys`.
 
         A null key would silently merge unrelated rows: one keyed row for all of them, or
@@ -1370,9 +1454,11 @@ class Poller:
         Args:
             core: The session's core.
             table: The cycle's rows.
+            asked: Each row's symbol or value (`CycleRows.asked`), or None.
 
         Returns:
-            The cycle's rows with a value in every poll key that must have one.
+            The cycle's rows with a value in every poll key that must have one, and the symbol
+            or value of each, or None.
 
         Raises:
             RowDataError: Under `unreadable_keys=RAISE`, when a row is withheld; or, whatever
@@ -1385,11 +1471,11 @@ class Poller:
         nullable = self._spec.nullable_poll_keys
         masks = [
             (name, pc.is_null(table.column(name), nan_is_null=True))
-            for name in self._key_names
+            for name in self._spec.poll_keys
             if name not in nullable
         ]
         if not any(pc.any(mask).as_py() for _, mask in masks):
-            return table
+            return table, asked
         symbol = _SYMBOL if _SYMBOL in table.schema.names else None
         sent = None if symbol is None else table.column(symbol)
         marked = with_marks(table, {}, sent=sent)
@@ -1424,7 +1510,10 @@ class Poller:
             raise RowDataError(
                 f"{dataset}: {sent}. {reason_sentence(withheld.first_reason)} {WITHHELD_LISTED}"
             )
-        return withheld.rows
+        if asked is not None:
+            unkeyed = functools.reduce(pc.or_, (mask for _, mask in masks))
+            asked = asked.filter(pc.invert(unkeyed))  # the rows `withhold_rows` kept
+        return withheld.rows, asked
 
     def _fresh(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
         """Keep the rows of an `APPEND` cycle whose identity the poller has not appended yet.
@@ -1440,7 +1529,7 @@ class Poller:
             The rows to append, and every identity of the cycle (those already held are
             harmless to add again).
         """
-        names = (*self._key_names, *self._spec.revision_keys)
+        names = (*self._spec.poll_keys, *self._spec.revision_keys)
         identities = zip(*(_hashable(table.column(name)) for name in names), strict=True)
         taken: set[tuple[Hashable, ...]] = set()
         keep = []
@@ -1449,20 +1538,41 @@ class Poller:
             taken.add(identity)
         return table.filter(pa.array(keep, pa.bool_())), taken
 
-    def _replace(self, table: pa.Table) -> tuple[pa.Table, set[tuple[Hashable, ...]]]:
-        """Mark a cycle's rows live and add one tombstone per key the last published cycle had.
+    def _replace(
+        self, table: pa.Table, asked: pa.ChunkedArray | None
+    ) -> tuple[pa.Table, dict[tuple[Hashable, ...], str | None]]:
+        """Mark a cycle's rows live and add one tombstone per key the table should lose.
 
-        The poller's key set is left as is; `_publish` replaces it once the cycle is published.
+        A key the last published cycle had and this one lacks is lost, unless its row was read
+        for a symbol (or value) waiting to be read again (`PollSymbols.holds_keys`): that
+        symbol's last rows stay, as stale as its span of `m.problems()` says. So a key leaves
+        when its symbol answered without it, failed for good, or left the symbol list. The
+        poller's keys are left as they are; `_publish` replaces them once the cycle is
+        published.
 
         Args:
             table: The cycle's rows.
+            asked: Each row's symbol or value (`CycleRows.asked`), or None when the rows name
+                none.
 
         Returns:
-            The rows with the live column, then the tombstones; and the cycle's key set.
+            The rows with the live column, then the tombstones; and the keys the table holds
+            after the cycle, each with its row's symbol or value.
         """
-        names = self._key_names
-        keys = set(zip(*(_hashable(table.column(name)) for name in names), strict=True))
-        gone = self._keys - keys
+        names = self._spec.poll_keys
+        found = list(zip(*(_hashable(table.column(name)) for name in names), strict=True))
+        # A dataset keyed on no column (market status, one row) has no key to lose: the zip of
+        # no columns is empty, whatever the rows.
+        owners = [None] * len(found) if asked is None or not found else asked.to_pylist()
+        keys: dict[tuple[Hashable, ...], str | None] = dict(zip(found, owners, strict=True))
+        gone: set[tuple[Hashable, ...]] = set()
+        for key, owner in self._keys.items():
+            if key in keys:
+                continue
+            if owner is not None and self._names.holds_keys(owner):
+                keys[key] = owner
+            else:
+                gone.add(key)
         rows = table.append_column(LIVE_COLUMN, pa.array([True] * table.num_rows, pa.bool_()))
         if not gone:
             return rows, keys
@@ -1760,29 +1870,33 @@ def _build(
     core: SessionCore,
     spec: DatasetSpec,
     *,
+    request: Request,
     mode: PollMode,
     stream_id: int,
     stop: threading.Event,
     note: str | None,
-) -> tuple[tuple[Table, BlinkPublisher], LivenessScope]:
-    """Create a `poll()` table in a new result scope (`make_result`).
+) -> tuple[_Built, LivenessScope]:
+    """Create a `poll()` table, and the watch of a refreshing symbol table, in a new result scope.
 
     Args:
         core: The session's core, for the dataset's schema.
         spec: The dataset.
+        request: The normalized arguments, whose refreshing table of symbols or values is
+            watched (`_watch_names`).
         mode: How cycles combine.
         stream_id: The table's `StreamId`.
         stop: The poller's stop token, set when the blink table shuts down.
         note: The sentence the table description adds about its recency, or None.
 
     Returns:
-        The result and its publisher (`build_table`), and the result scope. The result is the
-        shape `build_table` derives, described last (`describe`), so it carries the dataset's
-        column descriptions and lists its columns in schema order in every mode, also after
-        the `last_by` of `UPSERT` and `REPLACE` put the poll keys first; the poller writes
-        only through the publisher.
+        The result, its publisher (`build_table`), and the started watch of a refreshing
+        table of symbols or values, and the result scope. The result is the shape
+        `build_table` derives, described last (`describe`), so it carries the dataset's column
+        descriptions and lists its columns in schema order in every mode, also after the
+        `last_by` of `UPSERT` and `REPLACE` put the poll keys first; the poller writes only
+        through the publisher.
     """
-    built: list[BlinkPublisher] = []
+    built: list[_Built] = []
     schema = core.dataset_schema(spec)
 
     def shape() -> Table:
@@ -1795,11 +1909,72 @@ def _build(
             on_shutdown=on_shutdown,
             release_later=core.release_later,
         )
-        built.append(publisher)
-        return describe(table, spec, schema, note=note)
+        result = describe(table, spec, schema, note=note)
+        watched = _watch_names(spec, request, publisher, stream_id=stream_id)
+        built.append(_Built(result, publisher, watched))
+        return result
 
-    result, scope = make_result(core.exec_ctx, shape)
-    return (result, built[0]), scope
+    _, scope = make_result(core.exec_ctx, shape)
+    return built[0], scope
+
+
+class _Built(NamedTuple):
+    """What `_build` creates in the result scope.
+
+    Attributes:
+        result: The live table.
+        publisher: Its publisher.
+        watched: The started watch of a refreshing table of symbols or values and the symbols
+            it saw leave, or None.
+    """
+
+    result: Table
+    publisher: BlinkPublisher
+    watched: tuple[SymbolWatch, DroppedNames] | None
+
+
+def _watch_names(
+    spec: DatasetSpec, request: Request, publisher: BlinkPublisher, *, stream_id: int
+) -> tuple[SymbolWatch, DroppedNames] | None:
+    """Start watching a refreshing table of values or symbols for the symbols that leave it.
+
+    A cycle reads the table's rows itself; the watch only reports each symbol whose last row is
+    deleted, so a symbol deleted and added back between two cycles starts a new run
+    (`PollSymbols.due`). Runs inside the result scope, on the caller thread; the blink table
+    keeps the watch alive, and the poller stops it when its thread ends.
+
+    Args:
+        spec: The dataset.
+        request: The normalized arguments.
+        publisher: The table's publisher, whose blink table keeps the watch alive.
+        stream_id: The table's `StreamId`, for the watch's log records.
+
+    Returns:
+        The started watch and the symbols it saw leave; None when the poll reads no
+        refreshing table.
+    """
+    noncanonical = request.on_error.noncanonical_symbols
+    values, symbols = request.value_table, request.symbols
+    if values is not None and values.table.is_refreshing:
+        table, rule = values.table, SymbolRowRule.for_values(spec, values, noncanonical)
+    elif isinstance(symbols, SymbolTable) and symbols.table.is_refreshing:
+        table, rule = symbols.table, SymbolRowRule.of(spec, noncanonical)
+    else:  # a fixed list, `ALL`, or a static table: no row ever leaves
+        return None
+    dropped = DroppedNames()
+    watch = SymbolWatch(
+        rule,
+        table,
+        dropped.on_change,
+        stream_id=stream_id,
+        # Each cycle reads the table itself, which fails the poll on a bad row under `RAISE`
+        # and lists a skipped one, so the watch reports neither.
+        on_invalid=lambda _message: None,
+        on_skipped=lambda _values: None,
+    )
+    watch.keep_alive_with(publisher.table)
+    watch.start()
+    return watch, dropped
 
 
 def open_poll(
@@ -1866,9 +2041,10 @@ def open_poll(
     """
     stream_id = core.next_stream_id()
     with entered(core.exec_ctx):
-        (result, publisher), scope = _build(
+        (result, publisher, watched), scope = _build(
             core,
             spec,
+            request=request,
             mode=mode,
             stream_id=stream_id,
             stop=stop,
@@ -1904,6 +2080,7 @@ def open_poll(
             clock=clock,
             publisher=publisher,
             stop=stop,
+            watched=watched,
         )
         pollers.add(poller)  # raises if the session closed: the poller then joined nothing
         return poller, row

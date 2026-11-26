@@ -42,6 +42,7 @@ from deephaven_massive._errors import (
 from deephaven_massive._ingest.rest import RestEndpoints
 from deephaven_massive._massive import Cancel, DriftReport, Transport
 from deephaven_massive._tables import poll
+from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import (
     ResultRecord,
     ResultRegistry,
@@ -132,6 +133,14 @@ class Script:
         data = [{"Symbol": symbol, "CashAmount": amount} for symbol, amount in pairs]
         self.outcomes.put(pa.Table.from_pylist(data, schema=self.schema))
 
+    def answer(self, *pairs: tuple[str, float], failed: dict[str, dm.MassiveError]) -> None:
+        # A cycle of symbols that read each one alone: the rows of those that answered, each
+        # given to its symbol, and the failures of the others.
+        data = [{"Symbol": symbol, "CashAmount": amount} for symbol, amount in pairs]
+        rows = pa.Table.from_pylist(data, schema=self.schema)
+        asked = pa.chunked_array([[symbol for symbol, _ in pairs]], pa.string())
+        self.outcomes.put(poll.CycleRows(rows, 3, 600.0, asked=asked, failures=failed))
+
     def fail(self, error: BaseException) -> None:
         # A copy: a test's parameter lives as long as the run, and the raised exception's
         # traceback would keep the poller's frames, and its session, alive with it.
@@ -163,6 +172,8 @@ class Script:
             record(DriftReport())
         if isinstance(outcome, BaseException):
             raise outcome
+        if isinstance(outcome, poll.CycleRows):
+            return outcome
         assert isinstance(outcome, pa.Table)
         return poll.CycleRows(outcome, 3, 600.0, self.left_out)
 
@@ -515,11 +526,11 @@ def test_each_cycle_and_its_failure_are_logged_with_the_stream_id(
         ),
         (
             f"stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 2 published in "
-            f"0.000 s, {patience}"
+            f"0.000 s, {patience}; failed: none"
         ),
         (
             f"stream 1: stocks.dividends poll() cycle: 3 requests, 2 rows read, 0 published in "
-            f"0.000 s, {patience}"
+            f"0.000 s, {patience}; failed: none"
         ),
         (
             f"stocks.dividends poll() stream 1: a cycle failed. {ANSWER_503} Nothing to do: the "
@@ -1935,7 +1946,7 @@ def test_a_poll_fails_once_and_publishes_nothing_after(
     assert poller.fail(error)
     assert not poller.fail(error)
     rows = pa.Table.from_pylist([{"Symbol": "IBM", "CashAmount": 3.0}], schema=script.schema)
-    assert poller._publish(rows) == 0
+    assert poller._publish(rows, None) == 0
     until(lambda: bool(table.j_table.isFailed()))
     clock.advance(60)
     poller.thread.join(TIMEOUT)
@@ -2643,10 +2654,10 @@ def test_a_failure_while_publishing_keeps_the_poller(
     publish = poll.Poller._publish
     failures = [RuntimeError("publish failed")]
 
-    def flaky(self: poll.Poller, table: pa.Table) -> int:
+    def flaky(self: poll.Poller, table: pa.Table, asked: pa.ChunkedArray | None) -> int:
         if failures:
             raise failures.pop()
-        return publish(self, table)
+        return publish(self, table, asked)
 
     monkeypatch.setattr(poll.Poller, "_publish", flaky)
     script.rows(("AAPL", 1.0))
@@ -2965,7 +2976,7 @@ def test_a_cycle_whose_every_row_has_a_null_poll_key_fails_the_table(
     *, feed_session: dm.MassiveSession, fake_rest: FakeRestServer, dh_to_pylist: ToPylist
 ) -> None:
     # A problem of every row the cycle read fails the table, whatever the policy.
-    fake_rest.reply(PATH, Reply(envelope([NULL_ID, {**NULL_ID, "ticker": "MSFT"}])))
+    fake_rest.reply(PATH, Reply(envelope([NULL_ID, NULL_ID])))
     q = build_query(
         feed_session._core, FEED, query_type=FetchQuery, symbols=["AAPL"], start="2025-01-02"
     )
@@ -3332,34 +3343,34 @@ def closed(case: PollCase) -> None:
     case.m.close()
 
 
-def refused_then_closed(case: PollCase) -> None:
-    failed_by_cycle(REFUSED)(case)
+def rejected_then_closed(case: PollCase) -> None:
+    failed_by_cycle(REJECTED)(case)
     until(lambda: bool(case.table.j_table.isFailed()))
     case.cycles_ended()
     case.m.close()
 
 
-def close_racing_a_refusal(case: PollCase) -> None:
-    case.fail_next_cycle(REFUSED)
+def close_racing_a_rejection(case: PollCase) -> None:
+    case.fail_next_cycle(REJECTED)
     case.race(case.m.close, case.next_cycle)
 
 
-def release_racing_a_refusal(case: PollCase) -> None:
-    # The user's tables keep the poll running after the release, so its refused cycle still
+def release_racing_a_rejection(case: PollCase) -> None:
+    # The user's tables keep the poll running after the release, so its rejected cycle still
     # fails them.
-    case.fail_next_cycle(REFUSED)
+    case.fail_next_cycle(REJECTED)
     case.race(functools.partial(case.m.release, case.table), case.next_cycle)
 
 
 POLL_PATHS: dict[str, Callable[[PollCase], None]] = {
-    "HTTP 403": failed_by_cycle(REFUSED),
     "HTTP 401": failed_by_cycle(REJECTED),
     "session closed": closed,
-    "HTTP 403, then session closed": refused_then_closed,
-    "close racing an HTTP 403": close_racing_a_refusal,
-    "release racing an HTTP 403": release_racing_a_refusal,
+    "HTTP 401, then session closed": rejected_then_closed,
+    "close racing an HTTP 401": close_racing_a_rejection,
+    "release racing an HTTP 401": release_racing_a_rejection,
 }
-"""Each way a case's poll fails, by test id."""
+"""Each way a case's poll fails, by test id. Massive refusing the poll's one symbol after its
+first cycle is no way: that symbol is listed, and the table goes on."""
 
 
 def is_failed(table: Table) -> bool:
@@ -3408,7 +3419,7 @@ def test_every_poll_mode_fails_once_by_every_path(
     rest_session.release(case.table)
 
 
-@pytest.mark.parametrize("path", ["HTTP 403", "session closed", "close racing an HTTP 403"])
+@pytest.mark.parametrize("path", ["HTTP 401", "session closed", "close racing an HTTP 401"])
 def test_a_poll_failing_while_its_watchlist_changes_fails_once(
     *,
     rest_session: dm.MassiveSession,
@@ -3571,3 +3582,332 @@ def test_a_poll_failed_by_a_withheld_row_still_shows_its_count(
         "raise",
     )
     rest_session.release(table)
+
+
+# --- Each symbol on its own ----------------------------------------------------------------------
+
+REFUSALS = ProblemCause.REFUSED_SYMBOLS
+RETRYING = ProblemCause.SYMBOL_READ_RETRYING
+READ_FAILED = ProblemCause.SYMBOL_READ_FAILED
+
+
+def refusal() -> dm.EntitlementError:
+    return dm.EntitlementError(ANSWER_403, status=403)
+
+
+def outage() -> dm.MassiveError:
+    return dm.MassiveError(ANSWER_503, status=503)
+
+
+def symbol_watchlist(
+    dh_input_table: Callable[..., InputTable], *symbols: str
+) -> tuple[InputTable, SymbolTable]:
+    watch = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watch.add(new_table([string_col("Symbol", list(symbols))]))
+    return watch, SymbolTable(watch)
+
+
+def spans(m: dm.MassiveSession, to_pylist: ToPylist, cause: ProblemCause) -> list[tuple[str, bool]]:
+    # Each span of the cause: its symbol, and whether it still holds.
+    return [(row["Symbol"], row["EndedAt"] is None) for row in problems_of(m, to_pylist, cause)]
+
+
+def test_a_poll_keeps_the_answering_symbols_and_lists_the_refused_one(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # No silent gap: every listed symbol without rows has a row in m.problems() that says why.
+    script.answer(("AAPL", 1.0), failed={"MSFT": refusal()})
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
+    without_rows = {"AAPL", "MSFT"} - {symbol for symbol, _ in pairs(table, dh_to_pylist)}
+    assert without_rows == {symbol for symbol, _ in spans(massive_session, dh_to_pylist, REFUSALS)}
+    script.answer(("AAPL", 2.0), failed={})
+    next_cycle(clock)
+    assert script.symbols == [("AAPL", "MSFT"), ("AAPL",)]  # a refusal is never retried
+    assert not is_failed(table)
+    assert problems_of(massive_session, dh_to_pylist, FAILED) == []
+
+
+def test_a_re_added_refused_symbol_is_requested_again_within_one_cycle(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # The row is deleted and added back while the poller waits: the next cycle reads it again.
+    watch, symbols = symbol_watchlist(dh_input_table, "AAPL", "MSFT")
+    script.answer(("AAPL", 1.0), failed={"MSFT": refusal()})
+    table = start(massive_session, script=script, pollers=pollers, clock=clock, symbols=symbols)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
+    assert spans(massive_session, dh_to_pylist, REFUSALS) == [("MSFT", True)]
+    clock.wait_for_sleepers(1)
+    watch.delete(new_table([string_col("Symbol", ["MSFT"])]))
+    watch.add(new_table([string_col("Symbol", ["MSFT"])]))
+    script.answer(("AAPL", 2.0), ("MSFT", 3.0), failed={})
+    next_cycle(clock)
+    assert script.symbols[-1] == ("AAPL", "MSFT")
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 2.0), ("MSFT", 3.0)])
+    assert spans(massive_session, dh_to_pylist, REFUSALS) == [("MSFT", False)]
+
+
+def test_a_symbols_failing_request_leaves_the_others_rows_and_keeps_its_replace_keys(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    script.answer(("AAPL", 1.0), ("MSFT", 2.0), failed={})
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
+    script.answer(("AAPL", 3.0), failed={"MSFT": outage()})
+    next_cycle(clock)
+    # MSFT's last row stays while it retries, and its span says the row is stale.
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0), ("MSFT", 2.0)])
+    assert spans(massive_session, dh_to_pylist, RETRYING) == [("MSFT", True)]
+    assert problems_of(massive_session, dh_to_pylist, FAILED) == []  # AAPL answered
+    script.answer(("AAPL", 4.0), ("MSFT", 5.0), failed={})
+    next_cycle(clock)  # 60 s later, past MSFT's first retry delay
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 4.0), ("MSFT", 5.0)])
+    assert spans(massive_session, dh_to_pylist, RETRYING) == [("MSFT", False)]
+
+
+def test_a_symbol_failing_for_max_outage_is_failed_and_its_replace_keys_leave(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    script.answer(("AAPL", 1.0), ("MSFT", 2.0), failed={})
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
+    cycles = int(massive_session._core.config.max_outage // 60) + 1
+    for _ in range(cycles):
+        script.answer(("AAPL", 3.0), failed={"MSFT": outage()})
+        next_cycle(clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0)])
+    assert spans(massive_session, dh_to_pylist, READ_FAILED) == [("MSFT", True)]
+    assert not is_failed(table)
+
+
+def test_a_poll_fails_when_every_symbol_it_was_called_with_is_refused(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    published_failures: list[dm.MassiveError],
+) -> None:
+    script.answer(failed={"AAPL": refusal(), "MSFT": refusal()})
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: is_failed(table))
+    (error,) = published_failures
+    assert isinstance(error, dm.EntitlementError)
+    assert str(error) == ANSWER_403
+
+
+def test_a_refused_symbol_added_later_is_listed_and_the_table_keeps_running(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # MSFT alone is refused, added once the table runs: the table never fails for it.
+    watch, symbols = symbol_watchlist(dh_input_table, "AAPL")
+    script.answer(("AAPL", 1.0), failed={})
+    table = start(massive_session, script=script, pollers=pollers, clock=clock, symbols=symbols)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
+    clock.wait_for_sleepers(1)
+    watch.add(new_table([string_col("Symbol", ["MSFT"])]))
+    script.answer(("AAPL", 2.0), failed={"MSFT": refusal()})
+    next_cycle(clock)
+    script.answer(("AAPL", 3.0), failed={})
+    next_cycle(clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0)])
+    assert script.symbols == [("AAPL",), ("AAPL", "MSFT"), ("AAPL",)]
+    assert spans(massive_session, dh_to_pylist, REFUSALS) == [("MSFT", True)]
+    assert problems_of(massive_session, dh_to_pylist, FAILED) == []
+    assert not is_failed(table)
+
+
+def test_a_cycle_that_reads_only_a_refused_symbol_keeps_the_table_running(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # MSFT replaces AAPL once the table runs, and Massive refuses it: no symbol answers that
+    # cycle, but the refusal is MSFT's alone, so the table neither fails nor counts an outage.
+    watch, symbols = symbol_watchlist(dh_input_table, "AAPL")
+    script.answer(("AAPL", 1.0), failed={})
+    table = start(massive_session, script=script, pollers=pollers, clock=clock, symbols=symbols)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0)])
+    clock.wait_for_sleepers(1)
+    watch.delete(new_table([string_col("Symbol", ["AAPL"])]))
+    watch.add(new_table([string_col("Symbol", ["MSFT"])]))
+    script.answer(failed={"MSFT": refusal()})
+    next_cycle(clock)
+    assert script.symbols == [("AAPL",), ("MSFT",)]
+    assert spans(massive_session, dh_to_pylist, REFUSALS) == [("MSFT", True)]
+    assert problems_of(massive_session, dh_to_pylist, FAILED) == []
+    assert not is_failed(table)
+
+
+def test_an_upsert_keeps_a_failing_symbols_last_row_and_shows_its_span(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    script.answer(("AAPL", 1.0), ("MSFT", 2.0), failed={})
+    table = start(
+        massive_session, script=script, pollers=pollers, clock=clock, mode=PollMode.UPSERT
+    )
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
+    script.answer(("AAPL", 3.0), failed={"MSFT": refusal()})
+    next_cycle(clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0), ("MSFT", 2.0)])
+    assert spans(massive_session, dh_to_pylist, REFUSALS) == [("MSFT", True)]
+
+
+def test_a_cycle_where_every_symbol_fails_for_now_is_a_failed_cycle(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # Nothing was read at all: the table's run of failed cycles opens, and ends with an answer.
+    script.answer(("AAPL", 1.0), ("MSFT", 2.0), failed={})
+    table = start(massive_session, script=script, pollers=pollers, clock=clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 1.0), ("MSFT", 2.0)])
+    script.answer(failed={"AAPL": outage(), "MSFT": outage()})
+    next_cycle(clock)
+    assert [row["EndedAt"] for row in problems_of(massive_session, dh_to_pylist, FAILED)] == [None]
+    script.answer(("AAPL", 3.0), ("MSFT", 4.0), failed={})
+    next_cycle(clock)
+    until(lambda: pairs(table, dh_to_pylist) == [("AAPL", 3.0), ("MSFT", 4.0)])
+    (row,) = problems_of(massive_session, dh_to_pylist, FAILED)
+    assert row["EndedAt"] is not None
+
+
+def test_a_refused_symbol_racing_its_watchlist_edits_leaves_the_table_running(
+    *,
+    routed_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+    dh_input_table: Callable[..., InputTable],
+) -> None:
+    # MSFT alone is refused while another thread deletes and adds it back as cycles run: each
+    # re-add is read afresh and refused again, AAPL keeps its rows, and the table never fails.
+    fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
+    fake_rest.reply(
+        "/v1/indicators/sma/MSFT", Reply({"status": "NOT_AUTHORIZED", "message": "no"}, status=403)
+    )
+    watch, _ = symbol_watchlist(dh_input_table, "AAPL", "MSFT")
+    q = build_query(routed_session._core, SMA, query_type=FetchQuery, symbols=watch)
+    table = q.poll(60, mode=PollMode.REPLACE)
+    until(lambda: symbols_of(table, dh_to_pylist) == ["AAPL"])
+    done = threading.Event()
+    msft = new_table([string_col("Symbol", ["MSFT"])])
+
+    def edit() -> None:
+        with entered(routed_session._core.exec_ctx):
+            while not done.is_set():
+                watch.delete(msft)
+                watch.add(msft)
+
+    editor = threading.Thread(target=edit)
+    editor.start()
+    try:
+        for _ in range(5):
+            next_cycle(clock)
+    finally:
+        done.set()
+        editor.join(TIMEOUT)
+    next_cycle(clock)
+    (row,) = streams_of(routed_session, dh_to_pylist)
+    assert (row["State"], row["Error"]) == ("RUNNING", None)
+    assert symbols_of(table, dh_to_pylist) == ["AAPL"]
+    refused = problems_of(routed_session, dh_to_pylist, REFUSALS)
+    assert {row["Symbol"] for row in refused} == {"MSFT"}
+    assert [row["EndedAt"] for row in refused][-1] is None  # the latest span holds
+    assert problems_of(routed_session, dh_to_pylist, FAILED) == []
+
+
+_DIVIDEND = {"ticker": "AAPL", "id": "a", "frequency": 4, "cash_amount": 1.0}
+"""A dividend row the library reads whole."""
+
+_RAISED_CAUSES: dict[str, tuple[Any, str, list[str], Reply]] = {
+    # The cause set to RAISE: its dataset, the path that answers, the symbols, and the reply.
+    "refused_symbols": (
+        SMA,
+        "/v1/indicators/sma/MSFT",
+        ["AAPL", "MSFT"],
+        Reply({"status": "NOT_AUTHORIZED", "message": "no"}, status=403),
+    ),
+    "unavailable_symbols": (SMA, "/v1/indicators/sma/MSFT", ["AAPL", "MSFT"], Reply(b"{}", 404)),
+    "unrequested_symbols": (
+        DIVIDENDS,
+        PATH,
+        ["AAPL"],
+        Reply(envelope([_DIVIDEND, {**_DIVIDEND, "ticker": "IBM", "id": "i"}])),
+    ),
+    "unconvertible_values": (
+        DIVIDENDS,
+        PATH,
+        ["AAPL"],
+        Reply(envelope([_DIVIDEND, {**_DIVIDEND, "id": "b", "frequency": 4.5}])),
+    ),
+}
+
+
+@pytest.mark.parametrize("cause", list(_RAISED_CAUSES))
+def test_a_symbols_problem_under_raise_fails_the_poll(
+    *,
+    cause: str,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    clock: FakeClock,
+    dh_to_pylist: ToPylist,
+) -> None:
+    # One symbol's problem fails the whole table when its cause is set to RAISE, as asked.
+    spec, path, symbols, reply = _RAISED_CAUSES[cause]
+    monkeypatch.setattr(_session, "CATALOG", Catalog((DIVIDENDS, SMA)))
+    monkeypatch.setattr(poll, "CLOCK", clock)
+    policy = dm.ErrorPolicy(**{cause: dm.OnError.RAISE})
+    m = dm.MassiveSession(
+        dm.MassiveConfig(api_key="test-key", rest_base_url=fake_rest.url, on_error=policy)
+    )
+    try:
+        fake_rest.reply("/v1/indicators/sma/AAPL", SMA_VALUE)
+        fake_rest.reply(path, reply)
+        q = build_query(m._core, spec, query_type=FetchQuery, symbols=symbols)
+        table = q.poll(60, mode=PollMode.REPLACE)
+        until(lambda: bool(table.j_table.isFailed()))
+        until(lambda: streams_of(m, dh_to_pylist)[0]["State"] == "FAILED")
+        (row,) = streams_of(m, dh_to_pylist)
+        assert row["Error"]
+    finally:
+        m.close()

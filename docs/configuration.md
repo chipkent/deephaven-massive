@@ -148,8 +148,19 @@ A read or stream fails, whatever the setting, when Massive's rows stop being rea
 would otherwise hold nothing and show no error. The rows are Massive's data, and `m.problems()`
 gives what Massive sent and why, for a report to Massive.
 
-- A `fetch()`, a `history()`, or a `poll()` cycle fails when it can read none of the rows of
-  the symbols it asked for. A row of a symbol it didn't ask for counts neither way.
+- A `fetch()`, a `history()`, or a `poll()` cycle of `dm.ALL` fails when it can read none of
+  the rows of the symbols it asked for. A row of a symbol it didn't ask for counts neither way.
+- A `poll()` of symbols, or of a table of values, reads each symbol on its own, so one
+  symbol's failure leaves the others' rows, and `m.problems()` lists it:
+  - When Massive refuses the symbol, or the library withheld every row Massive sent for it,
+    the poll stops reading it.
+  - When its request fails with a temporary error, a later poll reads it again, and a
+    `dm.PollMode.REPLACE` table keeps its last rows meanwhile. After
+    [`max_outage`](#settings-reference), the poll stops reading it.
+
+  To read a stopped symbol again, delete its row and add it back. For symbols listed in code,
+  call `poll()` again. The table fails when every symbol of its first poll fails before any of
+  them answers, or under `raise` for the failed symbol's cause.
 - A `fetch()` or `history()` of symbols you pass in code judges each symbol on its own. When
   Massive refuses a symbol, or its request fails after retries, the call returns the other
   symbols' rows, and `m.problems()` lists the failed symbol. The call fails when every symbol
@@ -325,8 +336,13 @@ Set `0` to fail at the first outage. Each kind of table counts its own time:
 
 - A stream counts the time its connection is down.
 - A `poll()` table counts the time its polls keep failing or stop arriving. A poll
-  that would wait longer than `max_outage` for Massive's rate limits gives up, and
-  counts as a failed poll.
+  fails when none of its symbols answered and one at least failed with a temporary
+  error. A poll that would wait longer than `max_outage` for Massive's rate limits
+  gives up, and counts as a failed poll.
+- Each symbol of a `poll()` counts the time its reads keep failing with a
+  temporary error. Then the poll stops reading it, and `m.problems()` lists it.
+  Delete its row and add it back to read it again, or call `poll()` again for
+  symbols listed in code.
 - A watchlist's `fetch()` or `history()` counts the time each symbol's reads keep
   failing with a temporary error. Then `m.symbol_reads()` shows that symbol
   `FAILED`. Delete its row and add it back to read it again.

@@ -568,9 +568,17 @@ class FetchQuery(Query):
         `MassiveConfig.max_outage`, 300 seconds by default. It also fails on a failure no later poll
         can fix, such as a rejected key.
 
-        A poll skips a symbol it can't read and lists it in `m.streams()`. To fail the table
-        instead, set `noncanonical_symbols` or `unavailable_symbols` in
-        `MassiveConfig` to `dm.OnError.RAISE`.
+        Each poll reads every symbol on its own, so one symbol's failure never costs another symbol
+        its rows. A symbol whose read fails for now is read again at a later poll, and a
+        `dm.PollMode.REPLACE` table keeps its last rows meanwhile. A symbol Massive refuses, or that
+        keeps failing for `max_outage`, isn't read again until you delete its row from the table of
+        symbols and add it back, or call `poll()` again. The table fails when every symbol of its
+        first poll has failed that way before any of them answered, or when Massive refuses the feed
+        or the API key. A poll skips a symbol it can't read or that Massive has no data for. Each
+        such symbol is listed in `m.problems()`. To fail the table instead, set
+        `noncanonical_symbols`, `unavailable_symbols`, or `refused_symbols` of `dm.ErrorPolicy` to
+        `dm.OnError.RAISE`, through `MassiveConfig(on_error=...)` or the dataset method's
+        `on_error=`.
 
         Args:
             interval: The time between polls, in seconds or as a `timedelta`, at least 1 second. For

@@ -740,7 +740,7 @@ def test_news_of_a_watchlist_lists_an_article_under_each_ticker(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.rest")
-    caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.static_reads")
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.symbol_reads")
     shared = _article("both", "2024-06-24T18:00:00Z", "AAPL", "MSFT")
     # An article without an id is listed like any other.
     unnamed = {

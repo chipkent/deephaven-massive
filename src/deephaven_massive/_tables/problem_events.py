@@ -375,7 +375,8 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             action=ProblemAction.DELAYED,
             span=True,
             summary="A symbol's read failed in a way that may pass, so the library tries it "
-            "again. A read that waits on Massive's crypto ticker list is one of these.",
+            "again. A `dm.PollMode.REPLACE` poll keeps the symbol's last rows meanwhile. A read "
+            "that waits on Massive's crypto ticker list is one of these.",
             fix="Nothing, unless it lasts. Then fix what `Detail` names.",
         ),
         _C.SYMBOL_READ_FAILED: CauseTraits(
@@ -383,9 +384,9 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_LIBRARY,
             action=ProblemAction.FAILED,
             span=True,
-            summary="A watchlist symbol's read failed and won't be tried again.",
-            fix="Fix what `Detail` names. Then delete the symbol's watchlist row and add it back "
-            "to read it again.",
+            summary="A symbol of a watchlist or a `poll()` failed and won't be read again.",
+            fix="Fix what `Detail` names. Then delete the symbol's row and add it back to read "
+            "it again. For symbols listed in code, call `poll()` again.",
         ),
         _C.STREAM_FAILED: CauseTraits(
             policy=None,

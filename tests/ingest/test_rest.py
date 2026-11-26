@@ -1543,22 +1543,18 @@ def test_a_poll_with_a_max_outage_of_zero_fails_at_its_first_rate_limit_pause(
         (row,) = dh_to_pylist(m.streams())
     finally:
         m.close()
-    # The pause outlasts max_outage, a setting of the user's, which the error names.
-    assert re.fullmatch(
-        r"stocks\.dividends poll\(\): every cycle since \S+Z has failed for 0 s, "
-        + re.escape(
-            "reaching max_outage=0 s, so this table stopped and the rows since then may be "
-            "missing. The latest error: Massive answered GET "
-            "/stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 with HTTP 429: "
-            '"slow down". The next request goes at 2027-01-15 08:01:00 UTC, past max_outage=0 s. '
-            "The usual cause is another program using the same Massive account, which shares "
-            "its limit, and m.rate_limits() shows each subscription's pace. Retry after that "
-            "time, stop the other program, or pass "
-            "rest_requests_per_minute={dm.Subscription.STOCKS: n} to dm.MassiveConfig, with "
-            "the limit n Massive gives you. Pass a larger max_outage to dm.MassiveConfig to "
-            "wait longer. Call m.stocks.dividends again for a new live table."
-        ),
-        row["Error"],
+    # The pause outlasts max_outage, a setting of the user's, which the error names. AAPL is
+    # every symbol the call asked for, so its failure is the table's.
+    assert row["Error"] == (
+        "AAPL has failed for 0 s, as long as max_outage=0 s allows. The latest error: Massive "
+        "answered GET /stocks/v1/dividends?limit=1000&ticker.any_of=AAPL on 127.0.0.1 with "
+        'HTTP 429: "slow down". The next request goes at 2027-01-15 08:01:00 UTC, past '
+        "max_outage=0 s. The usual cause is another program using the same Massive account, "
+        "which shares its limit, and m.rate_limits() shows each subscription's pace. Retry "
+        "after that time, stop the other program, or pass "
+        "rest_requests_per_minute={dm.Subscription.STOCKS: n} to dm.MassiveConfig, with the "
+        "limit n Massive gives you. Pass a larger max_outage to dm.MassiveConfig to wait longer. "
+        "Call m.stocks.dividends again for a new live table."
     )
     assert len(fake_rest.get_queries()) == 1
 
@@ -2847,6 +2843,35 @@ def test_all_daily_bars_read_one_grouped_day_at_a_time(
         GROUPED_PATH.format(date="2025-03-04"),
     ]
     assert [(r["Symbol"], r["Close"]) for r in out] == [("AAPL", 2.0), ("MSFT", 3.0)]
+
+
+def test_all_daily_bars_fail_on_a_day_massive_refuses_and_list_no_symbol(
+    *,
+    session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A read of dm.ALL names no symbol, so one day's refusal fails it and lists nothing.
+    events = record_problems(session, monkeypatch)
+    day = int(datetime(2025, 3, 3, 5, tzinfo=UTC).timestamp()) * 1000
+    fake_rest.reply(
+        GROUPED_PATH.format(date="2025-03-03"), Reply(envelope([{"T": "AAPL", "t": day, "c": 2.0}]))
+    )
+    fake_rest.reply(
+        GROUPED_PATH.format(date="2025-03-04"),
+        Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403),
+    )
+    with pytest.raises(dm.EntitlementError, match="upgrade"):
+        history(
+            session,
+            BARS,
+            start="2025-03-03",
+            end="2025-03-04",
+            symbols=dm.ALL,
+            timespan=Timespan.DAY,
+            adjusted=True,
+        )
+    assert events == []
 
 
 def test_all_daily_bars_request_only_the_days_asked_for(
@@ -5293,18 +5318,18 @@ def test_a_symbol_without_data_is_listed_beside_another_symbol_s_failure(
     ]
 
 
-def test_a_symbol_without_data_is_listed_when_a_later_path_fails_a_poll_cycle(
+def test_a_symbol_without_data_is_listed_when_a_later_path_fails_in_a_poll_cycle(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The cycle reads the stock path, where ZZZZ answers HTTP 404, then the crypto path, where
-    # X:BTCUSD's request fails. The cycle raises that failure, and m.problems() still lists ZZZZ.
+    # X:BTCUSD's request fails. That failure is X:BTCUSD's own, and m.problems() lists ZZZZ.
     fake_rest.reply("/v1/indicators/sma/X%3ABTCUSD", Reply(b"oops", status=500))
     events = record_problems(session, monkeypatch)
     symbols = ("ZZZZ", "X:BTCUSD")
     q = query(session, SMA, symbols=list(symbols))
     reader = _endpoints(session)._reader("poll", session._core.policy, waiter=Waiter.LIVE_TABLE)
-    with ThreadPoolExecutor(1) as pool, pytest.raises(dm.MassiveError, match="HTTP 500"):
-        reader.read_cycle(
+    with ThreadPoolExecutor(1) as pool:
+        read = reader.read_cycle(
             SMA,
             q._request,
             symbols=symbols,
@@ -5315,6 +5340,9 @@ def test_a_symbol_without_data_is_listed_when_a_later_path_fails_a_poll_cycle(
             cancel=Cancel(),
             pace=rate_limits.PaceCheck("indicators.sma poll()", 60.0),
         )
+    assert list(read.failures) == ["X:BTCUSD"]
+    assert "HTTP 500" in str(read.failures["X:BTCUSD"])
+    assert read.fatal is None
     why = "(HTTP 404 from GET /v1/indicators/sma/ZZZZ)"
     assert [(e.cause, e.symbol, e.detail) for e in events] == [
         (ProblemCause.UNAVAILABLE_SYMBOLS, "ZZZZ", f"Massive has no data for it {why}")
@@ -5714,7 +5742,9 @@ def test_limit_caps_the_rows_listed_under_each_ticker(
 # --- poll() cycles of a table of values -----------------------------------------------------------
 
 
-def _value_cycle(m: dm.MassiveSession, values: tuple[str, ...]) -> poll.CycleRows:
+def _value_cycle(
+    m: dm.MassiveSession, values: tuple[str, ...], *, cancel: Cancel | None = None
+) -> poll.CycleRows:
     # One poll() cycle of futures products over a table of product codes, read as it holds them.
     with entered(m._core.exec_ctx):
         table = new_table([string_col("ProductCode", list(values))])
@@ -5729,7 +5759,7 @@ def _value_cycle(m: dm.MassiveSession, values: tuple[str, ...]) -> poll.CycleRow
             record=lambda _: None,
             on_recency=lambda _: None,
             executor=pool,
-            cancel=Cancel(),
+            cancel=Cancel() if cancel is None else cancel,
             pace=rate_limits.PaceCheck("futures.products poll()", 60.0),
         )
 
@@ -5790,26 +5820,71 @@ def test_a_poll_cycle_s_values_share_one_patience(
     assert read.patience == 600.0
 
 
-def test_a_poll_cycle_raises_a_value_s_failure_other_than_no_data(
+def test_a_poll_cycle_returns_a_value_s_refusal_as_that_value_s_failure(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    refusal = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
-    fake_rest.reply("/futures/v1/products", refusal)
-    with pytest.raises(dm.EntitlementError):
-        _value_cycle(rest_session, ("ES",))
-
-
-def test_a_poll_cycle_judges_its_values_as_one_read(
-    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
-) -> None:
-    # NQ's only row is unreadable: beside ES's, it is withheld; alone, the cycle fails.
+    # NQ's refusal is NQ's alone: the cycle keeps ES's rows and returns the refusal, never raises.
     es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
-    nq = Reply(envelope([{"product_code": "NQ", "last_updated": "no time"}]))
-    fake_rest.reply("/futures/v1/products", es, nq, nq, nq)
+    refusal = Reply({"status": "NOT_AUTHORIZED", "message": "upgrade"}, status=403)
+    fake_rest.reply("/futures/v1/products", es, refusal)
     read = _value_cycle(rest_session, ("ES", "NQ"))
     assert read.rows.column("ProductCode").to_pylist() == ["ES"]
-    with pytest.raises(RowDataError, match="could read none of the 2 rows"):
-        _value_cycle(rest_session, ("NQ", "YM"))
+    assert list(read.failures) == ["NQ"]
+    assert isinstance(read.failures["NQ"], dm.EntitlementError)
+    assert read.fatal is None
+
+
+def test_a_poll_cycle_judges_each_value_alone(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # NQ's only row is unreadable, so NQ fails alone, whether or not ES's rows came beside it.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    nq = Reply(envelope([{"product_code": "NQ", "last_updated": "no time"}]))
+    fake_rest.reply("/futures/v1/products", es, nq)
+    read = _value_cycle(rest_session, ("ES", "NQ"))
+    assert read.rows.column("ProductCode").to_pylist() == ["ES"]
+    assert list(read.failures) == ["NQ"]
+    assert isinstance(read.failures["NQ"], RowDataError)
+    assert read.fatal is None
+
+
+def test_a_poll_cycle_fails_on_a_value_massive_has_no_data_for_under_raise(
+    *, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Under unavailable_symbols=RAISE, NQ's HTTP 404 fails the cycle, and m.problems() lists it.
+    es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
+    fake_rest.reply("/futures/v1/products", es, Reply({"status": "NOT_FOUND"}, status=404))
+    config = dm.MassiveConfig(
+        api_key="test-key",
+        rest_base_url=fake_rest.url,
+        on_error=dm.ErrorPolicy(unavailable_symbols=dm.OnError.RAISE),
+    )
+    with dm.MassiveSession(config) as strict:
+        events = record_problems(strict, monkeypatch)
+        with pytest.raises(UnavailableSymbolError, match="NQ"):
+            _value_cycle(strict, ("ES", "NQ"))
+    assert [(e.cause, e.symbol) for e in events] == [(ProblemCause.UNAVAILABLE_SYMBOLS, "NQ")]
+
+
+def test_a_poll_cycle_raises_a_value_s_rejected_api_key_as_the_whole_read_s_failure(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A rejected key would refuse every value, so it fails the cycle instead of failing ES alone.
+    fake_rest.reply("/futures/v1/products", Reply({"status": "ERROR"}, status=401))
+    with pytest.raises(dm.AuthenticationError):
+        _value_cycle(rest_session, ("ES", "NQ"))
+    assert len(fake_rest.get_queries()) == 1
+
+
+def test_a_poll_cycle_raises_a_value_s_failure_once_the_poller_stops(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # A stopped poller publishes nothing, so ES's cancelled read ends the cycle, never ES's failure.
+    stopped = Cancel()
+    stopped.set()
+    with pytest.raises(dm.MassiveError, match="stopped because its read was cancelled"):
+        _value_cycle(rest_session, ("ES", "NQ"), cancel=stopped)
+    assert fake_rest.get_queries() == []
 
 
 def test_a_poll_cycle_of_an_empty_table_of_values_reads_nothing(

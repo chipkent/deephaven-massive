@@ -248,7 +248,7 @@ class ReadTally:
         for symbol, outcome in outcomes.items():
             failure = None
             if isinstance(outcome, SymbolRows) and not outcome.table.size:
-                failure = self._failure_of(dataset, symbol, everyone)
+                failure = self.symbol_failure(dataset, symbol, everyone)
             judged[symbol] = outcome if failure is None else SymbolFailure(failure)
             if failure is not None:
                 log_failure(
@@ -262,7 +262,7 @@ class ReadTally:
                 )
         return judged
 
-    def _failure_of(
+    def symbol_failure(
         self, dataset: str, symbol: str, everyone: Sequence[str]
     ) -> RowDataError | None:
         """Return a symbol's failure, if rows that were or could be its own were all withheld.
