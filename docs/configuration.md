@@ -118,7 +118,8 @@ library can't read one of them:
 `m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30")`. The table gets 4
 rows. `m.problems()` lists the fifth, and the log warns once.
 
-Set every cause to `raise` when a call must return complete data:
+Set every cause to `raise` when a call must fail rather than leave out a refused symbol, a
+symbol with no data, or a row the library can't read:
 
 ```python
 import deephaven_massive as dm
@@ -130,9 +131,9 @@ apple = bars.history("2026-10-26", "2026-10-30")
 
 To do the same for every call, pass that policy to `MassiveConfig(on_error=...)`.
 
-Under `raise`, a `fetch()` or `history()` with `wait=True` raises an error for a problem it
-finds while it waits. A problem found after a call returns fails the table, and `Error` in
-`m.streams()` says why.
+A `fetch()` or `history()` with `wait=True` raises an error for a problem of a cause set to
+`raise` that it finds while it waits. Such a problem found after a call returns fails the
+table, and `Error` in `m.streams()` says why.
 
 A policy can also set one cause, such as `dm.ErrorPolicy(noncanonical_symbols=dm.OnError.RAISE)`.
 In a call's policy, a cause it leaves unset follows the session's. A cause the session's policy
@@ -144,11 +145,11 @@ leaves unset follows the default.
 
 In a `fetch()`, `history()`, `poll()`, or stream of several symbols, one symbol's failure is
 its own. By default, the other symbols keep their rows, and `m.problems()` lists the failed one
-with its cause. You can pass the symbols in code, such as a list, or as a watchlist. A
+with its cause. You can pass the symbols as a watchlist or in code, such as a list. A
 watchlist is a live table of symbols.
 
-Symbols that share one request or one flat file fail together when it keeps failing with a
-temporary error. Snapshots read several symbols in one request. A `history()` of many symbols can
+Symbols that share one request fail together when it keeps failing with a temporary error,
+and symbols read from the same flat files fail together when a read of the files fails. Snapshots read several symbols in one request. A `history()` of many symbols can
 read them all from the same flat files. When Massive refuses a shared request, see
 [`on_error.refused_symbols`](#setting-details).
 
@@ -167,7 +168,8 @@ A failed symbol isn't read again. To read it again:
 - In a watchlist, delete its row and add it back.
 - For symbols in code, call `fetch()`, `history()`, or `poll()` again.
 - For a stream of symbols in code, release each of its tables with `m.release()`, then call
-  the method again.
+  the method again. In the console, call it in a later command, since a release takes effect
+  when the command ends.
 
 When a symbol of a `poll()` fails, a `dm.PollMode.REPLACE` table drops its rows. A
 `dm.PollMode.APPEND` or `dm.PollMode.UPSERT` table keeps them.
@@ -180,16 +182,14 @@ Whatever the setting, each of these problems fails the whole table of a `fetch()
 `poll()`, or stream:
 
 - Massive rejects your API key.
-- Massive serves the current data of a `fetch()`, `poll()`, or stream delayed, and
-  [`delayed_subscriptions`](#setting-details) doesn't list its subscription. That entry names
-  the one exception.
+- Massive sends delayed data to a `fetch()`, `poll()`, or stream whose subscription
+  [`delayed_subscriptions`](#setting-details) doesn't list. A stream from a host you set in
+  `websocket_hosts` opens anyway.
 - Massive refuses a call for `dm.ALL`.
 - Every symbol the table started with fails. A table whose watchlist was empty when you called
   the method never fails this way.
-- The library can read none of the rows Massive sends to a `fetch()`, `history()`, or `poll()`
-  of `dm.ALL`.
-- The library can read none of the rows Massive sends to a `fetch()` or `history()` of symbols
-  in code.
+- The library can read none of the rows Massive sends. This applies to a `fetch()` or
+  `history()` of `dm.ALL` or of symbols in code, and to a `poll()` of `dm.ALL`.
 - A stream's or `poll()` table's outage outlasts [`max_outage`](#setting-details).
 
 <!-- The settings below are generated from MassiveConfig by scripts/render_reference.py. Edit the class's docstring, not this part of the page. -->
