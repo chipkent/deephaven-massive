@@ -154,6 +154,7 @@ __all__ = [
     "attribute_values",
     "fails_call",
     "fails_followed_read",
+    "fails_list_read",
     "fetch_units",
     "history_units",
     "leave_out_unrequested",
@@ -487,7 +488,7 @@ def read_symbol_list(
         current=current,
         cancel=cancel,
         patience=patience,
-        fails_read=functools.partial(_fails_list_read, cancel=cancel),
+        fails_read=functools.partial(fails_list_read, cancel=cancel),
         on_recency=on_recency,
         record=record,
         executor=executor,
@@ -536,7 +537,7 @@ def read_symbol_list(
     return SymbolListRead(rows, asked, failures, no_data, requests)
 
 
-def _fails_list_read(error: MassiveError, *, cancel: Cancel | None) -> bool:
+def fails_list_read(error: MassiveError, *, cancel: Cancel | None) -> bool:
     """Tell whether a request's failure fails a read of a list whole.
 
     Those of a followed read (`fails_followed_read`) do, and so does any failure once the

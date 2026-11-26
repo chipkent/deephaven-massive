@@ -244,23 +244,47 @@ class ReadTally:
             The outcomes, in the same order, judged.
         """
         everyone = tuple(outcomes)
-        judged: dict[str, SymbolOutcome] = {}
-        for symbol, outcome in outcomes.items():
-            failure = None
-            if isinstance(outcome, SymbolRows) and not outcome.table.size:
-                failure = self.symbol_failure(dataset, symbol, everyone)
-            judged[symbol] = outcome if failure is None else SymbolFailure(failure)
-            if failure is not None:
-                log_failure(
-                    logger,
-                    failure,
-                    "%s by symbol fails %s: %s",
-                    dataset,
-                    symbol,
-                    expected=logging.DEBUG,
-                    named=dataset,
-                )
-        return judged
+        empty = [
+            symbol
+            for symbol, outcome in outcomes.items()
+            if isinstance(outcome, SymbolRows) and not outcome.table.size
+        ]
+        failed = self.unread_symbols(dataset, empty, everyone)
+        return {
+            symbol: SymbolFailure(failed[symbol]) if symbol in failed else outcome
+            for symbol, outcome in outcomes.items()
+        }
+
+    def unread_symbols(
+        self, dataset: str, empty: Sequence[str], everyone: Sequence[str]
+    ) -> dict[str, RowDataError]:
+        """Return the failure of each symbol that got no row and whose rows were withheld.
+
+        Args:
+            dataset: The dataset, for the message.
+            empty: The symbols that got no row and did not fail on their own, in order.
+            everyone: Every symbol the read judges, for a scan's rows of no known symbol.
+
+        Returns:
+            Each such symbol's failure (`symbol_failure`), in the order of `empty`; a symbol
+            with no withheld row of its own, such as one Massive had no data for, has none.
+        """
+        failed: dict[str, RowDataError] = {}
+        for symbol in empty:
+            failure = self.symbol_failure(dataset, symbol, everyone)
+            if failure is None:
+                continue
+            log_failure(
+                logger,
+                failure,
+                "%s by symbol fails %s: %s",
+                dataset,
+                symbol,
+                expected=logging.DEBUG,
+                named=dataset,
+            )
+            failed[symbol] = failure
+        return failed
 
     def symbol_failure(
         self, dataset: str, symbol: str, everyone: Sequence[str]

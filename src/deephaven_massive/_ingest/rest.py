@@ -222,7 +222,7 @@ from deephaven_massive._ingest.symbol_reads import (
     ValueRead,
     asked_column,
     attribute_values,
-    fails_followed_read,
+    fails_list_read,
     fetch_units,
     history_units,
     leave_out_unrequested,
@@ -2671,7 +2671,7 @@ class RestReader:
         The requests are those `fetch()` makes for the symbols (`symbol_reads.fetch_units`),
         read as a static `fetch()` of them reads them (`symbol_reads.read_symbol_list`). A
         symbol that got no row and whose rows the library withheld every one of fails on its
-        own (`ReadTally.symbol_failure`), whatever its policy. A symbol Massive answered with
+        own (`ReadTally.unread_symbols`), whatever its policy. A symbol Massive answered with
         HTTP 404 has no rows, and the reader lists it (`read_each`).
 
         Args:
@@ -2715,13 +2715,8 @@ class RestReader:
             executor=executor,
         )
         with_rows = set(read.asked.to_pylist())
-        withheld = {
-            symbol: failure
-            for symbol in symbols
-            if symbol not in read.failures and symbol not in with_rows
-            for failure in (tally.symbol_failure(spec.name, symbol, symbols),)
-            if failure is not None
-        }
+        empty = [s for s in symbols if s not in read.failures and s not in with_rows]
+        withheld = tally.unread_symbols(spec.name, empty, symbols)
         left_out = [
             f"{call.symbol} ({call.unsplit.why})"
             for _, call in units
@@ -2778,7 +2773,7 @@ class RestReader:
             return cycle.rows, cycle.requests, cycle.left_out
 
         def fails_cycle(error: MassiveError) -> bool:
-            return fails_followed_read(error) or self.state.closed or cancel.is_set()
+            return fails_list_read(error, cancel=cancel) or self.state.closed
 
         got = self.read_by_value(spec, request, values, read=read_one, fails_read=fails_cycle)
         schema = self.catalog.dataset_schema(spec).arrow_schema()
