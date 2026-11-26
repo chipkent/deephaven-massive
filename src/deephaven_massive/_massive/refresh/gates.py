@@ -513,7 +513,8 @@ def stale_entries(hand: HandInput, uses: Mapping[str, PathUse]) -> Iterator[Prob
             ([(e.path, e.wire_key) for e in hand.sample_errors], fields, f"SAMPLE_ERRORS {absent}"),
             (
                 [(e.path, e.wire_key) for e in hand.answer_fields],
-                fields,
+                # Only a declared key: an entry for a key only an example sends is stale.
+                lambda use: use.wire_keys,
                 "ANSWER_FIELDS entry for a field the snapshot does not declare",
             ),
         ],

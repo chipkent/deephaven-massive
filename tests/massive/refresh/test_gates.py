@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from deephaven_massive._massive.refresh import overrides
-from deephaven_massive._massive.refresh.exclusions import Exclusion, IgnoredKey, SampleError
+from deephaven_massive._massive.refresh.exclusions import (
+    AnswerField,
+    Exclusion,
+    IgnoredKey,
+    SampleError,
+)
 from deephaven_massive._massive.refresh.gates import (
     Gate,
     PathUse,
@@ -304,6 +309,18 @@ def test_stale_entry_none_for_entries_the_paths_use() -> None:
         identities=frozenset({"id"}),
     )
     assert list(stale_entries(hand, {_PATH: use})) == []
+
+
+def test_an_answer_field_only_an_example_sends_is_stale() -> None:
+    # `error` is declared; `message` is only in a response example, so its entry is stale.
+    hand = dataclasses.replace(
+        _EMPTY,
+        answer_fields=tuple(
+            AnswerField(path=_PATH, wire_key=key, reason="test") for key in ("error", "message")
+        ),
+    )
+    use = PathUse(wire_keys=frozenset({"error"}), example_keys=frozenset({"message"}))
+    assert _found(stale_entries(hand, {_PATH: use})) == [("stale-entry", _PATH, "message")]
 
 
 # --- One name per field Massive documents alike ---------------------------------------------
