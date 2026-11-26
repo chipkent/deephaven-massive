@@ -3071,6 +3071,57 @@ def test_a_cycle_of_one_table_whose_every_row_has_a_null_poll_key_fails_it(
     )
 
 
+def test_a_value_whose_every_row_has_a_null_poll_key_fails_on_its_own(
+    *,
+    massive_session: dm.MassiveSession,
+    script: Script,
+    pollers: Pollers,
+    clock: FakeClock,
+    dh_input_table: Callable[..., InputTable],
+    dh_to_pylist: ToPylist,
+) -> None:
+    # A poll of values judges each value by the rows read for it, whatever symbol they name:
+    # ES's two rows are unkeyed, so ES fails alone under its own name, and NQ's row publishes.
+    _, values = product_codes(dh_input_table, "ES", "NQ")
+    data = [
+        {"Symbol": "ESH6", "CashAmount": None},
+        {"Symbol": "ESZ5", "CashAmount": None},
+        {"Symbol": "NQH6", "CashAmount": 1.0},
+    ]
+    rows = pa.Table.from_pylist(data, schema=script.schema)
+    asked = pa.chunked_array([["ES", "ES", "NQ"]], pa.string())
+    script.outcomes.put(poll.CycleRows(rows, 2, 600.0, asked=asked, failures={}))
+    table = open_poll(
+        massive_session._core,
+        spec=dataclasses.replace(DIVIDENDS, poll_keys=("CashAmount",)),
+        request=Request(symbols=None, value_table=values),
+        interval=timedelta(seconds=60),
+        mode=PollMode.APPEND,
+        query="<Query test>",
+        read=script,
+        pollers=pollers,
+        host="api.massive.com",
+        path=PATH,
+        recency=None,
+        clock=clock,
+        stop=threading.Event(),
+    )
+    until(lambda: [row["Symbol"] for row in dh_to_pylist(table)] == ["NQH6"])
+    until(lambda: problems_of(massive_session, dh_to_pylist, READ_FAILED) != [])
+    assert not is_failed(table)
+    (span,) = problems_of(massive_session, dh_to_pylist, READ_FAILED)
+    assert (span["Symbol"], span["EndedAt"]) == ("ES", None)
+    assert span["Detail"].startswith(
+        "stocks.dividends: Massive sent 2 rows for ES from GET /stocks/v1/dividends, and the "
+        "library could read none of them whole, so it withheld them all."
+    )
+    withheld = problems_of(massive_session, dh_to_pylist, ProblemCause.UNREADABLE_KEYS)
+    assert sorted((row["Symbol"], row["Rows"]) for row in withheld) == [
+        ("ESH6", 1),
+        ("ESZ5", 1),
+    ]
+
+
 @pytest.mark.parametrize("mode", list(PollMode))
 def test_a_null_in_a_nullable_poll_key_is_a_value(
     *,
