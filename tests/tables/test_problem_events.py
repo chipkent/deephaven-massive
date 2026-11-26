@@ -180,3 +180,12 @@ def test_the_causes_are_pinned() -> None:
         "PUBLISHED",
         "OVERFLOW",
     ]
+
+
+def test_the_fix_for_a_refused_symbol_suggests_no_plan_change() -> None:
+    # Massive decides what a key may read, so the fix sends the user to Massive's answer
+    # instead of guessing that a plan change would serve the symbol.
+    assert CAUSES[ProblemCause.REFUSED_SYMBOLS].fix == (
+        "Remove the symbol. If you expect Massive to serve it, ask Massive why it refused, "
+        "quoting `Detail`."
+    )

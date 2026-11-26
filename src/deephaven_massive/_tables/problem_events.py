@@ -193,9 +193,8 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             span=True,
             summary="Massive refused the symbol, usually because your plan doesn't serve it. "
             "`Detail` gives Massive's answer.",
-            fix="Remove the symbol, or upgrade to a plan that serves it. If your plan serves "
-            "it, [`refused_symbols`](configuration.md#setting-details) says how to read "
-            "it.",
+            fix="Remove the symbol. If you expect Massive to serve it, ask Massive why it "
+            "refused, quoting `Detail`.",
         ),
         _C.UNREQUESTED_SYMBOLS: CauseTraits(
             policy="unrequested_symbols",
