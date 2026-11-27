@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from deephaven_massive._datasets.column_reference import COMMAND, plan_cell
+from deephaven_massive._datasets.column_reference import COMMAND, PAGES_URL, plan_cell
 from deephaven_massive._datasets.readme_plans import (
     PLANS_TABLE_END,
     PLANS_TABLE_START,
@@ -80,7 +80,7 @@ def test_the_readme_holds_the_rendered_table() -> None:
 
 
 def test_a_row_shows_what_each_dataset_page_shows_for_the_same_plan() -> None:
-    labels = {f"[{r.label}](docs/datasets/{r.dataset}.md#plans)": r for r in ROWS}
+    labels = {f"[{r.label}]({PAGES_URL}{r.dataset}.md#plans)": r for r in ROWS}
     shown = []
     for table in _tables(plans_table(CATALOG, provenance())):
         header, body = table[0], table[2:]

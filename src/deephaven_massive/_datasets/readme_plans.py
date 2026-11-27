@@ -37,7 +37,7 @@ from deephaven_massive._datasets.column_reference import (
     COMMAND,
     NOT_INCLUDED,
     dataset_urls,
-    page_name,
+    page_url,
     plan_cell,
     table_row,
 )
@@ -231,8 +231,8 @@ def plans_table(catalog: Catalog, provenance: Provenance) -> str:
         for row, row_pages in zip(ROWS, pages, strict=True):
             if not set(plans) & set(_plans([row_pages])):
                 continue
-            name = page_name(catalog.by_name[row.dataset])
-            link = f"[{row.label}](docs/datasets/{name}#plans)"
+            # By full URL: PyPI shows the README but resolves no relative path.
+            link = f"[{row.label}]({page_url(catalog.by_name[row.dataset])}#plans)"
             lines.append(table_row([link, *(plan_cell(plan, row_pages) for plan in plans)]))
     return "\n".join(lines) + "\n"
 

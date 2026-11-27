@@ -38,7 +38,7 @@ you finish it, and next to each item, note anything that failed, surprised you, 
 
 ```markdown
 ## Set up
-- [ ] Installed the library from the README, and noted the release tag
+- [ ] Installed the library at the release tag, and noted the tag
 - [ ] Opened my results issue
 - [ ] Cloned the test tools, and `tester.py check` says `ready: yes`
 
@@ -68,10 +68,13 @@ Each step that differs shows both.
 
 ### Prerequisites
 
-You need the README's [prerequisites](../README.md#prerequisites), and uv to run the test tools:
+You need the README's [prerequisites](../README.md#prerequisites). You also need git and the
+GitHub CLI to install and clone the release you test, and uv to run the test tools:
 
 | What | Check it with | Get it from |
 |---|---|---|
+| Git | `git --version` | [git-scm.com](https://git-scm.com) |
+| The GitHub CLI, signed in | `gh auth status` | [cli.github.com](https://cli.github.com), then `gh auth login` |
 | uv | `uv --version` | [uv's install guide](https://docs.astral.sh/uv/getting-started/installation/) |
 | Docker, only to run the server in Docker | `docker info` | [Docker Desktop](https://www.docker.com/products/docker-desktop/) |
 
@@ -84,11 +87,20 @@ gives.
 ### Install the library and set your keys
 
 Follow the README's [Install](../README.md#install) section, from
-[Sign in to GitHub](../README.md#sign-in-to-github) through
+[Install the library](../README.md#install-the-library) through
 [Set your API keys](../README.md#set-your-api-keys), and stop before the README starts the
 server:
 
 - Python environment: do every step, and keep the environment the README names, `~/dh-massive`.
+  Run the README's commands that create and activate the environment, then this one in place
+  of its install command. It installs the release you test from its tag, so the
+  [setup check](#check-the-setup) can match it with the test tools you clone:
+
+  ```bash
+  TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
+  uv pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express \
+    "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+  ```
 - Docker: skip [Install the library](../README.md#install-the-library). The image you build in
   [Check the setup](#check-the-setup) holds the library.
 

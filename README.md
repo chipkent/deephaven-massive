@@ -1,8 +1,11 @@
 # deephaven-massive
 
-![A Deephaven dashboard: type a symbol, and its last price, live trades, today's news, a 90-minute chart, and a by-the-second chart switch to it.](docs/images/hero.webp)
+![A Deephaven dashboard: type a symbol, and its last price, live trades, today's news, a 90-minute chart, and a by-the-second chart switch to it.](https://raw.githubusercontent.com/chipkent/deephaven-massive/main/docs/images/hero.webp)
 
 [![CI](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml/badge.svg)](https://github.com/chipkent/deephaven-massive/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/deephaven-massive)](https://pypi.org/project/deephaven-massive/)
+[![Python versions](https://img.shields.io/pypi/pyversions/deephaven-massive)](https://pypi.org/project/deephaven-massive/)
+[![License](https://img.shields.io/pypi/l/deephaven-massive)](https://github.com/chipkent/deephaven-massive/blob/main/LICENSE)
 
 Market data from [Massive](https://massive.com) as live and historical
 [Deephaven](https://deephaven.io) tables, for traders and quants who work in Python.
@@ -48,20 +51,7 @@ You need:
 |---|---|---|
 | Python 3.11 or later | `python3 --version` | [python.org](https://www.python.org/downloads/) |
 | Java 17 or later, with `JAVA_HOME` set | `java -version` and `echo $JAVA_HOME` | Deephaven's [pip install guide](https://deephaven.io/core/docs/getting-started/pip-install/) |
-| Git and the GitHub CLI | `git --version` and `gh --version` | [git-scm.com](https://git-scm.com) and [cli.github.com](https://cli.github.com) |
 | A Massive account | Sign in at [massive.com](https://massive.com) | [Massive's plans](https://massive.com/pricing) |
-
-<a id="sign-in-to-github"></a>
-
-### Sign in to GitHub
-
-The library installs from its GitHub repository. Sign in with the GitHub CLI, and let git use
-the same sign-in:
-
-```bash
-gh auth login
-gh auth setup-git
-```
 
 <a id="install-the-library"></a>
 
@@ -75,9 +65,7 @@ With pip:
 ```bash
 python3 -m venv ~/dh-massive
 source ~/dh-massive/bin/activate
-TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
-pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express \
-  "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express deephaven-massive
 ```
 
 With [uv](https://docs.astral.sh/uv/getting-started/installation/):
@@ -85,9 +73,7 @@ With [uv](https://docs.astral.sh/uv/getting-started/installation/):
 ```bash
 uv venv --python ">=3.11" ~/dh-massive
 source ~/dh-massive/bin/activate
-TAG=$(gh release list --repo chipkent/deephaven-massive --limit 1 --json tagName --jq '.[0].tagName')
-uv pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express \
-  "deephaven-massive @ git+https://github.com/chipkent/deephaven-massive.git@$TAG"
+uv pip install deephaven-server deephaven-plugin-ui deephaven-plugin-plotly-express deephaven-massive
 ```
 
 <a id="set-your-api-keys"></a>
@@ -124,7 +110,7 @@ in your browser. Keep the terminal open while you work, and press Control-C ther
 server.
 
 Next, run the tutorial's [first example](#read-daily-bars). If a step fails,
-[Troubleshooting](docs/troubleshooting.md#setup-messages) lists common setup problems and their
+[Troubleshooting](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#setup-messages) lists common setup problems and their
 fixes.
 
 <a id="tutorial"></a>
@@ -179,7 +165,7 @@ apple = m.stocks.bars("AAPL", dm.Timespan.DAY).history("2026-10-26", "2026-10-30
 query's other methods read the data and return a Deephaven table, so Deephaven's
 [table operations](https://deephaven.io/core/docs/conceptual/table-operations-overview/) work on
 it. The
-[dataset index](docs/datasets/README.md) lists each dataset's arguments and columns.
+[dataset index](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md) lists each dataset's arguments and columns.
 
 `history()` returns `apple` at once and downloads its rows in the background, so the console
 stays free. Deephaven fills the table when the rows arrive. To wait for the rows instead, pass
@@ -447,7 +433,7 @@ ends.
 Massive sends a minute bar only for a minute with trades, so a table you start while no stock
 trades stays empty until trading resumes. Crypto trades around the clock, so
 `m.crypto.bars("X:BTCUSD", dm.Timespan.MINUTE).last_by()` streams at any hour. The
-[crypto bars page](docs/datasets/crypto.bars.md#plans) lists the plans that include it.
+[crypto bars page](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/crypto.bars.md#plans) lists the plans that include it.
 
 Next, a calculation on the live bars.
 
@@ -601,7 +587,7 @@ nearest_calls = nearest.view(
 
 `nearest_calls` has a row for each call of the nearest expiry. `calls` holds every expiry.
 `wait=True` keeps `calls` static, which avoids a
-[Deephaven crash](docs/troubleshooting.md#live-table-messages) when `where_in` filters a live
+[Deephaven crash](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages) when `where_in` filters a live
 table by a table made from it.
 
 A chain is a snapshot of every contract of one underlying. Its arguments, such as
@@ -632,7 +618,7 @@ so `problems` gets a row whose `Cause` is `unavailable_symbols` and `Symbol` is 
 unlisted ticker with no rows and no error, so `problems` gets no row for it.
 
 Other problems, such as rows the library left out or a connection outage, add rows the same way.
-Troubleshooting's [problems section](docs/troubleshooting.md#problems) says what each one means
+Troubleshooting's [problems section](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#problems) says what each one means
 and what to do about it.
 
 Four more live tables show what the session is doing:
@@ -650,7 +636,7 @@ Here `streams` has one row, for the ticker-details read, whose `State` ends `DON
 too, because a `fetch()` doesn't stream. Once a table streams, `connections` gets a row for each
 connection.
 
-Troubleshooting's [diagnostics section](docs/troubleshooting.md#diagnostics) says when to check
+Troubleshooting's [diagnostics section](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#diagnostics) says when to check
 each table. For a table's columns, run `help()` on its method, such as
 `help(m.connections)`.
 
@@ -718,8 +704,8 @@ see a change. Restart it from a new terminal ([Start the server](#start-the-serv
 | `HTTPS_PROXY`, `NO_PROXY` | A proxy for every connection to Massive, and the hosts that skip it | Your system's proxy on macOS; none on Linux |
 | `SSL_CERT_FILE`, `SSL_CERT_DIR` | The certificate authorities to trust, such as your company's own. Flat-file reads use only `SSL_CERT_FILE`. | The `certifi` bundle |
 
-[Turn on the debug log](docs/troubleshooting.md#the-log) explains each log level and how to
-record what the library does, and [Report a bug](docs/troubleshooting.md#report-a-bug) says how
+[Turn on the debug log](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#the-log) explains each log level and how to
+record what the library does, and [Report a bug](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#report-a-bug) says how
 to attach the log to an issue.
 
 <a id="plans"></a>
@@ -735,16 +721,16 @@ Each cell gives how recent a plan's data is and how far back its history goes, a
 
 | Data | Stocks Basic | Stocks Starter | Stocks Developer | Stocks Advanced | Stocks Business |
 | --- | --- | --- | --- | --- | --- |
-| [Bars, history](docs/datasets/stocks.bars.md#plans) | End-of-day, 2 years | 15-minute delayed, 5 years | 15-minute delayed, 10 years | Real-time, All history | Real-time, All history |
-| [Minute bars, streamed](docs/datasets/stocks.bars.md#plans) | Not included | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
-| [Previous day bar](docs/datasets/stocks.previous_day_bar.md#plans) | End-of-day | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
-| [News](docs/datasets/reference.news.md#plans) | Updated hourly, 2 years | Updated hourly, All history | Updated hourly, All history | Updated hourly, All history | Updated hourly, All history |
-| [Ticker details](docs/datasets/reference.ticker_details.md#plans) | Updated daily, 2 years | Updated daily, All history | Updated daily, All history | Updated daily, All history | Updated daily, All history |
-| [Snapshots](docs/datasets/stocks.snapshots.md#plans) | Not included | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
+| [Bars, history](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.bars.md#plans) | End-of-day, 2 years | 15-minute delayed, 5 years | 15-minute delayed, 10 years | Real-time, All history | Real-time, All history |
+| [Minute bars, streamed](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.bars.md#plans) | Not included | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
+| [Previous day bar](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.previous_day_bar.md#plans) | End-of-day | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
+| [News](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.news.md#plans) | Updated hourly, 2 years | Updated hourly, All history | Updated hourly, All history | Updated hourly, All history | Updated hourly, All history |
+| [Ticker details](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/reference.ticker_details.md#plans) | Updated daily, 2 years | Updated daily, All history | Updated daily, All history | Updated daily, All history | Updated daily, All history |
+| [Snapshots](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/stocks.snapshots.md#plans) | Not included | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
 
 | Data | Options Basic | Options Starter | Options Developer | Options Advanced | Options Business |
 | --- | --- | --- | --- | --- | --- |
-| [Option chain](docs/datasets/options.chain.md#plans) | Not included | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
+| [Option chain](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/options.chain.md#plans) | Not included | 15-minute delayed | 15-minute delayed | Real-time | Real-time |
 
 <!-- End of the generated plans table. -->
 
@@ -759,7 +745,7 @@ it out for the defaults. Three settings cover what a new user needs:
 |---|---|---|
 | `delayed_subscriptions` | A subscription's plan gets Massive's delayed feed | Live tables and snapshots accept the delayed data. |
 | `rest_requests_per_minute` | Massive limits a subscription's REST requests per minute | Its requests keep to your limit from the first one, with no pause to learn it. |
-| `on_error` | A bad symbol or row should fail the table, instead of the default, which skips it and logs a warning | The table fails, as [Bad symbols and rows](docs/configuration.md#on-error) describes for each kind of problem. |
+| `on_error` | A bad symbol or row should fail the table, instead of the default, which skips it and logs a warning | The table fails, as [Bad symbols and rows](https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error) describes for each kind of problem. |
 
 This session streams stocks from Massive's delayed feed and keeps four other subscriptions to
 five requests a minute:
@@ -784,7 +770,7 @@ rate-limit error, after a pause. `m.rate_limits()` then shows the learned limit 
 `RequestsPerMinute`. Copy that number into the setting to skip the pause next time.
 
 `dm.MassiveConfig.from_file()` reads the same settings from a YAML file
-([Example 8](#what-your-plan-allows)). The [settings page](docs/configuration.md) lists every
+([Example 8](#what-your-plan-allows)). The [settings page](https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md) lists every
 setting, its values, and its default, with an example settings file.
 
 <a id="next-steps"></a>
@@ -792,10 +778,10 @@ setting, its values, and its default, with an example settings file.
 ## Next steps
 
 - Call `help()` on any object for its full documentation, such as `help(m.stocks.bars)`.
-- The [dataset index](docs/datasets/README.md) has a page for each dataset, with its
+- The [dataset index](https://github.com/chipkent/deephaven-massive/blob/main/docs/datasets/README.md) has a page for each dataset, with its
   arguments, its columns, and the plans that include it. `dm.datasets()` lists them in the
   console.
-- [Troubleshooting](docs/troubleshooting.md) covers the problems whose message doesn't say how
+- [Troubleshooting](https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md) covers the problems whose message doesn't say how
   to fix them, and how to report a bug.
 
 <a id="contributing"></a>

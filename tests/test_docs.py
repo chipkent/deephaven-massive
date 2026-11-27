@@ -103,6 +103,16 @@ _BARE_CITATION = re.compile(
     r"|docs/datasets/[A-Za-z0-9_.]+?\.md\b)"
 )
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
+_REPOSITORY_FILE = re.compile(
+    r"https://(?:github\.com/chipkent/deephaven-massive/blob/main"
+    r"|raw\.githubusercontent\.com/chipkent/deephaven-massive/main)/([^#]+)(?:#(.*))?"
+)
+"""A link to a file on the repository's main branch, as a page or as raw content."""
+_REPOSITORY_FILE_PREFIXES = (
+    "https://github.com/chipkent/deephaven-massive/blob/",
+    "https://raw.githubusercontent.com/chipkent/deephaven-massive/",
+)
+"""The start of every link to a file in the repository, on any branch."""
 
 
 def _name(page: Path) -> str:
@@ -465,26 +475,56 @@ def test_the_citations_are_found() -> None:
     ]
 
 
+def _resolves(file: Path, anchor: str) -> bool:
+    """Return whether a link's file exists and, for a Markdown page, has the link's anchor.
+
+    A user page's anchors are its explicit ones only; another Markdown page, such as a
+    generated dataset page, also has the anchors GitHub makes from its headings.
+
+    Args:
+        file: The linked file.
+        anchor: The link's anchor, or `""` for none.
+
+    Returns:
+        Whether the link opens the file at its anchor.
+    """
+    if not file.exists():
+        return False
+    if not anchor or file.suffix != ".md":
+        return True
+    if file in {path.resolve() for path in USER_PAGES}:
+        return anchor in _anchors(file)
+    return anchor in {*_anchors(file), *_heading_slugs(file)}
+
+
 @pytest.mark.parametrize("page", [*USER_PAGES, TESTER_GUIDE], ids=_name)
 def test_every_relative_link_resolves(page: Path) -> None:
-    # A link to a user page must name one of its explicit anchors, if any; a link into another
-    # Markdown page, such as a generated dataset page, an explicit anchor or a heading's anchor;
-    # a link to any other file must name a file that exists.
-    user_pages = {path.resolve() for path in USER_PAGES}
     broken = []
     for target in _LINK.findall(page.read_text(encoding="utf-8")):
         if target.startswith(("http://", "https://", "mailto:")):
             continue
         path, _, anchor = target.partition("#")
         file = (page.parent / path).resolve() if path else page.resolve()
-        if file in user_pages:
-            known = set(_anchors(file))
-        elif file.suffix == ".md" and file.exists():
-            known = {*_anchors(file), *_heading_slugs(file)}
-        else:
-            known = set()
-        if not file.exists() or (anchor and file.suffix == ".md" and anchor not in known):
+        if not _resolves(file, anchor):
             broken.append(target)
+    assert broken == []
+
+
+def test_every_readme_link_opens_from_pypi() -> None:
+    # PyPI shows the README but resolves no relative path, so the README links every other file,
+    # its images included, by full URL, and each such link must name a file on main.
+    broken = []
+    for target in _LINK.findall(README.read_text(encoding="utf-8")):
+        repository_file = _REPOSITORY_FILE.fullmatch(target)
+        if repository_file:
+            path, anchor = repository_file[1], repository_file[2] or ""
+            if not _resolves((ROOT / path).resolve(), anchor):
+                broken.append(target)
+        else:
+            # A relative path, or a repository file off main (another branch, or a typo).
+            relative = not target.startswith(("#", "http://", "https://", "mailto:"))
+            if relative or target.startswith(_REPOSITORY_FILE_PREFIXES):
+                broken.append(target)
     assert broken == []
 
 
