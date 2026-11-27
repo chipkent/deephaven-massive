@@ -68,6 +68,7 @@ from deephaven_massive.queries import (
 )
 from deephaven_massive.queries._choice import query_class
 from tests._fakes.clock import FakeClock
+from tests._fakes.queries import until
 
 # The reply and envelope builders are plain functions of the fake, which no fixture can hand
 # over; the server itself comes from the `fake_rest` fixture.
@@ -1473,6 +1474,36 @@ def test_a_table_of_both_spellings_reads_them_once_and_keeps_each_set_once(
         ("O:DJT261120C00020000", "DJT"),
         ("O:DJTW261120C00020000", "I:DJT"),
     ]
+    assert [query["underlying_ticker"] for _, query in fake_rest.get_queries()] == [["DJT"]]
+    assert (events, warnings_of(caplog)) == ([], [])
+
+
+def test_a_live_table_of_both_spellings_reads_them_together(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_input_table: Callable[..., InputTable],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A followed table reads its values as they come, but `DJT` and `I:DJT` are one value on
+    # the wire: one request reads both, as a static table's read does, and each keeps its own
+    # contracts once, with no problem and no warning.
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    serve_djt_contracts(fake_rest)
+    watchlist = dh_input_table({"Symbol": dtypes.string}, key_cols="Symbol")
+    watchlist.add(new_table([string_col("Symbol", ["I:DJT", "DJT"])]))
+    listed = rest_session.options.contracts(underlying=watchlist).fetch()
+    try:
+        until(lambda: len(rows(listed)) == 2)
+        assert sorted((r["Symbol"], r["Underlying"]) for r in rows(listed)) == [
+            ("O:DJT261120C00020000", "DJT"),
+            ("O:DJTW261120C00020000", "I:DJT"),
+        ]
+    finally:
+        rest_session.release(listed)
     assert [query["underlying_ticker"] for _, query in fake_rest.get_queries()] == [["DJT"]]
     assert (events, warnings_of(caplog)) == ([], [])
 

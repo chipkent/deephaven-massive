@@ -30,6 +30,14 @@ diagnostics show. It owns:
   flat-file read reads every symbol waiting at once, in one scan, and a result has at most
   one scan in flight, since a scan downloads the same files whatever the number of symbols.
 
+**Siblings.** Symbols Massive is sent alike (`FollowPlan.sent_as`), such as `DJT` and `I:DJT` of
+a table of underlyings of the options contracts list, get one answer holding the rows of both,
+and a read gives each its own rows only when it asked for both: a read that asked for one lists
+the other's rows as `unrequested_symbols`. So the siblings the table holds are always read
+together, in one read, as a static read of the same table reads them. A symbol queued for a
+read (an add, or a retry come due) pulls each sibling the table holds into the queue with it
+(`_pull_in`), and the siblings wait whole while a read of any of them is in flight.
+
 **A symbol's life.** Added, it is `QUEUED`; a read of it makes it `LOADING`; its rows make it
 `DONE`. A failure that may pass (its error `is_retryable`) makes it `RETRYING`, read again 2, 8,
 and 30 seconds after the first, second, and third failure, then every minute, until it has
@@ -45,12 +53,11 @@ A `RETRYING` or `FAILED` symbol is a span of `m.problems()`: a refusal of the sy
 Removed, it is `REMOVED`: under `Reread.ALWAYS` an empty download replaces its rows in the
 result, freeing them, and a re-add reads it again; under `Reread.NEVER` its download is kept, so
 a re-add shows the earlier download at once, with no request. A `FAILED` symbol is read again
-on every re-add. Each add
-and removal moves the symbol to a new *generation*: the outcome of a read of an older one is
-dropped, so no removed or overtaken read ever lands, and a symbol is never read twice at once (a
-re-add during a read waits for it to end). When the result stops (released and unused, or failed),
-every symbol still following is `STOPPED`, and stays so: a read that starts after the stop
-changes nothing.
+on every re-add. Each add and removal, and each pull-in by a sibling, moves the symbol to a
+new *generation*: the outcome of a read of an older one is dropped, so no removed or overtaken
+read ever lands, and a symbol is never read twice at once (a re-add during a read waits for it
+to end). When the result stops (released and unused, or failed), every symbol still following
+is `STOPPED`, and stays so: a read that starts after the stop changes nothing.
 
 **Whole-table failures.** A read that raises (`AuthenticationError`, a refusal of the feed, a
 session closed during the read, or a defect), a symbol's final failure whose cause is set to
@@ -403,8 +410,8 @@ class _Symbol:
             queued, and its run of failures, if any, with when its next read is due
             (`SymbolRun`); made anew on each such add.
         in_table: Whether the symbol table holds it now.
-        generation: Moves on every add and removal; a read's outcome counts only at the
-            generation it was started for.
+        generation: Moves on every add and removal, and on a pull-in by a sibling
+            (`_pull_in`); a read's outcome counts only at the generation it was started for.
         reading: The generation a read in flight was started for, or None.
         waiting: Whether it waits for a read slot (its result's queue).
         next_attempt_at: When its next read is due, epoch nanoseconds, while `RETRYING`.
@@ -523,6 +530,9 @@ class _Result:
     Attributes:
         read: The result's handle.
         symbols: Every symbol it has followed, by name.
+        siblings: Every symbol it has followed, grouped by the value it is sent as
+            (`FollowPlan.sent_as`), so a symbol finds its siblings without a pass over every
+            symbol.
         queue: The symbols waiting for a read, in the order they began to wait: a dict used as
             an ordered set, so taking a symbol out costs no scan.
         scanning: Whether a flat-file scan of the result is in flight.
@@ -554,6 +564,7 @@ class _Result:
     read: CoordinatedRead
     decided_at_step: int
     symbols: dict[str, _Symbol] = field(default_factory=dict)
+    siblings: dict[str, list[str]] = field(default_factory=dict)
     queue: dict[str, None] = field(default_factory=dict)
     scanning: bool = False
     seq: int = 0
@@ -1013,13 +1024,8 @@ class FollowCoordinator:
                 if isinstance(outcome, SymbolFailure)
             )
             for name, outcome in first.outcomes.items():
-                symbol = _Symbol(
-                    in_table=True,
-                    generation=1,
-                    added_at=first.began_at,
-                    run=SymbolRun(SymbolReadState.LOADING, attempts=1),
-                )
-                result.symbols[name] = symbol
+                symbol = self._new_symbol(result, name, generation=1, added_at=first.began_at)
+                symbol.run = SymbolRun(SymbolReadState.LOADING, attempts=1)
                 if isinstance(outcome, SymbolRows):  # its rows are in the result's seed
                     symbol.kept = True
                 self._record(result, name, outcome, began_at=first.began_at, seconds=first.seconds)
@@ -1044,7 +1050,7 @@ class FollowCoordinator:
         """
         symbol = result.symbols.get(name)
         if symbol is None:
-            symbol = result.symbols[name] = _Symbol(in_table=True, generation=0, added_at=now)
+            symbol = self._new_symbol(result, name, generation=0, added_at=now)
         symbol.in_table = True
         symbol.generation += 1
         symbol.added_at = now
@@ -1108,14 +1114,74 @@ class FollowCoordinator:
             symbol.read_at = None
             symbol.rows = 0
 
+    @staticmethod
+    def _new_symbol(result: _Result, name: str, *, generation: int, added_at: int) -> _Symbol:
+        """Start following a symbol the result never followed: in the table, and its siblings'.
+
+        Args:
+            result: The result's state.
+            name: The symbol.
+            generation: Its first generation.
+            added_at: When its row entered the table, epoch nanoseconds.
+
+        Returns:
+            Its new state.
+        """
+        symbol = result.symbols[name] = _Symbol(
+            in_table=True, generation=generation, added_at=added_at
+        )
+        result.siblings.setdefault(result.read.plan.sent_as(name), []).append(name)
+        return symbol
+
     def _enqueue(self, result: _Result, name: str) -> None:
-        """Put a symbol at the end of its result's queue of symbols waiting for a read.
+        """Queue a symbol for a read, and pull in each sibling the table holds (`_pull_in`).
 
         Only a symbol that was not waiting comes here: a new add, or a retry come due.
 
         Args:
             result: The result's state.
             name: The symbol.
+        """
+        self._wait(result, name)
+        for sibling in result.siblings[result.read.plan.sent_as(name)]:
+            other = result.symbols[sibling]
+            if other.in_table and not other.waiting:
+                self._pull_in(result, sibling)
+
+    def _pull_in(self, result: _Result, name: str) -> None:
+        """Queue a sibling of a symbol just queued, so their read asks for both.
+
+        Its generation moves, so a read of it in flight, which did not ask for the queued
+        symbol and so lists that symbol's rows as `unrequested_symbols`, lands overtaken and is
+        dropped; its rows stay in the result until the read of both lands. A pending retry is
+        cancelled, since it is read now. Its run is kept, whatever its state: a run made anew
+        here would restart its `max_outage` clock on every retry of its sibling, so a pair
+        failing together would never end `FAILED`. A dropped read still counts in its
+        attempts.
+
+        Args:
+            result: The result's state.
+            name: The sibling, in the table and not waiting.
+        """
+        symbol = result.symbols[name]
+        symbol.generation += 1
+        symbol.run.state = SymbolReadState.QUEUED
+        symbol.run.due = symbol.next_attempt_at = None
+        result.dirty.add(name)
+        self._wait(result, name)
+        logger.debug(
+            "call %d follow %s: queued to be read with a sibling, which Massive is sent alike",
+            result.read.call,
+            name,
+        )
+
+    @staticmethod
+    def _wait(result: _Result, name: str) -> None:
+        """Put a symbol at the end of its result's queue of symbols waiting for a read.
+
+        Args:
+            result: The result's state.
+            name: The symbol, not waiting.
         """
         result.symbols[name].waiting = True
         result.queue[name] = None
@@ -1306,7 +1372,9 @@ class FollowCoordinator:
                 name,
             )
             return
-        pending[name] = error  # final: the symbol's next outcome needs a re-add, which drops it
+        if pending[name] is not None:  # a sibling's pull-in read it again; counted already
+            return
+        pending[name] = error
         result.call_time_open -= 1
         if result.call_time_open:
             return
@@ -1390,22 +1458,33 @@ class FollowCoordinator:
     def _schedule(self, result: _Result) -> None:
         """Start the reads the result's queue allows: REST groups, or one flat-file scan.
 
-        A REST read takes up to `FollowPlan.symbols_per_read` waiting symbols, in queue order.
-        A symbol whose earlier read is still in flight waits for it.
+        A REST read takes up to `FollowPlan.symbols_per_read` groups of waiting siblings, in
+        queue order, and never splits a group. A symbol whose earlier read is still in flight
+        waits for it, and its siblings with it.
 
         Args:
             result: The result's state.
         """
         if result.ended or (result.read.plan.one_scan and result.scanning):
             return
-        ready = [name for name in result.queue if result.symbols[name].reading is None]
-        if not ready:
+        sent_as = result.read.plan.sent_as
+        waiting: dict[str, list[str]] = {}
+        busy: set[str] = set()
+        for name in result.queue:
+            waiting.setdefault(sent_as(name), []).append(name)
+            if result.symbols[name].reading is not None:
+                busy.add(sent_as(name))
+        groups = [group for key, group in waiting.items() if key not in busy]
+        if not groups:
             return
-        for name in ready:
+        for name in itertools.chain.from_iterable(groups):
             del result.queue[name]
             result.symbols[name].waiting = False
-        size = len(ready) if result.read.plan.one_scan else result.read.plan.symbols_per_read
-        batches = [ready[i : i + size] for i in range(0, len(ready), size)]
+        size = len(groups) if result.read.plan.one_scan else result.read.plan.symbols_per_read
+        batches = [
+            list(itertools.chain.from_iterable(groups[i : i + size]))
+            for i in range(0, len(groups), size)
+        ]
         if result.read.plan.one_scan:
             result.scanning = True
         for batch in batches:

@@ -25,6 +25,7 @@ from deephaven_massive._enums import (
     Timespan,
 )
 from deephaven_massive._ingest import history_reads
+from deephaven_massive._ingest.symbol_reads import value_sent_as
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.background_read import BackgroundRead
@@ -203,6 +204,9 @@ class Recorder:
         self.valued.append((tuple(values), request, threading.current_thread().name))
         empty = dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
         return {name: self.outcomes.get(name, SymbolRows(empty)) for name in values}
+
+    def value_sent_as(self, request: Request, value: str) -> str:
+        return value_sent_as(request, value)
 
     def fetch_values(
         self,

@@ -444,7 +444,10 @@ class FetchQuery(Query):
 
         As `_followed_fetch` follows a symbol table, keyed by each value: a value added to the
         table is read, as Massive answers then, and lands whole; a value removed leaves the
-        result in the same update; a returning value is read again. Each value is one read.
+        result in the same update; a returning value is read again. Each value is one read,
+        but the values Massive is sent alike (`RestTransport.value_sent_as`), such as `DJT` and
+        `I:DJT` of the options contracts list, which are read together, in one request, as a
+        static read of the table reads them.
 
         Args:
             call: The call id.
@@ -489,6 +492,7 @@ class FetchQuery(Query):
                 spec, request, values=names, call=call, stop=stop
             ),
             policy=request.on_error,
+            sent_as=functools.partial(rest.value_sent_as, request),
         )
         recency = rest_recency_note(spec, core.config.delayed_subscriptions)
         note = (

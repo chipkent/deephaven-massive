@@ -378,6 +378,23 @@ class RestTransport(Protocol):
         """
         ...
 
+    def value_sent_as(self, request: Request, value: str) -> str:
+        """Return the value a value table's value is sent to Massive as.
+
+        `fetch_by_value` reads the values sent alike in one request, such as `DJT` and `I:DJT`
+        on the options contracts list, which takes an index bare; a read that follows a table
+        of values reads them together for the same reason.
+
+        Args:
+            request: The normalized arguments, with a value table.
+            value: The value, canonical.
+
+        Returns:
+            The value as the request sends it, such as `"DJT"` for `"I:DJT"` on the contracts
+            list.
+        """
+        ...
+
     def fetch_values(
         self,
         spec: DatasetSpec,

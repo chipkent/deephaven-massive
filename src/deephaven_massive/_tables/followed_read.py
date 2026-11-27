@@ -215,8 +215,8 @@ class FollowPlan:
             are read in groups of `symbols_per_read`, in parallel.
         symbols_per_read: The most symbols one REST read takes: 1 for a path that takes one
             symbol a request, or `DatasetSpec.symbols_per_request` for a `fetch()` whose
-            list parameter (`ticker.any_of`) names many symbols in one request. Ignored for
-            flat files.
+            list parameter (`ticker.any_of`) names many symbols in one request; siblings
+            (`sent_as`) count as one. Ignored for flat files.
         read: Reads symbols and returns each one's outcome, given the symbols and the result's
             stop token, or None for the read of a call that waits for it, whose rate-limit
             pauses are then waited out as its caller's (a stop token marks a read no caller
@@ -230,6 +230,10 @@ class FollowPlan:
             symbol Massive refuses is logged, and a symbol's final failure whose cause it sets
             to `RAISE` fails the table (`call_failure.fails_call`); any other fails the symbol
             alone.
+        sent_as: The value each symbol is sent to Massive as. Symbols sent alike are siblings,
+            always read together (`RestTransport.value_sent_as` for a table of values, where
+            `DJT` and `I:DJT` of the options contracts list are siblings); by default each
+            symbol is sent as written, alone.
     """
 
     transport: Transport
@@ -237,6 +241,7 @@ class FollowPlan:
     symbols_per_read: int
     read: Callable[[tuple[str, ...], threading.Event | None], Mapping[str, SymbolOutcome]]
     policy: ResolvedPolicy
+    sent_as: Callable[[str], str] = str
 
 
 class FollowedRead:

@@ -232,6 +232,7 @@ from deephaven_massive._ingest.symbol_reads import (
     read_values,
     split_failures,
     value_groups,
+    value_sent_as,
 )
 from deephaven_massive._log_limits import bounded_list, counted, log_once, prose_list
 from deephaven_massive._massive import (
@@ -3698,6 +3699,20 @@ class RestEndpoints:
             cancel=as_cancel(stop),
             to_table=functools.partial(self._static, spec),
         )
+
+    def value_sent_as(self, request: Request, value: str) -> str:
+        """Return the value a value table's value is sent to Massive as.
+
+        See `RestTransport.value_sent_as`; `symbol_reads.value_sent_as` decides it.
+
+        Args:
+            request: The normalized arguments, with a value table.
+            value: The value, canonical.
+
+        Returns:
+            The value as the request sends it.
+        """
+        return value_sent_as(request, value)
 
     def fetch_values(
         self,
