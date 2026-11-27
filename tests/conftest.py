@@ -105,6 +105,7 @@ from tests._live import (
     ticker_lists,
     week_windows,
 )
+from tests._live.arrow_rows import snapshot_rows
 from tests._live.live_run import upgrade_check
 from tests.embedded_server import CYCLE_MILLIS
 
@@ -2865,22 +2866,13 @@ def table_rows() -> Callable[[Table], list[dict[str, Any]]]:
     """Return a function that snapshots a table into row dictionaries, instants as epoch ns.
 
     Unlike `dh_to_pylist`, every timestamp column becomes an `int` of nanoseconds since the
-    epoch, so evidence shows exact values.
+    epoch, so evidence shows exact values. A column Deephaven sent run-end or dictionary
+    encoded is decoded first (`tests/_live/arrow_rows.py`).
 
     Returns:
         A function mapping a table to one `{column: value}` dictionary per row.
     """
-
-    def read(table: Table) -> list[dict[str, Any]]:
-        data = dh_arrow.to_arrow(table)
-        columns = [
-            column.cast(pa.int64()) if pa.types.is_timestamp(column.type) else column
-            for column in data.columns
-        ]
-        rows: list[dict[str, Any]] = pa.table(columns, names=data.column_names).to_pylist()
-        return rows
-
-    return read
+    return snapshot_rows
 
 
 @pytest.fixture

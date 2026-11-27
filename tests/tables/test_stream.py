@@ -68,6 +68,7 @@ from deephaven_massive._tables.stream import (
 )
 from deephaven_massive._tables.watchlist import SkippedValues, SymbolRowRule
 from deephaven_massive.namespaces._options import ADMIN_MESSAGES
+from tests._live.arrow_rows import plain_column
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -146,7 +147,7 @@ def arrivals(rows: list[dict[str, object]]) -> list[int]:
 
 def to_arrow_column(table: Table, name: str) -> list[int]:
     # One Instant column of a table, as epoch nanoseconds.
-    values: list[int] = to_arrow(table).column(name).cast(pa.int64()).to_pylist()
+    values: list[int] = plain_column(to_arrow(table).column(name)).to_pylist()
     return values
 
 
