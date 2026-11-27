@@ -322,8 +322,8 @@ def _assert_day_file_bar_is_the_range_bar(
 ) -> None:
     """Record the `X:BTCUSD` day file row of `day` and the REST range bars around it, and report.
 
-    Asserts the file's one row and its stamp, then reports through `expect_fixed` whether the
-    file's row equals the range bar of the same UTC day.
+    Asserts the file's one row and its stamp, then that the file's row equals the range bar of
+    the same UTC day.
     """
     read = flat_file_tickers(_DAY_FILE, day, wire_spellings(dm.AssetClass.CRYPTO, _PAIR))
     assert read is not None, f"{_DAY_FILE} has no file for {day}"
@@ -369,22 +369,19 @@ def _assert_day_file_bar_is_the_range_bar(
     values = tuple(float(str(row[k])) for k in ("open", "high", "low", "close", "volume"))
     same_day = [b for b in ranged if _utc_day(int(b["t"])) == day]
     assert same_day, f"REST sent no {_PAIR} range bar of {day}: {ranged}"
-    expect_fixed(
-        evidence=evidence,
-        fixed=any(_same(values, _ohlcv(b)) for b in same_day),
-        shown=(
-            f"{_DAY_FILE} {day} row (o, h, l, c, v) {values} is not the REST range bar "
-            f"of that day: {[_ohlcv(b) for b in same_day]}"
-        ),
+    shown = (
+        f"{_DAY_FILE} {day} row (o, h, l, c, v) {values} is not the REST range bar "
+        f"of that day: {[_ohlcv(b) for b in same_day]}"
     )
+    evidence(shown)
+    assert any(_same(values, _ohlcv(b)) for b in same_day), shown
 
 
 _REPORTED_DAY: Final = date(2026, 11, 23)
 """The day whose `global_crypto` day file Massive built with less volume and fewer pairs than
-its REST sources (issues 860 and 861)."""
+its REST sources."""
 
 
-@pytest.mark.massive_issue(860)
 @pytest.mark.verifies("1")
 @pytest.mark.timeout(100)
 def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
@@ -406,9 +403,8 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     when the file holds one row, stamped at 00:00 or 23:59:59.999 UTC of its day, and equal to the
     range bar of the same UTC day, so both sources cut days alike.
 
-    A pass means the file's day bar equals the range bar of the most recent published Monday. It
-    shows only that day: the issue counts as fixed only when the reported day's check, below,
-    passes too.
+    A failure means the file's day bar differs from the range bar again. It judges only that
+    day; the reported day's check, below, guards the day Massive once built wrongly.
     """
     _assert_day_file_bar_is_the_range_bar(
         live_session,
@@ -421,7 +417,6 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range(
     )
 
 
-@pytest.mark.massive_issue(860)
 @pytest.mark.verifies("1")
 @pytest.mark.timeout(100)
 def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range_on_the_reported_day(
@@ -435,9 +430,10 @@ def test_crypto_day_bar_of_the_flat_file_matches_the_rest_range_on_the_reported_
 ) -> None:
     """Whether the `global_crypto/day_aggs_v1` row of 2026-11-23 is the REST range bar of that day.
 
-    Today the file's `X:BTC-USD` volume of that day is 6.1% below the REST sources' (open, high,
-    low, and close agree). The evidence first asserts the file's one row and its stamp. A pass
-    means Massive rebuilt that file: close the issue once the recent-day check passes too.
+    Massive once built that day's file with an `X:BTC-USD` volume 6.1% below the REST sources'
+    (open, high, low, and close agreed), then rebuilt it, so this guards the corrected data. The
+    evidence first asserts the file's one row and its stamp. A failure means the file's volume
+    differs from the range bar's again.
     """
     _assert_day_file_bar_is_the_range_bar(
         live_session,
@@ -607,7 +603,7 @@ def _assert_grouped_daily_and_day_file_pairs_equal(
 ) -> None:
     """Record the pairs only grouped daily or only the day file lists on `day`, and report.
 
-    Asserts that both list pairs, then reports through `expect_fixed` whether the sets are equal.
+    Asserts that both list pairs, then that the sets are equal.
     """
     grouped = _canonical(str(row["T"]) for row in rest_rows(_GROUPED, {"date": day}, {}))
     read = flat_file_tickers(_DAY_FILE, day, None)
@@ -618,18 +614,14 @@ def _assert_grouped_daily_and_day_file_pairs_equal(
     evidence(f"only in the flat file: {sorted(filed - grouped)}")
     assert grouped
     assert filed, f"{_DAY_FILE} of {day} lists no pair"
-    expect_fixed(
-        evidence=evidence,
-        fixed=grouped == filed,
-        shown=(
-            f"{day}: {len(grouped)} pairs in grouped daily, {len(filed)} in {_DAY_FILE}; "
-            f"only in grouped daily {sorted(grouped - filed)}, only in the file "
-            f"{sorted(filed - grouped)}"
-        ),
+    shown = (
+        f"{day}: {len(grouped)} pairs in grouped daily, {len(filed)} in {_DAY_FILE}; "
+        f"only in grouped daily {sorted(grouped - filed)}, only in the file "
+        f"{sorted(filed - grouped)}"
     )
+    assert grouped == filed, shown
 
 
-@pytest.mark.massive_issue(861)
 @pytest.mark.verifies("39")
 @pytest.mark.timeout(100)
 def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
@@ -645,15 +637,14 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs(
     `X:BTC-USD` or `C:EUR-USD`), so both are compared in the canonical form the library reads
     them into; a spelling the library cannot read is kept as written, and so shows up as a
     difference. Records the pairs only one of them holds on the most recent published Monday.
-    A pass means the two sets are equal on that day. It shows only that day: the issue counts as
-    fixed only when the reported day's check, below, passes too.
+    Passes when the two sets are equal on that day; a failure means they differ again. It judges
+    only that day; the reported day's check, below, guards the day Massive once built wrongly.
     """
     _assert_grouped_daily_and_day_file_pairs_equal(
         recent_monday, rest_rows=rest_rows, flat_file_tickers=flat_file_tickers, evidence=evidence
     )
 
 
-@pytest.mark.massive_issue(861)
 @pytest.mark.verifies("39")
 @pytest.mark.timeout(100)
 def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs_on_the_reported_day(
@@ -664,9 +655,9 @@ def test_crypto_grouped_daily_and_day_flat_file_hold_the_same_pairs_on_the_repor
 ) -> None:
     """Whether grouped daily and `global_crypto/day_aggs_v1` list the same pairs on 2026-11-23.
 
-    Today the file lists 364 pairs and grouped daily 384. A pass means the two sets are equal, so
-    `dm.ALL` crypto day bars hold the same pairs from either source: Massive rebuilt the file, so
-    close the issue once the recent-day check passes too.
+    Massive once built that day's file with 364 pairs against grouped daily's 384, then rebuilt
+    it, so this guards the corrected data. Passes when the two sets are equal, so `dm.ALL` crypto
+    day bars hold the same pairs from either source; a failure means the file lacks pairs again.
     """
     _assert_grouped_daily_and_day_file_pairs_equal(
         _REPORTED_DAY, rest_rows=rest_rows, flat_file_tickers=flat_file_tickers, evidence=evidence
