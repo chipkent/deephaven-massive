@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -15,8 +16,8 @@ if TYPE_CHECKING:
 
     from deephaven.table import Table
 
-# Deephaven 43 encodes a column of repeated values only from about 16 rows, so these two sizes
-# sit well past the threshold.
+# Deephaven 43 encodes a column of repeated values only from about 16 rows (42 sent every
+# column plain), so these two sizes sit well past the threshold.
 RUN_ROWS = 32
 CYCLE_ROWS = 1_024
 
@@ -35,10 +36,13 @@ def cycle() -> Table:
     )
 
 
-def test_the_tables_come_back_encoded_from_deephaven() -> None:
-    # Guards the tests below: if Deephaven stops encoding these, they would test nothing.
-    assert pa.types.is_run_end_encoded(dh_arrow.to_arrow(runs()).column("Ts").type)
-    assert pa.types.is_dictionary(dh_arrow.to_arrow(cycle()).column("Ts").type)
+def test_the_tables_come_back_encoded_from_deephaven_43_and_plain_before() -> None:
+    # Guards the tests below: if Deephaven changes its encoding they would test nothing, so the
+    # encoding each version sends is stated, not skipped.
+    major = int(importlib.metadata.version("deephaven-core").split(".")[0])
+    run_ends = pa.types.is_run_end_encoded(dh_arrow.to_arrow(runs()).column("Ts").type)
+    dictionaries = pa.types.is_dictionary(dh_arrow.to_arrow(cycle()).column("Ts").type)
+    assert (run_ends, dictionaries) == ((major >= 43), (major >= 43))
 
 
 def test_encoded_timestamps_come_back_as_ints(
