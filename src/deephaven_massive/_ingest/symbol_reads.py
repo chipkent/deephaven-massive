@@ -166,6 +166,7 @@ __all__ = [
     "split_failures",
     "symbol_outcomes",
     "value_groups",
+    "value_sent_as",
 ]
 
 logger = logging.getLogger(__name__)
@@ -897,13 +898,31 @@ class ValueRead(NamedTuple):
     unread: dict[str, MassiveError]
 
 
+def value_sent_as(request: Request, value: str) -> str:
+    """Return the value a value table's value is sent to Massive as.
+
+    The contracts list takes an index underlying bare (`BARE_INDEX_PARAM`), so `DJT` and
+    `I:DJT` are both sent as `DJT`, and Massive answers it with the contracts of both. Every
+    other value is sent as written.
+
+    Args:
+        request: The normalized arguments, with a value table.
+        value: The value, canonical.
+
+    Returns:
+        The value as the request sends it, such as `"DJT"` for `"I:DJT"` on the contracts list.
+    """
+    parameter = required(request.value_table, "the request's value table").parameter
+    return contracts_underlying(value) if parameter == BARE_INDEX_PARAM else value
+
+
 def value_groups(request: Request, values: Sequence[str]) -> list[tuple[str, ...]]:
     """Group a value table's values by the value each is sent as, one request per group.
 
-    The contracts list takes an index underlying bare (`BARE_INDEX_PARAM`), so `DJT` and
-    `I:DJT` are one value on the wire, and Massive answers it with the contracts of both: one
-    request reads them together and gives each its own rows (`attribute_values`), so a table
-    that names both keeps each set once. Every other value is sent as written, alone.
+    Values sent alike (`value_sent_as`), such as `DJT` and `I:DJT` on the contracts list, get
+    one answer holding the rows of both: one request reads them together and gives each its
+    own rows (`attribute_values`), so a table that names both keeps each set once. Every other
+    value is read alone.
 
     Args:
         request: The normalized arguments, with a value table.
@@ -912,11 +931,9 @@ def value_groups(request: Request, values: Sequence[str]) -> list[tuple[str, ...
     Returns:
         The groups, in the order of each group's first value.
     """
-    parameter = required(request.value_table, "the request's value table").parameter
     groups: dict[str, list[str]] = {}
     for value in values:
-        sent = contracts_underlying(value) if parameter == BARE_INDEX_PARAM else value
-        groups.setdefault(sent, []).append(value)
+        groups.setdefault(value_sent_as(request, value), []).append(value)
     return [tuple(group) for group in groups.values()]
 
 

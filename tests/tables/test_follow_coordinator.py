@@ -213,6 +213,7 @@ def follow(
     first: FirstRead | None = None,
     one_scan: bool = False,
     symbols_per_read: int = 1,
+    sent_as: Callable[[str], str] = str,
     refused_symbols: dm.OnError = dm.OnError.LOG,
     unconvertible_values: dm.OnError = dm.OnError.LOG,
 ) -> Table:
@@ -226,6 +227,7 @@ def follow(
         symbols_per_read=symbols_per_read,
         read=script.read,
         policy=policy,
+        sent_as=sent_as,
     )
     return open_followed_read(
         core,
@@ -2174,6 +2176,173 @@ def test_a_rest_read_takes_up_to_symbols_per_read_symbols(
     until(lambda: len(dh_to_pylist(result)) == 6)
     assert sorted(len(names) for names in script.calls) == [1, 2]
     assert sorted(name for names in script.calls for name in names) == ["AAPL", "MSFT", "NVDA"]
+    massive_session.release(result)
+
+
+# --- Siblings: symbols Massive is sent alike ---------------------------------------------------
+
+
+def bare(symbol: str) -> str:
+    # Sends a share class bare, as the options contracts list sends an index: BRK.A and BRK.B
+    # are siblings, as BRK.A and BRK.B are there.
+    return symbol.split(".", maxsplit=1)[0]
+
+
+def calls(script: Script) -> list[tuple[str, ...]]:
+    # The symbols of each read, in read order, each read's in name order.
+    with script._lock:
+        return [tuple(sorted(names)) for names in script.calls]
+
+
+def tickers(m: dm.MassiveSession, result: Table, to_list: ToList) -> list[str]:
+    del m
+    return sorted(r["Ticker"] for r in to_list(result))
+
+
+def test_siblings_in_the_table_are_read_together_and_never_split(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+) -> None:
+    # One read a value, but BRK.A and BRK.B are one value on the wire: one read asks for both,
+    # so it gives each its own rows.
+    script = Script(massive_session)
+    result = follow(massive_session, watchlist("AAPL", "BRK.A", "BRK.B"), script, sent_as=bare)
+    until(lambda: len(dh_to_pylist(result)) == 6)
+    assert sorted(calls(script)) == [("AAPL",), ("BRK.A", "BRK.B")]
+    massive_session.release(result)
+
+
+def test_an_added_sibling_reads_again_with_the_one_already_read(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+) -> None:
+    # BRK.B added after BRK.A landed pulls BRK.A into its read, whose rows replace BRK.A's.
+    script = Script(massive_session)
+    table = watchlist("BRK.A")
+    result = follow(massive_session, table, script, sent_as=bare)
+    until(lambda: state(massive_session, "BRK.A") is SymbolReadState.DONE)
+    add(table, "BRK.B")
+    until(lambda: state(massive_session, "BRK.B") is SymbolReadState.DONE)
+    until(lambda: state(massive_session, "BRK.A") is SymbolReadState.DONE)
+    assert calls(script) == [("BRK.A",), ("BRK.A", "BRK.B")]
+    until(lambda: len(dh_to_pylist(result)) == 4)
+    assert tickers(massive_session, result, dh_to_pylist) == ["BRK.A"] * 2 + ["BRK.B"] * 2
+    assert row(massive_session, "BRK.A").attempts == 2
+    massive_session.release(result)
+
+
+def test_a_sibling_s_read_in_flight_is_dropped_for_the_read_of_both(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+) -> None:
+    # BRK.A's read alone did not ask for BRK.B, added meanwhile: its outcome is dropped, even a
+    # failure, and the pair is read once it ends.
+    script = Script(massive_session)
+    hold = threading.Event()
+    script.holds["BRK.A"] = [hold]
+    later = SymbolRows(rows_of(massive_session, "BRK.A", 2))
+    script.answers["BRK.A"] = [not_entitled("BRK.A"), later]
+    table = watchlist("BRK.A")
+    result = follow(massive_session, table, script, sent_as=bare)
+    until(lambda: calls(script) == [("BRK.A",)])
+    add(table, "BRK.B")
+    until(lambda: generation(massive_session, "BRK.A") == 2)
+    assert calls(script) == [("BRK.A",)]  # the pair waits for BRK.A's read
+    hold.set()
+    until(lambda: len(dh_to_pylist(result)) == 4)
+    assert calls(script) == [("BRK.A",), ("BRK.A", "BRK.B")]
+    assert state(massive_session, "BRK.A") is SymbolReadState.DONE
+    massive_session.release(result)
+
+
+def test_a_sibling_removed_during_the_read_of_both_gets_no_rows(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+) -> None:
+    script = Script(massive_session)
+    hold = script.gates["BRK.A"] = threading.Event()
+    table = watchlist("BRK.A", "BRK.B")
+    result = follow(massive_session, table, script, sent_as=bare)
+    until(lambda: calls(script) == [("BRK.A", "BRK.B")])
+    delete(table, "BRK.B")
+    until(lambda: state(massive_session, "BRK.B") is SymbolReadState.REMOVED)
+    hold.set()
+    until(lambda: len(dh_to_pylist(result)) == 2)
+    assert tickers(massive_session, result, dh_to_pylist) == ["BRK.A", "BRK.A"]
+    massive_session.release(result)
+
+
+def test_siblings_failing_together_end_failed_however_far_apart_their_runs_began(
+    watchlist: Callable[..., InputTable], massive_session: dm.MassiveSession, clock: FakeClock
+) -> None:
+    # A pull-in keeps the sibling's run, so BRK.A's max_outage clock is not restarted by each
+    # retry of BRK.B, added later: both end FAILED, and nothing reads them again.
+    script = Script(massive_session)
+    script.answers["BRK.A"] = [refused(503, "BRK.A")]
+    script.answers["BRK.B"] = [refused(503, "BRK.B")]
+    table = watchlist("BRK.A")
+    result = follow(massive_session, table, script, sent_as=bare)
+    until(lambda: script.reads_of("BRK.A") == 1)
+    retry_after(massive_session, script, clock=clock, name="BRK.A")
+    retry_after(massive_session, script, clock=clock, name="BRK.A")
+    until(functools.partial(settled, massive_session, "BRK.A", attempts=3, states=_RETRYING))
+    add(table, "BRK.B")
+    until(lambda: calls(script)[-1] == ("BRK.A", "BRK.B"))
+
+    def pair_settled() -> bool:
+        found = {name: state(massive_session, name) for name in ("BRK.A", "BRK.B")}
+        return set(found.values()) <= _SETTLED and all(
+            row(massive_session, name).attempts == script.reads_of(name) for name in found
+        )
+
+    for _ in range(40):
+        until(pair_settled)
+        due = [row(massive_session, n).next_attempt_at for n in ("BRK.A", "BRK.B")]
+        pending = [d for d in due if d is not None]
+        if not pending:
+            break
+        count = len(script.calls)
+        clock.advance(min(pending) / 1e9 - clock.time())
+        massive_session._core.follows.wake()
+        until(functools.partial(lambda n: len(script.calls) == n + 1, count))
+        assert calls(script)[-1] == ("BRK.A", "BRK.B")
+    assert {state(massive_session, n) for n in ("BRK.A", "BRK.B")} == {SymbolReadState.FAILED}
+    count = len(script.calls)
+    clock.advance(3600)  # BRK.A's retry the pull-in cancelled comes due, and is dropped
+    massive_session._core.follows.wake()
+    until(lambda: not massive_session._core.follows._retries)
+    assert len(script.calls) == count
+    massive_session.release(result)
+
+
+def test_a_call_time_sibling_read_again_by_a_pull_in_counts_once(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    clock: FakeClock,
+    dh_to_pylist: ToList,
+) -> None:
+    # BRK.A fails for good, and BRK.B retries, pulling BRK.A into each retry: BRK.A's second
+    # final failure is not counted again, so the table lives on to BRK.B's rows.
+    script = Script(massive_session)
+    script.answers["BRK.A"] = [not_entitled("BRK.A")]
+    later = SymbolRows(rows_of(massive_session, "BRK.B", 2))
+    script.answers["BRK.B"] = [refused(503, "BRK.B"), refused(503, "BRK.B"), later]
+    result = follow(massive_session, watchlist("BRK.A", "BRK.B"), script, sent_as=bare)
+    until(lambda: state(massive_session, "BRK.A") is SymbolReadState.FAILED)
+    retry_after(massive_session, script, clock=clock, name="BRK.B")
+    retry_after(massive_session, script, clock=clock, name="BRK.B")
+    assert calls(script) == [("BRK.A", "BRK.B")] * 3
+    until(lambda: tickers(massive_session, result, dh_to_pylist) == ["BRK.B", "BRK.B"])
+    assert not result.j_table.isFailed()
     massive_session.release(result)
 
 
