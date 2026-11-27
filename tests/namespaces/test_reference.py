@@ -740,6 +740,7 @@ def test_news_of_a_watchlist_lists_an_article_under_each_ticker(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.rest")
+    caplog.set_level(logging.DEBUG, logger="deephaven_massive._ingest.symbol_reads")
     shared = _article("both", "2024-06-24T18:00:00Z", "AAPL", "MSFT")
     # An article without an id is listed like any other.
     unnamed = {
@@ -771,8 +772,7 @@ def test_news_of_a_watchlist_lists_an_article_under_each_ticker(
         ("MSFT", None),
     ]
     assert (
-        "reference.news: kept 6 rows from 2 one-symbol requests; limit=3 per symbol"
-        in caplog.messages
+        "reference.news: 6 rows of 2 symbols from 2 requests; 0 symbols failed" in caplog.messages
     )
 
 

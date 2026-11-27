@@ -648,7 +648,7 @@ def test_a_symbol_with_no_data_keeps_its_rows_when_the_read_fails(
             assert isinstance(tally, ReadTally)
             tally.add(1, _lost(1), source="GET /v3/trades/{stockTicker}")
             empty = _rows(self.session, [], spec=spec)
-            return {s: SymbolRows(empty, no_data=s == "MSFT") for s in symbols}
+            return dict.fromkeys(symbols, SymbolRows(empty))
 
     monkeypatch.setattr(massive_session._core, "rest_transport", lambda: Rest(massive_session))
     empty = _rows(massive_session, [], MONDAY)
@@ -657,7 +657,79 @@ def test_a_symbol_with_no_data_keeps_its_rows_when_the_read_fails(
     assert isinstance(aapl, SymbolFailure)
     assert isinstance(aapl.error, RowDataError)
     assert isinstance(msft, SymbolRows)
-    assert msft.no_data
+    assert msft.table.size == 0
+
+
+def test_a_symbol_with_no_file_rows_beside_one_wholly_withheld_fails_only_the_withheld_one(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # One scan of the files for AAPL and MSFT: AAPL's one row is withheld, and the files hold
+    # no row of MSFT. AAPL fails, naming itself; MSFT gets no rows and no failure.
+    empty = _rows(massive_session, [], MONDAY)
+    request = Request(start=MONDAY, end=MONDAY)
+    window = history_window(TRADES, request, start=MONDAY, end=MONDAY)
+    out = read_history_by_symbol(
+        TRADES,
+        request,
+        window,
+        core=massive_session._core,
+        files=_LostFiles(FlatFileRead(((MONDAY, empty),), empty, ())),
+        symbols=["AAPL", "MSFT"],
+        dates=(MONDAY,),
+        call=1,
+        logged=LoggedKeys(),
+        stop=None,
+        forced=True,
+    )
+    aapl, msft = out["AAPL"], out["MSFT"]
+    assert isinstance(aapl, SymbolFailure)
+    assert str(aapl.error) == (
+        "stocks.trades: Massive sent 1 row for AAPL from the flat files, and the library could not "
+        "read it whole, so it withheld it. X. m.problems() counts the withheld rows by cause and "
+        "symbol."
+    )
+    assert isinstance(msft, SymbolRows)
+    assert msft.table.size == 0
+
+
+def test_a_scan_whose_only_row_has_no_readable_symbol_fails_each_symbol_without_rows(
+    massive_session: dm.MassiveSession,
+) -> None:
+    # The scan's one row of the read was withheld, and its symbol could not be read: it could
+    # be either symbol's, and the scan kept no row, so both fail.
+    class Unread(_Files):
+        @override
+        def history(self, *_: object, infer_holidays: bool, **kwargs: object) -> FlatFileRead:
+            tally = kwargs["tally"]
+            assert isinstance(tally, ReadTally)
+            group = WithheldGroup(RowFault.UNREADABLE_SYMBOLS, None, "aapl", "Symbol", 1, "x")
+            tally.add(1, Withheld(pa.table({}), (group,), "x"), source="the flat files")
+            return super().history(infer_holidays=infer_holidays)
+
+    empty = _rows(massive_session, [], MONDAY)
+    request = Request(start=MONDAY, end=MONDAY)
+    window = history_window(TRADES, request, start=MONDAY, end=MONDAY)
+    out = read_history_by_symbol(
+        TRADES,
+        request,
+        window,
+        core=massive_session._core,
+        files=Unread(FlatFileRead(((MONDAY, empty),), empty, ())),
+        symbols=["AAPL", "MSFT"],
+        dates=(MONDAY,),
+        call=1,
+        logged=LoggedKeys(),
+        stop=None,
+        forced=True,
+    )
+    for symbol in ("AAPL", "MSFT"):
+        failed = out[symbol]
+        assert isinstance(failed, SymbolFailure)
+        assert str(failed.error) == (
+            "stocks.trades: Massive sent 1 row for AAPL and MSFT from the flat files, and the "
+            "library could not read it whole, so it withheld it. X. m.problems() counts the "
+            "withheld rows by cause and symbol."
+        )
 
 
 def test_a_rest_day_bar_of_a_files_day_counts_as_read(
@@ -705,7 +777,7 @@ def test_a_symbol_whose_file_rows_were_all_withheld_fails_with_the_read(
             self, spec: DatasetSpec, *_: object, symbols: Sequence[str], tally: object, **__: object
         ) -> dict[str, SymbolOutcome]:
             empty = _rows(self.session, [], spec=spec)
-            return {s: SymbolRows(empty, no_data=True) for s in symbols}
+            return {s: SymbolRows(empty) for s in symbols}
 
     monkeypatch.setattr(massive_session._core, "rest_transport", lambda: Rest(massive_session))
     empty = _rows(massive_session, [], MONDAY)

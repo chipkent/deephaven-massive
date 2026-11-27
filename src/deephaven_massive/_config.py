@@ -312,20 +312,19 @@ class MassiveConfig:
         max_outage: Sets how many seconds a live table waits out an outage or Massive's rate
             limits before it fails. Defaults to 300 seconds.
 
-            Set `0` to fail at the first outage. Each kind of table counts its own time:
+            Set a larger value when your tables should ride out longer outages, or `0` when a
+            table must fail at the first one. A stream or `poll()` table fails once its outage
+            lasts `max_outage`:
 
-            - A stream counts the time its connection is down.
-            - A `poll()` table counts the time its polls keep failing or stop arriving. A poll
-              that would wait longer than `max_outage` for Massive's rate limits gives up, and
-              counts as a failed poll.
-            - A watchlist's `fetch()` or `history()` counts the time each symbol's reads keep
-              failing with a temporary error. Then `m.symbol_reads()` shows that symbol
-              `FAILED`. Delete its row and add it back to read it again.
-            - Any other `fetch()` or `history()` without `wait=True` counts the time it waits
-              out Massive's rate limits.
+            - A stream's outage is the time its connection is down.
+            - A `poll()` table's outage is the time its polls keep failing or waiting for
+              Massive's answer.
 
-            Until the limit passes, `m.problems()` lists the problem with the time it began. A
-            failed table stays failed, so call the method again for a new one. See
+            A symbol whose reads keep failing with a temporary error stops being read after
+            `max_outage`, in a `poll()` and in a `fetch()` or `history()` of a watchlist. Its
+            row in `m.problems()` says why.
+
+            A failed table stays failed, so call the method again for a new one. See
             https://github.com/chipkent/deephaven-massive/blob/main/docs/troubleshooting.md#live-table-messages.
         flat_file_symbol_threshold: Sets how many symbols in a list make a `history()` call read
             Massive's flat files instead of a request per symbol, when both can serve it. Defaults
@@ -1722,6 +1721,7 @@ _EXAMPLE: Final[Mapping[str, _Example]] = {
             noncanonical_symbols=OnError.RAISE,
             unreadable_symbols=OnError.LOG,
             unavailable_symbols=OnError.LOG,
+            refused_symbols=OnError.LOG,
             unrequested_symbols=OnError.LOG,
             unreadable_keys=OnError.LOG,
             unconvertible_values=OnError.LOG,
@@ -1769,6 +1769,7 @@ _CAUSE_COMMENTS: Final[Mapping[str, str]] = {
     "noncanonical_symbols": "A watchlist value that isn't Massive's exact ticker.",
     "unreadable_symbols": "A symbol in Massive's data that the library can't read.",
     "unavailable_symbols": "A symbol Massive has no data for.",
+    "refused_symbols": "A symbol Massive refuses.",
     "unrequested_symbols": "A row Massive sent for a symbol the call didn't ask for.",
     "unreadable_keys": "A row of Massive's data whose key the library can't read.",
     "unconvertible_values": "A row of Massive's data with a value the library can't read.",

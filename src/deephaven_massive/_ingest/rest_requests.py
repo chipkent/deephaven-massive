@@ -64,12 +64,15 @@ __all__ = [
     "CryptoSplit",
     "axis_query",
     "capped_call",
+    "caps_each_symbol",
     "fetch_paths",
     "history_calls",
     "largest_page",
+    "listed_part",
     "page_size",
     "plan_calls",
     "shared_params",
+    "wire_group",
     "wire_query",
 ]
 
@@ -711,6 +714,32 @@ def _page_limit(spec: DatasetSpec, rest_path: RestPath, cap: int | None) -> int 
     return min(sizes) if sizes else None
 
 
+def caps_each_symbol(name: str, calls: Sequence[Call]) -> bool:
+    """Return whether every planned call names one symbol, so `limit` caps each symbol.
+
+    Args:
+        name: The dataset's name, for the error.
+        calls: The planned calls.
+
+    Returns:
+        True when every call names one symbol (`Call.symbol`); False when none does, or there
+        are no calls.
+
+    Raises:
+        BrokenGuaranteeError: If some calls name one symbol and others do not: no dataset plans
+            such a read, and neither cap would be right for it.
+    """
+    kinds = {call.symbol is not None for call in calls}
+    if len(kinds) > 1:
+        raise BrokenGuaranteeError(
+            library_bug(
+                f"{name} planned requests of one symbol beside requests of several, so limit "
+                "can cap neither each symbol nor the whole call"
+            )
+        )
+    return True in kinds
+
+
 def capped_call(spec: DatasetSpec, rest_path: RestPath, call: Call, *, cap: int) -> Call:
     """Return a planned call that asks Massive for at most `cap` rows a page.
 
@@ -730,6 +759,41 @@ def capped_call(spec: DatasetSpec, rest_path: RestPath, call: Call, *, cap: int)
     if not any(param.name == "limit" and not param.in_path for param in rest_path.params):
         return call
     return replace(call, query={**call.query, "limit": _page_limit(spec, rest_path, cap)})
+
+
+def wire_group(spec: DatasetSpec, symbol: str) -> str:
+    """Return the key of the symbols a listed request can never send apart: one wire spelling.
+
+    `DJT` and `I:DJT` are both `DJT` in the options underlyings' list, so a request names both
+    or neither (`_symbol_parts`).
+
+    Args:
+        spec: The dataset, whose symbol parameter lists the request's symbols.
+        symbol: A canonical symbol of the request.
+
+    Returns:
+        The symbol as the request's list sends it.
+    """
+    return _wire_symbol(required(spec.symbol_param, f"{spec.name}'s symbol parameter"), symbol)
+
+
+def listed_part(spec: DatasetSpec, call: Call, part: Sequence[str]) -> Call:
+    """Return a listed request narrowed to some of its symbols, to send them on their own.
+
+    A request naming several symbols lists them in the dataset's list parameter
+    (`_symbol_parts`), and can be sent again for any of them: a search for the symbols
+    Massive refuses among them sends such parts (`refusal_search.RefusalSearch`).
+
+    Args:
+        spec: The dataset.
+        call: A planned request naming several symbols.
+        part: Some of its symbols, every symbol of a wire group (`wire_group`) or none.
+
+    Returns:
+        The request naming only `part`.
+    """
+    listed = required(spec.symbol_param, f"{spec.name}'s symbol parameter")
+    return replace(call, symbols=tuple(part), query={**call.query, listed: tuple(part)})
 
 
 def fetch_paths(

@@ -10,9 +10,11 @@ import dataclasses
 import logging
 import re
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import new_table
@@ -39,7 +41,8 @@ from deephaven_massive._errors import (
     UnavailableSymbolError,
     session_closed,
 )
-from deephaven_massive._ingest import rate_limits, rest
+from deephaven_massive._ingest import rate_limits, rest, symbol_reads
+from deephaven_massive._ingest.rest_requests import Call
 from deephaven_massive._ingest.symbol_reads import (
     AttributedRows,
     RequestRows,
@@ -49,6 +52,7 @@ from deephaven_massive._ingest.symbol_reads import (
     fails_followed_read,
     fetch_units,
     split_by_symbol,
+    split_failures,
     symbol_outcomes,
 )
 from deephaven_massive._massive import Transport
@@ -64,7 +68,7 @@ from deephaven_massive.namespaces import _options as options
 from tests._fakes.rest import FakeRestServer, Reply, envelope
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from deephaven.table import Table
 
@@ -382,7 +386,7 @@ def test_a_failure_is_retryable_only_when_its_cause_may_pass(
         (AuthenticationError("the key is refused", status=401), True),
         (SessionClosedError(session_closed()), True),
         (EntitlementError("refused", status=403), False),
-        (FeedRefusalError("delayed", source=ErrorSource.USER), False),
+        (FeedRefusalError("delayed", source=ErrorSource.USER), True),
         (MassiveError("HTTP 503", status=503), False),
         (MassiveError("connection reset", source=ErrorSource.NETWORK), False),
         (CutShortError("cut short", status=404), False),
@@ -409,6 +413,29 @@ def test_a_followed_read_fails_whole_only_for_what_fails_every_symbol_alike(
     assert fails_followed_read(error) is whole
 
 
+def test_a_refused_symbol_under_raise_fails_the_call_with_the_setting_that_reads_the_others() -> (
+    None
+):
+    # A poll() cycle fails its table with this error; the message names the setting only while
+    # another symbol may still be read, since a call whose every symbol is refused fails anyway.
+    policy = resolve_policy(dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE), dm.ErrorPolicy())
+    refusal = EntitlementError(
+        'stocks.dividends: Massive answered GET /stocks/v1/dividends with HTTP 403: "upgrade".',
+        status=403,
+    )
+    own, fatal = split_failures({"AAPL": refusal}, ["AAPL", "MSFT"], policy)
+    assert own == {"AAPL": refusal}
+    assert isinstance(fatal, EntitlementError)
+    assert fatal.status == 403
+    assert str(fatal) == (
+        'stocks.dividends: Massive answered GET /stocks/v1/dividends with HTTP 403: "upgrade". '
+        "Remove AAPL, or, to read the others, pass "
+        "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    assert split_failures({"AAPL": refusal}, ["AAPL"], policy) == ({"AAPL": refusal}, refusal)
+
+
 def test_attribution_gives_each_request_s_rows_failure_or_no_data_to_its_symbols(
     session: dm.MassiveSession,
 ) -> None:
@@ -427,31 +454,93 @@ def test_attribution_gives_each_request_s_rows_failure_or_no_data_to_its_symbols
     error = MassiveError("HTTP 503", status=503)
     tally = ReadTally()
     # The first request answered with AAPL's row; NVDA's had no data.
-    out = attribute_units(
-        reader, DIVIDENDS, units, results=[answered, None], symbols=symbols, tally=tally
-    )
-    assert (out.failures, out.no_data) == ({}, frozenset({"NVDA"}))
-    assert list(out.pieces) == symbols
-    [aapl] = out.pieces["AAPL"]
+    out = attribute_units(reader, DIVIDENDS, units, results=[answered, None], tally=tally)
+    assert out.failures == {}
+    pieces = out.pieces(symbols)
+    assert list(pieces) == symbols
+    [aapl] = pieces["AAPL"]
     assert aapl.equals(sent.drop_columns([SYMBOL_SENT]))
-    [msft] = out.pieces["MSFT"]  # named by the answered request, which gave it no row
+    [msft] = pieces["MSFT"]  # named by the answered request, which gave it no row
     assert msft.num_rows == 0
-    assert out.pieces["NVDA"] == []  # named only by the request with no data
-    assert tally.rows == 1
+    assert pieces["NVDA"] == []  # named only by the request with no data
     # The first request failed: its failure is both its symbols'.
-    out = attribute_units(
-        reader, DIVIDENDS, units, results=[error, None], symbols=symbols, tally=ReadTally()
-    )
-    assert out == AttributedRows(
-        {"AAPL": [], "MSFT": [], "NVDA": []}, {"AAPL": error, "MSFT": error}, frozenset({"NVDA"})
-    )
+    out = attribute_units(reader, DIVIDENDS, units, results=[error, None], tally=ReadTally())
+    assert out == AttributedRows({"AAPL": error, "MSFT": error}, [])
+    assert out.pieces(symbols) == {"AAPL": [], "MSFT": [], "NVDA": []}
     assert out.failures["AAPL"] is error  # the one error object, shared by the request's symbols
+
+
+class _CountingCompute:
+    # Stands in for the module's `pyarrow.compute`, counting each compute call made through it.
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __getattr__(self, name: str) -> Callable[..., object]:
+        function: Callable[..., object] = getattr(pc, name)  # whichever function the code calls
+
+        def counted(*args: object, **kwargs: object) -> object:
+            self.calls += 1
+            return function(*args, **kwargs)
+
+        return counted
+
+
+def test_a_request_s_rows_are_grouped_in_compute_calls_that_do_not_grow_with_its_symbols(
+    session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A request naming a thousand symbols must not cost a compute pass per symbol: a snapshot
+    # read of a large watchlist ran 2.5 times slower when each symbol filtered the rows alone.
+    transport = session._core.rest_transport()
+    assert isinstance(transport, rest.RestEndpoints)
+    reader = transport._reader("call-7", session._core.policy, waiter=rate_limits.Waiter.CALL)
+    units, _ = fetch_units(reader, DIVIDENDS, Request(), symbols=["AAPL"], cancel=None)
+    [(rest_path, _)] = units
+    schema = session._core.dataset_schema(DIVIDENDS).arrow_schema()
+    schema = schema.append(pa.field(SYMBOL_SENT, pa.string()))
+
+    def attribute(count: int) -> tuple[int, dict[str, list[float]]]:
+        own = tuple(f"S{i:03}" for i in range(count))
+        # Each symbol's rows interleaved with the others', then a row of no symbol and one of
+        # a symbol the request did not name.
+        rows = [
+            {"Symbol": symbol, "CashAmount": float(n), SYMBOL_SENT: symbol}
+            for n in range(2)
+            for symbol in reversed(own)
+        ]
+        rows += [
+            {"Symbol": None, "CashAmount": 9.0, SYMBOL_SENT: None},
+            {"Symbol": "IBM", "CashAmount": 9.0, SYMBOL_SENT: "IBM"},
+        ]
+        answered = RequestRows(
+            pa.Table.from_pylist(rows, schema=schema), Withheld(pa.table({})), "GET dividends"
+        )
+        planned = Call({}, {}, symbols=own)
+        counting = _CountingCompute()
+        with monkeypatch.context() as patched:
+            patched.setattr(symbol_reads, "pc", counting)
+            out = attribute_units(
+                reader, DIVIDENDS, [(rest_path, planned)], results=[answered], tally=ReadTally()
+            )
+            pieces = out.pieces(own)
+        cash = {
+            symbol: [v for piece in mine for v in piece["CashAmount"].to_pylist()]
+            for symbol, mine in pieces.items()
+        }
+        return counting.calls, cash
+
+    few, few_cash = attribute(3)
+    many, many_cash = attribute(300)
+    assert few == many
+    # Each symbol keeps its own rows, in the order Massive sent them, and no other row.
+    assert few_cash == {"S000": [0.0, 1.0], "S001": [0.0, 1.0], "S002": [0.0, 1.0]}
+    assert all(cash == [0.0, 1.0] for cash in many_cash.values())
+    assert len(many_cash) == 300
 
 
 # --- fetch by symbol ----------------------------------------------------------------------------
 
 
-def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
+def test_a_batched_request_splits_its_rows_by_symbol_and_searches_its_refusal(
     *,
     session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -467,13 +556,15 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
         out = _fetch(session, DIVIDENDS, ["TSLA", "MSFT", "AAPL", "NVDA", "AAPL"])
     assert list(out) == ["TSLA", "MSFT", "AAPL", "NVDA"]  # as given, each once
     sent = [query["ticker.any_of"] for _, query in fake_rest.get_queries()]
-    assert sent == [["AAPL,MSFT"], ["NVDA,TSLA"]]
+    # Massive refused NVDA and TSLA together, so each is sent alone to learn whose refusal it
+    # is; both are refused, so the search ends there.
+    assert sorted(sent) == [["AAPL,MSFT"], ["NVDA"], ["NVDA,TSLA"], ["TSLA"]]
     assert [(r["Symbol"], r["CashAmount"]) for r in _rows(out["AAPL"])] == [("AAPL", 0.25)]
     assert [(r["Symbol"], r["CashAmount"]) for r in _rows(out["MSFT"])] == [("MSFT", 0.83)]
     nvda, tsla = _failure(out["NVDA"]), _failure(out["TSLA"])
-    assert nvda.error is tsla.error
-    assert isinstance(nvda.error, EntitlementError)
-    assert not nvda.error.is_retryable
+    for failure in (nvda, tsla):
+        assert isinstance(failure.error, EntitlementError)
+        assert not failure.error.is_retryable
     # The row of a symbol no one asked for belongs to no symbol's read: it is the read's
     # problem, alarmed once.
     assert _zeroed(events) == [_unrequested("IBM", 1, asked="AAPL and MSFT")]
@@ -486,13 +577,13 @@ def test_a_batched_request_splits_its_rows_by_symbol_and_shares_its_failure(
             "DEBUG only."
         )
     ]
-    # The shared failure is logged once, at DEBUG: it is expected, and the caller reports it.
+    # Each refusal is logged at DEBUG: it is expected, and the caller reports it.
     failed = [r for r in caplog.records if "failed alone" in r.getMessage()]
     assert [r.levelno for r in failed] == [logging.DEBUG, logging.DEBUG]
     assert failed[0].getMessage() == (
         "call 7 stocks.dividends TSLA failed alone, in its read from REST: Massive refused this "
         "read for the Stocks subscription. Massive answered GET /stocks/v1/dividends?limit=5000&"
-        'ticker.any_of=NVDA%2CTSLA on 127.0.0.1 with HTTP 403: "upgrade".'
+        'ticker.any_of=TSLA on 127.0.0.1 with HTTP 403: "upgrade".'
     )
 
 
@@ -540,8 +631,8 @@ def test_a_row_of_another_symbol_is_no_row_of_the_read_s_symbols(
     failed = _failure(out["AAPL"])
     assert isinstance(failed.error, RowDataError)
     assert str(failed.error) == (
-        "stocks.dividends: the library could not read the 1 row of the read's symbols and window "
-        "from GET /stocks/v1/dividends whole, so it withheld it. /stocks/v1/dividends: row 0: "
+        "stocks.dividends: Massive sent 1 row for AAPL from GET /stocks/v1/dividends, and the "
+        "library could not read it whole, so it withheld it. /stocks/v1/dividends: row 0: "
         "CashAmount (wire key 'cash_amount') expects double, got \"a lot\". m.problems() counts "
         "the withheld rows by cause and symbol."
     )
@@ -594,8 +685,8 @@ def test_a_withheld_row_of_another_symbol_leaves_the_read_s_count_and_its_reason
     failed = _failure(out["AAPL"])
     assert isinstance(failed.error, RowDataError)
     assert str(failed.error) == (
-        "stocks.dividends: the library could not read the 1 row of the read's symbols and window "
-        "from GET /stocks/v1/dividends whole, so it withheld it. /stocks/v1/dividends: row 1: "
+        "stocks.dividends: Massive sent 1 row for AAPL from GET /stocks/v1/dividends, and the "
+        "library could not read it whole, so it withheld it. /stocks/v1/dividends: row 1: "
         "CashAmount (wire key 'cash_amount') expects double, got \"plenty\". m.problems() counts "
         "the withheld rows by cause and symbol."
     )
@@ -610,21 +701,61 @@ def test_a_withheld_row_of_another_symbol_s_request_is_not_the_read_s(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
     # By a symbol's own path, AAPL's request is answered with an unreadable IBM row and MSFT's
-    # with an unreadable row of its own: the read could read none of its one own row, so its
-    # symbols fail, and the failure names only MSFT's request as the source of that row.
+    # with an unreadable row of its own: MSFT fails for its own row, naming its request, and
+    # AAPL, which Massive sent no row of, gets no rows and no failure.
     fake_rest.reply("/v2/aggs/ticker/AAPL/prev", Reply(envelope([{"T": "IBM", "c": "a lot"}])))
     fake_rest.reply("/v2/aggs/ticker/MSFT/prev", Reply(envelope([{"T": "MSFT", "c": "a lot"}])))
     out = _fetch(session, PREV, ["AAPL", "MSFT"])
-    message = (
-        "stocks.previous_day_bar: the library could not read the 1 row of the read's symbols "
-        "and window from GET /v2/aggs/ticker/MSFT/prev whole, so it withheld it. "
-        "/v2/aggs/ticker/{stocksTicker}/prev: row 0: Close (wire key 'c') expects double, got "
-        '"a lot". m.problems() counts the withheld rows by cause and symbol.'
+    assert str(_failure(out["MSFT"]).error) == (
+        "stocks.previous_day_bar: Massive sent 1 row for MSFT from GET /v2/aggs/ticker/MSFT/prev, "
+        "and the library could not read it whole, so it withheld it. "
+        "/v2/aggs/ticker/{stocksTicker}/prev: row 0: Close (wire key 'c') expects double, got \"a "
+        'lot". m.problems() counts the withheld rows by cause and symbol.'
     )
-    assert {symbol: str(_failure(outcome).error) for symbol, outcome in out.items()} == {
-        "AAPL": message,
-        "MSFT": message,
-    }
+    assert _rows(out["AAPL"]) == []
+
+
+def test_a_symbol_with_no_rows_beside_one_wholly_withheld_fails_only_the_withheld_one(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One list request for AAPL and MSFT: Massive answers with one MSFT row the library can't
+    # read whole, and nothing for AAPL. MSFT fails for it; AAPL gets no rows and no failure.
+    events = _problems(session, monkeypatch)
+    rows = [{**_dividend("MSFT", 0.83), "cash_amount": "a lot"}]
+    fake_rest.reply(DIVIDENDS_PATH, Reply(envelope(rows)))
+    out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"])
+    assert str(_failure(out["MSFT"]).error) == (
+        "stocks.dividends: Massive sent 1 row for MSFT from GET /stocks/v1/dividends, and the "
+        "library could not read it whole, so it withheld it. /stocks/v1/dividends: row 0: "
+        "CashAmount (wire key 'cash_amount') expects double, got \"a lot\". m.problems() counts "
+        "the withheld rows by cause and symbol."
+    )
+    assert _rows(out["AAPL"]) == []
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "MSFT", 1)
+    ]
+
+
+def test_a_request_whose_only_row_has_an_unreadable_symbol_fails_its_symbols(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # The list request's only row names no symbol the library can read: it could be AAPL's or
+    # MSFT's, and the request kept no row, so both fail. Beside a row the request kept, the
+    # same row fails no one.
+    unread = {**_dividend("AAPL", 0.25), "ticker": 7}
+    fake_rest.reply(
+        DIVIDENDS_PATH,
+        Reply(envelope([unread])),
+        Reply(envelope([unread, _dividend("MSFT", 0.83)])),
+    )
+    out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"])
+    for symbol in ("AAPL", "MSFT"):
+        assert str(_failure(out[symbol]).error).startswith(
+            "stocks.dividends: Massive sent 1 row for AAPL and MSFT from GET /stocks/v1/dividends, "
+            "and the library could not read it whole, so it withheld it. "
+        )
+    out = _fetch(session, DIVIDENDS, ["AAPL", "MSFT"])
+    assert (len(_rows(out["AAPL"])), len(_rows(out["MSFT"]))) == (0, 1)
 
 
 def test_a_withheld_row_of_another_contract_is_not_the_read_s_by_root(
@@ -644,13 +775,12 @@ def test_a_withheld_row_of_another_contract_is_not_the_read_s_by_root(
     ]
 
 
-def test_a_withheld_row_of_a_bare_underlying_stays_the_read_s_by_underlying(
+def test_a_withheld_row_of_a_bare_underlying_is_its_asked_index_s(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The open interest by underlying gives `Symbol` its I: by a lookup after the page is
-    # read, so a withheld row's bare SPX may be the asked I:SPX, or QQQ's may be another's:
-    # neither is known, so both stay the read's, and I:SPX fails for them. Each bare ticker
-    # keeps its own problem.
+    # read, so a withheld row's bare SPX goes to the asked I:SPX, which fails for it, and
+    # QQQ's is another underlying's, counted out. Each bare ticker keeps its own problem.
     events = _problems(session, monkeypatch)
     page = [
         _underlying_open_interest("SPX", "a lot"),
@@ -661,9 +791,9 @@ def test_a_withheld_row_of_a_bare_underlying_stays_the_read_s_by_underlying(
     failed = _failure(out["I:SPX"])
     assert isinstance(failed.error, RowDataError)
     assert str(failed.error).startswith(
-        "options.open_interest_by_underlying: the library could read none of the 2 rows of the "
-        "read's symbols and window from GET /options/v1/open-interest/underlying whole, so it "
-        "withheld them all. "
+        "options.open_interest_by_underlying: Massive sent 1 row for I:SPX from GET "
+        "/options/v1/open-interest/underlying, and the library could not read it whole, so it "
+        "withheld it. "
     )
     assert [(e.cause, e.symbol, e.rows) for e in events] == [
         (ProblemCause.UNCONVERTIBLE_VALUES, "SPX", 1),
@@ -671,34 +801,80 @@ def test_a_withheld_row_of_a_bare_underlying_stays_the_read_s_by_underlying(
     ]
 
 
-def test_a_row_the_index_lookup_withholds_stays_the_read_s(
+def test_a_withheld_row_of_another_bare_underlying_fails_no_one_by_underlying(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SPY's request is answered with one SPX row whose open interest is "a lot": the row is
+    # withheld under SPX, before the lookup, and is another underlying's, so SPY gets no rows
+    # and no failure.
+    events = _problems(session, monkeypatch)
+    fake_rest.reply(
+        BY_UNDERLYING_PATH, Reply(envelope([_underlying_open_interest("SPX", "a lot")]))
+    )
+    out = _fetch(session, options.OPEN_INTEREST_BY_UNDERLYING, ["SPY"])
+    assert _rows(out["SPY"]) == []
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "SPX", 1)
+    ]
+
+
+def test_a_row_the_index_lookup_withholds_of_another_underlying_fails_no_one(
     *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Massive answers SPY's request with a row of SPX, whose contracts list can't say whether
-    # it is an index: the lookup withholds the row under no known symbol, so it stays possibly
-    # the read's, and SPY fails for it, as for a row whose symbol could not be read.
+    # it is an index: the lookup withholds the row, and its bare SPX is no spelling of SPY, so
+    # SPY gets no rows and no failure. The row keeps its problem.
     events = _problems(session, monkeypatch)
     fake_rest.reply(BY_UNDERLYING_PATH, Reply(envelope([_underlying_open_interest("SPX", 3)])))
     _serve_index_list(fake_rest, "SPX")
     fake_rest.reply(CONTRACTS_LIST_PATH, Reply(envelope([])))
     out = _fetch(session, options.OPEN_INTEREST_BY_UNDERLYING, ["SPY"])
-    failed = _failure(out["SPY"])
-    assert isinstance(failed.error, RowDataError)
-    assert str(failed.error).startswith(
-        "options.open_interest_by_underlying: the library could not read the 1 row of the "
-        "read's symbols and window from GET /options/v1/open-interest/underlying whole, so it "
-        "withheld it. Massive's contracts list has no contract with a CFI code for SPX"
-    )
+    assert _rows(out["SPY"]) == []
     assert [(e.cause, e.symbol, e.rows) for e in events] == [
         (ProblemCause.UNREADABLE_SYMBOLS, "SPX", 1)
     ]
+
+
+def test_a_row_the_root_lookup_withholds_of_another_contract_fails_no_one(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The open interest by contract: Massive answers an AAPL contract's request with a row of
+    # an SPX contract that Massive's contracts reference doesn't hold, so the lookup can't say
+    # whether its root is an index's and withholds the row. Its contract is another symbol,
+    # so the asked contract gets no rows and no failure.
+    events = _problems(session, monkeypatch)
+    asked, other = "O:AAPL260116C00200000", "O:SPX260116C05000000"
+    fake_rest.reply(BY_ROOT_PATH, Reply(envelope([_contract_open_interest(other, 3)])))
+    _serve_index_list(fake_rest, "SPX")
+    fake_rest.reply(f"/v3/reference/options/contracts/{other}", Reply(status=404))
+    out = _fetch(session, options.OPEN_INTEREST, [asked])
+    assert _rows(out[asked]) == []
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNREADABLE_SYMBOLS, "SPX", 1)
+    ]
+
+
+def test_a_row_the_index_lookup_withholds_of_the_asked_index_fails_it(
+    *, session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # I:SPX's request is answered with a bare SPX row the lookup can't classify: the row could
+    # be I:SPX's, and it was withheld, so I:SPX, with no row, fails for it.
+    fake_rest.reply(BY_UNDERLYING_PATH, Reply(envelope([_underlying_open_interest("SPX", 3)])))
+    _serve_index_list(fake_rest, "SPX")
+    fake_rest.reply(CONTRACTS_LIST_PATH, Reply(envelope([])))
+    out = _fetch(session, options.OPEN_INTEREST_BY_UNDERLYING, ["I:SPX"])
+    assert str(_failure(out["I:SPX"]).error).startswith(
+        "options.open_interest_by_underlying: Massive sent 1 row for I:SPX from GET "
+        "/options/v1/open-interest/underlying, and the library could not read it whole, so it "
+        "withheld it. Massive's contracts list has no contract with a CFI code for SPX"
+    )
 
 
 def test_a_request_result_no_case_handles_is_refused(
     *, session: dm.MassiveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def answered(self: object, spec: object, units: Sequence[object], **_: object) -> object:
-        return ["bogus"] * len(units), 0
+        return SimpleNamespace(units=units, results=["bogus"] * len(units), requests=0)
 
     monkeypatch.setattr(rest.RestReader, "read_each", answered)
     with pytest.raises(AssertionError, match="got: 'bogus'"):
@@ -762,8 +938,8 @@ def test_a_row_left_out_is_named_as_massive_sent_it(
             spec=INDEX,
             where=f"REST GET {INDEX_PATH}",
             detail=(
-                "Massive answered the request for I:SPX with rows of NDX, which the read did "
-                "not ask for, so they are left out. The table spells NDX as I:NDX."
+                "Massive answered the request for I:SPX with rows of I:NDX, which the read did not "
+                "ask for, so they are left out. Massive writes I:NDX as NDX"
             ),
         )
     ]
@@ -771,10 +947,11 @@ def test_a_row_left_out_is_named_as_massive_sent_it(
         failed = _failure(out["I:SPX"])
         assert isinstance(failed.error, RowDataError)
         assert str(failed.error) == (
-            "indices.snapshots: Massive answered the request for I:SPX with 1 row of NDX, "
-            "which the read did not ask for, so the library left it out. The table spells NDX "
-            "as I:NDX. To go on without such rows, pass on_error=dm.ErrorPolicy("
-            "unrequested_symbols=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+            "indices.snapshots: Massive answered the request for I:SPX with 1 row of I:NDX, which "
+            "the read did not ask for, so the library left it out. Massive writes I:NDX as NDX. To "
+            "go on without such rows, pass "
+            "on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) to the call or to "
+            "dm.MassiveConfig."
         )
     else:
         rows = _rows(out["I:SPX"])
@@ -881,8 +1058,8 @@ def test_a_listed_request_s_row_naming_no_symbol_belongs_to_none(
             None,
             1,
             (
-                "Massive answered the request for AAPL with rows of no symbol, which the "
-                "read did not ask for, so they are left out"
+                "Massive answered the request for AAPL with rows of no symbol, which the read did "
+                "not ask for, so they are left out"
             ),
         )
     ]
@@ -930,8 +1107,8 @@ def _unlisted(
         spec=LISTED,
         where="REST GET /benzinga/v2/news",
         field="Tickers",
-        detail=f"Massive answered the request for {asked} with rows whose Tickers lists no "
-        f"ticker asked for{only} so they are left out",
+        detail=f"Massive answered the request for {asked} with rows whose Tickers lists no ticker "
+        f"asked for{only} so they are left out",
     )
 
 
@@ -1381,27 +1558,50 @@ UNREADABLE_NQ = Reply(envelope([{"product_code": "NQ", "last_updated": "no time"
 """NQ's product, whose only row has an update time the library cannot read."""
 
 
-def test_a_value_whose_rows_are_all_unreadable_beside_one_read_whole_gets_no_rows(
+def test_a_value_whose_rows_are_all_unreadable_fails_alone(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    # The values are one read: NQ's row is withheld, and the read goes on with ES's.
+    # Each value is judged by its own rows: NQ's one row is withheld, so NQ fails, naming
+    # itself, and ES keeps its rows.
     es = Reply(envelope([{"product_code": "ES", "name": "E-mini S&P 500"}]))
     fake_rest.reply(PRODUCTS_PATH, es, UNREADABLE_NQ)
     out = _by_value(rest_session, ["ES", "NQ"])
     assert [r["ProductCode"] for r in _rows(out["ES"])] == ["ES"]
-    assert _rows(out["NQ"]) == []
+    error = _failure(out["NQ"]).error
+    assert isinstance(error, RowDataError)
+    assert str(error).startswith(
+        "futures.products: Massive sent 1 row for NQ from GET /futures/v1/products, and the "
+        "library could not read it whole, so it withheld it. "
+    )
 
 
-def test_a_read_by_value_whose_rows_are_all_unreadable_fails_each_value(
+def test_another_value_s_withheld_row_fails_no_asked_value(
     *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
 ) -> None:
-    es = Reply(envelope([{"product_code": "ES", "last_updated": "no time"}]))
-    fake_rest.reply(PRODUCTS_PATH, es, UNREADABLE_NQ)
-    out = _by_value(rest_session, ["ES", "NQ"])
-    for value in ("ES", "NQ"):
-        error = _failure(out[value]).error
-        assert isinstance(error, RowDataError)
-        assert "could read none of the 2 rows" in str(error)
+    # Each value is judged by its own rows: Massive answers ES with only NQ's row, which the
+    # library withholds. It is no row of ES, so ES has no rows and does not fail.
+    fake_rest.reply(PRODUCTS_PATH, UNREADABLE_NQ)
+    out = _by_value(rest_session, ["ES"])
+    assert _rows(out["ES"]) == []
+
+
+def test_a_404_on_a_value_s_later_page_cuts_its_data_short(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Only a value's first answer of HTTP 404 means Massive has no data for it. A 404 after a
+    # page of rows arrived cuts the value's rows short: the value fails, and is never read as
+    # having no rows.
+    gone = f"{PRODUCTS_PATH}?cursor=gone"
+    fake_rest.reply(gone, Reply(b'{"status":"NOT_FOUND"}', status=404))
+    first = envelope([{"product_code": "ES"}], next_url=f"{fake_rest.url}{gone}")
+    fake_rest.reply(PRODUCTS_PATH, Reply(first))
+    out = _by_value(rest_session, ["ES"])
+    error = _failure(out["ES"]).error
+    assert isinstance(error, CutShortError)
+    assert error.is_retryable
+    assert str(error).startswith(
+        "futures.products: the rows of ES were cut short after 1 page arrived. "
+    )
 
 
 def test_a_rejected_key_stops_a_read_by_value(
@@ -1424,3 +1624,27 @@ def test_a_parameter_the_path_does_not_take_fails_each_value_before_any_request(
         "symbols in a call without it."
     )
     assert fake_rest.get_queries() == []
+
+
+@pytest.mark.parametrize(
+    ("spec", "value", "sent"),
+    [
+        (futures.PRODUCTS, None, None),  # a row that names no value
+        (futures.PRODUCTS, "NQ", "NQ"),
+        (options.CONTRACTS, "I:DJT", "DJT"),  # the contracts list writes an index bare
+    ],
+)
+def test_a_value_row_is_named_as_massive_sent_it(
+    spec: DatasetSpec, value: str | None, sent: str | None
+) -> None:
+    assert symbol_reads._sent_value(spec, value) == sent
+
+
+def test_an_index_prefix_no_case_handles_is_refused() -> None:
+    # A dataset refuses such a prefix when it is built, so a stand-in carries it.
+    unplanned = SimpleNamespace(index_prefix="SOMEHOW")
+    with pytest.raises(AssertionError):
+        symbol_reads._sent_value(
+            unplanned,  # type: ignore[arg-type]  # the point: a prefix no case names is refused
+            "I:DJT",
+        )

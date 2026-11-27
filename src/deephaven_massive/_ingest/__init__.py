@@ -25,7 +25,9 @@
 - `ws_connection`: one connection per URL over `WsClient`, and the group that shares
   connections between sessions;
 - `subscriptions`: the subscription protocol of one connection (the reconcile loop,
-  acknowledgements, refusals).
+  acknowledgements, refusals);
+- `refusal_search`: which items of a refused request Massive refuses, found by sending it
+  again in halves.
 
 Layer: ingest, above the wire (`_massive`), the vocabulary (the root `_config`, `_enums`,
 `_errors`, `_log_limits`, `_types`), the datasets (`_datasets`), and the tables (`_tables`), all of

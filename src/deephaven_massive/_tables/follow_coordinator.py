@@ -38,6 +38,10 @@ failure of its run makes it `FAILED`, with an error that names the limit, as a `
 fails after its cycles have failed that long. Any other failure makes it `FAILED` at once.
 That rule, and each symbol's count of reads and run of failures, is `_tables/symbol_retry.py`'s
 (`SymbolRun`); the coordinator keeps one per symbol and schedules the retries it decides.
+A `RETRYING` or `FAILED` symbol is a span of `m.problems()`: a refusal of the symbol is a
+`refused_symbols` span, carrying the call's setting; any other final failure is
+`symbol_read_failed`. A final failure is the symbol's alone unless its cause is set to `RAISE`
+(`call_failure.fails_call`), which fails the table too.
 Removed, it is `REMOVED`: under `Reread.ALWAYS` an empty download replaces its rows in the
 result, freeing them, and a re-add reads it again; under `Reread.NEVER` its download is kept, so
 a re-add shows the earlier download at once, with no request. A `FAILED` symbol is read again
@@ -48,9 +52,10 @@ re-add during a read waits for it to end). When the result stops (released and u
 every symbol still following is `STOPPED`, and stays so: a read that starts after the stop
 changes nothing.
 
-**Whole-table failures.** A read that raises (`AuthenticationError`, a session closed during
-the read, or a defect) and a symbol table that fails or, under
-`noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
+**Whole-table failures.** A read that raises (`AuthenticationError`, a refusal of the feed, a
+session closed during the read, or a defect), a symbol's final failure whose cause is set to
+`RAISE` (a refused symbol under `refused_symbols=RAISE`), and a symbol table that fails or,
+under `noncanonical_symbols=RAISE`, gains a bad row fail the result (`FollowedRead.fail_table`):
 the coordinator records the failure and publishes it, never the listener. So does a call that
 did not wait whose call-time symbols (the table's symbols when the watch started) all end
 `FAILED`, such as on a plan without the dataset, which refuses every symbol: the table fails
@@ -103,6 +108,7 @@ from deephaven_massive._log_limits import (
     prose_list,
 )
 from deephaven_massive._tables import poll
+from deephaven_massive._tables.call_failure import call_failure
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
     SYMBOLS_LISTED,
@@ -112,9 +118,15 @@ from deephaven_massive._tables.diagnostics import (
 from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.liveness import QueueWorker
 from deephaven_massive._tables.poll import SymbolRowError
-from deephaven_massive._tables.problem_events import ProblemCause, SpanTracker
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
-from deephaven_massive._tables.symbol_retry import Failed, Retry, SymbolRun
+from deephaven_massive._tables.symbol_retry import (
+    SPAN_CAUSES,
+    Failed,
+    Retry,
+    SymbolRun,
+    is_symbol_refusal,
+)
+from deephaven_massive._tables.symbol_spans import SymbolSpans
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 
 if TYPE_CHECKING:
@@ -126,7 +138,7 @@ if TYPE_CHECKING:
     from deephaven_massive._config import MassiveConfig
     from deephaven_massive._tables.followed_read import FollowPlan
     from deephaven_massive._tables.poll import PollClock
-    from deephaven_massive._tables.problem_events import Problem
+    from deephaven_massive._tables.problem_events import Problem, ProblemCause
     from deephaven_massive._tables.read_pool import ReadPool
     from deephaven_massive._tables.transports import SymbolOutcome
 
@@ -151,12 +163,6 @@ _FOLLOWING: Final = frozenset(
 
 _ENDED: Final = frozenset({SymbolReadState.FAILED, SymbolReadState.REMOVED, SymbolReadState.CLOSED})
 """The states a stop leaves as they are; every other becomes `STOPPED`."""
-
-_TROUBLE_CAUSES: Final = {
-    SymbolReadState.RETRYING: ProblemCause.SYMBOL_READ_RETRYING,
-    SymbolReadState.FAILED: ProblemCause.SYMBOL_READ_FAILED,
-}
-"""The cause of each state whose symbols are spans of `m.problems()`."""
 
 
 class FollowedReadRows(Protocol):
@@ -439,12 +445,12 @@ class _Counted:
     Attributes:
         state: Its state, which counts it as loading, retrying, or failed.
         rows: Its rows in the result.
-        cause: Its latest failure's cause, which groups a retrying or failed symbol.
+        span: The cause of its span of `m.problems()` (`SymbolRun.cause`), or None for none.
     """
 
     state: SymbolReadState
     rows: int
-    cause: str
+    span: ProblemCause | None
 
 
 @dataclass(slots=True)
@@ -460,7 +466,7 @@ class _Progress:
         members: The symbols the table holds now.
         loading: How many of them still wait for their rows (`QUEUED`, `LOADING`, `RETRYING`).
         rows: Their rows in the result, in all.
-        troubled: Of them, the `RETRYING` and `FAILED` ones, by state, then by cause.
+        troubled: Of them, the ones that hold a span of `m.problems()`, by its cause.
         members_changed: Whether `members` changed since `symbols` was last made.
         troubled_changed: Whether `troubled` changed since its spans were last reported.
         symbols: The `SymbolCount` and `Symbols` shown (`symbol_list_text`).
@@ -469,8 +475,8 @@ class _Progress:
     members: set[str] = field(default_factory=set)
     loading: int = 0
     rows: int = 0
-    troubled: dict[SymbolReadState, dict[str, set[str]]] = field(
-        default_factory=lambda: {SymbolReadState.RETRYING: {}, SymbolReadState.FAILED: {}}
+    troubled: dict[ProblemCause, set[str]] = field(
+        default_factory=lambda: {cause: set() for cause in SPAN_CAUSES}
     )
     members_changed: bool = True
     troubled_changed: bool = True
@@ -485,7 +491,7 @@ class _Progress:
         """
         before = symbol.counted
         after = (
-            _Counted(symbol.run.state, symbol.rows, symbol.cause or "") if symbol.in_table else None
+            _Counted(symbol.run.state, symbol.rows, symbol.run.cause) if symbol.in_table else None
         )
         if before == after:
             return
@@ -494,17 +500,13 @@ class _Progress:
                 continue
             self.loading += sign * (counted.state in _FOLLOWING)
             self.rows += sign * counted.rows
-            causes = self.troubled.get(counted.state)
-            if causes is None:
+            if counted.span is None:
                 continue
             self.troubled_changed = True
-            names = causes.setdefault(counted.cause, set())
             if sign > 0:
-                names.add(name)
-                continue
-            names.discard(name)
-            if not names:
-                del causes[counted.cause]
+                self.troubled[counted.span].add(name)
+            else:
+                self.troubled[counted.span].discard(name)
         if (before is None) != (after is None):
             self.members_changed = True
             if after is None:
@@ -533,7 +535,7 @@ class _Result:
         dirty: The symbols whose `m.symbol_reads()` row changed since it was last written.
         warned: The causes of failure already logged at WARNING for the result.
         transports: The sources its reads have used.
-        spans: Its `symbol_read_retrying` and `symbol_read_failed` spans of `m.problems()`.
+        spans: Its symbols' spans of `m.problems()`, by cause (`SPAN_CAUSES`).
         progress: Its `m.streams()` progress, kept current by `_show`.
         shown: The `m.streams()` progress last written, to skip an unchanged write.
         decided_at_step: The latest update cycle of the symbol table whose change the
@@ -560,7 +562,7 @@ class _Result:
     dirty: set[str] = field(default_factory=set)
     warned: set[str] = field(default_factory=set)
     transports: set[str] = field(default_factory=set)
-    spans: dict[SymbolReadState, SpanTracker] = field(default_factory=dict)
+    spans: SymbolSpans | None = None
     progress: _Progress = field(default_factory=_Progress)
     shown: object = None
     call_time: dict[str, MassiveError | None] | None = None
@@ -592,6 +594,32 @@ def _cause(error: MassiveError) -> str:
     if error.is_bug:
         parts.append("bug")
     return " ".join(parts)
+
+
+def _failure_level(error: MassiveError, *, first: bool, fails_table: bool) -> int:
+    """Return the level of the record that says a symbol has failed for good.
+
+    The first failure of each cause on a result is logged at WARNING (a bug at ERROR, with its
+    traceback), and the later ones at DEBUG. A failure that fails the table is at DEBUG, since
+    the table's failure is its alarm (`_fail`). A refusal of the symbol that does not is a
+    `refused_symbols` span, which the session's problem reporter logs once per table at WARNING
+    under `LOG` and at DEBUG under `IGNORE`, so it is at DEBUG here too.
+
+    Args:
+        error: The symbol's final failure.
+        first: Whether it is the first failure of its cause on the result.
+        fails_table: Whether the failure fails the table (`call_failure.fails_call`).
+
+    Returns:
+        `logging.ERROR`, `logging.WARNING`, or `logging.DEBUG`.
+    """
+    if not first or fails_table:
+        return logging.DEBUG
+    if error.is_bug:
+        return logging.ERROR
+    if is_symbol_refusal(error):
+        return logging.DEBUG
+    return logging.WARNING
 
 
 def _transport(read: CoordinatedRead, outcome: SymbolOutcome) -> str:
@@ -1186,13 +1214,14 @@ class FollowCoordinator:
         self._failed(result, name, outcome)
 
     def _failed(self, result: _Result, name: str, outcome: SymbolFailure) -> None:
-        """Make a failed symbol `RETRYING` or `FAILED`, and log it.
+        """Make a failed symbol `RETRYING` or `FAILED`, log it, and fail the table if it must.
 
         The symbol's run decides which (`SymbolRun.failed`): a failure that may pass is read
         again after its delay, until one lands `MassiveConfig.max_outage` seconds or more
         after the run's first failure landed; that failure, and any other, is final. A
         read's own time is not counted, since it may have spent most of it receiving pages.
-        A retry goes on the heap of retries, due at the run's time.
+        A retry goes on the heap of retries, due at the run's time. A final failure whose
+        cause the call set to `RAISE` (`call_failure.fails_call`) fails the table too.
 
         Args:
             result: The result's state.
@@ -1231,10 +1260,11 @@ class FollowCoordinator:
         symbol.next_attempt_at = None
         first = symbol.cause not in result.warned
         result.warned.add(symbol.cause)
-        mark_failure_logged(error)
-        level = logging.WARNING if first else logging.DEBUG
-        if error.is_bug and first:
-            level = logging.ERROR
+        fatal = call_failure(name, error, result.read.plan.policy)
+        if fatal is not error:
+            # Logged below. A table it fails logs it in `_fail`, at WARNING, as its alarm.
+            mark_failure_logged(error)
+        level = _failure_level(error, first=first, fails_table=fatal is not None)
         logger.log(
             level,
             "%s call %d: %s failed after %d %s and is left out of the result. %s To read it "
@@ -1248,6 +1278,8 @@ class FollowCoordinator:
             exc_info=error if level == logging.ERROR else None,  # a bug, with its traceback
         )
         self._call_time_outcome(result, name, error)
+        if fatal is not None:  # a cause set to RAISE; a no-op when the check above failed it
+            self._fail(result, fatal)
 
     def _call_time_outcome(self, result: _Result, name: str, error: MassiveError | None) -> None:
         """Take a symbol's outcome toward the call-time check of a call that did not wait.
@@ -1567,29 +1599,30 @@ class FollowCoordinator:
     def _report_troubled(result: _Result) -> None:
         """Report the result's `RETRYING` and `FAILED` symbols as spans of `m.problems()`.
 
-        Each symbol in one of those states is one span, `symbol_read_retrying` or
-        `symbol_read_failed`, with its latest error; a span ends when the symbol leaves the
-        state (it is read, retried, removed, or the result stops).
+        Each symbol in one of those states is one span, with its latest error, under the cause
+        its run gives (`SymbolRun.cause`): `symbol_read_retrying`, `refused_symbols`, which
+        carries the read's setting of that cause, or `symbol_read_failed`. A span ends when
+        the symbol leaves the state (it is read, retried, removed, or the result stops).
 
         Args:
             result: The result's state.
         """
         read = result.read
-        found = []
-        for state, cause in _TROUBLE_CAUSES.items():
-            tracker = result.spans.get(state)
-            if tracker is None:
-                tracker = result.spans[state] = SpanTracker(
-                    cause, dataset=read.dataset, stream_id=read.call, where=f"call {read.call}"
-                )
-            names = {name for names in result.progress.troubled[state].values() for name in names}
-            spans = tracker.update(
-                {name: (name, None, result.symbols[name].error or "", 0) for name in names}
+        if result.spans is None:
+            result.spans = SymbolSpans(
+                dataset=read.dataset,
+                stream_id=read.call,
+                where=f"call {read.call}",
+                refused_symbols=read.plan.policy.refused_symbols,
             )
-            if spans is not None:
-                found.append(spans)
+        found = result.spans.update(
+            {
+                cause: {name: result.symbols[name].error or "" for name in names}
+                for cause, names in result.progress.troubled.items()
+            }
+        )
         if found:
-            read.core.problems(found)
+            read.core.problems(list(found))
 
     def _forget(self, result: _Result) -> None:
         """Forget a result once its blink table has shut down: no event of it matters any more.

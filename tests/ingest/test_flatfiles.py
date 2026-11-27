@@ -1049,6 +1049,43 @@ def test_a_malformed_line_under_raise_fails_every_symbol_of_a_read_by_symbol(
         assert not failed.error.is_retryable
 
 
+def test_each_symbol_s_outcome_holds_only_its_own_rows(
+    *, fake_s3: FakeS3, clock: Callable[[datetime], None]
+) -> None:
+    # One file for AAPL, MSFT, and NVDA: AAPL's only row has a price the library can't read,
+    # the file holds no row of MSFT, and NVDA's row reads whole. AAPL fails for its own row,
+    # naming itself; MSFT gets no rows and no failure; NVDA gets its row.
+    at = 1741012200000000000
+    unreadable = f"12,,4,1,{at},x,1,{at},10,1,AAPL,,\n"
+    fake_s3.put(
+        TRADES_0303,
+        gzip.compress((TRADE_HEADER + unreadable + trade(2, at + 2, "NVDA")).encode()),
+    )
+    asked = Request(start=date(2025, 3, 3), end=date(2025, 3, 3))
+    window = whole_days(STOCK_TRADES, "2025-03-03")
+    with dm.MassiveSession(CONFIG) as m:
+        out = files_transport(m).history_by_symbol(
+            STOCK_TRADES,
+            asked,
+            window,
+            symbols=["AAPL", "MSFT", "NVDA"],
+            dates=(date(2025, 3, 3),),
+            call=1,
+            forced=True,
+            logged=LoggedKeys(),
+        )
+        aapl, msft, nvda = out["AAPL"], out["MSFT"], out["NVDA"]
+        assert isinstance(aapl, SymbolFailure)
+        assert str(aapl.error).startswith(
+            "stocks.trades: Massive sent 1 row for AAPL from the flat files of "
+            "us_stocks_sip/trades_v1, and the library could not read it whole, so it withheld it. "
+        )
+        assert isinstance(msft, SymbolRows)
+        assert msft.table.size == 0
+        assert isinstance(nvda, SymbolRows)
+        assert dh_arrow.to_arrow(nvda.table).column("Symbol").to_pylist() == ["NVDA"]
+
+
 def test_a_file_whose_every_line_is_malformed_fails_the_call(
     *,
     session: dm.MassiveSession,
@@ -1159,9 +1196,9 @@ def test_a_file_whose_every_time_is_in_a_wrong_unit_fails_the_call(
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + trade(1, 1741012200000)))
     with pytest.raises(
         RowDataError,
-        match=r"^stocks\.trades: the library could not read the 1 row of the read's "
-        r"symbols and window from the flat files of us_stocks_sip/trades_v1 whole, so it withheld "
-        r"it\. Timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
+        match=r"^stocks\.trades: Massive sent 1 row of the read's symbols and window from the "
+        r"flat files of us_stocks_sip/trades_v1, and the library could not read it whole, so it "
+        r"withheld it\. Timestamp unit mismatch for stocks\.trades\.Timestamp: 1741012200000 ns is "
         r"outside 1990 to 2100\. m\.problems\(\) counts the withheld rows by cause and symbol\."
         "$",
     ) as info:
@@ -1195,8 +1232,7 @@ def test_a_file_whose_rows_in_the_window_are_all_unreadable_fails_the_read(
     fake_s3.put(TRADES_0303, make_csv_gz(TRADE_HEADER + rows))
     with pytest.raises(
         RowDataError,
-        match=r"the library could (read none of the \d rows|not read the 1 row) of the read's "
-        r"symbols and window",
+        match=r"Massive sent \d rows? of the read's symbols and window",
     ):
         query(session, STOCK_TRADES, symbols=dm.ALL).history("2025-03-03", "2025-03-03", wait=True)
 
@@ -1827,7 +1863,7 @@ def test_auto_judges_its_files_and_rest_fills_as_one_read(
         events = capture_problems(m, monkeypatch)
         q = query(m, STOCK_TRADES, symbols=MANY)
         if not files_whole:
-            with pytest.raises(RowDataError, match="could read none of the 2 rows"):
+            with pytest.raises(RowDataError, match="Massive sent 2 rows "):
                 q.history("2025-03-03", "2025-03-04", wait=True)
             return
         t = q.history("2025-03-03", "2025-03-04", wait=True)

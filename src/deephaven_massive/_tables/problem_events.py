@@ -99,6 +99,7 @@ class ProblemCause(StrEnum):
     NONCANONICAL_SYMBOLS = "noncanonical_symbols"
     UNREADABLE_SYMBOLS = "unreadable_symbols"
     UNAVAILABLE_SYMBOLS = "unavailable_symbols"
+    REFUSED_SYMBOLS = "refused_symbols"
     UNREQUESTED_SYMBOLS = "unrequested_symbols"
     UNREADABLE_KEYS = "unreadable_keys"
     UNCONVERTIBLE_VALUES = "unconvertible_values"
@@ -180,9 +181,20 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_MASSIVE,
             action=ProblemAction.SKIPPED,
             span=False,
-            summary="Massive has no data for the symbol. It answered HTTP 404, or the pair isn't "
-            "on its crypto ticker list.",
+            summary="Massive has no data for the symbol. It answered HTTP 404, or a snapshot "
+            "row's `error` was `NOT_FOUND`. "
+            "For a crypto pair, the pair isn't on Massive's crypto ticker list.",
             fix="Look the symbol up in Massive's lists, such as `m.reference.tickers()`.",
+        ),
+        _C.REFUSED_SYMBOLS: CauseTraits(
+            policy="refused_symbols",
+            source=_MASSIVE,
+            action=ProblemAction.SKIPPED,
+            span=True,
+            summary="Massive refused the symbol, usually because your plan doesn't serve it. "
+            "`Detail` gives Massive's answer.",
+            fix="Remove the symbol. If you expect Massive to serve it, ask Massive why it "
+            "refused, quoting `Detail`.",
         ),
         _C.UNREQUESTED_SYMBOLS: CauseTraits(
             policy="unrequested_symbols",
@@ -361,7 +373,7 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_LIBRARY,
             action=ProblemAction.DELAYED,
             span=True,
-            summary="A symbol's read failed in a way that may pass, so the library tries it "
+            summary="A symbol's read failed with a temporary error, so the library tries it "
             "again. A read that waits on Massive's crypto ticker list is one of these.",
             fix="Nothing, unless it lasts. Then fix what `Detail` names.",
         ),
@@ -370,9 +382,9 @@ CAUSES: Final[Mapping[ProblemCause, CauseTraits]] = MappingProxyType(
             source=_LIBRARY,
             action=ProblemAction.FAILED,
             span=True,
-            summary="A watchlist symbol's read failed and won't be tried again.",
-            fix="Fix what `Detail` names. Then delete the symbol's watchlist row and add it back "
-            "to read it again.",
+            summary="A symbol's read failed and won't be tried again.",
+            fix="Fix what `Detail` names. Then delete the symbol's row and add it back, or call "
+            "the method again.",
         ),
         _C.STREAM_FAILED: CauseTraits(
             policy=None,

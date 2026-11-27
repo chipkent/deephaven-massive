@@ -22,30 +22,43 @@ failure (`SymbolFailure`, `_tables/transports.py`). This module holds what they 
   `unrequested_symbols` problem, one event per symbol such rows name, by the symbol as
   Massive sent it (`ProblemEvent`; `SPX` for a row the table would name `I:SPX`), which
   `m.problems()` lists and the session's reporter alarms once per table; under `RAISE` the
-  request's symbols fail (`RowDataError`). The same rule says which of a request's rows are
-  the read's for its tally (`ReadTally`): its kept rows of the symbols it names, and its
-  withheld rows but those whose asked symbol names another symbol, so a withheld row of
-  another symbol never fails the request's own. A request's failure is the failure of each
-  symbol it names. A dataset whose rows list their tickers fills `Symbol` with the asked ticker each
-  row lists before this step (`rest._listed_rows`), so its rows follow the same rule. A
-  flat-file scan reads every symbol at once (`history_reads.read_history_by_symbol`): its rows
-  are split by `Symbol` (`split_by_symbol`) under the same rule, and its failure is every
-  symbol's; the days its files lack are read from REST symbol by symbol.
-- **Reads by value** (`read_rest_by_value`): a table passed where a dataset takes one value (an
-  option chain's underlying, a futures product code) is read value by value, each with the
-  requests `fetch()` makes for that value alone, so every row belongs to the value whose
-  request returned it, and one value's failure fails only that value.
+  request's symbols fail (`RowDataError`). The same rule says whose a request's withheld rows
+  are, for the read's tally (`ReadTally.add_request`): each goes to the asked symbol it would
+  have gone to (`_owners`), so a withheld row of another symbol never fails the request's own,
+  and one whose symbol is not known could be any of the request's. A request's failure is the
+  failure of each symbol it names. A dataset whose rows list their tickers fills `Symbol`
+  with the asked ticker each row lists before this step (`rest._listed_rows`), so its rows
+  follow the same rule. A flat-file scan reads every symbol at once
+  (`history_reads.read_history_by_symbol`): its rows are split by `Symbol`
+  (`split_by_symbol`) under the same rule, and its failure is every symbol's; the days its
+  files lack are read from REST symbol by symbol.
+- **Reads by value** (`read_rest_by_value`, `RestReader.read_by_value`): a table passed where
+  a dataset takes one value (an option chain's underlying, a futures product code) is read
+  value by value, each with the requests `fetch()` makes for that value alone, and the values
+  Massive takes as one (`DJT` and `I:DJT` on the contracts list) by one request
+  (`value_groups`). Each row goes to the value its `ValueTable.row_column` names, and a row of
+  any other value is the read's `unrequested_symbols` problem (`attribute_values`), the rule
+  of a read by symbol. One value's failure fails only that value. A static or followed
+  `fetch()` reads them as a `poll()` cycle does.
 - **Classes of failure** (the error's `is_retryable`): retryable when the cause may pass (a
   rate limit beyond the read's patience, a server error after the client's retries, a network
-  failure, a symbol's later page that answered HTTP 404); otherwise the same read would fail
-  again for this session's entitlements (a refusal of the plan, which an upgrade of the plan
-  lifts; rows that break the schema; a crypto pair Massive does not list; a parameter the path
-  does not take; any other HTTP 404, such as a path Massive retired; a defect of the library).
+  failure, a symbol's or value's later page that answered HTTP 404); otherwise the same read
+  would fail again for this session's entitlements (a refusal of the plan, which an upgrade
+  of the plan lifts; rows that break the schema; a crypto pair Massive does not list; a
+  parameter the path does not take; any other HTTP 404, such as a path Massive retired; a
+  defect of the library).
   HTTP 404 on a symbol's first request is no failure: the symbol has no data, and its table is
   empty.
 - **Whole-read failures** (`fails_followed_read`): a rejected API key
-  (`AuthenticationError`) and a session closed during the read would fail every symbol alike,
-  so they raise, and the reader cancels the requests not yet made (`RestReader.read_each`).
+  (`AuthenticationError`), a refusal of the feed (`FeedRefusalError`), and a session closed
+  during the read would fail every symbol alike, so they raise, and the reader cancels the
+  requests not yet made (`RestReader.read_each`).
+- **Failures that fail the call** (`_tables/call_failure.py`, `fails_call`): one symbol's
+  failure fails its whole call or table only when its cause is set to `RAISE`.
+- **A list in one table** (`read_symbol_list`): the rows of every symbol of a list that did
+  not fail, in one Arrow table, with each failed symbol's error beside it, for a static
+  `fetch()` or `history()` of symbols in code (`_ingest/static_reads.py`) and for a `poll()`
+  cycle of symbols (`RestReader.read_cycle`).
 - **Columns**: each symbol's table must have exactly the dataset's columns
   (`SessionCore.dataset_schema`), so tables of different symbols, and of reads made at
   different times, can be merged. A table that does not is a defect of the library: the symbol
@@ -64,8 +77,8 @@ import functools
 import logging
 import time
 from collections import Counter
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, TypeAlias, assert_never
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias, assert_never
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -73,11 +86,13 @@ from deephaven import arrow as dh_arrow
 
 from deephaven_massive._datasets.column_descriptions import TRANSPORT_LABELS
 from deephaven_massive._datasets.source_columns import key_column
-from deephaven_massive._enums import OnError
+from deephaven_massive._datasets.wire_symbols import contracts_underlying
+from deephaven_massive._enums import IndexPrefix, OnError
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     AuthenticationError,
     ErrorSource,
+    FeedRefusalError,
     MassiveError,
     PermanentError,
     RowDataError,
@@ -89,6 +104,9 @@ from deephaven_massive._errors import (
 )
 from deephaven_massive._ingest.crypto_tickers import recording_split
 from deephaven_massive._ingest.rest_requests import (
+    BARE_INDEX_PARAM,
+    capped_call,
+    caps_each_symbol,
     fetch_paths,
     history_calls,
     plan_calls,
@@ -96,15 +114,17 @@ from deephaven_massive._ingest.rest_requests import (
 from deephaven_massive._log_limits import bounded_list, counted, log_failure, prose_list
 from deephaven_massive._massive import Transport
 from deephaven_massive._on_error import effect_of
+from deephaven_massive._tables.call_failure import fails_call, refusal_raised
 from deephaven_massive._tables.columns import col_defs
 from deephaven_massive._tables.execution_context import entered, holds_update_graph_lock
 from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause, ProblemEvent
-from deephaven_massive._tables.read_tally import ReadTally
+from deephaven_massive._tables.symbol_retry import is_symbol_refusal
 from deephaven_massive._tables.transports import SymbolFailure, SymbolRows
 from deephaven_massive._tables.withheld import SYMBOL_SENT, Withheld
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
+    from concurrent.futures import ThreadPoolExecutor
 
     from deephaven import dtypes
     from deephaven.table import Table
@@ -112,26 +132,40 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.catalog import DatasetSpec
     from deephaven_massive._datasets.history_source import HistoryWindow
     from deephaven_massive._datasets.request import Request
+    from deephaven_massive._enums import Recency
+    from deephaven_massive._error_policy import ResolvedPolicy
     from deephaven_massive._ingest.rest import RestReader
     from deephaven_massive._ingest.rest_requests import Call, CryptoSplit
-    from deephaven_massive._massive import Cancel, RestPath
+    from deephaven_massive._massive import Cancel, DriftReport, Patience, RestPath
+    from deephaven_massive._tables.read_tally import ReadTally
     from deephaven_massive._tables.session_core import SessionCore
     from deephaven_massive._tables.transports import SymbolOutcome
 
 __all__ = [
+    "AnsweredRows",
     "AttributedRows",
+    "ReadEach",
     "RequestRows",
     "RestUnit",
+    "SymbolListRead",
     "UnsupportedParameterError",
+    "ValueRead",
     "asked_column",
     "attribute_units",
+    "attribute_values",
     "fails_followed_read",
+    "fails_list_read",
     "fetch_units",
     "history_units",
+    "leave_out_unrequested",
     "read_rest_by_symbol",
     "read_rest_by_value",
+    "read_symbol_list",
+    "read_values",
     "split_by_symbol",
+    "split_failures",
     "symbol_outcomes",
+    "value_groups",
 ]
 
 logger = logging.getLogger(__name__)
@@ -152,11 +186,50 @@ class RequestRows:
             (`rest._withheld_symbol_column`); no rows.
         source: What the rows were read from, as the read's tally names it, such as
             `GET /v3/trades/AAPL`.
+        failed: The tickers its answer failed in place of their data, with their errors:
+            Massive's error row refusing a ticker, or, under `unavailable_symbols=RAISE`, one
+            saying it has no data (`RestReader._answer_failures`), as Massive sent them.
     """
 
     rows: pa.Table
     withheld: Withheld
     source: str
+    failed: Mapping[str, MassiveError] = field(default_factory=dict)
+
+
+class ReadEach(NamedTuple):
+    """What a read by symbol's requests returned (`RestReader.read_each`).
+
+    Attributes:
+        units: The requests the results answer, in plan order, each symbol in one of them: a
+            planned request, or, for a listed request Massive refused whole, the parts of it
+            sent again that each symbol's answer came from (`_ingest/rest_refusals.py`).
+        results: Each unit's rows, its failure, or None for a request of a symbol Massive has
+            no data for.
+        requests: How many requests Massive answered, a refused one and those of the search
+            included.
+        received: How many rows Massive sent in them, before any was withheld or listed
+            under its tickers, as the client counts them when it stops paging.
+    """
+
+    units: list[RestUnit]
+    results: list[RequestRows | MassiveError | None]
+    requests: int
+    received: int
+
+
+class AnsweredRows(NamedTuple):
+    """One answered request's rows of the symbols it named (`AttributedRows.answered`).
+
+    Attributes:
+        column: The request's asked column (`asked_column`), which names each row's symbol.
+        symbols: The symbols the request named (`Call.symbols`).
+        rows: The request's rows of those symbols, in page order, without `SYMBOL_SENT`.
+    """
+
+    column: str
+    symbols: tuple[str, ...]
+    rows: pa.Table
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,21 +237,58 @@ class AttributedRows:
     """What a read by symbol's requests gave each symbol, before any Deephaven table is built.
 
     The outcome of `attribute_units`, at the Arrow level, so that a caller can build what it
-    needs from it: one static table per symbol, or one table of every symbol's rows.
+    needs from it: one table of every symbol's rows from `answered`, or each symbol's own
+    rows from `pieces`, which groups them only when asked.
 
     Attributes:
-        pieces: Each asked symbol's rows: one Arrow table, perhaps empty, per answered
-            request that named it, in plan order, without `SYMBOL_SENT`; no table for a
-            symbol no request answered.
         failures: Each failed symbol's error: its request's failure, which is every symbol's
             the request named, or the read's `unrequested_symbols` failure under `RAISE`.
-        no_data: The symbols whose every request Massive had no data for, and that no
-            request answered.
+        answered: Each answered request's rows of the symbols it named, in plan order and then
+            page order, in the order Massive sent them.
     """
 
-    pieces: Mapping[str, Sequence[pa.Table]]
     failures: Mapping[str, MassiveError]
-    no_data: frozenset[str]
+    answered: Sequence[AnsweredRows]
+
+    def pieces(self, symbols: Sequence[str]) -> dict[str, list[pa.Table]]:
+        """Return each asked symbol's rows, grouped from the answered requests that named it.
+
+        Args:
+            symbols: The asked symbols, which the result is keyed by, in order; every symbol
+                a request names is one of them.
+
+        Returns:
+            Each symbol's rows: one Arrow table, perhaps empty, per answered request that
+            named it, in plan order; no table for a symbol no request answered.
+        """
+        pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in symbols}
+        for column, own, rows in self.answered:
+            for symbol, mine in _rows_by_symbol(rows, column, own).items():
+                pieces[symbol].append(mine)
+        return pieces
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolListRead:
+    """What a read of a list of symbols into one table returned (`read_symbol_list`).
+
+    Attributes:
+        rows: The rows of every symbol that did not fail, an Arrow table of the dataset's
+            schema in plan order and then page order.
+        asked: Each row's asked symbol, the one it was given to (`attribute_units`), a string
+            array as long as `rows`.
+        failures: Each failed symbol's error, in the order the symbols failed; a failure
+            before any request takes the place of a later one.
+        no_data: The symbols a request was answered for with no data (HTTP 404), in plan
+            order.
+        requests: How many requests Massive answered.
+    """
+
+    rows: pa.Table
+    asked: pa.ChunkedArray
+    failures: Mapping[str, MassiveError]
+    no_data: tuple[str, ...]
+    requests: int
 
 
 class UnsupportedParameterError(PermanentError):
@@ -252,9 +362,10 @@ def fails_followed_read(error: MassiveError) -> bool:
     """Tell whether a request's failure fails a read that follows a symbol table whole.
 
     The read's failures are those that would fail every symbol alike: Massive rejecting the
-    API key, and the session closing during the read. Any other failure is the failed
-    request's symbols' own, and the read goes on with the others; a failure that may pass is
-    read again later (`_tables/follow_coordinator.py`).
+    API key, a refusal of the feed (`FeedRefusalError`, which no symbol escapes, even when it
+    answers one part of a refused request being searched), and the session closing during the
+    read. Any other failure is the failed request's symbols' own, and the read goes on with the
+    others; a failure that may pass is read again later (`_tables/follow_coordinator.py`).
 
     Args:
         error: A request's failure (`RestReader.read_each`).
@@ -262,7 +373,217 @@ def fails_followed_read(error: MassiveError) -> bool:
     Returns:
         True for a failure of the whole read.
     """
-    return isinstance(error, (AuthenticationError, SessionClosedError))
+    return isinstance(error, (AuthenticationError, FeedRefusalError, SessionClosedError))
+
+
+def split_failures(
+    failed: Mapping[str, MassiveError], order: Sequence[str], policy: ResolvedPolicy
+) -> tuple[dict[str, MassiveError], MassiveError | None]:
+    """Split failed symbols into those that keep their failure as their own and the call's failure.
+
+    Args:
+        failed: Each failed symbol (or value) with the failure its request or planning gave.
+        order: The symbols, in the order the call's failure is chosen by.
+        policy: The call's resolved policy.
+
+    Returns:
+        Each failure that is the symbol's own: every one but those that fail the call and
+        are listed where they were found, or fail it whatever the symbol (a refusal of the
+        feed, HTTP 404 under `RAISE`, a withheld or unrequested row under `RAISE`); a refused
+        symbol under `refused_symbols=RAISE` is its own and fails the call too. And the first
+        failure, in `order`, that fails the call (`fails_call`), or None: a refused symbol's,
+        while another symbol did not fail, ends with the setting that reads the others
+        (`refusal_raised`).
+    """
+    fatal = next(
+        (name for name in order if name in failed and fails_call(failed[name], policy)), None
+    )
+    own = {
+        name: error
+        for name, error in failed.items()
+        if is_symbol_refusal(error) or not fails_call(error, policy)
+    }
+    if fatal is None:
+        return own, None
+    if is_symbol_refusal(failed[fatal]) and not all(name in failed for name in order):
+        return own, refusal_raised(failed[fatal], fatal)
+    return own, failed[fatal]
+
+
+def read_symbol_list(
+    reader: RestReader,
+    spec: DatasetSpec,
+    request: Request,
+    *,
+    symbols: Sequence[str],
+    units: Sequence[RestUnit],
+    failed: Mapping[str, MassiveError],
+    window: HistoryWindow | None,
+    current: bool,
+    limit: int | None,
+    cancel: Cancel | None,
+    patience: Patience,
+    tally: ReadTally,
+    on_recency: Callable[[Recency], None] | None = None,
+    record: Callable[[DriftReport], None] | None = None,
+    executor: ThreadPoolExecutor | None = None,
+) -> SymbolListRead:
+    """Make a list's planned requests; return the rows of every symbol that did not fail.
+
+    Each request's rows go to the symbols it named (`attribute_units`), so one symbol's failure
+    never takes another's rows: a failed symbol's rows from its other requests are left out
+    too, and every other symbol's are kept. `limit` caps each symbol's rows where every
+    request names one symbol; otherwise it caps the total, and the requests are sent one at a
+    time, each asking only for the rows still wanted, until Massive has sent `limit` rows
+    (`_send_capped`). A failure of the whole read (`fails_followed_read`), or any failure once
+    the read's stop token is set, raises: the read is over, not the symbol.
+
+    Args:
+        reader: The reader of the session's paths, with the call's policy and stop token.
+        spec: The dataset.
+        request: The normalized arguments.
+        symbols: The canonical symbols the list names.
+        units: The planned requests (`fetch_units`, `history_units`).
+        failed: The symbols that failed before any request, with their errors.
+        window: The `history()` window whose rows to keep, or None for `fetch()`.
+        current: True when the pages are checked for a `DELAYED` label.
+        limit: `Request.limit` for `fetch()`, None for `history()`.
+        cancel: The read's stop token, or None.
+        patience: The patience of the whole read (`RestReader.patience`), shared by every
+            request.
+        tally: The whole read's count of its rows and of those withheld, which the caller
+            judges.
+        on_recency: Given what each page of current data shows about its recency, or None.
+        record: Also given each page's drift, or None.
+        executor: The caller's pool for the requests, or None for one of the read's own.
+
+    Returns:
+        The read (`SymbolListRead`).
+
+    Errors are those `RestReader.read_each` raises for a failure of the whole read.
+    """
+    ordered = _ordered(symbols)
+    read = functools.partial(
+        reader.read_each,
+        spec,
+        request=request,
+        window=window,
+        current=current,
+        cancel=cancel,
+        patience=patience,
+        fails_read=functools.partial(fails_list_read, cancel=cancel),
+        on_recency=on_recency,
+        record=record,
+        executor=executor,
+    )
+    per_symbol = limit is None or caps_each_symbol(spec.name, [call for _, call in units])
+    if per_symbol:
+        leaves, results, requests = read(units, limit=limit)[:3]
+    else:
+        assert limit is not None  # a total cap is the only other case
+        leaves, results, requests = _send_capped(spec, units, read, limit=limit)
+    attributed = attribute_units(reader, spec, leaves, results=results, tally=tally)
+    failures = {**attributed.failures, **failed}  # a planning failure comes first
+    gone = pa.array(list(failures), pa.string())
+    pieces = [
+        rows.filter(pc.invert(pc.is_in(rows[column], value_set=gone))) if failures else rows
+        for column, _, rows in attributed.answered
+    ]
+    schema = reader.catalog.dataset_schema(spec).arrow_schema()
+    rows = pa.concat_tables(pieces) if pieces else schema.empty_table()
+    asked = pa.chunked_array(
+        [
+            pc.cast(piece[column], pa.string())
+            for (column, _, _), piece in zip(attributed.answered, pieces, strict=True)
+        ],
+        pa.string(),
+    )
+    if not per_symbol:
+        # Rows listed under several named tickers can outnumber the rows Massive capped.
+        rows, asked = rows.slice(0, limit), asked.slice(0, limit)
+    no_data = tuple(
+        symbol
+        for (_, call), result in zip(leaves, results, strict=True)
+        if result is None
+        for symbol in call.symbols
+    )
+    logger.debug(
+        "%s: %d rows of %d symbols from %d requests; %d symbols failed",
+        spec.name,
+        rows.num_rows,
+        len(ordered),
+        requests,
+        len(failures),
+    )
+    return SymbolListRead(rows, asked, failures, no_data, requests)
+
+
+def fails_list_read(error: MassiveError, *, cancel: Cancel | None) -> bool:
+    """Tell whether a request's failure fails a read of a list whole.
+
+    Those of a followed read (`fails_followed_read`) do, and so does any failure once the
+    read's stop token is set: the read's table is gone, and the failure is the stop's.
+
+    Args:
+        error: The request's failure.
+        cancel: The read's stop token, or None.
+
+    Returns:
+        True for a failure of the whole read.
+    """
+    return fails_followed_read(error) or (cancel is not None and cancel.is_set())
+
+
+def _send_capped(
+    spec: DatasetSpec,
+    units: Sequence[RestUnit],
+    read: functools.partial[ReadEach],
+    *,
+    limit: int,
+) -> tuple[list[RestUnit], list[RequestRows | MassiveError | None], int]:
+    """Send the requests one at a time until Massive has sent `limit` rows: a capped read.
+
+    `limit` caps a call's total rows, and Massive stops sending them only per request, so each
+    request asks only for the rows still wanted (`capped_call`), and none is sent once
+    Massive has sent `limit` rows. The count is of the rows Massive sent, before any was
+    withheld or listed under its tickers. One DEBUG line names the requests left unsent; their
+    symbols get no rows, and no failure.
+
+    Args:
+        spec: The dataset.
+        units: The planned requests; none names one symbol.
+        read: Reads requests (`RestReader.read_each` bound to the read's arguments), given
+            the requests and the cap on each one's rows as `limit`.
+        limit: The cap on the read's rows.
+
+    Returns:
+        The requests answered, each one's result, and the request count, as `ReadEach` gives
+        them.
+    """
+    leaves: list[RestUnit] = []
+    results: list[RequestRows | MassiveError | None] = []
+    requests = 0
+    remaining = limit
+    for index, (rest_path, call) in enumerate(units):
+        if remaining <= 0:
+            logger.debug(
+                "%s: limit=%d rows arrived after %d of %d planned requests; the other %d are "
+                "not sent",
+                spec.name,
+                limit,
+                index,
+                len(units),
+                len(units) - index,
+            )
+            break
+        one = read(
+            [(rest_path, capped_call(spec, rest_path, call, cap=remaining))], limit=remaining
+        )
+        leaves.extend(one.units)
+        results.extend(one.results)
+        requests += one.requests
+        remaining -= one.received
+    return leaves, results, requests
 
 
 def fetch_units(
@@ -397,10 +718,10 @@ def read_rest_by_symbol(
     """Make a read by symbol's planned REST requests and return each symbol's outcome.
 
     Each request's rows go to the symbols it names (`attribute_units`), and each symbol's
-    rows become one static table, in plan order. A symbol whose every request Massive had no
-    data for is marked so (`SymbolRows.no_data`). Each answered request's rows of its symbols
-    count in `tally` (`_attribute`), which the read's entry point judges (`ReadTally.judge`);
-    this read never does. A failure of the whole read (`fails_followed_read`) raises.
+    rows become one static table, in plan order; a symbol Massive had no data for gets an
+    empty one. Each answered request's rows count in `tally` (`_attribute`), which the read's
+    entry point judges (`ReadTally.judge`); this read never does. A failure of the whole
+    read (`fails_followed_read`) raises.
 
     Args:
         reader: The reader of the session's paths.
@@ -427,7 +748,7 @@ def read_rest_by_symbol(
     """
     ordered = _ordered(symbols)
     patience = reader.patience()  # once for every request, on this thread, before any fan-out
-    results, requests = reader.read_each(
+    read = reader.read_each(
         spec,
         units,
         request=request,
@@ -439,19 +760,20 @@ def read_rest_by_symbol(
         fails_read=fails_followed_read,
     )
     logger.debug(
-        "call %d %s by symbol: %d of %d requests answered, waiting out at most %.0f s of pauses",
+        "call %d %s by symbol: %d requests answered for %d planned, waiting out at most %.0f s "
+        "of pauses",
         call,
         spec.name,
-        requests,
+        read.requests,
         len(units),
         patience.seconds,
     )
-    attributed = attribute_units(reader, spec, units, results=results, symbols=ordered, tally=tally)
+    attributed = attribute_units(reader, spec, read.units, results=read.results, tally=tally)
     failures = {**attributed.failures, **failed}  # a planning failure comes first
     empty = core.dataset_schema(spec).arrow_schema().empty_table()
     tables = {
         symbol: to_table(pa.concat_tables(rows) if rows else empty)
-        for symbol, rows in attributed.pieces.items()
+        for symbol, rows in attributed.pieces(ordered).items()
         if symbol not in failures
     }
     outcomes = symbol_outcomes(
@@ -463,13 +785,6 @@ def read_rest_by_symbol(
         call=call,
         source=TRANSPORT_LABELS[Transport.REST],
     )
-    # A symbol with no data from every request that named it; one that failed keeps its failure.
-    outcomes = {
-        symbol: replace(outcome, no_data=True)
-        if symbol in attributed.no_data and isinstance(outcome, SymbolRows)
-        else outcome
-        for symbol, outcome in outcomes.items()
-    }
     return _with_skipped(outcomes, units)
 
 
@@ -479,7 +794,6 @@ def attribute_units(
     units: Sequence[RestUnit],
     *,
     results: Sequence[RequestRows | MassiveError | None],
-    symbols: Sequence[str],
     tally: ReadTally,
 ) -> AttributedRows:
     """Give each answered request's rows to the symbols it named, and each failure to its symbols.
@@ -487,9 +801,8 @@ def attribute_units(
     Each request's rows go to the asked symbols they name, and the rows of any other symbol
     are reported (`_attribute`, the module docstring); a request's failure is the failure of
     each symbol it named, and a symbol fails with the first failure that names it, in plan
-    order. A symbol Massive had no data for on every request that named it, and that no
-    request answered, has no data. Each answered request's rows of its symbols count in
-    `tally`.
+    order. A symbol Massive had no data for gets no rows. Each answered request's rows count
+    in `tally`, by the symbol they would have gone to.
 
     Args:
         reader: The reader, whose policy and problem sink the read uses.
@@ -497,33 +810,30 @@ def attribute_units(
         units: The planned requests, each with its path.
         results: Each request's rows, failure, or None for no data, in plan order
             (`RestReader.read_each`).
-        symbols: The asked symbols, which the pieces are keyed by; every symbol a request
-            names is one of them.
         tally: The whole read's count of its rows and of those withheld.
 
     Returns:
-        Each symbol's rows, each failed symbol's error, and the symbols with no data.
+        Each answered request's rows of its symbols, and each failed symbol's error.
     """
-    pieces: dict[str, list[pa.Table]] = {symbol: [] for symbol in symbols}
     failures: dict[str, MassiveError] = {}
-    absent: set[str] = set()
-    answered: set[str] = set()
+    answered: list[AnsweredRows] = []
     for (rest_path, planned), result in zip(units, results, strict=True):
         own = planned.symbols
         if isinstance(result, MassiveError):
             for symbol in own:
                 failures.setdefault(symbol, result)
         elif result is None:
-            absent.update(own)
+            continue  # Massive had no data for the request: its symbols get no rows from it
         elif isinstance(result, RequestRows):
-            answered.update(own)
+            for ticker, error in result.failed.items():
+                failures.setdefault(ticker, error)
             unrequested = _attribute(
                 reader,
                 spec,
                 result,
                 template=rest_path.template,
                 planned=planned,
-                pieces=pieces,
+                kept=answered,
                 tally=tally,
             )
             if unrequested is not None:
@@ -531,7 +841,7 @@ def attribute_units(
                     failures.setdefault(symbol, unrequested)
         else:
             assert_never(result)
-    return AttributedRows(pieces, failures, frozenset(absent - answered))
+    return AttributedRows(failures, answered)
 
 
 def _with_skipped(
@@ -564,6 +874,215 @@ def _with_skipped(
     return outcomes
 
 
+class ValueRead(NamedTuple):
+    """A read of a value table's values (`RestReader.read_by_value`).
+
+    Attributes:
+        pieces: The rows of each value that did not fail, in value order; a value Massive
+            had no data for has none.
+        requests: How many requests the read made.
+        left_out: What the reads left out, each with why, such as `"NQ (HTTP 404 from GET
+            /futures/v1/products?product_code=NQ)"`.
+        failures: The error of each value that failed, but for those in `unread`.
+        unread: The failure of each value that got no row and whose own rows the library
+            withheld (`ReadTally.unread_symbols`). It fails the value alone in a `poll()`
+            cycle or a followed read, whatever the policy; a static read fails on it only
+            when no value kept a row, as a static read of symbols is judged whole.
+    """
+
+    pieces: dict[str, pa.Table]
+    requests: int
+    left_out: tuple[str, ...]
+    failures: dict[str, MassiveError]
+    unread: dict[str, MassiveError]
+
+
+def value_groups(request: Request, values: Sequence[str]) -> list[tuple[str, ...]]:
+    """Group a value table's values by the value each is sent as, one request per group.
+
+    The contracts list takes an index underlying bare (`BARE_INDEX_PARAM`), so `DJT` and
+    `I:DJT` are one value on the wire, and Massive answers it with the contracts of both: one
+    request reads them together and gives each its own rows (`attribute_values`), so a table
+    that names both keeps each set once. Every other value is sent as written, alone.
+
+    Args:
+        request: The normalized arguments, with a value table.
+        values: The values, each once.
+
+    Returns:
+        The groups, in the order of each group's first value.
+    """
+    parameter = required(request.value_table, "the request's value table").parameter
+    groups: dict[str, list[str]] = {}
+    for value in values:
+        sent = contracts_underlying(value) if parameter == BARE_INDEX_PARAM else value
+        groups.setdefault(sent, []).append(value)
+    return [tuple(group) for group in groups.values()]
+
+
+def attribute_values(
+    reader: RestReader,
+    spec: DatasetSpec,
+    rows: pa.Table,
+    *,
+    column: str,
+    own: tuple[str, ...],
+    template: str,
+) -> tuple[dict[str, pa.Table], RowDataError | None]:
+    """Give one value request's rows to the values it read, and report the rows of any other.
+
+    The rule `_attribute` applies to a request of symbols: each row goes to the value its
+    `column` names (`ValueTable.row_column`), and a row naming a value the request did not
+    read, or none, is left out as the read's `unrequested_symbols` problem
+    (`_report_unrequested`), by the value as Massive sent it.
+
+    Args:
+        reader: The reader, whose policy and problem sink the read uses.
+        spec: The dataset.
+        rows: The request's rows, in the dataset's schema.
+        column: The column of the rows that names their value.
+        own: The values the request read (`Request.value_group`).
+        template: The request's path, for the events.
+
+    Returns:
+        Each value's rows, and the failure of the request's values when a row was left out
+        under `unrequested_symbols=RAISE` (None otherwise).
+    """
+    kept, unrequested = leave_out_unrequested(
+        reader, spec, rows, column=column, own=own, template=template
+    )
+    return _rows_by_symbol(kept, column, own), unrequested
+
+
+def leave_out_unrequested(
+    reader: RestReader,
+    spec: DatasetSpec,
+    rows: pa.Table,
+    *,
+    column: str,
+    own: tuple[str, ...],
+    template: str,
+) -> tuple[pa.Table, RowDataError | None]:
+    """Keep a request's rows of the instruments it asked for, and report the rows of any other.
+
+    A row whose `column` names an instrument the request did not ask for, or none, is left
+    out as the read's `unrequested_symbols` problem (`_report_unrequested`), by the
+    instrument as Massive sent it: the rule `_attribute` applies to a request of symbols, for
+    a request that names its instruments in a parameter, such as a value table's value or
+    the options underlying of `m.options.contracts("I:DJT")`, which the wire sends bare, so
+    Massive answers with the stock `DJT`'s contracts too.
+
+    Args:
+        reader: The reader, whose policy and problem sink the read uses.
+        spec: The dataset.
+        rows: The request's rows; `column` is one of their columns.
+        column: The column of the rows that names their instrument.
+        own: The instruments the request asked for, canonical.
+        template: The request's path, for the events.
+
+    Returns:
+        The rows of the asked instruments, and the failure of the request when a row was left
+        out under `unrequested_symbols=RAISE` (None otherwise).
+    """
+    named = rows[column]
+    asked = pc.fill_null(pc.is_in(named, value_set=pa.array(own, pa.string())), fill_value=False)
+    others = Counter(
+        (_sent_value(spec, value), value)
+        for value in pc.filter(named, pc.invert(asked)).to_pylist()
+    )
+    if not others:
+        return rows, None
+    return rows.filter(asked), _report_unrequested(
+        reader, spec, others, own=own, column=column, template=template
+    )
+
+
+def _sent_value(spec: DatasetSpec, value: str | None) -> str | None:
+    """Return a row's value as Massive sent it, from the spelling the table gives it.
+
+    Args:
+        spec: The dataset.
+        value: The row's value in the table, or None.
+
+    Returns:
+        The value as the table spells it when Massive writes an index with its `I:`
+        (`IndexPrefix.NONE`); otherwise the bare ticker Massive wrote, to which the library
+        gave the `I:` of an index (`I:DJT` was sent as `DJT`).
+    """
+    if value is None:
+        return None
+    match spec.index_prefix:
+        case IndexPrefix.NONE:
+            return value
+        case IndexPrefix.FROM_CFI | IndexPrefix.BY_ROOT | IndexPrefix.BY_UNDERLYING:
+            return contracts_underlying(value)
+        case _:
+            assert_never(spec.index_prefix)
+
+
+def read_values(
+    reader: RestReader,
+    core: SessionCore,
+    spec: DatasetSpec,
+    *,
+    request: Request,
+    values: Sequence[str],
+    call: int,
+    cancel: Cancel | None,
+) -> ValueRead:
+    """Read `fetch()` for each value of a value table, as a `poll()` cycle of the values reads them.
+
+    The values are read by `RestReader.read_by_value`, as a `poll()` cycle reads them: each
+    with the requests `fetch()` makes for that value alone (`RestReader.read_fetch`), the
+    values Massive takes as one value read together (`value_groups`), each row given to the
+    value it names (`attribute_values`), and one value's failure its own. A parameter its path
+    does not take fails a value with `UnsupportedParameterError`.
+
+    Args:
+        reader: The reader of the session's paths.
+        core: The session's core, whose execution context says whether the read pauses live
+            tables.
+        spec: The dataset, with a fetch path.
+        request: The normalized arguments, with a value table and static symbols.
+        values: The values, already checked, each once.
+        call: The verb call's id, for the log line.
+        cancel: The read's stop token, or None.
+
+    Returns:
+        The read: each value's rows, and each failed or unread value's error.
+
+    Errors are those of `RestReader.read_by_value`, which raises a failure of the whole read
+    (`fails_followed_read`).
+    """
+    pauses = holds_update_graph_lock(core.exec_ctx)
+
+    def read_one(one: Request, tally: ReadTally) -> tuple[pa.Table, int, tuple[str, ...]]:
+        try:
+            rows, requests = reader.read_fetch(
+                spec,
+                one,
+                symbols=request.static_symbols,
+                cancel=cancel,
+                pauses_live_tables=pauses,
+                tally=tally,
+            )
+        except ValueError as error:
+            raise _refused(one.value_group, error)[one.value_group[0]] from error
+        return rows, requests, ()
+
+    read = reader.read_by_value(
+        spec, request, values, read=read_one, fails_read=fails_followed_read
+    )
+    logger.debug(
+        "call %d %s by value: %d values in %d requests",
+        call,
+        spec.name,
+        len(values),
+        read.requests,
+    )
+    return read
+
+
 def read_rest_by_value(
     reader: RestReader,
     core: SessionCore,
@@ -575,17 +1094,11 @@ def read_rest_by_value(
     cancel: Cancel | None,
     to_table: Callable[[pa.Table], Table],
 ) -> dict[str, SymbolOutcome]:
-    """Read `fetch()` for each value of a value table, one value after another.
+    """Read `fetch()` for each value of a value table: each one's rows, or its failure.
 
-    Each value is read with the requests `fetch()` makes when that value is passed alone
-    (`Request.for_value`, `RestReader.read_fetch`), so all of a request's rows belong to its
-    value and `Request.limit` caps each value's requests as it would that call's. A value whose
-    read fails gets its own failure; a parameter its path does not take fails it with
-    `UnsupportedParameterError`. A rejected API key stops the read, since every value would
-    be refused. The values are one read: their rows count in one tally, judged after the last
-    value (`ReadTally.judge`), so a value whose rows are all withheld, beside others read
-    whole, gets no rows, and when the library could read none of the rows of every value
-    whole, each value that read fails.
+    The values are read by `read_values`. A value whose every row was withheld fails alone,
+    as any other value's failure does, and a value Massive has no data for gets an empty
+    table.
 
     Args:
         reader: The reader of the session's paths.
@@ -600,36 +1113,20 @@ def read_rest_by_value(
     Returns:
         Each value, in the order given, with its outcome.
 
-    Errors are those of `symbol_outcomes`.
+    Errors are those of `read_values` and `symbol_outcomes`.
     """
     ordered = _ordered(values)
-    pauses = holds_update_graph_lock(core.exec_ctx)
-    tables: dict[str, Table] = {}
-    failures: dict[str, MassiveError] = {}
-    tally = ReadTally()
-    for value in ordered:
-        try:
-            rows, requests = reader.read_fetch(
-                spec,
-                request.for_value(value),
-                symbols=request.static_symbols,
-                cancel=cancel,
-                pauses_live_tables=pauses,
-                tally=tally,
-            )
-        except MassiveError as error:
-            failures[value] = error
-            if isinstance(error, AuthenticationError):
-                break  # every later value would be refused too
-            continue
-        except ValueError as error:
-            failures.update(_refused((value,), error))
-            continue
-        logger.debug(
-            "call %d %s by value: %s read in %d requests", call, spec.name, value, requests
-        )
-        tables[value] = to_table(rows)
-    outcomes = symbol_outcomes(
+    read = read_values(
+        reader, core, spec, request=request, values=ordered, call=call, cancel=cancel
+    )
+    empty = core.dataset_schema(spec).arrow_schema().empty_table()
+    failures = {**read.failures, **read.unread}
+    tables = {
+        value: to_table(read.pieces.get(value, empty))  # a value with no data has no rows
+        for value in ordered
+        if value not in failures
+    }
+    return symbol_outcomes(
         core,
         spec,
         symbols=ordered,
@@ -638,7 +1135,6 @@ def read_rest_by_value(
         call=call,
         source=TRANSPORT_LABELS[Transport.REST],
     )
-    return tally.judge(spec.name, outcomes)
 
 
 def asked_column(spec: DatasetSpec, template: str) -> str:
@@ -671,7 +1167,7 @@ def _attribute(
     *,
     template: str,
     planned: Call,
-    pieces: dict[str, list[pa.Table]],
+    kept: list[AnsweredRows],
     tally: ReadTally,
 ) -> RowDataError | None:
     """Give one request's rows to the symbols it named, and report the rows of any other.
@@ -682,14 +1178,12 @@ def _attribute(
     symbol such rows name, by the symbol as Massive sent it (`SYMBOL_SENT`; `ProblemEvent`),
     with the table's spelling in the detail where it differs, handed to the session's
     reporter, which alarms once per table and lists each in `m.problems()`. The same rule
-    counts the request's rows for the read's tally (`ReadTally.add`), once, here: its kept
-    rows of the symbols it named, and its withheld rows but those whose asked symbol names
-    another (`Withheld.for_symbols`). A withheld row whose asked symbol is not known, a
-    symbol the library could not read or one its index lookup would have prefixed, could be
-    any symbol's, so it stays the request's, and the tally's reason is the first such row's.
-    The withheld rows were reported under their own cause at the page, by the symbol as
-    Massive sent it, so none is reported here again. A request that failed has no rows to
-    give, so none of its rows is left out or counted: its failure is its symbols' outcome.
+    counts the request's rows for the read's tally (`ReadTally.add_request`), once, here: its
+    kept rows of the symbols it named, and each withheld row under the asked symbol it would
+    have gone to (`_owners`). The withheld rows were reported under their own cause at the
+    page, by the symbol as Massive sent it, so none is reported here again. A request that
+    failed has no rows to give, so none of its rows is left out or counted: its failure is its
+    symbols' outcome.
 
     Args:
         reader: The reader, whose policy and problem sink the read uses.
@@ -699,7 +1193,8 @@ def _attribute(
             without `SYMBOL_SENT`.
         template: The request's path, for the events.
         planned: The request, whose symbols are those it named (`Call.symbols`).
-        pieces: Each symbol's rows so far, which receive the request's.
+        kept: Each request's kept rows so far, which receive the request's
+            (`AttributedRows.answered`); `AttributedRows.pieces` groups them by symbol.
         tally: The read's count of its rows and of those withheld, which the request's add to.
 
     Returns:
@@ -711,23 +1206,84 @@ def _attribute(
     sent = answered.rows[SYMBOL_SENT]
     rows = answered.rows.drop_columns([SYMBOL_SENT])
     symbols = rows[column]
-    for symbol in own:
-        mine = pc.equal(symbols, symbol)
-        # The rows are filtered only when some are another symbol's: a copy of a large read
-        # whose every row is the symbol's would double its memory for nothing.
-        every = pc.all(mine, skip_nulls=False).as_py()
-        pieces[symbol].append(rows if every else rows.filter(mine))
     asked = pc.fill_null(pc.is_in(symbols, value_set=pa.array(own, pa.string())), fill_value=False)
+    # The rows are filtered only when some are another symbol's: a copy of a large read whose
+    # every row is the request's would double its memory for nothing.
+    kept.append(AnsweredRows(column, own, rows if pc.all(asked).as_py() else rows.filter(asked)))
     left = pc.invert(asked)
     others = Counter(
         zip(pc.filter(sent, left).to_pylist(), pc.filter(symbols, left).to_pylist(), strict=True)
     )
-    withheld = answered.withheld.for_symbols(own.__contains__)
-    kept = rows.num_rows - sum(others.values())
-    tally.add(kept + withheld.total, withheld, source=answered.source)
+    by_lookup = spec.index_prefix.prefixed_by_lookup == column
+    tally.add_request(
+        kept=rows.num_rows - sum(others.values()),
+        withheld=answered.withheld,
+        owners=functools.partial(_owners, own, by_lookup=by_lookup),
+        source=answered.source,
+    )
     if not others:
         return None
     return _report_unrequested(reader, spec, others, own=own, column=column, template=template)
+
+
+def _rows_by_symbol(rows: pa.Table, column: str, own: Sequence[str]) -> dict[str, pa.Table]:
+    """Group a request's rows by the symbol `column` names, for each symbol the request named.
+
+    One stable sort groups the rows, so a request naming a thousand symbols costs the same
+    few compute passes as one naming two, and each symbol's rows keep the order Massive sent
+    them in. Rows that name every one the same symbol are given as they are: a copy of a
+    large read of one symbol would double its memory for nothing.
+
+    Args:
+        rows: The request's rows; `column` is one of their string columns.
+        column: The column that names each row's symbol.
+        own: The symbols the request named.
+
+    Returns:
+        Each named symbol's rows, in `own` order; a symbol no row names gets an empty table
+        with the rows' columns. Rows naming no symbol, or another, are in none.
+    """
+    named = rows[column]
+    runs = pc.value_counts(named).to_pylist()
+    grouped = rows
+    if len(runs) > 1:
+        order = pc.sort_indices(named)  # stable, so a symbol's rows keep their order
+        grouped = rows.take(order)
+        runs = pc.value_counts(grouped[column]).to_pylist()  # in sorted order, so each a run
+    found: dict[str | None, pa.Table] = {}
+    start = 0
+    for run in runs:
+        found[run["values"]] = grouped.slice(start, run["counts"])
+        start += run["counts"]
+    none = rows.slice(0, 0)
+    # A named symbol Massive sent no row of gets none.
+    return {symbol: found.get(symbol, none) for symbol in own}
+
+
+def _owners(own: tuple[str, ...], symbol: str | None, *, by_lookup: bool) -> tuple[str, ...]:
+    """Return the asked symbols a request's withheld row could have gone to.
+
+    The rule `_attribute` gives a kept row, applied to the row's asked column as it was read
+    when the row was withheld (`WithheldGroup.symbol`). That column is canonical, unless the
+    index lookup gives it its `I:` only later: then a bare `SPX` goes to an asked `I:SPX` or
+    to an asked `SPX`, the spellings the lookup would have given it.
+
+    Args:
+        own: The symbols the request named.
+        symbol: The withheld row's asked column, or None when the library could not read it.
+        by_lookup: Whether the index lookup prefixes the column after the row was withheld
+            (`IndexPrefix.prefixed_by_lookup`).
+
+    Returns:
+        The one asked symbol the row is; the request's symbols when the row could be any of
+        them (its symbol unread), or the asked spellings a bare ticker shares; none for a row
+        of another symbol.
+    """
+    if symbol is None:
+        return own
+    if by_lookup:
+        return tuple(asked for asked in own if symbol in (asked, contracts_underlying(asked)))
+    return (symbol,) if symbol in own else ()
 
 
 def _report_unrequested(
@@ -759,7 +1315,7 @@ def _report_unrequested(
     asked_for = prose_list(own, "symbols")
     events: list[ProblemEvent] = []
     for (spelling, symbol), count in others.items():
-        spelled = _spellings([(spelling, symbol)])
+        spelled = _spellings([(spelling, symbol)]).removesuffix(".")
         events.append(
             ProblemEvent(
                 cause=ProblemCause.UNREQUESTED_SYMBOLS,
@@ -771,8 +1327,8 @@ def _report_unrequested(
                 field=column,
                 rows=count,
                 detail=f"Massive answered the request for {asked_for} with rows of "
-                f"{_no_symbol(spelling)}, which the read did not ask for, so they are left out"
-                f"{f'. {spelled}' if spelled else ''}",
+                f"{_table_symbol(spelling, symbol)}, which the read did not ask for, so they are "
+                f"left out{f'. {spelled}' if spelled else ''}",
                 at=at,
                 policy=setting,
             )
@@ -781,14 +1337,29 @@ def _report_unrequested(
     if not effect_of(setting).fails:
         return None
     total = sum(others.values())
-    named = prose_list([_no_symbol(spelling) for spelling, _ in others], "symbols")
+    names = dict.fromkeys(_table_symbol(spelling, symbol) for spelling, symbol in others)
     spelled = _spellings(others)
     return RowDataError(
         f"{spec.name}: Massive answered the request for {asked_for} with "
-        f"{counted(total, 'row')} of {named}, which the read did not ask for, so the library "
-        f"left {'it' if total == 1 else 'them'} out. {f'{spelled} ' if spelled else ''}"
+        f"{counted(total, 'row')} of {prose_list(names, 'symbols')}, which the read did not ask "
+        f"for, so the library left {'it' if total == 1 else 'them'} out. "
+        f"{f'{spelled} ' if spelled else ''}"
         f"{policy_hint(OnError.LOG, 'unrequested_symbols', purpose='To go on without such rows')}"
     )
+
+
+def _table_symbol(spelling: str | None, symbol: str | None) -> str:
+    """Return a left-out row's symbol for a message: the table's spelling of it, when known.
+
+    Args:
+        spelling: The symbol as Massive sent it, or None for none.
+        symbol: The spelling the table gives it, or None when the library has none.
+
+    Returns:
+        Such as `"I:DJT"` for the index's row Massive sent as `DJT`, the symbol as Massive
+        sent it when the table has no spelling of it, or `"no symbol"`.
+    """
+    return _no_symbol(spelling if symbol is None else symbol)
 
 
 def _no_symbol(symbol: str | None) -> str:
@@ -797,17 +1368,22 @@ def _no_symbol(symbol: str | None) -> str:
 
 
 def _spellings(pairs: Iterable[tuple[str | None, str | None]]) -> str:
-    """Return the sentence naming the table's spelling of each symbol Massive spelled otherwise.
+    """Return the sentence naming how Massive writes a left-out symbol the table spells otherwise.
 
     Args:
         pairs: Each symbol as Massive sent it with the spelling the table gives it.
 
     Returns:
-        `"The table spells SPX as I:SPX and ETH-USD as X:ETHUSD."`, or `""` when the table
-        spells each symbol as Massive sent it.
+        `"Massive writes I:SPX as SPX and X:ETHUSD as ETH-USD."`, or `""` when Massive wrote
+        each symbol as the table spells it. A symbol without both spellings is not named: a
+        row of no symbol, or one the table can't spell, has no other spelling to give.
     """
-    differ = [f"{sent} as {symbol}" for sent, symbol in pairs if sent != symbol]
-    return f"The table spells {prose_list(differ, 'symbols')}." if differ else ""
+    differ = [
+        f"{symbol} as {sent}"
+        for sent, symbol in pairs
+        if sent is not None and symbol is not None and sent != symbol
+    ]
+    return f"Massive writes {prose_list(differ, 'symbols')}." if differ else ""
 
 
 def split_by_symbol(

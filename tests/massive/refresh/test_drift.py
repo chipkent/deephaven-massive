@@ -66,6 +66,7 @@ NO_HAND = HandInput(
     undeclared_fields={},
     optional_fields={},
     ignored_keys=(),
+    answer_fields=(),
 )
 """Hand input with every table empty, so a synthetic snapshot needs none."""
 

@@ -54,6 +54,7 @@ _EMPTY = HandInput(
     undeclared_fields={},
     optional_fields={},
     ignored_keys=(),
+    answer_fields=(),
 )
 
 

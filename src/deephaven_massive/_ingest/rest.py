@@ -79,13 +79,17 @@ datasets and the REST side of `history()`. This module turns a dataset's declara
   generated fields), then `source_columns.rename`'s column mapping for the dataset, the timestamp
   routine of `_datasets/timestamps.py`, and the lattice widening of `source_columns.widen`, into one
   Arrow batch of the dataset's merged schema. Only one page of decoded rows is held at a time.
-  A row that carries an `error` (a ticker the plan does not include) keeps its `Error` and
-  `Message` columns and is logged once.
+  A snapshot row that carries Massive's `error` in place of a ticker's data is left out of the
+  table and fails its ticker as a request of that ticker alone would (`_answer_failures`): a
+  refused ticker is a refused symbol of the read, listed and judged as one HTTP 403 refused.
+  An error row of a ticker the request did not name is an `unrequested_symbols` problem, as a
+  data row of one is (`_leave_out_unrequested_answers`).
 - **Problems.** Each page's field Massive's documentation lacks is a `schema_drift` problem,
-  each withheld row an event of its cause, and each symbol Massive has no data for an
-  `unavailable_symbols` problem, all handed to the session's problem sink with the read's
-  `StreamId` (`RestReader.stream_id`); undocumented envelope statuses go to the session's
-  `DriftRegistry`, once per path.
+  each withheld row an event of its cause, each symbol Massive has no data for an
+  `unavailable_symbols` problem (an error row of `NOT_FOUND` included), all handed to the
+  session's problem sink with the read's `StreamId` (`RestReader.stream_id`);
+  undocumented envelope statuses and error-row values go to the session's `DriftRegistry`, once
+  per path.
 - **Errors.** Every `WireError` becomes its public exception through `_errors.from_wire`
   (401 `AuthenticationError`, 403 `EntitlementError`), except a pause longer than the read's
   patience still covers (`rate_limits.read_patience`: 10 minutes of pauses for a read its
@@ -137,7 +141,6 @@ from typing import TYPE_CHECKING, Final, NamedTuple, TypeVar, assert_never
 from urllib.parse import urlsplit
 
 import pyarrow as pa
-import pyarrow.compute as pc
 from typing_extensions import override
 
 from deephaven_massive._datasets.catalog import REFERENCE_PATH
@@ -145,7 +148,6 @@ from deephaven_massive._datasets.dates import day_class, is_trading_day, reaches
 from deephaven_massive._datasets.history_source import partition_dates, session_date_param
 from deephaven_massive._datasets.row_times import START, StampRule, time_rule, whole
 from deephaven_massive._datasets.symbols import AllSymbols, SymbolTable, symbol_class
-from deephaven_massive._datasets.wire_symbols import contracts_underlying, index_ticker
 from deephaven_massive._enums import (
     AssetClass,
     IndexPrefix,
@@ -156,7 +158,6 @@ from deephaven_massive._enums import (
 )
 from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
-    BrokenGuaranteeError,
     CutShortError,
     EntitlementError,
     ErrorSource,
@@ -164,6 +165,7 @@ from deephaven_massive._errors import (
     MassiveError,
     RowDataError,
     SessionClosedError,
+    SymbolRefusalError,
     UnavailableSymbolError,
     failure_text,
     from_wire,
@@ -190,6 +192,7 @@ from deephaven_massive._ingest.rate_limits import (
 )
 from deephaven_massive._ingest.recency_labels import DELAYED as DELAYED_LABEL
 from deephaven_massive._ingest.recency_labels import delayed_refusal, read_labels
+from deephaven_massive._ingest.rest_refusals import drop_named_refusals, search_refusals
 from deephaven_massive._ingest.rest_requests import (
     BARE_INDEX_LIST_PARAM,
     BARE_INDEX_PARAM,
@@ -204,21 +207,31 @@ from deephaven_massive._ingest.rest_requests import (
     wire_query,
 )
 from deephaven_massive._ingest.rest_rows import (
-    CFI,
     UNDERLYING,
     RowConverter,
     keep_window,
+    read_error_row,
 )
 from deephaven_massive._ingest.shared_lookup import Claim, SharedLookup
+from deephaven_massive._ingest.static_reads import judge_failures, read_symbols, report_failures
 from deephaven_massive._ingest.stop_tokens import as_cancel
 from deephaven_massive._ingest.symbol_reads import (
+    ReadEach,
     RequestRows,
     RestUnit,
+    ValueRead,
     asked_column,
+    attribute_values,
+    fails_list_read,
     fetch_units,
     history_units,
+    leave_out_unrequested,
     read_rest_by_symbol,
     read_rest_by_value,
+    read_symbol_list,
+    read_values,
+    split_failures,
+    value_groups,
 )
 from deephaven_massive._log_limits import bounded_list, counted, log_once, prose_list
 from deephaven_massive._massive import (
@@ -269,6 +282,7 @@ if TYPE_CHECKING:
     from deephaven_massive._datasets.row_times import TimeRule
     from deephaven_massive._enums import ChannelFamily, PollMode
     from deephaven_massive._error_policy import ResolvedPolicy
+    from deephaven_massive._ingest.rest_rows import ErrorRow
     from deephaven_massive._log_limits import BoundedLog
     from deephaven_massive._massive import Page, Patience, RestClient, RestPath
     from deephaven_massive._tables.diagnostics import DriftRegistry
@@ -301,10 +315,6 @@ at the cost of warning about an old fact once more."""
 _ANY_VALUE: Final = "VALUE"
 """The value a value-table poll's parameters are checked with (`RestReader.check_parameters`):
 the check reads only which parameters a request carries, never their values."""
-
-_ANSWER_SHOWN: Final = 200
-"""The most characters of one error row's answer a WARNING shows (`_cut`); the row's DEBUG
-line shows it whole."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,76 +368,32 @@ def _missing_error(spec: DatasetSpec, missing: Sequence[_Missing]) -> Unavailabl
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _OtherSpelling:
-    """The instrument a call's bare underlying also names, beside the one the call asked for.
-
-    An underlying goes to Massive bare (`DJT` for the index `I:DJT`, `wire_query`), and a bare
-    ticker can name a stock and an index (`DJT` is both), so Massive may answer about the one
-    the caller did not name. Every dataset that takes `BARE_INDEX_PARAM` calls its argument
-    `underlying`, so a message can name it.
-
-    Attributes:
-        asked: The canonical ticker the call asked for, such as `I:DJT`.
-        other: The canonical ticker it did not ask for that the wire spells the same, `DJT`.
-        param: The wire parameter that carries the bare ticker, such as `underlying_ticker`.
-    """
-
-    asked: str
-    other: str
-    param: str
-
-    @property
-    def bare(self) -> str:
-        """The ticker as sent, `DJT`."""
-        return contracts_underlying(self.asked)
-
-    @property
-    def other_is_index(self) -> bool:
-        """Whether `other` is the index, so `asked` is the stock."""
-        return contracts_underlying(self.other) != self.other
-
-    @property
-    def kind(self) -> str:
-        """What `other` is, `"stock"` or `"index"`, for a message."""
-        return "index" if self.other_is_index else "stock"
-
-    @property
-    def both(self) -> list[str]:
-        """Both tickers, the stock first, as the caller would pass them."""
-        return [self.asked, self.other] if self.other_is_index else [self.other, self.asked]
-
-
-def _other_spellings(request: Request) -> dict[str, _OtherSpelling]:
-    """Return the instruments a call's bare underlyings also name, by their canonical ticker.
+def _filtered_underlyings(request: Request) -> tuple[str, ...]:
+    """Return the underlyings a call filters its rows by, canonical, as the caller named them.
 
     Args:
         request: The normalized arguments, which keep the canonical tickers; the wire gets
-            an index underlying bare (`rest_requests.wire_query`).
+            an index underlying bare (`rest_requests.wire_query`), so Massive's answer for
+            `I:DJT` holds the contracts of the stock `DJT` too.
 
     Returns:
-        For each ticker in `BARE_INDEX_PARAM` or `BARE_INDEX_LIST_PARAM`, the other ticker the
-        wire spells the same (`I:DJT` for `DJT`, `DJT` for `I:DJT`), keyed by that other
-        ticker, unless the call asked for it too; empty for any other call. Only a bare ticker
-        and its `I:` form spell alike, so two asked tickers never share a key.
+        The tickers of `BARE_INDEX_PARAM` or `BARE_INDEX_LIST_PARAM`, such as `("I:DJT",)`;
+        empty for any other call, and for a read of a value table's values, whose rows
+        `symbol_reads.attribute_values` gives to the values they name.
     """
+    if request.value_group:
+        return ()
     params = dict(request.params)
-    asked: dict[str, str] = {}
+    asked: list[str] = []
     one = params.get(BARE_INDEX_PARAM)
     if isinstance(one, str):
-        asked[one] = BARE_INDEX_PARAM
+        asked.append(one)
     listed = params.get(BARE_INDEX_LIST_PARAM)
     if isinstance(listed, tuple):
         for canonical in listed:
             assert isinstance(canonical, str)  # build_query refused any other element
-            asked[canonical] = BARE_INDEX_LIST_PARAM
-    found: dict[str, _OtherSpelling] = {}
-    for canonical, param in asked.items():
-        bare = contracts_underlying(canonical)
-        other = index_ticker(bare) if bare == canonical else bare
-        if other not in asked:
-            found[other] = _OtherSpelling(canonical, other, param)
-    return found
+            asked.append(canonical)
+    return tuple(asked)
 
 
 def _listed_rows(
@@ -472,32 +438,6 @@ def _listed_rows(
     arrays = list(taken.columns)
     arrays[position] = pa.array(symbols, taken.schema.field(position).type)
     return pa.RecordBatch.from_arrays(arrays, schema=taken.schema), unlisted
-
-
-def _per_symbol(name: str, planned: Sequence[tuple[RestPath, list[Call]]]) -> bool:
-    """Return whether every planned call names one symbol, so `limit` caps each symbol.
-
-    Args:
-        name: The dataset's name, for the error.
-        planned: Each path with its calls.
-
-    Returns:
-        True when every call names one symbol (`Call.symbol`); False when none does, or there
-        are no calls.
-
-    Raises:
-        BrokenGuaranteeError: If some calls name one symbol and others do not: no dataset plans
-            such a read, and neither cap would be right for it.
-    """
-    kinds = {call.symbol is not None for _, calls in planned for call in calls}
-    if len(kinds) > 1:
-        raise BrokenGuaranteeError(
-            library_bug(
-                f"{name} planned requests of one symbol beside requests of several, so limit "
-                "can cap neither each symbol nor the whole call"
-            )
-        )
-    return True in kinds
 
 
 def _read_capped(
@@ -552,18 +492,6 @@ def _read_capped(
     return tables, requests
 
 
-def _cut(text: str) -> str:
-    """Return a text from Massive cut to `_ANSWER_SHOWN` characters, for a WARNING's list.
-
-    Args:
-        text: The text.
-
-    Returns:
-        The text, or its first characters ending in `…` when it is longer.
-    """
-    return text if len(text) <= _ANSWER_SHOWN else text[: _ANSWER_SHOWN - 1] + "…"
-
-
 def _stamped(
     stamps: StampRule,
     label: str,
@@ -613,6 +541,8 @@ class _Outcome:
             was asked for and why; None when the call was answered.
         received: How many rows Massive sent, before any was withheld, listed under its
             tickers, or left out of a window: what `limit` counts.
+        answers: The error rows of its pages (`rest_rows.read_error_row`): Massive's answer
+            for a ticker in place of its data, which no table holds (`_answer_failures`).
     """
 
     batches: tuple[pa.RecordBatch, ...]
@@ -621,11 +551,25 @@ class _Outcome:
     source: str
     missing: _Missing | None = None
     received: int = 0
+    answers: tuple[ErrorRow, ...] = ()
 
     @property
     def rows(self) -> int:
         """How many rows the call kept."""
         return sum(batch.num_rows for batch in self.batches)
+
+
+class _PageBatches(NamedTuple):
+    """What `RestReader._page_batches` made of one page.
+
+    Attributes:
+        batches: The page's rows, converted, with the mark columns.
+        answers: Its error rows, which the read gives their tickers as failures or no data
+            (`RestReader._answer_failures`).
+    """
+
+    batches: list[pa.RecordBatch]
+    answers: list[ErrorRow]
 
 
 class _PathRows(NamedTuple):
@@ -940,7 +884,7 @@ class RestReader:
         stop: Cancel,
         patience: Patience,
         where: str,
-        others: Mapping[str, _OtherSpelling],
+        symbol: str | None,
     ) -> Withheld:
         """Give a page's index underlyings their `I:` the way the dataset's rows allow.
 
@@ -950,11 +894,10 @@ class RestReader:
         reference can't classify are withheld as `unreadable_symbols` and reported as
         `_page_rows` reports its own (`_report_withheld`); the call counts them with the
         page's withheld rows (`_Outcome.withheld`), grouped by the symbol as Massive sent it
-        and no known canonical symbol. A call that asked for an underlying by a bare ticker
-        that names another instrument too then has its kept rows checked for that
-        instrument's (`_warn_other_instruments` by root, `_check_index_rows` by CFI code); by
-        bare underlying, the lookup itself warns about a ticker that names a stock too
-        (`OptionRootKinds.underlying_kind`), since its row is Massive's total for the ticker.
+        and by `symbol`, as the page's are. By bare underlying, the lookup itself warns about a
+        ticker that names a stock too (`OptionRootKinds.underlying_kind`), since its row is
+        Massive's total for the ticker. Rows of an underlying the call did not ask for are left
+        out after the call's last page (`_asked_underlyings`).
 
         Args:
             spec: The dataset.
@@ -964,8 +907,7 @@ class RestReader:
                 are charged to: `_call` may run on a fan-out worker, whose own patience would
                 not know a console caller holds the update graph's lock.
             where: The request template, for the events.
-            others: The instruments the call's bare underlyings also name, by canonical
-                ticker (`_other_spellings`); empty for any other call.
+            symbol: The column the withheld rows are grouped by (`_withheld_symbol_column`).
 
         Returns:
             The rows to publish, and the rows the lookup withheld, grouped.
@@ -977,25 +919,23 @@ class RestReader:
         A failed lookup raises the `MassiveError` of `root_kind` or `underlying_kind`.
         """
         match spec.index_prefix:
-            case IndexPrefix.NONE:
-                return Withheld(pa.Table.from_batches(rows))
-            case IndexPrefix.FROM_CFI:
-                self._check_index_rows(spec, rows, others)
+            case IndexPrefix.NONE | IndexPrefix.FROM_CFI:
                 return Withheld(pa.Table.from_batches(rows))
             case IndexPrefix.BY_ROOT:
                 by_root = canonical_underlyings(
                     rows,
                     functools.partial(self.root_kind, patience=patience, cancel=stop),
                     dataset=spec.name,
+                    symbol=symbol,
                 )
                 self._report_lookup_withheld(spec, by_root, where=where)
-                self._warn_other_instruments(spec, list(by_root.rows.to_batches()), others)
                 return by_root
             case IndexPrefix.BY_UNDERLYING:
                 by_underlying = canonical_symbols(
                     rows,
                     functools.partial(self.underlying_kind, patience=patience, cancel=stop),
                     dataset=spec.name,
+                    symbol=symbol,
                 )
                 self._report_lookup_withheld(spec, by_underlying, where=where)
                 return by_underlying
@@ -1016,65 +956,6 @@ class RestReader:
         """
         if withheld.groups:
             self._report_withheld(spec, withheld, where=where)
-
-    def _warn_other_instruments(
-        self,
-        spec: DatasetSpec,
-        batches: Sequence[pa.RecordBatch],
-        others: Mapping[str, _OtherSpelling],
-    ) -> None:
-        """Warn about rows whose option root names an instrument the call did not ask for.
-
-        A dataset that reads its underlyings by root takes an index bare (`SPX` for `I:SPX`),
-        as the contracts list does, and a bare ticker can also name a stock (`DJT` is both a
-        stock and the index `I:DJT`), so Massive may answer about the other instrument's
-        contracts too: the stock's when the index was asked for, the index's when the stock
-        was, and neither is unasked when both were. Each root's contracts say whose they are,
-        so the rows keep the underlying Massive wrote, prefixed for the index's; one WARNING
-        per dataset and asked ticker per session names the request, the rows, and how to ask
-        for both or drop them, as `_check_index_rows` does for the contracts list. A null
-        `Underlying` says nothing about the instrument and is not counted. No row is dropped.
-
-        Args:
-            spec: The dataset.
-            batches: One page's kept rows, their index underlyings prefixed.
-            others: The instruments the call's bare underlyings also name, by canonical
-                ticker (`_other_spellings`).
-        """
-        if not batches or not others:
-            return
-        underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
-        unasked = pc.is_in(underlyings, value_set=pa.array(list(others)))
-        if not pc.any(unasked).as_py():
-            return
-        symbols = pa.chunked_array([batch.column("Symbol") for batch in batches])
-        for found in pc.unique(pc.filter(underlyings, unasked)).to_pylist():
-            other = others[found]
-            if not self.state.first("other-instrument", spec.name, other.asked):
-                continue
-            rows = pc.equal(underlyings, found)
-            first = pc.indices_nonzero(rows)[0].as_py()
-            logger.warning(
-                "%s: the underlying %r is sent to Massive as %s=%s, which also names the %s "
-                "%s, and the option root of %d of the rows is the %s's, so Massive answered "
-                "about the %s %s too. They keep the underlying Massive wrote. The first is %s, "
-                "with Underlying %s. Pass underlying=%r to ask for both, or drop the rows with "
-                '.where("Underlying != `%s`").',
-                spec.name,
-                other.asked,
-                other.param,
-                other.bare,
-                other.kind,
-                other.other,
-                pc.sum(rows).as_py(),
-                other.kind,
-                other.kind,
-                other.other,
-                symbols[first].as_py(),
-                found,
-                other.both,
-                found,
-            )
 
     def root_kind(
         self,
@@ -1168,7 +1049,6 @@ class RestReader:
         cancel: Cancel | None = None,
         patience: Patience,
         tally: ReadTally,
-        on_missing: Callable[[Sequence[_Missing]], None] | None = None,
     ) -> _PathRows:
         """Make the calls and return their rows as one Arrow table of the dataset's schema.
 
@@ -1211,21 +1091,22 @@ class RestReader:
             tally: The whole read's count of its rows and of those withheld, which this read
                 adds each call's to, every row of a static read being the read's, and the
                 caller checks after the read's last path (`ReadTally.check`).
-            on_missing: Given the symbols of the read Massive has no data for, each with why
-                (`_Outcome.missing`), in call order, when there are any; the caller then
-                applies `ErrorPolicy.unavailable_symbols` (a `poll()` cycle). None to apply
-                that setting here (`_report_missing`).
 
         Returns:
             The rows, in call order and then page order, the number of requests made, and how
             many rows Massive sent.
 
+        Raises:
+            MassiveError: The refusal of a ticker an error row refuses, under
+                `refused_symbols=RAISE` (`report_failures`), once the tickers Massive has no
+                data for are listed (`_report_missing_of_failed`).
+
         Errors: the public error of each `WireError` (`public_error`), the `RowDataError` of a
         withheld row's `RAISE` cause (`_page_rows`), and the `MassiveError` of `_call` for a
         page on another adjustment basis, its `CutShortError` for a symbol whose data was cut
-        short, the `EntitlementError` of `_check_recency` for delayed data, and, with no
-        `on_missing`, the `UnavailableSymbolError` of `_report_missing` for a symbol Massive has
-        no data for. A closed session raises `SessionClosedError("This session is closed. ...")`.
+        short, the `EntitlementError` of `_check_recency` for delayed data, and the
+        `UnavailableSymbolError` of `_report_missing` for a symbol Massive has no data for. A
+        closed session raises `SessionClosedError("This session is closed. ...")`.
         """
         converter = RowConverter.build(self.catalog, spec, rest_path)
         with Cancel(*(() if cancel is None else (cancel,))) as stop:
@@ -1259,9 +1140,21 @@ class RestReader:
                 outcome.rows + outcome.withheld.total, outcome.withheld, source=outcome.source
             )
         missing = [o.missing for o in outcomes if o.missing is not None]
-        if missing and on_missing is not None:
-            on_missing(missing)
-        elif missing:
+        refused: dict[str, MassiveError] = {}
+        for outcome in outcomes:
+            failed, absent = self._answer_failures(spec, outcome)
+            missing.extend(absent)
+            for ticker, error in failed.items():
+                refused.setdefault(ticker, error)
+        # A whole read names no symbol, so a ticker an error row refuses is listed as any
+        # refused symbol of a static read is, and fails the read only under RAISE. The
+        # tickers Massive has no data for are listed before that failure, never hidden by it.
+        try:
+            report_failures(self, spec, symbols=list(refused), failures=refused, named=False)
+        except MassiveError:
+            self._report_missing_of_failed(spec, missing)
+            raise
+        if missing:
             self._report_missing(spec, missing)
         batches = [
             batch.drop_columns([SYMBOL_SENT]) for outcome in outcomes for batch in outcome.batches
@@ -1287,7 +1180,7 @@ class RestReader:
         on_recency: Callable[[Recency], None] | None = None,
         record: Callable[[DriftReport], None] | None = None,
         executor: ThreadPoolExecutor | None = None,
-    ) -> tuple[list[RequestRows | MassiveError | None], int]:
+    ) -> ReadEach:
         """Make each planned request and return each one's rows or failure, in plan order.
 
         The read by symbol (`_ingest/symbol_reads.py`): unlike `read`, a request that fails
@@ -1297,11 +1190,14 @@ class RestReader:
         paths. They run on this thread when there is one, else on `executor` or a pool of
         `min(max_concurrency, requests)` threads made for this read, and listen to a `Cancel`
         token of the read's own (following `cancel`), which is also the read's lane in the
-        rate governor. Each is made as `read` makes it (`_call`), capped at `limit`. A symbol
-        Massive answered HTTP 404 on its first request has no data and follows
+        rate governor. Each is made as `read` makes it (`_call`), capped at `limit`. A listed
+        request Massive refuses for some of its symbols is sent again in parts until each of
+        its symbols is answered, refused, or failed on its own (`_ingest/rest_refusals.py`). A
+        symbol Massive answered HTTP 404 on its first request has no data and follows
         `ErrorPolicy.unavailable_symbols`: under `LOG` and `IGNORE` it has no rows and one
         line per path names it (`_report_missing`); under `RAISE` its result is an
-        `UnavailableSymbolError`. The read's tally counts nothing here: the caller counts each
+        `UnavailableSymbolError`, and `m.problems()` lists it with why
+        (`_report_missing_of_failed`). The read's tally counts nothing here: the caller counts each
         request's rows once it knows which are the read's symbols' (`symbol_reads._attribute`).
 
         Args:
@@ -1322,10 +1218,11 @@ class RestReader:
             executor: The caller's pool for the requests, or None for one of this read's own.
 
         Returns:
-            Each request's rows with its withheld rows and source (`RequestRows`), its
-            `MassiveError`, or None for a request of a symbol Massive has no data for, in plan
-            order; and the number of requests that were answered. A request whose rows are
-            all withheld gives its symbols no rows.
+            The requests answered, each planned request or, once searched, its parts; each
+            one's rows with its withheld rows and source (`RequestRows`), its `MassiveError`,
+            or None for a request of a symbol Massive has no data for, in plan order; and the
+            number of requests that were answered (`ReadEach`). A request whose rows are all
+            withheld gives its symbols no rows.
 
         Raises:
             MassiveError: If a request fails and `fails_read` says the failure is the read's:
@@ -1338,36 +1235,51 @@ class RestReader:
         for rest_path, _ in units:
             if rest_path.template not in converters:
                 converters[rest_path.template] = RowConverter.build(self.catalog, spec, rest_path)
-        with Cancel(*(() if cancel is None else (cancel,))) as stop:
-            run = functools.partial(
-                self._call_alone,
-                converters,
-                spec=spec,
-                request=request,
-                limit=limit,
-                window=window,
-                current=current,
-                stop=stop,
-                patience=patience,
-                fails_read=fails_read,
-                on_recency=on_recency,
-                record=record,
+        run = functools.partial(
+            self._call_alone,
+            converters,
+            spec=spec,
+            request=request,
+            limit=limit,
+            window=window,
+            current=current,
+            patience=patience,
+            fails_read=fails_read,
+            on_recency=on_recency,
+            record=record,
+        )
+        answered_requests = 0
+
+        def send(parts: Sequence[RestUnit]) -> list[_Outcome | MassiveError]:
+            # Every request counts, a refused one and those of a search included: a failed
+            # request's error is one answer, its pages' requests uncounted.
+            nonlocal answered_requests
+            outcomes = self._send_each(parts, run=run, cancel=cancel, executor=executor)
+            answered_requests += sum(
+                one.requests if isinstance(one, _Outcome) else 1 for one in outcomes
             )
-            if len(units) <= 1:
-                done = [run(unit) for unit in units]
-            else:
-                done = self._fan_out(run, units, executor=executor, stop=stop)
+            return outcomes
+
+        sent, answers = drop_named_refusals(spec, units, send(units), send=send)
+        leaves, done = search_refusals(spec, sent, answers, send=send)
         answered = [
             (rest_path.template, outcome)
-            for (rest_path, _), outcome in zip(units, done, strict=True)
+            for (rest_path, _), outcome in zip(leaves, done, strict=True)
             if isinstance(outcome, _Outcome)
         ]
         refused = effect_of(self.policy.unavailable_symbols).fails
         missing = [o.missing for _, o in answered if o.missing is not None]
-        if missing and not refused:
+        verdicts = [
+            self._answer_failures(spec, o) if isinstance(o, _Outcome) else ({}, []) for o in done
+        ]
+        missing.extend(one for _, absent in verdicts for one in absent)
+        if missing and refused:
+            # Each such symbol fails alone below; its m.problems() row says why.
+            self._report_missing_of_failed(spec, missing)
+        elif missing:
             self._report_missing(spec, missing)
         results: list[RequestRows | MassiveError | None] = []
-        for (rest_path, _), outcome in zip(units, done, strict=True):
+        for (rest_path, _), outcome, (failed, absent) in zip(leaves, done, verdicts, strict=True):
             if not isinstance(outcome, _Outcome):
                 results.append(outcome)
             elif outcome.missing is not None:
@@ -1377,8 +1289,16 @@ class RestReader:
                 schema = converters[rest_path.template].arrow_schema
                 sent = schema.append(pa.field(SYMBOL_SENT, pa.string()))
                 rows = pa.Table.from_batches(outcome.batches, schema=sent)
-                results.append(RequestRows(rows, outcome.withheld, outcome.source))
-        return results, sum(outcome.requests for _, outcome in answered)
+                # An error row fails its ticker as a request of that ticker alone would.
+                if refused:
+                    failed |= {one.symbol: _missing_error(spec, [one]) for one in absent}
+                results.append(RequestRows(rows, outcome.withheld, outcome.source, failed))
+        return ReadEach(
+            leaves,
+            results,
+            answered_requests,
+            sum(outcome.received for _, outcome in answered),
+        )
 
     def _call_alone(
         self,
@@ -1453,6 +1373,38 @@ class RestReader:
             )
             return error
 
+    def _send_each(
+        self,
+        units: Sequence[RestUnit],
+        *,
+        run: Callable[..., _Outcome | MassiveError],
+        cancel: Cancel | None,
+        executor: ThreadPoolExecutor | None,
+    ) -> list[_Outcome | MassiveError]:
+        """Send one round of a read by symbol's requests, each on its own (`_call_alone`).
+
+        The round listens to a `Cancel` token of its own, following `cancel` and never an
+        earlier round's token, which a fan-out sets when it ends; the token is also the
+        round's lane in the rate governor. One request runs on this thread, several on
+        `executor` or on a pool of this round's own.
+
+        Args:
+            units: The requests.
+            run: Makes one request (`_call_alone` with every argument but the unit and `stop`).
+            cancel: The read's stop token, or None.
+            executor: The caller's pool, or None.
+
+        Returns:
+            Each request's outcome or failure, in order.
+
+        Errors are those of `_call_alone`: a failure of the whole read raises.
+        """
+        with Cancel(*(() if cancel is None else (cancel,))) as stop:
+            bound = functools.partial(run, stop=stop)
+            if len(units) <= 1:
+                return [bound(unit) for unit in units]
+            return self._fan_out(bound, units, executor=executor, stop=stop)
+
     def _report_missing(self, spec: DatasetSpec, missing: Sequence[_Missing]) -> None:
         """Apply `ErrorPolicy.unavailable_symbols` to the symbols a read found no data for.
 
@@ -1483,17 +1435,17 @@ class RestReader:
         )
 
     def _report_missing_of_failed(self, spec: DatasetSpec, missing: Sequence[_Missing]) -> None:
-        """List the symbols Massive has no data for among the calls of a read another call failed.
+        """List the symbols Massive has no data for in a read that fails for them or another.
 
-        The read raises the other call's failure, so `ErrorPolicy.unavailable_symbols` decides
+        The read raises another call's failure, or, in a read by symbol under `RAISE`, gives
+        each such symbol its own (`read_each`), so `ErrorPolicy.unavailable_symbols` decides
         nothing here: each symbol is only an `unavailable_symbols` problem of the read's table,
         with the setting, so the failure never hides what Massive answered for it.
 
         Args:
             spec: The dataset.
             missing: The symbols Massive answered with HTTP 404 in the calls that completed,
-                in call order: those of one path's calls (`_fan_out`), or of a `poll()`
-                cycle's earlier paths (`_read_one_cycle`).
+                in call order: those of one path's calls (`_fan_out`), or of a read by symbol.
         """
         if not missing:
             return
@@ -1680,11 +1632,9 @@ class RestReader:
         `history()` window dropped (`keep_window`), and its rows given the library's time columns
         (`row_times.TimeRule.fill`), with `TimestampInsert` the instant the page arrived. The
         call's day zone follows its own symbols' class (`dates.day_class`). The rows the
-        library withholds are grouped by the asked column (`symbol_reads.asked_column`), so
-        that a read by symbol can tell which are its symbols'; by no column where the index
-        lookup (`_underlyings`) gives that column its `I:` only after the page is withheld
-        (`IndexPrefix.prefixed_by_lookup`), since such a row's bare `SPX` may be the asked
-        `I:SPX`.
+        library withholds, on the page and in the index lookup (`_underlyings`), are grouped by
+        the asked column (`_withheld_symbol_column`), so that a read by symbol can tell which
+        are its symbols'.
 
         Args:
             converter: The path's conversion.
@@ -1708,9 +1658,10 @@ class RestReader:
             DEBUG line with its rows after each step (`_page_rows`).
 
         Raises:
-            CutShortError: If a per-symbol call's later page answers HTTP 404, so the symbol's
-                data was cut short: the message names the dataset, the symbol, the path, and
-                how many pages had arrived.
+            CutShortError: If a later page of a per-symbol call, or of a value's request
+                (`Request.value_group`), answers HTTP 404, so the symbol's or value's data was
+                cut short: the message names the dataset, the symbol or values, and how many
+                pages had arrived.
 
         A failed request otherwise raises the public error of its `WireError` (`public_error`), and
         once the session is closed every failed request does, a 404 included: the call raises
@@ -1724,6 +1675,7 @@ class RestReader:
             return self._unsplit_outcome(spec, call, call.unsplit, template=template)
         kept: list[pa.RecordBatch] = []
         parts: list[Withheld] = []
+        answers: list[ErrorRow] = []
         requests = 0
         received_rows = 0
         # The path as sent, with the call's values in place of the template's placeholders.
@@ -1735,8 +1687,7 @@ class RestReader:
             warnings=self.warnings,
         )
         bucket = _request_bucket(spec, template, call)
-        others = _other_spellings(request)
-        grouped = _withheld_symbol_column(spec, converter)
+        grouped = _withheld_symbol_column(spec, converter, request)
         try:
             for page in self.state.client.pages(
                 converter.rest_path,
@@ -1764,11 +1715,19 @@ class RestReader:
                         on_recency=on_recency,
                     )
                 self._check_adjusted(spec, request, template=template, echoed=page.adjusted)
+                converted = self._page_batches(
+                    converter,
+                    page,
+                    call,
+                    spec=spec,
+                    times=times,
+                    record=record,
+                    requested=requested,
+                )
+                answers.extend(converted.answers)
                 rows, withheld = self._page_rows(
                     spec,
-                    self._page_batches(
-                        converter, page, call, spec=spec, times=times, record=record
-                    ),
+                    converted.batches,
                     window=window,
                     time_name=converter.time_name,
                     fill=functools.partial(times.fill, received=received),
@@ -1786,7 +1745,7 @@ class RestReader:
                         stop=stop,
                         patience=patience,
                         where=f"GET {template}",
-                        others=others,
+                        symbol=grouped,
                     )
                     kept.extend(looked_up.rows.to_batches())
                     parts.append(looked_up)
@@ -1795,12 +1754,64 @@ class RestReader:
                 error,
                 spec=spec,
                 call=call,
+                request=request,
                 requested=requested,
                 bucket=bucket,
                 window=window,
                 requests=requests,
             )
-        return _Outcome(tuple(kept), requests, merged(parts), requested, received=received_rows)
+        return _Outcome(
+            self._asked_underlyings(spec, request, kept, template=template),
+            requests,
+            merged(parts),
+            requested,
+            received=received_rows,
+            answers=tuple(answers),
+        )
+
+    def _asked_underlyings(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        kept: Sequence[pa.RecordBatch],
+        *,
+        template: str,
+    ) -> tuple[pa.RecordBatch, ...]:
+        """Keep a call's rows of the underlyings it filters by, and report the rows of any other.
+
+        An underlying goes to Massive bare (`I:DJT` as `DJT`), and a bare ticker can name a
+        stock and an index, so Massive may answer with the contracts of both. A row whose
+        `Underlying` names no underlying the call asked for is left out as an
+        `unrequested_symbols` problem (`symbol_reads.leave_out_unrequested`), as a read by
+        symbol leaves out a row of a symbol it did not ask for.
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments (`_filtered_underlyings`).
+            kept: The call's kept rows, every page's.
+            template: The request's path, for the events.
+
+        Returns:
+            The rows to keep: all of `kept` for a call that filters by no underlying.
+
+        Raises:
+            RowDataError: If a row is left out and `unrequested_symbols` is `RAISE` in the
+                read's policy.
+        """
+        underlyings = _filtered_underlyings(request)
+        if not underlyings or not kept:
+            return tuple(kept)
+        rows, unrequested = leave_out_unrequested(
+            self,
+            spec,
+            pa.Table.from_batches(kept),
+            column=UNDERLYING,
+            own=underlyings,
+            template=template,
+        )
+        if unrequested is not None:
+            raise unrequested
+        return tuple(rows.to_batches())
 
     def _page_batches(
         self,
@@ -1811,12 +1822,16 @@ class RestReader:
         spec: DatasetSpec,
         times: TimeRule,
         record: Callable[[DriftReport], None] | None,
-    ) -> list[pa.RecordBatch]:
+        requested: str,
+    ) -> _PageBatches:
         """Convert one page's rows, and fill and stamp them as the dataset's rows are.
 
-        The page's drift is reported (`drift_events`), its error rows warned about
-        (`_warn_error_rows`), its `Symbol` filled from each row's ticker list where the dataset
-        has one (`_listed`), and its bars of a day or longer stamped (`_stamped`).
+        The page's drift is reported (`drift_events`), its error rows set apart and logged at
+        DEBUG, with an `error` value Massive does not document also recorded in the session's
+        `DriftRegistry` once per path and those of a ticker the request did not name left out
+        (`_leave_out_unrequested_answers`), its `Symbol` filled from each row's ticker list
+        where the dataset has one (`_listed`), and its bars of a day or longer stamped
+        (`_stamped`).
 
         Args:
             converter: The path's conversion.
@@ -1825,9 +1840,12 @@ class RestReader:
             spec: The dataset.
             times: The call's time rule, whose stamps the bars take.
             record: Also given the page's drift, or None.
+            requested: The request as sent, such as `GET /v3/snapshot`, for the log and the
+                drift record.
 
         Returns:
-            The page's rows, converted, with the mark columns.
+            The page's rows, converted, with the mark columns, and its error rows, which the
+            read gives their tickers as failures or no data (`_answer_failures`).
 
         A row that breaks the schema raises the `RowDataError` of
         `rest_rows.RowConverter.convert`.
@@ -1846,7 +1864,30 @@ class RestReader:
             )
         if record is not None:
             record(drift)
-        self._warn_error_rows(converter, flagged, call.symbol, template=template)
+        answers = [
+            read_error_row(row, symbol_key=converter.symbol_key, symbol=call.symbol)
+            for row in flagged
+        ]
+        for one in answers:
+            logger.debug(
+                "%s: Massive answered %s with %s for %s; the row is left out as %s",
+                spec.name,
+                requested,
+                one.answer,
+                one.ticker,
+                one.cause,
+            )
+        if answers:
+            self.drift.report_row_errors(
+                template,
+                frozenset(one.error for one in answers if not one.documented),
+                dataset=spec.name,
+                requested=requested,
+            )
+        if call.symbols:
+            answers = self._leave_out_unrequested_answers(
+                spec, answers, named=call.symbols, template=template
+            )
         if spec.ticker_list is not None:
             batches, unlisted = self._listed(spec, batches, call.symbols)
             self._report_unlisted(spec, unlisted, named=call.symbols, template=template)
@@ -1857,7 +1898,7 @@ class RestReader:
                 _stamped(times.stamps, spec.name, b, source=template, policy=self.policy)
                 for b in batches
             ]
-        return batches
+        return _PageBatches(batches, answers)
 
     def _not_found(
         self,
@@ -1865,6 +1906,7 @@ class RestReader:
         *,
         spec: DatasetSpec,
         call: Call,
+        request: Request,
         requested: str,
         bucket: str,
         window: HistoryWindow | None,
@@ -1875,12 +1917,16 @@ class RestReader:
         Only HTTP 404 on a per-symbol call while the session is open is about the symbol. On the
         call's first request it means the symbol has no data: the call returns no rows with the
         symbol in `missing`, scoped to the futures session a `history()` call asked for, and
-        logs it at DEBUG.
+        logs it at DEBUG. A value's request (`Request.value_group`) names no symbol: its first
+        404 is the call's failure, which the read by value takes as the value's no data
+        (`read_by_value`), and a 404 on its later page cuts the value's rows short, as a
+        symbol's.
 
         Args:
             error: The request's failure.
             spec: The dataset.
             call: The call.
+            request: The call's request, which names a value request's values.
             requested: The call's request as sent, such as `GET /v3/trades/AAPL`, for messages
                 and as the outcome's source.
             bucket: The call's rate-limit bucket, for the public error.
@@ -1892,15 +1938,23 @@ class RestReader:
             rows and nothing withheld, since the 404 was its first answer.
 
         Raises:
-            CutShortError: If a per-symbol call's later page answers HTTP 404, so the symbol's
-                data was cut short: the message names the dataset, the symbol, the path, and
-                how many pages had arrived.
+            CutShortError: If a later page of a per-symbol call, or of a value's request
+                (`Request.value_group`), answers HTTP 404, so the symbol's or value's data was
+                cut short: the message names the dataset, the symbol or values, and how many
+                pages had arrived.
 
         A 404 that arrives after the session closed raises the
         `SessionClosedError("This session is closed. ...")` of `public_error`, and any other
         failure the error of `_dataset_error`.
         """
-        if error.status != HTTPStatus.NOT_FOUND or call.symbol is None:
+        # What the 404 is about: the call's symbol, or a value request's values once a page
+        # of them arrived; a value request's first 404 is settled by the read by value.
+        about = (
+            call.symbol
+            if call.symbol is not None or not requests or not request.value_group
+            else prose_list(request.value_group, "values")
+        )
+        if error.status != HTTPStatus.NOT_FOUND or about is None:
             raise self._dataset_error(spec, bucket, error) from error
         # A 404 that arrives after the session closed is no answer about the symbol,
         # so the call reports the close rather than dropping a symbol with no data.
@@ -1908,7 +1962,7 @@ class RestReader:
             logger.debug(
                 "%s: HTTP 404 for %s from %s arrived after %s closed; the call reports the close",
                 spec.name,
-                call.symbol,
+                about,
                 requested,
                 self.state.label,
             )
@@ -1916,8 +1970,8 @@ class RestReader:
         if requests:
             pages = "1 page" if requests == 1 else f"{requests} pages"
             raise CutShortError(
-                f"{spec.name}: the rows of {call.symbol} were cut short after {pages} arrived. "
-                f"{error.message} Call m.{spec.name} again to read {call.symbol} from the start.",
+                f"{spec.name}: the rows of {about} were cut short after {pages} arrived. "
+                f"{error.message} Call m.{spec.name} again to read {about} from the start.",
                 status=error.status,
                 request_id=error.request_id,
             ) from error
@@ -1937,7 +1991,7 @@ class RestReader:
             error.request_id,
             error.message,
         )
-        missing = _Missing(call.symbol, f"{scope} (HTTP 404 from {requested})".lstrip())
+        missing = _Missing(about, f"{scope} (HTTP 404 from {requested})".lstrip())
         return _Outcome((), requests + 1, Withheld(pa.table({})), requested, missing=missing)
 
     def _page_rows(
@@ -2127,81 +2181,85 @@ class RestReader:
             f"{'it' if total == 1 else 'them'} out. {hint}"
         )
 
-    def _check_index_rows(
+    def _leave_out_unrequested_answers(
         self,
         spec: DatasetSpec,
-        batches: Sequence[pa.RecordBatch],
-        others: Mapping[str, _OtherSpelling],
-    ) -> None:
-        """Warn about rows of the contracts list that do not read as the underlying asked for.
+        answers: Sequence[ErrorRow],
+        *,
+        named: Sequence[str],
+        template: str,
+    ) -> list[ErrorRow]:
+        """Keep a page's error rows of the tickers its request named, and report the others.
 
-        The contracts list takes an index bare (`SPX` for `I:SPX`), and a row gets its `I:` back
-        only when its CFI code marks an option on an index (`rest_rows.RowConverter`). A bare
-        ticker can also name a stock (`DJT` is both a stock and the index `I:DJT`, the Dow Jones
-        Transportation Average), so a row whose code marks the other kind of option is Massive's
-        answer about an instrument the call did not ask for, the stock's when the index was
-        asked for or the index's when the stock was: it keeps the underlying Massive wrote, and
-        one WARNING per dataset and asked ticker per session names the request, the rows, and
-        how to drop them. When an index was asked for, a row without a CFI code keeps the bare
-        ticker, since nothing says it is an index: one WARNING per dataset per session says so.
-        Neither drops a row.
+        An error row is Massive's answer for its ticker, so one for a ticker the request did
+        not name is the read's `unrequested_symbols` problem, as a data row of such a ticker
+        is: one event per such row, by the ticker as Massive sent it, handed to the session's
+        reporter, which alarms once per table and lists it in `m.problems()`. The row is
+        never another symbol's failure or no-data answer.
 
         Args:
             spec: The dataset.
-            batches: One page's kept rows in the dataset's schema; at least one.
-            others: The instruments the call's bare underlyings also name, by canonical
-                ticker (`_other_spellings`).
+            answers: The page's error rows, in the order Massive sent them.
+            named: The tickers the request named, canonical; never empty.
+            template: The path, for the events.
+
+        Returns:
+            The error rows of the named tickers.
+
+        Raises:
+            RowDataError: If a row was left out and `unrequested_symbols` is `RAISE` in the
+                read's policy: the call's failure, raised on the first such page.
         """
+        asked = set(named)
+        others = [one for one in answers if one.ticker not in asked]
         if not others:
-            return
-        underlyings = pa.chunked_array([batch.column(UNDERLYING) for batch in batches])
-        cfi = pa.chunked_array([batch.column(CFI) for batch in batches])
-        symbols = pa.chunked_array([batch.column("Symbol") for batch in batches])
-        for other in others.values():
-            unasked = pc.fill_null(pc.not_equal(underlyings, other.asked), fill_value=True)
-            if not pc.any(unasked).as_py():
-                continue
-            other_kind = pc.and_(unasked, pc.is_valid(cfi))
-            if pc.any(other_kind).as_py() and self.state.first(
-                "other-instrument", spec.name, other.asked
-            ):
-                first = pc.indices_nonzero(other_kind)[0].as_py()
-                logger.warning(
-                    "%s: the underlying %r is sent to Massive as %s=%s, which also names the "
-                    "%s %s, and the CFI code of %d of the rows marks an option on %s, so "
-                    "Massive answered about the %s %s too. They keep the underlying Massive "
-                    "wrote. The first is %s, with Underlying %s and Cfi %s. Drop the rows with "
-                    '.where("Underlying != `%s`").',
-                    spec.name,
-                    other.asked,
-                    other.param,
-                    other.bare,
-                    other.kind,
-                    other.other,
-                    pc.sum(other_kind).as_py(),
-                    "an index" if other.other_is_index else "something other than an index",
-                    other.kind,
-                    other.other,
-                    symbols[first].as_py(),
-                    underlyings[first].as_py(),
-                    cfi[first].as_py(),
-                    other.other,
+            return list(answers)
+        setting = self.policy.unrequested_symbols
+        asked_for = prose_list(named, "symbols")
+        at = time.time_ns()
+        self.problems(
+            [
+                ProblemEvent(
+                    cause=ProblemCause.UNREQUESTED_SYMBOLS,
+                    action=ProblemAction.WITHHELD,
+                    dataset=spec.name,
+                    stream_id=self.stream_id,
+                    where=f"{Transport.REST.value} GET {template}",
+                    symbol=one.ticker,
+                    field=None,
+                    rows=1,
+                    detail=f"Massive answered the request for {asked_for} with {one.answer} for "
+                    f"{one.ticker}, which the read did not ask for, so the row is left out",
+                    at=at,
+                    policy=setting,
                 )
-            if other.asked == other.bare:
-                # The stock was asked for: a row without a code keeps the bare ticker, which is
-                # what was asked for, so nothing marks it as another instrument's.
-                continue
-            no_code = pc.and_(unasked, pc.is_null(cfi))
-            if pc.any(no_code).as_py() and self.state.first("index-no-cfi", spec.name):
-                logger.warning(
-                    "%s: the contracts of %s include %d with no CFI code, so nothing marks their "
-                    "underlying as the index, and they keep Massive's bare %r. The first is %s.",
-                    spec.name,
-                    other.asked,
-                    pc.sum(no_code).as_py(),
-                    other.bare,
-                    pc.filter(symbols, no_code)[0].as_py(),
-                )
+                for one in others
+            ]
+        )
+        logger.debug(
+            "%s: Massive answered the request for %s with error rows for %s, which it did not "
+            "name; they are left out as unrequested_symbols (%s)",
+            spec.name,
+            asked_for,
+            [one.ticker for one in others],
+            setting.value,
+        )
+        if effect_of(setting).fails:
+            [first, *rest] = others
+            what = (
+                f"{first.answer} for {first.ticker}"
+                if not rest
+                else f"error rows for {prose_list([one.ticker for one in others], 'tickers')}"
+            )
+            hint = policy_hint(
+                OnError.LOG, "unrequested_symbols", purpose="To go on without such rows"
+            )
+            raise RowDataError(
+                f"{spec.name}: Massive answered the request for {asked_for} with {what}, which "
+                f"the read did not ask for, so the library left {'it' if not rest else 'them'} "
+                f"out. {hint}"
+            )
+        return [one for one in answers if one.ticker in asked]
 
     def _check_recency(
         self,
@@ -2237,9 +2295,10 @@ class RestReader:
         request served: any label on a page charged to a subscription, since the page is that
         subscription's data, and an envelope label on a page of the `other` bucket when every
         class the request names is unlisted. A row's label on a page of the `other` bucket,
-        and an envelope label on one that names a listed class beside an unlisted one, are a
-        plain `EntitlementError`: the request's own, which a read by symbol gives to every
-        symbol the request named.
+        and an envelope label on one that names a listed class beside an unlisted one, refuse
+        the symbols they label (`SymbolRefusalError`): the labelled rows' tickers the request
+        named, or the request's symbols of the unlisted classes. A read by symbol refuses
+        exactly those and asks again for the others (`_ingest/rest_refusals.py`).
 
         Args:
             spec: The dataset, for the message.
@@ -2255,7 +2314,7 @@ class RestReader:
         Raises:
             EntitlementError: If a label says delayed for a subscription not listed
                 (`recency_labels.delayed_refusal`): a `FeedRefusalError` when the label is
-                the feed's.
+                the feed's, else a `SymbolRefusalError` naming the labelled symbols.
         """
         listed = self.delayed_subscriptions
         fixed = None if bucket == OTHER else Subscription(bucket)
@@ -2276,7 +2335,12 @@ class RestReader:
                 # The feed's when the label leaves no class of the request served: the one
                 # subscription the page is charged to, or every class a mixed page names.
                 # Currencies are never unlisted, so a mixed page naming them is a symbol's.
-                raise _feed_refusal(refusal) if named <= set(unlisted) else refusal
+                whose = _whose_refusal(
+                    refusal,
+                    feed=named <= set(unlisted),
+                    symbols=[s for s in own if subscription_of(symbol_class(s)) in unlisted],
+                )
+                raise whose
         recency = _page_recency(
             page.rows, fixed=fixed, listed=listed, symbol_key=symbol_key, symbol=call.symbol
         )
@@ -2294,7 +2358,12 @@ class RestReader:
             )
             # A row's label on a page charged to a subscription is held against that
             # subscription, so it is the feed's; on the `other` bucket it is the row's own.
-            raise _feed_refusal(refusal) if fixed is not None else refusal
+            whose = _whose_refusal(
+                refusal,
+                feed=fixed is not None,
+                symbols=[s for s in own if any(s in t for t, _ in recency.refused.values())],
+            )
+            raise whose
         delayed = recency.delayed or (page.status == DELAYED_LABEL and bool(named))
         if on_recency is not None and (delayed or recency.real_time):
             on_recency(Recency.DELAYED if delayed else Recency.REALTIME)
@@ -2373,45 +2442,47 @@ class RestReader:
                 is_retryable=True,
             )
 
-    def _warn_error_rows(
-        self,
-        converter: RowConverter,
-        flagged: Sequence[Mapping[str, object]],
-        symbol: str | None,
-        *,
-        template: str,
-    ) -> None:
-        """Log a page's error rows: each at DEBUG, and one WARNING for the tickers new to it.
+    def _answer_failures(
+        self, spec: DatasetSpec, outcome: _Outcome
+    ) -> tuple[dict[str, MassiveError], list[_Missing]]:
+        """Return what a call's error rows answered for their tickers, as the read's other answers.
 
-        The WARNING lists each ticker not warned about before in the session, with Massive's
-        error and message, through `prose_list`, so a page of thousands of error rows logs
-        one short line. The rows are kept, with their `Error` and `Message` columns.
+        A `NOT_FOUND` row means Massive has no data for its ticker, as HTTP 404 does, so the
+        read treats it as it treats a 404 (`_Missing`, `unavailable_symbols`). Every other row is
+        Massive's refusal of its ticker, as HTTP 403 for one symbol is: an `EntitlementError`
+        of that ticker alone, which the read lists and judges as it does every refused symbol
+        (`refused_symbols`), so a call or table whose every symbol Massive refused fails by the
+        same rule whichever way Massive refused them.
 
         Args:
-            converter: The path's conversion.
-            flagged: The page's error rows.
-            symbol: The request's one symbol, for a path whose rows do not carry it.
-            template: The path template, for the record.
+            spec: The dataset.
+            outcome: The call's outcome, with its error rows and the request as sent.
+
+        Returns:
+            Each refused ticker's error, such as `EntitlementError("indices.snapshots: Massive
+            answered GET /v3/snapshot/indices with error NOT_ENTITLED for I:VIX: "Not entitled
+            to this ticker.".")`, and each ticker Massive has no data for, in the order Massive
+            sent them.
+
         """
-        dataset = converter.dataset
-        key = converter.symbol_key
-        new = []
-        for row in flagged:
-            ticker = str(symbol if key is None else row.get(key))
-            answer = f'{ticker} with "{row.get("error")}: {row.get("message")}"'
-            logger.debug(
-                "%s: Massive answered an error row from %s for %s", dataset, template, answer
-            )
-            if self.state.first("error-row", dataset, ticker):
-                # The WARNING shows the start of each answer; the DEBUG line above has it all.
-                new.append(_cut(answer))
-        if new:
-            logger.warning(
-                "%s: Massive answered error rows for %s. The rows are kept, with Massive's "
-                "answer in their Error and Message columns.",
-                dataset,
-                prose_list(new, "tickers"),
-            )
+        refused: dict[str, MassiveError] = {}
+        missing: list[_Missing] = []
+        for one in outcome.answers:
+            match one.cause:
+                case ProblemCause.UNAVAILABLE_SYMBOLS:
+                    missing.append(_Missing(one.ticker, f"({one.answer} from {outcome.source})"))
+                case ProblemCause.REFUSED_SYMBOLS:
+                    refused.setdefault(
+                        one.ticker,
+                        EntitlementError(
+                            f"{spec.name}: Massive answered {outcome.source} with error "
+                            f'{one.error} for {one.ticker}: "{one.message}".',
+                            source=ErrorSource.MASSIVE,
+                        ),
+                    )
+                case _:
+                    assert_never(one.cause)
+        return refused, missing
 
     def public_error(self, error: WireError) -> MassiveError:
         """Return the public error of a wire error.
@@ -2547,24 +2618,24 @@ class RestReader:
         cancel: Cancel,
         pace: PaceCheck,
     ) -> poll.CycleRows:
-        """Run one `poll()` cycle, once for each value of a value table when there is one.
+        """Run one `poll()` cycle: its symbols, or its values, each read on its own.
 
-        Without a value table the cycle is one read (`_read_one_cycle`). With one, each of the
-        cycle's values is read as if passed alone (`Request.for_value`), one after another,
-        and the reads are joined: their rows in value order, their requests summed, and what
-        each left out. They share one patience, taken once for the cycle, so the cycle's pauses
-        together stay within it. The cycle is one read: its rows count in one tally, checked once
-        after its last value (`ReadTally.check`), so a value whose rows are all withheld,
-        beside others read whole, adds no rows. A value Massive answers with HTTP 404 follows
-        `ErrorPolicy.unavailable_symbols`, as a symbol does: under `LOG` and `IGNORE` it is
-        left out of the cycle and named in its `left_out`.
+        A cycle of symbols in a list (`_read_cycle_by_symbol`) or of the values of a value
+        table (`_read_cycle_by_value`) reads each symbol or value on its own, so one's failure
+        is its own: its rows are left out, and it is returned in `CycleRows.failures` for the
+        poller to retry or list, while the others' rows are kept. A failure of the whole read
+        (`symbol_reads.fails_followed_read`) raises, and a failure that fails the table
+        (`call_failure.fails_call`) is returned as `CycleRows.fatal`. A cycle of `ALL`, or of a
+        dataset without instruments, is one read (`_read_one_cycle`), whose failure is the
+        cycle's.
 
         Args:
             spec: The dataset.
             request: The normalized arguments.
-            symbols: The cycle's static symbols (a reactive table already read).
-            values: The values the value table holds now (already checked), or None when the
-                request has no value table.
+            symbols: The cycle's symbols: those due this cycle for a list (a reactive table
+                already read), else `ALL` or None.
+            values: The values due this cycle, of those the value table holds now (already
+                checked), or None when the request has no value table.
             record: Given each page's drift, as the cycle's progress.
             on_recency: Records each page's recency evidence, for the table's `Recency`.
             executor: The poller's fan-out pool.
@@ -2575,53 +2646,279 @@ class RestReader:
             The cycle's read (`poll.CycleRows`).
 
         Raises:
-            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a
-                value Massive answered with HTTP 404.
-            RowDataError: If the library could read none of the rows of the cycle's symbols
-                whole, across all its values, paths, and pages, whatever its policy.
-            MassiveError: Any other failure of a read, as `_read_one_cycle` raises it.
+            RowDataError: If the library could read none of the rows of a cycle of `ALL` whole,
+                whatever its policy.
+            MassiveError: A failure of the whole read, a refusal of the feed included,
+                any failure once the poller is stopped, or a failure of a cycle of `ALL`, as
+                `_read_one_cycle` raises it.
         """
-        tally = ReadTally()
-        patience = self.patience()  # once for the cycle, on this thread, before any value's read
+        patience = self.patience()  # once for the cycle, on this thread, before any request
         read = functools.partial(
             self._read_one_cycle,
             spec,
-            symbols=symbols,
             record=record,
             on_recency=on_recency,
             executor=executor,
             cancel=cancel,
             pace=pace,
-            tally=tally,
             patience=patience,
         )
-        if values is None:
-            rows = read(request)
-            tally.check(spec.name)
-            return rows
-        reads: list[poll.CycleRows] = []
-        absent: list[str] = []
-        for value in values:
-            try:
-                reads.append(read(request.for_value(value)))
-            except MassiveError as error:
-                if error.status != HTTPStatus.NOT_FOUND or self.state.closed:
-                    raise
-                found = _Missing(
-                    value, f"(HTTP 404 from GET {self._value_target(spec, request, value)})"
-                )
-                self._report_missing(spec, [found])
-                absent.append(str(found))
+        if values is not None:
+            return self._read_cycle_by_value(
+                spec,
+                request,
+                values,
+                read=functools.partial(read, symbols=symbols),
+                cancel=cancel,
+                patience=patience,
+            )
+        if isinstance(symbols, tuple):
+            return self._read_cycle_by_symbol(
+                spec,
+                request,
+                symbols,
+                record=record,
+                on_recency=on_recency,
+                executor=executor,
+                cancel=cancel,
+                pace=pace,
+                patience=patience,
+            )
+        tally = ReadTally()
+        rows = read(request, symbols=symbols, tally=tally)
         tally.check(spec.name)
-        schema = self.catalog.dataset_schema(spec)
-        return poll.CycleRows(
-            pa.concat_tables([one.rows for one in reads])
-            if reads
-            else schema.arrow_schema().empty_table(),
-            sum(one.requests for one in reads),
-            patience.seconds,
-            (*(name for one in reads for name in one.left_out), *absent),
+        return rows
+
+    def _read_cycle_by_symbol(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        symbols: tuple[str, ...],
+        *,
+        record: Callable[[DriftReport], None],
+        on_recency: Callable[[Recency], None],
+        executor: ThreadPoolExecutor,
+        cancel: Cancel,
+        pace: PaceCheck,
+        patience: Patience,
+    ) -> poll.CycleRows:
+        """Read a cycle of symbols in a list, each symbol's failure its own.
+
+        The requests are those `fetch()` makes for the symbols (`symbol_reads.fetch_units`),
+        read as a static `fetch()` of them reads them (`symbol_reads.read_symbol_list`). A
+        symbol that got no row and whose rows the library withheld every one of fails on its
+        own (`ReadTally.unread_symbols`), whatever its policy. A symbol Massive answered with
+        HTTP 404 has no rows, and the reader lists it (`read_each`).
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments.
+            symbols: The symbols due this cycle, sorted.
+            record: Given each page's drift, as the cycle's progress.
+            on_recency: Records each page's recency evidence, for the table's `Recency`.
+            executor: The poller's fan-out pool.
+            cancel: The poller's stop token, which ends the cycle's waits.
+            pace: The table's pace check.
+            patience: The cycle's patience.
+
+        Returns:
+            The cycle's read (`poll.CycleRows`), with each row's symbol and each failure.
+
+        Errors are those `symbol_reads.read_symbol_list` raises for a failure of the whole read.
+        """
+        tally = ReadTally()
+        units, failed = fetch_units(self, spec, request, symbols=symbols, cancel=cancel)
+        sent = [(rest_path, call) for rest_path, call in units if call.unsplit is None]
+        pace.check(
+            self.state.client.governor,
+            Counter(call_bucket(spec, rest_path.template, call) for rest_path, call in sent),
         )
+        read = read_symbol_list(
+            self,
+            spec,
+            request,
+            symbols=symbols,
+            units=units,
+            failed=failed,
+            window=None,
+            current=spec.serves_current_data or spec.latest_is_current,
+            limit=request.limit,
+            cancel=cancel,
+            patience=patience,
+            tally=tally,
+            on_recency=on_recency,
+            record=record,
+            executor=executor,
+        )
+        with_rows = set(read.asked.to_pylist())
+        empty = [s for s in symbols if s not in read.failures and s not in with_rows]
+        withheld = tally.unread_symbols(spec.name, empty, symbols)
+        left_out = [
+            f"{call.symbol} ({call.unsplit.why})"
+            for _, call in units
+            if call.unsplit is not None and not call.unsplit.no_data
+        ]
+        left_out.extend(f"{symbol} (no data)" for symbol in read.no_data)
+        failures, fatal = split_failures(read.failures, symbols, self.policy)
+        return poll.CycleRows(
+            read.rows,
+            read.requests,
+            patience.seconds,
+            tuple(left_out),
+            asked=read.asked,
+            failures={**failures, **withheld},
+            fatal=fatal,
+        )
+
+    def _read_cycle_by_value(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        values: tuple[str, ...],
+        *,
+        read: Callable[..., poll.CycleRows],
+        cancel: Cancel,
+        patience: Patience,
+    ) -> poll.CycleRows:
+        """Read a cycle of values, as a static `fetch()` of them reads them (`read_by_value`).
+
+        A failure of the whole read (`symbol_reads.fails_followed_read`, a refusal of the feed
+        included) and any failure once the poller is stopped raise; a value whose failure's cause
+        is set to `RAISE` is also returned as `CycleRows.fatal`, which fails the table.
+
+        Args:
+            spec: The dataset.
+            request: The normalized arguments.
+            values: The values due this cycle.
+            read: Reads one value's request into the cycle's rows (`_read_one_cycle`, bound
+                to the cycle), given the request and the value's tally as `tally`.
+            cancel: The poller's stop token.
+            patience: The cycle's patience, which every value's read shares.
+
+        Returns:
+            The cycle's read (`poll.CycleRows`): the values' rows in value order, with each
+            row's value, their requests summed, what each left out, and each failed value.
+
+        Raises:
+            MassiveError: A failure of a value's read that fails the whole read, as
+                `_read_one_cycle` raises it.
+        """
+
+        def read_one(one: Request, tally: ReadTally) -> tuple[pa.Table, int, tuple[str, ...]]:
+            cycle = read(one, tally=tally)
+            return cycle.rows, cycle.requests, cycle.left_out
+
+        def fails_cycle(error: MassiveError) -> bool:
+            return fails_list_read(error, cancel=cancel) or self.state.closed
+
+        got = self.read_by_value(spec, request, values, read=read_one, fails_read=fails_cycle)
+        schema = self.catalog.dataset_schema(spec).arrow_schema()
+        failures, fatal = split_failures(got.failures, values, self.policy)
+        pieces = [(value, got.pieces[value]) for value in values if value in got.pieces]
+        return poll.CycleRows(
+            pa.concat_tables([rows for _, rows in pieces]) if pieces else schema.empty_table(),
+            got.requests,
+            patience.seconds,
+            got.left_out,
+            asked=pa.chunked_array(
+                [pa.array([value] * rows.num_rows, pa.string()) for value, rows in pieces],
+                pa.string(),
+            ),
+            failures={**failures, **got.unread},
+            fatal=fatal,
+        )
+
+    def read_by_value(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        values: Sequence[str],
+        *,
+        read: Callable[[Request, ReadTally], tuple[pa.Table, int, tuple[str, ...]]],
+        fails_read: Callable[[MassiveError], bool],
+    ) -> ValueRead:
+        """Read each value of a value table on its own, for a `fetch()` or a `poll()` cycle.
+
+        The values Massive takes as one value are read by one request (`value_groups`), as if
+        passed alone (`Request.for_value`), and each row goes to the value it names
+        (`attribute_values`): a row of a value the request did not read is an
+        `unrequested_symbols` problem. Each request's rows count in a tally of their own, each
+        withheld row for the value it names (`Request.value_column`), so a value is judged by
+        its own rows, as a symbol of a read by symbol is (`ReadTally.unread_symbols`): a value
+        that got no row and whose own rows the library withheld fails on its own, whatever the
+        policy, and another value's withheld row fails none of the request's. A value Massive
+        answers with HTTP 404 on its first request follows `ErrorPolicy.unavailable_symbols`,
+        as a symbol does (`_report_missing`): under `LOG` and `IGNORE` it gets no rows and is
+        named in `left_out`. A 404 on a later page cuts its rows short (`CutShortError`), a
+        failure of its own. Any other failure is its values' own, but for one `fails_read`
+        names, which raises.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with a value table.
+            values: The values, each once, in the order to read them.
+            read: Reads one request (`Request.for_value`) into its rows, its request count,
+                and what it left out, counting its rows in the tally given.
+            fails_read: Whether a value's failure fails the whole read instead.
+
+        Returns:
+            Each value's rows, the requests, what the reads left out, and each failed value,
+            those whose every row was withheld apart (`ValueRead.unread`).
+
+        Raises:
+            MassiveError: A failure `fails_read` names, as `read` raises it.
+            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a value Massive has
+                no data for (`_report_missing`).
+        """
+        column = required(request.value_table, "the request's value table").row_column
+        template = required(spec.fetch_path, f"{spec.name}'s fetch path")
+        pieces: dict[str, pa.Table] = {}
+        requests = 0
+        left_out: list[str] = []
+        failed: dict[str, MassiveError] = {}
+        unread: dict[str, MassiveError] = {}
+        for group in value_groups(request, values):
+            tally = ReadTally()
+            try:
+                rows, sent, skipped = read(request.for_value(group[0], group=group), tally)
+            except MassiveError as error:
+                if fails_read(error):
+                    raise
+                # Only a first answer of HTTP 404 is no data; a later page's cut the rows short.
+                if error.status != HTTPStatus.NOT_FOUND or isinstance(error, CutShortError):
+                    failed.update(dict.fromkeys(group, error))
+                    continue
+                found = [
+                    _Missing(
+                        value, f"(HTTP 404 from GET {self._value_target(spec, request, value)})"
+                    )
+                    for value in group
+                ]
+                self._report_missing(spec, found)
+                left_out.extend(str(one) for one in found)
+                continue
+            requests += sent
+            left_out.extend(skipped)
+            own, unrequested = attribute_values(
+                self, spec, rows, column=column, own=group, template=template
+            )
+            if unrequested is not None:
+                failed.update(dict.fromkeys(group, unrequested))
+                continue
+            withheld = tally.unread_symbols(
+                spec.name, [value for value in group if not own[value].num_rows], group
+            )
+            unread.update(withheld)
+            pieces.update((value, own[value]) for value in group if value not in withheld)
+        logger.debug(
+            "%s by value: %d values in %d requests; failed: %s; left out: %s",
+            spec.name,
+            len(values),
+            requests,
+            bounded_list([*failed, *unread]) if failed or unread else "none",
+            bounded_list(left_out) if left_out else "none",
+        )
+        return ValueRead(pieces, requests, tuple(left_out), failed, unread)
 
     def _read_one_cycle(
         self,
@@ -2637,15 +2934,12 @@ class RestReader:
         tally: ReadTally,
         patience: Patience,
     ) -> poll.CycleRows:
-        """Run one read of a `poll()` cycle: the planned requests of `read_fetch` for its symbols.
+        """Run one read of a `poll()` cycle: the planned requests of `read_fetch` for `ALL` or None.
 
-        By default one symbol never fails the table. Massive can answer HTTP 404 for a symbol
-        (no data), and `ErrorPolicy.unavailable_symbols` decides (`_report_missing`): under
-        `LOG` and `IGNORE` such symbols are left out of the cycle, each an
-        `unavailable_symbols` problem of the table, and named in its `left_out`; under `RAISE`
-        the table fails. When a later path's failure fails the cycle, the symbols earlier paths
-        answered with HTTP 404 are still problems of the table (`_report_missing_of_failed`).
-        A parameter a path does not take never reaches a cycle:
+        Its requests name no symbol. Its failure is the cycle's for `ALL`, and the value's for
+        one value of a value table (`_read_cycle_by_value`). A cycle of symbols in a
+        list goes through `_read_cycle_by_symbol` instead. A parameter a path does not take
+        never reaches a cycle:
         `check_parameters` refused it when the table was made.
         Before reading, the cycle's requests per bucket go to `pace`, which warns once when
         the paced ones outlast the interval.
@@ -2653,7 +2947,7 @@ class RestReader:
         Args:
             spec: The dataset.
             request: The normalized arguments.
-            symbols: The cycle's static symbols (a reactive table already read).
+            symbols: The cycle's symbols, `ALL` or None.
             record: Given each page's drift, as the cycle's progress.
             on_recency: Records each page's recency evidence, for the table's `Recency`.
             executor: The poller's fan-out pool.
@@ -2668,36 +2962,22 @@ class RestReader:
             rate-limit pauses the cycle's reads wait out together, and the symbols it left out,
             each with why.
 
-        Raises:
-            UnavailableSymbolError: Under `unavailable_symbols=RAISE`, for a
-                symbol Massive answered with HTTP 404 (`_report_missing`).
-
-        Any other error is that of `read_fetch`.
+        Errors are those of `read_fetch`.
         """
         planned, left_out = self._plan_cycle(spec, request, symbols, cancel=cancel)
         pace.check(self.state.client.governor, Counter(_buckets(spec, planned)))
-        missing: list[_Missing] = []
-        try:
-            table, requests = self._read_planned(
-                spec,
-                request,
-                planned,
-                current=spec.serves_current_data or spec.latest_is_current,
-                record=record,
-                on_recency=on_recency,
-                executor=executor,
-                cancel=cancel,
-                patience=patience,
-                tally=tally,
-                on_missing=missing.extend,
-            )
-        except Exception:
-            # A later path's failure fails the cycle; the earlier paths' 404s are still listed.
-            self._report_missing_of_failed(spec, missing)
-            raise
-        if missing:
-            self._report_missing(spec, missing)
-            left_out.extend(str(one) for one in missing)
+        table, requests = self._read_planned(
+            spec,
+            request,
+            planned,
+            current=spec.serves_current_data or spec.latest_is_current,
+            record=record,
+            on_recency=on_recency,
+            executor=executor,
+            cancel=cancel,
+            patience=patience,
+            tally=tally,
+        )
         return poll.CycleRows(table, requests, patience.seconds, tuple(left_out))
 
     def _plan_cycle(
@@ -2730,8 +3010,6 @@ class RestReader:
 
         A failed read of the crypto ticker list raises the `MassiveError` of `crypto_pair`.
         """
-        if symbols == ():
-            return [], []
         planned = []
         left_out: list[str] = []
         for template, own in fetch_paths(spec, symbols):
@@ -2885,8 +3163,8 @@ class RestReader:
                 runs.
 
         Returns:
-            The rows of every path, in path order, capped at `Request.limit` (each symbol's
-            rows where a request names one symbol; `_read_planned`), and the request count.
+            The rows of every path, in path order, capped in total at `Request.limit`
+            (`_read_planned`), and the request count.
 
         Errors are those of `read`, and a parameter a path does not take raises the
         `ValueError` of `shared_params`.
@@ -2931,15 +3209,13 @@ class RestReader:
         patience: Patience,
         tally: ReadTally,
         on_recency: Callable[[Recency], None] | None = None,
-        on_missing: Callable[[Sequence[_Missing]], None] | None = None,
     ) -> tuple[pa.Table, int]:
         """Make planned calls, path by path, and cap the rows at `Request.limit`.
 
-        The cap is on the total rows (`_read_capped`), except where each request names one
-        symbol (`Call.symbol`, a per-symbol path): there it caps each symbol's rows, so a few
-        symbols with many rows never crowd out the rest, and the calls of a path run together.
-        On a dataset whose rows list their tickers, each row is repeated once per named ticker
-        it lists (`_listed_rows`), and the cap counts the repeated rows.
+        The cap is on the total rows (`_read_capped`): the read is of `ALL`, of no symbols, or
+        of one value of a value table, so its requests name no symbol. On a dataset whose rows
+        list their tickers, each row is repeated once per named ticker it lists
+        (`_listed_rows`), and the cap counts the repeated rows.
 
         Args:
             spec: The dataset.
@@ -2956,17 +3232,11 @@ class RestReader:
             tally: The whole read's count of its rows and of those withheld, which this read
                 adds to and never checks: the read's entry point checks it after its last part.
             on_recency: Receives each page's recency evidence (`read`), or None.
-            on_missing: Receives each path's template and its symbols Massive answered with
-                HTTP 404 (`read`), or None.
 
         Returns:
             The rows of every path, in path order, and the request count.
 
-        Raises:
-            BrokenGuaranteeError: If a capped plan mixes per-symbol calls with calls of several
-                symbols (`_per_symbol`).
-
-        Errors are otherwise those of `read`.
+        Errors are those of `read`.
         """
         read = functools.partial(
             self.read,
@@ -2979,10 +3249,8 @@ class RestReader:
             cancel=cancel,
             patience=patience,
             tally=tally,
-            on_missing=on_missing,
         )
-        per_symbol = request.limit is not None and _per_symbol(spec.name, planned)
-        if request.limit is None or per_symbol:
+        if request.limit is None:
             done = [read(rest_path, calls, limit=request.limit) for rest_path, calls in planned]
             tables = [path_rows.table for path_rows in done]
             requests = sum(path_rows.requests for path_rows in done)
@@ -2992,16 +3260,7 @@ class RestReader:
             schema = self.catalog.dataset_schema(spec)
             return schema.arrow_schema().empty_table(), 0
         rows = pa.concat_tables(tables)
-        if request.limit is not None and per_symbol:
-            # Each request named one symbol and was capped on its own.
-            logger.debug(
-                "%s: kept %d rows from %d one-symbol requests; limit=%d per symbol",
-                spec.name,
-                rows.num_rows,
-                requests,
-                request.limit,
-            )
-        elif request.limit is not None:
+        if request.limit is not None:
             # Rows listed under several named tickers can outnumber the rows Massive capped.
             rows = rows.slice(0, request.limit)
         return rows, requests
@@ -3236,6 +3495,12 @@ class RestEndpoints:
         a row several requests return once (`RestReader._read_planned`). Drift is logged, once
         per field.
 
+        Symbols in code are read by symbol (`static_reads.read_symbols`): a symbol's own
+        failure (a refusal, a request that failed after retries) leaves the others' rows, and
+        `m.problems()` lists it; the call raises when every symbol it names fails, for a
+        failure of the whole read, and under `RAISE` for the failed symbol's cause. `dm.ALL`
+        and a path without symbols are read whole.
+
         Args:
             spec: The dataset, with a fetch path.
             request: The normalized arguments, with static symbols (the query reads a reactive
@@ -3251,12 +3516,13 @@ class RestEndpoints:
             A static table in the dataset's schema.
 
         Errors, which the verb's call logs at the level their `is_bug` gives (DEBUG for an
-        expected one, ERROR for a defect): `AuthenticationError` (HTTP 401),
-        `EntitlementError` (HTTP 403 or `NOT_AUTHORIZED`, or a `DELAYED` label on a subscription
-        not in `MassiveConfig.delayed_subscriptions`, `RestReader._check_recency`),
-        `RowDataError` for a row that breaks the schema, and `MassiveError` itself for any other
-        failure (a rate limit with status 429, a closed session as
-        `"This session is closed. ..."`).
+        expected one, ERROR for a defect), each raised for symbols in code only as the
+        paragraph above says: `AuthenticationError` (HTTP 401), `EntitlementError` (HTTP 403 or
+        `NOT_AUTHORIZED`, or a `DELAYED` label on a subscription not in
+        `MassiveConfig.delayed_subscriptions`, `RestReader._check_recency`), `RowDataError` for
+        a read whose every row of its symbols was withheld (`ReadTally.check`), and
+        `MassiveError` itself for any other failure (a rate limit with status 429, a closed
+        session as `"This session is closed. ..."`).
 
         A parameter a path does not take raises the `ValueError` of `shared_params` before any
         request: every path is planned before the first one is read.
@@ -3265,14 +3531,47 @@ class RestEndpoints:
             f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
         )
         tally = ReadTally()
-        table, _ = reader.read_fetch(
-            spec,
-            request,
-            symbols=request.static_symbols,
-            tally=tally,
-            cancel=as_cancel(stop),
-            pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
-        )
+        cancel = as_cancel(stop)
+        symbols = request.static_symbols
+        if isinstance(symbols, tuple):
+            units, failed = fetch_units(reader, spec, request, symbols=symbols, cancel=cancel)
+            patience = reader.patience()  # once for every request, before any fan-out
+            logger.debug(
+                "%s fetch: %d requests on %d paths; the read waits out %.0f s of pauses",
+                spec.name,
+                len(units),
+                len({rest_path.template for rest_path, _ in units}),
+                patience.seconds,
+            )
+            announce(
+                self._state.client.governor,
+                f"{spec.name} fetch",
+                [call_bucket(spec, rest_path.template, unit) for rest_path, unit in units],
+                pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+            )
+            table, _ = read_symbols(
+                reader,
+                spec,
+                request,
+                symbols=symbols,
+                units=units,
+                failed=failed,
+                window=None,
+                current=_fetch_is_current(spec, request),
+                limit=request.limit,
+                cancel=cancel,
+                patience=patience,
+                tally=tally,
+            )
+        else:
+            table, _ = reader.read_fetch(
+                spec,
+                request,
+                symbols=symbols,
+                tally=tally,
+                cancel=cancel,
+                pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+            )
         tally.check(spec.name)
         return self._static(spec, table)
 
@@ -3400,6 +3699,54 @@ class RestEndpoints:
             to_table=functools.partial(self._static, spec),
         )
 
+    def fetch_values(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        values: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Table:
+        """Read `fetch` once for a static table of values, as a fixed list: one table.
+
+        See `RestTransport.fetch_values`. The values are read as `fetch_by_value` reads them
+        (`symbol_reads.read_values`), and judged as a static read of symbols in code is: each
+        failed value is listed and left out (`static_reads.judge_failures`), and a value whose
+        every row was withheld fails only with the whole read, when no value kept a row.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with a value table and static symbols.
+            values: The values to read, already checked.
+            call: The call's id, which names the read's threads and its problems.
+            stop: A background read's stop token, or None, as `fetch` takes it.
+
+        Returns:
+            A static table of every value's rows, in value order.
+
+        Errors are those of `symbol_reads.read_values` and `static_reads.judge_failures`, and
+        the `RowDataError` of the first value whose every row was withheld, when no value kept
+        a row.
+        """
+        reader = self._reader(
+            f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
+        )
+        cancel = as_cancel(stop)
+        ordered = tuple(dict.fromkeys(values))
+        read = read_values(
+            reader, self._core, spec, request=request, values=ordered, call=call, cancel=cancel
+        )
+        judge_failures(reader, spec, symbols=ordered, failures=read.failures, cancel=cancel)
+        pieces = [read.pieces[value] for value in ordered if value in read.pieces]
+        if read.unread and not any(piece.num_rows for piece in pieces):
+            # As a static read of symbols: a read whose every row was withheld fails whole.
+            unread = next(iter(read.unread.values()))
+            logger.debug("%s by value: every row was withheld: %s", spec.name, unread)
+            raise unread
+        schema = self._core.dataset_schema(spec).arrow_schema()
+        return self._static(spec, pa.concat_tables(pieces) if pieces else schema.empty_table())
+
     def history(
         self,
         spec: DatasetSpec,
@@ -3446,19 +3793,57 @@ class RestEndpoints:
         Returns:
             A static table in the dataset's schema.
 
-        Errors: as `fetch` raises them, and `MassiveError` for a page whose `adjusted` echo
-        differs from the request and for a symbol whose later page answers HTTP 404, its data
-        cut short.
+        Symbols are read by symbol, as `fetch` reads them: one symbol's failure leaves the
+        others' rows.
+
+        Errors: as `fetch` raises them. A page whose `adjusted` echo differs from the request,
+        and a later page that answers HTTP 404 (the data cut short), are failures of the
+        request's symbols, and of the whole read on a `dm.ALL` read.
         """
         reader = self._reader(
             f"call-{call}", request.on_error, waiter=_waiter_of(stop), stream_id=call
         )
+        cancel = as_cancel(stop)
+        symbols = request.static_symbols
+        if isinstance(symbols, tuple):
+            units, failed = history_units(
+                reader, spec, request, window=window, symbols=symbols, cancel=cancel
+            )
+            announce(
+                self._state.client.governor,
+                f"{spec.name} history",
+                [call_bucket(spec, rest_path.template, unit) for rest_path, unit in units],
+                shape=ReadShape.PER_SESSION if window.requested is None else ReadShape.PAGED,
+                pauses_live_tables=holds_update_graph_lock(self._core.exec_ctx),
+            )
+            patience = reader.patience()
+            table, requests = read_symbols(
+                reader,
+                spec,
+                request,
+                symbols=symbols,
+                units=units,
+                failed=failed,
+                window=window,
+                current=False,
+                limit=None,
+                cancel=cancel,
+                patience=patience,
+                tally=tally,
+            )
+            logger.info(
+                "%s history: source=REST requests=%d, waiting out at most %.0f s of pauses",
+                spec.name,
+                requests,
+                patience.seconds,
+            )
+            return self._static(spec, table)
         rest_path, calls, shape = _history_plan(
             reader,
             spec,
             request,
             window=window,
-            split=functools.partial(reader.crypto_pair, cancel=as_cancel(stop)),
+            split=functools.partial(reader.crypto_pair, cancel=cancel),
             days=days,
         )
         announce(
@@ -3476,7 +3861,7 @@ class RestEndpoints:
             request=request,
             limit=None,
             window=window,
-            cancel=as_cancel(stop),
+            cancel=cancel,
             patience=patience,
             tally=tally,
         )
@@ -3642,27 +4027,35 @@ _DELAYED_TICKERS_SHOWN: Final = 5
 """How many tickers a refusal of delayed data names before it counts the rest."""
 
 
-def _withheld_symbol_column(spec: DatasetSpec, converter: RowConverter) -> str | None:
+def _withheld_symbol_column(
+    spec: DatasetSpec, converter: RowConverter, request: Request
+) -> str | None:
     """Return the column a call's withheld rows are grouped by, for a read by symbol's count.
 
-    A withheld row counts as the request's unless its asked symbol names another
+    A withheld row counts for the asked symbol it would have gone to
     (`symbol_reads._attribute`), so the rows are grouped by the asked column
-    (`symbol_reads.asked_column`) where it is canonical as the page is withheld. Where the
-    index lookup gives that column its `I:` only afterwards (`IndexPrefix.prefixed_by_lookup`),
-    a withheld row's bare `SPX` may be the asked `I:SPX`, so its asked symbol is unknown and
-    the rows are grouped by no column.
+    (`symbol_reads.asked_column`) as it reads when the row is withheld. Where the index lookup
+    gives that column its `I:` only afterwards (`IndexPrefix.prefixed_by_lookup`), the value
+    is the bare ticker, which the read by symbol resolves against its request's asked
+    spellings (`symbol_reads._owners`). A request of a value table's values groups them by
+    the column that names each row's value (`Request.value_column`) instead, so that each
+    value is judged by its own rows (`RestReader.read_by_value`); no value table's column
+    gets its `I:` by a lookup, so it reads canonical.
 
     Args:
         spec: The dataset.
         converter: The path's conversion, whose schema says whether the rows carry the column.
+        request: The call's request, which names the column of a value's rows.
 
     Returns:
-        The column, or None for a dataset whose rows lack it or whose lookup prefixes it.
+        The column, or None for a dataset whose rows lack it.
     """
-    asked = asked_column(spec, converter.rest_path.template)
-    if asked not in converter.arrow_schema.names or spec.index_prefix.prefixed_by_lookup == asked:
-        return None
-    return asked
+    asked = (
+        asked_column(spec, converter.rest_path.template)
+        if request.value_column is None
+        else request.value_column
+    )
+    return asked if asked in converter.arrow_schema.names else None
 
 
 def _feed_refusal(refusal: EntitlementError) -> FeedRefusalError:
@@ -3678,6 +4071,36 @@ def _feed_refusal(refusal: EntitlementError) -> FeedRefusalError:
     """
     return FeedRefusalError(
         str(refusal),
+        status=refusal.status,
+        request_id=refusal.request_id,
+        source=refusal.source,
+        is_retryable=refusal.is_retryable,
+    )
+
+
+def _whose_refusal(
+    refusal: EntitlementError, *, feed: bool, symbols: Sequence[str]
+) -> EntitlementError:
+    """Return a refusal of delayed data typed by whose it is.
+
+    Args:
+        refusal: The refusal (`recency_labels.delayed_refusal`).
+        feed: True when the label leaves no symbol of the request served.
+        symbols: The request's symbols the label refuses, when it is not the feed's.
+
+    Returns:
+        The same refusal, its status, request id, and source included: a `FeedRefusalError`
+        for the feed's (`_feed_refusal`), else a `SymbolRefusalError` naming `symbols`, or
+        the plain refusal when it names no symbol of the request (rows of tickers the
+        request did not name), which a read by symbol then searches.
+    """
+    if feed:
+        return _feed_refusal(refusal)
+    if not symbols:
+        return refusal
+    return SymbolRefusalError(
+        str(refusal),
+        symbols=symbols,
         status=refusal.status,
         request_id=refusal.request_id,
         source=refusal.source,

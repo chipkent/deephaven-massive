@@ -1,5 +1,6 @@
 """Tests for `queries/_history.py`: `history()` from REST and flat files, and following a table."""
 
+import dataclasses
 import logging
 import re
 import threading
@@ -24,7 +25,7 @@ from deephaven_massive._enums import (
     NotBars,
     Timespan,
 )
-from deephaven_massive._errors import BrokenGuaranteeError
+from deephaven_massive._errors import BrokenGuaranteeError, FeedRefusalError
 from deephaven_massive._tables.transports import (
     SymbolFailure,
 )
@@ -45,6 +46,7 @@ from tests._fakes.queries import (
     make,
     released,
     strict,
+    symbol_reads,
     trades,
     until,
 )
@@ -785,33 +787,128 @@ def test_wait_true_raises_when_every_call_time_symbol_fails(
     follows(massive_session)
 
 
+_MSFT_403 = (
+    "Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on api.massive.com with "
+    'HTTP 403: "You are not entitled to this data".'
+)
+"""Massive's answer to the read of MSFT, as the REST client words it."""
+
+
+_WAIT_TRUE_WARNINGS = {
+    # The one alarm of MSFT's refused_symbols span.
+    dm.OnError.LOG: [
+        (
+            f"stocks.trades table 1: refused_symbols: MSFT: {_MSFT_403.removesuffix('.')} "
+            "(at call 1). m.problems() lists it and every later refused_symbols problem of "
+            "this table, which the log shows at DEBUG only."
+        )
+    ],
+    dm.OnError.IGNORE: [],
+}
+"""The WARNINGs a wait=True read logs when Massive refuses MSFT of its AAPL and MSFT, under each
+setting that reads the others; under RAISE the call raises instead."""
+
+
+def test_each_setting_but_raise_has_its_wait_true_warnings() -> None:
+    assert set(_WAIT_TRUE_WARNINGS) == set(dm.OnError) - {dm.OnError.RAISE}
+
+
+@pytest.mark.parametrize("setting", list(_WAIT_TRUE_WARNINGS))
 def test_wait_true_warns_once_when_some_call_time_symbols_fail(
+    setting: dm.OnError,
     live: Callable[..., InputTable],
     *,
     massive_session: dm.MassiveSession,
     rest: Recorder,
+    problem_rows: Callable[[], list[dict[str, Any]]],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Massive's answer to the read of MSFT, as the REST client words it.
-    refusal = dm.EntitlementError(
-        "Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on api.massive.com with "
-        'HTTP 403: "You are not entitled to this data".',
-        status=403,
-    )
-    rest.outcomes = {"MSFT": SymbolFailure(refusal)}
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
+    on_error = dm.ErrorPolicy(refused_symbols=setting)
+    config = dataclasses.replace(massive_session._core.config, on_error=on_error)
+    monkeypatch.setattr(massive_session._core, "config", config)
+    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError(_MSFT_403, status=403))}
+    with caplog.at_level(logging.WARNING, logger="deephaven_massive"):
         result = trades(massive_session, live("AAPL", "MSFT")).history(
             "2025-03-03", "2025-03-03", wait=True
         )
-    assert caplog.messages == [
-        (
-            "stocks.trades history: 1 of the 2 symbols failed and are left out of the result "
-            "for now. MSFT: Massive answered GET /v3/trades/MSFT?timestamp.gte=2025-03-03 on "
-            'api.massive.com with HTTP 403: "You are not entitled to this data". Check '
-            "m.symbol_reads() for whether each one is retrying or has failed."
+        until(
+            lambda: (
+                [(r["Cause"], r["Symbol"]) for r in problem_rows()] == [("refused_symbols", "MSFT")]
+            )
         )
-    ]
+    assert caplog.messages == _WAIT_TRUE_WARNINGS[setting]
     massive_session.release(result)
+    follows(massive_session)
+
+
+REFUSALS_RAISE = dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE)
+REFUSALS_LOG = dm.ErrorPolicy(refused_symbols=dm.OnError.LOG)
+
+
+def test_wait_true_raises_when_a_refused_symbol_raises(
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    # Under RAISE, one refused symbol fails the call, with the setting that reads the others.
+    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError(_MSFT_403, status=403))}
+    query = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_RAISE)
+    with pytest.raises(dm.EntitlementError) as raised:
+        query.history("2025-03-03", "2025-03-03", wait=True)
+    assert str(raised.value) == (
+        f"{_MSFT_403} Remove MSFT, or, to read the others, pass "
+        "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    # The setting the error names reads the others.
+    logged = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_LOG)
+    result = logged.history("2025-03-03", "2025-03-03", wait=True)
+    assert not result.j_table.isFailed()
+    rest.outcomes = {}  # the raised error's traceback holds the session
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_a_followed_history_without_wait_fails_its_table_only_when_a_refusal_raises(
+    live: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    drain: Callable[[], None],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    rest.outcomes = {"MSFT": SymbolFailure(dm.EntitlementError(_MSFT_403, status=403))}
+    query = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_LOG)
+    logged = query.history("2025-03-03", "2025-03-03")
+    until(
+        lambda: (
+            {
+                name: row["State"]
+                for name, row in symbol_reads(massive_session, drain, dh_to_pylist).items()
+            }
+            == {"AAPL": "DONE", "MSFT": "FAILED"}
+        )
+    )
+    assert not logged.j_table.isFailed()
+    massive_session.release(logged)
+    follows(massive_session)
+    query = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_RAISE)
+    raised = query.history("2025-03-03", "2025-03-03")
+    until(lambda: bool(raised.j_table.isFailed()))
+    follows(massive_session)
+
+
+def test_a_feed_refusal_fails_a_followed_history(
+    live: Callable[..., InputTable], *, massive_session: dm.MassiveSession, rest: Recorder
+) -> None:
+    # A refusal of the feed is no symbol's: the read raises it, even under LOG, so a call that
+    # waits raises it and one that does not fails its table.
+    rest.raises = FeedRefusalError(_MSFT_403, status=403)
+    query = massive_session.stocks.trades(live("AAPL", "MSFT"), on_error=REFUSALS_LOG)
+    with pytest.raises(FeedRefusalError):
+        query.history("2025-03-03", "2025-03-03", wait=True)
+    result = query.history("2025-03-03", "2025-03-03")
+    until(lambda: bool(result.j_table.isFailed()))
+    rest.raises = None  # the raised error's traceback holds the session
     follows(massive_session)
 
 
@@ -916,6 +1013,45 @@ def test_a_followed_history_reads_each_symbol_from_rest_with_its_own_outcome(
     assert found["MSFT"][:2] == ("FAILED", 0)
     assert "403" in (found["MSFT"][2] or "")
     assert any("AAPL" in m for m in caplog.messages)  # the 404's WARNING is in the log only
+    rest_session.release(result)
+    follows(rest_session)
+
+
+@pytest.mark.parametrize("setting", [dm.OnError.LOG, dm.OnError.RAISE])
+def test_a_followed_history_fails_a_symbol_whose_rows_are_all_withheld_alone_unless_raise(
+    setting: dm.OnError,
+    live: Callable[..., InputTable],
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+    drain: Callable[[], None],
+) -> None:
+    # Through the real REST transport: MSFT's only trade has a price the library cannot read,
+    # so it is withheld, and NVDA has one trade. Under LOG, MSFT fails alone and NVDA keeps its
+    # row; under RAISE, the table fails.
+    nanos = int(datetime(2025, 3, 3, 15, tzinfo=UTC).timestamp() * 1e9)
+    for symbol, price in (("MSFT", "x"), ("NVDA", 1.0)):
+        fake_rest.reply(
+            f"/v3/trades/{symbol}",
+            Reply(envelope([{"sip_timestamp": nanos, "price": price, "size": 10}])),
+        )
+    query = rest_session.stocks.trades(
+        live("MSFT", "NVDA"), on_error=dm.ErrorPolicy(unconvertible_values=setting)
+    )
+    result = query.history("2025-03-03", "2025-03-03", wait=False)
+    if setting is dm.OnError.RAISE:
+        until(lambda: bool(result.j_table.isFailed()))
+        follows(rest_session)
+        return
+    until(lambda: [r["Symbol"] for r in dh_to_pylist(result)] == ["NVDA"])
+
+    def states() -> dict[str, str]:
+        drain()
+        return {r["Symbol"]: r["State"] for r in dh_to_pylist(rest_session.symbol_reads())}
+
+    until(lambda: states() == {"MSFT": "FAILED", "NVDA": "DONE"})
+    assert not result.j_table.isFailed()
     rest_session.release(result)
     follows(rest_session)
 

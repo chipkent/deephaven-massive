@@ -326,7 +326,7 @@ def test_rows_of_an_index_root_get_the_prefix_and_each_root_is_asked_once() -> N
         ["SPXW", "SPXW", "DJT", None, "SPX"],
         ["SPX", "SPX", "DJT", "SPX", None],
     )
-    out = canonical_underlyings([batch], kind, dataset="options.open_interest").rows
+    out = canonical_underlyings([batch], kind, dataset="options.open_interest", symbol=None).rows
     assert out.column("Underlying").to_pylist() == ["I:SPX", "I:SPX", "DJT", "I:SPX", None]
     # A row without Massive's root is keyed by its symbol's; a null underlying asks nothing.
     assert asked == [
@@ -339,14 +339,14 @@ def test_rows_of_an_index_root_get_the_prefix_and_each_root_is_asked_once() -> N
 def test_a_page_already_canonical_or_of_stocks_alone_is_unchanged() -> None:
     prefixed = page([SPXW], ["SPXW"], ["I:SPX"])
     for batch in (prefixed, page([AAPL], ["AAPL"], ["AAPL"])):
-        found = canonical_underlyings([batch], fixed(RootKind.OTHER), dataset="d")
+        found = canonical_underlyings([batch], fixed(RootKind.OTHER), dataset="d", symbol=None)
         assert found.rows.equals(pa.Table.from_batches([batch]))
         assert found.groups == ()
 
 
 def test_a_row_already_prefixed_beside_a_bare_one_is_not_prefixed_twice() -> None:
     batch = page([SPXW, "O:SPXW261218P06000000"], ["SPXW", "SPXW"], ["I:SPX", "SPX"])
-    out = canonical_underlyings([batch], fixed(RootKind.INDEX), dataset="d").rows
+    out = canonical_underlyings([batch], fixed(RootKind.INDEX), dataset="d", symbol=None).rows
     assert out.column("Underlying").to_pylist() == ["I:SPX", "I:SPX"]
 
 
@@ -365,7 +365,7 @@ def test_the_rows_of_an_unclassified_root_are_withheld_as_unreadable_symbols(
         return kinds[root]
 
     with caplog.at_level(logging.WARNING, LOGGER):
-        found = canonical_underlyings([batch], kind, dataset="options.open_interest")
+        found = canonical_underlyings([batch], kind, dataset="options.open_interest", symbol=None)
     # SPX may be an index's ticker without its I:, so SPXW's rows are left out; AAPL's stay.
     assert found.rows.column("Symbol").to_pylist() == [AAPL]
     # One group per underlying as Massive sent it, which its reader reports, so no WARNING.
@@ -391,7 +391,7 @@ def test_a_kind_no_case_handles_is_refused() -> None:
 
     batch = page([SPXW], ["SPXW"], ["SPX"])
     with pytest.raises(AssertionError):
-        canonical_underlyings([batch], text, dataset="d")  # type: ignore[arg-type]  # the point
+        canonical_underlyings([batch], text, dataset="d", symbol=None)  # type: ignore[arg-type]  # the point
 
 
 def test_the_index_list_is_every_page_of_the_active_and_retired_indices(
@@ -651,7 +651,9 @@ def test_symbols_of_an_index_get_the_prefix_and_each_ticker_is_asked_once_with_i
         ["SPX", "DJT", "SPX", "I:VIX", "NDX"],
         ["2026-11-13", "2026-11-13", "2026-11-12", "2026-11-13", "2026-11-11"],
     )
-    out = canonical_symbols([batch], kind, dataset="options.open_interest_by_underlying").rows
+    out = canonical_symbols(
+        [batch], kind, dataset="options.open_interest_by_underlying", symbol=None
+    ).rows
     assert out.column("Symbol").to_pylist() == ["I:SPX", "DJT", "I:SPX", "I:VIX", "I:NDX"]
     assert out.column("Date").to_pylist() == [
         "2026-11-13",
@@ -673,7 +675,9 @@ def test_a_symbol_row_without_a_date_dates_no_lookup_and_a_ticker_with_none_is_w
 
     # SPX's undated row cannot date its lookup, so the dated one does; NDX has no dated row.
     batch = symbol_page(["SPX", "SPX", "NDX", "AAPL"], [None, "2026-11-12", None, None])
-    found = canonical_symbols([batch], kind, dataset="options.open_interest_by_underlying")
+    found = canonical_symbols(
+        [batch], kind, dataset="options.open_interest_by_underlying", symbol=None
+    )
     assert asked == [("SPX", "2026-11-12")]
     assert found.rows.column("Symbol").to_pylist() == ["I:SPX", "I:SPX"]
     assert found.groups == (
@@ -714,7 +718,7 @@ def test_a_contract_row_without_a_date_dates_no_lookup_and_a_root_with_none_is_w
             "Underlying": ["SPX", "SPX", "NDX"],
         }
     )
-    found = canonical_underlyings([batch], kind, dataset="options.open_interest")
+    found = canonical_underlyings([batch], kind, dataset="options.open_interest", symbol=None)
     assert asked == [("SPXW", "O:SPXW261218P06000000", "2026-11-12")]
     assert found.rows.column("Underlying").to_pylist() == ["I:SPX", "I:SPX"]
     assert found.groups == (
@@ -735,7 +739,7 @@ def test_a_symbol_page_already_canonical_is_unchanged() -> None:
         raise AssertionError(f"asked about {underlying} as of {day}")
 
     batch = symbol_page(["I:SPX", "I:NDX"])
-    found = canonical_symbols([batch], refuse, dataset="d")
+    found = canonical_symbols([batch], refuse, dataset="d", symbol=None)
     assert found.rows.equals(pa.Table.from_batches([batch]))
     assert found.groups == ()
 
@@ -751,7 +755,9 @@ def test_the_rows_of_an_unclassified_ticker_are_withheld_as_unreadable_symbols(
         return kinds[underlying]
 
     with caplog.at_level(logging.WARNING, LOGGER):
-        found = canonical_symbols([batch], kind, dataset="options.open_interest_by_underlying")
+        found = canonical_symbols(
+            [batch], kind, dataset="options.open_interest_by_underlying", symbol=None
+        )
     assert found.rows.column("Symbol").to_pylist() == ["AAPL"]
     assert found.groups == (
         WithheldGroup(
@@ -773,4 +779,4 @@ def test_an_underlying_kind_no_case_handles_is_refused() -> None:
         return "index"
 
     with pytest.raises(AssertionError):
-        canonical_symbols([symbol_page(["SPX"])], text, dataset="d")  # type: ignore[arg-type]  # the point
+        canonical_symbols([symbol_page(["SPX"])], text, dataset="d", symbol=None)  # type: ignore[arg-type]  # the point

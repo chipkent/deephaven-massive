@@ -5,11 +5,12 @@ authentication, frame decoding, reconnecting with backoff), its `Subscriptions` 
 subscription protocol), its flush thread (`Flusher`), and the streams it carries
 (`ConnectionStream`). It owns everything that happens on one connection:
 
-- **Refusals and failures.** A refused topic fails exactly the streams that want it, and a
-  refusal of a whole step fails the step's streams, with an `EntitlementError` that quotes
-  Massive and names the fix for the connection's feed (`_refused`); a connection never moves
-  to another host. A fatal failure (a rejected key, a handshake error retrying cannot fix)
-  fails every stream on it.
+- **Refusals and failures.** A refused symbol is a `refused_symbols` problem of each stream
+  that wants it, which keeps running, unless its session sets `refused_symbols` to `RAISE`. A
+  stream fails, with an `EntitlementError` that quotes Massive and names the fix for the
+  connection's feed, when Massive refuses its channel's wildcard or every symbol it was opened
+  with (`_refused`); a connection never moves to another host. A fatal failure (a rejected
+  key, a handshake error retrying cannot fix) fails every stream on it.
 - **Rows, drift, and its row.** Rows go to the flush thread, with the client's marks of the
   rows it could not read; a field Massive's documentation lacks is handed to it too, and it
   reports both as the streams' problems; a withheld row fails no stream unless its cause is
@@ -68,7 +69,14 @@ from typing import TYPE_CHECKING, Final, Protocol, TypeAlias, assert_never
 from deephaven_massive import _massive
 from deephaven_massive._config import DELAYED_PREFIX, REALTIME_HOST, delayed_fix
 from deephaven_massive._datasets.feeds import FMV_CHANNEL, channel_only_host
-from deephaven_massive._enums import AssetClass, ChannelFamily, ConnectionTaken, subscription_of
+from deephaven_massive._enums import (
+    AssetClass,
+    ChannelFamily,
+    ConnectionTaken,
+    OnError,
+    subscription_of,
+)
+from deephaven_massive._error_policy import policy_hint
 from deephaven_massive._errors import (
     NEW_SESSION,
     AuthenticationError,
@@ -112,6 +120,7 @@ from deephaven_massive._massive import (
     WireError,
     WsState,
 )
+from deephaven_massive._on_error import effect_of
 from deephaven_massive._tables.diagnostics import (
     ConnectionRow,
     ConnectionState,
@@ -246,6 +255,9 @@ def _live_tables(count: int) -> str:
 
 _Current: TypeAlias = "Mapping[str, tuple[str | None, str | None, str, int]]"
 """The spans of one cause that hold now for a stream, as `SpanTracker.update` takes them."""
+
+_GO_ON: Final = "To keep streaming the other symbols without it"
+"""The purpose of the setting a stream that failed under `refused_symbols=RAISE` names."""
 
 _BACKLOG_ROW_DELAY: Final = 1.0
 """Seconds after a connection's row showed buffered rows that it is written again."""
@@ -396,6 +408,14 @@ class ConnectionStream:
         refusal_note: What the error of a refused subscription adds for this stream: for a
             dataset Massive documents on one feed, that feed and its page
             (`host_decision.refusal_note`); `""` for any other.
+        call_time: The symbols the stream was opened with, while none of them has been
+            acknowledged or removed: Massive refusing all of them fails the stream. A symbol
+            list's from the start; a symbol table's once its watch replayed its rows
+            (`Connection.settle_call_time`); None for `dm.ALL`, an empty symbol table, and
+            once settled.
+        refused: Each of its topics Massive refused, with the topic's symbol and Massive's
+            message, until the symbol leaves the stream or a later subscription of the topic
+            is acknowledged: its `refused_symbols` spans.
     """
 
     stream_id: int
@@ -406,6 +426,8 @@ class ConnectionStream:
     topics: frozenset[str]
     static: bool
     refusal_note: str = ""
+    call_time: frozenset[str] | None = None
+    refused: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -845,9 +867,40 @@ class Connection:
             )
         stream.symbols, stream.topics = symbols, topics
         stream.sink.set_symbols(symbols)
+        if stream.call_time is not None and stream.call_time & removed:
+            stream.call_time = None  # its check settled: no later refusal is the call's
+        left = [t for t, (symbol, _) in stream.refused.items() if symbol in removed]
+        for topic in left:
+            del stream.refused[topic]
+        if left:
+            self._show_refusals([stream_id])
         count, text = describe_symbols(tuple(sorted(symbols)))
         self._update_streams({stream_id: StreamUpdate(symbol_count=count, symbols=text)})
         self._after_change()
+
+    def settle_call_time(self, stream_id: int, symbols: frozenset[str]) -> None:
+        """Take the symbols a symbol table's stream was opened with: its watch's replay.
+
+        A refusal of every one of them fails the stream, as a symbol list's does. One that
+        came before this call, while the replay's change was on its way, is judged now.
+
+        Args:
+            stream_id: The stream.
+            symbols: The symbols the replay added; empty for an empty table, whose symbols
+                are all added later and none of them the call's.
+        """
+        stream = self._streams.get(stream_id)
+        if stream is None:
+            self._unknown(stream_id, self.settle_call_time, (symbols,))
+            return
+        # An acknowledgement since is no refusal, so it never makes the check below true.
+        stream.call_time = symbols or None
+        if self._refused_at_call(stream):  # its refused subscriptions, Massive's latest answer
+            topics = set(stream.refused)
+            _, message = stream.refused[max(topics)]
+            error = EntitlementError(self._refusal_text(topics, message, stream.refusal_note))
+            log_failure(logger, error, "%s")
+            self.flusher.fail([stream_id], stream_copy(error, stream.plan.dataset))
 
     def _unknown(
         self, stream_id: int, callback: Callable[..., None], _args: tuple[object, ...]
@@ -1310,47 +1363,190 @@ class Connection:
     # --- loop thread: failures and drift -------------------------------------------------------
 
     def _refused(self, topics: tuple[str, ...], message: str) -> None:
-        """Fail the streams of refused topics with `EntitlementError`, naming the feed's fix.
+        """Report refused topics as their streams' problems, failing a stream they leave nothing.
 
-        The streams of a dataset Massive documents on one feed add that feed and its page
-        (`ConnectionStream.refusal_note`), and only theirs. A stream whose refused topic is a
-        channel's wildcard (`T.*`) asked for the feed itself, so its error is a
-        `FeedRefusalError`; one whose refused topics name symbols gets a plain
-        `EntitlementError`.
+        A refused explicit topic is a `refused_symbols` span of each stream that wants it, with
+        Massive's text and the feed's fix, and the stream keeps running; under
+        `refused_symbols=RAISE`, resolved through each stream's own session, it fails. A stream
+        fails whatever its setting when Massive refuses its channel's wildcard (`T.*`), which
+        asks for the feed itself (a `FeedRefusalError`), or every symbol it was opened with
+        (`ConnectionStream.call_time`). Each failure is an `EntitlementError` that quotes
+        Massive and names the fix for the connection's feed; the streams of a dataset Massive
+        documents on one feed add that feed and its page (`ConnectionStream.refusal_note`), and
+        only theirs.
 
         Args:
             topics: The refused topics.
             message: The server's message, verbatim.
         """
         refused = set(topics)
+        self._last_error = self._refusal_text(refused, message, "")
+        acknowledged = self.subscriptions.acknowledged
+        # One error per note and setting, so a note reaches only the streams that carry it,
+        # logged once here, and each dataset's streams get their own copy of it; a stream
+        # whose refused topic is a wildcard gets the feed's kind of the same error.
+        failing: dict[tuple[str, bool, bool, str], list[int]] = {}
+        listed: list[int] = []
+        for stream in self._streams.values():
+            own = stream.topics & refused
+            if not own:
+                continue
+            dataset, note = stream.plan.dataset, stream.refusal_note
+            if any(is_wildcard(topic) for topic in own):
+                failing.setdefault((note, True, False, dataset), []).append(stream.stream_id)
+                continue
+            self._settle(stream, acknowledged)
+            symbols = self._topic_symbols(stream)
+            stream.refused.update({topic: (symbols[topic], message) for topic in own})
+            if self._refused_at_call(stream):
+                failing.setdefault((note, False, False, dataset), []).append(stream.stream_id)
+                continue
+            listed.append(stream.stream_id)
+            logger.debug(
+                "%s stream %d: Massive refused %s; each is a refused_symbols problem of the "
+                "stream: %s",
+                dataset,
+                stream.stream_id,
+                bounded_list(sorted(own)),
+                message,
+            )
+            if effect_of(stream.sink.policy.refused_symbols).fails:
+                failing.setdefault((note, False, True, dataset), []).append(stream.stream_id)
+        self._show_refusals(listed)
+        self._fail_refused(failing, refused, message)
+
+    def _fail_refused(
+        self,
+        failing: Mapping[tuple[str, bool, bool, str], list[int]],
+        refused: set[str],
+        message: str,
+    ) -> None:
+        """Fail the streams a refusal fails for a wildcard or under `refused_symbols=RAISE`.
+
+        Args:
+            failing: The streams, by their note, whether the refusal is the feed's, whether
+                their setting raised (False also for a stream refused every symbol it was
+                opened with, which fails whatever its setting), and their dataset.
+            refused: The refused topics.
+            message: The server's message, verbatim.
+        """
+        errors: dict[tuple[str, bool], EntitlementError] = {}
+        for (note, feed, raised, dataset), ids in failing.items():
+            error = errors.get((note, raised))
+            if error is None:
+                text = self._refusal_text(refused, message, note)
+                if raised:
+                    text = f"{text} {policy_hint(OnError.LOG, 'refused_symbols', purpose=_GO_ON)}"
+                error = errors[note, raised] = EntitlementError(text)
+                log_failure(logger, error, "%s")
+            if feed:
+                error = FeedRefusalError(str(error))
+                mark_failure_logged(error)  # a repeat of the note's error, logged above
+            self.flusher.fail(ids, stream_copy(error, dataset))
+
+    def _refusal_text(self, refused: set[str], message: str, note: str) -> str:
+        """Return the text of a refusal: Massive's answer, the stream's note, the feed's fix.
+
+        Args:
+            refused: The refused topics.
+            message: Massive's message, verbatim.
+            note: The stream's `refusal_note`, or `""`.
+
+        Returns:
+            `Massive answered the subscription to <topics> on <url>: "<message>".`, then the
+            note when there is one, a why before the fix, then `_refusal_hint`.
+        """
         answered = (
             f"Massive answered the subscription to {prose_list(sorted(refused), 'subscriptions')} "
             f'on {self.url}: "{message}".'
         )
         hint = self._refusal_hint(refused)
-        self._last_error = f"{answered} {hint}"
-        # One error per note, so a note reaches only the streams that carry it, logged once
-        # here, and each dataset's streams get their own copy of it; a stream whose refused
-        # topic is a wildcard gets the feed's kind of the same error, logged by the note's.
-        by_note: dict[tuple[str, bool, str], list[int]] = {}
-        for stream in self._streams.values():
-            own = stream.topics & refused
-            if own:
-                feed = any(is_wildcard(topic) for topic in own)
-                key = (stream.refusal_note, feed, stream.plan.dataset)
-                by_note.setdefault(key, []).append(stream.stream_id)
-        errors: dict[str, EntitlementError] = {}
-        for (note, feed, dataset), ids in by_note.items():
-            if note not in errors:
-                # The note says where Massive documents the dataset: a why, before the fix.
-                text = f"{answered} {note.removesuffix('.')}. {hint}" if note else self._last_error
-                errors[note] = EntitlementError(text)
-                log_failure(logger, errors[note], "%s")
-            error = errors[note]
-            if feed:
-                error = FeedRefusalError(str(error))
-                mark_failure_logged(error)  # a repeat of the note's error, logged above
-            self.flusher.fail(ids, stream_copy(error, dataset))
+        return f"{answered} {note.removesuffix('.')}. {hint}" if note else f"{answered} {hint}"
+
+    @staticmethod
+    def _refused_at_call(stream: ConnectionStream) -> bool:
+        """Return whether Massive refused every symbol the stream was opened with.
+
+        Args:
+            stream: The stream.
+
+        Returns:
+            True while its call-time check is open and each of those symbols is refused.
+        """
+        if stream.call_time is None:
+            return False
+        return stream.call_time <= {symbol for symbol, _ in stream.refused.values()}
+
+    def _topic_symbols(self, stream: ConnectionStream) -> dict[str, str]:
+        """Return the symbol of each of a stream's topics.
+
+        Args:
+            stream: A stream of explicit symbols.
+
+        Returns:
+            Each topic with its canonical symbol.
+        """
+        pairs: dict[str, tuple[str, str]] = {}
+        if self.asset_class is AssetClass.CRYPTO:
+            with self._lock:  # every symbol of the stream was split before it was added
+                pairs = dict(self._group.pairs)
+        symbols = required(stream.symbols, f"stream {stream.stream_id}'s symbols")
+        return {
+            topic: symbol
+            for symbol in symbols
+            for topic in stream_topics(self.asset_class, stream.channel, (symbol,), pairs=pairs)
+        }
+
+    def _settle(self, stream: ConnectionStream, acknowledged: frozenset[str]) -> bool:
+        """Apply Massive's acknowledgements to a stream's call-time check and refused topics.
+
+        An acknowledged topic of a call-time symbol settles the check: Massive serves the call
+        something, so no later refusal fails the stream. A refused topic acknowledged since,
+        subscribed again for this stream or another, ends its span.
+
+        Args:
+            stream: The stream.
+            acknowledged: The topics acknowledged on the current socket.
+
+        Returns:
+            True when a refused topic's span ended.
+        """
+        if stream.call_time is not None and stream.topics & acknowledged:
+            call_time = self._topic_symbols(stream)
+            if any(call_time[t] in stream.call_time for t in stream.topics & acknowledged):
+                stream.call_time = None
+        ended = [topic for topic in stream.refused if topic in acknowledged]
+        for topic in ended:
+            del stream.refused[topic]
+        return bool(ended)
+
+    def _show_refusals(self, stream_ids: Iterable[int]) -> None:
+        """Report each stream's refused topics as its `refused_symbols` spans, or end them.
+
+        Each refused symbol is one span, named by its symbol, with Massive's answer and the
+        feed's fix as its `Detail`, under the stream's own setting of `refused_symbols`.
+
+        Args:
+            stream_ids: The streams whose refused topics may have changed.
+        """
+        changes: dict[int, dict[ProblemCause, tuple[_Current, int | None]]] = {}
+        for stream_id in stream_ids:
+            stream = self._streams[stream_id]
+            changes[stream_id] = {
+                ProblemCause.REFUSED_SYMBOLS: (
+                    {
+                        symbol: (
+                            symbol,
+                            None,
+                            self._refusal_text({topic}, message, stream.refusal_note),
+                            0,
+                        )
+                        for topic, (symbol, message) in stream.refused.items()
+                    },
+                    None,
+                )
+            }
+        self._report_spans(changes)
 
     def _refusal_hint(self, refused: set[str]) -> str:
         """Return what a refusal's message adds after Massive's answer, by the connection's feed.
@@ -1568,7 +1764,8 @@ class Connection:
         that has received rows: Massive never confirmed it, so its rows may never come, and
         its last values could look current. A stream that has never received a row shows no
         stale data, so it recovers once each such topic is acknowledged or in `NO_ACK`, and
-        runs on with its no-acknowledgement note.
+        runs on with its no-acknowledgement note. A topic Massive refused (`stream.refused`) is
+        never acknowledged, so it waits for nothing: its refusal is its own problem.
 
         Args:
             stream: A down stream.
@@ -1583,7 +1780,7 @@ class Connection:
         resolved = topics.acknowledged if sink.rows_published else topics.answered
         return all(
             t in resolved or wildcard(channel_of(t)) in topics.acknowledged
-            for t in stream.topics - topics.deferred
+            for t in stream.topics - topics.deferred - stream.refused.keys()
         )
 
     def _check_recovered(self) -> None:
@@ -1697,8 +1894,18 @@ class Connection:
                 if tracker is None:
                     if not current:
                         continue
+                    # A refused symbol's span carries the stream's own setting of its cause.
+                    policy = (
+                        stream.sink.policy.refused_symbols
+                        if cause is ProblemCause.REFUSED_SYMBOLS
+                        else None
+                    )
                     tracker = trackers[cause] = SpanTracker(
-                        cause, dataset=stream.plan.dataset, stream_id=stream_id, where=self.url
+                        cause,
+                        dataset=stream.plan.dataset,
+                        stream_id=stream_id,
+                        where=self.url,
+                        policy=policy,
                     )
                 spans = tracker.update(current, since=since)
                 if spans is not None:
@@ -1771,9 +1978,24 @@ class Connection:
     def _publish_change(self) -> None:
         """Publish the streams' notes and rewrite the row for the changes of a loop turn."""
         self._change_scheduled = False
+        self._settle_streams()
         self._show_notes()
         self._check_recovered()
         self._write_row()
+
+    def _settle_streams(self) -> None:
+        """Apply the acknowledgements of a loop turn to each stream's call-time check and refusals.
+
+        Only streams with an open check or a refused topic are read, so a connection with none
+        reads no topic set.
+        """
+        open_ = [s for s in self._streams.values() if s.call_time is not None or s.refused]
+        if not open_:
+            return
+        acknowledged = self.subscriptions.acknowledged
+        ended = [s.stream_id for s in open_ if self._settle(s, acknowledged)]
+        if ended:
+            self._show_refusals(ended)
 
     def _show_notes(self, *, opened: Collection[int] = ()) -> None:
         """Publish the admitted options topics, and report each stream's cap and no-ack spans.

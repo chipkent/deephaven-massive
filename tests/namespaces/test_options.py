@@ -46,10 +46,15 @@ from deephaven_massive._enums import (
 from deephaven_massive._errors import RowDataError
 from deephaven_massive._ingest.recency_labels import delayed_refusal
 from deephaven_massive._ingest.rest_requests import page_size
+from deephaven_massive._ingest.rest_rows import is_error_row
 from deephaven_massive._log_limits import LoggedKeys
 from deephaven_massive._massive import RowFault, Transport, to_batch
 from deephaven_massive._session import CATALOG
-from deephaven_massive._tables.problem_events import ProblemAction, ProblemCause
+from deephaven_massive._tables.problem_events import (
+    ProblemAction,
+    ProblemCause,
+    ProblemSpans,
+)
 from deephaven_massive._tables.transports import HostDecision
 from deephaven_massive.namespaces import _options as options
 from deephaven_massive.namespaces._namespace import Namespace
@@ -362,10 +367,17 @@ def test_contract_rows_carry_symbol_and_underlying(spec: DatasetSpec, gone: set[
     assert types["Underlying"] is ColumnType.STRING
 
 
-def test_snapshots_carry_the_greeks_and_the_per_ticker_error() -> None:
+def test_snapshots_carry_the_greeks_and_no_error_columns() -> None:
     names = set(CATALOG.dataset_schema(options.SNAPSHOTS).column_names)
     assert {"Delta", "Gamma", "Theta", "Vega"} <= names
-    assert {"ImpliedVolatility", "OpenInterest", "Error", "Message"} <= names
+    assert {"ImpliedVolatility", "OpenInterest"} <= names
+    # Massive's per-ticker answer is a problem in m.problems(), never a column.
+    assert {"Error", "Message"}.isdisjoint(names)
+
+
+def test_admin_messages_keep_their_message_column() -> None:
+    # An OPRA administrative message's text is the data itself.
+    assert "Message" in CATALOG.dataset_schema(options.ADMIN_MESSAGES).column_names
 
 
 def test_daily_open_close_has_symbol_and_its_day() -> None:
@@ -426,7 +438,8 @@ def test_fixtures_are_shaped_like_the_generated_fields(
         rows = [{k: v for k, v in body.items() if k not in {"status", "request_id"}}]
     else:
         found = body[rest.result_key]
-        rows = found if isinstance(found, list) else [found]
+        # An error row is Massive's answer for its ticker, never decoded (`is_error_row`).
+        rows = [r for r in (found if isinstance(found, list) else [found]) if not is_error_row(r)]
     batch, drift, marks = to_batch(rows, rest, required=required)
     assert marks == {}  # every row read whole
     assert batch.num_rows == len(rows)
@@ -437,13 +450,13 @@ def test_the_snapshot_fixture_has_a_per_ticker_error_row(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     rows = json.loads(load_fixture(OWNER, "snapshot.json"))["results"]
+    assert [is_error_row(row) for row in rows] == [False, True]
     rest = CATALOG.rest_path("/v3/snapshot")
-    batch, _, marks = to_batch(rows, rest, required=("Ticker",))
+    batch, _, marks = to_batch(rows[:1], rest, required=("Ticker",))
     assert marks == {}  # every row read whole
     table = batch.to_pydict()
-    assert table["Ticker"] == ["O:NCLH221014C00005000", "O:NCLH221014C00999000"]
-    assert table["UnderlyingTicker"] == ["NCLH", None]
-    assert table["Error"] == [None, "NOT_FOUND"]
+    assert table["Ticker"] == ["O:NCLH221014C00005000"]
+    assert table["UnderlyingTicker"] == ["NCLH"]
 
 
 # --- Factories -------------------------------------------------------------------------------
@@ -1114,7 +1127,7 @@ def test_a_daily_bar_at_an_early_close_is_moved_and_off_a_known_time_warns(
     ]
     assert not stamp_warnings(caplog)
     # 14:30 is withheld, so a page of no other bar fails the read, with one WARNING.
-    with pytest.raises(dm.MassiveError, match="could not read the 1 row"):
+    with pytest.raises(dm.MassiveError, match="could not read it whole"):
         rest_session.options.previous_day_bar(TSLA).fetch(wait=True)
     [warning] = stamp_warnings(caplog)
     assert warning.startswith(
@@ -1196,7 +1209,7 @@ def test_snapshots_send_no_type_beside_tickers(
     ]
 
 
-def test_snapshots_keep_the_error_row_of_a_contract(
+def test_snapshots_list_the_error_row_of_a_contract_in_problems(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
@@ -1205,16 +1218,19 @@ def test_snapshots_keep_the_error_row_of_a_contract(
     fake_rest.reply("/v3/snapshot", Reply(body(load_fixture, "snapshot.json")))
     out = rows(rest_session.options.snapshots(dm.ALL).fetch(wait=True))
     assert fake_rest.get_queries() == [("/v3/snapshot", {"type": ["options"], "limit": ["250"]})]
-    found, missing = out
-    assert (found["Symbol"], found["Underlying"], found["Error"]) == (
-        "O:NCLH221014C00005000",
-        "NCLH",
-        None,
-    )
+    (found,) = out
+    assert (found["Symbol"], found["Underlying"]) == ("O:NCLH221014C00005000", "NCLH")
     assert found["Delta"] == 0.5520187372272933
     assert found["LastTradeSipTimestamp"] == 1675280958783136800
-    assert (missing["Symbol"], missing["Underlying"]) == ("O:NCLH221014C00999000", None)
-    assert (missing["Error"], missing["Message"]) == ("NOT_FOUND", "Ticker not found.")
+    assert rest_session._core.diagnostics.wait_until_shown(30.0)
+    requested = "GET /v3/snapshot"
+    assert [(r["Cause"], r["Symbol"], r["Detail"]) for r in rows(rest_session.problems())] == [
+        (
+            "unavailable_symbols",
+            "O:NCLH221014C00999000",
+            f'Massive has no data for it (error NOT_FOUND: "Ticker not found." from {requested})',
+        )
+    ]
 
 
 def test_contracts_list_and_contract_details_read_each_contract(
@@ -1349,8 +1365,10 @@ def test_a_table_of_underlyings_reads_each_one_s_chain(
     load_fixture: Callable[[str, str], bytes],
 ) -> None:
     for underlying in ("AAPL", "MSFT"):
-        reply = Reply(body(load_fixture, "chain.json"))
-        fake_rest.reply(f"/v3/snapshot/options/{underlying}", reply)
+        chain = load_fixture(OWNER, "chain.json").replace(
+            b'"ticker": "AAPL"', f'"ticker": "{underlying}"'.encode()
+        )
+        fake_rest.reply(f"/v3/snapshot/options/{underlying}", Reply(json.loads(chain)))
     underlyings = new_table([string_col("Symbol", ["MSFT", "AAPL"])])
     out = rows(rest_session.options.chain(underlyings).fetch(wait=True))
     assert [path for path, _ in fake_rest.get_queries()] == [
@@ -1358,6 +1376,25 @@ def test_a_table_of_underlyings_reads_each_one_s_chain(
         "/v3/snapshot/options/MSFT",
     ]
     assert len(out) == 2  # each chain's one contract
+
+
+def test_a_table_of_underlyings_leaves_out_a_chain_row_of_an_unasked_underlying(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    load_fixture: Callable[[str, str], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each chain row goes to the underlying it names: AAPL's contract in MSFT's chain is no row
+    # of MSFT, and the table did not ask for AAPL, so it is withheld and listed.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    fake_rest.reply("/v3/snapshot/options/MSFT", Reply(body(load_fixture, "chain.json")))
+    underlyings = new_table([string_col("Symbol", ["MSFT"])])
+    assert rows(rest_session.options.chain(underlyings).fetch(wait=True)) == []
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNREQUESTED_SYMBOLS, "AAPL", "Underlying", 1)
+    ]
 
 
 def contract_row(ticker: str, underlying: str, cfi: str | None) -> dict[str, object]:
@@ -1384,96 +1421,166 @@ def serve_djt_contracts(server: FakeRestServer) -> None:
     )
 
 
-def test_the_stock_s_contracts_beside_an_index_s_keep_their_underlying_and_warn_once(
+def test_a_table_of_underlyings_leaves_out_the_contracts_of_an_unasked_spelling(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # `I:DJT` is sent as `DJT`, which is a stock too: the stock's options are no index's, so
-    # they keep the underlying Massive wrote rather than read as the index's.
+    # `I:DJT` is sent as `DJT`, and Massive answers with the stock's contracts too. The table
+    # did not ask for the stock, so its row is withheld and listed, and nothing else warns.
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    serve_djt_contracts(fake_rest)
+    underlyings = new_table([string_col("Symbol", ["I:DJT"])])
+    listed = rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    assert [(r["Symbol"], r["Underlying"]) for r in rows(listed)] == [
+        ("O:DJTW261120C00020000", "I:DJT")
+    ]
+    assert [(e.cause, e.symbol, e.field, e.rows, e.detail) for e in events] == [
+        (
+            ProblemCause.UNREQUESTED_SYMBOLS,
+            "DJT",
+            "Underlying",
+            1,
+            (
+                "Massive answered the request for I:DJT with rows of DJT, which the read did not "
+                "ask for, so they are left out"
+            ),
+        )
+    ]
+    assert warnings_of(caplog) == []
+
+
+def test_a_table_of_both_spellings_reads_them_once_and_keeps_each_set_once(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `DJT` and `I:DJT` are one value on the wire: one request reads both, and each keeps its
+    # own contracts once, with no problem and no warning.
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    serve_djt_contracts(fake_rest)
+    underlyings = new_table([string_col("Symbol", ["I:DJT", "DJT"])])
+    listed = rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    assert sorted((r["Symbol"], r["Underlying"]) for r in rows(listed)) == [
+        ("O:DJT261120C00020000", "DJT"),
+        ("O:DJTW261120C00020000", "I:DJT"),
+    ]
+    assert [query["underlying_ticker"] for _, query in fake_rest.get_queries()] == [["DJT"]]
+    assert (events, warnings_of(caplog)) == ([], [])
+
+
+def unrequested(events: list[ProblemEvent]) -> list[tuple[object, ...]]:
+    # What `m.problems()` lists of each left-out row group.
+    return [(e.cause, e.action, e.symbol, e.field, e.rows, e.detail) for e in events]
+
+
+def test_the_stock_s_contracts_in_the_answer_for_an_index_are_left_out(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `I:DJT` is sent as `DJT`, which is a stock too, and Massive answers with the stock's
+    # contracts as well. The call asked for the index alone, so the stock's row is withheld
+    # and listed, as a value table's is, and the table alarms once.
+    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
     serve_djt_contracts(fake_rest)
     listed = rest_session.options.contracts(underlying="I:DJT").fetch(wait=True)
-    expected = [("O:DJT261120C00020000", "DJT"), ("O:DJTW261120C00020000", "I:DJT")]
-    assert [(r["Symbol"], r["Underlying"]) for r in rows(listed)] == expected
-    # A second read gets the same rows and warns no more.
-    again = rest_session.options.contracts(underlying="I:DJT").fetch(wait=True)
-    assert [(r["Symbol"], r["Underlying"]) for r in rows(again)] == expected
+    assert [(r["Symbol"], r["Underlying"]) for r in rows(listed)] == [
+        ("O:DJTW261120C00020000", "I:DJT")
+    ]
     assert fake_rest.get_queries()[0][1]["underlying_ticker"] == ["DJT"]
-    assert warnings_of(caplog) == [
+    assert unrequested(events) == [
         (
-            "options.contracts: the underlying 'I:DJT' is sent to Massive as "
-            "underlying_ticker=DJT, which also names the stock DJT, and the CFI code of 1 of the "
-            "rows marks an option on something other than an index, so Massive answered about the "
-            "stock DJT too. They keep the underlying Massive wrote. The first is "
-            "O:DJT261120C00020000, with Underlying DJT and Cfi OCASPS. Drop the rows with "
-            '.where("Underlying != `DJT`").'
+            ProblemCause.UNREQUESTED_SYMBOLS,
+            ProblemAction.WITHHELD,
+            "DJT",
+            "Underlying",
+            1,
+            (
+                "Massive answered the request for I:DJT with rows of DJT, which the read did not "
+                "ask for, so they are left out"
+            ),
         )
     ]
-    # The advice: the where clause keeps the index's rows alone.
-    kept = where(listed, "Underlying != `DJT`")
-    assert [(r["Symbol"], r["Underlying"]) for r in kept] == [("O:DJTW261120C00020000", "I:DJT")]
 
 
-def test_the_index_s_contracts_beside_a_stock_s_keep_their_underlying_and_warn_once(
+def test_the_index_s_contracts_in_the_answer_for_a_stock_are_left_out(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The stock `DJT` is sent as is, and the bare ticker names the index `I:DJT` too: the
-    # index's options get their `I:` by their CFI code, which also says they were not asked for.
-    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    # index's contract gets its `I:` by its CFI code, which also says the call did not ask
+    # for it.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
     serve_djt_contracts(fake_rest)
     listed = rest_session.options.contracts(underlying="DJT").fetch(wait=True)
-    expected = [("O:DJT261120C00020000", "DJT"), ("O:DJTW261120C00020000", "I:DJT")]
-    assert [(r["Symbol"], r["Underlying"]) for r in rows(listed)] == expected
-    # A second read gets the same rows and warns no more.
-    again = rest_session.options.contracts(underlying="DJT").fetch(wait=True)
-    assert [(r["Symbol"], r["Underlying"]) for r in rows(again)] == expected
-    assert fake_rest.get_queries()[0][1]["underlying_ticker"] == ["DJT"]
-    assert warnings_of(caplog) == [
+    assert [(r["Symbol"], r["Underlying"]) for r in rows(listed)] == [
+        ("O:DJT261120C00020000", "DJT")
+    ]
+    assert unrequested(events) == [
         (
-            "options.contracts: the underlying 'DJT' is sent to Massive as underlying_ticker=DJT, "
-            "which also names the index I:DJT, and the CFI code of 1 of the rows marks an option "
-            "on an index, so Massive answered about the index I:DJT too. They keep the underlying "
-            "Massive wrote. The first is O:DJTW261120C00020000, with Underlying I:DJT and Cfi "
-            'OCEICS. Drop the rows with .where("Underlying != `I:DJT`").'
+            ProblemCause.UNREQUESTED_SYMBOLS,
+            ProblemAction.WITHHELD,
+            "DJT",
+            "Underlying",
+            1,
+            (
+                "Massive answered the request for DJT with rows of I:DJT, which the read did not "
+                "ask for, so they are left out. Massive writes I:DJT as DJT"
+            ),
         )
     ]
-    kept = where(listed, "Underlying != `I:DJT`")
-    assert [(r["Symbol"], r["Underlying"]) for r in kept] == [("O:DJT261120C00020000", "DJT")]
 
 
-def test_an_index_contract_without_a_cfi_code_keeps_the_bare_ticker_and_warns_once(
+def test_contracts_of_another_instrument_fail_the_call_under_raise(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    serve_djt_contracts(fake_rest)
+    policy = dm.ErrorPolicy(unrequested_symbols=dm.OnError.RAISE)
+    with pytest.raises(RowDataError) as raised:
+        rest_session.options.contracts(underlying="I:DJT", on_error=policy).fetch(wait=True)
+    assert str(raised.value) == (
+        "options.contracts: Massive answered the request for I:DJT with 1 row of DJT, which the "
+        "read did not ask for, so the library left it out. To go on without such rows, pass "
+        "on_error=dm.ErrorPolicy(unrequested_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+
+
+def test_an_index_contract_without_a_cfi_code_is_left_out_with_its_bare_ticker(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    caplog.set_level(logging.WARNING, logger="deephaven_massive")
-    path = "/v3/reference/options/contracts"
-    # An empty answer first, then one coded row and one without a code, repeated.
+    # Only a CFI code marks a contract as an index's, so one without a code keeps Massive's
+    # bare `SPX`, which the call did not ask for.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
     coded = contract_row("O:SPX261120C00400000", "SPX", "OCEICS")
     bare = contract_row("O:SPX261120C00600000", "SPX", None)
-    empty = Reply(body={"status": "OK", "request_id": "r", "results": []})
-    both = Reply(body={"status": "OK", "request_id": "r", "results": [coded, bare]})
-    fake_rest.reply(path, empty, both)
-    assert rows(rest_session.options.contracts(underlying="I:SPX").fetch(wait=True)) == []
-    for _ in range(2):
-        listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch(wait=True))
-        assert [(r["Symbol"], r["Underlying"]) for r in listed] == [
-            ("O:SPX261120C00400000", "I:SPX"),
-            ("O:SPX261120C00600000", "SPX"),
-        ]
-    assert warnings_of(caplog) == [
-        (
-            "options.contracts: the contracts of I:SPX include 1 with no CFI code, so nothing "
-            "marks their underlying as the index, and they keep Massive's bare 'SPX'. The first is "
-            "O:SPX261120C00600000."
-        )
-    ]
+    fake_rest.reply(
+        "/v3/reference/options/contracts",
+        Reply(body={"status": "OK", "request_id": "r", "results": [coded, bare]}),
+    )
+    listed = rows(rest_session.options.contracts(underlying="I:SPX").fetch(wait=True))
+    assert [(r["Symbol"], r["Underlying"]) for r in listed] == [("O:SPX261120C00400000", "I:SPX")]
+    assert [(e.symbol, e.rows) for e in events] == [("SPX", 1)]
 
 
 def test_daily_open_close_reads_one_day_per_contract(
@@ -1681,8 +1788,8 @@ def test_a_watchlist_of_one_index_by_its_bare_ticker_gets_no_rows_and_a_problem(
             "Symbol",
             1,
             (
-                "Massive answered the request for SPX with rows of SPX, which the read did "
-                "not ask for, so they are left out. The table spells SPX as I:SPX."
+                "Massive answered the request for SPX with rows of I:SPX, which the read did not "
+                "ask for, so they are left out. Massive writes I:SPX as SPX"
             ),
         )
     ]
@@ -1787,7 +1894,7 @@ def test_open_interest_by_underlying_withholds_a_ticker_the_contracts_list_canno
     with pytest.raises(RowDataError, match=r"2 under unreadable_symbols.*code for SPX"):
         rest_session.options.open_interest_by_underlying(on_error=strict).fetch(wait=True)
     # Every row the read would return is withheld, so it fails under the default LOG too.
-    with pytest.raises(RowDataError, match=r"none of the 2 rows.*code for SPX"):
+    with pytest.raises(RowDataError, match=r"Massive sent 2 rows .*code for SPX"):
         rest_session.options.open_interest_by_underlying("I:SPX").fetch(wait=True)
 
 
@@ -1844,7 +1951,7 @@ def test_greeks_of_an_index_asked_bare_whose_every_root_is_unclassified_fail(
     )
     # No row is kept, so there is nothing to check against the index asked for; the read fails
     # because every row it would return is withheld.
-    with pytest.raises(RowDataError, match=r"none of the 2 rows.*option root SPXW"):
+    with pytest.raises(RowDataError, match=r"Massive sent 2 rows .*option root SPXW"):
         rest_session.options.greeks(underlying="I:SPX").fetch(wait=True)
 
 
@@ -2227,98 +2334,87 @@ def test_greeks_name_an_index_underlying_by_root(
     ]
 
 
-def test_greeks_of_the_stock_beside_an_index_s_keep_their_underlying_and_warn_once(
+def test_greeks_of_the_stock_in_the_answer_for_an_index_are_left_out(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # `I:DJT` is sent as `DJT`, which is a stock too: the stock root's contracts are no index's,
-    # so they keep the underlying Massive wrote, while the index's weekly root gets its `I:`.
-    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    # `I:DJT` is sent as `DJT`, which is a stock too: the stock root's contract is no index's,
+    # so it keeps the underlying Massive wrote, which the call did not ask for.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
     serve_djt_greeks(fake_rest)
     out = rest_session.options.greeks(underlying="I:DJT").fetch(wait=True)
-    expected = [(DJT_STOCK_GREEKS, "DJT"), (DJT_INDEX_GREEKS, "I:DJT")]
-    assert [(r["Symbol"], r["Underlying"]) for r in rows(out)] == expected
-    # A second read gets the same rows and warns no more.
-    again = rest_session.options.greeks(underlying="I:DJT").fetch(wait=True)
-    assert [(r["Symbol"], r["Underlying"]) for r in rows(again)] == expected
+    assert [(r["Symbol"], r["Underlying"]) for r in rows(out)] == [(DJT_INDEX_GREEKS, "I:DJT")]
     assert fake_rest.get_queries()[0][1]["underlying_ticker"] == ["DJT"]
-    assert warnings_of(caplog) == [
-        (
-            "options.greeks: the underlying 'I:DJT' is sent to Massive as underlying_ticker=DJT, "
-            "which also names the stock DJT, and the option root of 1 of the rows is the stock's, "
-            "so Massive answered about the stock DJT too. They keep the underlying Massive wrote. "
-            "The first is O:DJT261218C00030000, with Underlying DJT. Pass underlying=['DJT', "
-            "'I:DJT'] to ask for both, or drop the rows with .where(\"Underlying != `DJT`\")."
-        )
-    ]
-    # The advice: the where clause keeps the index's rows alone, and asking for both reads both.
-    kept = where(out, "Underlying != `DJT`")
-    assert [(r["Symbol"], r["Underlying"]) for r in kept] == [(DJT_INDEX_GREEKS, "I:DJT")]
-    both = rows(rest_session.options.greeks(underlying=["DJT", "I:DJT"]).fetch(wait=True))
-    assert [(r["Symbol"], r["Underlying"]) for r in both] == [
-        (DJT_STOCK_GREEKS, "DJT"),
-        (DJT_INDEX_GREEKS, "I:DJT"),
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNREQUESTED_SYMBOLS, "DJT", 1)
     ]
 
 
-def test_greeks_of_the_index_beside_a_stock_s_keep_their_underlying_and_warn_once(
+def test_greeks_of_the_index_in_the_answer_for_a_stock_are_left_out(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The stock `DJT` is sent as is, and the bare ticker names the index `I:DJT` too: the index
-    # root's contracts get their `I:`, which also says they were not asked for.
-    caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
     serve_djt_greeks(fake_rest)
     out = rest_session.options.greeks(underlying="DJT").fetch(wait=True)
-    expected = [(DJT_STOCK_GREEKS, "DJT"), (DJT_INDEX_GREEKS, "I:DJT")]
-    assert [(r["Symbol"], r["Underlying"]) for r in rows(out)] == expected
-    # A second read gets the same rows and warns no more.
-    again = rest_session.options.greeks(underlying="DJT").fetch(wait=True)
-    assert [(r["Symbol"], r["Underlying"]) for r in rows(again)] == expected
-    assert fake_rest.get_queries()[0][1]["underlying_ticker"] == ["DJT"]
-    assert warnings_of(caplog) == [
+    assert [(r["Symbol"], r["Underlying"]) for r in rows(out)] == [(DJT_STOCK_GREEKS, "DJT")]
+    assert [(e.cause, e.symbol, e.rows) for e in events] == [
+        (ProblemCause.UNREQUESTED_SYMBOLS, "DJT", 1)
+    ]
+
+
+def test_greeks_of_a_list_with_one_spelling_leave_out_the_other_instrument_s(
+    *,
+    rest_session: dm.MassiveSession,
+    fake_rest: FakeRestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The list form sends `DJT` bare too, so the stock's contract is left out the same.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    serve_djt_greeks(fake_rest)
+    out = rows(rest_session.options.greeks(underlying=["AMD", "I:DJT"]).fetch(wait=True))
+    assert [(r["Symbol"], r["Underlying"]) for r in out] == [(DJT_INDEX_GREEKS, "I:DJT")]
+    assert fake_rest.get_queries()[0][1]["underlying_ticker.any_of"] == ["AMD,DJT"]
+    assert unrequested(events) == [
         (
-            "options.greeks: the underlying 'DJT' is sent to Massive as underlying_ticker=DJT, "
-            "which also names the index I:DJT, and the option root of 1 of the rows is the "
-            "index's, so Massive answered about the index I:DJT too. They keep the underlying "
-            "Massive wrote. The first is O:DJTW261218C00030000, with Underlying I:DJT. Pass "
-            "underlying=['DJT', 'I:DJT'] to ask for both, or drop the rows with "
-            '.where("Underlying != `I:DJT`").'
+            ProblemCause.UNREQUESTED_SYMBOLS,
+            ProblemAction.WITHHELD,
+            "DJT",
+            "Underlying",
+            1,
+            (
+                "Massive answered the request for AMD and I:DJT with rows of DJT, which the read "
+                "did not ask for, so they are left out"
+            ),
         )
     ]
-    kept = where(out, "Underlying != `I:DJT`")
-    assert [(r["Symbol"], r["Underlying"]) for r in kept] == [(DJT_STOCK_GREEKS, "DJT")]
 
 
-def test_greeks_of_several_underlyings_warn_about_an_unasked_instrument_s_contracts(
+def test_greeks_of_a_list_with_both_spellings_keep_each_instrument_s(
     *,
     rest_session: dm.MassiveSession,
     fake_rest: FakeRestServer,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The list form sends `DJT` bare too, so the stock's contracts are warned about the same.
     caplog.set_level(logging.WARNING, logger="deephaven_massive")
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
     serve_djt_greeks(fake_rest)
-    out = rows(rest_session.options.greeks(underlying=["AMD", "I:DJT"]).fetch(wait=True))
+    out = rows(rest_session.options.greeks(underlying=["DJT", "I:DJT"]).fetch(wait=True))
     assert [(r["Symbol"], r["Underlying"]) for r in out] == [
         (DJT_STOCK_GREEKS, "DJT"),
         (DJT_INDEX_GREEKS, "I:DJT"),
     ]
-    assert fake_rest.get_queries()[0][1]["underlying_ticker.any_of"] == ["AMD,DJT"]
-    assert warnings_of(caplog) == [
-        (
-            "options.greeks: the underlying 'I:DJT' is sent to Massive as "
-            "underlying_ticker.any_of=DJT, which also names the stock DJT, and the option root of "
-            "1 of the rows is the stock's, so Massive answered about the stock DJT too. They keep "
-            "the underlying Massive wrote. The first is O:DJT261218C00030000, with Underlying DJT. "
-            "Pass underlying=['DJT', 'I:DJT'] to ask for both, or drop the rows with "
-            '.where("Underlying != `DJT`").'
-        )
-    ]
+    assert fake_rest.get_queries()[0][1]["underlying_ticker.any_of"] == ["DJT"]
+    assert (events, warnings_of(caplog)) == ([], [])
 
 
 def test_greeks_refuse_an_underlying_that_is_not_a_stock_or_index(
@@ -2404,9 +2500,12 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
     serve_indices(fake_rest, "SPX")
     fake_rest.reply(wire(spxw), contract_reference("OCEICS"))
     start = datetime(2025, 10, 29, 15, tzinfo=UTC)
+    # The fixture answers with a trade of each contract, so the call asks for both.
     out = rows(
         rest_session.options.unusual_trades(
-            "O:SPY260123C00687000", start=start, end=datetime(2025, 10, 29, 16, tzinfo=UTC)
+            ["O:SPY260123C00687000", "O:SPXW261218C06000000"],
+            start=start,
+            end=datetime(2025, 10, 29, 16, tzinfo=UTC),
         ).fetch(wait=True)
     )
     [(sent_path, sent), *references] = fake_rest.get_queries(one_value=True)
@@ -2418,7 +2517,7 @@ def test_unusual_trades_read_each_trade_at_its_sip_time(
         (INDEX_LIST, {"market": "indices", "active": "false", "limit": "1000"}),
         (spxw, {"as_of": "2025-10-29"}),
     ]
-    assert sent["ticker.any_of"] == "O:SPY260123C00687000"
+    assert sent["ticker.any_of"] == "O:SPXW261218C06000000,O:SPY260123C00687000"
     assert {"sip_timestamp.gte", "sip_timestamp.lt", "limit"} <= sent.keys()
     picked = ("Symbol", "Date", "Timestamp", "OptionRoot", "Price", "Size", "Flags")
     assert [tuple(r[c] for c in picked) for r in out] == [
@@ -2532,7 +2631,7 @@ def test_a_read_of_an_unclassified_root_alone_fails_whatever_the_setting(
         Reply({"status": "OK", "results": {}}),
     )
     # Every row the read would return is withheld, so it fails under the default LOG too.
-    with pytest.raises(RowDataError, match=r"none of the 2 rows.*option root SPXW"):
+    with pytest.raises(RowDataError, match=r"Massive sent 2 rows .*option root SPXW"):
         rest_session.options.open_interest(root="SPXW").fetch(wait=True)
 
 
@@ -3182,7 +3281,7 @@ def test_an_archive_read_with_no_readable_message_fails_as_a_format_change(
     # Under the default LOG, a read with rows but none whole fails rather than read empty.
     page = [{"id": "1-1", "exchange": 300, "message": "OPRA SYSTEM NORMAL", "sequence_number": 1}]
     fake_rest.reply(ADMIN_ARCHIVE, Reply({"status": "OK", "results": page}))
-    with pytest.raises(RowDataError, match="could not read the 1 row"):
+    with pytest.raises(RowDataError, match="could not read it whole"):
         rest_session.options.admin_messages().history(ADMIN_DAY, ADMIN_DAY, wait=True)
 
 
@@ -3325,3 +3424,93 @@ def test_the_options_snapshots_and_chain_describe_a_trade_alike() -> None:
     for name in ("LastTradePrice", "LastTradeExchange"):
         assert snapshots[name].description == chain[name].description
     assert "AAPL" not in snapshots["LastTradeId"].description
+
+
+def test_each_value_of_a_shared_request_fails_for_its_own_withheld_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `DJT` and `I:DJT` are read by one request, since Massive writes both as `DJT`. Each
+    # contract's code tells the stock's from the index's, so when the library withholds every
+    # row of the request, each value fails for its own row (one row each), and the static
+    # read, which kept no row, raises one of those failures.
+    found: list[object] = []
+    monkeypatch.setattr(rest_session._core, "problems", found.extend)
+    broken = [row | {"strike_price": "x"} for row in (DJT_STOCK_CONTRACT, DJT_INDEX_CONTRACT)]
+    fake_rest.reply(
+        "/v3/reference/options/contracts",
+        Reply(body={"status": "OK", "request_id": "r", "results": broken}),
+    )
+    underlyings = new_table([string_col("Symbol", ["I:DJT", "DJT"])])
+    with pytest.raises(RowDataError) as raised:
+        rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    failure = (
+        "options.contracts: Massive sent 1 row for DJT from GET "
+        "/v3/reference/options/contracts, and the library could not read it whole, so it "
+        "withheld it. /v3/reference/options/contracts: row 0: StrikePrice (wire key "
+        "'strike_price') expects double, got \"x\". m.problems() counts the withheld rows by "
+        "cause and symbol."
+    )
+    assert str(raised.value) == failure
+    spans = [
+        (problem.cause, name, span.detail)
+        for problem in found
+        if isinstance(problem, ProblemSpans)
+        for name, span in problem.spans.items()
+    ]
+    # The withheld rows' own events list them, and a static read fails whole instead of
+    # listing its values.
+    assert spans == []
+
+
+def test_another_spelling_s_withheld_row_fails_no_asked_value(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `I:DJT` is sent as `DJT`, and Massive answers with only the stock's contract, which the
+    # library cannot read whole. The row names the stock, so it is no row of `I:DJT`: the
+    # table reads `I:DJT` as having no rows, and lists the withheld row as its own problem.
+    events: list[ProblemEvent] = []
+    monkeypatch.setattr(rest_session._core, "problems", events.extend)
+    fake_rest.reply(
+        "/v3/reference/options/contracts",
+        Reply(
+            body={
+                "status": "OK",
+                "request_id": "r",
+                "results": [DJT_STOCK_CONTRACT | {"strike_price": "x"}],
+            }
+        ),
+    )
+    underlyings = new_table([string_col("Symbol", ["I:DJT"])])
+    listed = rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    assert rows(listed) == []
+    assert [(e.cause, e.symbol, e.field, e.rows) for e in events] == [
+        (ProblemCause.UNCONVERTIBLE_VALUES, "O:DJT261120C00020000", "StrikePrice", 1)
+    ]
+
+
+def test_an_asked_value_whose_own_rows_are_all_withheld_fails_beside_another_s_rows(
+    *, rest_session: dm.MassiveSession, fake_rest: FakeRestServer
+) -> None:
+    # Massive answers `I:DJT`, sent as `DJT`, with a valid contract of the stock and an index
+    # contract the library cannot read whole. The stock's row is not `I:DJT`'s, so every row
+    # of `I:DJT` was withheld, and the read fails rather than return an empty table.
+    fake_rest.reply(
+        "/v3/reference/options/contracts",
+        Reply(
+            body={
+                "status": "OK",
+                "request_id": "r",
+                "results": [DJT_STOCK_CONTRACT, DJT_INDEX_CONTRACT | {"strike_price": "x"}],
+            }
+        ),
+    )
+    underlyings = new_table([string_col("Symbol", ["I:DJT"])])
+    with pytest.raises(RowDataError) as raised:
+        rest_session.options.contracts(underlying=underlyings).fetch(wait=True)
+    assert str(raised.value) == (
+        "options.contracts: Massive sent 1 row for I:DJT from GET "
+        "/v3/reference/options/contracts, and the library could not read it whole, so it "
+        "withheld it. /v3/reference/options/contracts: row 1: StrikePrice (wire key "
+        "'strike_price') expects double, got \"x\". m.problems() counts the withheld rows by "
+        "cause and symbol."
+    )

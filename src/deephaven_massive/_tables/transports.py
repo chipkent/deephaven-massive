@@ -167,15 +167,11 @@ class SymbolRows:
         skipped: Why the read sent no request for the symbol and gave it no rows: a crypto
             pair whose currencies, as Massive's crypto ticker list gives them, don't make up its
             ticker. `m.symbol_reads()` shows it in `Error`. None when the symbol was read.
-        no_data: True when Massive has no data for the symbol (HTTP 404 on its first
-            request), so its empty rows stand even when the rest of its read fails because
-            the library could read none of its rows whole (`ReadTally.judge`).
     """
 
     table: Table
     source: str | None = None
     skipped: str | None = None
-    no_data: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +375,41 @@ class RestTransport(Protocol):
         Raises:
             AuthenticationError: If Massive rejects the API key: every value would fail.
             MassiveError: If the session closed during the read.
+        """
+        ...
+
+    def fetch_values(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        values: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Table:
+        """Read `fetch` once for a static table of values, as a fixed list: one table.
+
+        Each value is read as `fetch_by_value` reads it. As a static read of symbols in code,
+        a value that fails alone is left out of the table and listed in `m.problems()`, and
+        the others' rows are returned; a value whose every row was withheld fails the call
+        only when no value kept a row.
+
+        Args:
+            spec: The dataset, with a fetch path.
+            request: The normalized arguments, with a value table and static symbols.
+            values: The values to read, already checked; a repeated one is read once.
+            call: The id of the verb call the read serves.
+            stop: A background read's stop token, or None, as `fetch` takes it.
+
+        Returns:
+            A static table of every value's rows, in value order.
+
+        Raises:
+            MassiveError: When every value failed (the first value's failure), for a failure
+                of the whole read (a rejected key, a refused feed, a closed session), and for
+                a value's failure whose cause is set to `RAISE`, once every failed value is
+                listed. `RowDataError` when no value kept a row and the library withheld
+                some.
         """
         ...
 

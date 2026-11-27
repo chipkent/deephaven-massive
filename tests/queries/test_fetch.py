@@ -21,6 +21,7 @@ from deephaven_massive._enums import (
     AssetClass,
     PollMode,
 )
+from deephaven_massive._errors import FeedRefusalError
 from deephaven_massive._ingest import rest as rest_module
 from deephaven_massive._massive import Patience
 from deephaven_massive._tables.execution_context import entered
@@ -322,38 +323,126 @@ def test_fetch_wait_false_returns_at_once_and_reads_in_the_background(
     follows(massive_session)
 
 
-def test_a_followed_fetch_raises_only_when_every_call_time_symbol_fails(
+_AAPL_403 = (
+    "Massive answered GET /v2/last/trade/AAPL on api.massive.com with HTTP 403: "
+    '"You are not entitled to this data".'
+)
+"""Massive's answer to the read of AAPL, as the REST client words it."""
+
+REFUSALS_RAISE = dm.ErrorPolicy(refused_symbols=dm.OnError.RAISE)
+REFUSALS_LOG = dm.ErrorPolicy(refused_symbols=dm.OnError.LOG)
+QUERIES_LOGGER = "deephaven_massive.queries"
+
+
+def test_a_followed_fetch_raises_when_every_call_time_symbol_fails_or_a_refusal_raises(
     *,
     live: Callable[..., InputTable],
     massive_session: dm.MassiveSession,
     rest: Recorder,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Massive's answer to the read of AAPL, as the REST client words it.
-    refusal = dm.EntitlementError(
-        "Massive answered GET /v2/last/trade/AAPL on api.massive.com with HTTP 403: "
-        '"You are not entitled to this data".',
-        status=403,
-    )
-    rest.outcomes = {"AAPL": SymbolFailure(refusal)}
-    q = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL"))
-    assert isinstance(q, FetchQuery)
-    with pytest.raises(dm.EntitlementError, match="not entitled"):
-        q.fetch(wait=True)
-    both = make(massive_session, LAST_TRADE_SPEC, symbols=live("AAPL", "MSFT"))
-    assert isinstance(both, FetchQuery)
-    with caplog.at_level(logging.WARNING, logger="deephaven_massive.queries"):
-        result = both.fetch(wait=True)
-    assert caplog.messages == [
-        (
-            "stocks.last_trade fetch: 1 of the 2 symbols failed and are left out of the result "
-            "for now. AAPL: Massive answered GET /v2/last/trade/AAPL on api.massive.com with "
-            'HTTP 403: "You are not entitled to this data". Check m.symbol_reads() for whether '
-            "each one is retrying or has failed."
+    rest.outcomes = {"AAPL": SymbolFailure(dm.EntitlementError(_AAPL_403, status=403))}
+    # Every call-time symbol failed: the call raises Massive's refusal as it is, whatever the
+    # setting.
+    with pytest.raises(dm.EntitlementError) as alone:
+        massive_session.stocks.last_trade(live("AAPL")).fetch(wait=True)
+    assert str(alone.value) == _AAPL_403
+    # Under RAISE, one refused symbol fails the call, with the setting that reads the others.
+    with pytest.raises(dm.EntitlementError) as one:
+        massive_session.stocks.last_trade(live("AAPL", "MSFT"), on_error=REFUSALS_RAISE).fetch(
+            wait=True
         )
-    ]
+    assert str(one.value) == (
+        f"{_AAPL_403} Remove AAPL, or, to read the others, pass "
+        "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to "
+        "dm.MassiveConfig."
+    )
+    # The setting the error names reads the others; the refusal is AAPL's refused_symbols
+    # problem, whose alarm is the problem reporter's, not the read's.
+    with caplog.at_level(logging.WARNING, logger=QUERIES_LOGGER):
+        result = massive_session.stocks.last_trade(
+            live("AAPL", "MSFT"), on_error=REFUSALS_LOG
+        ).fetch(wait=True)
+    assert [r.getMessage() for r in caplog.records if r.name.startswith(QUERIES_LOGGER)] == []
+    assert not result.j_table.isFailed()
     rest.outcomes = {}  # the raised error's traceback holds the session
     massive_session.release(result)
+    follows(massive_session)
+
+
+def test_a_followed_fetch_warns_of_a_symbol_whose_read_failed_and_reads_the_others(
+    *,
+    live: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A failure no setting makes the call's own, such as a 503 after the retries, leaves the
+    # symbol out and warns; the others are read.
+    busy = (
+        "Massive answered GET /v2/last/trade/AAPL on api.massive.com with HTTP 503: "
+        '"Service Unavailable"'
+    )
+    rest.outcomes = {"AAPL": SymbolFailure(dm.MassiveError(busy, status=503))}
+    with caplog.at_level(logging.WARNING, logger=QUERIES_LOGGER):
+        result = massive_session.stocks.last_trade(live("AAPL", "MSFT")).fetch(wait=True)
+    assert [r.getMessage() for r in caplog.records if r.name.startswith(QUERIES_LOGGER)] == [
+        (
+            "stocks.last_trade fetch: 1 of the 2 symbols failed and are left out of the result "
+            f"for now. AAPL: {busy}. Check m.symbol_reads() for whether each one is retrying "
+            "or has failed."
+        )
+    ]
+    assert not result.j_table.isFailed()
+    rest.outcomes = {}
+    massive_session.release(result)
+    follows(massive_session)
+
+
+def test_a_followed_fetch_without_wait_fails_its_table_only_when_a_refusal_raises(
+    *,
+    live: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+    drain: Callable[[], None],
+    dh_to_pylist: Callable[[Table], list[dict[str, Any]]],
+) -> None:
+    rest.outcomes = {"AAPL": SymbolFailure(dm.EntitlementError(_AAPL_403, status=403))}
+    logged = massive_session.stocks.last_trade(live("AAPL", "MSFT"), on_error=REFUSALS_LOG).fetch()
+    until(
+        lambda: (
+            {
+                name: row["State"]
+                for name, row in symbol_reads(massive_session, drain, dh_to_pylist).items()
+            }
+            == {"AAPL": "FAILED", "MSFT": "DONE"}
+        )
+    )
+    assert not logged.j_table.isFailed()
+    massive_session.release(logged)
+    follows(massive_session)
+    raised = massive_session.stocks.last_trade(
+        live("AAPL", "MSFT"), on_error=REFUSALS_RAISE
+    ).fetch()
+    until(lambda: bool(raised.j_table.isFailed()))
+    follows(massive_session)
+
+
+def test_a_feed_refusal_fails_a_followed_fetch(
+    *,
+    live: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    rest: Recorder,
+) -> None:
+    # A refusal of the feed is no symbol's: the read raises it, even under LOG, so a call that
+    # waits raises it and one that does not fails its table.
+    rest.raises = FeedRefusalError(_AAPL_403, status=403)
+    query = massive_session.stocks.last_trade(live("AAPL", "MSFT"), on_error=REFUSALS_LOG)
+    with pytest.raises(FeedRefusalError):
+        query.fetch(wait=True)
+    result = query.fetch()
+    until(lambda: bool(result.j_table.isFailed()))
+    rest.raises = None  # the raised error's traceback holds the session
     follows(massive_session)
 
 
@@ -547,7 +636,7 @@ def test_a_static_table_of_underlyings_reads_each_chain_once(
     assert request.for_value("AAPL").params == (("underlyingAsset", "AAPL"),)
 
 
-def test_a_static_table_of_values_fails_when_one_value_fails(
+def test_a_static_table_of_values_raises_what_its_read_raises(
     *, massive_session: dm.MassiveSession, rest: Recorder
 ) -> None:
     refusal = dm.EntitlementError("HTTP 403: not in the plan")

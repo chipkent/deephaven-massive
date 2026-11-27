@@ -11,6 +11,11 @@ final at once. The limit is a threshold checked as each failure lands, not a wal
 bound: the retry delays and each read's own length can carry a symbol past it before the
 failure that ends it lands.
 
+A symbol that is retrying or has failed is a span of `m.problems()`, under the cause its state
+and error give (`span_cause`): a refusal of the symbol (an `EntitlementError` that is not the
+feed's) is `refused_symbols`, whose setting decides how loudly it is logged; any other final
+failure is `symbol_read_failed`; a retry is `symbol_read_retrying`.
+
 This module holds that rule as a function over plain values (`next_step`) and the
 bookkeeping of one symbol's run (`SymbolRun`). Nothing here waits, reads, or touches a table:
 the follow coordinator (`_tables/follow_coordinator.py`) keeps one `SymbolRun` per symbol,
@@ -22,7 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, assert_never
 
-from deephaven_massive._errors import copy_error
+from deephaven_massive._errors import EntitlementError, FeedRefusalError, copy_error
+from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive._tables.symbol_read_rows import SymbolReadState
 
 if TYPE_CHECKING:
@@ -31,11 +37,14 @@ if TYPE_CHECKING:
 __all__ = [
     "RETRY_DELAYS",
     "RETRY_EVERY",
+    "SPAN_CAUSES",
     "Failed",
     "Retry",
     "SymbolRun",
+    "is_symbol_refusal",
     "next_step",
     "outage_failure",
+    "span_cause",
 ]
 
 RETRY_DELAYS: Final = (2.0, 8.0, 30.0)
@@ -44,6 +53,58 @@ soon, since most such failures (a rate-limit pause, a dropped connection) pass i
 
 RETRY_EVERY: Final = 60.0
 """Seconds between a symbol's later reads, until it has failed for `MassiveConfig.max_outage`."""
+
+SPAN_CAUSES: Final = (
+    ProblemCause.SYMBOL_READ_RETRYING,
+    ProblemCause.SYMBOL_READ_FAILED,
+    ProblemCause.REFUSED_SYMBOLS,
+)
+"""Every cause `span_cause` gives: the spans of `m.problems()` a symbol's run can hold."""
+
+
+def is_symbol_refusal(error: MassiveError | None) -> bool:
+    """Return whether a symbol's failure is Massive's refusal of that symbol.
+
+    Args:
+        error: The symbol's failure, or None for none.
+
+    Returns:
+        True for an `EntitlementError` that is not the feed's (`FeedRefusalError`, which no
+        symbol escapes); False for any other error, and for None.
+    """
+    return isinstance(error, EntitlementError) and not isinstance(error, FeedRefusalError)
+
+
+def span_cause(state: SymbolReadState, error: MassiveError | None) -> ProblemCause | None:
+    """Return the cause of the span of `m.problems()` a symbol in `state` holds, if any.
+
+    Args:
+        state: The symbol's state.
+        error: Its latest failure, or None while it has none.
+
+    Returns:
+        `symbol_read_retrying` while `RETRYING`; for `FAILED`, `refused_symbols` when Massive
+        refused the symbol (`is_symbol_refusal`), else `symbol_read_failed`; None in every
+        other state, which holds no span.
+    """
+    match state:
+        case SymbolReadState.RETRYING:
+            return ProblemCause.SYMBOL_READ_RETRYING
+        case SymbolReadState.FAILED:
+            if is_symbol_refusal(error):
+                return ProblemCause.REFUSED_SYMBOLS
+            return ProblemCause.SYMBOL_READ_FAILED
+        case (
+            SymbolReadState.QUEUED
+            | SymbolReadState.LOADING
+            | SymbolReadState.DONE
+            | SymbolReadState.REMOVED
+            | SymbolReadState.STOPPED
+            | SymbolReadState.CLOSED
+        ):
+            return None
+        case _:
+            assert_never(state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,22 +211,34 @@ class SymbolRun:
 
     One per symbol, owned by the one thread that reads and changes the symbol's state. The
     owner tells it when a read begins (`started`) and how it ended (`succeeded`, `failed`),
-    and reads its `state`, `attempts`, and `due`; `failed` decides the next step by
+    and reads its `state`, `attempts`, `due`, and `cause`; `failed` decides the next step by
     `next_step` and keeps the run's bookkeeping. The owner sets `state` itself for the
     changes no read makes: a symbol removed from its table, or stopped with its result.
 
     Attributes:
         state: Where the symbol stands (`SymbolReadState`): `QUEUED` until a read begins.
         attempts: Reads begun since the run was made.
+        succeeded_before: Reads begun before the current run of failures, which a symbol read
+            again and again (a `poll()`) has answered: its retry delays count only the reads of
+            the current run.
         failing_since: When the first failure of its current run of failures landed, monotonic
             seconds; None while it has none.
         due: When its next read is due, monotonic seconds, while `RETRYING`; None otherwise.
+        error: Its latest failure, as `failed` recorded it (a final one as its `Failed` step
+            gives it); None until one, and again once a read succeeds.
     """
 
     state: SymbolReadState = SymbolReadState.QUEUED
     attempts: int = 0
+    succeeded_before: int = 0
     failing_since: float | None = None
     due: float | None = None
+    error: MassiveError | None = None
+
+    @property
+    def cause(self) -> ProblemCause | None:
+        """The cause of the span of `m.problems()` the symbol holds now, or None (`span_cause`)."""
+        return span_cause(self.state, self.error)
 
     def started(self) -> None:
         """A read of the symbol began: count it, and the symbol is `LOADING`."""
@@ -177,6 +250,7 @@ class SymbolRun:
         self.state = SymbolReadState.DONE
         self.failing_since = None
         self.due = None
+        self.error = None
 
     def failed(self, error: MassiveError, *, name: str, now: float, limit: float) -> Retry | Failed:
         """A read of the symbol failed: decide its next step, and record it.
@@ -195,11 +269,12 @@ class SymbolRun:
         """
         if self.failing_since is None:
             self.failing_since = now
+            self.succeeded_before = self.attempts - 1
         step = next_step(
             error,
             name=name,
             failing_since=self.failing_since,
-            attempts=self.attempts,
+            attempts=self.attempts - self.succeeded_before,
             limit=limit,
             now=now,
         )
@@ -207,9 +282,11 @@ class SymbolRun:
             case Retry():
                 self.state = SymbolReadState.RETRYING
                 self.due = step.due
+                self.error = error
             case Failed():
                 self.state = SymbolReadState.FAILED
                 self.due = None
+                self.error = step.error
             case _:
                 assert_never(step)
         return step

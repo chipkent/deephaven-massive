@@ -23,7 +23,7 @@ A linked argument follows its rule under [shared arguments](README.md#shared-arg
 | Argument | Description |
 | --- | --- |
 | [`symbols`](README.md#symbols) | Option contracts; leave it out for every contract. |
-| `underlying` | The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or several; leave it out for every underlying. |
+| `underlying` | The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or several; leave it out for every underlying. A row of an underlying you didn't ask for, such as the stock `DJT`'s in Massive's answer for the index `I:DJT`, follows the `unrequested_symbols` cause of `on_error`. |
 | `contract_type` | `dm.ContractType.CALL` or `PUT`; leave it out for both. |
 | [`start`](README.md#start) | The first trading day. |
 | [`end`](README.md#end) | The last trading day. |

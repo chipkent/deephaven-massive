@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import deephaven_massive as dm
 from deephaven_massive._enums import Reread
+from deephaven_massive._error_policy import DEFAULT_POLICY
 from deephaven_massive._massive import Transport
 from deephaven_massive._tables.followed_read import FollowPlan
 
@@ -96,7 +97,13 @@ class QuietRead:
     def __init__(self) -> None:
         """Make a read that has not failed."""
         self.core = QuietCore()
-        self.plan = FollowPlan(Transport.REST, one_scan=False, symbols_per_read=1, read=self.read)
+        self.plan = FollowPlan(
+            Transport.REST,
+            one_scan=False,
+            symbols_per_read=1,
+            read=self.read,
+            policy=DEFAULT_POLICY,
+        )
         self.stop_token = threading.Event()
         self.failed: MassiveError | None = None
 

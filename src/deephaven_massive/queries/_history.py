@@ -210,8 +210,8 @@ class HistoryQuery(Query):
         range fixed at the call: a symbol you add arrives with all its rows, and one you delete
         leaves
         (https://github.com/chipkent/deephaven-massive/blob/main/README.md#drive-with-a-watchlist).
-        One symbol's failure leaves the watchlist's other symbols in place, and `m.symbol_reads()`
-        shows each symbol's read.
+        One symbol's failure leaves the watchlist's other symbols in place, unless its cause is set
+        to `dm.OnError.RAISE`, which fails the table. `m.symbol_reads()` shows each symbol's read.
 
         Args:
             start: The first day, or the first time included.
@@ -369,7 +369,8 @@ class HistoryQuery(Query):
         Under `AUTO` the source is REST whenever REST can serve the request, whatever the
         number of symbols, so one added symbol never re-reads the flat files of the whole range;
         otherwise flat files. With `wait=True` the call-time symbols are read now, as one read;
-        the call raises only when every one of them failed, and logs one WARNING when some did.
+        the call raises when every one of them failed, or when one failed for a cause set to
+        `RAISE`, and else logs one WARNING when some did.
 
         Args:
             call: The call id.
@@ -432,6 +433,7 @@ class HistoryQuery(Query):
                     logged=logged,
                     stop=stop,
                 ),
+                policy=request.on_error,
             )
             note = (
                 "Read from flat files: requested with source=dm.HistorySource.FLAT_FILES."
@@ -476,6 +478,7 @@ class HistoryQuery(Query):
             read=lambda names, stop: self._read_rest_by_symbol(
                 request, window, symbols=names, call=call, stop=stop
             ),
+            policy=request.on_error,
         )
 
     def _flat_history(
@@ -627,9 +630,8 @@ class HistoryQuery(Query):
             stop: A read's stop token, or None.
 
         Returns:
-            Each symbol's outcome (`RestTransport.history_by_symbol`); when the library could
-            read none of the read's rows whole, each symbol it gave rows fails
-            (`ReadTally.judge`).
+            Each symbol's outcome (`RestTransport.history_by_symbol`); a symbol that got no
+            row fails when the library withheld rows that were its own (`ReadTally.judge`).
         """
         spec = self._spec
         tally = ReadTally()

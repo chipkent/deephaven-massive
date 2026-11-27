@@ -21,6 +21,7 @@ from datetime import datetime
 from types import MethodType
 from typing import TYPE_CHECKING, Any
 
+import pyarrow as pa
 import pytest
 from deephaven import arrow as dh_arrow
 from deephaven import dtypes, new_table
@@ -36,10 +37,12 @@ from deephaven_massive._enums import AssetClass, NotBars, Reread
 from deephaven_massive._errors import (
     LIBRARY_BUG,
     BrokenGuaranteeError,
+    FeedRefusalError,
     MassiveError,
+    RowDataError,
     session_closed,
 )
-from deephaven_massive._massive import Transport
+from deephaven_massive._massive import RowFault, Transport
 from deephaven_massive._tables import follow_coordinator, symbol_retry
 from deephaven_massive._tables.diagnostics import (
     FLAT_FILES_AND_REST,
@@ -51,6 +54,7 @@ from deephaven_massive._tables.execution_context import entered
 from deephaven_massive._tables.follow_coordinator import FirstRead
 from deephaven_massive._tables.followed_read import FollowedRead, FollowPlan, open_followed_read
 from deephaven_massive._tables.read_pool import ReadPool
+from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.symbol_read_rows import SymbolReadRow, SymbolReadState
 from deephaven_massive._tables.symbol_retry import RETRY_DELAYS, RETRY_EVERY
 from deephaven_massive._tables.transports import (
@@ -59,6 +63,7 @@ from deephaven_massive._tables.transports import (
     SymbolRows,
 )
 from deephaven_massive._tables.watchlist import SymbolRowRule
+from deephaven_massive._tables.withheld import Withheld, WithheldGroup
 from tests._fakes.clock import FakeClock
 from tests._fakes.followed_read import QuietRead
 
@@ -128,6 +133,11 @@ FLAT_FILES_403 = (
 def refused(status: int, symbol: str = "AAPL", *, request_id: str | None = None) -> SymbolFailure:
     text = answer(status, symbol, request_id=request_id)
     return SymbolFailure(MassiveError(text, status=status, request_id=request_id))
+
+
+def not_entitled(symbol: str = "AAPL") -> SymbolFailure:
+    """Return Massive's refusal of `symbol` (HTTP 403), as the REST client raises it."""
+    return SymbolFailure(dm.EntitlementError(answer(403, symbol), status=403))
 
 
 class Script:
@@ -203,13 +213,19 @@ def follow(
     first: FirstRead | None = None,
     one_scan: bool = False,
     symbols_per_read: int = 1,
+    refused_symbols: dm.OnError = dm.OnError.LOG,
+    unconvertible_values: dm.OnError = dm.OnError.LOG,
 ) -> Table:
     core = m._core
+    policy = dataclasses.replace(
+        core.policy, refused_symbols=refused_symbols, unconvertible_values=unconvertible_values
+    )
     plan = FollowPlan(
         Transport.FLAT_FILES if one_scan else Transport.REST,
         one_scan=one_scan,
         symbols_per_read=symbols_per_read,
         read=script.read,
+        policy=policy,
     )
     return open_followed_read(
         core,
@@ -1100,6 +1116,133 @@ def test_failed_and_retrying_symbols_are_spans_with_their_errors(
     massive_session.release(result)
 
 
+_REFUSAL_WARNINGS = {
+    dm.OnError.LOG: [
+        r"test\.trades table \d+: refused_symbols: AAPL: "
+        + re.escape(answer(403).removesuffix("."))
+        + r" \(at call \d+\)\. m\.problems\(\) lists it and every later refused_symbols "
+        r"problem of this table, which the log shows at DEBUG only\."
+    ],
+    dm.OnError.IGNORE: [],
+}
+"""The WARNINGs a followed read's refused symbol logs under each `refused_symbols` setting that
+reads the others; under RAISE the table fails instead."""
+
+
+def test_each_setting_but_raise_has_its_refusal_warnings() -> None:
+    assert set(_REFUSAL_WARNINGS) == set(dm.OnError) - {dm.OnError.RAISE}
+
+
+@pytest.mark.parametrize("setting", list(_REFUSAL_WARNINGS))
+def test_a_refused_symbol_is_a_refused_symbols_span_and_fails_only_itself(
+    setting: dm.OnError,
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    drain: Callable[[], None],
+    dh_to_pylist: ToList,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Massive refuses AAPL: under a setting that reads the others it alone fails, as a
+    # refused_symbols span that carries the setting; the setting decides how loudly the log
+    # says so.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [not_entitled()]
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
+        result = follow(massive_session, watchlist("AAPL", "MSFT"), script, refused_symbols=setting)
+        failed = wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
+        wait_state(massive_session, "MSFT", SymbolReadState.DONE)
+
+        def spans() -> list[tuple[object, ...]]:
+            return [
+                (r["Cause"], r["Symbol"], r["Detail"], r["Policy"], r["EndedAt"] is not None)
+                for r in problem_rows()
+                if r["StreamId"] is not None
+            ]
+
+        until(lambda: spans() == [("refused_symbols", "AAPL", answer(403), setting.value, False)])
+    assert (failed.error, failed.attempts) == (answer(403), 1)
+    assert stream(massive_session, drain, dh_to_pylist)["Error"] is None
+    until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    patterns = _REFUSAL_WARNINGS[setting]
+    assert len(warnings) == len(patterns), warnings
+    for warning, pattern in zip(warnings, patterns, strict=True):
+        assert re.fullmatch(pattern, warning), warning
+    massive_session.release(result)
+
+
+_RAISED = (
+    f"{answer(403)} Remove AAPL, or, to read the others, pass "
+    "on_error=dm.ErrorPolicy(refused_symbols=dm.OnError.LOG) to the call or to dm.MassiveConfig."
+)
+"""The Error of a followed read whose refused AAPL fails it under `refused_symbols=RAISE`."""
+
+
+def test_a_refused_symbol_fails_the_table_under_raise(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    drain: Callable[[], None],
+    dh_to_pylist: ToList,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # MSFT's read is held, so the table may still read another symbol: AAPL's refusal fails it
+    # as RAISE asks, with the setting that reads the others, and the table's failure is the
+    # one WARNING.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [not_entitled()]
+    gate = script.gates["MSFT"] = threading.Event()
+    with caplog.at_level(logging.DEBUG, logger="deephaven_massive"):
+        result = follow(
+            massive_session,
+            watchlist("AAPL", "MSFT"),
+            script,
+            refused_symbols=dm.OnError.RAISE,
+        )
+        until(lambda: bool(result.j_table.isFailed()))
+        wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
+    gate.set()
+    row = stream(massive_session, drain, dh_to_pylist)
+    assert row["Error"] == _RAISED
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == [
+        f"test.trades call {row['StreamId']}: the read failed, and so did its table: {_RAISED}"
+    ]
+
+
+def test_a_table_whose_every_call_time_symbol_is_refused_fails_with_the_refusal_under_raise(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    drain: Callable[[], None],
+    dh_to_pylist: ToList,
+) -> None:
+    # No other symbol is left to read, so the refusal fails the table as it is, as under any
+    # setting.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [not_entitled()]
+    result = follow(massive_session, watchlist("AAPL"), script, refused_symbols=dm.OnError.RAISE)
+    until(lambda: bool(result.j_table.isFailed()))
+    assert stream(massive_session, drain, dh_to_pylist)["Error"] == answer(403)
+
+
+def test_a_feed_refusal_of_a_symbol_is_a_failed_read_not_a_refused_symbol(
+    watchlist: Callable[..., InputTable],
+    *,
+    massive_session: dm.MassiveSession,
+    problem_rows: Callable[[], list[dict[str, Any]]],
+) -> None:
+    # A refusal of the feed is no symbol's, so a symbol that met one is symbol_read_failed.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [SymbolFailure(FeedRefusalError(answer(403), status=403))]
+    result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
+    wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
+    until(lambda: troubled(problem_rows) == [("symbol_read_failed", "AAPL", answer(403), False)])
+    massive_session.release(result)
+
+
 def test_a_retrying_symbol_removed_from_the_watchlist_ends_its_span(
     watchlist: Callable[..., InputTable],
     *,
@@ -1498,6 +1641,74 @@ def test_a_symbol_whose_rows_the_library_cannot_use_fails_alone_at_error(
     assert not result.j_table.isFailed()
     until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
     massive_session.release(result)
+
+
+def all_withheld(symbol: str) -> SymbolFailure:
+    # A read by symbol's verdict on a symbol whose only row the library withheld: an
+    # unconvertible value, which the read's policy did not raise for.
+    group = WithheldGroup(
+        RowFault.UNCONVERTIBLE_VALUES, symbol, symbol, "Price", 1, 'Price expects double, got "x"'
+    )
+    tally = ReadTally()
+    tally.add_request(
+        kept=0,
+        withheld=Withheld(pa.table({}), (group,), group.reason),
+        owners=lambda _: (symbol,),
+        source=f"GET /v3/trades/{symbol}",
+    )
+    return SymbolFailure(tally.unread_symbols("test.trades", [symbol], [symbol])[symbol])
+
+
+def test_a_symbol_whose_rows_are_all_withheld_fails_alone_under_log(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    dh_to_pylist: ToList,
+) -> None:
+    # AAPL's only row was withheld under unconvertible_values=LOG: AAPL fails alone, and MSFT
+    # keeps its rows.
+    script = Script(massive_session)
+    script.answers["AAPL"] = [all_withheld("AAPL")]
+    result = follow(massive_session, watchlist("AAPL", "MSFT"), script)
+    failed = wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
+    wait_state(massive_session, "MSFT", SymbolReadState.DONE)
+    assert failed.error is not None
+    assert "could not read it whole" in failed.error
+    until(lambda: {r["Ticker"] for r in dh_to_pylist(result)} == {"MSFT"})
+    assert not result.j_table.isFailed()
+    massive_session.release(result)
+
+
+def test_a_symbol_whose_rows_are_all_withheld_fails_the_table_under_raise(
+    *,
+    watchlist: Callable[..., InputTable],
+    massive_session: dm.MassiveSession,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Under RAISE the page raises a RowDataError at AAPL's first withheld row. The table's
+    # failure is the one WARNING, though the failure is the symbol's own error.
+    script = Script(massive_session)
+    failure = SymbolFailure(
+        RowDataError('test.trades: Price expects double, got "x" in a row of AAPL.')
+    )
+    script.answers["AAPL"] = [failure]
+    gate = script.gates["MSFT"] = threading.Event()  # the table may still read another symbol
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        result = follow(
+            massive_session,
+            watchlist("AAPL", "MSFT"),
+            script,
+            unconvertible_values=dm.OnError.RAISE,
+        )
+        until(lambda: bool(result.j_table.isFailed()))
+        wait_state(massive_session, "AAPL", SymbolReadState.FAILED)
+    gate.set()
+    [record] = caplog.records
+    assert re.fullmatch(
+        r"test\.trades call \d+: the read failed, and so did its table: "
+        + re.escape(str(failure.error).removeprefix("test.trades: ")),
+        record.getMessage(),
+    )
 
 
 def test_two_bad_rows_fail_the_table_once(

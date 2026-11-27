@@ -636,3 +636,19 @@ def test_a_capped_call_asks_only_for_the_rows_still_wanted() -> None:
     # A path without a page size sends the call as planned.
     last = rest_requests.Call({"from": "BTC", "to": "USD"}, {}, symbols=())
     assert rest_requests.capped_call(CRYPTO_LAST, _rest_path(CRYPTO_LAST_PATH), last, cap=3) is last
+
+
+def test_limit_caps_each_symbol_only_where_every_request_names_one() -> None:
+    one = rest_requests.Call({}, {}, "AAPL", symbols=("AAPL",))
+    shared = rest_requests.Call({}, {}, symbols=("AAPL", "MSFT"))
+    assert rest_requests.caps_each_symbol("stocks.dividends", [one, one]) is True
+    assert rest_requests.caps_each_symbol("stocks.dividends", [shared]) is False
+    assert rest_requests.caps_each_symbol("stocks.dividends", []) is False
+    # Neither cap fits a plan of both kinds, and no dataset makes one.
+    with pytest.raises(
+        BrokenGuaranteeError,
+        match=r"^stocks\.dividends planned requests of one symbol beside requests of several, so "
+        r"limit can cap neither each symbol nor the whole call\. This is a bug in "
+        r"deephaven-massive\. ",
+    ):
+        rest_requests.caps_each_symbol("stocks.dividends", [one, shared])

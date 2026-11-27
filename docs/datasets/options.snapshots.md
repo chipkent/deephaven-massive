@@ -55,7 +55,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ExpirationDate` | String | The contract's expiration date in YYYY-MM-DD format. From the `details` object: The details for this contract. |
 | `SharesPerContract` | double | The number of shares per contract for this contract. From the `details` object: The details for this contract. |
 | `StrikePrice` | double | The strike price of the option contract. From the `details` object: The details for this contract. |
-| `Error` | String | The error while looking for this ticker. |
 | `Fmv` | double | Fair Market Value is only available on Business plans. It is our proprietary algorithm to generate a real-time, accurate, fair market value of a tradable security. For more information, contact us (https://massive.com/contact). |
 | `FmvLastUpdated` | Instant | If Fair Market Value (FMV) is available, this field is the nanosecond timestamp of the last FMV calculation. |
 | `Delta` | double | Change in option price per $1 move in the underlying. From the `greeks` object: The greeks for this contract. There are certain circumstances where greeks will not be returned, such as options contracts that are deep in the money. See this article (https://massive.com/blog/greeks-and-implied-volatility/#testing) for more information. |
@@ -93,7 +92,6 @@ How recent the data is on each of Massive's plans, and how far back its history 
 | `ImpliedVolatility` | double | The market's forecast for the volatility of the underlying asset, based on this option's current price. |
 | `LastUpdated` | Instant | The nanosecond timestamp of when this information was updated. |
 | `MarketStatus` | String | The market status for the market that trades this ticker. Possible values for Stocks are overnight_trading, open, closed, early_trading, and late_trading. Note that the overnight_trading session is new as of 2026-12-07 for SIP 23/5 extended hours. Possible values for options, crypto, and forex snapshots are open, closed, early_trading, or late_trading. Possible values for indices snapshots are regular_trading, closed, early_trading, and late_trading. |
-| `Message` | String | The error message while looking for this ticker. |
 | `Name` | String | The name of this contract. |
 | `OpenInterest` | double | The quantity of this contract held at the end of the last trading day. |
 | `TodaysChange` | double | The value of the price change for the asset from the previous trading day. From the `session` object: Comprehensive trading session metrics, detailing price changes, trading volume, and key price points (open, close, high, low) for the asset within the current trading day. Includes specific changes during early, regular, and late trading periods to enable detailed performance analysis and trend tracking. Values describe the current trading session only; nothing carries over from the previous session apart from `previous_close`. For stocks snapshots, an asset that has not traded yet this session reports `volume: 0` with the price and change fields omitted rather than reported as 0. During early trading on stocks snapshots, `volume` and `price` track the session as it happens, but `open`, `high`, `low`, `close` and `vwap` are omitted until the regular session opens, as those report official session prices. They appear from the open and remain through late trading. For options snapshots, the early, regular and late trading changes use these sessions: early trading from 7:30 to 9:30 AM ET, the regular session from 9:30 AM to 4:00 PM ET (4:15 PM ET for some products, such as SPY and SPX options), and late trading from the end of the regular session to 5:00 PM ET. Only trades marked with the extended hours condition (EXHT, 248) count as early or late trading. Cboe's extended trading hours program covers selected equity options, so other contracts do not get an early or late trading change. Index options, such as SPX, SPXW and XSP, get the regular trading change only. A change field is omitted when the contract has no trade in that session on the current trading day, or when the price it is measured against is missing. A change of 0 is returned as 0. |
@@ -143,7 +141,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `ExpirationDate` | `details.expiration_date` |
 | `SharesPerContract` | `details.shares_per_contract` |
 | `StrikePrice` | `details.strike_price` |
-| `Error` | `error` |
 | `Fmv` | `fmv` |
 | `FmvLastUpdated` | `fmv_last_updated` |
 | `Delta` | `greeks.delta` |
@@ -181,7 +178,6 @@ The Massive field behind each column, by source. An empty cell means the source 
 | `ImpliedVolatility` | `implied_volatility` |
 | `LastUpdated` | `last_updated` |
 | `MarketStatus` | `market_status` |
-| `Message` | `message` |
 | `Name` | `name` |
 | `OpenInterest` | `open_interest` |
 | `TodaysChange` | `session.change` |

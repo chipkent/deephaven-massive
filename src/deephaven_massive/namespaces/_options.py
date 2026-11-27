@@ -979,8 +979,11 @@ class OptionsNamespace(Namespace):
 
         A table of underlyings is read value by value. A row that isn't a stock or index ticker
         follows the `noncanonical_symbols` cause of `on_error`, which skips and logs it by
-        default. A live
-        table is followed. In a static table, one failed underlying fails the call.
+        default. A contract of an underlying the table doesn't hold follows its
+        `unrequested_symbols` cause, which leaves it out and lists it in `m.problems()`. A live
+        table is followed. In a static table, a failed underlying is left out and listed in
+        `m.problems()`, and the call fails when every underlying fails, or when an underlying's
+        problem has a cause set to `dm.OnError.RAISE`.
 
         Args:
             underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`. A
@@ -1135,8 +1138,10 @@ class OptionsNamespace(Namespace):
         Args:
             underlying: Massive's exact ticker of the underlying, such as `"AAPL"` or `"I:SPX"`.
                 A table of stock or index tickers in a `Symbol` column lists each one's
-                contracts. With a live table, add an underlying and its contracts appear. Leave
-                it out for every underlying.
+                contracts. A contract of an underlying you didn't ask for, such as the stock
+                `DJT`'s in Massive's answer for the index `I:DJT`, follows the
+                `unrequested_symbols` cause of `on_error`. With a live table, add an underlying and
+                its contracts appear. Leave it out for every underlying.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             as_of: The day whose contracts to list; leave it out for today.
             expired: True asks Massive for expired contracts.
@@ -1510,7 +1515,9 @@ class OptionsNamespace(Namespace):
         Args:
             symbols: Option contracts; leave it out for every contract.
             underlying: The underlying's exact Massive ticker, such as `"AAPL"` or `"I:SPX"`, or
-                several; leave it out for every underlying.
+                several; leave it out for every underlying. A row of an underlying you didn't
+                ask for, such as the stock `DJT`'s in Massive's answer for the index `I:DJT`,
+                follows the `unrequested_symbols` cause of `on_error`.
             contract_type: `dm.ContractType.CALL` or `PUT`; leave it out for both.
             start: The first trading day.
             end: The last trading day.

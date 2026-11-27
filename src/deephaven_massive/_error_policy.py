@@ -53,8 +53,12 @@ class ErrorPolicy:
     reports it. When the library can read none of the rows of your symbols inside your call's
     window whole, across all the pages or files the call read, the call fails whatever the
     setting, since the table would otherwise hold nothing and show no error. Rows outside the
-    window count neither way. A live stream judges runs of rows instead:
-    https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error lists
+    window, and rows of a symbol the call didn't ask for, count neither way. Under `LOG`
+    and `IGNORE`, one symbol's failure never takes another's rows: a call that names symbols
+    returns the rows of those that didn't fail, and `m.problems()` lists each that did. Under
+    `RAISE`, a symbol's problem of that cause fails the whole call or table. Whatever the
+    setting, a call fails when every symbol it names fails. A live stream judges runs of rows,
+    and https://github.com/chipkent/deephaven-massive/blob/main/docs/configuration.md#on-error lists
     how each read and stream judges.
 
     Set a session's policy with `dm.MassiveConfig(on_error=...)`. Set one call's policy with any
@@ -100,29 +104,41 @@ class ErrorPolicy:
             written together. Under `dm.OnError.LOG` or `dm.OnError.IGNORE` it gets no rows, and
             `m.problems()` lists it. A watchlist read by `fetch()` also names it in `Error` in
             `m.symbol_reads()`.
-        unavailable_symbols: Decides what happens to a symbol Massive has no data for: it
-            answers HTTP 404, or its crypto ticker list doesn't hold the pair. Defaults to
-            `LOG`.
+        unavailable_symbols: Decides what happens to a symbol Massive has no data for.
+            Defaults to `LOG`.
 
             Set `dm.OnError.RAISE` when a missing symbol means your list is wrong. Under
             `dm.OnError.LOG` and `dm.OnError.IGNORE`, the call skips the symbol and reads the
-            others, and `m.problems()` lists it.
+            others, and `m.problems()` lists it. Massive has no data for a symbol when it
+            gives one of these answers:
+
+            - HTTP 404 for the symbol's request;
+            - a snapshot row whose `error` is `NOT_FOUND`;
+            - a crypto ticker list without the pair.
 
             A symbol Massive answers with no rows and no error has no rows, whatever this
             setting says.
+        refused_symbols: Decides what happens to a symbol Massive refuses, usually because
+            your plan doesn't serve it. Defaults to `LOG`.
+
+            Set `dm.OnError.RAISE` when a `fetch()`, `history()`, `poll()`, or stream must not
+            run without every symbol you named. Under `dm.OnError.LOG` and `dm.OnError.IGNORE`,
+            the symbol gets no rows, the others are read, and `m.problems()` lists it with
+            Massive's answer.
         unrequested_symbols: Decides whether a row Massive returns for a symbol the call
             didn't ask for fails the table; the row is left out either way. Defaults to
             `LOG`.
 
-            A watchlist read by `fetch()` or `history()` asks Massive for its symbols, and
-            Massive can answer with a row of another symbol: an index asked for by its bare
-            ticker, such as `SPX`, answers with rows of `I:SPX`. Such a row belongs to no
-            symbol of the watchlist, so it is left out, whatever the watchlist's size, and
-            `m.problems()` lists it with its symbol and count. On a dataset whose rows list
-            their tickers, such as `m.partners.benzinga.news()`, a row that lists none of the
-            tickers the call named is left out the same way, in a plain `fetch()` too. Set
-            `dm.OnError.RAISE` to fail the symbols whose request got such a row, or the
-            plain `fetch()` that did.
+            Set `dm.OnError.RAISE` to fail the call or table when Massive sends a row of a
+            symbol the call didn't ask for. `m.problems()` lists each such row with its symbol
+            and count. Massive sends such rows in these cases:
+
+            - `m.options.open_interest_by_underlying()` asked for `SPX` gets rows of `I:SPX`.
+            - A dataset whose rows list their tickers, such as `m.partners.benzinga.news()`,
+              sends a row that lists none of the tickers the call named.
+            - An options dataset sends rows of another underlying. For example,
+              `m.options.contracts("I:DJT")` leaves out the stock `DJT`'s contracts.
+            - A futures read by a table of product codes gets a row of another code.
         unreadable_keys: Decides whether a row of Massive's data whose key the library can't
             read fails the table; the row is left out either way. Defaults to `LOG`.
 
@@ -164,8 +180,7 @@ class ErrorPolicy:
               one's row number, never the line itself.
             - `dm.OnError.IGNORE` does the same, logging only at `DEBUG`.
             - `dm.OnError.RAISE` makes `history()` raise `MassiveError`, naming the file and the
-              first such line's row. A `history()` of a live table instead marks every symbol
-              of the read `FAILED` in `m.symbol_reads()`.
+              first such line's row. A `history()` of a live table fails the table instead.
 
             Only a `history()` that reads flat files meets such a line. Under any setting, a
             file whose every line is malformed fails the read.
@@ -227,6 +242,7 @@ class ErrorPolicy:
     noncanonical_symbols: OnError | None
     unreadable_symbols: OnError | None
     unavailable_symbols: OnError | None
+    refused_symbols: OnError | None
     unrequested_symbols: OnError | None
     unreadable_keys: OnError | None
     unconvertible_values: OnError | None
@@ -243,6 +259,7 @@ class ErrorPolicy:
         noncanonical_symbols: OnError | None = None,
         unreadable_symbols: OnError | None = None,
         unavailable_symbols: OnError | None = None,
+        refused_symbols: OnError | None = None,
         unrequested_symbols: OnError | None = None,
         unreadable_keys: OnError | None = None,
         unconvertible_values: OnError | None = None,
@@ -259,6 +276,7 @@ class ErrorPolicy:
             noncanonical_symbols: A watchlist row that isn't Massive's exact ticker.
             unreadable_symbols: A symbol in Massive's data that the library can't read.
             unavailable_symbols: A symbol Massive has no data for.
+            refused_symbols: A symbol Massive refuses.
             unrequested_symbols: A row Massive returns for a symbol the call didn't ask for.
             unreadable_keys: A row of Massive's data whose key the library can't read.
             unconvertible_values: A row of Massive's data with a value the library can't read.
@@ -276,6 +294,7 @@ class ErrorPolicy:
             "noncanonical_symbols": noncanonical_symbols,
             "unreadable_symbols": unreadable_symbols,
             "unavailable_symbols": unavailable_symbols,
+            "refused_symbols": refused_symbols,
             "unrequested_symbols": unrequested_symbols,
             "unreadable_keys": unreadable_keys,
             "unconvertible_values": unconvertible_values,
@@ -322,6 +341,7 @@ class ResolvedPolicy:
     noncanonical_symbols: OnError
     unreadable_symbols: OnError
     unavailable_symbols: OnError
+    refused_symbols: OnError
     unrequested_symbols: OnError
     unreadable_keys: OnError
     unconvertible_values: OnError
@@ -369,6 +389,9 @@ def resolve_policy(call: ErrorPolicy | None, session: ErrorPolicy) -> ResolvedPo
         ),
         unavailable_symbols=_first(
             given.unavailable_symbols, session.unavailable_symbols, default.unavailable_symbols
+        ),
+        refused_symbols=_first(
+            given.refused_symbols, session.refused_symbols, default.refused_symbols
         ),
         unrequested_symbols=_first(
             given.unrequested_symbols, session.unrequested_symbols, default.unrequested_symbols

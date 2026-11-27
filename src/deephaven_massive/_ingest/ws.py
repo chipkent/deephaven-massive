@@ -12,9 +12,10 @@ one connection, and the group that shares connections between sessions, to
 `_ingest/ws_connection.py` (`Connection`, `ConnectionGroup`); the session's side of
 everything else belongs here:
 
-- **Refusals.** A refused topic fails exactly the streams that want it, with
-  `EntitlementError`; nothing tears down the connection, and no connection moves to another
-  host. A refusal that names no topic applies to the whole step in flight.
+- **Refusals.** A refused topic is its symbol's `refused_symbols` problem in each stream that
+  wants it, and fails a stream only when every symbol the stream started with is refused, or
+  under `RAISE`. Nothing tears down the connection, and no connection moves to another host.
+  A refusal that names no topic applies to the whole step in flight.
 - **Rows and drift.** Rows go to the connection's flush thread (`Flusher`), which publishes
   them. A row the library cannot read whole is withheld, counted, and reported, and fails only
   a stream whose policy is `RAISE` for its cause. A connection logs one WARNING per outage,
@@ -392,6 +393,9 @@ class WsConnections:
         self._closing: Final = threading.Event()
         # The crypto pairs each stream does not subscribe, by stream; guarded by the group's lock.
         self._pair_states: dict[int, _PairState] = {}
+        # The symbols each opening symbol table's watch replays, its call-time symbols, by
+        # stream, with the thread that replays them; guarded by the group's lock.
+        self._replays: dict[int, tuple[int, set[str]]] = {}
         self._closed = False
 
     @property
@@ -503,6 +507,9 @@ class WsConnections:
                 topics,
                 static,
                 refusal_note=refusal_note(spec),
+                # A symbol list's symbols, its crypto pairs included; a table's come with its
+                # watch's replay below, and `dm.ALL` has none.
+                call_time=(pairs | (wanted or frozenset())) or None if static else None,
             )
             if asset_class is AssetClass.CRYPTO:  # its pairs are split by the stream's policy
                 with self._lock:
@@ -517,7 +524,14 @@ class WsConnections:
                     removed=frozenset(),
                 )
             if opened.watch is not None:
-                opened.watch.start()
+                with self._lock:
+                    self._replays[stream_id] = (threading.get_ident(), set())
+                try:
+                    opened.watch.start()  # replays the table's rows on this thread
+                finally:
+                    with self._lock:
+                        replayed = frozenset(self._replays.pop(stream_id)[1])
+                connection.post(connection.settle_call_time, stream_id, replayed)
         except BaseException:
             release_scope(core.exec_ctx, opened.handle.scope)
             self._abandon(connection, stream_id)
@@ -775,6 +789,12 @@ class WsConnections:
         """
         with self._lock:
             connection = self.group.streams.get(stream_id)
+            replay = self._replays.get(stream_id)
+            # The watch's replay, on the thread that started it: the stream's call-time symbols.
+            # A change an update cycle delivers once the replay is done, before the opening
+            # thread takes the replay, is a later one, never the call's.
+            if replay is not None and replay[0] == threading.get_ident():
+                replay[1].update(added)
         if connection is None:
             return
         asset_class = connection.asset_class

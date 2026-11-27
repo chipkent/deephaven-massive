@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 import pytest
 from deephaven import arrow as dh_arrow
+from deephaven import merge
 from deephaven.table import Table
 
 import deephaven_massive as dm
@@ -32,6 +33,7 @@ from deephaven_massive._tables.read_tally import ReadTally
 from deephaven_massive._tables.session_core import SessionCore
 from deephaven_massive._tables.transports import (
     FlatFileRead,
+    SymbolFailure,
     SymbolOutcome,
     SymbolRows,
 )
@@ -201,6 +203,24 @@ class Recorder:
         self.valued.append((tuple(values), request, threading.current_thread().name))
         empty = dh_arrow.to_table(self._catalog.dataset_schema(spec).to_arrow([]))
         return {name: self.outcomes.get(name, SymbolRows(empty)) for name in values}
+
+    def fetch_values(
+        self,
+        spec: DatasetSpec,
+        request: Request,
+        *,
+        values: Sequence[str],
+        call: int,
+        stop: threading.Event | None = None,
+    ) -> Table:
+        # Reads as `fetch_by_value` does; a scripted failure stands for one the read raises.
+        outcomes = self.fetch_by_value(spec, request, values=values, call=call, stop=stop)
+        tables = []
+        for outcome in outcomes.values():
+            if isinstance(outcome, SymbolFailure):
+                raise outcome.error
+            tables.append(outcome.table)
+        return merge(tables)
 
     def check_fetch(self, spec: DatasetSpec, request: Request) -> None:
         self.checks.append(("fetch", spec, request))

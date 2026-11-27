@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from deephaven_massive._config import NO_ACK_RESEND
 from deephaven_massive._datasets.wire_symbols import ws_symbol
+from deephaven_massive._errors import required
+from deephaven_massive._ingest.refusal_search import RefusalSearch
 from deephaven_massive._log_limits import bounded_list, prose_list
 from deephaven_massive._massive import StatusKind
 
@@ -47,6 +49,9 @@ _WILDCARD: Final = "*"
 
 _NO_ACK_ATTEMPT: Final = 2
 """The watchdog attempt that marks a topic `NO_ACK`; attempt 1 re-sends it once alone."""
+
+_NO_ANSWER: Final = "no answer"
+"""What a part of a refusal search that Massive did not answer at all failed with."""
 
 
 def wildcard(channel: str) -> str:
@@ -108,6 +113,21 @@ def stream_topics(
     A crypto symbol not in `pairs` raises the `KeyError` of `ws_symbol`.
     """
     return frozenset(f"{channel}.{ws_symbol(asset_class, s, pairs)}" for s in symbols)
+
+
+def _topic_class(topic: str) -> str:
+    """Return the class a refusal search splits a topic into: its channel, or itself for a wildcard.
+
+    A plan serves one channel and not another, and a wildcard asks for the feed itself, so a
+    wildcard is searched apart from its channel's explicit topics.
+
+    Args:
+        topic: The topic, such as `T.AAPL` or `T.*`.
+
+    Returns:
+        `T` for `T.AAPL`, `T.*` for `T.*`.
+    """
+    return topic if is_wildcard(topic) else channel_of(topic)
 
 
 def _named(message: str, topics: Iterable[str]) -> list[str]:
@@ -200,11 +220,25 @@ class Subscriptions:
     round awaits its answer (for `subscription_confirmation_timeout`). An acknowledgement naming no
     topic is credited to the step in flight, else to the round awaiting its answer, else to the
     latest step's `NO_ACK` topics, whose answer came after their watchdogs gave up. A refusal naming
-    no topic fails streams, so it is credited only when exactly one topic on the connection awaits
-    an answer (`_refuse_status`); any other is logged and fails nothing. An acknowledgement that
+    no topic is credited only where it cannot be wrong (`_refuse_status`): to the one topic on the
+    connection that awaits an answer, or to the step in flight of several topics, which a search
+    then checks part by part; any other is logged and fails nothing. An acknowledgement that
     arrives later clears `NO_ACK`. The connection is never reconnected for it: a reconnect
     would cut every other stream on the connection over one late answer. A watchdog whose
     topic has left the wire or whose generation has ended does nothing more.
+
+    **A step refused whole.** Massive answers a subscribe frame of several topics it refuses with
+    "not authorized" statuses that name none of them. Such a step is judged at its timeout: its
+    topics left unacknowledged, when two or more, are searched (`RefusalSearch`): sent again one
+    part at a time, a part per channel and then halves, until each is acknowledged, refused, or
+    unanswered. One left alone is sent again alone, as any topic is, and a refusal then is surely
+    its. A part that draws a refusal and no acknowledgement is refused whole; with
+    acknowledgements, its unacknowledged topics are searched again; a part with no answer at all
+    returns its topics to the ordinary steps, which re-send them until Massive confirms. A search
+    refuses the topics it found at its end, so they are never sent again nor counted `NO_ACK`.
+    While it runs, its parts are the only subscriptions sent: other topics wait for its end, and
+    unsubscriptions still go. Each part waits at most `subscription_confirmation_timeout`
+    (`refusal_search` gives the search and its cost).
 
     Created by `Connection`, which passes the client, its loop's `call_later`, and its
     callbacks: `on_refused(topics, message)` for topics the server refused, and `on_change()`
@@ -280,6 +314,17 @@ class Subscriptions:
         self._round: Timer | None = None
         self._watchdogs: dict[str, Timer] = {}
         self._warned_unparsed = False
+        # A refusal naming no topic of the step in flight, of several topics, judged at the
+        # step's timeout; the search of the topics it left unanswered, its message, the topics
+        # it may still refuse, and the part of it in flight: its topics, the topics sent of it,
+        # and the message of a refusal naming no topic that arrived while it awaited answers.
+        self._step_refusal: str | None = None
+        self._search: RefusalSearch[str] | None = None
+        self._search_message = ""
+        self._held: set[str] = set()
+        self._part: tuple[str, ...] | None = None
+        self._part_sent: frozenset[str] = frozenset()
+        self._part_refusal: str | None = None
 
     # --- demand --------------------------------------------------------------------------------
 
@@ -320,6 +365,7 @@ class Subscriptions:
                 continue
             del self._refs[topic]
             self._refused.discard(topic)
+            self._held.discard(topic)
             self._pending.discard(topic)
             self._cancel(topic)
             self._resend_resolved(topic)
@@ -390,6 +436,12 @@ class Subscriptions:
         self._unreported.clear()
         self._pending.clear()
         self._step = frozenset()
+        self._step_refusal = None
+        self._search = None  # it searched this generation's answers
+        self._held.clear()
+        self._part = None
+        self._part_sent = frozenset()
+        self._part_refusal = None
         self._resend_resolved(*self._resend)
         if self._round is not None:
             self._round.cancel()
@@ -410,6 +462,7 @@ class Subscriptions:
         row shows each partial acknowledgement, refusal, and `NO_ACK` as it happens rather
         than when the whole step resolves.
         """
+        self._advance_search()
         if self._admission_stale:
             self._admission_stale = False
             self._defer()
@@ -429,6 +482,10 @@ class Subscriptions:
         """
         wire = self._wire()
         adds, removes = wire - self._sent, self._sent - wire
+        if self._search is not None:  # its next part is the only subscription sent
+            part = self._search.pending()[0]
+            adds = set(part) & self._held & wire
+            self._part, self._part_sent, self._part_refusal = part, frozenset(adds), None
         if (adds or removes) and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "generation %d: subscribe %s, unsubscribe %s (desired %d, acknowledged %d, "
@@ -447,6 +504,7 @@ class Subscriptions:
             self._spaced.update(t for t in adds if " " in t)
             self._pending = set(adds)
             self._step = frozenset(adds)
+            self._step_refusal = None
             for topic in ordered:
                 self._arm(topic, generation, attempt=1)
         if removes:
@@ -518,15 +576,23 @@ class Subscriptions:
             )
 
     def _refuse_status(self, status: Status) -> None:
-        """Apply a refusal: of the topics it names, or else of the one topic it surely answers.
+        """Apply a refusal: of the topics it names, or else of the topics it surely answers.
 
-        A refusal fails streams, so one naming no topic is credited only where it cannot be
-        wrong: when exactly one topic on the connection awaits an answer, a single unresolved
-        topic of the step in flight, with no topic in `NO_ACK` and no re-send round
-        outstanding. Any other is logged at INFO and fails nothing: a late answer to an old
-        topic could otherwise fail a healthy stream. The unanswered topics keep their notes,
-        and a stream with rows still fails at `max_outage` after a reconnect, so nothing stale
-        goes unmarked.
+        A refusal is final, so one naming no topic is credited only where it cannot be wrong:
+        to the part of a search in flight (`_judge_part`), judged at once when one of its
+        topics awaits an answer; to a single unresolved topic of the step in flight, when it is
+        the one topic on the connection that awaits an answer, with no topic in `NO_ACK` and no
+        re-send round outstanding; and to the step in flight of several topics, marked for its
+        search at the step's timeout (`_judge_step`). The search refuses only a part that draws
+        a refusal of its own, so the step is marked even while older topics are in `NO_ACK`:
+        waiting for them instead would leave the step's refused topics re-sent for as long as an
+        older one goes unanswered. A late refusal of an older topic that lands between parts
+        makes the search find nothing; one that lands while a part awaits its answer refuses
+        that part, a risk Massive's answers in order and within the timeout keep small. Any
+        other refusal is logged at INFO and fails nothing: a late answer to an old topic could
+        otherwise refuse a healthy one. The unanswered topics keep their notes, and a stream
+        with rows still fails at `max_outage` after a reconnect, so nothing stale goes
+        unmarked.
 
         A wanted topic with a space, such as a futures combo's `T.CL:BF Q6-U6-V6`, is never one
         word of the message, so it counts as named when the message holds it whole and no
@@ -542,6 +608,21 @@ class Subscriptions:
         if status.topics or spaced:
             named = [t for t in status.topics if t in self._refs]
             self._refuse(tuple(dict.fromkeys([*named, *spaced])), status.message)
+            return
+        if self._part is not None and self._pending:
+            self._part_refusal = status.message
+            if len(self._pending) == 1:
+                self._judge_part()
+            return
+        if len(self._pending) > 1:  # a step in flight: no round of re-sends awaits an answer
+            logger.debug(
+                "generation %s: a refusal named no topic while the step's %s await an answer; "
+                "they are judged at the step's timeout: %s",
+                self.generation,
+                bounded_list(sorted(self._pending)),
+                status.message,
+            )
+            self._step_refusal = status.message
             return
         awaiting = len(self._pending) + len(self._noack) + len(self._resend)
         if len(self._pending) != 1 or awaiting != 1:
@@ -584,6 +665,7 @@ class Subscriptions:
         """
         for topic in topics:
             self._refused.add(topic)
+            self._held.discard(topic)
             self._sent.discard(topic)
             self._acked.discard(topic)
             self._noack.discard(topic)
@@ -593,6 +675,105 @@ class Subscriptions:
         if topics:
             self._admission_stale = True
             self._on_refused(topics, message)
+
+    # --- a step refused whole: the search -----------------------------------------------------
+
+    def _judge_step(self) -> bool:
+        """Judge the step in flight, refused with no topic named, at its timeout: search it.
+
+        Called once, by the first watchdog of the step to fire; the mark is cleared either way.
+
+        Returns:
+            True when two or more of its topics await an answer and a search of them started;
+            False for one, which is re-sent alone as any other topic is, so that a refusal of
+            the re-send is surely its.
+        """
+        message = required(self._step_refusal, "the step's refusal")
+        self._step_refusal = None
+        unresolved = sorted(self._pending)
+        if len(unresolved) <= 1:
+            return False
+        logger.info(
+            '%s: Massive answered a subscription step with "%s" and named no subscription, so '
+            "the library sends its subscriptions again in parts to find the refused ones: %s.",
+            self._url,
+            message,
+            prose_list(unresolved, "subscriptions"),
+        )
+        self._search = RefusalSearch(unresolved, group=str, class_of=_topic_class)
+        self._search_message = message
+        self._held = set(unresolved)
+        for topic in unresolved:
+            self._pending.discard(topic)
+            self._sent.discard(topic)
+            self._cancel(topic)
+        return True
+
+    def _judge_part(self) -> None:
+        """Give the search Massive's answer to its part in flight.
+
+        Its topics still awaiting an answer stop awaiting it. With a refusal naming no topic
+        during the part, they are refused: the whole part when none of it was acknowledged,
+        else searched again. Without one, the part was answered, or failed for want of any
+        answer, and its unanswered topics return to the ordinary steps once the search ends.
+        """
+        search = required(self._search, "the search of the part in flight")
+        part = required(self._part, "the part in flight")
+        sent, message = self._part_sent, self._part_refusal
+        self._part, self._part_sent, self._part_refusal = None, frozenset(), None
+        unresolved = sorted(self._pending)
+        for topic in unresolved:
+            self._pending.discard(topic)
+            self._sent.discard(topic)
+            self._cancel(topic)
+        acknowledged = bool(sent & self._acked)
+        if message is not None and unresolved and acknowledged:
+            search.answered(part, refused=unresolved)
+        elif message is not None and unresolved:
+            search.refused(part)
+        elif acknowledged:
+            search.answered(part)
+        elif unresolved:
+            search.failed(part, _NO_ANSWER)
+        else:  # every topic sent of it left the watchlist before an answer
+            search.dropped(part)
+
+    def _advance_search(self) -> None:
+        """Judge a part no topic of which awaits an answer, skip unwanted parts, end a done search.
+
+        Called by `reconcile` before anything is sent. A part none of whose topics is wanted on
+        the wire any more is never sent: the search counts it dropped. A done search refuses
+        what it found (`_end_search`).
+        """
+        search = self._search
+        if search is None:
+            return
+        if self._part is not None:
+            if self._pending:
+                return
+            self._judge_part()
+        wire = self._wire()
+        while not search.done and not set(search.pending()[0]) & self._held & wire:
+            search.dropped(search.pending()[0])
+        if search.done:
+            self._end_search(search)
+
+    def _end_search(self, search: RefusalSearch[str]) -> None:
+        """Refuse the topics a finished search found, and let the other topics go out again.
+
+        Args:
+            search: The finished search.
+        """
+        refused = tuple(t for t in search.refused_items if t in self._held)
+        logger.info(
+            "%s: the search of a refused subscription step sent %d parts and found %s refused.",
+            self._url,
+            search.requests,
+            prose_list(sorted(refused), "subscriptions") if refused else "no subscription",
+        )
+        self._search = None
+        self._held.clear()
+        self._refuse(refused, self._search_message)
 
     def _desired(self) -> set[str]:
         """Return D: the wanted topics, minus refused ones and deferred options contracts.
@@ -670,7 +851,9 @@ class Subscriptions:
 
         The first timeout re-sends the topic alone, while its step is still in flight; the
         second marks it `NO_ACK` and makes sure a round of re-sends is scheduled
-        (`_resend_round`). Nothing reconnects (see the class).
+        (`_resend_round`). Nothing reconnects (see the class). The timeout of a part of a
+        search judges the part instead, and the first timeout of a step Massive refused
+        without naming a topic judges the step.
 
         Args:
             topic: The topic.
@@ -680,6 +863,13 @@ class Subscriptions:
         self._watchdogs.pop(topic, None)
         if generation != self.generation or topic not in self._sent or topic not in self._wire():
             self._pending.discard(topic)  # it left the wire: nothing to escalate
+            self.reconcile()
+            return
+        if self._part is not None and topic in self._part_sent:
+            self._judge_part()
+            self.reconcile()
+            return
+        if attempt == 1 and self._step_refusal is not None and self._judge_step():
             self.reconcile()
             return
         if attempt < _NO_ACK_ATTEMPT:

@@ -204,9 +204,16 @@ These protect the owner's repository, money, and secrets.
     setting, set for a session in `MassiveConfig(on_error=...)` and for one call with the
     dataset method's `on_error=`. The setting decides only whether the table fails (`RAISE`)
     and how loudly the log reports the problem, never whether a row is published or whether
-    `m.problems()` lists it. A refusal of part of what a call explicitly asked for (a futures
-    exchange the plan lacks) defaults to `RAISE`, because asking for data the plan lacks is a
-    bug in the caller. A new cause gets a new setting and a new `ProblemCause`, never a
+    `m.problems()` lists it. A refusal of one symbol among those a call names is that symbol's
+    problem (`refused_symbols`, `LOG` by default; decision 137): the others are served,
+    `m.problems()` lists it with Massive's answer, and, unless the setting is `RAISE`
+    (decision 139), a symbol a watchlist adds later never fails a table. A refusal of every symbol a call names, or of the feed itself (a dataset or
+    a delayed subscription the plan lacks), fails the table, since Massive serves nothing the
+    call asked for. The one exception is a futures exchange named in `venues`
+    (`refused_venues`, `RAISE` by default): the owner ruled (decision 107) that naming an
+    exchange the plan lacks is a bug in the caller, because a venue is chosen once in code and
+    never comes from a table; a call whose every exchange is refused raises under any setting.
+    A new cause gets a new setting and a new `ProblemCause`, never a
     hard-coded failure or a silent skip.
   - **Every problem is a row of `m.problems()`, and only a real one** (decision 124): a
     withheld row, a skipped symbol or line, an outage, a pause, a failed table. Valid data (a
@@ -215,8 +222,8 @@ These protect the owner's repository, money, and secrets.
     DEBUG) that points at `m.problems()`, with the details at DEBUG.
   - **Only a problem that affects every row a table would receive fails it, whatever the
     setting:**
-    authentication, a closed session, a plan without the dataset, a refusal of everything a
-    call asked for, a read or stream whose rows it would receive are all withheld, and a library
+    authentication, a closed session, a plan without the dataset, a refusal of the feed, or of
+    every symbol the call named, a read or stream whose rows it would receive are all withheld, and a library
     defect.
     `docs/configuration.md` says how each read and stream judges that.
 - **Dates are ISO strings**: every calendar-date column, vendor dates included, stores

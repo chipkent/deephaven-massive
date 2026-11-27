@@ -4,17 +4,26 @@ from __future__ import annotations
 
 import pytest
 
-from deephaven_massive._errors import EntitlementError, ErrorSource, MassiveError
+from deephaven_massive._errors import (
+    EntitlementError,
+    ErrorSource,
+    FeedRefusalError,
+    MassiveError,
+)
 from deephaven_massive._tables import symbol_retry
+from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive._tables.symbol_read_rows import SymbolReadState
 from deephaven_massive._tables.symbol_retry import (
     RETRY_DELAYS,
     RETRY_EVERY,
+    SPAN_CAUSES,
     Failed,
     Retry,
     SymbolRun,
+    is_symbol_refusal,
     next_step,
     outage_failure,
+    span_cause,
 )
 
 LIMIT = 300.0
@@ -127,11 +136,15 @@ def test_a_run_counts_its_reads_and_keeps_its_failures_until_one_succeeds() -> N
         None,
         None,
     )
-    # The next failure starts a new run of failures, timed from itself.
+    # The next failure starts a new run of failures, timed and counted from itself: a symbol
+    # read again and again (a poll) gets the first retry's delay, not the fourth read's.
     run.started()
     third = run.failed(busy(), name="AAPL", now=500.0, limit=LIMIT)
-    assert third == Retry(560.0, 60.0, attempts=4, failing_for=0.0)  # the fourth attempt's delay
-    assert run.failing_since == 500.0
+    assert third == Retry(502.0, 2.0, attempts=1, failing_for=0.0)
+    assert (run.attempts, run.failing_since) == (4, 500.0)
+    run.started()
+    fourth = run.failed(busy(), name="AAPL", now=502.5, limit=LIMIT)
+    assert fourth == Retry(510.5, 8.0, attempts=2, failing_for=2.5)
 
 
 def test_a_run_that_fails_for_good_is_failed_and_never_due() -> None:
@@ -146,3 +159,80 @@ def test_a_step_no_case_handles_is_refused(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(symbol_retry, "next_step", lambda *_, **__: "bogus")
     with pytest.raises(AssertionError, match="bogus"):
         SymbolRun().failed(busy(), name="AAPL", now=0.0, limit=LIMIT)
+
+
+# --- span_cause ---------------------------------------------------------------------------------
+
+_ERRORS: dict[str, MassiveError | None] = {
+    "none": None,
+    "transient": busy(),
+    "refusal": refused(),
+    "feed refusal": FeedRefusalError("Massive labelled the stocks page DELAYED", status=403),
+    "outage": outage_failure("AAPL", busy(), failing_for=300.0, limit=LIMIT),
+}
+"""One error of each kind a symbol's run can hold, by name."""
+
+_FAILED_CAUSES = {
+    "none": ProblemCause.SYMBOL_READ_FAILED,
+    "transient": ProblemCause.SYMBOL_READ_FAILED,
+    "refusal": ProblemCause.REFUSED_SYMBOLS,
+    "feed refusal": ProblemCause.SYMBOL_READ_FAILED,  # the feed's, never one symbol's
+    "outage": ProblemCause.SYMBOL_READ_FAILED,
+}
+"""The span cause of a `FAILED` symbol, by the kind of its error."""
+
+
+@pytest.mark.parametrize("state", list(SymbolReadState))
+@pytest.mark.parametrize("kind", list(_ERRORS))
+def test_the_span_cause_of_every_state_and_error(state: SymbolReadState, kind: str) -> None:
+    expected: ProblemCause | None = None  # every state but these two holds no span
+    if state is SymbolReadState.RETRYING:
+        expected = ProblemCause.SYMBOL_READ_RETRYING
+    if state is SymbolReadState.FAILED:
+        expected = _FAILED_CAUSES[kind]
+    assert span_cause(state, _ERRORS[kind]) is expected
+    assert SymbolRun(state, error=_ERRORS[kind]).cause is expected
+
+
+def test_every_span_cause_is_listed() -> None:
+    given = {span_cause(state, error) for state in SymbolReadState for error in _ERRORS.values()}
+    assert given - {None} == set(SPAN_CAUSES)
+    assert all(cause.traits.span for cause in SPAN_CAUSES)
+
+
+def test_a_state_no_case_handles_is_refused() -> None:
+    with pytest.raises(AssertionError, match="bogus"):
+        span_cause("bogus", None)  # type: ignore[arg-type]  # the point: refused at run time
+
+
+def test_a_run_keeps_its_latest_error_until_a_read_succeeds() -> None:
+    run = SymbolRun(SymbolReadState.LOADING, attempts=1)
+    error = busy()
+    run.failed(error, name="AAPL", now=0.0, limit=LIMIT)
+    assert (run.error, run.cause) == (error, ProblemCause.SYMBOL_READ_RETRYING)
+    run.started()
+    assert (run.error, run.cause) == (error, None)  # a read in flight holds no span
+    run.succeeded()
+    assert (run.error, run.cause) == (None, None)
+
+
+def test_a_refused_run_holds_a_refused_symbols_span() -> None:
+    run = SymbolRun(SymbolReadState.LOADING, attempts=1)
+    refusal = refused()
+    run.failed(refusal, name="AAPL", now=1.0, limit=LIMIT)
+    assert (run.error, run.cause) == (refusal, ProblemCause.REFUSED_SYMBOLS)
+
+
+def test_a_failure_that_outlasts_max_outage_keeps_its_wrapped_error() -> None:
+    run = SymbolRun(SymbolReadState.LOADING, attempts=1, failing_since=0.0)
+    step = run.failed(busy(), name="AAPL", now=LIMIT, limit=LIMIT)
+    assert isinstance(step, Failed)
+    assert (run.error, run.cause) == (step.error, ProblemCause.SYMBOL_READ_FAILED)
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [("none", False), ("transient", False), ("refusal", True), ("feed refusal", False)],
+)
+def test_only_a_refusal_of_the_symbol_is_a_symbol_refusal(kind: str, expected: bool) -> None:
+    assert is_symbol_refusal(_ERRORS[kind]) is expected

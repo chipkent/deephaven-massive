@@ -190,6 +190,7 @@ _EMPTY = HandInput(
     undeclared_fields={},
     optional_fields={},
     ignored_keys=(),
+    answer_fields=(),
 )
 _VENUES = dataclasses.replace(_EMPTY, venues={"cme": "test", "cbot": "test"})
 

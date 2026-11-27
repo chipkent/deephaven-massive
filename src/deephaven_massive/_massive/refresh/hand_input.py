@@ -5,7 +5,8 @@ and identity keys (`lexicon`); the names, units, conversions, corrected wire key
 fields, optional fields, corrected descriptions, result keys, parameter units, dataset kinds and
 their projections, single-transport columns, futures venues, respellings that give a field one
 name across sources, and descriptions differently named fields share (`overrides`); and the
-excluded vendor items, disbelieved vendor samples, and ignored wire keys (`exclusions`). Those
+excluded vendor items, disbelieved vendor samples, ignored wire keys, and fields that carry
+Massive's answer instead of data (`exclusions`). Those
 modules hold the tables, each entry with its reason; this one only bundles them as `HandInput`,
 so a test can pass small tables of its own instead of the real ones.
 """
@@ -20,7 +21,7 @@ from deephaven_massive._massive.refresh import exclusions, lexicon, overrides
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from deephaven_massive._massive.refresh.exclusions import IgnoredKey, SampleError
+    from deephaven_massive._massive.refresh.exclusions import AnswerField, IgnoredKey, SampleError
 
 
 __all__ = ["HandInput"]
@@ -81,6 +82,8 @@ class HandInput:
             in that group.
         venues: The futures venues folded into a flat-file prefix's `{venue}` template.
         ignored_keys: The undeclared keys the decoders drop without reporting drift.
+        answer_fields: The declared fields left out because they carry Massive's answer about
+            a row instead of its data.
     """
 
     lexicons: Mapping[str, lexicon.Lexicon] = field(default_factory=lambda: lexicon.LEXICONS)
@@ -133,3 +136,4 @@ class HandInput:
     )
     venues: Mapping[str, str] = field(default_factory=lambda: overrides.VENUES)
     ignored_keys: Sequence[IgnoredKey] = field(default_factory=lambda: exclusions.IGNORED_KEYS)
+    answer_fields: Sequence[AnswerField] = field(default_factory=lambda: exclusions.ANSWER_FIELDS)

@@ -7,10 +7,11 @@ batches of the dataset's merged schema, one page at a time:
   its columns for the dataset (`source_columns.rename`), converts its timestamps
   (`_datasets/timestamps.py`), widens each column to its merged type
   (`source_columns.widen`), and reads its symbols into the canonical form (`WireSymbols`), an
-  options row's index underlying included (`wire_symbols.index_underlyings`). A row
-  that carries an `error` (`is_error_row`: a ticker the plan does not include) keeps only its
-  symbol key and its `Error` and `Message` columns, or is dropped on a path that joins its
-  dataset through a projection.
+  options row's index underlying included (`wire_symbols.index_underlyings`). A snapshot
+  row that carries Massive's per-ticker `error` in place of data (`is_error_row`) is set
+  apart undecoded, for the REST transport to report as a problem of its ticker
+  (`read_error_row`: `NOT_FOUND` is `unavailable_symbols`, every other value
+  `refused_symbols`).
 - `keep_window` keeps the rows a `history()` window holds; the transports judge a bar's whole
   window (`row_times.whole`) once its time columns are filled.
 
@@ -25,8 +26,8 @@ threads of one read. The REST transport (`rest.py`) reads the pages, and the hos
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -47,6 +48,7 @@ from deephaven_massive._datasets.wire_symbols import (
     unreadable_symbol_reason,
 )
 from deephaven_massive._massive import DriftReport, DriftSample, RowFault, to_batch
+from deephaven_massive._tables.problem_events import ProblemCause
 from deephaven_massive._tables.withheld import (
     MARK_COLUMNS,
     Failure,
@@ -68,12 +70,18 @@ if TYPE_CHECKING:
 __all__ = [
     "CFI",
     "UNDERLYING",
+    "ErrorRow",
+    "ErrorRowCause",
     "RowConverter",
     "is_error_row",
     "keep_window",
+    "read_error_row",
 ]
 
 logger = logging.getLogger(__name__)
+
+ErrorRowCause: TypeAlias = Literal[ProblemCause.UNAVAILABLE_SYMBOLS, ProblemCause.REFUSED_SYMBOLS]
+"""The problems an error row can be (`ErrorRow.cause`)."""
 
 UNDERLYING: Final = KEY_COLUMNS["fanout"]
 """The column naming the instrument a row is linked to, such as an option's underlying."""
@@ -96,8 +104,6 @@ class RowConverter:
         arrow_schema: The dataset's Arrow schema.
         required: The long-form columns every row must carry: the dataset's keys for the path
             that are not filled from the request.
-        required_on_error: The required columns of an error row (`is_error_row`): only
-            its symbol key, so a ticker the plan does not include keeps its row.
         symbols: How a symbol read from the rows becomes canonical (`WireSymbols`).
         symbol_column: The long-form column of the rows' symbol field, or None when the symbol
             is filled from the request.
@@ -112,7 +118,6 @@ class RowConverter:
     columns: tuple[tuple[ColumnType, str, SourceColumn | None], ...]
     arrow_schema: pa.Schema
     required: frozenset[str]
-    required_on_error: frozenset[str]
     symbols: WireSymbols
     symbol_column: str | None
     symbol_key: str | None
@@ -141,7 +146,6 @@ class RowConverter:
             columns=tuple((c.type, c.name, renamed.get(c.name)) for c in schema.columns),
             arrow_schema=schema.arrow_schema(),
             required=frozenset(f.column for f in required_fields(spec, rest_path)),
-            required_on_error=frozenset(() if symbol_field is None else (symbol_field.column,)),
             symbols=WireSymbols(spec.name, spec.symbols_class, spec.symbols_as_written),
             symbol_column=None if symbol_field is None else symbol_field.column,
             symbol_key=None if symbol_field is None else symbol_field.wire_key,
@@ -153,10 +157,10 @@ class RowConverter:
     ) -> tuple[list[pa.RecordBatch], DriftReport, list[Mapping[str, object]]]:
         """Convert one page's rows into batches of the dataset's schema, every row marked or whole.
 
-        Error rows (`is_error_row`: a ticker the plan does not include) are decoded
-        apart, with only their symbol required, and come after the page's other rows.
+        Error rows (`is_error_row`: Massive's answer for a ticker in place of its data) are
+        set apart undecoded, so no table holds them.
 
-        Every row the page held is in the batches, with the mark columns
+        Every other row the page held is in the batches, with the mark columns
         (`withheld.with_marks`): a row is marked when a key the dataset requires is absent,
         null, or does not fit, or its time column overflows or lies outside 1990 to 2100
         (`unreadable_keys`); when its symbol is a spelling the library cannot read
@@ -169,28 +173,24 @@ class RowConverter:
             symbol: The request's one symbol, which fills the keys taken from the request.
 
         Returns:
-            The batches (none for an empty page), with the mark columns; the page's drift (the
-            fields that drifted, with a sample each); and the error rows.
+            The batches (none for a page with no data rows), with the mark columns; the page's
+            drift (the fields that drifted, with a sample each); and the error rows, as
+            Massive sent them.
         """
         flagged = [row for row in rows if is_error_row(row)]
         good = [row for row in rows if not is_error_row(row)] if flagged else rows
-        batches: list[pa.RecordBatch] = []
-        drift = DriftReport()
-        for part, required in ((good, self.required), (flagged, self.required_on_error)):
-            if not part:
-                continue
-            decoded, found, marks = to_batch(
-                part, self.rest_path, required=required, symbol=self.symbol_column
-            )
-            sent = (
-                pa.array([symbol] * decoded.num_rows, pa.string())
-                if self.symbol_column is None
-                else decoded.column(self.symbol_column)
-            )
-            batch, checked = self._apply(with_marks(decoded, marks, sent=sent), symbol)
-            batches.append(batch)
-            drift = drift.merge(found).merge(checked)
-        return batches, drift, flagged
+        if not good:
+            return [], DriftReport(), flagged
+        decoded, found, marks = to_batch(
+            good, self.rest_path, required=self.required, symbol=self.symbol_column
+        )
+        sent = (
+            pa.array([symbol] * decoded.num_rows, pa.string())
+            if self.symbol_column is None
+            else decoded.column(self.symbol_column)
+        )
+        batch, checked = self._apply(with_marks(decoded, marks, sent=sent), symbol)
+        return [batch], found.merge(checked), flagged
 
     def _apply(
         self, batch: pa.RecordBatch, symbol: str | None
@@ -381,11 +381,12 @@ def keep_window(
 
 
 def is_error_row(row: Mapping[str, object]) -> bool:
-    """Tell whether a snapshot row reports a ticker the plan does not include.
+    """Tell whether a snapshot row is Massive's answer for a ticker in place of its data.
 
-    Massive answers such a ticker with a row that carries an `error` (`NOT_ENTITLED`) and a
-    `message` in place of its data. The host decision counts the row as absent, and the REST
-    transport keeps or drops it apart from the data rows; both use this one test.
+    Massive answers a ticker it has no data for, or that the plan does not include, with a row
+    that carries an `error` (`NOT_FOUND`, `NOT_ENTITLED`) and a `message`, and no data. The
+    host decision counts the row as absent, and the REST transport leaves it out of the table
+    and reports it as a problem of its ticker; both use this one test.
 
     Args:
         row: One decoded row.
@@ -394,3 +395,63 @@ def is_error_row(row: Mapping[str, object]) -> bool:
         True when the row's `error` is set.
     """
     return row.get("error") is not None
+
+
+@dataclass(frozen=True, slots=True)
+class ErrorRow:
+    """Massive's answer for one ticker in place of its data (`is_error_row`), as it sent it.
+
+    Attributes:
+        ticker: The ticker, as Massive sent it, or the request's one symbol for a path whose
+            rows do not carry it.
+        error: Massive's `error`, such as `"NOT_ENTITLED"`.
+        message: Massive's `message`, such as `"Not entitled to this ticker."`.
+        cause: The problem it is: `unavailable_symbols` for `NOT_FOUND`, `refused_symbols`
+            for `NOT_ENTITLED` and for any value Massive does not document.
+        documented: Whether Massive documents the `error` value (`NOT_FOUND`, `NOT_ENTITLED`).
+    """
+
+    ticker: str
+    error: str
+    message: str
+    cause: ErrorRowCause
+    documented: bool = field(kw_only=True)
+
+    @property
+    def answer(self) -> str:
+        """Massive's answer, quoted, such as `error NOT_FOUND: "Ticker not found."`."""
+        return f'error {self.error}: "{self.message}"'
+
+
+def read_error_row(
+    row: Mapping[str, object], *, symbol_key: str | None, symbol: str | None
+) -> ErrorRow:
+    """Read an error row (`is_error_row`) as the answer it gives for its ticker.
+
+    Massive documents two values of a snapshot row's `error`
+    (https://massive.com/docs/rest/indices/snapshots/indices-snapshot, and each asset class's
+    unified snapshot page): `NOT_FOUND` ("Ticker not found."), the same answer as HTTP 404,
+    and `NOT_ENTITLED` ("Not entitled to this ticker."), the same answer as HTTP 403.
+
+    Args:
+        row: The row, as Massive sent it.
+        symbol_key: The wire key of the rows' symbol field, or None when the symbol is filled
+            from the request.
+        symbol: The request's one symbol, for a path whose rows do not carry it.
+
+    Returns:
+        The answer, with its ticker and the problem it is.
+    """
+    ticker = str(symbol if symbol_key is None else row.get(symbol_key))
+    error, message = str(row.get("error")), str(row.get("message"))
+    cause: ErrorRowCause
+    match error:
+        case "NOT_FOUND":
+            cause, documented = ProblemCause.UNAVAILABLE_SYMBOLS, True
+        case "NOT_ENTITLED":
+            cause, documented = ProblemCause.REFUSED_SYMBOLS, True
+        case _:
+            # A value Massive does not document is still its error for that ticker, so the
+            # ticker is refused, with Massive's text, and the caller records the value as drift.
+            cause, documented = ProblemCause.REFUSED_SYMBOLS, False
+    return ErrorRow(ticker, error, message, cause, documented=documented)

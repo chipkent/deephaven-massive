@@ -884,6 +884,7 @@ on_error:
   noncanonical_symbols: raise
   unreadable_symbols: ignore
   unavailable_symbols: raise
+  refused_symbols: ignore
   malformed_rows: ignore
   refused_venues: log
 connection_taken: reconnect
@@ -911,6 +912,7 @@ connection_taken: reconnect
             noncanonical_symbols=OnError.RAISE,
             unreadable_symbols=OnError.IGNORE,
             unavailable_symbols=OnError.RAISE,
+            refused_symbols=OnError.IGNORE,
             malformed_rows=OnError.IGNORE,
             refused_venues=OnError.LOG,
         ),
@@ -1238,7 +1240,7 @@ _EMPTY = "the value is empty. Write a value, or leave the setting out to keep it
             "on_error: {malformed_row: raise}\n",
             (
                 ", line 1, column 12: In on_error, 'malformed_row' is not a cause. Write "
-                "noncanonical_symbols, unreadable_symbols, unavailable_symbols, "
+                "noncanonical_symbols, unreadable_symbols, unavailable_symbols, refused_symbols, "
                 "unrequested_symbols, unreadable_keys, unconvertible_values, malformed_rows, "
                 "unlisted_contracts, unscheduled_products, or refused_venues."
             ),
@@ -1659,8 +1661,7 @@ def test_the_reference_takes_each_entry_from_the_docstring_without_its_default()
     assert "Defaults to" not in texts["reconnect_backoff"]
     assert "EntitlementError" not in texts["delayed_subscriptions"]
     assert texts["on_error.unavailable_symbols"] == (
-        "Decides what happens to a symbol Massive has no data for: it answers HTTP 404, or its "
-        "crypto ticker list doesn't hold the pair."
+        "Decides what happens to a symbol Massive has no data for."
     )
     details = _config._setting_details()
     assert details["s3_bucket"] == ["Change it only with `s3_endpoint_url`."]
